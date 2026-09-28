@@ -92,5 +92,5 @@ Task 14: complete (commits 8a61489..a6de5af, tests: cli_index 4, всего 104,
 Task 15: Ruling: `ReadIndex` (read-only tantivy handle, без writer) + `chunk_id_parts`; read-команды отвергают статус != Indexed (C8); `status` выводит hint при пустом реестре
 Task 15: fix round — тест «read path не берёт writer/lease», CLI-кейс cwd вне root, `status` hint, unit `chunk_id_parts`; commit включён в T15
 Task 15: minor (deferred): hits без citation молча выпадают (R2-окно); missing index dir → -32603 без recovery-hint; FR-23 в acceptance T15 vs traceability (T28)
-Task 15: complete (commit c13035a + fix, tests: cli_read 7, tantivy_index 8, всего 111, clippy clean, fmt clean; review PASS/APPROVED(Med test-gap) → fixed)
+Task 15: complete (commit c13035a + fix, tests: cli_read 7, tantivy_index 8, всего 112, clippy clean, fmt clean; review PASS/APPROVED(Med test-gap) → fixed)
 
