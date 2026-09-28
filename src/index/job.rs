@@ -437,6 +437,45 @@ mod tests {
     use rusqlite::Connection;
 
     #[test]
+    fn concurrent_marker_tx_allocates_distinct_ids() {
+        use std::time::Duration;
+
+        let cache = tempfile::tempdir().expect("cache");
+        let mut db_a = Db::open(cache.path()).expect("db a");
+        let mut db_b = Db::open(cache.path()).expect("db b");
+        let conn = Connection::open(cache.path().join(DB_FILE)).expect("raw db");
+        conn.execute(
+            "INSERT INTO projects (id, canonical_root, name, status, schema_version, created_at)
+             VALUES (1, '/p', 'p', 'indexed', 1, 0)",
+            [],
+        )
+        .expect("project");
+        drop(conn);
+
+        let tx = db_a
+            .connection_mut()
+            .transaction()
+            .expect("tx a holds the write lock");
+        let id_a = repo::insert_pending_doc(&tx, 1, "a.md", "/p/a.md").expect("alloc a");
+
+        let handle = std::thread::spawn(move || {
+            let tx = db_b
+                .connection_mut()
+                .transaction()
+                .expect("tx b blocks until a commits");
+            let id = repo::insert_pending_doc(&tx, 1, "b.md", "/p/b.md").expect("alloc b");
+            tx.commit().expect("commit b");
+            id
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        tx.commit().expect("commit a");
+
+        let id_b = handle.join().expect("join");
+        assert_ne!(id_a, id_b);
+        assert!(id_a > 0 && id_b > 0);
+    }
+
+    #[test]
     fn mark_pending_tombstones_planned_and_removed_docs() {
         let cache = tempfile::tempdir().expect("cache");
         let mut db = Db::open(cache.path()).expect("db");

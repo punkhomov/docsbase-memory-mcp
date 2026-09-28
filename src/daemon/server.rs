@@ -183,7 +183,19 @@ async fn register_session(shared: &Arc<Shared>, pid: u32, cwd: &Path) -> Result<
             return Err(project_err);
         }
         let project = registry::ensure_project(&mut db, &root)?;
-        tools::run_project_index(&mut db, &shared_for_task.cache, &project, &config)?;
+        if let Err(err) =
+            tools::run_project_index(&mut db, &shared_for_task.cache, &project, &config)
+        {
+            // A concurrent registration may have won the writer lease and
+            // already indexed the project; bind to that result instead.
+            if let Some(indexed) = registry::resolve_by_cwd(&db, &cwd_for_task)
+                .ok()
+                .filter(|project| project.status == crate::store::models::ProjectStatus::Indexed)
+            {
+                return Ok(indexed);
+            }
+            return Err(err);
+        }
         registry::project_by_id(&db, project.id)?.ok_or_else(|| {
             Error::internal(format!("project {} vanished after auto-index", project.id))
         })
