@@ -15,7 +15,7 @@ pub enum Error {
     #[error("protocol error: {message}")]
     Protocol { message: String },
     /// Project is not registered or a path is outside its roots.
-    #[error("project error: {message}")]
+    #[error("project error: {message}{}", instruction_hint(.instruction.as_deref()))]
     Project {
         message: String,
         instruction: Option<String>,
@@ -77,6 +77,10 @@ impl Error {
 
 fn path_suffix(path: Option<&Path>) -> String {
     path.map_or_else(String::new, |p| format!(" in {}", p.display()))
+}
+
+fn instruction_hint(instruction: Option<&str>) -> String {
+    instruction.map_or_else(String::new, |hint| format!(" (hint: {hint})"))
 }
 
 impl From<std::io::Error> for Error {

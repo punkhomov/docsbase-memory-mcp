@@ -128,6 +128,10 @@ fn status_round_trip() {
     set_status(&env.db, project.id, ProjectStatus::Indexed).expect("set");
     let listed = list_projects(&env.db).expect("list");
     assert_eq!(listed[0].status, ProjectStatus::Indexed);
+    assert!(
+        listed[0].last_indexed_at.is_some(),
+        "Indexed must stamp last_indexed_at"
+    );
 
     let err = set_status(&env.db, 999, ProjectStatus::Error).expect_err("unknown");
     assert!(matches!(err, Error::Project { .. }), "{err:?}");

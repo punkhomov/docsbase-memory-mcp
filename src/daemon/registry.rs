@@ -89,19 +89,26 @@ pub fn list_projects(db: &Db) -> Result<Vec<Project>> {
     Ok(projects)
 }
 
-/// Updates the lifecycle status of one project.
+/// Updates the lifecycle status of one project; `Indexed` also stamps
+/// `last_indexed_at` (FR-26).
 ///
 /// # Errors
 /// Returns [`Error::Project`] for an unknown id and [`Error::Internal`] on
 /// SQLite failures.
 pub fn set_status(db: &Db, id: i64, status: ProjectStatus) -> Result<()> {
-    let updated = db
-        .connection()
-        .execute(
+    let conn = db.connection();
+    let updated = if status == ProjectStatus::Indexed {
+        conn.execute(
+            "UPDATE projects SET status = ?1, last_indexed_at = ?2 WHERE id = ?3",
+            params![status.as_str(), unix_now(), id],
+        )
+    } else {
+        conn.execute(
             "UPDATE projects SET status = ?1 WHERE id = ?2",
             params![status.as_str(), id],
         )
-        .map_err(db_error)?;
+    }
+    .map_err(db_error)?;
     if updated == 0 {
         return Err(Error::Project {
             message: format!("unknown project id {id}"),

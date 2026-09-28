@@ -10,10 +10,10 @@ use fd_lock::RwLock;
 use crate::config::{Config, paths};
 use crate::daemon::registry;
 use crate::error::{Error, Result};
-use crate::index::job::run_full;
+use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::IndexHandle;
 use crate::store::Db;
-use crate::store::models::ProjectStatus;
+use crate::store::models::{Project, ProjectStatus};
 
 /// Runs `docsbase index [path]`, printing `{"project_id":…,"stats":…}`.
 ///
@@ -27,21 +27,26 @@ pub fn run(path: Option<&Path>) -> anyhow::Result<()> {
         .canonicalize()
         .with_context(|| format!("resolve {}", target.display()))?;
 
-    let config = Config::load(Some(&target))?;
     let mut db = Db::open(&paths::cache_dir()?)?;
     let project = registry::ensure_project(&mut db, &target)?;
+    let config = Config::load(Some(&project.canonical_root))?;
 
     let cache_root = db.cache_root().to_path_buf();
     let stats = with_writer_lease(&cache_root, project.id, || {
         registry::set_status(&db, project.id, ProjectStatus::Indexing)?;
-        let mut index = IndexHandle::open_or_create(&index_dir(db.cache_root(), project.id))?;
-        match run_full(&mut db, &mut index, &project, &config) {
+        match run_index(&mut db, &project, &config) {
             Ok(stats) => {
                 registry::set_status(&db, project.id, ProjectStatus::Indexed)?;
                 Ok(stats)
             }
             Err(err) => {
-                registry::set_status(&db, project.id, ProjectStatus::Error)?;
+                if let Err(status_err) = registry::set_status(&db, project.id, ProjectStatus::Error)
+                {
+                    eprintln!(
+                        "warning: cannot mark project {} as error: {status_err}",
+                        project.id
+                    );
+                }
                 Err(err)
             }
         }
@@ -50,6 +55,11 @@ pub fn run(path: Option<&Path>) -> anyhow::Result<()> {
     let payload = serde_json::json!({ "project_id": project.id, "stats": stats });
     println!("{payload}");
     Ok(())
+}
+
+fn run_index(db: &mut Db, project: &Project, config: &Config) -> Result<JobStats> {
+    let mut index = IndexHandle::open_or_create(&index_dir(db.cache_root(), project.id))?;
+    run_full(db, &mut index, project, config)
 }
 
 /// Per-project index directory (design §3 runtime layout).
