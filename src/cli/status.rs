@@ -4,8 +4,8 @@
 use crate::config::paths;
 use crate::daemon::registry;
 use crate::error::{Error, Result};
-use crate::store::models::{Project, ProjectStatus};
-use crate::store::{DB_FILE, Db, repo};
+use crate::store::models::Project;
+use crate::store::{DB_FILE, Db};
 
 /// Resolves the current directory to a registered project, read-only.
 ///
@@ -26,21 +26,6 @@ pub(crate) fn read_project() -> Result<(Db, Project)> {
     })?;
     let project = registry::resolve_by_cwd(&db, &cwd)?;
     Ok((db, project))
-}
-
-/// Refuses read commands for projects that have no usable index (C8).
-pub(crate) fn ensure_indexed(project: &Project) -> Result<()> {
-    if project.status != ProjectStatus::Indexed {
-        return Err(Error::Project {
-            message: format!(
-                "project '{}' is not indexed (status: {})",
-                project.name,
-                project.status.as_str()
-            ),
-            instruction: Some("run `docsbase index`".to_owned()),
-        });
-    }
-    Ok(())
 }
 
 /// Runs `docsbase status`, printing registry-wide JSON (FR-26).
@@ -66,31 +51,12 @@ pub fn status() -> anyhow::Result<()> {
         return Ok(());
     }
     let db = Db::open_readonly(&cache)?;
-    let schema_version = db.schema_version()?;
-    let mut projects = Vec::new();
-    for project in registry::list_projects(&db)? {
-        let counts = repo::project_counts(db.connection(), project.id)?;
-        projects.push(serde_json::json!({
-            "id": project.id,
-            "name": project.name,
-            "root": project.canonical_root,
-            "status": project.status.as_str(),
-            "docs": counts.docs,
-            "chunks": counts.chunks,
-            "last_indexed_at": project.last_indexed_at,
-        }));
+    let value = crate::daemon::tools::status(&db, 0, 0)?;
+    let mut value = value;
+    if value["projects"].as_array().is_some_and(Vec::is_empty) {
+        value["hint"] = serde_json::json!("run `docsbase index` in your project");
     }
-    let hint = projects
-        .is_empty()
-        .then_some("run `docsbase index` in your project");
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "schema_version": schema_version,
-            "projects": projects,
-            "hint": hint,
-        }))?
-    );
+    println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
 
@@ -106,24 +72,7 @@ pub fn list() -> anyhow::Result<()> {
     }
 
     let (db, project) = read_project()?;
-    ensure_indexed(&project)?;
-    let docs: Vec<serde_json::Value> = repo::docs_overview(db.connection(), project.id)?
-        .into_iter()
-        .map(|doc| {
-            serde_json::json!({
-                "path": doc.path,
-                "title": doc.title,
-                "size": doc.size,
-                "chunks": doc.chunks,
-            })
-        })
-        .collect();
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "project": project.name,
-            "docs": docs,
-        }))?
-    );
+    let value = crate::daemon::tools::list_docs(&db, &project)?;
+    println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }

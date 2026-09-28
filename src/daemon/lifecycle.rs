@@ -14,14 +14,13 @@ use std::time::{Duration, Instant};
 
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream as AsyncUnixStream};
+use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 
 use crate::error::{Error, Result};
 use crate::ipc::client::socket_path;
-use crate::ipc::protocol::{self, Request, Response};
+use crate::ipc::protocol::{self, Request};
 use crate::store::migrations;
 
 /// How long [`ensure_daemon`] waits for the socket after spawning a child.
@@ -185,7 +184,8 @@ async fn serve(cache: &Path, grace: Duration) -> Result<()> {
         .map_err(|err| Error::internal_with_source("chmod 0600 socket", err))?;
     write_state(cache)?;
 
-    let result = accept_loop(&listener, grace).await;
+    let shared = crate::daemon::server::Shared::open(cache)?;
+    let result = accept_loop(shared, &listener, grace).await;
 
     if let Err(err) = fs::remove_file(&sock) {
         eprintln!("warning: cannot remove {}: {err}", sock.display());
@@ -196,7 +196,11 @@ async fn serve(cache: &Path, grace: Duration) -> Result<()> {
     result
 }
 
-async fn accept_loop(listener: &UnixListener, grace: Duration) -> Result<()> {
+async fn accept_loop(
+    shared: Arc<crate::daemon::server::Shared>,
+    listener: &UnixListener,
+    grace: Duration,
+) -> Result<()> {
     let sessions = Arc::new(AtomicUsize::new(0));
     let (events_tx, mut events_rx) = mpsc::unbounded_channel::<()>();
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -214,64 +218,32 @@ async fn accept_loop(listener: &UnixListener, grace: Duration) -> Result<()> {
             }
         };
         tokio::select! {
-            _ = sigterm.recv() => break,
-            _ = sigint.recv() => break,
-            _ = shutdown_rx.changed() => break,
-            () = grace_sleep => break,
+            biased;
             accepted = listener.accept() => {
                 let (stream, _) = accepted
                     .map_err(|err| Error::internal_with_source("accept connection", err))?;
                 sessions.fetch_add(1, Ordering::SeqCst);
                 grace_deadline = None;
-                let sessions = Arc::clone(&sessions);
+                let connections = Arc::clone(&sessions);
                 let events = events_tx.clone();
                 let shutdown = shutdown_tx.clone();
-                tokio::spawn(session_loop(stream, sessions, events, shutdown));
+                let shared = Arc::clone(&shared);
+                tokio::spawn(crate::daemon::server::handle_connection(
+                    shared, stream, connections, events, shutdown,
+                ));
             }
             Some(()) = events_rx.recv() => {
                 if sessions.load(Ordering::SeqCst) == 0 {
                     grace_deadline = Some(tokio::time::Instant::now() + grace);
                 }
             }
+            _ = shutdown_rx.changed() => break,
+            _ = sigterm.recv() => break,
+            _ = sigint.recv() => break,
+            () = grace_sleep => break,
         }
     }
     Ok(())
-}
-
-async fn session_loop(
-    stream: AsyncUnixStream,
-    sessions: Arc<AtomicUsize>,
-    events: mpsc::UnboundedSender<()>,
-    shutdown: watch::Sender<bool>,
-) {
-    let (read_half, mut write_half) = stream.into_split();
-    let mut lines = BufReader::new(read_half).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        let response = match protocol::decode_request(line.as_bytes()) {
-            Ok(Request::StopDaemon) => {
-                let _ = shutdown.send(true);
-                Response::ToolResult {
-                    value: serde_json::Value::Null,
-                }
-            }
-            Ok(_) => Response::Error {
-                code: -32011,
-                message: "tool routing arrives with T19".to_owned(),
-            },
-            Err(err) => Response::Error {
-                code: err.mcp_code(),
-                message: err.to_string(),
-            },
-        };
-        let Ok(bytes) = protocol::encode(&response) else {
-            break;
-        };
-        if write_half.write_all(&bytes).await.is_err() {
-            break;
-        }
-    }
-    sessions.fetch_sub(1, Ordering::SeqCst);
-    let _ = events.send(());
 }
 
 fn is_running(cache: &Path) -> bool {
@@ -309,6 +281,9 @@ fn spawn_detached(cache: &Path, exe: Option<&Path>) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
+    if let Some(config_dir) = std::env::var_os("DOCSBASE_CONFIG_DIR") {
+        command.env("DOCSBASE_CONFIG_DIR", config_dir);
+    }
     command
         .spawn()
         .map_err(|err| Error::internal_with_source("spawn daemon", err))?;
@@ -395,6 +370,66 @@ fn open_lock_file(path: &Path) -> Result<File> {
         .truncate(false)
         .open(path)
         .map_err(|err| Error::internal_with_source(format!("open {}", path.display()), err))
+}
+
+/// Per-project index directory (design §3 runtime layout).
+pub(crate) fn index_dir(cache_root: &Path, project_id: i64) -> PathBuf {
+    cache_root
+        .join("projects")
+        .join(project_id.to_string())
+        .join("tantivy")
+}
+
+/// Per-project writer lock file path (design §3 runtime layout).
+pub(crate) fn lease_path(cache_root: &Path, project_id: i64) -> PathBuf {
+    cache_root
+        .join("projects")
+        .join(project_id.to_string())
+        .join(".writer.lock")
+}
+
+/// Runs `f` while holding the per-project writer lease; refuses when another
+/// writer (daemon or CLI) owns it (I5).
+pub(crate) fn with_writer_lease<T>(
+    cache_root: &Path,
+    project_id: i64,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let path = lease_path(cache_root, project_id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            Error::internal_with_source(format!("create {}: {err}", parent.display()), err)
+        })?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|err| {
+            Error::internal_with_source(format!("open {}: {err}", path.display()), err)
+        })?;
+    let mut lock = RwLock::new(file);
+    let guard = match lock.try_write() {
+        Ok(guard) => guard,
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+            return Err(Error::Project {
+                message: format!("another writer holds {}", path.display()),
+                instruction: Some(
+                    "stop `docsbase serve` or wait for the running index to finish".to_owned(),
+                ),
+            });
+        }
+        Err(err) => {
+            return Err(Error::internal_with_source(
+                format!("lock {}: {err}", path.display()),
+                err,
+            ));
+        }
+    };
+    let result = f();
+    drop(guard);
+    result
 }
 
 pub(crate) fn state_dir(cache: &Path) -> PathBuf {

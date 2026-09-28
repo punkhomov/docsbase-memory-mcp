@@ -139,6 +139,34 @@ pub fn resolve_by_cwd(db: &Db, cwd: &Path) -> Result<Project> {
         })
 }
 
+/// Loads one project by id.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures or a corrupt status value.
+pub fn project_by_id(db: &Db, id: i64) -> Result<Option<Project>> {
+    let row = db
+        .connection()
+        .query_row(
+            "SELECT id, canonical_root, name, status, schema_version, created_at, last_indexed_at
+             FROM projects WHERE id = ?1",
+            [id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, u32>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(db_error)?;
+    row.map(to_project).transpose()
+}
+
 fn find_by_root(conn: &Connection, root: &Path) -> Result<Option<Project>> {
     let root = root.to_string_lossy();
     let row = conn
