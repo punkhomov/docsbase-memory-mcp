@@ -76,3 +76,7 @@ Task 11: fix round 3 — unit-тест `mark_pending` (mutation-verified: уда
 Task 11: minor (deferred): wiring `run_full → mark_pending` и порядок «marker до tantivy» не запинены (нужен fault-injection seam); walk-error purge suppression без теста
 Task 11: complete (commits a1859c6..7971898, tests: index_job 11 + unit 1, всего 86, clippy clean, fmt clean; review FAIL/CHANGES(3xMed) → fixed → PASS)
 
+Task 12: Ruling: `Db` хранит `cache_root` (для I7 при сигнатуре `ensure_project(db, path)`); git root — поиск `.git` вверх без git CLI; категория невалидного root — `Project` (-32012)
+Task 12: minor (deferred): F1 — `$HOME` сравнивается без canonicalize (symlink HOME обходит I7); F2 — non-UTF8 пути через `to_string_lossy`; F3 — нет busy_timeout (гонка двух писателей → SQLITE_BUSY); F4 — unit-тест home флаки, если TMPDIR внутри git-репы; F5 — имена RED-тестов слегка отличаются от брифа
+Task 12: complete (commit 67431a9, tests: registry 7 + unit 1, всего 94, clippy clean, fmt clean; review PASS/APPROVED, minors deferred)
+
