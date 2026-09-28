@@ -30,6 +30,30 @@ fn migrate_fresh() {
             "missing {expected}: {tables:?}"
         );
     }
+
+    let conn = Connection::open(cache.path().join(DB_FILE)).expect("open raw");
+    let journal: String = conn
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("journal_mode");
+    assert_eq!(journal.to_lowercase(), "wal");
+}
+
+#[test]
+fn cache_dir_private() {
+    let cache = TempDir::new().expect("tempdir");
+    let nested = cache.path().join("docsbase-memory-mcp");
+    Db::open(&nested).expect("open");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&nested)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "cache dir mode: {mode:o}");
+    }
 }
 
 #[test]
@@ -56,6 +80,18 @@ fn readonly_open() {
     Db::open(cache.path()).expect("create");
     let db = Db::open_readonly(cache.path()).expect("readonly open");
     assert_eq!(db.schema_version().expect("version"), 1);
+}
+
+#[test]
+fn readonly_rejects_mismatch() {
+    let cache = TempDir::new().expect("tempdir");
+    Db::open(cache.path()).expect("create");
+    {
+        let conn = Connection::open(cache.path().join(DB_FILE)).expect("open raw");
+        conn.pragma_update(None, "user_version", 99).expect("bump");
+    }
+    let err = Db::open_readonly(cache.path()).expect_err("must refuse");
+    assert!(matches!(err, Error::Admission { .. }), "{err:?}");
 }
 
 #[test]

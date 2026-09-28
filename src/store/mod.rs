@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 /// Database file name inside the cache root.
 pub const DB_FILE: &str = "registry.db";
 
-/// Handle to the metadata database. One writer per process (I5).
+/// Handle to the metadata database. One writer per process.
 #[derive(Debug)]
 pub struct Db {
     conn: Connection,
@@ -21,13 +21,14 @@ pub struct Db {
 impl Db {
     /// Opens (creating if needed) the database in `cache_dir` and migrates it.
     ///
+    /// The cache directory is created with mode `0700`: the database contains
+    /// document text and absolute paths (design §3 runtime layout).
+    ///
     /// # Errors
     /// Returns [`Error::Internal`] on IO/SQLite failures and [`Error::Admission`]
     /// when the on-disk schema is newer than this build supports.
     pub fn open(cache_dir: &Path) -> Result<Self> {
-        std::fs::create_dir_all(cache_dir).map_err(|err| Error::Internal {
-            message: format!("create cache dir {}: {err}", cache_dir.display()),
-        })?;
+        ensure_private_dir(cache_dir)?;
         let path = cache_dir.join(DB_FILE);
         let conn = Connection::open(&path).map_err(|err| sql_error(&path, &err))?;
         conn.pragma_update(None, "foreign_keys", "ON")
@@ -77,4 +78,19 @@ fn sql_error(path: &Path, err: &rusqlite::Error) -> Error {
     Error::Internal {
         message: format!("sqlite {}: {err}", path.display()),
     }
+}
+
+fn ensure_private_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).map_err(|err| Error::Internal {
+        message: format!("create cache dir {}: {err}", dir.display()),
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(dir, mode).map_err(|err| Error::Internal {
+            message: format!("set 0700 on {}: {err}", dir.display()),
+        })?;
+    }
+    Ok(())
 }

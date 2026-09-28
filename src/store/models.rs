@@ -1,4 +1,4 @@
-//! Row models for the registry and index state (design §7).
+//! Row models for the registry and index state (requirements §7).
 
 use std::path::PathBuf;
 
