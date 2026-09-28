@@ -21,3 +21,9 @@ Task 3: minor (deferred): paths::cache_dir/config_dir не покрыты юни
 Task 3: minor (deferred): ошибки чтения/парсинга конфига маппятся в Internal (-32603); T29 должен дать actionable категорию
 Task 3: complete (commits f70aa04..3567290, tests: cargo test → 11/11, clippy clean, fmt clean; review PASS/APPROVED)
 
+Task 4: Ruling: review Med (cache root umask) — fixed via chmod 0700 + regression test; fix commit d685040
+Task 4: minor (deferred): migrate/read_version messages lack DB path; wrap in T11
+Task 4: minor (deferred): FK cascade + UNIQUE constraints untested; cover in T11/T21
+Task 4: minor (deferred): ProjectStatus::as_str/parse round-trip untested
+Task 4: complete (commits 3567290..d685040, tests: store 6/6, clippy clean, fmt clean; review PASS + fix ADDRESSED)
+

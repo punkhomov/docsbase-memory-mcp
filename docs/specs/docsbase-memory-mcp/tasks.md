@@ -94,7 +94,7 @@ auto_index_default_false)` — падают.
 ### T5 — IPC protocol types
 **Depends:** T2
 **New crates:** `serde_json` — payloads (design §7).
-**Files:** Create `src/ipc/mod.rs`, `src/ipc/protocol.rs`, `tests/ipc_protocol.rs`; Modify `src/lib.rs`, `Cargo.toml`
+**Files:** Create `src/ipc/mod.rs`, `src/ipc/protocol.rs`, `tests/ipc_protocol.rs`; Modify `src/lib.rs`, `src/error.rs`, `Cargo.toml`, `Cargo.lock`
 **Interfaces:** Produces `PROTOCOL_VERSION: u32 = 1`, `Request::{Hello, RegisterSession{pid,cwd},
 CallTool{name,args}, StopDaemon}`, `Response::{Hello, ToolResult, Error, Stats}`,
 `TOOL_ALLOWLIST`, NDJSON `encode/decode`, `impl From<serde_json::Error> for Error`,
