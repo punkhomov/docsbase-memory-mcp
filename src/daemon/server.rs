@@ -168,7 +168,9 @@ async fn register_session(shared: &Arc<Shared>, pid: u32, cwd: &Path) -> Result<
     let cwd = cwd.to_path_buf();
     let cwd_for_task = cwd.clone();
     let outcome = tokio::task::spawn_blocking(move || -> Result<crate::store::models::Project> {
-        let mut db = shared_for_task.db();
+        // Own connection: the shared read connection must stay free while a
+        // full index runs (F4/NFR-1).
+        let mut db = Db::open(&shared_for_task.cache)?;
         let project_err = match registry::resolve_by_cwd(&db, &cwd_for_task) {
             Ok(project) => return Ok(project),
             Err(err) => err,

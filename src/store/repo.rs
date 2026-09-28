@@ -76,46 +76,6 @@ pub fn doc_states(conn: &Connection, project_id: i64) -> Result<Vec<DocState>> {
         .map_err(db_error)
 }
 
-/// Next free `docs.id`.
-///
-/// The caller must hold the single-writer lease (I5); ids are allocated
-/// explicitly so tantivy documents can be written before the SQLite commit.
-///
-/// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
-pub fn next_doc_id(conn: &Connection) -> Result<i64> {
-    conn.query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM docs", [], |row| {
-        row.get(0)
-    })
-    .map_err(db_error)
-}
-
-/// Marks a document as in-flight before the tantivy commit (R2).
-///
-/// The empty `content_hash` makes a later run reprocess the document even if
-/// its bytes match the stored hash, so a crash between the tantivy and SQLite
-/// commits cannot leave the two stores divergent.
-///
-/// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
-pub fn mark_pending(
-    conn: &Connection,
-    project_id: i64,
-    doc_id: i64,
-    rel_path: &str,
-    abs_path: &str,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO docs (id, project_id, rel_path, abs_path, title, frontmatter_json,
-                           size, mtime, content_hash, indexed_at)
-         VALUES (?1, ?2, ?3, ?4, NULL, NULL, 0, 0, '', 0)
-         ON CONFLICT(id) DO UPDATE SET content_hash = ''",
-        params![doc_id, project_id, rel_path, abs_path],
-    )
-    .map_err(db_error)?;
-    Ok(())
-}
-
 /// Invalidates the stored hash of a document slated for removal (R2).
 ///
 /// A crash after the tantivy purge but before the SQLite delete must not let a
@@ -127,6 +87,29 @@ pub fn invalidate_doc(conn: &Connection, doc_id: i64) -> Result<()> {
     conn.execute("UPDATE docs SET content_hash = '' WHERE id = ?1", [doc_id])
         .map_err(db_error)?;
     Ok(())
+}
+
+/// Inserts an in-flight document row (R2) and returns its SQLite row id.
+///
+/// Allocation happens inside the write transaction, so concurrent index jobs
+/// (different projects, same registry) cannot compute the same id.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn insert_pending_doc(
+    conn: &Connection,
+    project_id: i64,
+    rel_path: &str,
+    abs_path: &str,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO docs (project_id, rel_path, abs_path, title, frontmatter_json,
+                           size, mtime, content_hash, indexed_at)
+         VALUES (?1, ?2, ?3, NULL, NULL, 0, 0, '', 0)",
+        params![project_id, rel_path, abs_path],
+    )
+    .map_err(db_error)?;
+    Ok(conn.last_insert_rowid())
 }
 
 /// Inserts or updates one document row.

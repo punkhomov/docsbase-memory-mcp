@@ -34,7 +34,7 @@ pub struct JobStats {
 
 #[derive(Debug)]
 struct Pending {
-    id: i64,
+    id: Option<i64>,
     rel_path: String,
     abs_path: String,
     title: Option<String>,
@@ -50,10 +50,10 @@ struct Pending {
 /// purged. Per-file failures are counted in [`JobStats::errors`] and never
 /// abort the job (A4).
 ///
-/// Commit order is tantivy first, SQLite second (R2). Before touching tantivy
-/// every planned document is marked in-flight (empty `content_hash`), so a
-/// crash between the commits makes the next run reprocess the document
-/// instead of trusting a stale hash.
+/// Order: mark in-flight (allocating ids inside the marker transaction) →
+/// tantivy commit → short SQLite write transaction (R2). A crash between the
+/// commits makes the next run reprocess marked documents instead of trusting
+/// a stale hash.
 ///
 /// # Errors
 /// Returns errors for walk setup failures and SQLite/tantivy failures that
@@ -108,7 +108,6 @@ pub fn run_full(
         Vec::new()
     };
 
-    let mut next_id = repo::next_doc_id(db.connection())?;
     let mut new_budget = config
         .max_docs_per_project
         .saturating_sub(existing.len().saturating_sub(removed.len()));
@@ -124,11 +123,7 @@ pub fn run_full(
                     }
                     new_budget -= 1;
                 }
-                let doc_id = previous.map_or(next_id, |state| state.id);
-                if previous.is_none() {
-                    next_id += 1;
-                }
-                prepared.id = doc_id;
+                prepared.id = previous.map(|state| state.id);
                 plan.push(prepared);
             }
             Ok(None) => stats.skipped += 1,
@@ -176,7 +171,6 @@ pub fn run_incremental_with(
     let mut plan: Vec<Pending> = Vec::new();
     let mut removed: Vec<&DocState> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut next_id = repo::next_doc_id(db.connection())?;
     let mut new_budget = config.max_docs_per_project.saturating_sub(existing.len());
 
     for path in changed {
@@ -205,11 +199,7 @@ pub fn run_incremental_with(
                     }
                     new_budget -= 1;
                 }
-                let doc_id = previous.map_or(next_id, |state| state.id);
-                if previous.is_none() {
-                    next_id += 1;
-                }
-                prepared.id = doc_id;
+                prepared.id = previous.map(|state| state.id);
                 plan.push(prepared);
             }
             Ok(None) => stats.skipped += 1,
@@ -232,9 +222,12 @@ fn finish_plan(
     mark_pending(db, project_id, plan, removed)?;
 
     for pending in plan.iter_mut() {
-        index.delete_doc(pending.id);
+        let id = pending
+            .id
+            .ok_or_else(|| Error::internal("pending document without id"))?;
+        index.delete_doc(id);
         for chunk in &mut pending.chunks {
-            chunk.doc_id = pending.id;
+            chunk.doc_id = id;
         }
         index.add_chunks(&pending.chunks)?;
         stats.docs += 1;
@@ -245,27 +238,30 @@ fn finish_plan(
     }
     stats.removed = removed.len();
 
-    apply_plan(db, index, project_id, plan, removed)
+    // Tantivy first, then a short SQLite write transaction (R2): the marker
+    // rows make a crash in between reprocess on the next run.
+    index.commit()?;
+    apply_plan(db, project_id, plan, removed)
 }
 
 fn mark_pending(
     db: &mut Db,
     project_id: i64,
-    plan: &[Pending],
+    plan: &mut [Pending],
     removed: &[&DocState],
 ) -> Result<()> {
     let tx = db
         .connection_mut()
         .transaction()
         .map_err(|err| Error::internal_with_source(format!("begin sqlite: {err}"), err))?;
-    for pending in plan {
-        repo::mark_pending(
-            &tx,
-            project_id,
-            pending.id,
-            &pending.rel_path,
-            &pending.abs_path,
-        )?;
+    for pending in plan.iter_mut() {
+        if let Some(id) = pending.id {
+            repo::invalidate_doc(&tx, id)?;
+        } else {
+            let id =
+                repo::insert_pending_doc(&tx, project_id, &pending.rel_path, &pending.abs_path)?;
+            pending.id = Some(id);
+        }
     }
     for state in removed {
         repo::invalidate_doc(&tx, state.id)?;
@@ -313,7 +309,7 @@ fn prepare_doc(
         .clone()
         .or_else(|| chunks.iter().find_map(|c| c.heading_path.first().cloned()));
     Ok(Some(Pending {
-        id: 0,
+        id: None,
         rel_path: rel_path.to_owned(),
         abs_path: path.to_string_lossy().into_owned(),
         title,
@@ -325,13 +321,7 @@ fn prepare_doc(
     }))
 }
 
-fn apply_plan(
-    db: &mut Db,
-    index: &mut IndexHandle,
-    project_id: i64,
-    plan: &[Pending],
-    removed: &[&DocState],
-) -> Result<()> {
+fn apply_plan(db: &mut Db, project_id: i64, plan: &[Pending], removed: &[&DocState]) -> Result<()> {
     let tx = db
         .connection_mut()
         .transaction()
@@ -339,6 +329,9 @@ fn apply_plan(
     let now = unix_now();
 
     for pending in plan {
+        let id = pending
+            .id
+            .ok_or_else(|| Error::internal("pending document without id"))?;
         let doc = NewDoc {
             rel_path: &pending.rel_path,
             abs_path: &pending.abs_path,
@@ -349,7 +342,7 @@ fn apply_plan(
             content_hash: &pending.content_hash,
             indexed_at: now,
         };
-        repo::upsert_doc(&tx, project_id, pending.id, &doc)?;
+        repo::upsert_doc(&tx, project_id, id, &doc)?;
 
         let paths: Vec<String> = pending
             .chunks
@@ -373,13 +366,12 @@ fn apply_plan(
                 }
             })
             .collect();
-        repo::replace_chunks(&tx, pending.id, &rows)?;
+        repo::replace_chunks(&tx, id, &rows)?;
     }
     for state in removed {
         repo::delete_doc(&tx, state.id)?;
     }
 
-    index.commit()?;
     tx.commit()
         .map_err(|err| Error::internal_with_source(format!("commit sqlite: {err}"), err))
 }
@@ -463,8 +455,8 @@ mod tests {
         .expect("doc");
         drop(conn);
 
-        let plan = vec![Pending {
-            id: 2,
+        let mut plan = vec![Pending {
+            id: None,
             rel_path: "new.md".to_owned(),
             abs_path: "/p/new.md".to_owned(),
             title: None,
@@ -481,7 +473,7 @@ mod tests {
         };
         let removed = [&removed_state];
 
-        mark_pending(&mut db, 1, &plan, &removed).expect("mark pending");
+        mark_pending(&mut db, 1, &mut plan, &removed).expect("mark pending");
 
         let conn = Connection::open(cache.path().join(DB_FILE)).expect("raw db");
         let mut stmt = conn
@@ -497,5 +489,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM docs", [], |row| row.get(0))
             .expect("count");
         assert_eq!(rows, 2, "removed row is kept until the final commit");
+        let assigned = plan[0].id.expect("new doc id assigned in marker tx");
+        assert!(assigned > 1, "SQLite allocated the id: {assigned}");
     }
 }
