@@ -90,6 +90,32 @@ pub fn next_doc_id(conn: &Connection) -> Result<i64> {
     .map_err(db_error)
 }
 
+/// Marks a document as in-flight before the tantivy commit (R2).
+///
+/// The empty `content_hash` makes a later run reprocess the document even if
+/// its bytes match the stored hash, so a crash between the tantivy and SQLite
+/// commits cannot leave the two stores divergent.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn mark_pending(
+    conn: &Connection,
+    project_id: i64,
+    doc_id: i64,
+    rel_path: &str,
+    abs_path: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO docs (id, project_id, rel_path, abs_path, title, frontmatter_json,
+                           size, mtime, content_hash, indexed_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, NULL, 0, 0, '', 0)
+         ON CONFLICT(id) DO UPDATE SET content_hash = ''",
+        params![doc_id, project_id, rel_path, abs_path],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
 /// Inserts or updates one document row.
 ///
 /// # Errors

@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use docsbase_memory::config::Config;
+use docsbase_memory::index::chunk::{Chunk, ChunkKind};
 use docsbase_memory::index::job::{JobStats, run_full};
 use docsbase_memory::index::tantivy_index::{Hit, IndexHandle};
 use docsbase_memory::store::models::{Project, ProjectStatus};
@@ -19,10 +20,6 @@ struct Env {
 
 impl Env {
     fn new(files: &[(&str, &str)]) -> Self {
-        Self::with_config(files, Config::default())
-    }
-
-    fn with_config(files: &[(&str, &str)], _config: Config) -> Self {
         let cache = TempDir::new().expect("cache");
         let root = TempDir::new().expect("root");
         for (rel, body) in files {
@@ -85,7 +82,7 @@ fn write_file(root: &Path, rel: &str, bytes: &[u8]) {
     fs::write(path, bytes).expect("write file");
 }
 
-const GUIDE: &str = "---\ntitle: Setup Guide\ntags: [setup, guide]\n---\n\n# Install\n\nRun the installer quickly.\n\n## Example\n\n```rust\nlet x = 1;\n```\n";
+const GUIDE: &str = "---\ntitle: Setup Guide\ntags: setup, guide\n---\n\n# Install\n\nRun the installer quickly.\n\n## Example\n\n```rust\nlet x = 1;\n```\n";
 const PLAIN: &str = "# Plain\n\nSome prose about widgets and gadgets.\n";
 
 #[test]
@@ -137,6 +134,66 @@ fn fresh_corpus() {
         .expect("code chunk");
     assert_eq!(kind, "code");
     assert_eq!(lang.as_deref(), Some("rust"));
+
+    let (first_line, code_line): (i64, i64) = conn
+        .query_row(
+            "SELECT MIN(line_start), (SELECT line_start FROM chunks WHERE doc_id = 1 AND kind = 'code')
+             FROM chunks WHERE doc_id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("line rows");
+    assert_eq!(first_line, 6, "frontmatter shifts cached file lines");
+    assert_eq!(code_line, 10, "code chunk points at its real file line");
+}
+
+#[test]
+fn crash_between_commits_converges() {
+    let mut env = Env::new(&[("a.md", "# Title\n\nalpha content\n")]);
+    env.run();
+
+    // Simulate a crashed run: the pending marker and the tantivy commit made
+    // it to disk, the final SQLite commit did not.
+    let conn = Connection::open(env.cache.path().join(DB_FILE)).expect("raw db");
+    conn.execute("UPDATE docs SET content_hash = ''", [])
+        .expect("marker");
+    drop(conn);
+    env.index.delete_doc(1);
+    env.index
+        .add_chunks(&[Chunk {
+            doc_id: 1,
+            seq: 0,
+            heading_path: Vec::new(),
+            kind: ChunkKind::Prose,
+            line_start: 1,
+            line_end: 3,
+            text: "beta content".to_owned(),
+        }])
+        .expect("add stale");
+    env.index.commit().expect("commit stale");
+
+    // The file was reverted before the rerun (e.g. `git checkout`).
+    write_file(env.root.path(), "a.md", b"# Title\n\nalpha content\n");
+
+    let stats = env.run();
+    assert_eq!(stats.docs, 1, "marker forces reprocess");
+    assert_eq!(stats.skipped, 0);
+    assert!(
+        env.search("beta").is_empty(),
+        "stale committed chunks removed"
+    );
+    assert!(
+        !env.search("alpha").is_empty(),
+        "reverted content reindexed"
+    );
+
+    let hash: String = Connection::open(env.cache.path().join(DB_FILE))
+        .expect("raw db")
+        .query_row("SELECT content_hash FROM docs WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .expect("hash");
+    assert!(!hash.is_empty(), "marker cleared after commit");
 }
 
 #[test]

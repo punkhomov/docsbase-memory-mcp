@@ -50,8 +50,10 @@ struct Pending {
 /// purged. Per-file failures are counted in [`JobStats::errors`] and never
 /// abort the job (A4).
 ///
-/// Commit order is tantivy first, SQLite second (R2): a crash in between is
-/// recovered by rerunning, which converges on the stored hashes.
+/// Commit order is tantivy first, SQLite second (R2). Before touching tantivy
+/// every planned document is marked in-flight (empty `content_hash`), so a
+/// crash between the commits makes the next run reprocess the document
+/// instead of trusting a stale hash.
 ///
 /// # Errors
 /// Returns errors for walk setup failures and SQLite/tantivy failures that
@@ -71,28 +73,49 @@ pub fn run_full(
     let mut stats = JobStats::default();
     let mut plan: Vec<Pending> = Vec::new();
     let mut walked: HashSet<String> = HashSet::new();
-    let mut next_id = repo::next_doc_id(db.connection())?;
-    let mut new_budget = config.max_docs_per_project.saturating_sub(existing.len());
 
     let mut paths: Vec<PathBuf> = Vec::new();
+    let mut walk_errors = 0_usize;
     for entry in walk::walk(&project.canonical_root, config)? {
         match entry {
             Ok(path) => paths.push(path),
+            Err(_) => walk_errors += 1,
+        }
+    }
+    stats.errors += walk_errors;
+    paths.sort();
+
+    let mut files: Vec<(PathBuf, String)> = Vec::new();
+    for path in paths {
+        match path.strip_prefix(&project.canonical_root) {
+            Ok(rel) => {
+                let rel = rel.to_string_lossy().into_owned();
+                walked.insert(rel.clone());
+                files.push((path, rel));
+            }
             Err(_) => stats.errors += 1,
         }
     }
-    paths.sort();
 
-    for path in &paths {
-        let Ok(rel) = path.strip_prefix(&project.canonical_root) else {
-            stats.errors += 1;
-            continue;
-        };
-        let rel = rel.to_string_lossy().into_owned();
-        walked.insert(rel.clone());
+    // An incomplete walk cannot prove absence: skip purging when any entry
+    // failed, otherwise one unreadable directory would drop its whole subtree.
+    let removed: Vec<&DocState> = if walk_errors == 0 {
+        existing
+            .iter()
+            .filter(|state| !walked.contains(&state.rel_path))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
+    let mut next_id = repo::next_doc_id(db.connection())?;
+    let mut new_budget = config
+        .max_docs_per_project
+        .saturating_sub(existing.len().saturating_sub(removed.len()));
+
+    for (path, rel) in &files {
         let previous = by_path.get(rel.as_str()).copied();
-        match prepare_doc(path, &rel, previous, config) {
+        match prepare_doc(path, rel, previous, config) {
             Ok(Some(mut prepared)) => {
                 if previous.is_none() {
                     if new_budget == 0 {
@@ -113,10 +136,7 @@ pub fn run_full(
         }
     }
 
-    let removed: Vec<&DocState> = existing
-        .iter()
-        .filter(|state| !walked.contains(&state.rel_path))
-        .collect();
+    mark_pending(db, project.id, &plan)?;
 
     for pending in &mut plan {
         index.delete_doc(pending.id);
@@ -134,6 +154,24 @@ pub fn run_full(
 
     apply_plan(db, index, project.id, &plan, &removed)?;
     Ok(stats)
+}
+
+fn mark_pending(db: &mut Db, project_id: i64, plan: &[Pending]) -> Result<()> {
+    let tx = db
+        .connection_mut()
+        .transaction()
+        .map_err(|err| Error::internal_with_source(format!("begin sqlite: {err}"), err))?;
+    for pending in plan {
+        repo::mark_pending(
+            &tx,
+            project_id,
+            pending.id,
+            &pending.rel_path,
+            &pending.abs_path,
+        )?;
+    }
+    tx.commit()
+        .map_err(|err| Error::internal_with_source(format!("commit sqlite: {err}"), err))
 }
 
 /// Reads and hashes one walked file. Returns `Ok(None)` when the stored hash
@@ -157,12 +195,19 @@ fn prepare_doc(
     }
     let text = std::fs::read_to_string(path).map_err(|err| file_error(path, &err))?;
     let content_hash = blake3::hash(text.as_bytes()).to_hex().to_string();
-    if existing.is_some_and(|state| state.content_hash == content_hash) {
+    if existing
+        .is_some_and(|state| !state.content_hash.is_empty() && state.content_hash == content_hash)
+    {
         return Ok(None);
     }
 
     let (meta, body) = frontmatter::parse(&text);
-    let chunks = chunk_markdown(body, MAX_CHUNK_CHARS);
+    let line_shift = frontmatter_line_shift(&text, body);
+    let mut chunks = chunk_markdown(body, MAX_CHUNK_CHARS);
+    for chunk in &mut chunks {
+        chunk.line_start = chunk.line_start.saturating_add(line_shift);
+        chunk.line_end = chunk.line_end.saturating_add(line_shift);
+    }
     let title = meta
         .title
         .clone()
@@ -252,6 +297,14 @@ fn file_error(path: &Path, err: &std::io::Error) -> Error {
         path: Some(path.to_path_buf()),
         message: err.to_string(),
     }
+}
+
+/// Number of newlines in the frontmatter prefix, so cached `line_start` /
+/// `line_end` are file lines, not body lines.
+fn frontmatter_line_shift(text: &str, body: &str) -> u32 {
+    let prefix = text.len().saturating_sub(body.len());
+    let lines = text[..prefix].bytes().filter(|byte| *byte == b'\n').count();
+    u32::try_from(lines).unwrap_or(u32::MAX)
 }
 
 fn serialize_metadata(meta: &Frontmatter) -> Result<Option<String>> {
