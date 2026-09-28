@@ -54,6 +54,8 @@ pub enum Command {
         #[arg(long, hide = true, default_value_t = crate::daemon::lifecycle::DEFAULT_GRACE_MS)]
         grace_ms: u64,
     },
+    /// Run the stdio MCP server for one agent.
+    Mcp,
     /// Daemon control commands.
     Daemon {
         /// Daemon subcommand.
@@ -81,6 +83,7 @@ pub fn run() -> anyhow::Result<()> {
         Command::List => status::list(),
         Command::Status => status::status(),
         Command::Serve { detached, grace_ms } => serve(detached, grace_ms),
+        Command::Mcp => crate::mcp::frontend::run_blocking(),
         Command::Daemon { command } => match command {
             DaemonCommand::Stop => daemon_stop(),
         },
