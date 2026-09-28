@@ -84,3 +84,8 @@ Task 13: Ruling: `run_incremental` + `run_incremental_with(cfg)`; общий `fi
 Task 13: minor (deferred): F1 — бюджет incremental игнорирует удаления этого прогона (rename у лимита теряет документ; починить до T22); F2 — дефолтный `Config` в `run_incremental` (T22 обязан звать `_with`); F3 — проверка root лексическая (`..`-пути не нормализуются)
 Task 13: complete (commits 3d60d5c..382f746, tests: index_incremental 6, всего 100, clippy clean, fmt clean; review PASS/APPROVED, minors deferred)
 
+Task 14: Ruling: lease `projects/<id>/.writer.lock` (fd-lock, non-blocking `try_write`), статус-машина под lease, конфиг грузится от `project.canonical_root`; T11/T13-тесты переведены на `projects/<id>/tantivy` (layout дизайна §3)
+Task 14: fix round — статус `Error` при любой ошибке (включая open index), конфиг от git root, исходная ошибка не маскируется, `instruction` в Display, `last_indexed_at` стампится при `Indexed`; commit a6de5af
+Task 14: minor (deferred): падение `set_status(Indexed)` оставляет `indexing` (самоизлечимо следующим прогоном); порядок «регистрация → валидация конфига»
+Task 14: complete (commits 8a61489..a6de5af, tests: cli_index 4, всего 104, clippy clean, fmt clean; review PASS/CHANGES(Med) → fixed → ADDRESSED)
+

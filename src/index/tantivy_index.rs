@@ -39,6 +39,14 @@ pub fn chunk_id(doc_id: i64, seq: u32) -> u64 {
         .wrapping_add(u64::from(seq))
 }
 
+/// Splits a composite id back into `(doc_id, seq)` for citation joins.
+#[must_use]
+pub fn chunk_id_parts(chunk_id_value: u64) -> (i64, u32) {
+    let doc_id = i64::try_from(chunk_id_value >> 32).unwrap_or(i64::MAX);
+    let seq = u32::try_from(chunk_id_value & u64::from(u32::MAX)).unwrap_or(u32::MAX);
+    (doc_id, seq)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Fields {
     chunk_id: Field,
@@ -67,13 +75,12 @@ impl IndexHandle {
             Error::internal_with_source(format!("create index dir {}: {err}", dir.display()), err)
         })?;
         let index = if dir.join("meta.json").exists() {
-            Index::open_in_dir(dir).map_err(tantivy_error)?
+            open_index(dir)?
         } else {
-            Index::create_in_dir(dir, build_schema()).map_err(tantivy_error)?
+            let index = Index::create_in_dir(dir, build_schema()).map_err(tantivy_error)?;
+            register_tokenizer(&index);
+            index
         };
-        index
-            .tokenizers()
-            .register(tokenizer::NAME, IdentifierTokenizer);
         let fields = fields_from(&index.schema())?;
         let writer: IndexWriter = index.writer(WRITER_HEAP_BYTES).map_err(tantivy_error)?;
         let reader = index
@@ -81,20 +88,7 @@ impl IndexHandle {
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .map_err(tantivy_error)?;
-
-        let mut parser = QueryParser::for_index(
-            &index,
-            vec![
-                fields.text,
-                fields.title,
-                fields.heading_path,
-                fields.identifiers,
-            ],
-        );
-        parser.set_field_boost(fields.text, 1.0);
-        parser.set_field_boost(fields.title, 2.0);
-        parser.set_field_boost(fields.heading_path, 1.5);
-        parser.set_field_boost(fields.identifiers, 2.5);
+        let parser = build_parser(&index, &fields);
 
         Ok(Self {
             writer,
@@ -153,43 +147,124 @@ impl IndexHandle {
     /// Returns [`Error::Query`] for an unparsable query and [`Error::Internal`]
     /// for search failures.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
-        if query.trim().is_empty() {
-            return Err(Error::Query {
-                message: "empty query".to_owned(),
-            });
-        }
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let parsed = self.parser.parse_query(query).map_err(|err| Error::Query {
-            message: format!("parse query {query:?}: {err}"),
-        })?;
-        let searcher = self.reader.searcher();
-        let top = searcher
-            .search(&parsed, &TopDocs::with_limit(limit))
-            .map_err(tantivy_error)?;
-
-        let mut hits = Vec::with_capacity(top.len());
-        for (score, address) in top {
-            let document: TantivyDocument = searcher.doc(address).map_err(tantivy_error)?;
-            let chunk = document
-                .get_first(self.fields.chunk_id)
-                .and_then(|value| value.as_u64())
-                .ok_or_else(|| {
-                    Error::internal(format!("index doc {address:?}: missing chunk_id"))
-                })?;
-            let doc = document
-                .get_first(self.fields.doc_id)
-                .and_then(|value| value.as_i64())
-                .ok_or_else(|| Error::internal(format!("index doc {address:?}: missing doc_id")))?;
-            hits.push(Hit {
-                chunk_id: chunk,
-                doc_id: doc,
-                score,
-            });
-        }
-        Ok(hits)
+        search_reader(&self.reader, &self.parser, &self.fields, query, limit)
     }
+}
+
+/// Read-only handle for search-only consumers (CLI snapshots, FR-30).
+pub struct ReadIndex {
+    reader: IndexReader,
+    parser: QueryParser,
+    fields: Fields,
+}
+
+impl ReadIndex {
+    /// Opens an existing index without creating a writer (I5-friendly).
+    ///
+    /// # Errors
+    /// Returns [`Error::Internal`] when the index is missing or unreadable.
+    pub fn open(dir: &Path) -> Result<Self> {
+        let index = open_index(dir)?;
+        let fields = fields_from(&index.schema())?;
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .map_err(tantivy_error)?;
+        let parser = build_parser(&index, &fields);
+        Ok(Self {
+            reader,
+            parser,
+            fields,
+        })
+    }
+
+    /// Reader for the snapshot.
+    #[must_use]
+    pub fn reader(&self) -> &IndexReader {
+        &self.reader
+    }
+
+    /// Runs a BM25 search over all fields with identifier boosts.
+    ///
+    /// # Errors
+    /// Returns [`Error::Query`] for an unparsable query and [`Error::Internal`]
+    /// for search failures.
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
+        search_reader(&self.reader, &self.parser, &self.fields, query, limit)
+    }
+}
+
+fn search_reader(
+    reader: &IndexReader,
+    parser: &QueryParser,
+    fields: &Fields,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<Hit>> {
+    if query.trim().is_empty() {
+        return Err(Error::Query {
+            message: "empty query".to_owned(),
+        });
+    }
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let parsed = parser.parse_query(query).map_err(|err| Error::Query {
+        message: format!("parse query {query:?}: {err}"),
+    })?;
+    let searcher = reader.searcher();
+    let top = searcher
+        .search(&parsed, &TopDocs::with_limit(limit))
+        .map_err(tantivy_error)?;
+
+    let mut hits = Vec::with_capacity(top.len());
+    for (score, address) in top {
+        let document: TantivyDocument = searcher.doc(address).map_err(tantivy_error)?;
+        let chunk = document
+            .get_first(fields.chunk_id)
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| Error::internal(format!("index doc {address:?}: missing chunk_id")))?;
+        let doc = document
+            .get_first(fields.doc_id)
+            .and_then(|value| value.as_i64())
+            .ok_or_else(|| Error::internal(format!("index doc {address:?}: missing doc_id")))?;
+        hits.push(Hit {
+            chunk_id: chunk,
+            doc_id: doc,
+            score,
+        });
+    }
+    Ok(hits)
+}
+
+fn open_index(dir: &Path) -> Result<Index> {
+    let index = Index::open_in_dir(dir).map_err(tantivy_error)?;
+    register_tokenizer(&index);
+    Ok(index)
+}
+
+fn register_tokenizer(index: &Index) {
+    index
+        .tokenizers()
+        .register(tokenizer::NAME, IdentifierTokenizer);
+}
+
+fn build_parser(index: &Index, fields: &Fields) -> QueryParser {
+    let mut parser = QueryParser::for_index(
+        index,
+        vec![
+            fields.text,
+            fields.title,
+            fields.heading_path,
+            fields.identifiers,
+        ],
+    );
+    parser.set_field_boost(fields.text, 1.0);
+    parser.set_field_boost(fields.title, 2.0);
+    parser.set_field_boost(fields.heading_path, 1.5);
+    parser.set_field_boost(fields.identifiers, 2.5);
+    parser
 }
 
 fn build_schema() -> Schema {

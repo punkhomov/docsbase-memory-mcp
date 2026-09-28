@@ -1,6 +1,6 @@
 //! Repository helpers for documents and chunks (FR-16).
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Error, Result};
 
@@ -206,4 +206,108 @@ pub fn delete_doc(conn: &Connection, doc_id: i64) -> Result<()> {
 
 pub(crate) fn db_error(err: rusqlite::Error) -> Error {
     Error::internal_with_source(format!("sqlite: {err}"), err)
+}
+
+/// Citation metadata for one stored chunk (FR-20).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Citation {
+    /// Path relative to the project root.
+    pub path: String,
+    /// Breadcrumb `H1 > H2 > H3`.
+    pub heading_path: String,
+    /// First line (1-based, inclusive).
+    pub line_start: u32,
+    /// Last line (1-based, inclusive).
+    pub line_end: u32,
+}
+
+/// Looks up citation metadata for `(doc_id, seq)`.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn citation_for(conn: &Connection, doc_id: i64, seq: u32) -> Result<Option<Citation>> {
+    conn.query_row(
+        "SELECT d.rel_path, c.heading_path, c.line_start, c.line_end
+         FROM chunks c JOIN docs d ON d.id = c.doc_id
+         WHERE c.doc_id = ?1 AND c.seq = ?2",
+        params![doc_id, seq],
+        |row| {
+            Ok(Citation {
+                path: row.get(0)?,
+                heading_path: row.get(1)?,
+                line_start: row.get(2)?,
+                line_end: row.get(3)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(db_error)
+}
+
+/// One `docsbase list` row (FR-25 snapshot view).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocOverview {
+    /// Path relative to the project root.
+    pub path: String,
+    /// Title from frontmatter or the first heading.
+    pub title: Option<String>,
+    /// File size in bytes.
+    pub size: i64,
+    /// Chunk count for this document.
+    pub chunks: i64,
+}
+
+/// Lists documents of `project_id` ordered by path.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn docs_overview(conn: &Connection, project_id: i64) -> Result<Vec<DocOverview>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT d.rel_path, d.title, d.size,
+                    (SELECT COUNT(*) FROM chunks c WHERE c.doc_id = d.id)
+             FROM docs d WHERE d.project_id = ?1 ORDER BY d.rel_path",
+        )
+        .map_err(db_error)?;
+    let rows = stmt
+        .query_map([project_id], |row| {
+            Ok(DocOverview {
+                path: row.get(0)?,
+                title: row.get(1)?,
+                size: row.get(2)?,
+                chunks: row.get(3)?,
+            })
+        })
+        .map_err(db_error)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(db_error)
+}
+
+/// Aggregate document/chunk counts for one project (FR-26).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectCounts {
+    /// Indexed documents.
+    pub docs: i64,
+    /// Indexed chunks.
+    pub chunks: i64,
+}
+
+/// Counts documents and chunks of `project_id`.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn project_counts(conn: &Connection, project_id: i64) -> Result<ProjectCounts> {
+    conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM docs WHERE project_id = ?1),
+                (SELECT COUNT(*) FROM chunks c JOIN docs d ON d.id = c.doc_id
+                 WHERE d.project_id = ?1)",
+        [project_id],
+        |row| {
+            Ok(ProjectCounts {
+                docs: row.get(0)?,
+                chunks: row.get(1)?,
+            })
+        },
+    )
+    .map_err(db_error)
 }
