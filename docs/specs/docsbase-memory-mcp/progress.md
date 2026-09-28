@@ -107,3 +107,13 @@ Task 18: fix round — admission-check перед cleanup, schema/build expected
 Task 18: minor (deferred): root mismatch не сверяется (I1 требует только build/schema); admission_lock_held fail-open при EACCES/EMFILE; нет теста live-gap ветки; 10s wait при wedged ком
 Task 18: complete (commits 22c38c0+d72bd77, tests: admission 4, всего 125, clippy clean, fmt clean; review PASS/CHANGES(Med) → fixed → verified)
 
+Task 19: Ruling: tool-реализации вынесены в `daemon::tools` (одинаковые payload'ы direct/daemon); `index_project` работает на своём соединении `Db`; `docs.id` аллоцируется в marker-транзакции (`insert_pending_doc`, без `MAX(id)+1`)
+Task 19: fix rounds — auto_index от git root; замена сессии при повторной регистрации; статусы до lease (конфликт не флипает `error`); handshake-порядок Hello-first; marker-tx до tantivy + короткая SQLite-транзакция после; retry при гонке auto-index; commits 553cec6, e1d9fcd, 73c5f3d
+Task 19: minor (deferred): >5s SQLite-транзакция может дать SQLITE_BUSY; краш job оставляет status=indexing до полного прогона; shared Mutex<Db> для reads освобождён, но сессионная запись живёт до отказа записи
+Task 19: complete (commit e07353e+fixes, tests: ipc_server 11 + unit 1, всего 138, clippy clean, fmt clean; review FAIL(High) → fixed → verified)
+
+Task 20: Ruling: rmcp 2.2.0 (3.5.0 требует Rust 1.88 при MSRV 1.85); ручной `ServerHandler` вместо `#[tool]`-макросов; per-tool IPC-таймауты (30s quick / 600s long); новый `Error::Transport` + реконнект с одним retry
+Task 20: fix rounds — таймауты и desync, invalidation/reconnect кэшированного клиента, структурный Transport, retry с ensure_daemon, один префикс hint, allowlist без дубля, rmcp без `macros`; commits 48e0cff, fa911f4
+Task 20: minor (deferred): `index_project` без `path` из непривязанной сессии требует path (C8-петля — T21); mid-call смерть daemon лечится следующим вызовом; `get_doc`/`read_neighbors`/`sync_*`/`list_projects` рекламируются, но реализуются в T21/T28
+Task 20: complete (commit e2fbf96+fixes, tests: mcp_frontend 6, всего 144, clippy clean, fmt clean; review PASS/CHANGES(High) → fixed → verified)
+
