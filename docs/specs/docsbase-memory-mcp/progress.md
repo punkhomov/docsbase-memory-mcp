@@ -14,3 +14,10 @@ Task 2: minor (deferred): `From<io::Error>` maps to `Internal` (-32603), drops `
 Task 2: minor (deferred): Cargo.toml/Cargo.lock absent from T2 `Files` (plan oversight; Files list updated)
 Task 2: complete (commits a5f6265..f70aa04, tests: cargo test → 6/6, clippy clean, fmt clean; review PASS/APPROVED)
 
+Task 3: Ruling: dev-dep `tempfile` moved T4→T3 (config tests need temp dirs); plan updated
+Task 3: Ruling: design §2 "один крейт на задачу" противоречил конституции — приведён к правилу «крейты из §7 с обоснованием»
+Task 3: minor (deferred): CLI-precedence — opt-in `with_overrides`, вызывающий может её пропустить (src/config/mod.rs:97)
+Task 3: minor (deferred): paths::cache_dir/config_dir не покрыты юнит-тестами; проверить через DOCSBASE_* env в T17/T19
+Task 3: minor (deferred): ошибки чтения/парсинга конфига маппятся в Internal (-32603); T29 должен дать actionable категорию
+Task 3: complete (commits f70aa04..3567290, tests: cargo test → 11/11, clippy clean, fmt clean; review PASS/APPROVED)
+
