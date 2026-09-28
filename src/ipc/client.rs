@@ -13,9 +13,6 @@ use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 /// Timeout for a single request/response exchange.
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Marker distinguishing transport failures from daemon-reported errors.
-const TRANSPORT_PREFIX: &str = "daemon transport: ";
-
 /// Connected daemon client.
 pub struct Client {
     stream: BufReader<UnixStream>,
@@ -69,13 +66,10 @@ impl Client {
         let mut line = Vec::new();
         let read = self.stream.read_until(b'\n', &mut line).map_err(io_error)?;
         if read == 0 {
-            return Err(Error::Protocol {
-                message: format!("{TRANSPORT_PREFIX}connection closed"),
-            });
+            return Err(Error::transport("connection closed"));
         }
-        protocol::decode_response(&line).map_err(|err| Error::Protocol {
-            message: format!("{TRANSPORT_PREFIX}bad response: {err}"),
-        })
+        protocol::decode_response(&line)
+            .map_err(|err| Error::transport(format!("bad response: {err}")))
     }
 
     /// Performs the `Hello` exchange only; used by registry-wide tools that
@@ -146,12 +140,12 @@ pub fn socket_path(cache: &Path) -> PathBuf {
 }
 
 fn io_error(err: std::io::Error) -> Error {
-    Error::internal_with_source(format!("{TRANSPORT_PREFIX}{err}"), err)
+    Error::transport_with_source(err.to_string(), err)
 }
 
 /// True when the error came from the socket/framing rather than the daemon
 /// answering with an error category; such connections must be reconnected.
 #[must_use]
 pub fn is_transport_error(err: &Error) -> bool {
-    err.to_string().contains(TRANSPORT_PREFIX)
+    matches!(err, Error::Transport { .. })
 }

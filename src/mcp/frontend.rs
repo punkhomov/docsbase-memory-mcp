@@ -65,13 +65,18 @@ impl Frontend {
                 let timeout = if tools::LONG_TOOLS.contains(&name.as_str()) {
                     tools::LONG_TIMEOUT
                 } else {
-                    tools::IO_TIMEOUT
+                    tools::QUICK_TIMEOUT
                 };
-                conn.client.set_read_timeout(Some(timeout))?;
-                match conn.client.call_tool(&name, args.clone()) {
+                let timeout_set = conn.client.set_read_timeout(Some(timeout));
+                let result = match timeout_set {
+                    Ok(()) => conn.client.call_tool(&name, args.clone()),
+                    Err(err) => Err(err),
+                };
+                match result {
                     Err(err) if is_transport_error(&err) && attempt == 0 => {
-                        // The daemon restarted underneath us: reconnect once.
+                        // The daemon restarted underneath us: revive and retry once.
                         *guard = None;
+                        ensure_daemon(&cache)?;
                     }
                     other => return other,
                 }
@@ -90,14 +95,14 @@ fn open_conn(cache: &Path) -> Result<Conn, Error> {
         std::env::current_dir().map_err(|err| Error::internal_with_source("resolve cwd", err))?;
     let project_hint = match client.handshake(&cwd) {
         Ok(()) => None,
-        Err(err @ Error::Project { .. }) => {
-            let message = err.to_string();
-            let message = message
-                .strip_prefix("project error: ")
-                .unwrap_or(&message)
-                .to_owned();
+        Err(Error::Project {
+            message,
+            instruction,
+        }) => {
+            let hint =
+                instruction.map_or(message.clone(), |hint| format!("{message} (hint: {hint})"));
             client.handshake_registry()?;
-            Some(message)
+            Some(hint)
         }
         Err(err) => return Err(err),
     };

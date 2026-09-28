@@ -29,6 +29,15 @@ pub enum Error {
     /// Invalid or empty query.
     #[error("query error: {message}")]
     Query { message: String },
+    /// Frontend↔daemon transport failure (socket/framing), never a daemon
+    /// error answer; callers may reconnect and retry.
+    #[error("daemon transport: {message}")]
+    Transport {
+        message: String,
+        /// Underlying socket failure kept for logs.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
     /// Anything else; masked to the client.
     #[error("internal error: {message}")]
     Internal {
@@ -40,6 +49,27 @@ pub enum Error {
 }
 
 impl Error {
+    /// Transport failure without an underlying socket error.
+    #[must_use]
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self::Transport {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Transport failure that keeps `source` for diagnostics.
+    #[must_use]
+    pub fn transport_with_source(
+        message: impl Into<String>,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        Self::Transport {
+            message: message.into(),
+            source: Some(source.into()),
+        }
+    }
+
     /// Internal error without an underlying failure.
     #[must_use]
     pub fn internal(message: impl Into<String>) -> Self {
@@ -89,7 +119,7 @@ impl Error {
             Error::Project { .. } => -32012,
             Error::Index { .. } => -32013,
             Error::Query { .. } => -32014,
-            Error::Internal { .. } => -32603,
+            Error::Transport { .. } | Error::Internal { .. } => -32603,
         }
     }
 }

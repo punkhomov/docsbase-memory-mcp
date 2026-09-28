@@ -12,7 +12,7 @@ pub const PROJECT_TOOLS: &[&str] = &["search_docs", "get_doc", "read_neighbors",
 pub const LONG_TOOLS: &[&str] = &["index_project", "sync_start", "sync_status"];
 
 /// Default IPC read timeout for fast tools.
-pub const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub const QUICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// IPC read timeout for long-running tools.
 pub const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
