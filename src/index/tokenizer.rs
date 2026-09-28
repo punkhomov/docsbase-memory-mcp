@@ -2,15 +2,13 @@
 //!
 //! Emits the lowercased raw token plus `camelCase` / `snake_case` sub-tokens so
 //! technical identifiers (`defineStore`, `assessment_plan_id`,
-//! `__bt_tt_getProp`, `X-Request-ID`) rank high on exact matches while still
-//! matching their parts.
+//! `__bt_tt_getProp`, `X-Request-ID`) rank high on exact matches while prose
+//! words match regardless of adjacent punctuation.
 
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 
 /// Tokenizer name registered in the [`TokenizerManager`].
 pub const NAME: &str = "identifier";
-
-const SEPARATORS: &[char] = &['_', '-', '.', ':', '/', '\\'];
 
 /// Tokenizer producing identifier sub-tokens.
 #[derive(Clone, Default)]
@@ -20,22 +18,30 @@ impl Tokenizer for IdentifierTokenizer {
     type TokenStream<'a> = IdentifierTokenStream;
 
     fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
-        IdentifierTokenStream {
-            tokens: tokenize(text),
-            index: 0,
-        }
+        IdentifierTokenStream::new(text)
     }
 }
 
 /// Registers this tokenizer in a tantivy manager under [`NAME`].
-pub fn register(manager: &mut tantivy::tokenizer::TokenizerManager) {
+pub fn register(manager: &tantivy::tokenizer::TokenizerManager) {
     manager.register(NAME, IdentifierTokenizer);
 }
 
-/// Vec-backed token stream; positions are contiguous.
+/// Vec-backed token stream; positions are contiguous from zero.
 pub struct IdentifierTokenStream {
     tokens: Vec<Token>,
     index: usize,
+    fallback: Token,
+}
+
+impl IdentifierTokenStream {
+    fn new(text: &str) -> Self {
+        Self {
+            tokens: tokenize(text),
+            index: 0,
+            fallback: Token::default(),
+        }
+    }
 }
 
 impl TokenStream for IdentifierTokenStream {
@@ -43,17 +49,22 @@ impl TokenStream for IdentifierTokenStream {
         if self.index >= self.tokens.len() {
             return false;
         }
-        self.index += 1;
+        self.index = self.index.saturating_add(1);
         true
     }
 
     fn token(&self) -> &Token {
-        &self.tokens[self.index - 1]
+        self.index
+            .checked_sub(1)
+            .and_then(|position| self.tokens.get(position))
+            .unwrap_or(&self.fallback)
     }
 
     fn token_mut(&mut self) -> &mut Token {
-        let index = self.index - 1;
-        &mut self.tokens[index]
+        if let Some(index) = self.index.checked_sub(1) {
+            return &mut self.tokens[index];
+        }
+        &mut self.fallback
     }
 }
 
@@ -65,34 +76,63 @@ fn tokenize(text: &str) -> Vec<Token> {
         if !raw.chars().any(char::is_alphanumeric) {
             continue;
         }
+        let mut emitted: Vec<String> = Vec::new();
         let lower = raw.to_lowercase();
-        push(
+        emit(
             &mut tokens,
+            &mut emitted,
             &lower,
             offset,
             offset + raw.len(),
             &mut position,
         );
 
-        for part in raw.split(SEPARATORS).filter(|part| !part.is_empty()) {
+        for (part_from, part_to) in alnum_runs(raw) {
+            let part = &raw[part_from..part_to];
             let part_lower = part.to_lowercase();
-            if part_lower != lower {
-                push(
+            emit(
+                &mut tokens,
+                &mut emitted,
+                &part_lower,
+                offset + part_from,
+                offset + part_to,
+                &mut position,
+            );
+            for (sub, sub_from, sub_to) in camel_split(part) {
+                emit(
                     &mut tokens,
-                    &part_lower,
-                    offset,
-                    offset + raw.len(),
+                    &mut emitted,
+                    &sub,
+                    offset + part_from + sub_from,
+                    offset + part_from + sub_to,
                     &mut position,
                 );
-            }
-            for sub in camel_split(part) {
-                if sub != part_lower && sub != lower {
-                    push(&mut tokens, &sub, offset, offset + raw.len(), &mut position);
-                }
             }
         }
     }
     tokens
+}
+
+fn emit(
+    tokens: &mut Vec<Token>,
+    emitted: &mut Vec<String>,
+    text: &str,
+    from: usize,
+    to: usize,
+    position: &mut usize,
+) {
+    if text.is_empty() || emitted.iter().any(|seen| seen == text) {
+        return;
+    }
+    tokens.push(Token {
+        offset_from: from,
+        offset_to: to,
+        position: *position,
+        text: text.to_owned(),
+        position_length: 1,
+    });
+    emitted.push(text.to_owned());
+    *position += 1;
 }
 
 fn raw_segments(text: &str) -> Vec<(usize, &str)> {
@@ -113,41 +153,50 @@ fn raw_segments(text: &str) -> Vec<(usize, &str)> {
     segments
 }
 
-fn camel_split(part: &str) -> Vec<String> {
-    let chars: Vec<char> = part.chars().collect();
+fn alnum_runs(raw: &str) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut start: Option<usize> = None;
+    for (index, ch) in raw.char_indices() {
+        if ch.is_alphanumeric() {
+            if start.is_none() {
+                start = Some(index);
+            }
+        } else if let Some(from) = start.take() {
+            runs.push((from, index));
+        }
+    }
+    if let Some(from) = start {
+        runs.push((from, raw.len()));
+    }
+    runs
+}
+
+fn camel_split(part: &str) -> Vec<(String, usize, usize)> {
     let mut words = Vec::new();
     let mut current = String::new();
+    let mut current_start = 0_usize;
 
-    for (index, ch) in chars.iter().enumerate() {
-        let prev = index
-            .checked_sub(1)
-            .and_then(|position| chars.get(position));
-        let next = chars.get(index + 1);
+    for (byte_index, ch) in part.char_indices() {
+        let prev = part[..byte_index].chars().next_back();
+        let next = part[byte_index + ch.len_utf8()..].chars().next();
         let boundary = !current.is_empty()
             && ch.is_uppercase()
             && prev.is_some_and(|prev| {
                 prev.is_lowercase()
                     || prev.is_ascii_digit()
-                    || (prev.is_uppercase() && next.is_some_and(|next| next.is_lowercase()))
+                    || (prev.is_uppercase() && next.is_some_and(char::is_lowercase))
             });
         if boundary {
-            words.push(std::mem::take(&mut current).to_lowercase());
+            words.push((current.to_lowercase(), current_start, byte_index));
+            current = String::new();
         }
-        current.push(*ch);
+        if current.is_empty() {
+            current_start = byte_index;
+        }
+        current.push(ch);
     }
     if !current.is_empty() {
-        words.push(current.to_lowercase());
+        words.push((current.to_lowercase(), current_start, part.len()));
     }
     words
-}
-
-fn push(tokens: &mut Vec<Token>, text: &str, from: usize, to: usize, position: &mut usize) {
-    tokens.push(Token {
-        offset_from: from,
-        offset_to: to,
-        position: *position,
-        text: text.to_owned(),
-        position_length: 1,
-    });
-    *position += 1;
 }
