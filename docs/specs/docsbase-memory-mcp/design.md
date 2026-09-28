@@ -17,7 +17,7 @@ Unix socket и пробрасывают MCP tool-calls. Индексация я�
 
 Скопировано из constitution:
 
-- Rust, edition 2024, MSRV 1.85; `cargo fmt`, `cargo clippy -- -D warnings`.
+- Rust, edition 2024, MSRV 1.88; `cargo fmt`, `cargo clippy -- -D warnings`.
 - v1 — Linux/WSL2 (x86_64) только; `#[cfg(unix)]` там, где нужно.
 - Один статический бинарь; ноль сетевых вызовов и внешних сервисов в рантайме.
 - `unwrap`/`expect` запрещены в библиотечном коде; `thiserror` в libs, `anyhow` на границе.

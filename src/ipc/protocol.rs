@@ -93,12 +93,12 @@ impl Request {
     /// # Errors
     /// Returns [`Error::Protocol`] when a `CallTool` name is not allowlisted.
     pub fn validate(&self) -> Result<()> {
-        if let Self::CallTool { name, .. } = self {
-            if !TOOL_ALLOWLIST.contains(&name.as_str()) {
-                return Err(Error::Protocol {
-                    message: format!("unknown tool: {name}"),
-                });
-            }
+        if let Self::CallTool { name, .. } = self
+            && !TOOL_ALLOWLIST.contains(&name.as_str())
+        {
+            return Err(Error::Protocol {
+                message: format!("unknown tool: {name}"),
+            });
         }
         Ok(())
     }

@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ContentBlock, Implementation, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerInfo,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler};
@@ -54,13 +54,13 @@ impl Frontend {
                 let conn = guard
                     .as_mut()
                     .ok_or_else(|| Error::internal("daemon connection lost"))?;
-                if tools::PROJECT_TOOLS.contains(&name.as_str()) {
-                    if let Some(hint) = &conn.project_hint {
-                        return Err(Error::Project {
-                            message: hint.clone(),
-                            instruction: None,
-                        });
-                    }
+                if tools::PROJECT_TOOLS.contains(&name.as_str())
+                    && let Some(hint) = &conn.project_hint
+                {
+                    return Err(Error::Project {
+                        message: hint.clone(),
+                        instruction: None,
+                    });
                 }
                 let timeout = if tools::LONG_TOOLS.contains(&name.as_str()) {
                     tools::LONG_TIMEOUT
@@ -139,10 +139,10 @@ impl ServerHandler for Frontend {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         let name = request.name.to_string();
         if !TOOL_ALLOWLIST.contains(&name.as_str()) {
-            return Ok(tool_error(format!("unknown tool: {name}")));
+            return Ok(tool_error(format!("unknown tool: {name}")).into());
         }
         let args = request.arguments.map_or_else(|| json!({}), Value::Object);
         match self.proxy(&name, args).await {
@@ -150,9 +150,9 @@ impl ServerHandler for Frontend {
                 let mut result =
                     CallToolResult::success(vec![ContentBlock::text(value.to_string())]);
                 result.structured_content = Some(value);
-                Ok(result)
+                Ok(result.into())
             }
-            Err(err) => Ok(tool_error(err.to_string())),
+            Err(err) => Ok(tool_error(err.to_string()).into()),
         }
     }
 }

@@ -10,7 +10,7 @@ jobs; frontend'ы ходят через Unix-socket (JSON-RPC, версия пр
 **Constitution:** `docs/specs/constitution.md`
 
 **Global constraints (verbatim из design/constitution):**
-- Rust edition 2024, MSRV 1.85; `cargo fmt`; `cargo clippy --all-targets -- -D warnings`.
+- Rust edition 2024, MSRV 1.88; `cargo fmt`; `cargo clippy --all-targets -- -D warnings`.
 - Linux/WSL2 x86_64, `#[cfg(unix)]`; один статический бинарь; офлайн, ноль сетевых крейтов.
 - `unwrap`/`expect` запрещены в библиотечном коде; `thiserror` в libs, `anyhow` на границе.
 - Крейты — только из design.md; в шапке задачи указывать `New crates:` с обоснованием.

@@ -65,7 +65,7 @@ Skill-review: S3–S5, S8, S11 — HashSet-дедуп в токенизатор�
 Skill-review: S9 — `Config::validate` (нулевые лимиты → `Admission`), вызывается в `load_from`; после `with_overrides` — повторная валидация
 Skill-review: S10 — `Error::Internal` получил `#[source]` + конструкторы `internal`/`internal_with_source`; io/rusqlite/tantivy/ignore/toml ошибки сохраняют цепочку
 Skill-review: S7 Ruling — `ProjectStatus::parse` → `impl FromStr` c общим `ParseEnumError`; T11 обязан маппить `index::chunk::ChunkKind` → `store::models::ChunkKind` (имена совпадают, модули разные)
-Skill-review: Ruling — S6 (let-chains в `Request::validate`) отклонён: design §2 MSRV 1.85, let_chains стабильны с 1.88
+Skill-review: Ruling — S6 (let-chains) был отклонён при MSRV 1.85; ПЕРЕСМОТРЕНО в MSRV-раунде: MSRV поднят до 1.88, let-chains применены
 Skill-review: scoped re-review PASS, Critical/Important нет; minors (deferred): нет тестов на S4 non-NotFound и S11 corrupt-index (нужен фабрикованный индекс); docs синхронизированы (tasks.md T2/T5, Config::load `# Errors`)
 
 Task 11: Ruling: files — дополнительно `src/store/repo.rs` и `pub(crate)`-доступ к `Connection`; `Serialize` на `Frontmatter`; `MAX_CHUNK_CHARS = 4000`
@@ -112,8 +112,13 @@ Task 19: fix rounds — auto_index от git root; замена сессии пр
 Task 19: minor (deferred): >5s SQLite-транзакция может дать SQLITE_BUSY; краш job оставляет status=indexing до полного прогона; shared Mutex<Db> для reads освобождён, но сессионная запись живёт до отказа записи
 Task 19: complete (commit e07353e+fixes, tests: ipc_server 11 + unit 1, всего 138, clippy clean, fmt clean; review FAIL(High) → fixed → verified)
 
-Task 20: Ruling: rmcp 2.2.0 (3.5.0 требует Rust 1.88 при MSRV 1.85); ручной `ServerHandler` вместо `#[tool]`-макросов; per-tool IPC-таймауты (30s quick / 600s long); новый `Error::Transport` + реконнект с одним retry
+Task 20: Ruling: на момент T20 был rmcp 2.2.0 (3.5.0 требует Rust 1.88 при MSRV 1.85); ручной `ServerHandler` вместо `#[tool]`-макросов; per-tool IPC-таймауты (30s quick / 600s long); новый `Error::Transport` + реконнект с одним retry
 Task 20: fix rounds — таймауты и desync, invalidation/reconnect кэшированного клиента, структурный Transport, retry с ensure_daemon, один префикс hint, allowlist без дубля, rmcp без `macros`; commits 48e0cff, fa911f4
 Task 20: minor (deferred): `index_project` без `path` из непривязанной сессии требует path (C8-петля — T21); mid-call смерть daemon лечится следующим вызовом; `get_doc`/`read_neighbors`/`sync_*`/`list_projects` рекламируются, но реализуются в T21/T28
 Task 20: complete (commit e2fbf96+fixes, tests: mcp_frontend 6, всего 144, clippy clean, fmt clean; review PASS/CHANGES(High) → fixed → verified)
 
+
+MSRV-раунд (после T20): design §2/tasks.md/Cargo.toml — MSRV 1.85 → 1.88 (edition 2024 держит 1.85 минимумом, но 1.88 даёт rmcp 3.x и let-chains)
+MSRV-раунд: rmcp 2.2.0 → 3.3.0 (`default-features = false`, features server/transport-io; 3.5.0 придержан min-publish-age); адаптация `CallToolResponse` (SEP-2322) в frontend
+MSRV-раунд: S6 закрыт — let-chains применены в `Request::validate` и в проектно-сессионной проверке frontend
+MSRV-раунд: 144 теста зелёные, clippy/fmt чисты
