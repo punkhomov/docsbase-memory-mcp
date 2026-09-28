@@ -33,6 +33,8 @@ impl Db {
         ensure_private_dir(cache_dir)?;
         let path = cache_dir.join(DB_FILE);
         let conn = Connection::open(&path).map_err(|err| sql_error(&path, err))?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|err| sql_error(&path, err))?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|err| sql_error(&path, err))?;
         conn.pragma_update(None, "journal_mode", "WAL")

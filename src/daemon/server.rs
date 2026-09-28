@@ -58,13 +58,20 @@ pub async fn handle_connection(
     let (read_half, mut writer) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
     let mut session_id: Option<u64> = None;
+    let mut hello_done = false;
 
     loop {
         let Ok(Some(line)) = lines.next_line().await else {
             break;
         };
-        let (response, close) =
-            handle_request(&shared, &shutdown, &mut session_id, line.as_bytes()).await;
+        let (response, close) = handle_request(
+            &shared,
+            &shutdown,
+            &mut hello_done,
+            &mut session_id,
+            line.as_bytes(),
+        )
+        .await;
         let Ok(bytes) = protocol::encode(&response) else {
             break;
         };
@@ -86,6 +93,7 @@ pub async fn handle_connection(
 async fn handle_request(
     shared: &Arc<Shared>,
     shutdown: &watch::Sender<bool>,
+    hello_done: &mut bool,
     session_id: &mut Option<u64>,
     line: &[u8],
 ) -> (Response, bool) {
@@ -114,6 +122,7 @@ async fn handle_request(
                 };
                 return (error_response(&err), true);
             }
+            *hello_done = true;
             (
                 Response::Hello {
                     protocol_version: PROTOCOL_VERSION,
@@ -123,14 +132,24 @@ async fn handle_request(
                 false,
             )
         }
-        Request::RegisterSession { pid, cwd } => match register_session(shared, pid, &cwd).await {
-            Ok((id, value)) => {
-                *session_id = Some(id);
-                (Response::ToolResult { value }, false)
+        Request::RegisterSession { pid, cwd } => {
+            if !*hello_done {
+                return (hello_required(), true);
             }
-            Err(err) => (error_response(&err), false),
-        },
+            match register_session(shared, pid, &cwd).await {
+                Ok((id, value)) => {
+                    if let Some(previous) = session_id.replace(id) {
+                        shared.sessions.leave(previous);
+                    }
+                    (Response::ToolResult { value }, false)
+                }
+                Err(err) => (error_response(&err), false),
+            }
+        }
         Request::CallTool { name, args } => {
+            if !*hello_done {
+                return (hello_required(), true);
+            }
             let value = call_tool(shared, *session_id, &name, args).await;
             match value {
                 Ok(value) => (Response::ToolResult { value }, false),
@@ -150,19 +169,22 @@ async fn register_session(shared: &Arc<Shared>, pid: u32, cwd: &Path) -> Result<
     let cwd_for_task = cwd.clone();
     let outcome = tokio::task::spawn_blocking(move || -> Result<crate::store::models::Project> {
         let mut db = shared_for_task.db();
-        if let Ok(project) = registry::resolve_by_cwd(&db, &cwd_for_task) {
-            return Ok(project);
-        }
-        let config = Config::load(Some(&cwd_for_task))?;
+        let project_err = match registry::resolve_by_cwd(&db, &cwd_for_task) {
+            Ok(project) => return Ok(project),
+            Err(err) => err,
+        };
+        let Ok(root) = registry::project_root_for(&cwd_for_task, &shared_for_task.cache) else {
+            return Err(project_err);
+        };
+        let config = Config::load(Some(&root))?;
         if !config.auto_index {
-            return Err(Error::Project {
-                message: format!("no project registered for {}", cwd_for_task.display()),
-                instruction: Some("call index_project or `docsbase index` first".to_owned()),
-            });
+            return Err(project_err);
         }
-        let project = registry::ensure_project(&mut db, &cwd_for_task)?;
+        let project = registry::ensure_project(&mut db, &root)?;
         tools::run_project_index(&mut db, &shared_for_task.cache, &project, &config)?;
-        Ok(project)
+        registry::project_by_id(&db, project.id)?.ok_or_else(|| {
+            Error::internal(format!("project {} vanished after auto-index", project.id))
+        })
     })
     .await
     .map_err(|err| Error::internal_with_source("session task join", err))??;
@@ -214,14 +236,23 @@ fn route_tool(
         }
         "index_project" => {
             drop(db);
-            let mut db = shared.db();
-            let path = args.get("path").and_then(Value::as_str).map_or_else(
-                || project_path(shared, session_id),
-                |p| Ok(PathBuf::from(p)),
-            )?;
-            let config = Config::load(Some(&path))?;
-            let project = registry::ensure_project(&mut db, &path)?;
-            let stats = tools::run_project_index(&mut db, &shared.cache, &project, &config)?;
+            let session_cwd = session_cwd(shared, session_id)?;
+            let path = match args.get("path").and_then(Value::as_str) {
+                Some(raw) => {
+                    let raw = PathBuf::from(raw);
+                    if raw.is_absolute() {
+                        raw
+                    } else {
+                        session_cwd.join(raw)
+                    }
+                }
+                None => session_cwd,
+            };
+            let root = registry::project_root_for(&path, &shared.cache)?;
+            let config = Config::load(Some(&root))?;
+            let mut job_db = Db::open(&shared.cache)?;
+            let project = registry::ensure_project(&mut job_db, &root)?;
+            let stats = tools::run_project_index(&mut job_db, &shared.cache, &project, &config)?;
             Ok(json!({ "project_id": project.id, "stats": stats }))
         }
         other => Err(Error::internal(format!(
@@ -248,7 +279,7 @@ fn bound_project(
     })
 }
 
-fn project_path(shared: &Arc<Shared>, session_id: Option<u64>) -> Result<PathBuf> {
+fn session_cwd(shared: &Arc<Shared>, session_id: Option<u64>) -> Result<PathBuf> {
     session_id
         .and_then(|id| shared.sessions.get(id))
         .map(|session| session.cwd)
@@ -256,6 +287,12 @@ fn project_path(shared: &Arc<Shared>, session_id: Option<u64>) -> Result<PathBuf
             message: "session is not bound to a project".to_owned(),
             instruction: Some("index_project needs a path or a bound session".to_owned()),
         })
+}
+
+fn hello_required() -> Response {
+    error_response(&Error::Protocol {
+        message: "Hello must be the first request".to_owned(),
+    })
 }
 
 fn error_response(err: &Error) -> Response {

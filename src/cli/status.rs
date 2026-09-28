@@ -52,10 +52,6 @@ pub fn status() -> anyhow::Result<()> {
     }
     let db = Db::open_readonly(&cache)?;
     let value = crate::daemon::tools::status(&db, 0, 0)?;
-    let mut value = value;
-    if value["projects"].as_array().is_some_and(Vec::is_empty) {
-        value["hint"] = serde_json::json!("run `docsbase index` in your project");
-    }
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }

@@ -208,6 +208,15 @@ fn to_project(row: Row) -> Result<Project> {
     })
 }
 
+/// Canonical project root (realpath + git root) with I7 validation, without
+/// touching the registry; used for config lookup before registration.
+///
+/// # Errors
+/// Same as [`ensure_project`].
+pub fn project_root_for(path: &Path, cache: &Path) -> Result<PathBuf> {
+    normalize_root(path, home_dir().as_deref(), cache)
+}
+
 fn normalize_root(path: &Path, home: Option<&Path>, cache: &Path) -> Result<PathBuf> {
     if !path.exists() {
         return Err(Error::Project {

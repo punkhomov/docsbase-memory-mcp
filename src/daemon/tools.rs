@@ -86,11 +86,15 @@ pub fn status(db: &Db, sessions: u64, fd_count: u64) -> Result<Value> {
             "last_indexed_at": project.last_indexed_at,
         }));
     }
+    let hint = projects
+        .is_empty()
+        .then_some("run `docsbase index` in your project");
     Ok(json!({
         "schema_version": db.schema_version()?,
         "projects": projects,
         "sessions": sessions,
         "fd_count": fd_count,
+        "hint": hint,
     }))
 }
 
@@ -105,28 +109,31 @@ pub fn run_project_index(
     project: &Project,
     config: &Config,
 ) -> Result<JobStats> {
-    registry::set_status(db, project.id, ProjectStatus::Indexing)?;
-    let result = lifecycle::with_writer_lease(cache, project.id, || {
-        let mut index = crate::index::tantivy_index::IndexHandle::open_or_create(
-            &lifecycle::index_dir(cache, project.id),
-        )?;
-        run_full(db, &mut index, project, config)
-    });
-    match result {
-        Ok(stats) => {
-            registry::set_status(db, project.id, ProjectStatus::Indexed)?;
-            Ok(stats)
-        }
-        Err(err) => {
-            if let Err(status_err) = registry::set_status(db, project.id, ProjectStatus::Error) {
-                eprintln!(
-                    "warning: cannot mark project {} as error: {status_err}",
-                    project.id
-                );
+    lifecycle::with_writer_lease(cache, project.id, || {
+        registry::set_status(db, project.id, ProjectStatus::Indexing)?;
+        let outcome = (|| -> Result<JobStats> {
+            let mut index = crate::index::tantivy_index::IndexHandle::open_or_create(
+                &lifecycle::index_dir(cache, project.id),
+            )?;
+            run_full(db, &mut index, project, config)
+        })();
+        match outcome {
+            Ok(stats) => {
+                registry::set_status(db, project.id, ProjectStatus::Indexed)?;
+                Ok(stats)
             }
-            Err(err)
+            Err(err) => {
+                if let Err(status_err) = registry::set_status(db, project.id, ProjectStatus::Error)
+                {
+                    eprintln!(
+                        "warning: cannot mark project {} as error: {status_err}",
+                        project.id
+                    );
+                }
+                Err(err)
+            }
         }
-    }
+    })
 }
 
 fn ensure_indexed(project: &Project) -> Result<()> {
