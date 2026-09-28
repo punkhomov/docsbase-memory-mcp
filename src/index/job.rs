@@ -345,3 +345,65 @@ fn unix_now() -> i64 {
             i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{DB_FILE, Db};
+    use rusqlite::Connection;
+
+    #[test]
+    fn mark_pending_tombstones_planned_and_removed_docs() {
+        let cache = tempfile::tempdir().expect("cache");
+        let mut db = Db::open(cache.path()).expect("db");
+        let conn = Connection::open(cache.path().join(DB_FILE)).expect("raw db");
+        conn.execute(
+            "INSERT INTO projects (id, canonical_root, name, status, schema_version, created_at)
+             VALUES (1, '/p', 'p', 'indexed', 1, 0)",
+            [],
+        )
+        .expect("project");
+        conn.execute(
+            "INSERT INTO docs (id, project_id, rel_path, abs_path, content_hash, size, mtime, indexed_at)
+             VALUES (1, 1, 'gone.md', '/p/gone.md', 'abc', 1, 1, 1)",
+            [],
+        )
+        .expect("doc");
+        drop(conn);
+
+        let plan = vec![Pending {
+            id: 2,
+            rel_path: "new.md".to_owned(),
+            abs_path: "/p/new.md".to_owned(),
+            title: None,
+            frontmatter_json: None,
+            size: 0,
+            mtime: 0,
+            content_hash: "def".to_owned(),
+            chunks: Vec::new(),
+        }];
+        let removed_state = DocState {
+            id: 1,
+            rel_path: "gone.md".to_owned(),
+            content_hash: "abc".to_owned(),
+        };
+        let removed = [&removed_state];
+
+        mark_pending(&mut db, 1, &plan, &removed).expect("mark pending");
+
+        let conn = Connection::open(cache.path().join(DB_FILE)).expect("raw db");
+        let mut stmt = conn
+            .prepare("SELECT content_hash FROM docs ORDER BY id")
+            .expect("prepare");
+        let hashes: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("collect");
+        assert_eq!(hashes, vec![String::new(), String::new()]);
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM docs", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(rows, 2, "removed row is kept until the final commit");
+    }
+}

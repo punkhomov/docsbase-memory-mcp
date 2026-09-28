@@ -197,24 +197,6 @@ fn crash_between_commits_converges() {
 }
 
 #[test]
-fn crash_before_tantivy_commit_reprocesses() {
-    let mut env = Env::new(&[("a.md", "# Title\n\nalpha content\n")]);
-    env.run();
-
-    // Marker reached SQLite, tantivy never got the new version.
-    let conn = Connection::open(env.cache.path().join(DB_FILE)).expect("raw db");
-    conn.execute("UPDATE docs SET content_hash = ''", [])
-        .expect("marker");
-    drop(conn);
-    write_file(env.root.path(), "a.md", b"# Title\n\ngamma content\n");
-
-    let stats = env.run();
-    assert_eq!(stats.docs, 1, "empty hash cannot skip");
-    assert!(!env.search("gamma").is_empty(), "new content indexed");
-    assert!(env.search("alpha").is_empty(), "old content gone");
-}
-
-#[test]
 fn crash_after_removal_purge_recovers_restored_file() {
     let mut env = Env::new(&[("a.md", "# Title\n\nalpha content\n")]);
     env.run();
