@@ -46,30 +46,27 @@ pub fn chunk_markdown(body: &str, max_chunk_chars: usize) -> Vec<Chunk> {
         return Vec::new();
     }
     let starts = line_starts(body);
-    let sections = sections(body);
     let mut chunks = Vec::new();
     let mut seq = 0_u32;
 
-    for section in sections {
+    for section in sections(body, &starts) {
         if section.start >= section.end {
             continue;
         }
         let text = &body[section.start..section.end];
-        let kind = classify(text);
         for (start, end) in split_ranges(text, max_chunk_chars) {
-            if start >= end {
+            let piece = &text[start..end];
+            if piece.trim().is_empty() {
                 continue;
             }
-            let abs_start = section.start + start;
-            let abs_end = section.start + end;
             chunks.push(Chunk {
                 doc_id: 0,
                 seq,
                 heading_path: section.headings.clone(),
-                kind: kind.clone(),
-                line_start: line_of(&starts, abs_start),
-                line_end: line_of(&starts, abs_end.saturating_sub(1)),
-                text: text[start..end].to_owned(),
+                kind: classify(piece),
+                line_start: line_of(&starts, section.start + start),
+                line_end: line_of(&starts, section.start + end - 1),
+                text: piece.to_owned(),
             });
             seq += 1;
         }
@@ -84,7 +81,7 @@ struct Section {
     headings: Vec<String>,
 }
 
-fn sections(body: &str) -> Vec<Section> {
+fn sections(body: &str, starts: &[usize]) -> Vec<Section> {
     let parser = Parser::new_ext(
         body,
         Options::ENABLE_TABLES
@@ -100,27 +97,25 @@ fn sections(body: &str) -> Vec<Section> {
     for (event, range) in parser.into_offset_iter() {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
-                if range.start > section_start {
+                let boundary = line_start_at(starts, range.start);
+                if boundary > section_start {
                     sections.push(Section {
                         start: section_start,
-                        end: range.start,
+                        end: boundary,
                         headings: headings.clone(),
                     });
                 }
-                section_start = range.start;
+                section_start = boundary;
                 heading = Some((level as usize, String::new()));
             }
             Event::End(TagEnd::Heading(_)) => {
                 if let Some((level, text)) = heading.take() {
                     headings.truncate(level.saturating_sub(1));
-                    headings.push(text.trim().to_owned());
+                    headings.push(normalize(&text));
                 }
             }
-            Event::Text(text) | Event::Code(text) => {
+            Event::Text(text) | Event::Code(text) | Event::InlineHtml(text) => {
                 if let Some((_, buffer)) = heading.as_mut() {
-                    if !buffer.is_empty() {
-                        buffer.push(' ');
-                    }
                     buffer.push_str(&text);
                 }
             }
@@ -133,6 +128,10 @@ fn sections(body: &str) -> Vec<Section> {
         headings,
     });
     sections
+}
+
+fn normalize(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn classify(text: &str) -> ChunkKind {
@@ -148,43 +147,60 @@ fn classify(text: &str) -> ChunkKind {
     let Some(first) = content.first() else {
         return ChunkKind::Prose;
     };
-    let first = first.trim_start();
-    if first.starts_with("```") || first.starts_with("~~~") {
-        let fence = &first[..3];
-        let closed = content.len() >= 2
-            && content
-                .last()
-                .is_some_and(|last| last.trim_start().starts_with(fence));
+    if let Some((marker, len)) = fence_marker(first) {
+        let closed = content
+            .iter()
+            .skip(1)
+            .any(|line| is_fence_close(line, marker, len));
         if closed {
-            let lang = first[3..].trim();
+            let info = first.trim_start()[len..].trim();
             return ChunkKind::Code {
-                lang: if lang.is_empty() {
+                lang: if info.is_empty() {
                     None
                 } else {
-                    Some(lang.to_owned())
+                    Some(info.to_owned())
                 },
             };
         }
     }
-    if first.starts_with('|') {
+    if first.trim_start().starts_with('|') {
         return ChunkKind::Table;
     }
     ChunkKind::Prose
+}
+
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let trimmed = line.trim_start();
+    let marker = trimmed.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+    let len = trimmed.chars().take_while(|c| *c == marker).count();
+    (len >= 3).then_some((marker, len))
+}
+
+fn is_fence_close(line: &str, marker: char, open_len: usize) -> bool {
+    let trimmed = line.trim_start();
+    let len = trimmed.chars().take_while(|c| *c == marker).count();
+    len >= open_len && trimmed[len..].trim().is_empty()
 }
 
 fn split_ranges(text: &str, max: usize) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut start = 0_usize;
     let mut pos = 0_usize;
-    let mut in_fence = false;
+    let mut fence: Option<(char, usize)> = None;
 
     for line in text.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
+        if let Some((marker, len)) = fence {
+            if is_fence_close(line, marker, len) {
+                fence = None;
+            }
+        } else if let Some(opened) = fence_marker(line) {
+            fence = Some(opened);
         }
         pos += line.len();
-        let boundary = !in_fence && line.trim().is_empty();
+        let boundary = fence.is_none() && line.trim().is_empty();
         if boundary && pos - start > max {
             ranges.push((start, pos));
             start = pos;
@@ -207,6 +223,13 @@ fn line_starts(text: &str) -> Vec<usize> {
         }
     }
     starts
+}
+
+fn line_start_at(starts: &[usize], offset: usize) -> usize {
+    match starts.binary_search(&offset) {
+        Ok(index) => starts[index],
+        Err(index) => starts[index.saturating_sub(1)],
+    }
 }
 
 fn line_of(starts: &[usize], offset: usize) -> u32 {
