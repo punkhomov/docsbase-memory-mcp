@@ -55,7 +55,7 @@ lints из конституции.
 ### T2 — Error taxonomy
 **Depends:** T1
 **New crates:** `thiserror` — таксономия (design §7).
-**Files:** Create `src/error.rs`, `tests/error_codes.rs`; Modify `src/lib.rs`
+**Files:** Create `src/error.rs`, `tests/error_codes.rs`; Modify `src/lib.rs`, `Cargo.toml`, `Cargo.lock`
 **Interfaces:** Produces `enum Error { Admission|Protocol|Project|Index|Query|Internal }`,
 `fn mcp_code(&self) -> i32`, `type Result<T>`
 **RED:** `error_codes::maps_categories` — проверяет коды `-32010..-32014`, `-32603`; падает.
@@ -66,8 +66,8 @@ lints из конституции.
 
 ### T3 — Paths + config
 **Depends:** T2
-**New crates:** `serde`, `toml`, `directories` — конфиг и XDG-пути (design §7).
-**Files:** Create `src/config/mod.rs`, `src/config/paths.rs`, `tests/config.rs`; Modify `src/lib.rs`, `Cargo.toml`
+**New crates:** `serde`, `toml`, `directories` — конфиг и XDG-пути; dev `tempfile` — temp-dirs в тестах (design §7).
+**Files:** Create `src/config/mod.rs`, `src/config/paths.rs`, `tests/config.rs`; Modify `src/lib.rs`, `Cargo.toml`, `Cargo.lock`
 **Interfaces:** Produces `struct Config { ignores, max_file_size, max_docs_per_project,
 auto_index: bool /*=false*/, hybrid: bool /*=false*/ }`, `Config::load(project_root: Option<&Path>)`, `paths::cache_dir()/config_dir()`
 **RED:** `config::(defaults_when_missing, project_overrides_global, cli_overrides_project,
@@ -79,7 +79,7 @@ auto_index_default_false)` — падают.
 
 ### T4 — Store: schema + models
 **Depends:** T2
-**New crates:** `rusqlite` (bundled) — метаданные/реестр; dev `tempfile` — temp-БД в тестах (design §7).
+**New crates:** `rusqlite` (bundled) — метаданные/реестр (design §7).
 **Files:** Create `src/store/mod.rs`, `src/store/migrations.rs`, `src/store/models.rs`,
 `tests/store.rs`; Modify `src/lib.rs`, `Cargo.toml`
 **Interfaces:** Produces `SCHEMA_VERSION: u32 = 1`, `Db::open(cache)/open_readonly(cache)`,

@@ -7,5 +7,10 @@ BASE (before T1): 1e02a47
 Task 1: fix round 1/5 (1 addressed: cargo fmt; 0 open — tester: cargo test 3/3, clippy clean, fmt check OK)
 Task 1: minor (deferred): smoke.rs:19-34 — config checks are substring-based, not TOML-parsed
 Task 1: Ruling: NFR-6 (static binary) had no owning task — added T32 (release/static hardening); coverage updated
-Task 1: complete (commits: uncommitted — awaiting explicit commit permission; tests: cargo test --test smoke → 3/3, clippy -D warnings → clean)
+Task 1: complete (commits 1e02a47..a5f6265, tests: cargo test --test smoke → 3/3, clippy -D warnings → clean, fmt → clean)
+
+Task 2: Ruling: plan defect — `serde_json::Error` conversion moved from T2 to T5 (crate appears only in T5); tasks.md updated
+Task 2: minor (deferred): `From<io::Error>` maps to `Internal` (-32603), drops `ErrorKind`/source; T11/T29 must remap file-IO to `Error::Index`
+Task 2: minor (deferred): Cargo.toml/Cargo.lock absent from T2 `Files` (plan oversight; Files list updated)
+Task 2: complete (commits a5f6265..f70aa04, tests: cargo test → 6/6, clippy clean, fmt clean; review PASS/APPROVED)
 
