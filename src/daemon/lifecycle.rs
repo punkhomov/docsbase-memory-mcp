@@ -35,12 +35,17 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Serialize, Deserialize)]
-struct DaemonState {
-    pid: u32,
-    socket: PathBuf,
-    build_id: String,
-    schema_version: u32,
-    cache_root: PathBuf,
+pub(crate) struct DaemonState {
+    /// Daemon process id.
+    pub(crate) pid: u32,
+    /// Socket path recorded at startup.
+    pub(crate) socket: PathBuf,
+    /// Build identity of the daemon binary (I1).
+    pub(crate) build_id: String,
+    /// Schema version the daemon was built against (I1).
+    pub(crate) schema_version: u32,
+    /// Canonical cache root the daemon serves (I1).
+    pub(crate) cache_root: PathBuf,
 }
 
 /// Ensures a daemon is running for `cache`, starting one when needed (FR-2).
@@ -81,6 +86,11 @@ pub fn ensure_daemon_with(cache: &Path, exe: Option<&Path>) -> Result<()> {
 /// Returns [`Error::Admission`] when another daemon owns the cache, and
 /// IO/protocol errors otherwise.
 pub fn run_daemon(cache: &Path, grace: Duration) -> Result<()> {
+    let _lease = crate::daemon::admission::Lease::acquire(
+        cache,
+        &protocol::build_id(),
+        migrations::SCHEMA_VERSION,
+    )?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -320,7 +330,7 @@ fn write_state(cache: &Path) -> Result<()> {
     fs::rename(&tmp, &path).map_err(|err| Error::internal_with_source("publish daemon state", err))
 }
 
-fn read_state(cache: &Path) -> Result<Option<DaemonState>> {
+pub(crate) fn read_state(cache: &Path) -> Result<Option<DaemonState>> {
     let path = state_file(cache);
     if !path.exists() {
         return Ok(None);
@@ -345,7 +355,7 @@ fn pid_alive(pid: u32) -> bool {
     })
 }
 
-fn create_state_dir(cache: &Path) -> Result<()> {
+pub(crate) fn create_state_dir(cache: &Path) -> Result<()> {
     let dir = state_dir(cache);
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true).mode(0o700);
@@ -365,7 +375,7 @@ fn open_lock_file(path: &Path) -> Result<File> {
         .map_err(|err| Error::internal_with_source(format!("open {}", path.display()), err))
 }
 
-fn state_dir(cache: &Path) -> PathBuf {
+pub(crate) fn state_dir(cache: &Path) -> PathBuf {
     cache.join("state")
 }
 
