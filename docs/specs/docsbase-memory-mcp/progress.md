@@ -47,3 +47,14 @@ Task 8: minor (deferred): F3 (table-часть) — различающего tab
 Task 8: minor (deferred): latent false positive — fence → prose → чужой closing fence классифицируется Code (был и до фикса)
 Task 8: complete (commits ee1dacb..588a416, tests: chunker 19/19, clippy clean, fmt clean; review FAIL(High) → fixed → ADDRESSED)
 
+Task 9: Ruling: fix round — сплит по любому non-alphanumeric (High), точные offsets, дедуп, `register(&TokenizerManager)`, защитный `token()`; fix commit b9b6042; re-review ADDRESSED
+Task 9: complete (commits a5e866e..b9b6042, tests: tokenizer 13/13, clippy clean, fmt clean; review FAIL(High) → fixed → ADDRESSED)
+
+Task 10: Ruling: `search(&str, limit)` вместо `&Query`; `ReloadPolicy::Manual` + явный reload (в tantivy 0.25 нет `OnCommit`); план обновлён
+Task 10: fix round — пустой запрос → `Error::Query` (-32014), `limit = 0` → `[]`, доступ `reader()`; fix commit 26e6c90; re-review ADDRESSED
+Task 10: minor (deferred): `extract_identifiers` пере-/недоинклюзивен (слова с пунктуацией получают boost; чисто camelCase-идентификаторы в поле не попадают)
+Task 10: minor (deferred): `title` = последний heading, а не title документа; уточнить в T11/T27
+Task 10: minor (deferred): schema-mismatch проверяется только по именам полей; усилить при I1/T17
+Task 10: minor (deferred): `Hit.chunk_id` — композит `doc_id<<32|seq`, а SQLite `chunks.id` — autoincrement; согласовать в T11/T28
+Task 10: complete (commits e760d25+fix 26e6c90, tests: tantivy_index 7/7, clippy clean, fmt clean; review PASS/CHANGES(Med) → fixed → ADDRESSED)
+
