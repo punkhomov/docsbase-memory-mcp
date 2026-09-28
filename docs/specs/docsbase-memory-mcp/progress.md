@@ -36,5 +36,9 @@ Task 5: complete (commits d685040..7d8a8f4, tests: cargo test → 21/21, clippy 
 Task 6: Ruling: `walk` сигнатура — `Result<impl Iterator>` (eager-валидация `..`), а не голый iterator из плана
 Task 6: fix: `.git` добавлен в `DEFAULT_IGNORED_DIRS`; тесты на hidden/dist/build и `resolve_in_root` (review Low #1)
 Task 6: minor (deferred): вложенные `.docsbaseignore` с `..` не валидируются (escape невозможен); пост-фильтрация default-папок — перф-долг в T30
-Task 6: complete (commits 7d8a8f4..ca85ec8+fix, tests: walk 7/7, clippy clean, fmt clean; review PASS/APPROVED)
+Task 6: complete (commits 7d8a8f4..ca85ec8+fix 290363b, tests: walk 7/7, clippy clean, fmt clean; review PASS/APPROVED)
+
+Task 7: minor (deferred): unquote снимает непарные кавычки (`'Twas` → `Twas`); `--- ` с хвостовым пробелом не распознаётся как закрытие (frontmatter.rs:83,32)
+Task 7: minor (deferred): нет регрессионных тестов для `"---"`, `"---\n---"`, без trailing newline, multibyte body
+Task 7: complete (commits 290363b..ee1dacb, tests: frontmatter 5/5, clippy clean, fmt clean; review PASS/APPROVED)
 
