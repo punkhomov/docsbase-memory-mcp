@@ -18,7 +18,7 @@ use crate::store::repo::{self, DocState, NewChunk, NewDoc};
 pub const MAX_CHUNK_CHARS: usize = 4_000;
 
 /// Outcome of one indexing run.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct JobStats {
     /// New or changed documents written.
     pub docs: usize,

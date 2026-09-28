@@ -1,13 +1,9 @@
-use clap::Parser;
-
-#[derive(Parser)]
-#[command(
-    name = "docsbase",
-    version,
-    about = "Local-first docs memory MCP server"
-)]
-struct Cli {}
-
-fn main() {
-    let _cli = Cli::parse();
+fn main() -> std::process::ExitCode {
+    match docsbase_memory::cli::run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }

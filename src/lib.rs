@@ -1,5 +1,6 @@
 //! `docsbase_memory` — local-first documentation memory for coding agents.
 
+pub mod cli;
 pub mod config;
 pub mod daemon;
 pub mod error;

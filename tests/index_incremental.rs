@@ -37,7 +37,7 @@ impl Env {
         drop(conn);
 
         let index =
-            IndexHandle::open_or_create(&cache.path().join("projects/1/index")).expect("index");
+            IndexHandle::open_or_create(&cache.path().join("projects/1/tantivy")).expect("index");
         let project = Project {
             id: 1,
             canonical_root,
