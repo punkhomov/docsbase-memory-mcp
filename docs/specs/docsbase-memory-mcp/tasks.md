@@ -256,7 +256,7 @@ stop_command_terminates, stale_state_recovered)` — падают.
 ### T18 — Admission S1
 **Depends:** T17
 **Files:** Create `src/daemon/admission.rs`, `tests/admission.rs`; Modify `src/daemon/lifecycle.rs`
-**Interfaces:** Produces `Admission::acquire(cache, build_id, schema_version) -> Result<Lease>`;
+**Interfaces:** Produces `admission::Lease::acquire(cache, build_id, schema_version) -> Result<Lease>`;
 `logs/conflicts.ndjson`
 **RED:** `admission::(build_mismatch_refuses_and_logs, schema_mismatch_refuses, lock_recovered_after_kill,
 second_daemon_refused)` — падают.

@@ -74,9 +74,31 @@ pub fn ensure_daemon_with(cache: &Path, exe: Option<&Path>) -> Result<()> {
     if is_running(cache) {
         return Ok(());
     }
+    if admission_lock_held(cache) {
+        // A daemon is starting (bind/write_state gap) or alive without a
+        // responsive socket yet: never unlink its files; just wait (FR-9).
+        return wait_for_daemon(cache, START_TIMEOUT);
+    }
     cleanup_stale(cache)?;
     spawn_detached(cache, exe)?;
     wait_for_daemon(cache, START_TIMEOUT)
+}
+
+/// True when some process holds `state/admission.lock` (FR-4, FR-9).
+fn admission_lock_held(cache: &Path) -> bool {
+    let path = state_dir(cache).join("admission.lock");
+    let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
+        return false;
+    };
+    let mut lock = RwLock::new(file);
+    match lock.try_write() {
+        Ok(guard) => {
+            drop(guard);
+            false
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => true,
+        Err(_) => false,
+    }
 }
 
 /// Runs the daemon in the foreground until stopped or the grace period after

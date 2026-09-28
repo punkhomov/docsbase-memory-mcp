@@ -15,6 +15,8 @@ use crate::error::{Error, Result};
 /// Held for the whole daemon lifetime; a second daemon cannot acquire it
 /// (FR-4, FR-9). The underlying `RwLock` is leaked into a `'static` allocation
 /// so the guard can be stored; the daemon exits with the process anyway.
+/// Refused acquires also leak one allocation/fd per call — acceptable for the
+/// once-per-process daemon path and tests.
 #[derive(Debug)]
 pub struct Lease {
     #[expect(dead_code, reason = "RAII guard: held, never read, releases on drop")]
@@ -63,19 +65,25 @@ impl Lease {
         };
 
         if let Some(state) = lifecycle::read_state(cache)? {
+            let recorded_schema = state.schema_version.to_string();
+            let expected_schema = schema_version.to_string();
             let mismatch = if state.build_id != build_id {
-                Some(("build_mismatch", state.build_id.as_str()))
+                Some(("build_mismatch", build_id, state.build_id.as_str()))
             } else if state.schema_version != schema_version {
-                Some(("schema_mismatch", ""))
+                Some((
+                    "schema_mismatch",
+                    expected_schema.as_str(),
+                    recorded_schema.as_str(),
+                ))
             } else {
                 None
             };
-            if let Some((kind, actual)) = mismatch {
+            if let Some((kind, expected, actual)) = mismatch {
                 log_best_effort(
                     cache,
                     &Conflict {
                         kind,
-                        expected: build_id,
+                        expected,
                         actual,
                         cache_root: cache,
                     },

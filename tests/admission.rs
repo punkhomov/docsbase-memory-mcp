@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -79,9 +80,17 @@ fn build_mismatch_refuses_and_logs() {
     assert!(matches!(err, Error::Admission { .. }), "{err:?}");
     assert_eq!(err.mcp_code(), -32010);
 
-    let log = env.conflicts();
-    assert!(log.contains("build_mismatch"), "{log}");
-    assert!(log.contains("docsbase 0.0.0-old"), "{log}");
+    let lines = conflict_lines(&env);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["kind"], "build_mismatch");
+    assert_eq!(lines[0]["actual"], "docsbase 0.0.0-old");
+
+    let mode = fs::metadata(env.cache().join("logs"))
+        .expect("logs metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, "conflict log dir must be private");
 }
 
 #[test]
@@ -129,5 +138,13 @@ fn lock_recovered_after_kill() {
     let lease = Lease::acquire(env.cache(), &build_id(), 1).expect("recover lock");
     drop(lease);
 
-    stop_daemon(env.cache()).expect("stop is a no-op for a dead daemon");
+    ensure_daemon_with(env.cache(), Some(&daemon_bin())).expect("fresh daemon starts");
+    stop_daemon(env.cache()).expect("stop fresh daemon");
+}
+
+fn conflict_lines(env: &Env) -> Vec<serde_json::Value> {
+    env.conflicts()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("ndjson line"))
+        .collect()
 }
