@@ -27,3 +27,9 @@ Task 4: minor (deferred): FK cascade + UNIQUE constraints untested; cover in T11
 Task 4: minor (deferred): ProjectStatus::as_str/parse round-trip untested
 Task 4: complete (commits 3567290..d685040, tests: store 6/6, clippy clean, fmt clean; review PASS + fix ADDRESSED)
 
+Task 5: Ruling: T5 `Files` дополнены `src/error.rs` — сюда перенесена отложенная из T2 конверсия `From<serde_json::Error>`
+Task 5: minor (deferred): только `Response::Hello` в roundtrip; нет raw wire fixture и `\r`-кейса (tests/ipc_protocol.rs)
+Task 5: minor (deferred): wire использует i32/u64 вместо ErrorCode/usize из эскиза design §5 — обновить эскиз или зафиксировать отклонение
+Task 5: minor (deferred): асимметричный API (`encode` generic, только `decode_request`); T20 добавит декод ответов
+Task 5: complete (commits d685040..7d8a8f4, tests: cargo test → 21/21, clippy clean, fmt clean; review PASS/APPROVED)
+
