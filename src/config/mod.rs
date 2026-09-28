@@ -67,7 +67,8 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`Error::Internal`] when the config directory cannot be determined
-    /// or a config file exists but cannot be read or parsed.
+    /// or a config file exists but cannot be read or parsed, and
+    /// [`Error::Admission`] when a limit is zero.
     pub fn load(project_root: Option<&Path>) -> Result<Self> {
         Self::load_from(&paths::config_dir()?, project_root)
     }
@@ -76,7 +77,7 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`Error::Internal`] when a config file exists but cannot be read
-    /// or parsed.
+    /// or parsed, and [`Error::Admission`] when a limit is zero.
     pub fn load_from(config_dir: &Path, project_root: Option<&Path>) -> Result<Self> {
         let mut config = Config::default();
         let global = config_dir.join("config.toml");

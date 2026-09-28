@@ -58,3 +58,13 @@ Task 10: minor (deferred): schema-mismatch проверяется только �
 Task 10: minor (deferred): `Hit.chunk_id` — композит `doc_id<<32|seq`, а SQLite `chunks.id` — autoincrement; согласовать в T11/T28
 Task 10: complete (commits e760d25+fix 26e6c90, tests: tantivy_index 7/7, clippy clean, fmt clean; review PASS/CHANGES(Med) → fixed → ADDRESSED)
 
+Skill-review T1–T10 (router → coding-guidelines, m06, m15): S1–S11, fix commit 6409d25
+Skill-review: S1 Med — `ChunkMeta.kind`/`SyncJob.state` String → enum'ы `ChunkKind`/`SyncState` (+`as_str`/`FromStr`, строки БД не менялись)
+Skill-review: S2 Med — глобальный `From<serde_json::Error>` удалён: `encode` → `Internal`, `decode_request` → явный `Protocol`
+Skill-review: S3–S5, S8, S11 — HashSet-дедуп в токенизаторе; в `.docsbaseignore` глотается только `NotFound`; `trim_ascii_end`; `HEAP_SIZE` → `WRITER_HEAP_BYTES`; missing stored field → `Internal` (без тихого 0)
+Skill-review: S9 — `Config::validate` (нулевые лимиты → `Admission`), вызывается в `load_from`; после `with_overrides` — повторная валидация
+Skill-review: S10 — `Error::Internal` получил `#[source]` + конструкторы `internal`/`internal_with_source`; io/rusqlite/tantivy/ignore/toml ошибки сохраняют цепочку
+Skill-review: S7 Ruling — `ProjectStatus::parse` → `impl FromStr` c общим `ParseEnumError`; T11 обязан маппить `index::chunk::ChunkKind` → `store::models::ChunkKind` (имена совпадают, модули разные)
+Skill-review: Ruling — S6 (let-chains в `Request::validate`) отклонён: design §2 MSRV 1.85, let_chains стабильны с 1.88
+Skill-review: scoped re-review PASS, Critical/Important нет; minors (deferred): нет тестов на S4 non-NotFound и S11 corrupt-index (нужен фабрикованный индекс); docs синхронизированы (tasks.md T2/T5, Config::load `# Errors`)
+
