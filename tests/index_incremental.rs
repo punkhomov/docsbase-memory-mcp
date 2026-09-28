@@ -184,7 +184,7 @@ fn crash_marker_converges_on_rerun() {
     write_file(env.root.path(), "a.md", beta().as_bytes());
     let changed = [env.path("a.md")];
     env.incremental(&changed);
-    assert!(!env.search("beta").is_empty());
+    assert!(!env.search("beta").is_empty(), "beta indexed before crash");
 
     // Simulate a crash after the tantivy commit: marker set, stale chunks
     // committed for the same doc id, no final SQLite write.

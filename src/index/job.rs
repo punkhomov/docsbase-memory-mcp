@@ -191,7 +191,7 @@ pub fn run_incremental_with(
         let previous = by_path.get(rel.as_str()).copied();
         if !path.exists() {
             match previous {
-                Some(state) => removed.push(state),
+                Some(previous) => removed.push(previous),
                 None => stats.errors += 1,
             }
             continue;
