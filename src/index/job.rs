@@ -136,9 +136,102 @@ pub fn run_full(
         }
     }
 
-    mark_pending(db, project.id, &plan, &removed)?;
+    finish_plan(db, index, project.id, &mut plan, &removed, &mut stats)?;
+    Ok(stats)
+}
 
-    for pending in &mut plan {
+/// Incrementally reindexes only `changed` paths (FR-16): created/modified files
+/// are hashed and reindexed when needed, missing files are purged. Paths
+/// outside the project root and unknown deletions count as warnings (A4).
+///
+/// # Errors
+/// Same as [`run_full`].
+pub fn run_incremental(
+    db: &mut Db,
+    index: &mut IndexHandle,
+    project: &Project,
+    changed: &[PathBuf],
+) -> Result<JobStats> {
+    run_incremental_with(db, index, project, changed, &Config::default())
+}
+
+/// [`run_incremental`] with explicit limits for watcher/CLI callers.
+///
+/// # Errors
+/// Same as [`run_full`].
+pub fn run_incremental_with(
+    db: &mut Db,
+    index: &mut IndexHandle,
+    project: &Project,
+    changed: &[PathBuf],
+    config: &Config,
+) -> Result<JobStats> {
+    let existing = repo::doc_states(db.connection(), project.id)?;
+    let by_path: HashMap<&str, &DocState> = existing
+        .iter()
+        .map(|state| (state.rel_path.as_str(), state))
+        .collect();
+
+    let mut stats = JobStats::default();
+    let mut plan: Vec<Pending> = Vec::new();
+    let mut removed: Vec<&DocState> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut next_id = repo::next_doc_id(db.connection())?;
+    let mut new_budget = config.max_docs_per_project.saturating_sub(existing.len());
+
+    for path in changed {
+        let Ok(rel) = path.strip_prefix(&project.canonical_root) else {
+            stats.errors += 1;
+            continue;
+        };
+        let rel = rel.to_string_lossy().into_owned();
+        if !seen.insert(rel.clone()) {
+            continue;
+        }
+        let previous = by_path.get(rel.as_str()).copied();
+        if !path.exists() {
+            match previous {
+                Some(state) => removed.push(state),
+                None => stats.errors += 1,
+            }
+            continue;
+        }
+        match prepare_doc(path, &rel, previous, config) {
+            Ok(Some(mut prepared)) => {
+                if previous.is_none() {
+                    if new_budget == 0 {
+                        stats.errors += 1;
+                        continue;
+                    }
+                    new_budget -= 1;
+                }
+                let doc_id = previous.map_or(next_id, |state| state.id);
+                if previous.is_none() {
+                    next_id += 1;
+                }
+                prepared.id = doc_id;
+                plan.push(prepared);
+            }
+            Ok(None) => stats.skipped += 1,
+            Err(_) => stats.errors += 1,
+        }
+    }
+
+    finish_plan(db, index, project.id, &mut plan, &removed, &mut stats)?;
+    Ok(stats)
+}
+
+fn finish_plan(
+    db: &mut Db,
+    index: &mut IndexHandle,
+    project_id: i64,
+    plan: &mut [Pending],
+    removed: &[&DocState],
+    stats: &mut JobStats,
+) -> Result<()> {
+    mark_pending(db, project_id, plan, removed)?;
+
+    for pending in plan.iter_mut() {
         index.delete_doc(pending.id);
         for chunk in &mut pending.chunks {
             chunk.doc_id = pending.id;
@@ -147,13 +240,12 @@ pub fn run_full(
         stats.docs += 1;
         stats.chunks += pending.chunks.len();
     }
-    for state in &removed {
+    for state in removed {
         index.delete_doc(state.id);
     }
     stats.removed = removed.len();
 
-    apply_plan(db, index, project.id, &plan, &removed)?;
-    Ok(stats)
+    apply_plan(db, index, project_id, plan, removed)
 }
 
 fn mark_pending(
