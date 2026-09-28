@@ -149,9 +149,8 @@ fn classify(text: &str) -> ChunkKind {
     };
     if let Some((marker, len)) = fence_marker(first) {
         let closed = content
-            .iter()
-            .skip(1)
-            .any(|line| is_fence_close(line, marker, len));
+            .last()
+            .is_some_and(|line| is_fence_close(line, marker, len));
         if closed {
             let info = first.trim_start()[len..].trim();
             return ChunkKind::Code {

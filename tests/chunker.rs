@@ -57,6 +57,17 @@ fn fenced_section_is_code() {
 }
 
 #[test]
+fn fence_with_trailing_prose_is_prose() {
+    let body = "# T\n\n```rust\ncode();\n```\ntrailing prose\n";
+    let chunks = chunk_markdown(body, 10_000);
+    let chunk = chunks
+        .iter()
+        .find(|chunk| chunk.text.contains("code();"))
+        .expect("code chunk");
+    assert_eq!(chunk.kind, ChunkKind::Prose, "{chunks:?}");
+}
+
+#[test]
 fn table_intact() {
     let body = "# T\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n";
     let chunks = chunk_markdown(body, 4);
