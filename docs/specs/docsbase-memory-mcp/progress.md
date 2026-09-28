@@ -42,3 +42,8 @@ Task 7: minor (deferred): unquote снимает непарные кавычки
 Task 7: minor (deferred): нет регрессионных тестов для `"---"`, `"---\n---"`, без trailing newline, multibyte body
 Task 7: complete (commits 290363b..ee1dacb, tests: frontmatter 5/5, clippy clean, fmt clean; review PASS/APPROVED)
 
+Task 8: Ruling: fix loop 2 rounds — F1 High (длина fence), F2 Med (kind на чанк), F4–F7; fix commits 15fb51a, 588a416; re-review ADDRESSED
+Task 8: minor (deferred): F3 (table-часть) — различающего table-теста не существует (в таблице нет пустых строк)
+Task 8: minor (deferred): latent false positive — fence → prose → чужой closing fence классифицируется Code (был и до фикса)
+Task 8: complete (commits ee1dacb..588a416, tests: chunker 19/19, clippy clean, fmt clean; review FAIL(High) → fixed → ADDRESSED)
+
