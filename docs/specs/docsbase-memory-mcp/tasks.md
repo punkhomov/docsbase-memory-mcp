@@ -156,11 +156,14 @@ empty_doc, line_ranges_match)` — падают.
 **Depends:** T4, T9
 **Files:** Create `src/index/tantivy_index.rs`, `tests/tantivy_index.rs`; Modify `src/index/mod.rs`
 **Interfaces:** Produces `IndexHandle::open_or_create(dir)`, `add_chunks(&[Chunk])`,
-`delete_doc(doc_id)`, `commit()`, `reader()`, `search(&Query, limit) -> Vec<Hit>`,
-`Hit{chunk_id, doc_id, score}`; поля `text^1.0 title^2.0 heading_path^1.5 identifiers^2.5`
+`delete_doc(doc_id)`, `commit()`, `reader() -> &IndexReader`, `search(&str, limit) -> Vec<Hit>`
+(строка, парсится внутри настроенным `QueryParser`; отклонение от эскиза `&Query`
+зафиксировано в ledger), `Hit{chunk_id, doc_id, score}`; поля
+`text^1.0 title^2.0 heading_path^1.5 identifiers^2.5`
 **RED:** `tantivy_index::(add_and_search, delete_by_doc, reload_after_commit,
 exact_identifier_beats_prose)` — падают.
-**GREEN:** схема, writer с одним экземпляром на проект (I5), `ReloadPolicy::OnCommit`.
+**GREEN:** схема, writer с одним экземпляром на проект (I5), `ReloadPolicy::Manual` +
+явный `reader.reload()` в `commit()` (в tantivy 0.25 нет `OnCommit`).
 **Verify:** `cargo test --test tantivy_index` → OK
 **Acceptance:** FR-19, FR-21, FR-26; NFR-1; I5.
 

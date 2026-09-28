@@ -29,6 +29,8 @@ pub struct Hit {
 /// Composite chunk id used across the store and the index.
 #[must_use]
 pub fn chunk_id(doc_id: i64, seq: u32) -> u64 {
+    debug_assert!(doc_id >= 0, "doc ids are positive row ids");
+    debug_assert!(doc_id < (1_i64 << 32), "doc id must fit 32 bits");
     u64::try_from(doc_id)
         .unwrap_or(0)
         .wrapping_shl(32)
@@ -100,6 +102,12 @@ impl IndexHandle {
         })
     }
 
+    /// Reader for the current index generation (used by read-only CLI paths).
+    #[must_use]
+    pub fn reader(&self) -> &IndexReader {
+        &self.reader
+    }
+
     /// Adds chunks to the pending segment (visible after [`Self::commit`]).
     ///
     /// # Errors
@@ -145,12 +153,20 @@ impl IndexHandle {
     /// Returns [`Error::Query`] for an unparsable query and [`Error::Internal`]
     /// for search failures.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
+        if query.trim().is_empty() {
+            return Err(Error::Query {
+                message: "empty query".to_owned(),
+            });
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let parsed = self.parser.parse_query(query).map_err(|err| Error::Query {
             message: format!("parse query {query:?}: {err}"),
         })?;
         let searcher = self.reader.searcher();
         let top = searcher
-            .search(&parsed, &TopDocs::with_limit(limit.max(1)))
+            .search(&parsed, &TopDocs::with_limit(limit))
             .map_err(|err| tantivy_error(&err))?;
 
         let mut hits = Vec::with_capacity(top.len());

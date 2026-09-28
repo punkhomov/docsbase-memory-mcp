@@ -124,6 +124,30 @@ fn exact_identifier_beats_prose() {
 }
 
 #[test]
+fn empty_query_is_query_error() {
+    let (_dir, index) = handle();
+    for query in ["", "   "] {
+        let err = index.search(query, 5).expect_err("must reject");
+        assert!(
+            matches!(err, docsbase_memory::error::Error::Query { .. }),
+            "{err:?}"
+        );
+        assert_eq!(err.mcp_code(), -32014);
+    }
+}
+
+#[test]
+fn zero_limit_returns_empty() {
+    let (_dir, mut index) = handle();
+    index
+        .add_chunks(&[chunk(1, 0, "A", "something searchable")])
+        .expect("add");
+    index.commit().expect("commit");
+    assert_eq!(index.search("something", 0).expect("search"), Vec::new());
+    let _ = index.reader();
+}
+
+#[test]
 fn bad_query_is_query_error() {
     let (_dir, index) = handle();
     let err = index.search("\"unbalanced", 5).expect_err("must fail");
