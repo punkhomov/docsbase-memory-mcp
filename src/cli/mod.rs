@@ -45,6 +45,28 @@ pub enum Command {
     List,
     /// Show registry-wide status.
     Status,
+    /// Run the shared daemon in the foreground (hidden `--detached` for autostart).
+    Serve {
+        /// Marker flag used by autostart; detaching is done by the parent.
+        #[arg(long, hide = true)]
+        detached: bool,
+        /// Grace period before the last session's exit stops the daemon.
+        #[arg(long, hide = true, default_value_t = crate::daemon::lifecycle::DEFAULT_GRACE_MS)]
+        grace_ms: u64,
+    },
+    /// Daemon control commands.
+    Daemon {
+        /// Daemon subcommand.
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+}
+
+/// Daemon control subcommands.
+#[derive(Debug, Subcommand)]
+pub enum DaemonCommand {
+    /// Stop the running daemon.
+    Stop,
 }
 
 /// Parses argv and runs the selected command.
@@ -58,7 +80,24 @@ pub fn run() -> anyhow::Result<()> {
         Command::Search { query, limit } => search::run(&query, limit),
         Command::List => status::list(),
         Command::Status => status::status(),
+        Command::Serve { detached, grace_ms } => serve(detached, grace_ms),
+        Command::Daemon { command } => match command {
+            DaemonCommand::Stop => daemon_stop(),
+        },
     }
+}
+
+fn serve(_detached: bool, grace_ms: u64) -> anyhow::Result<()> {
+    let cache = paths::cache_dir()?;
+    crate::daemon::lifecycle::run_daemon(&cache, std::time::Duration::from_millis(grace_ms))?;
+    Ok(())
+}
+
+fn daemon_stop() -> anyhow::Result<()> {
+    let cache = paths::cache_dir()?;
+    crate::daemon::lifecycle::stop_daemon(&cache)?;
+    println!("daemon stopped");
+    Ok(())
 }
 
 /// Routes `tool` through the live daemon; `Ok(None)` means no daemon is
