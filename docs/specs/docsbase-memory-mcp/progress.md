@@ -98,3 +98,12 @@ Task 16: Ruling: `docsbase index` остаётся direct+lease (сокет-ро
 Task 16: minor (deferred): нет таймаута на `UnixStream::connect` (backlog); build_id из Hello не сверяется на клиенте (I1 — на сервере); формы payload search/list/status должны совпадать у daemon и direct (T19/T21); version-mismatch path не запинен тестом
 Task 16: complete (commits 2ad12b5+565188d, tests: cli_routing 3, всего 115, clippy clean, fmt clean; review PASS/CHANGES(Med) → fixed → ADDRESSED)
 
+Task 17: Ruling: tokio-фичи расширены (io-util, sync, macros — нужны для lines/mpsc/select); тест-симы `DOCSBASE_DAEMON_EXE`/`ensure_daemon_with`/hidden `--grace-ms`; zombie детектится по `/proc/<pid>/stat` (Z = dead)
+Task 17: minor (deferred): unbiased select! (grace vs accept — добавить `biased;` с accept первым); zombie-дети у долгоживущего frontend (NFR-9/T23); liveness-проба коннектом создаёт сессию (T19); нет тестов start-lock concurrency/SIGTERM/cancel-grace
+Task 17: complete (commit d8a4cbe, tests: lifecycle 5 + unit 1, всего 121, clippy clean, fmt clean; review PASS/APPROVED(Med → T18))
+
+Task 18: Ruling: `admission::Lease` (Box::leak + guard `'static`) вместо типа `Admission`; cleanup_stale гейтится admission-lock (закрыта T17-раса); conflicts.ndjson {ts,kind,expected,actual,cache_root}
+Task 18: fix round — admission-check перед cleanup, schema/build expected+actual в логе, tasks.md синхронизирован; commit d72bd77
+Task 18: minor (deferred): root mismatch не сверяется (I1 требует только build/schema); admission_lock_held fail-open при EACCES/EMFILE; нет теста live-gap ветки; 10s wait при wedged ком
+Task 18: complete (commits 22c38c0+d72bd77, tests: admission 4, всего 125, clippy clean, fmt clean; review PASS/CHANGES(Med) → fixed → verified)
+
