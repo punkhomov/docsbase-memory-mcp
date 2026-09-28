@@ -5,21 +5,17 @@ use std::sync::Arc;
 use rmcp::model::{JsonObject, Tool};
 use serde_json::{Value, json};
 
-/// Frontend allowlist mirroring the daemon IPC allowlist (I8, FR-34).
-pub const ALLOWED: &[&str] = &[
-    "search_docs",
-    "get_doc",
-    "read_neighbors",
-    "list_docs",
-    "list_projects",
-    "index_project",
-    "sync_start",
-    "sync_status",
-    "status",
-];
-
 /// Tools that need a session bound to a registered project (I6).
 pub const PROJECT_TOOLS: &[&str] = &["search_docs", "get_doc", "read_neighbors", "list_docs"];
+
+/// Tools that may run for the full indexing budget (NFR-1).
+pub const LONG_TOOLS: &[&str] = &["index_project", "sync_start", "sync_status"];
+
+/// Default IPC read timeout for fast tools.
+pub const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// IPC read timeout for long-running tools.
+pub const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// MCP tool definitions with JSON input schemas.
 #[must_use]

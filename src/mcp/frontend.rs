@@ -1,6 +1,6 @@
 //! stdio MCP server proxying tool calls to the daemon (FR-7, FR-34; I8).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use rmcp::model::{
@@ -14,7 +14,8 @@ use serde_json::{Value, json};
 use crate::config::paths;
 use crate::daemon::lifecycle::ensure_daemon;
 use crate::error::Error;
-use crate::ipc::client::Client;
+use crate::ipc::client::{Client, is_transport_error};
+use crate::ipc::protocol::TOOL_ALLOWLIST;
 use crate::mcp::tools;
 
 struct Conn {
@@ -46,41 +47,64 @@ impl Frontend {
         tokio::task::spawn_blocking(move || -> Result<Value, Error> {
             ensure_daemon(&cache)?;
             let mut guard = conn.lock().unwrap_or_else(PoisonError::into_inner);
-            if guard.is_none() {
-                let mut client = Client::connect(&cache)
-                    .ok_or_else(|| Error::internal("daemon socket missing after ensure_daemon"))?;
-                let cwd = std::env::current_dir()
-                    .map_err(|err| Error::internal_with_source("resolve cwd", err))?;
-                let project_hint = match client.handshake(&cwd) {
-                    Ok(()) => None,
-                    Err(err @ Error::Project { .. }) => {
-                        let hint = err.to_string();
-                        client.handshake_registry()?;
-                        Some(hint)
+            for attempt in 0..2 {
+                if guard.is_none() {
+                    *guard = Some(open_conn(&cache)?);
+                }
+                let conn = guard
+                    .as_mut()
+                    .ok_or_else(|| Error::internal("daemon connection lost"))?;
+                if tools::PROJECT_TOOLS.contains(&name.as_str()) {
+                    if let Some(hint) = &conn.project_hint {
+                        return Err(Error::Project {
+                            message: hint.clone(),
+                            instruction: None,
+                        });
                     }
-                    Err(err) => return Err(err),
+                }
+                let timeout = if tools::LONG_TOOLS.contains(&name.as_str()) {
+                    tools::LONG_TIMEOUT
+                } else {
+                    tools::IO_TIMEOUT
                 };
-                *guard = Some(Conn {
-                    client,
-                    project_hint,
-                });
-            }
-            let conn = guard
-                .as_mut()
-                .ok_or_else(|| Error::internal("daemon connection lost"))?;
-            if tools::PROJECT_TOOLS.contains(&name.as_str()) {
-                if let Some(hint) = &conn.project_hint {
-                    return Err(Error::Project {
-                        message: hint.clone(),
-                        instruction: None,
-                    });
+                conn.client.set_read_timeout(Some(timeout))?;
+                match conn.client.call_tool(&name, args.clone()) {
+                    Err(err) if is_transport_error(&err) && attempt == 0 => {
+                        // The daemon restarted underneath us: reconnect once.
+                        *guard = None;
+                    }
+                    other => return other,
                 }
             }
-            conn.client.call_tool(&name, args)
+            Err(Error::internal("daemon unreachable after reconnect"))
         })
         .await
         .map_err(|err| Error::internal_with_source("mcp proxy join", err))?
     }
+}
+
+fn open_conn(cache: &Path) -> Result<Conn, Error> {
+    let mut client = Client::connect(cache)
+        .ok_or_else(|| Error::internal("daemon socket missing after ensure_daemon"))?;
+    let cwd =
+        std::env::current_dir().map_err(|err| Error::internal_with_source("resolve cwd", err))?;
+    let project_hint = match client.handshake(&cwd) {
+        Ok(()) => None,
+        Err(err @ Error::Project { .. }) => {
+            let message = err.to_string();
+            let message = message
+                .strip_prefix("project error: ")
+                .unwrap_or(&message)
+                .to_owned();
+            client.handshake_registry()?;
+            Some(message)
+        }
+        Err(err) => return Err(err),
+    };
+    Ok(Conn {
+        client,
+        project_hint,
+    })
 }
 
 impl ServerHandler for Frontend {
@@ -112,7 +136,7 @@ impl ServerHandler for Frontend {
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let name = request.name.to_string();
-        if !tools::ALLOWED.contains(&name.as_str()) {
+        if !TOOL_ALLOWLIST.contains(&name.as_str()) {
             return Ok(tool_error(format!("unknown tool: {name}")));
         }
         let args = request.arguments.map_or_else(|| json!({}), Value::Object);

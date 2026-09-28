@@ -13,6 +13,9 @@ use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 /// Timeout for a single request/response exchange.
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Marker distinguishing transport failures from daemon-reported errors.
+const TRANSPORT_PREFIX: &str = "daemon transport: ";
+
 /// Connected daemon client.
 pub struct Client {
     stream: BufReader<UnixStream>,
@@ -37,6 +40,17 @@ impl Client {
         })
     }
 
+    /// Adjusts the read timeout for one exchange (long tools need longer).
+    ///
+    /// # Errors
+    /// Returns [`Error::Internal`] when the socket refuses the option.
+    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<()> {
+        self.stream
+            .get_mut()
+            .set_read_timeout(timeout)
+            .map_err(io_error)
+    }
+
     /// Sends one request and reads one NDJSON response.
     ///
     /// # Errors
@@ -56,10 +70,12 @@ impl Client {
         let read = self.stream.read_until(b'\n', &mut line).map_err(io_error)?;
         if read == 0 {
             return Err(Error::Protocol {
-                message: "daemon closed the connection".to_owned(),
+                message: format!("{TRANSPORT_PREFIX}connection closed"),
             });
         }
-        protocol::decode_response(&line)
+        protocol::decode_response(&line).map_err(|err| Error::Protocol {
+            message: format!("{TRANSPORT_PREFIX}bad response: {err}"),
+        })
     }
 
     /// Performs the `Hello` exchange only; used by registry-wide tools that
@@ -130,5 +146,12 @@ pub fn socket_path(cache: &Path) -> PathBuf {
 }
 
 fn io_error(err: std::io::Error) -> Error {
-    Error::internal_with_source(format!("daemon io: {err}"), err)
+    Error::internal_with_source(format!("{TRANSPORT_PREFIX}{err}"), err)
+}
+
+/// True when the error came from the socket/framing rather than the daemon
+/// answering with an error category; such connections must be reconnected.
+#[must_use]
+pub fn is_transport_error(err: &Error) -> bool {
+    err.to_string().contains(TRANSPORT_PREFIX)
 }
