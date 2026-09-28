@@ -129,6 +129,22 @@ pub fn encode<T: Serialize>(message: &T) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Build identity advertised in `Hello` and checked at admission (I1).
+#[must_use]
+pub fn build_id() -> String {
+    format!("docsbase {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Decodes one NDJSON line into a [`Response`].
+///
+/// # Errors
+/// Returns [`Error::Protocol`] on malformed JSON.
+pub fn decode_response(line: &[u8]) -> Result<Response> {
+    serde_json::from_slice(line.trim_ascii_end()).map_err(|err| Error::Protocol {
+        message: format!("parse response: {err}"),
+    })
+}
+
 /// Decodes one NDJSON line into a validated [`Request`].
 ///
 /// # Errors

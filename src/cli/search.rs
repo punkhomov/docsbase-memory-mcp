@@ -16,6 +16,14 @@ use crate::store::repo;
 /// Returns an error when the project is unregistered/not indexed, the snapshot
 /// cannot be opened, or the query is invalid.
 pub fn run(query: &str, limit: usize) -> anyhow::Result<()> {
+    if let Some(value) = crate::cli::try_daemon(
+        "search_docs",
+        serde_json::json!({ "query": query, "limit": limit }),
+    )? {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+
     let (db, project) = read_project()?;
     ensure_indexed(&project)?;
     let cache = paths::cache_dir()?;

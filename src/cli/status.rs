@@ -48,6 +48,11 @@ pub(crate) fn ensure_indexed(project: &Project) -> Result<()> {
 /// # Errors
 /// Returns an error when the read-only snapshot cannot be opened.
 pub fn status() -> anyhow::Result<()> {
+    if let Some(value) = crate::cli::try_daemon("status", serde_json::json!({}))? {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+
     let cache = paths::cache_dir()?;
     if !cache.join(DB_FILE).exists() {
         println!(
@@ -95,6 +100,11 @@ pub fn status() -> anyhow::Result<()> {
 /// Returns an error when the project is unregistered/not indexed or the
 /// snapshot cannot be opened.
 pub fn list() -> anyhow::Result<()> {
+    if let Some(value) = crate::cli::try_daemon("list_docs", serde_json::json!({}))? {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+
     let (db, project) = read_project()?;
     ensure_indexed(&project)?;
     let docs: Vec<serde_json::Value> = repo::docs_overview(db.connection(), project.id)?

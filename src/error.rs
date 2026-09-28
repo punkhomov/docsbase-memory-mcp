@@ -61,6 +61,25 @@ impl Error {
         }
     }
 
+    /// Rebuilds a category error from an MCP code sent by the daemon.
+    #[must_use]
+    pub fn from_mcp_code(code: i32, message: String) -> Self {
+        match code {
+            -32010 => Self::Admission { message },
+            -32011 => Self::Protocol { message },
+            -32012 => Self::Project {
+                message,
+                instruction: None,
+            },
+            -32013 => Self::Index {
+                path: None,
+                message,
+            },
+            -32014 => Self::Query { message },
+            _ => Self::internal(message),
+        }
+    }
+
     /// Stable JSON-RPC/MCP error code for the category (design §9).
     #[must_use]
     pub fn mcp_code(&self) -> i32 {
