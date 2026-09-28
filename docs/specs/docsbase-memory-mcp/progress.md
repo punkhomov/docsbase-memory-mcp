@@ -80,3 +80,7 @@ Task 12: Ruling: `Db` хранит `cache_root` (для I7 при сигнату
 Task 12: minor (deferred): F1 — `$HOME` сравнивается без canonicalize (symlink HOME обходит I7); F2 — non-UTF8 пути через `to_string_lossy`; F3 — нет busy_timeout (гонка двух писателей → SQLITE_BUSY); F4 — unit-тест home флаки, если TMPDIR внутри git-репы; F5 — имена RED-тестов слегка отличаются от брифа
 Task 12: complete (commit 67431a9, tests: registry 7 + unit 1, всего 94, clippy clean, fmt clean; review PASS/APPROVED, minors deferred)
 
+Task 13: Ruling: `run_incremental` + `run_incremental_with(cfg)`; общий `finish_plan` (marker/tantivy/apply) для full/incremental
+Task 13: minor (deferred): F1 — бюджет incremental игнорирует удаления этого прогона (rename у лимита теряет документ; починить до T22); F2 — дефолтный `Config` в `run_incremental` (T22 обязан звать `_with`); F3 — проверка root лексическая (`..`-пути не нормализуются)
+Task 13: complete (commits 3d60d5c..382f746, tests: index_incremental 6, всего 100, clippy clean, fmt clean; review PASS/APPROVED, minors deferred)
+
