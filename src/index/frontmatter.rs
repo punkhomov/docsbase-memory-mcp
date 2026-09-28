@@ -5,7 +5,7 @@
 //! parser returns an empty metadata set instead.
 
 /// Metadata extracted from a leading frontmatter block.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Frontmatter {
     /// `title:` value, if present.
     pub title: Option<String>,

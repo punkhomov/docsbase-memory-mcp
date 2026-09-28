@@ -1,0 +1,170 @@
+//! Repository helpers for documents and chunks (FR-16).
+
+use rusqlite::{Connection, params};
+
+use crate::error::{Error, Result};
+
+/// Identity and hash of an already indexed document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocState {
+    /// Row id.
+    pub id: i64,
+    /// Path relative to the project root.
+    pub rel_path: String,
+    /// Hash recorded by the last successful run.
+    pub content_hash: String,
+}
+
+/// Fields written when a document is indexed (new or changed).
+#[derive(Debug)]
+pub struct NewDoc<'a> {
+    /// Path relative to the project root.
+    pub rel_path: &'a str,
+    /// Absolute path used for reads.
+    pub abs_path: &'a str,
+    /// Title from frontmatter or the first heading.
+    pub title: Option<&'a str>,
+    /// Raw frontmatter serialized as JSON.
+    pub frontmatter_json: Option<&'a str>,
+    /// File size in bytes.
+    pub size: i64,
+    /// File mtime (Unix seconds).
+    pub mtime: i64,
+    /// Content hash used for incremental indexing.
+    pub content_hash: &'a str,
+    /// Unix timestamp of this index run.
+    pub indexed_at: i64,
+}
+
+/// One chunk row to persist.
+#[derive(Debug)]
+pub struct NewChunk<'a> {
+    /// Sequence within the document.
+    pub seq: u32,
+    /// Breadcrumb `H1 > H2 > H3`.
+    pub heading_path: &'a str,
+    /// `prose` / `code` / `table`.
+    pub kind: &'a str,
+    /// Code fence language when `kind = code`.
+    pub lang: Option<&'a str>,
+    /// First line (1-based, inclusive).
+    pub line_start: u32,
+    /// Last line (1-based, inclusive).
+    pub line_end: u32,
+    /// Chunk text.
+    pub text: &'a str,
+}
+
+/// Loads `(id, rel_path, hash)` for every document of `project_id`.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn doc_states(conn: &Connection, project_id: i64) -> Result<Vec<DocState>> {
+    let mut stmt = conn
+        .prepare("SELECT id, rel_path, content_hash FROM docs WHERE project_id = ?1")
+        .map_err(db_error)?;
+    let rows = stmt
+        .query_map([project_id], |row| {
+            Ok(DocState {
+                id: row.get(0)?,
+                rel_path: row.get(1)?,
+                content_hash: row.get(2)?,
+            })
+        })
+        .map_err(db_error)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(db_error)
+}
+
+/// Next free `docs.id`.
+///
+/// The caller must hold the single-writer lease (I5); ids are allocated
+/// explicitly so tantivy documents can be written before the SQLite commit.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn next_doc_id(conn: &Connection) -> Result<i64> {
+    conn.query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM docs", [], |row| {
+        row.get(0)
+    })
+    .map_err(db_error)
+}
+
+/// Inserts or updates one document row.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn upsert_doc(conn: &Connection, project_id: i64, doc_id: i64, doc: &NewDoc<'_>) -> Result<()> {
+    conn.execute(
+        "INSERT INTO docs (id, project_id, rel_path, abs_path, title, frontmatter_json,
+                           size, mtime, content_hash, indexed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(id) DO UPDATE SET
+             project_id = excluded.project_id,
+             rel_path = excluded.rel_path,
+             abs_path = excluded.abs_path,
+             title = excluded.title,
+             frontmatter_json = excluded.frontmatter_json,
+             size = excluded.size,
+             mtime = excluded.mtime,
+             content_hash = excluded.content_hash,
+             indexed_at = excluded.indexed_at",
+        params![
+            doc_id,
+            project_id,
+            doc.rel_path,
+            doc.abs_path,
+            doc.title,
+            doc.frontmatter_json,
+            doc.size,
+            doc.mtime,
+            doc.content_hash,
+            doc.indexed_at
+        ],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
+/// Deletes all chunk rows of `doc_id` and inserts `chunks`.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn replace_chunks(conn: &Connection, doc_id: i64, chunks: &[NewChunk<'_>]) -> Result<()> {
+    conn.execute("DELETE FROM chunks WHERE doc_id = ?1", [doc_id])
+        .map_err(db_error)?;
+    let mut stmt = conn
+        .prepare(
+            "INSERT INTO chunks (doc_id, seq, heading_path, kind, lang, line_start, line_end, text)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .map_err(db_error)?;
+    for chunk in chunks {
+        stmt.execute(params![
+            doc_id,
+            chunk.seq,
+            chunk.heading_path,
+            chunk.kind,
+            chunk.lang,
+            chunk.line_start,
+            chunk.line_end,
+            chunk.text
+        ])
+        .map_err(db_error)?;
+    }
+    Ok(())
+}
+
+/// Deletes a document row; `chunks` rows follow via `ON DELETE CASCADE`.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn delete_doc(conn: &Connection, doc_id: i64) -> Result<()> {
+    conn.execute("DELETE FROM docs WHERE id = ?1", [doc_id])
+        .map_err(db_error)?;
+    Ok(())
+}
+
+fn db_error(err: rusqlite::Error) -> Error {
+    Error::internal_with_source(format!("sqlite: {err}"), err)
+}

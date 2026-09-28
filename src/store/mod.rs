@@ -2,6 +2,7 @@
 
 pub mod migrations;
 pub mod models;
+pub mod repo;
 
 use std::path::Path;
 
@@ -72,6 +73,14 @@ impl Db {
     /// Returns an error when the pragma cannot be read.
     pub fn schema_version(&self) -> Result<u32> {
         migrations::read_version(&self.conn)
+    }
+
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    pub(crate) fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.conn
     }
 }
 

@@ -1,0 +1,282 @@
+//! Full index job: walk → hash → diff → tantivy + SQLite (FR-16, FR-18; A4; R2).
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::config::Config;
+use crate::error::{Error, Result};
+use crate::index::chunk::{Chunk, ChunkKind, chunk_markdown};
+use crate::index::frontmatter::{self, Frontmatter};
+use crate::index::tantivy_index::IndexHandle;
+use crate::index::walk;
+use crate::store::Db;
+use crate::store::models::{ChunkKind as StoredChunkKind, Project};
+use crate::store::repo::{self, DocState, NewChunk, NewDoc};
+
+/// Longest section body kept in one chunk when no paragraph boundary splits it.
+pub const MAX_CHUNK_CHARS: usize = 4_000;
+
+/// Outcome of one indexing run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobStats {
+    /// New or changed documents written.
+    pub docs: usize,
+    /// Chunks added to tantivy and SQLite.
+    pub chunks: usize,
+    /// Documents skipped because the content hash matched.
+    pub skipped: usize,
+    /// Documents removed because the file is gone.
+    pub removed: usize,
+    /// Files skipped non-fatally (IO/parse/size/limit problems, A4).
+    pub errors: usize,
+}
+
+#[derive(Debug)]
+struct Pending {
+    id: i64,
+    rel_path: String,
+    abs_path: String,
+    title: Option<String>,
+    frontmatter_json: Option<String>,
+    size: i64,
+    mtime: i64,
+    content_hash: String,
+    chunks: Vec<Chunk>,
+}
+
+/// Indexes `project` fully: every `.md` under its root is hashed and only
+/// new/changed files are re-chunked; documents whose files disappeared are
+/// purged. Per-file failures are counted in [`JobStats::errors`] and never
+/// abort the job (A4).
+///
+/// Commit order is tantivy first, SQLite second (R2): a crash in between is
+/// recovered by rerunning, which converges on the stored hashes.
+///
+/// # Errors
+/// Returns errors for walk setup failures and SQLite/tantivy failures that
+/// affect the whole job.
+pub fn run_full(
+    db: &mut Db,
+    index: &mut IndexHandle,
+    project: &Project,
+    config: &Config,
+) -> Result<JobStats> {
+    let existing = repo::doc_states(db.connection(), project.id)?;
+    let by_path: HashMap<&str, &DocState> = existing
+        .iter()
+        .map(|state| (state.rel_path.as_str(), state))
+        .collect();
+
+    let mut stats = JobStats::default();
+    let mut plan: Vec<Pending> = Vec::new();
+    let mut walked: HashSet<String> = HashSet::new();
+    let mut next_id = repo::next_doc_id(db.connection())?;
+    let mut new_budget = config.max_docs_per_project.saturating_sub(existing.len());
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in walk::walk(&project.canonical_root, config)? {
+        match entry {
+            Ok(path) => paths.push(path),
+            Err(_) => stats.errors += 1,
+        }
+    }
+    paths.sort();
+
+    for path in &paths {
+        let Ok(rel) = path.strip_prefix(&project.canonical_root) else {
+            stats.errors += 1;
+            continue;
+        };
+        let rel = rel.to_string_lossy().into_owned();
+        walked.insert(rel.clone());
+
+        let previous = by_path.get(rel.as_str()).copied();
+        match prepare_doc(path, &rel, previous, config) {
+            Ok(Some(mut prepared)) => {
+                if previous.is_none() {
+                    if new_budget == 0 {
+                        stats.errors += 1;
+                        continue;
+                    }
+                    new_budget -= 1;
+                }
+                let doc_id = previous.map_or(next_id, |state| state.id);
+                if previous.is_none() {
+                    next_id += 1;
+                }
+                prepared.id = doc_id;
+                plan.push(prepared);
+            }
+            Ok(None) => stats.skipped += 1,
+            Err(_) => stats.errors += 1,
+        }
+    }
+
+    let removed: Vec<&DocState> = existing
+        .iter()
+        .filter(|state| !walked.contains(&state.rel_path))
+        .collect();
+
+    for pending in &mut plan {
+        index.delete_doc(pending.id);
+        for chunk in &mut pending.chunks {
+            chunk.doc_id = pending.id;
+        }
+        index.add_chunks(&pending.chunks)?;
+        stats.docs += 1;
+        stats.chunks += pending.chunks.len();
+    }
+    for state in &removed {
+        index.delete_doc(state.id);
+    }
+    stats.removed = removed.len();
+
+    apply_plan(db, index, project.id, &plan, &removed)?;
+    Ok(stats)
+}
+
+/// Reads and hashes one walked file. Returns `Ok(None)` when the stored hash
+/// matches, `Err` for per-file problems the caller counts as a warning (A4).
+fn prepare_doc(
+    path: &Path,
+    rel_path: &str,
+    existing: Option<&DocState>,
+    config: &Config,
+) -> Result<Option<Pending>> {
+    let metadata = std::fs::metadata(path).map_err(|err| file_error(path, &err))?;
+    if metadata.len() > config.max_file_size {
+        return Err(Error::Index {
+            path: Some(path.to_path_buf()),
+            message: format!(
+                "file is {} bytes, over max_file_size {}",
+                metadata.len(),
+                config.max_file_size
+            ),
+        });
+    }
+    let text = std::fs::read_to_string(path).map_err(|err| file_error(path, &err))?;
+    let content_hash = blake3::hash(text.as_bytes()).to_hex().to_string();
+    if existing.is_some_and(|state| state.content_hash == content_hash) {
+        return Ok(None);
+    }
+
+    let (meta, body) = frontmatter::parse(&text);
+    let chunks = chunk_markdown(body, MAX_CHUNK_CHARS);
+    let title = meta
+        .title
+        .clone()
+        .or_else(|| chunks.iter().find_map(|c| c.heading_path.first().cloned()));
+    Ok(Some(Pending {
+        id: 0,
+        rel_path: rel_path.to_owned(),
+        abs_path: path.to_string_lossy().into_owned(),
+        title,
+        frontmatter_json: serialize_metadata(&meta)?,
+        size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
+        mtime: mtime_seconds(&metadata),
+        content_hash,
+        chunks,
+    }))
+}
+
+fn apply_plan(
+    db: &mut Db,
+    index: &mut IndexHandle,
+    project_id: i64,
+    plan: &[Pending],
+    removed: &[&DocState],
+) -> Result<()> {
+    let tx = db
+        .connection_mut()
+        .transaction()
+        .map_err(|err| Error::internal_with_source(format!("begin sqlite: {err}"), err))?;
+    let now = unix_now();
+
+    for pending in plan {
+        let doc = NewDoc {
+            rel_path: &pending.rel_path,
+            abs_path: &pending.abs_path,
+            title: pending.title.as_deref(),
+            frontmatter_json: pending.frontmatter_json.as_deref(),
+            size: pending.size,
+            mtime: pending.mtime,
+            content_hash: &pending.content_hash,
+            indexed_at: now,
+        };
+        repo::upsert_doc(&tx, project_id, pending.id, &doc)?;
+
+        let paths: Vec<String> = pending
+            .chunks
+            .iter()
+            .map(|chunk| chunk.heading_path.join(" > "))
+            .collect();
+        let rows: Vec<NewChunk<'_>> = pending
+            .chunks
+            .iter()
+            .zip(&paths)
+            .map(|(chunk, heading_path)| {
+                let (kind, lang) = split_kind(&chunk.kind);
+                NewChunk {
+                    seq: chunk.seq,
+                    heading_path,
+                    kind: kind.as_str(),
+                    lang,
+                    line_start: chunk.line_start,
+                    line_end: chunk.line_end,
+                    text: &chunk.text,
+                }
+            })
+            .collect();
+        repo::replace_chunks(&tx, pending.id, &rows)?;
+    }
+    for state in removed {
+        repo::delete_doc(&tx, state.id)?;
+    }
+
+    index.commit()?;
+    tx.commit()
+        .map_err(|err| Error::internal_with_source(format!("commit sqlite: {err}"), err))
+}
+
+fn split_kind(kind: &ChunkKind) -> (StoredChunkKind, Option<&str>) {
+    match kind {
+        ChunkKind::Prose => (StoredChunkKind::Prose, None),
+        ChunkKind::Code { lang } => (StoredChunkKind::Code, lang.as_deref()),
+        ChunkKind::Table => (StoredChunkKind::Table, None),
+    }
+}
+
+fn file_error(path: &Path, err: &std::io::Error) -> Error {
+    Error::Index {
+        path: Some(path.to_path_buf()),
+        message: err.to_string(),
+    }
+}
+
+fn serialize_metadata(meta: &Frontmatter) -> Result<Option<String>> {
+    if meta == &Frontmatter::default() {
+        return Ok(None);
+    }
+    serde_json::to_string(meta)
+        .map(Some)
+        .map_err(|err| Error::internal_with_source(format!("frontmatter json: {err}"), err))
+}
+
+fn mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
+}
