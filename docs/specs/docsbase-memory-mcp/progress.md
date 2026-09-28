@@ -33,3 +33,8 @@ Task 5: minor (deferred): wire использует i32/u64 вместо ErrorCo
 Task 5: minor (deferred): асимметричный API (`encode` generic, только `decode_request`); T20 добавит декод ответов
 Task 5: complete (commits d685040..7d8a8f4, tests: cargo test → 21/21, clippy clean, fmt clean; review PASS/APPROVED)
 
+Task 6: Ruling: `walk` сигнатура — `Result<impl Iterator>` (eager-валидация `..`), а не голый iterator из плана
+Task 6: fix: `.git` добавлен в `DEFAULT_IGNORED_DIRS`; тесты на hidden/dist/build и `resolve_in_root` (review Low #1)
+Task 6: minor (deferred): вложенные `.docsbaseignore` с `..` не валидируются (escape невозможен); пост-фильтрация default-папок — перф-долг в T30
+Task 6: complete (commits 7d8a8f4..ca85ec8+fix, tests: walk 7/7, clippy clean, fmt clean; review PASS/APPROVED)
+

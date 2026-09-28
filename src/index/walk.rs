@@ -9,7 +9,8 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 
 /// Directories always skipped, regardless of git or custom ignore files.
-pub const DEFAULT_IGNORED_DIRS: &[&str] = &["node_modules", "target", "vendor", "dist", "build"];
+pub const DEFAULT_IGNORED_DIRS: &[&str] =
+    &["node_modules", "target", "vendor", "dist", "build", ".git"];
 
 /// Custom ignore file consulted in addition to `.gitignore`.
 pub const IGNORE_FILE: &str = ".docsbaseignore";

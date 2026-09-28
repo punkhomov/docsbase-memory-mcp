@@ -48,9 +48,26 @@ fn skips_default_ignores() {
     write(root.path(), "node_modules/pkg/readme.md", "# pkg");
     write(root.path(), "target/doc.md", "# doc");
     write(root.path(), "vendor/x.md", "# x");
+    write(root.path(), "dist/y.md", "# y");
+    write(root.path(), "build/z.md", "# z");
+    write(root.path(), ".git/COMMIT_EDITMSG.md", "# git");
+    write(root.path(), ".hidden/secret.md", "# hidden");
 
     let found = collect(root.path(), &Config::default());
     assert_eq!(found, vec!["keep.md"]);
+}
+
+#[test]
+fn resolve_in_root_contract() {
+    let root = TempDir::new().expect("tempdir");
+    write(root.path(), "a.md", "# a");
+
+    let relative = resolve_in_root(root.path(), Path::new("a.md")).expect("relative");
+    let absolute = resolve_in_root(root.path(), &root.path().join("a.md")).expect("absolute");
+    assert_eq!(relative, absolute);
+
+    let missing = resolve_in_root(root.path(), Path::new("missing.md")).expect_err("missing");
+    assert!(matches!(missing, Error::Project { .. }), "{missing:?}");
 }
 
 #[test]
