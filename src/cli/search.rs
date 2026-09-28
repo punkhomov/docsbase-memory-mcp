@@ -19,6 +19,7 @@ pub fn run(query: &str, limit: usize) -> anyhow::Result<()> {
     if let Some(value) = crate::cli::try_daemon(
         "search_docs",
         serde_json::json!({ "query": query, "limit": limit }),
+        true,
     )? {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());

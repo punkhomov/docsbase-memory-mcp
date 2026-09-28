@@ -64,17 +64,25 @@ pub fn run() -> anyhow::Result<()> {
 /// Routes `tool` through the live daemon; `Ok(None)` means no daemon is
 /// reachable and the caller should fall back to direct mode (FR-30).
 ///
+/// `bind_session` registers the cwd-bound session first (I6); registry-wide
+/// tools such as `status` skip it so they work from any directory.
+///
 /// # Errors
 /// Surfaces handshake/tool errors from a daemon that did answer.
 pub(crate) fn try_daemon(
     tool: &str,
     args: serde_json::Value,
+    bind_session: bool,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let cache = paths::cache_dir()?;
     let Some(mut client) = Client::connect(&cache) else {
         return Ok(None);
     };
-    let cwd = std::env::current_dir().context("resolve current directory")?;
-    client.handshake(&cwd)?;
+    if bind_session {
+        let cwd = std::env::current_dir().context("resolve current directory")?;
+        client.handshake(&cwd)?;
+    } else {
+        client.handshake_registry()?;
+    }
     Ok(Some(client.call_tool(tool, args)?))
 }

@@ -48,7 +48,7 @@ pub(crate) fn ensure_indexed(project: &Project) -> Result<()> {
 /// # Errors
 /// Returns an error when the read-only snapshot cannot be opened.
 pub fn status() -> anyhow::Result<()> {
-    if let Some(value) = crate::cli::try_daemon("status", serde_json::json!({}))? {
+    if let Some(value) = crate::cli::try_daemon("status", serde_json::json!({}), false)? {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
@@ -100,7 +100,7 @@ pub fn status() -> anyhow::Result<()> {
 /// Returns an error when the project is unregistered/not indexed or the
 /// snapshot cannot be opened.
 pub fn list() -> anyhow::Result<()> {
-    if let Some(value) = crate::cli::try_daemon("list_docs", serde_json::json!({}))? {
+    if let Some(value) = crate::cli::try_daemon("list_docs", serde_json::json!({}), true)? {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }

@@ -62,12 +62,12 @@ impl Client {
         protocol::decode_response(&line)
     }
 
-    /// Performs `Hello` + `RegisterSession` for `cwd` (FR-7, I6).
+    /// Performs the `Hello` exchange only; used by registry-wide tools that
+    /// need no project binding (FR-26).
     ///
     /// # Errors
-    /// Returns protocol/admission errors on version mismatch or an
-    /// unregistered project reply.
-    pub fn handshake(&mut self, cwd: &Path) -> Result<()> {
+    /// Returns protocol/admission errors on version or build mismatch.
+    pub fn handshake_registry(&mut self) -> Result<()> {
         let hello = self.call(Request::Hello {
             protocol_version: PROTOCOL_VERSION,
             build_id: protocol::build_id(),
@@ -76,14 +76,21 @@ impl Client {
         match hello {
             Response::Hello {
                 protocol_version, ..
-            } => protocol::ensure_protocol_version(protocol_version)?,
-            Response::Error { code, message } => return Err(Error::from_mcp_code(code, message)),
-            other => {
-                return Err(Error::Protocol {
-                    message: format!("unexpected hello reply: {other:?}"),
-                });
-            }
+            } => protocol::ensure_protocol_version(protocol_version),
+            Response::Error { code, message } => Err(Error::from_mcp_code(code, message)),
+            other => Err(Error::Protocol {
+                message: format!("unexpected hello reply: {other:?}"),
+            }),
         }
+    }
+
+    /// Performs `Hello` + `RegisterSession` for `cwd` (FR-7, I6).
+    ///
+    /// # Errors
+    /// Returns protocol/admission errors on version mismatch or an
+    /// unregistered project reply.
+    pub fn handshake(&mut self, cwd: &Path) -> Result<()> {
+        self.handshake_registry()?;
 
         match self.call(Request::RegisterSession {
             pid: std::process::id(),
