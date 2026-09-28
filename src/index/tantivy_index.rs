@@ -13,7 +13,9 @@ use crate::error::{Error, Result};
 use crate::index::chunk::Chunk;
 use crate::index::tokenizer::{self, IdentifierTokenizer};
 
-const HEAP_SIZE: usize = 20_000_000;
+/// Writer heap: tantivy's minimum is 15 MB; 20 MB keeps a single indexing
+/// thread without growing the RSS of short-lived CLI runs much.
+const WRITER_HEAP_BYTES: usize = 20_000_000;
 
 /// A search hit: composite chunk id, owning document, BM25 score.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,24 +63,24 @@ impl IndexHandle {
     /// # Errors
     /// Returns [`Error::Internal`] on IO/tantivy failures or a schema mismatch.
     pub fn open_or_create(dir: &Path) -> Result<Self> {
-        std::fs::create_dir_all(dir).map_err(|err| Error::Internal {
-            message: format!("create index dir {}: {err}", dir.display()),
+        std::fs::create_dir_all(dir).map_err(|err| {
+            Error::internal_with_source(format!("create index dir {}: {err}", dir.display()), err)
         })?;
         let index = if dir.join("meta.json").exists() {
-            Index::open_in_dir(dir).map_err(|err| tantivy_error(&err))?
+            Index::open_in_dir(dir).map_err(tantivy_error)?
         } else {
-            Index::create_in_dir(dir, build_schema()).map_err(|err| tantivy_error(&err))?
+            Index::create_in_dir(dir, build_schema()).map_err(tantivy_error)?
         };
         index
             .tokenizers()
             .register(tokenizer::NAME, IdentifierTokenizer);
         let fields = fields_from(&index.schema())?;
-        let writer: IndexWriter = index.writer(HEAP_SIZE).map_err(|err| tantivy_error(&err))?;
+        let writer: IndexWriter = index.writer(WRITER_HEAP_BYTES).map_err(tantivy_error)?;
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
-            .map_err(|err| tantivy_error(&err))?;
+            .map_err(tantivy_error)?;
 
         let mut parser = QueryParser::for_index(
             &index,
@@ -124,9 +126,7 @@ impl IndexHandle {
             );
             document.add_text(self.fields.heading_path, chunk.heading_path.join(" > "));
             document.add_text(self.fields.identifiers, extract_identifiers(&chunk.text));
-            self.writer
-                .add_document(document)
-                .map_err(|err| tantivy_error(&err))?;
+            self.writer.add_document(document).map_err(tantivy_error)?;
         }
         Ok(())
     }
@@ -142,8 +142,8 @@ impl IndexHandle {
     /// # Errors
     /// Returns [`Error::Internal`] when commit or reload fails.
     pub fn commit(&mut self) -> Result<()> {
-        self.writer.commit().map_err(|err| tantivy_error(&err))?;
-        self.reader.reload().map_err(|err| tantivy_error(&err))?;
+        self.writer.commit().map_err(tantivy_error)?;
+        self.reader.reload().map_err(tantivy_error)?;
         Ok(())
     }
 
@@ -167,20 +167,21 @@ impl IndexHandle {
         let searcher = self.reader.searcher();
         let top = searcher
             .search(&parsed, &TopDocs::with_limit(limit))
-            .map_err(|err| tantivy_error(&err))?;
+            .map_err(tantivy_error)?;
 
         let mut hits = Vec::with_capacity(top.len());
         for (score, address) in top {
-            let document: TantivyDocument =
-                searcher.doc(address).map_err(|err| tantivy_error(&err))?;
+            let document: TantivyDocument = searcher.doc(address).map_err(tantivy_error)?;
             let chunk = document
                 .get_first(self.fields.chunk_id)
                 .and_then(|value| value.as_u64())
-                .unwrap_or(0);
+                .ok_or_else(|| {
+                    Error::internal(format!("index doc {address:?}: missing chunk_id"))
+                })?;
             let doc = document
                 .get_first(self.fields.doc_id)
                 .and_then(|value| value.as_i64())
-                .unwrap_or(0);
+                .ok_or_else(|| Error::internal(format!("index doc {address:?}: missing doc_id")))?;
             hits.push(Hit {
                 chunk_id: chunk,
                 doc_id: doc,
@@ -211,9 +212,9 @@ fn build_schema() -> Schema {
 
 fn fields_from(schema: &Schema) -> Result<Fields> {
     let get = |name: &str| -> Result<Field> {
-        schema.get_field(name).map_err(|err| Error::Internal {
-            message: format!("schema field {name}: {err}"),
-        })
+        schema
+            .get_field(name)
+            .map_err(|err| Error::internal(format!("schema field {name}: {err}")))
     };
     Ok(Fields {
         chunk_id: get("chunk_id")?,
@@ -234,8 +235,6 @@ fn extract_identifiers(text: &str) -> String {
         .join(" ")
 }
 
-fn tantivy_error(err: &tantivy::TantivyError) -> Error {
-    Error::Internal {
-        message: format!("tantivy: {err}"),
-    }
+fn tantivy_error(err: tantivy::TantivyError) -> Error {
+    Error::internal_with_source(format!("tantivy: {err}"), err)
 }

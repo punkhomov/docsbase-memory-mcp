@@ -72,8 +72,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(&format!(
         "BEGIN;{SCHEMA_V1}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
     ))
-    .map_err(|err| Error::Internal {
-        message: format!("migrate schema to v{SCHEMA_VERSION}: {err}"),
+    .map_err(|err| {
+        Error::internal_with_source(format!("migrate schema to v{SCHEMA_VERSION}: {err}"), err)
     })
 }
 
@@ -84,10 +84,6 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 pub fn read_version(conn: &Connection) -> Result<u32> {
     let raw: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(|err| Error::Internal {
-            message: format!("read user_version: {err}"),
-        })?;
-    u32::try_from(raw).map_err(|_| Error::Internal {
-        message: format!("user_version out of range: {raw}"),
-    })
+        .map_err(|err| Error::internal_with_source(format!("read user_version: {err}"), err))?;
+    u32::try_from(raw).map_err(|_| Error::internal(format!("user_version out of range: {raw}")))
 }

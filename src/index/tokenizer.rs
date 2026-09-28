@@ -5,6 +5,8 @@
 //! `__bt_tt_getProp`, `X-Request-ID`) rank high on exact matches while prose
 //! words match regardless of adjacent punctuation.
 
+use std::collections::HashSet;
+
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 
 /// Tokenizer name registered in the [`TokenizerManager`].
@@ -76,7 +78,7 @@ fn tokenize(text: &str) -> Vec<Token> {
         if !raw.chars().any(char::is_alphanumeric) {
             continue;
         }
-        let mut emitted: Vec<String> = Vec::new();
+        let mut emitted: HashSet<String> = HashSet::new();
         let lower = raw.to_lowercase();
         emit(
             &mut tokens,
@@ -115,13 +117,13 @@ fn tokenize(text: &str) -> Vec<Token> {
 
 fn emit(
     tokens: &mut Vec<Token>,
-    emitted: &mut Vec<String>,
+    emitted: &mut HashSet<String>,
     text: &str,
     from: usize,
     to: usize,
     position: &mut usize,
 ) {
-    if text.is_empty() || emitted.iter().any(|seen| seen == text) {
+    if text.is_empty() || !emitted.insert(text.to_owned()) {
         return;
     }
     tokens.push(Token {
@@ -131,7 +133,6 @@ fn emit(
         text: text.to_owned(),
         position_length: 1,
     });
-    emitted.push(text.to_owned());
     *position += 1;
 }
 

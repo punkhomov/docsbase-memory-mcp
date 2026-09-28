@@ -64,9 +64,10 @@ pub fn walk(root: &Path, config: &Config) -> Result<impl Iterator<Item = Result<
                 None
             }
         }
-        Err(err) => Some(Err(Error::Internal {
-            message: format!("walk: {err}"),
-        })),
+        Err(err) => Some(Err(Error::internal_with_source(
+            format!("walk: {err}"),
+            err,
+        ))),
     }))
 }
 
@@ -121,13 +122,22 @@ fn validate_patterns(root: &Path, config: &Config) -> Result<()> {
         reject_escape(root, pattern)?;
     }
     let ignore_file = root.join(IGNORE_FILE);
-    if let Ok(text) = std::fs::read_to_string(&ignore_file) {
-        for line in text.lines() {
-            let pattern = line.trim();
-            if pattern.is_empty() || pattern.starts_with('#') {
-                continue;
+    match std::fs::read_to_string(&ignore_file) {
+        Ok(text) => {
+            for line in text.lines() {
+                let pattern = line.trim();
+                if pattern.is_empty() || pattern.starts_with('#') {
+                    continue;
+                }
+                reject_escape(root, pattern)?;
             }
-            reject_escape(root, pattern)?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(Error::internal_with_source(
+                format!("read {}: {err}", ignore_file.display()),
+                err,
+            ));
         }
     }
     Ok(())

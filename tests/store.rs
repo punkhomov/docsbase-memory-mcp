@@ -1,6 +1,7 @@
 use std::fs;
 
 use docsbase_memory::error::Error;
+use docsbase_memory::store::models::{ChunkKind, ProjectStatus, SyncState};
 use docsbase_memory::store::{DB_FILE, Db, migrations};
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -92,6 +93,44 @@ fn readonly_rejects_mismatch() {
     }
     let err = Db::open_readonly(cache.path()).expect_err("must refuse");
     assert!(matches!(err, Error::Admission { .. }), "{err:?}");
+}
+
+#[test]
+fn enum_string_round_trip() {
+    for status in [
+        ProjectStatus::NotIndexed,
+        ProjectStatus::Indexing,
+        ProjectStatus::Indexed,
+        ProjectStatus::Error,
+    ] {
+        assert_eq!(
+            status
+                .as_str()
+                .parse::<ProjectStatus>()
+                .expect("status parse"),
+            status
+        );
+    }
+    for kind in [ChunkKind::Prose, ChunkKind::Code, ChunkKind::Table] {
+        assert_eq!(
+            kind.as_str().parse::<ChunkKind>().expect("kind parse"),
+            kind
+        );
+    }
+    for state in [
+        SyncState::Queued,
+        SyncState::Running,
+        SyncState::Done,
+        SyncState::Error,
+    ] {
+        assert_eq!(
+            state.as_str().parse::<SyncState>().expect("state parse"),
+            state
+        );
+    }
+    assert!("bogus".parse::<ProjectStatus>().is_err());
+    assert!("bogus".parse::<ChunkKind>().is_err());
+    assert!("bogus".parse::<SyncState>().is_err());
 }
 
 #[test]

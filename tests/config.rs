@@ -82,3 +82,24 @@ fn unknown_key_rejected() {
     let text = err.to_string();
     assert!(text.contains("unknown_key"), "{text}");
 }
+
+#[test]
+fn zero_limits_rejected() {
+    let config_dir = TempDir::new().expect("tempdir");
+    write(config_dir.path(), "config.toml", "max_file_size = 0\n");
+
+    let err = Config::load_from(config_dir.path(), None).expect_err("must reject");
+    assert!(
+        matches!(err, docsbase_memory::error::Error::Admission { .. }),
+        "{err:?}"
+    );
+
+    let overridden = Config::default().with_overrides(&ConfigOverrides {
+        max_docs_per_project: Some(0),
+        ..ConfigOverrides::default()
+    });
+    assert!(
+        overridden.validate().is_err(),
+        "overrides must be revalidated"
+    );
+}

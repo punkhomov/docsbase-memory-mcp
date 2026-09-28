@@ -89,6 +89,7 @@ impl Config {
                 config.apply(read_file(&project)?);
             }
         }
+        config.validate()?;
         Ok(config)
     }
 
@@ -113,6 +114,26 @@ impl Config {
         self
     }
 
+    /// Rejects values that would silently disable indexing.
+    ///
+    /// Callers that apply [`Config::with_overrides`] must validate again.
+    ///
+    /// # Errors
+    /// Returns [`Error::Admission`] for zero limits.
+    pub fn validate(&self) -> Result<()> {
+        if self.max_file_size == 0 {
+            return Err(Error::Admission {
+                message: "max_file_size must be > 0".to_owned(),
+            });
+        }
+        if self.max_docs_per_project == 0 {
+            return Err(Error::Admission {
+                message: "max_docs_per_project must be > 0".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     fn apply(&mut self, file: FileConfig) {
         if let Some(v) = file.ignores {
             self.ignores = v;
@@ -133,10 +154,9 @@ impl Config {
 }
 
 fn read_file(path: &Path) -> Result<FileConfig> {
-    let text = std::fs::read_to_string(path).map_err(|err| Error::Internal {
-        message: format!("read {}: {err}", path.display()),
+    let text = std::fs::read_to_string(path).map_err(|err| {
+        Error::internal_with_source(format!("read {}: {err}", path.display()), err)
     })?;
-    toml::from_str(&text).map_err(|err| Error::Internal {
-        message: format!("parse {}: {err}", path.display()),
-    })
+    toml::from_str(&text)
+        .map_err(|err| Error::internal_with_source(format!("parse {}: {err}", path.display()), err))
 }

@@ -120,9 +120,11 @@ pub fn ensure_protocol_version(remote: u32) -> Result<()> {
 /// Encodes one message as a single NDJSON line.
 ///
 /// # Errors
-/// Returns [`Error::Protocol`] when serialization fails.
+/// Returns [`Error::Internal`] when serialization fails (a bug in the caller's
+/// message type, not a wire problem).
 pub fn encode<T: Serialize>(message: &T) -> Result<Vec<u8>> {
-    let mut bytes = serde_json::to_vec(message)?;
+    let mut bytes = serde_json::to_vec(message)
+        .map_err(|err| Error::internal(format!("encode message: {err}")))?;
     bytes.push(b'\n');
     Ok(bytes)
 }
@@ -132,15 +134,10 @@ pub fn encode<T: Serialize>(message: &T) -> Result<Vec<u8>> {
 /// # Errors
 /// Returns [`Error::Protocol`] on malformed JSON or an invalid tool name.
 pub fn decode_request(line: &[u8]) -> Result<Request> {
-    let request: Request = serde_json::from_slice(trim_line(line))?;
+    let request: Request =
+        serde_json::from_slice(line.trim_ascii_end()).map_err(|err| Error::Protocol {
+            message: format!("parse request: {err}"),
+        })?;
     request.validate()?;
     Ok(request)
-}
-
-fn trim_line(line: &[u8]) -> &[u8] {
-    let mut end = line.len();
-    while end > 0 && matches!(line[end - 1], b'\n' | b'\r') {
-        end -= 1;
-    }
-    &line[..end]
 }

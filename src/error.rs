@@ -31,10 +31,36 @@ pub enum Error {
     Query { message: String },
     /// Anything else; masked to the client.
     #[error("internal error: {message}")]
-    Internal { message: String },
+    Internal {
+        message: String,
+        /// Underlying failure kept for logs; never serialized to clients.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 }
 
 impl Error {
+    /// Internal error without an underlying failure.
+    #[must_use]
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Internal error that keeps `source` for diagnostics (`Error::source`).
+    #[must_use]
+    pub fn internal_with_source(
+        message: impl Into<String>,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        Self::Internal {
+            message: message.into(),
+            source: Some(source.into()),
+        }
+    }
+
     /// Stable JSON-RPC/MCP error code for the category (design §9).
     #[must_use]
     pub fn mcp_code(&self) -> i32 {
@@ -55,16 +81,6 @@ fn path_suffix(path: Option<&Path>) -> String {
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
-        Error::Internal {
-            message: err.to_string(),
-        }
-    }
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(err: serde_json::Error) -> Self {
-        Error::Protocol {
-            message: err.to_string(),
-        }
+        Self::internal_with_source(err.to_string(), err)
     }
 }

@@ -30,11 +30,11 @@ impl Db {
     pub fn open(cache_dir: &Path) -> Result<Self> {
         ensure_private_dir(cache_dir)?;
         let path = cache_dir.join(DB_FILE);
-        let conn = Connection::open(&path).map_err(|err| sql_error(&path, &err))?;
+        let conn = Connection::open(&path).map_err(|err| sql_error(&path, err))?;
         conn.pragma_update(None, "foreign_keys", "ON")
-            .map_err(|err| sql_error(&path, &err))?;
+            .map_err(|err| sql_error(&path, err))?;
         conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|err| sql_error(&path, &err))?;
+            .map_err(|err| sql_error(&path, err))?;
         migrations::migrate(&conn)?;
         Ok(Self { conn })
     }
@@ -47,12 +47,13 @@ impl Db {
     pub fn open_readonly(cache_dir: &Path) -> Result<Self> {
         let path = cache_dir.join(DB_FILE);
         if !path.exists() {
-            return Err(Error::Internal {
-                message: format!("database not found: {}", path.display()),
-            });
+            return Err(Error::internal(format!(
+                "database not found: {}",
+                path.display()
+            )));
         }
         let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|err| sql_error(&path, &err))?;
+            .map_err(|err| sql_error(&path, err))?;
         let version = migrations::read_version(&conn)?;
         if version != migrations::SCHEMA_VERSION {
             return Err(Error::Admission {
@@ -74,22 +75,20 @@ impl Db {
     }
 }
 
-fn sql_error(path: &Path, err: &rusqlite::Error) -> Error {
-    Error::Internal {
-        message: format!("sqlite {}: {err}", path.display()),
-    }
+fn sql_error(path: &Path, err: rusqlite::Error) -> Error {
+    Error::internal_with_source(format!("sqlite {}: {err}", path.display()), err)
 }
 
 fn ensure_private_dir(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir).map_err(|err| Error::Internal {
-        message: format!("create cache dir {}: {err}", dir.display()),
+    std::fs::create_dir_all(dir).map_err(|err| {
+        Error::internal_with_source(format!("create cache dir {}: {err}", dir.display()), err)
     })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(dir, mode).map_err(|err| Error::Internal {
-            message: format!("set 0700 on {}: {err}", dir.display()),
+        std::fs::set_permissions(dir, mode).map_err(|err| {
+            Error::internal_with_source(format!("set 0700 on {}: {err}", dir.display()), err)
         })?;
     }
     Ok(())

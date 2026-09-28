@@ -12,9 +12,8 @@ use crate::error::{Error, Result};
 const APP: &str = "docsbase-memory-mcp";
 
 fn project_dirs() -> Result<ProjectDirs> {
-    ProjectDirs::from("", "", APP).ok_or_else(|| Error::Internal {
-        message: "cannot determine XDG directories (no home?)".to_owned(),
-    })
+    ProjectDirs::from("", "", APP)
+        .ok_or_else(|| Error::internal("cannot determine XDG directories (no home?)"))
 }
 
 /// Cache root (`$XDG_CACHE_HOME/docsbase-memory-mcp`), overridable via
