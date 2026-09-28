@@ -1,0 +1,25 @@
+[package]
+name = "docsbase"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Local-first documentation memory MCP server for coding agents"
+license = "MIT"
+
+[lib]
+name = "docsbase_memory"
+path = "src/lib.rs"
+
+[[bin]]
+name = "docsbase"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
