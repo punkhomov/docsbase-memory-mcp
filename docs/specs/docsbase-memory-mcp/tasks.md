@@ -59,7 +59,8 @@ lints из конституции.
 **Interfaces:** Produces `enum Error { Admission|Protocol|Project|Index|Query|Internal }`,
 `fn mcp_code(&self) -> i32`, `type Result<T>`
 **RED:** `error_codes::maps_categories` — проверяет коды `-32010..-32014`, `-32603`; падает.
-**GREEN:** варианты + `From`-конверсии для `io::Error`/`serde_json::Error`; без unwrap.
+**GREEN:** варианты + `From<std::io::Error>` (конверсия `serde_json::Error` добавляется в T5,
+когда появляется крейт); без unwrap.
 **Verify:** `cargo test --test error_codes` → OK
 **Acceptance:** NFR-8, design §9 (таксономия).
 
@@ -96,7 +97,8 @@ auto_index_default_false)` — падают.
 **Files:** Create `src/ipc/mod.rs`, `src/ipc/protocol.rs`, `tests/ipc_protocol.rs`; Modify `src/lib.rs`, `Cargo.toml`
 **Interfaces:** Produces `PROTOCOL_VERSION: u32 = 1`, `Request::{Hello, RegisterSession{pid,cwd},
 CallTool{name,args}, StopDaemon}`, `Response::{Hello, ToolResult, Error, Stats}`,
-`TOOL_ALLOWLIST`, NDJSON `encode/decode`, `CallTool` для неизвестного имени → `Protocol`
+`TOOL_ALLOWLIST`, NDJSON `encode/decode`, `impl From<serde_json::Error> for Error`,
+`CallTool` для неизвестного имени → `Protocol`
 **RED:** `ipc_protocol::(roundtrip, unknown_tool_rejected, version_checked)` — падают.
 **GREEN:** serde tag/content, length-safe NDJSON, allowlist.
 **Verify:** `cargo test --test ipc_protocol` → OK

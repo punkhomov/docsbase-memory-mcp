@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+thiserror = "2"
 
 [lints.rust]
 unsafe_code = "warn"
