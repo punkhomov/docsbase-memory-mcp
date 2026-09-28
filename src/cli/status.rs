@@ -52,7 +52,11 @@ pub fn status() -> anyhow::Result<()> {
     if !cache.join(DB_FILE).exists() {
         println!(
             "{}",
-            serde_json::json!({ "schema_version": null, "projects": [] })
+            serde_json::json!({
+                "schema_version": null,
+                "projects": [],
+                "hint": "run `docsbase index` in your project",
+            })
         );
         return Ok(());
     }
@@ -71,11 +75,15 @@ pub fn status() -> anyhow::Result<()> {
             "last_indexed_at": project.last_indexed_at,
         }));
     }
+    let hint = projects
+        .is_empty()
+        .then_some("run `docsbase index` in your project");
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "schema_version": schema_version,
             "projects": projects,
+            "hint": hint,
         }))?
     );
     Ok(())

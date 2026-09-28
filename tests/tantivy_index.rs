@@ -1,5 +1,5 @@
 use docsbase_memory::index::chunk::{Chunk, ChunkKind};
-use docsbase_memory::index::tantivy_index::{IndexHandle, chunk_id};
+use docsbase_memory::index::tantivy_index::{IndexHandle, chunk_id, chunk_id_parts};
 use tempfile::TempDir;
 
 fn chunk(doc_id: i64, seq: u32, heading: &str, text: &str) -> Chunk {
@@ -156,4 +156,10 @@ fn bad_query_is_query_error() {
         "{err:?}"
     );
     assert_eq!(err.mcp_code(), -32014);
+}
+
+#[test]
+fn chunk_id_parts_inverse() {
+    assert_eq!(chunk_id_parts(chunk_id(7, 42)), (7, 42));
+    assert_eq!(chunk_id_parts(chunk_id(0, 0)), (0, 0));
 }

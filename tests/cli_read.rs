@@ -3,7 +3,9 @@ use std::path::Path;
 
 use assert_cmd::Command;
 use docsbase_memory::daemon::registry::ensure_project;
+use docsbase_memory::index::tantivy_index::IndexHandle;
 use docsbase_memory::store::Db;
+use fd_lock::RwLock;
 use tempfile::TempDir;
 
 struct Env {
@@ -116,6 +118,52 @@ fn unregistered_project_message() {
         stderr.contains("docsbase index"),
         "hint must surface: {stderr}"
     );
+}
+
+#[test]
+fn read_path_needs_no_writer() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    env.index();
+
+    let writer = IndexHandle::open_or_create(&env.cache.path().join("projects/1/tantivy"))
+        .expect("writer handle locks tantivy");
+    let lock_path = env.cache.path().join("projects/1/.writer.lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .expect("lease file");
+    let mut lock = RwLock::new(file);
+    let lease = lock.write().expect("hold lease");
+
+    env.cmd().args(["search", "widgets"]).assert().success();
+    env.cmd().arg("list").assert().success();
+    env.cmd().arg("status").assert().success();
+
+    drop(lease);
+    drop(writer);
+}
+
+#[test]
+fn cwd_outside_registered_root() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    let mut db = Db::open(env.cache.path()).expect("db");
+    ensure_project(&mut db, env.root.path()).expect("register");
+    drop(db);
+
+    let elsewhere = TempDir::new().expect("elsewhere");
+    let output = env
+        .cmd()
+        .current_dir(elsewhere.path())
+        .args(["search", "widgets"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("no project registered for"), "{stderr}");
+    assert!(stderr.contains("docsbase index"), "{stderr}");
 }
 
 #[test]

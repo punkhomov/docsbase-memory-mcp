@@ -9,7 +9,8 @@ use crate::index::tantivy_index::{ReadIndex, chunk_id_parts};
 use crate::store::repo;
 
 /// Runs `docsbase search <query> [--limit N]`, printing a JSON array of
-/// `{path, heading_path, lines, score}` (FR-20).
+/// `{path, heading_path, lines, score}` (FR-20). Hits whose citation row
+/// vanished during an R2 crash window are dropped from the snapshot.
 ///
 /// # Errors
 /// Returns an error when the project is unregistered/not indexed, the snapshot
