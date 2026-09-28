@@ -204,6 +204,6 @@ pub fn delete_doc(conn: &Connection, doc_id: i64) -> Result<()> {
     Ok(())
 }
 
-fn db_error(err: rusqlite::Error) -> Error {
+pub(crate) fn db_error(err: rusqlite::Error) -> Error {
     Error::internal_with_source(format!("sqlite: {err}"), err)
 }

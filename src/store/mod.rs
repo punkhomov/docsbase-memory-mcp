@@ -4,7 +4,7 @@ pub mod migrations;
 pub mod models;
 pub(crate) mod repo;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
@@ -17,6 +17,7 @@ pub const DB_FILE: &str = "registry.db";
 #[derive(Debug)]
 pub struct Db {
     conn: Connection,
+    cache_root: PathBuf,
 }
 
 impl Db {
@@ -37,7 +38,10 @@ impl Db {
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|err| sql_error(&path, err))?;
         migrations::migrate(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            cache_root: cache_dir.to_path_buf(),
+        })
     }
 
     /// Opens the database read-only; never migrates or creates.
@@ -64,7 +68,10 @@ impl Db {
                 ),
             });
         }
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            cache_root: cache_dir.to_path_buf(),
+        })
     }
 
     /// Current schema version recorded in the database.
@@ -81,6 +88,10 @@ impl Db {
 
     pub(crate) fn connection_mut(&mut self) -> &mut Connection {
         &mut self.conn
+    }
+
+    pub(crate) fn cache_root(&self) -> &Path {
+        &self.cache_root
     }
 }
 
