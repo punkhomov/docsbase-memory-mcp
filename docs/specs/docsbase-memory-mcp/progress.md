@@ -68,3 +68,11 @@ Skill-review: S7 Ruling — `ProjectStatus::parse` → `impl FromStr` c общи
 Skill-review: Ruling — S6 (let-chains в `Request::validate`) отклонён: design §2 MSRV 1.85, let_chains стабильны с 1.88
 Skill-review: scoped re-review PASS, Critical/Important нет; minors (deferred): нет тестов на S4 non-NotFound и S11 corrupt-index (нужен фабрикованный индекс); docs синхронизированы (tasks.md T2/T5, Config::load `# Errors`)
 
+Task 11: Ruling: files — дополнительно `src/store/repo.rs` и `pub(crate)`-доступ к `Connection`; `Serialize` на `Frontmatter`; `MAX_CHUNK_CHARS = 4000`
+Task 11: Ruling: R2-идемпотентность — in-flight marker (`content_hash = ''`) для плана и удалений перед tantivy-операциями, точная аллокация `doc_id = MAX(id)+1`; FR-19-лимиты (oversized/over-budget) считаются как warnings в `JobStats.errors`
+Task 11: fix round 1 — frontmatter-сдвиг строк, marker, walk-error не чистит поддерево, budget учитывает removed, `pub(crate) repo`; commit 6151e9b
+Task 11: fix round 2 — tombstone удалений (краш после purge + восстановленный файл); commit 27a6bca
+Task 11: fix round 3 — unit-тест `mark_pending` (mutation-verified: удаление loop ломает тест); commit 7971898
+Task 11: minor (deferred): wiring `run_full → mark_pending` и порядок «marker до tantivy» не запинены (нужен fault-injection seam); walk-error purge suppression без теста
+Task 11: complete (commits a1859c6..7971898, tests: index_job 11 + unit 1, всего 86, clippy clean, fmt clean; review FAIL/CHANGES(3xMed) → fixed → PASS)
+
