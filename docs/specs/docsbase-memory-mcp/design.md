@@ -182,8 +182,9 @@ pub struct Project {
 2. `walk` → список `.md`; для каждого: hash → сравнение с `docs.content_hash`.
 3. Новые/изменённые → `frontmatter` + `chunk` → tantivy `delete_term(doc_id)` + `add`.
 4. SQLite: upsert `docs`/`chunks`; удалённые → `delete`.
-5. Commit tantivy, затем commit SQLite (идемпотентность: при краше повторный прогон
-   сходится по hash).
+5. Перед tantivy-операциями изменённые и удаляемые документы помечаются in-flight
+   (`content_hash = ''` в SQLite); затем commit tantivy, затем commit SQLite
+   (при краше повторный прогон переобрабатывает помеченные документы и сходится).
 6. `ProjectStatus::Indexed`, `last_indexed_at`. Job принадлежит daemon: смерть frontend не
    прерывает прогон.
 

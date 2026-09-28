@@ -197,6 +197,65 @@ fn crash_between_commits_converges() {
 }
 
 #[test]
+fn crash_before_tantivy_commit_reprocesses() {
+    let mut env = Env::new(&[("a.md", "# Title\n\nalpha content\n")]);
+    env.run();
+
+    // Marker reached SQLite, tantivy never got the new version.
+    let conn = Connection::open(env.cache.path().join(DB_FILE)).expect("raw db");
+    conn.execute("UPDATE docs SET content_hash = ''", [])
+        .expect("marker");
+    drop(conn);
+    write_file(env.root.path(), "a.md", b"# Title\n\ngamma content\n");
+
+    let stats = env.run();
+    assert_eq!(stats.docs, 1, "empty hash cannot skip");
+    assert!(!env.search("gamma").is_empty(), "new content indexed");
+    assert!(env.search("alpha").is_empty(), "old content gone");
+}
+
+#[test]
+fn crash_after_removal_purge_recovers_restored_file() {
+    let mut env = Env::new(&[("a.md", "# Title\n\nalpha content\n")]);
+    env.run();
+
+    // Removal purge committed in tantivy, SQLite tombstone set, then the file
+    // was restored byte-identical before the rerun.
+    let conn = Connection::open(env.cache.path().join(DB_FILE)).expect("raw db");
+    conn.execute("UPDATE docs SET content_hash = ''", [])
+        .expect("tombstone");
+    drop(conn);
+    env.index.delete_doc(1);
+    env.index.commit().expect("purge");
+
+    let stats = env.run();
+    assert_eq!(stats.docs, 1, "tombstone forces reindex");
+    assert!(!env.search("alpha").is_empty(), "restored file searchable");
+}
+
+#[test]
+fn doc_budget_frees_slots_in_same_run() {
+    let mut env = Env::new(&[("a.md", PLAIN)]);
+    let config = Config {
+        max_docs_per_project: 1,
+        ..Config::default()
+    };
+    env.run_with(&config);
+
+    fs::remove_file(env.root.path().join("a.md")).expect("remove");
+    write_file(
+        env.root.path(),
+        "c.md",
+        b"# Fresh\n\nCompletely different subject.\n",
+    );
+    let stats = env.run_with(&config);
+    assert_eq!(stats.removed, 1);
+    assert_eq!(stats.docs, 1, "freed slot reused in the same run");
+    assert_eq!(stats.errors, 0);
+    assert_eq!(env.count("SELECT COUNT(*) FROM docs"), 1);
+}
+
+#[test]
 fn skip_identical() {
     let mut env = Env::new(&[("a/guide.md", GUIDE), ("b/plain.md", PLAIN)]);
     env.run();

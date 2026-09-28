@@ -176,7 +176,8 @@ exact_identifier_beats_prose)` — падают.
 `run_full(db, idx, project, cfg) -> Result<JobStats>`; порядок commit: tantivy → SQLite (R2)
 **RED:** `index_job::(fresh_corpus, skip_identical, remove_deleted, corrupt_file_nonfatal,
 idempotent_rerun)` — падают.
-**GREEN:** walk → hash → diff → pythonless pipeline; ошибка файла → warning в stats, job жив.
+**GREEN:** walk → hash → diff → pythonless pipeline; ошибка файла → warning в stats, job жив;
+in-flight marker (`content_hash = ''`) перед tantivy-коммитом для R2-сходимости.
 **Verify:** `cargo test --test index_job` → OK
 **Acceptance:** FR-16, FR-18; A4; R2; design §6.
 

@@ -116,6 +116,19 @@ pub fn mark_pending(
     Ok(())
 }
 
+/// Invalidates the stored hash of a document slated for removal (R2).
+///
+/// A crash after the tantivy purge but before the SQLite delete must not let a
+/// rerun skip a restored file whose bytes still match the old hash.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn invalidate_doc(conn: &Connection, doc_id: i64) -> Result<()> {
+    conn.execute("UPDATE docs SET content_hash = '' WHERE id = ?1", [doc_id])
+        .map_err(db_error)?;
+    Ok(())
+}
+
 /// Inserts or updates one document row.
 ///
 /// # Errors

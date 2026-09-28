@@ -136,7 +136,7 @@ pub fn run_full(
         }
     }
 
-    mark_pending(db, project.id, &plan)?;
+    mark_pending(db, project.id, &plan, &removed)?;
 
     for pending in &mut plan {
         index.delete_doc(pending.id);
@@ -156,7 +156,12 @@ pub fn run_full(
     Ok(stats)
 }
 
-fn mark_pending(db: &mut Db, project_id: i64, plan: &[Pending]) -> Result<()> {
+fn mark_pending(
+    db: &mut Db,
+    project_id: i64,
+    plan: &[Pending],
+    removed: &[&DocState],
+) -> Result<()> {
     let tx = db
         .connection_mut()
         .transaction()
@@ -169,6 +174,9 @@ fn mark_pending(db: &mut Db, project_id: i64, plan: &[Pending]) -> Result<()> {
             &pending.rel_path,
             &pending.abs_path,
         )?;
+    }
+    for state in removed {
+        repo::invalidate_doc(&tx, state.id)?;
     }
     tx.commit()
         .map_err(|err| Error::internal_with_source(format!("commit sqlite: {err}"), err))
@@ -301,7 +309,11 @@ fn file_error(path: &Path, err: &std::io::Error) -> Error {
 
 /// Number of newlines in the frontmatter prefix, so cached `line_start` /
 /// `line_end` are file lines, not body lines.
+///
+/// Relies on `frontmatter::parse` returning `body` as a suffix slice of
+/// `text`; both sides are byte-exact slice boundaries.
 fn frontmatter_line_shift(text: &str, body: &str) -> u32 {
+    debug_assert!(text.ends_with(body));
     let prefix = text.len().saturating_sub(body.len());
     let lines = text[..prefix].bytes().filter(|byte| *byte == b'\n').count();
     u32::try_from(lines).unwrap_or(u32::MAX)
