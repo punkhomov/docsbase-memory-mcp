@@ -307,7 +307,7 @@ second_sync_start_returns_current, sync_job_persists_across_restart)` — пад
 
 ### T22 — Watcher + инкремент
 **Depends:** T13, T17, T19
-**New crates:** `notify`, `notify-debouncer-mini` — watcher (design §7).
+**New crates:** `notify` — watcher; debounce/коалесценция — собственный quiet-collector (Ruling T22 в progress.md).
 **Files:** Create `src/watch/mod.rs`, `tests/watcher.rs`; Modify `src/daemon/lifecycle.rs`
 **Interfaces:** Produces `spawn_watcher(project, tx) -> WatcherGuard`; debounce 1.5 с;
 коалесценция burst; игнор `projects/<id>/` и cache

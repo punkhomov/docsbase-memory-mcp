@@ -8,3 +8,4 @@ pub mod index;
 pub mod ipc;
 pub mod mcp;
 pub mod store;
+pub mod watch;

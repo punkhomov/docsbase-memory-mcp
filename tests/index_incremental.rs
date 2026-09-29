@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use docsbase_memory::config::Config;
 use docsbase_memory::index::chunk::{Chunk, ChunkKind};
-use docsbase_memory::index::job::{JobStats, run_full, run_incremental};
+use docsbase_memory::index::job::{JobStats, run_full, run_incremental_with};
 use docsbase_memory::index::tantivy_index::{Hit, IndexHandle};
 use docsbase_memory::store::models::{Project, ProjectStatus};
 use docsbase_memory::store::{DB_FILE, Db};
@@ -16,6 +16,7 @@ struct Env {
     db: Db,
     index: IndexHandle,
     project: Project,
+    config: Config,
 }
 
 impl Env {
@@ -53,21 +54,23 @@ impl Env {
             db,
             index,
             project,
+            config: Config::default(),
         }
     }
 
     fn full(&mut self) -> JobStats {
-        run_full(
-            &mut self.db,
-            &mut self.index,
-            &self.project,
-            &Config::default(),
-        )
-        .expect("full")
+        run_full(&mut self.db, &mut self.index, &self.project, &self.config).expect("full")
     }
 
     fn incremental(&mut self, changed: &[PathBuf]) -> JobStats {
-        run_incremental(&mut self.db, &mut self.index, &self.project, changed).expect("incremental")
+        run_incremental_with(
+            &mut self.db,
+            &mut self.index,
+            &self.project,
+            changed,
+            &self.config,
+        )
+        .expect("incremental")
     }
 
     fn path(&self, rel: &str) -> PathBuf {
@@ -210,4 +213,59 @@ fn crash_marker_converges_on_rerun() {
     assert_eq!(stats.docs, 1, "empty hash forces reprocess");
     assert!(env.search("gamma").is_empty(), "stale chunks removed");
     assert!(!env.search("beta").is_empty(), "current content kept");
+}
+
+#[test]
+fn removed_dir_purges_subtree() {
+    let mut env = Env::new(&[
+        ("dir/a.md", alpha()),
+        ("dir/b.md", PLAIN),
+        ("keep.md", PLAIN),
+    ]);
+    env.full();
+    fs::remove_dir_all(env.path("dir")).expect("remove dir");
+
+    let stats = env.incremental(&[env.path("dir")]);
+    assert_eq!(stats.removed, 2, "whole subtree purged");
+    assert_eq!(env.search("alpha").len(), 0);
+    assert_eq!(env.count("SELECT COUNT(*) FROM docs"), 1);
+}
+
+#[test]
+fn rename_at_capacity_keeps_document() {
+    let mut env = Env::new(&[("a.md", alpha()), ("b.md", PLAIN)]);
+    env.config.max_docs_per_project = 2;
+    env.full();
+
+    let old = env.path("a.md");
+    let new = env.path("c.md");
+    fs::rename(&old, &new).expect("rename");
+    let stats = env.incremental(&[old, new]);
+    assert_eq!(stats.removed, 1);
+    assert_eq!(stats.docs, 1);
+    assert_eq!(stats.errors, 0, "rename must not hit the document budget");
+    assert_eq!(env.count("SELECT COUNT(*) FROM docs"), 2);
+}
+
+#[test]
+fn batch_budget_counts_removals_before_additions() {
+    let mut env = Env::new(&[
+        ("a.md", alpha()),
+        ("b.md", PLAIN),
+        ("c.md", "# C\n\nc content.\n"),
+        ("d.md", "# D\n\nd content.\n"),
+    ]);
+    env.config.max_docs_per_project = 4;
+    env.full();
+
+    let gone = env.path("a.md");
+    fs::remove_file(&gone).expect("remove");
+    write_file(env.root.path(), "e.md", b"# E\n\ne content.\n");
+    write_file(env.root.path(), "f.md", b"# F\n\nf content.\n");
+    let stats = env.incremental(&[gone, env.path("e.md"), env.path("f.md")]);
+
+    assert_eq!(stats.removed, 1);
+    assert_eq!(stats.docs, 1, "removal frees exactly one slot");
+    assert_eq!(stats.errors, 1, "second addition is over budget");
+    assert_eq!(env.count("SELECT COUNT(*) FROM docs"), 4);
 }

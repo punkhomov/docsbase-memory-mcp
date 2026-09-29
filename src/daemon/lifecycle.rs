@@ -380,6 +380,16 @@ pub(crate) fn index_dir(cache_root: &Path, project_id: i64) -> PathBuf {
         .join("tantivy")
 }
 
+/// True when `err` is the per-project writer-lease conflict (I5); callers
+/// may wait and retry their job instead of dropping it.
+#[must_use]
+pub(crate) fn is_lease_conflict(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Project { message, .. } if message.starts_with("another writer holds")
+    )
+}
+
 /// Per-project writer lock file path (design §3 runtime layout).
 pub(crate) fn lease_path(cache_root: &Path, project_id: i64) -> PathBuf {
     cache_root

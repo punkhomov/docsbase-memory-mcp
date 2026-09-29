@@ -217,7 +217,7 @@ pub struct Project {
 | `tantivy` | BM25/FTS, кастомный токенизатор, реляционная выдача | FR-19, FR-21, NFR-1 |
 | `pulldown-cmark` | Markdown → события с byte-offset (line ranges, fences, tables) | FR-22 |
 | `rusqlite` (`bundled`) | метаданные и реестр; статическая сборка SQLite | FR-10, FR-16, NFR-6 |
-| `notify` + `notify-debouncer-mini` | watcher с debounce/коалесценцией | FR-15, NFR-4 |
+| `notify` | watcher; debounce/коалесценция — собственный quiet-collector 1.5 с (кап 2 с) | FR-15, NFR-4 |
 | `ignore` | обход с gitignore-семантикой, `.docsbaseignore` и границы root | FR-14, FR-32 |
 | `blake3` | content hash | FR-16 |
 | `serde`, `serde_json` | IPC и MCP payloads | FR-7 |

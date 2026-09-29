@@ -152,6 +152,11 @@ pub fn run_incremental(
 
 /// [`run_incremental`] with explicit limits for watcher/CLI callers.
 ///
+/// Missing `.md` paths purge that document; other missing paths are treated
+/// as removed/renamed directories and purge every document below them
+/// (FR-16). The document budget accounts for both subtractions before new
+/// documents are admitted, so a rename at the limit still succeeds.
+///
 /// # Errors
 /// Same as [`run_full`].
 pub fn run_incremental_with(
@@ -170,9 +175,12 @@ pub fn run_incremental_with(
     let mut stats = JobStats::default();
     let mut plan: Vec<Pending> = Vec::new();
     let mut removed: Vec<&DocState> = Vec::new();
+    let mut removed_ids: HashSet<i64> = HashSet::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut new_budget = config.max_docs_per_project.saturating_sub(existing.len());
+    let mut unique: Vec<(String, &PathBuf)> = Vec::new();
 
+    // Pass 1: deduplicate inputs and collect removals (files and whole
+    // subtrees), so pass 2 sees the final document count.
     for path in changed {
         let Ok(rel) = path.strip_prefix(&project.canonical_root) else {
             stats.errors += 1;
@@ -182,23 +190,60 @@ pub fn run_incremental_with(
         if !seen.insert(rel.clone()) {
             continue;
         }
-        let previous = by_path.get(rel.as_str()).copied();
-        if !path.exists() {
-            match previous {
-                Some(previous) => removed.push(previous),
-                None => stats.errors += 1,
-            }
+        unique.push((rel.clone(), path));
+        if path.exists() {
             continue;
+        }
+        let exact = by_path.get(rel.as_str()).copied();
+        if let Some(previous) = exact
+            && removed_ids.insert(previous.id)
+        {
+            removed.push(previous);
+        }
+        // A missing path may also be a removed/renamed directory (even one
+        // named like a document); purge everything below its prefix (FR-16).
+        let prefix = format!("{}/", rel.trim_end_matches('/'));
+        let mut prefixed = false;
+        for state in existing
+            .iter()
+            .filter(|state| state.rel_path.starts_with(&prefix))
+        {
+            prefixed = true;
+            if removed_ids.insert(state.id) {
+                removed.push(state);
+            }
+        }
+        if exact.is_none() && !prefixed && walk::is_markdown(path) {
+            stats.errors += 1;
+        }
+    }
+
+    // Pass 2: hash and chunk new/changed documents under the live budget
+    // (removals free slots before additions are admitted).
+    let mut new_budget = config
+        .max_docs_per_project
+        .saturating_sub(existing.len().saturating_sub(removed_ids.len()));
+    let mut still_present: HashSet<i64> = HashSet::new();
+    for (rel, path) in unique {
+        if !path.exists() {
+            continue;
+        }
+        let previous = by_path.get(rel.as_str()).copied();
+        if let Some(previous) = previous {
+            still_present.insert(previous.id);
+            if removed_ids.contains(&previous.id) {
+                // Recreated between the passes: still occupies a slot.
+                new_budget = new_budget.saturating_sub(1);
+            }
+        } else {
+            if new_budget == 0 {
+                stats.errors += 1;
+                continue;
+            }
+            new_budget -= 1;
         }
         match prepare_doc(path, &rel, previous, config) {
             Ok(Some(mut prepared)) => {
-                if previous.is_none() {
-                    if new_budget == 0 {
-                        stats.errors += 1;
-                        continue;
-                    }
-                    new_budget -= 1;
-                }
                 prepared.id = previous.map(|state| state.id);
                 plan.push(prepared);
             }
@@ -206,6 +251,11 @@ pub fn run_incremental_with(
             Err(_) => stats.errors += 1,
         }
     }
+
+    // A document whose file exists after both passes must not be purged even
+    // if a purge was planned while it briefly looked missing (flip race).
+    let planned_ids: HashSet<i64> = plan.iter().filter_map(|pending| pending.id).collect();
+    removed.retain(|state| !planned_ids.contains(&state.id) && !still_present.contains(&state.id));
 
     finish_plan(db, index, project.id, &mut plan, &removed, &mut stats)?;
     Ok(stats)

@@ -18,6 +18,7 @@ use crate::error::{Error, Result};
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 use crate::store::Db;
 use crate::store::migrations;
+use crate::watch::Watchers;
 
 /// Daemon state shared by all connections.
 pub struct Shared {
@@ -26,6 +27,8 @@ pub struct Shared {
     db: Mutex<Db>,
     /// Live sessions.
     pub sessions: SessionRegistry,
+    /// Per-project filesystem watchers (FR-15).
+    pub watchers: Arc<Watchers>,
 }
 
 impl Shared {
@@ -39,11 +42,18 @@ impl Shared {
         if orphans > 0 {
             eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
         }
-        Ok(Arc::new(Self {
+        let shared = Arc::new(Self {
             cache: cache.to_path_buf(),
             db: Mutex::new(db),
             sessions: SessionRegistry::new(),
-        }))
+            watchers: Arc::new(Watchers::new()),
+        });
+        match shared.watchers.start_registered(cache, &shared.db()) {
+            Ok(started) if started > 0 => eprintln!("watching {started} indexed project(s)"),
+            Ok(_) => {}
+            Err(err) => eprintln!("warning: cannot start watchers: {err}"),
+        }
+        Ok(shared)
     }
 
     fn db(&self) -> MutexGuard<'_, Db> {
@@ -281,7 +291,7 @@ fn route_tool(
     match name {
         "status" => {
             let stats = shared.sessions.stats();
-            tools::status(&db, stats.sessions, stats.fd_count, 0)
+            tools::status(&db, stats.sessions, stats.fd_count, shared.watchers.count())
         }
         "list_projects" => tools::list_projects(&db),
         "search_docs" => {
@@ -313,6 +323,14 @@ fn route_tool(
             if created {
                 tools::run_sync_job_in(&mut job_db, &shared.cache, job_id, &project, &config)?;
             }
+            let fresh =
+                registry::project_by_id(&job_db, project.id)?.ok_or_else(|| Error::Project {
+                    message: format!("project {} vanished after indexing", project.id),
+                    instruction: None,
+                })?;
+            if let Err(err) = shared.watchers.ensure(&shared.cache, &fresh) {
+                eprintln!("warning: cannot watch project {}: {err}", fresh.id);
+            }
             current_job(&job_db, job_id)
         }
         "sync_start" => {
@@ -328,7 +346,7 @@ fn route_tool(
             Config::load(Some(&project.canonical_root))?;
             let (job_id, created) = tools::enqueue_sync(&db, &project)?;
             if created {
-                spawn_sync_job(shared.cache.clone(), job_id, project.id);
+                spawn_sync_job(Arc::clone(shared), job_id, project.id);
             }
             current_job(&db, job_id)
         }
@@ -364,12 +382,17 @@ fn current_job(db: &Db, job_id: i64) -> Result<Value> {
     Ok(tools::sync_job_value(&job))
 }
 
-fn spawn_sync_job(cache: PathBuf, job_id: i64, project_id: i64) {
+fn spawn_sync_job(shared: Arc<Shared>, job_id: i64, project_id: i64) {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
             handle.spawn_blocking(move || {
-                if let Err(err) = tools::execute_sync_job(&cache, job_id, project_id) {
-                    eprintln!("warning: sync job {job_id} failed: {err}");
+                match tools::execute_sync_job(&shared.cache, job_id, project_id) {
+                    Ok(project) => {
+                        if let Err(err) = shared.watchers.ensure(&shared.cache, &project) {
+                            eprintln!("warning: cannot watch project {}: {err}", project.id);
+                        }
+                    }
+                    Err(err) => eprintln!("warning: sync job {job_id} failed: {err}"),
                 }
             });
         }

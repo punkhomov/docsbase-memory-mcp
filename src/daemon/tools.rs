@@ -149,7 +149,7 @@ pub fn enqueue_sync(db: &Db, project: &Project) -> Result<(i64, bool)> {
 ///
 /// # Errors
 /// Propagates setup and indexing errors after persisting them.
-pub fn execute_sync_job(cache: &Path, job_id: i64, project_id: i64) -> Result<()> {
+pub fn execute_sync_job(cache: &Path, job_id: i64, project_id: i64) -> Result<Project> {
     let mut db = Db::open(cache)?;
     let setup = (|| -> Result<(Project, Config)> {
         let project = registry::project_by_id(&db, project_id)?.ok_or_else(|| Error::Project {
@@ -159,10 +159,8 @@ pub fn execute_sync_job(cache: &Path, job_id: i64, project_id: i64) -> Result<()
         let config = Config::load(Some(&project.canonical_root))?;
         Ok((project, config))
     })();
-    match setup {
-        Ok((project, config)) => {
-            run_sync_job_in(&mut db, cache, job_id, &project, &config).map(|_| ())
-        }
+    let outcome = match setup {
+        Ok((project, config)) => run_sync_job_in(&mut db, cache, job_id, &project, &config),
         Err(err) => {
             let stats = json!({ "error": err.to_string() }).to_string();
             if let Err(record) =
@@ -172,7 +170,13 @@ pub fn execute_sync_job(cache: &Path, job_id: i64, project_id: i64) -> Result<()
             }
             Err(err)
         }
-    }
+    };
+    let final_project =
+        registry::project_by_id(&db, project_id)?.ok_or_else(|| Error::Project {
+            message: format!("project {project_id} disappeared after job {job_id}"),
+            instruction: None,
+        })?;
+    outcome.map(|_| final_project)
 }
 
 /// Marks `job_id` running, runs the full index and records the terminal

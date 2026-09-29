@@ -324,7 +324,10 @@ fn status_reports_sessions_watcher_versions() {
         "status: {status}"
     );
     assert!(status["fd_count"].is_u64(), "status: {status}");
-    assert_eq!(status["watchers"], 0);
+    assert_eq!(
+        status["watchers"], 1,
+        "indexed project is watched: {status}"
+    );
     let projects = status["projects"].as_array().expect("projects");
     assert_eq!(projects[0]["status"], "indexed");
 }
@@ -500,4 +503,41 @@ fn unbound_frontend_indexes_then_searches() {
         .as_array()
         .expect("hits array");
     assert!(!hits.is_empty(), "hits: {search}");
+}
+
+#[test]
+fn watcher_refreshes_search() {
+    let mut env = Env::new(&[("README.md", DOC)]);
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake_registry().expect("hello");
+    Env::index_project(&mut client, env.root());
+
+    let mut bound = env.client();
+    bound.handshake(env.root()).expect("bind session");
+    let status = bound.call_tool("status", json!({})).expect("status");
+    assert_eq!(
+        status["watchers"], 1,
+        "indexed project is watched: {status}"
+    );
+
+    write_file(
+        env.root(),
+        "README.md",
+        b"# Guide\n\ninstaller prose about gizmos.\n",
+    );
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let hits = bound
+            .call_tool("search_docs", json!({ "query": "gizmos" }))
+            .expect("search_docs");
+        if !hits.as_array().expect("hits").is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watcher did not refresh search: {hits}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

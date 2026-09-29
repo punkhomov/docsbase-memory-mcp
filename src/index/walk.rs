@@ -71,6 +71,82 @@ pub fn walk(root: &Path, config: &Config) -> Result<impl Iterator<Item = Result<
     }))
 }
 
+/// Returns every file in `dir` (non-recursive) that [`walk`] would pick,
+/// using the same ignore stack: hidden entries below `dir` (the directory
+/// itself is assumed visible), `.gitignore` chains (including parent
+/// directories and `.git/info/exclude`), `.docsbaseignore`, always-ignored
+/// directories and configured patterns. Symlinks are never followed, so
+/// results stay inside `root` (FR-32).
+///
+/// The watcher calls this once per directory of changed files instead of the
+/// full recursive walk (FR-15).
+///
+/// # Errors
+/// Returns [`Error::Internal`] when the walker cannot be built, and
+/// [`Error::Project`] for escaping ignore patterns.
+pub fn indexable_files(
+    dir: &Path,
+    root: &Path,
+    config: &Config,
+) -> Result<std::collections::HashSet<PathBuf>> {
+    validate_patterns(root, config)?;
+
+    let mut builder = WalkBuilder::new(dir);
+    builder
+        .hidden(true)
+        .follow_links(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(false)
+        .require_git(false)
+        .max_depth(Some(1))
+        .add_custom_ignore_filename(IGNORE_FILE);
+
+    if !config.ignores.is_empty() {
+        let mut overrides = OverrideBuilder::new(root);
+        for pattern in &config.ignores {
+            let negative = format!("!{pattern}");
+            overrides.add(&negative).map_err(|err| Error::Project {
+                message: format!("invalid ignore pattern {pattern:?}: {err}"),
+                instruction: None,
+            })?;
+        }
+        let built = overrides.build().map_err(|err| Error::Project {
+            message: format!("invalid ignore overrides: {err}"),
+            instruction: None,
+        })?;
+        builder.overrides(built);
+    }
+
+    let mut files = std::collections::HashSet::new();
+    for entry in builder.build() {
+        let entry = entry.map_err(|err| {
+            Error::internal_with_source(format!("walk {}: {err}", dir.display()), err)
+        })?;
+        let path = entry.path();
+        let is_file = entry.file_type().is_some_and(|kind| kind.is_file());
+        if is_file && is_markdown(path) && !in_ignored_dir(root, path) {
+            files.insert(path.to_path_buf());
+        }
+    }
+    Ok(files)
+}
+
+/// True when `path` is outside `root`, hidden or below an always-ignored
+/// directory; used by the watcher before any filesystem access (FR-15).
+#[must_use]
+pub fn is_pruned(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    if in_ignored_dir(root, path) {
+        return true;
+    }
+    relative.components().any(|component| {
+        matches!(component, Component::Normal(name) if name.to_string_lossy().starts_with('.'))
+    })
+}
+
 /// Canonicalizes `path` and guarantees it stays inside `root` (I4).
 ///
 /// # Errors
@@ -99,7 +175,7 @@ pub fn resolve_in_root(root: &Path, path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-fn is_markdown(path: &Path) -> bool {
+pub(crate) fn is_markdown(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
 }
