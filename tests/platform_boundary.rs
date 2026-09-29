@@ -89,6 +89,9 @@ fn no_os_transport_outside_platform() {
         "PermissionsExt",
         "DirBuilderExt",
         "OpenOptionsExt",
+        "var_os(\"HOME\")",
+        "var(\"HOME\")",
+        "env!(\"HOME\")",
     ];
     let mut violations = Vec::new();
     for entry in fs::read_dir(&src).expect("read src") {

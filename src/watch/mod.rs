@@ -72,7 +72,9 @@ pub fn spawn_watcher(
             return;
         }
         for path in event.paths {
-            if path.starts_with(&watch_cache) || walk::is_pruned(&watch_root, &path) {
+            if crate::platform::paths::is_under(&path, &watch_cache)
+                || walk::is_pruned(&watch_root, &path)
+            {
                 continue;
             }
             match std::fs::symlink_metadata(&path) {
@@ -204,11 +206,11 @@ impl IndexFilter {
     /// root through a symlinked ancestor (FR-32).
     fn inside_root(&self, path: &Path) -> bool {
         path.canonicalize()
-            .is_ok_and(|canonical| canonical.starts_with(&self.root))
+            .is_ok_and(|canonical| crate::platform::paths::is_under(&canonical, &self.root))
     }
 
     fn indexable(&mut self, path: &Path) -> bool {
-        if !self.inside_root(path) || path.starts_with(&self.cache) {
+        if !self.inside_root(path) || crate::platform::paths::is_under(path, &self.cache) {
             return false;
         }
         let Some(parent) = path.parent() else {
@@ -272,7 +274,7 @@ fn expand_dir_inner(filter: &mut IndexFilter, batch: &mut Batch, dir: &Path, dep
     if depth > EXPAND_MAX_DEPTH || batch.paths.len() >= EXPAND_MAX_FILES {
         return;
     }
-    if !filter.inside_root(dir) || dir.starts_with(&filter.cache) {
+    if !filter.inside_root(dir) || crate::platform::paths::is_under(dir, &filter.cache) {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {

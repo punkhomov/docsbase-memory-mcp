@@ -8,6 +8,7 @@
 //! (`daemon`, `ipc`, `store`, …) so integration tests can exercise the seam
 //! directly; it is not a stable API.
 
+pub mod paths;
 mod unix;
 
 use std::fmt;
