@@ -10,7 +10,7 @@ use crate::daemon::session::Stats;
 use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
 use crate::index::job::{JobStats, run_full};
-use crate::index::tantivy_index::{ReadIndex, chunk_id, chunk_id_parts};
+use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
 use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
 use crate::store::migrations;
 use crate::store::models::{Project, ProjectStatus, SyncJob, SyncState};
@@ -29,10 +29,11 @@ pub fn search_docs(db: &Db, cache: &Path, project: &Project, args: &Value) -> Re
         .ok_or_else(|| Error::Protocol {
             message: "search_docs: missing query".to_owned(),
         })?;
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .map_or(10, |v| usize::try_from(v).unwrap_or(usize::MAX));
+    // Client-supplied limits are clamped: the top-k collector allocates
+    // proportional to the request (final review C1).
+    let limit = args.get("limit").and_then(Value::as_u64).map_or(10, |v| {
+        usize::try_from(v).unwrap_or(usize::MAX).min(MAX_HITS)
+    });
 
     let index = ReadIndex::open(&lifecycle::index_dir(cache, project.id))?;
     let hits = index.search(query, limit)?;
@@ -253,7 +254,7 @@ pub const NEIGHBOR_CAP: u64 = 100;
 pub fn list_projects(db: &Db) -> Result<Value> {
     let mut projects = Vec::new();
     for project in registry::list_projects(db)? {
-        projects.push(project_entry(db, &project)?);
+        projects.push(project_entry(db, &project, None)?);
     }
     Ok(Value::Array(projects))
 }
@@ -267,10 +268,11 @@ pub fn status(
     stats: &Stats,
     watchers: u64,
     restart_notice: Option<&str>,
+    watching: &dyn Fn(i64) -> bool,
 ) -> Result<Value> {
     let mut projects = Vec::new();
     for project in registry::list_projects(db)? {
-        projects.push(project_entry(db, &project)?);
+        projects.push(project_entry(db, &project, Some(watching(project.id)))?);
     }
     let hint = projects
         .is_empty()
@@ -290,7 +292,7 @@ pub fn status(
     }))
 }
 
-fn project_entry(db: &Db, project: &Project) -> Result<Value> {
+fn project_entry(db: &Db, project: &Project, watched: Option<bool>) -> Result<Value> {
     let counts = repo::project_counts(db.connection(), project.id)?;
     // Warnings come from the newest job only when it succeeded: a newer
     // failed job must not leave an older job's warnings looking current.
@@ -301,7 +303,7 @@ fn project_entry(db: &Db, project: &Project) -> Result<Value> {
             .unwrap_or_else(|| Value::Array(Vec::new())),
         _ => Value::Array(Vec::new()),
     };
-    Ok(json!({
+    let mut entry = json!({
         "id": project.id,
         "name": project.name,
         "root": project.canonical_root,
@@ -310,7 +312,11 @@ fn project_entry(db: &Db, project: &Project) -> Result<Value> {
         "chunks": counts.chunks,
         "last_indexed_at": project.last_indexed_at,
         "warnings": warnings,
-    }))
+    });
+    if let Some(watched) = watched {
+        entry["watched"] = json!(watched);
+    }
+    Ok(entry)
 }
 
 /// Creates a `queued` sync job for `project`; when an active job already

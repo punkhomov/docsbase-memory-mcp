@@ -150,6 +150,75 @@ fn falls_back_when_dead() {
 }
 
 #[test]
+fn sync_via_daemon_polls_until_done() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    let path = socket_path(env.cache.path());
+    fs::create_dir_all(path.parent().expect("state dir")).expect("mkdir state");
+    let listener = UnixListener::bind(&path).expect("bind socket");
+
+    let _handle = thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut writer = stream;
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let request: Request =
+                    serde_json::from_str(line.trim()).expect("parse request line");
+                let response = match request {
+                    Request::Hello { .. } => Response::Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                        build_id: "test-daemon".to_owned(),
+                        schema_version: 1,
+                    },
+                    Request::RegisterSession { .. } | Request::RegisterUnbound { .. } => {
+                        Response::ToolResult {
+                            value: serde_json::Value::Null,
+                        }
+                    }
+                    Request::CallTool { name, .. } if name == "sync_start" => {
+                        Response::ToolResult {
+                            value: serde_json::json!({
+                                "job_id": 7, "state": "running", "stats": null
+                            }),
+                        }
+                    }
+                    Request::CallTool { name, .. } if name == "sync_status" => {
+                        Response::ToolResult {
+                            value: serde_json::json!({
+                                "job_id": 7, "state": "done", "stats": { "docs": 1 }
+                            }),
+                        }
+                    }
+                    Request::CallTool { name, .. } => Response::ToolResult {
+                        value: serde_json::json!({ "routed_tool": name }),
+                    },
+                    Request::StopDaemon => break,
+                };
+                writer
+                    .write_all(&encode(&response).expect("encode"))
+                    .expect("write response");
+                writer.flush().expect("flush");
+            }
+        }
+    });
+
+    let output = env
+        .cmd()
+        .arg("sync")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let json: serde_json::Value = serde_json::from_str(stdout_text(&output).trim()).expect("json");
+    assert_eq!(json["job_id"], 7);
+    assert_eq!(json["state"], "done");
+}
+
+#[test]
 fn daemon_errors_surface() {
     let env = Env::new(&[("docs/a.md", DOC)]);
     let path = socket_path(env.cache.path());

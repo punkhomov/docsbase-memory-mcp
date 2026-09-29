@@ -55,6 +55,14 @@ impl Frontend {
                 let conn = guard
                     .as_mut()
                     .ok_or_else(|| Error::internal("daemon connection lost"))?;
+                if tools::PROJECT_TOOLS.contains(&name.as_str()) && conn.project_hint.is_some() {
+                    // The project may have been indexed out-of-band (e.g.
+                    // `docsbase index` in a terminal): retry the bind before
+                    // serving the stale hint.
+                    if conn.client.handshake(&conn.cwd).is_ok() {
+                        conn.project_hint = None;
+                    }
+                }
                 if tools::PROJECT_TOOLS.contains(&name.as_str())
                     && let Some((hint, instruction)) = &conn.project_hint
                 {

@@ -85,15 +85,25 @@ impl Lease {
         };
 
         if let Some(state) = lifecycle::read_state(cache)? {
-            let recorded_schema = state.schema_version.to_string();
-            let expected_schema = schema_version.to_string();
-            let mismatch = if state.build_id != build_id {
-                Some(("build_mismatch", build_id, state.build_id.as_str()))
+            let expected_root = normalized(cache);
+            let recorded_root = normalized(&state.cache_root);
+            let mismatch: Option<(&str, String, String)> = if state.build_id != build_id {
+                Some((
+                    "build_mismatch",
+                    build_id.to_owned(),
+                    state.build_id.clone(),
+                ))
             } else if state.schema_version != schema_version {
                 Some((
                     "schema_mismatch",
-                    expected_schema.as_str(),
-                    recorded_schema.as_str(),
+                    schema_version.to_string(),
+                    state.schema_version.to_string(),
+                ))
+            } else if recorded_root != expected_root {
+                Some((
+                    "root_mismatch",
+                    expected_root.display().to_string(),
+                    recorded_root.display().to_string(),
                 ))
             } else {
                 None
@@ -103,8 +113,8 @@ impl Lease {
                     cache,
                     &Conflict {
                         kind,
-                        expected,
-                        actual,
+                        expected: &expected,
+                        actual: &actual,
                         build_id,
                         schema_version,
                         cache_root: cache,
@@ -114,16 +124,26 @@ impl Lease {
                         holder_pid: Some(state.pid),
                     },
                 );
-                return Err(Error::Admission {
-                    message: format!(
+                let message = if kind == "root_mismatch" {
+                    format!(
+                        "cache root mismatch: daemon.json records {actual}, this process serves {expected}; run `docsbase daemon stop` and retry, or remove the stale state file"
+                    )
+                } else {
+                    format!(
                         "cache was created by build {:?} schema {}, this build is {:?} schema {schema_version}; run `docsbase install` to update, then `docsbase index` to rebuild stale indexes",
                         state.build_id, state.schema_version, build_id
-                    ),
-                });
+                    )
+                };
+                return Err(Error::Admission { message });
             }
         }
         Ok(Self { guard })
     }
+}
+
+/// Canonical form of a root path when it exists, raw otherwise.
+fn normalized(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn recorded(cache: &Path) -> Option<DaemonState> {

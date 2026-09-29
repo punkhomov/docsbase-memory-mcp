@@ -330,6 +330,36 @@ fn status_reports_sessions_watcher_versions() {
     );
     let projects = status["projects"].as_array().expect("projects");
     assert_eq!(projects[0]["status"], "indexed");
+    assert_eq!(
+        projects[0]["watched"], true,
+        "indexed project must show a live watcher: {status}"
+    );
+}
+
+#[test]
+fn huge_search_limit_is_clamped() {
+    let mut env = Env::new(&[("README.md", DOC)]);
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake_registry().expect("hello");
+    Env::index_project(&mut client, env.root());
+
+    let mut bound = env.client();
+    bound.handshake(env.root()).expect("bind session");
+    // `u64::MAX` used to reach tantivy's allocating collector and abort the
+    // shared daemon (final review C1).
+    let hits = bound
+        .call_tool(
+            "search_docs",
+            json!({ "query": "widgets", "limit": u64::MAX }),
+        )
+        .expect("huge limit must be clamped, not fatal");
+    assert!(
+        hits.as_array().expect("hits").len() <= 1_000,
+        "clamped result set"
+    );
+    let status = bound.call_tool("status", json!({})).expect("daemon alive");
+    assert_eq!(status["projects"][0]["docs"], 1, "status: {status}");
 }
 
 #[test]

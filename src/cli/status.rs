@@ -54,8 +54,13 @@ pub fn status() -> anyhow::Result<()> {
     // Direct mode has no daemon: sessions/fd/threads are not applicable.
     // Direct mode reloads the config every run, so there is no stale snapshot
     // to warn about (OQ-6).
-    let value =
-        crate::daemon::tools::status(&db, &crate::daemon::session::Stats::default(), 0, None)?;
+    let value = crate::daemon::tools::status(
+        &db,
+        &crate::daemon::session::Stats::default(),
+        0,
+        None,
+        &|_| false,
+    )?;
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }

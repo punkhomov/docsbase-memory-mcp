@@ -6,11 +6,12 @@ pub mod search;
 pub mod status;
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 
-use crate::config::paths;
+use crate::config::{Config, paths};
 use crate::ipc::client::Client;
 
 /// `docsbase` command-line interface.
@@ -44,6 +45,13 @@ pub enum Command {
     },
     /// List indexed documents of the current project.
     List,
+    /// Synchronize (re-index) the current project.
+    Sync {
+        /// Project directory (direct mode only).
+        path: Option<PathBuf>,
+    },
+    /// Print the effective configuration for the current directory.
+    Config,
     /// Show registry-wide status.
     Status,
     /// Run the shared daemon in the foreground (hidden `--detached` for autostart).
@@ -90,6 +98,8 @@ pub fn run() -> anyhow::Result<()> {
         Command::Index { path } => index::run(path.as_deref()),
         Command::Search { query, limit } => search::run(&query, limit),
         Command::List => status::list(),
+        Command::Sync { path } => sync(path.as_deref()),
+        Command::Config => show_config(),
         Command::Status => status::status(),
         Command::Serve { detached, grace_ms } => serve(detached, grace_ms),
         Command::Mcp => crate::mcp::frontend::run_blocking(),
@@ -104,6 +114,46 @@ pub fn run() -> anyhow::Result<()> {
 fn serve(_detached: bool, grace_ms: u64) -> anyhow::Result<()> {
     let cache = paths::cache_dir()?;
     crate::daemon::lifecycle::run_daemon(&cache, std::time::Duration::from_millis(grace_ms))?;
+    Ok(())
+}
+
+/// Runs `docsbase sync`: a daemon sync job when one is reachable (FR-17),
+/// otherwise a direct full index (FR-30).
+fn sync(path: Option<&std::path::Path>) -> anyhow::Result<()> {
+    if let Some(job) = try_daemon("sync_start", serde_json::json!({}), true)? {
+        let id = job["job_id"].as_i64().context("sync_start: job_id")?;
+        let deadline = Instant::now() + Duration::from_secs(610);
+        let mut job = job;
+        while matches!(job["state"].as_str(), Some("queued" | "running")) {
+            if Instant::now() >= deadline {
+                anyhow::bail!("sync job {id} did not finish within the budget");
+            }
+            std::thread::sleep(Duration::from_millis(250));
+            job = try_daemon("sync_status", serde_json::json!({ "job_id": id }), false)?
+                .context("daemon exited while a sync job was running")?;
+        }
+        println!("{}", serde_json::to_string_pretty(&job)?);
+        if job["state"] == "error" {
+            anyhow::bail!("sync job {id} failed: {}", job["stats"]);
+        }
+        return Ok(());
+    }
+    index::run(path)
+}
+
+/// Runs `docsbase config`: effective values for the current directory
+/// (CLI > project > global > defaults, FR-28/FR-29).
+fn show_config() -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("resolve current directory")?;
+    let config = Config::load(Some(&cwd))?;
+    let payload = serde_json::json!({
+        "ignores": config.ignores,
+        "max_file_size": config.max_file_size,
+        "max_docs_per_project": config.max_docs_per_project,
+        "auto_index": config.auto_index,
+        "hybrid": config.hybrid,
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
 

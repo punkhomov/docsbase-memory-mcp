@@ -78,6 +78,13 @@ fn first_start_creates_daemon() {
     let pid = env.start();
 
     assert!(pid_alive(pid), "daemon pid must be alive");
+    let log = env.cache().join("logs/daemon.log");
+    let metadata = fs::metadata(&log).expect("NFR-8: detached daemon writes logs/daemon.log");
+    assert_eq!(
+        metadata.permissions().mode() & 0o777,
+        0o600,
+        "daemon log must be owner-only"
+    );
     assert!(env.socket().exists(), "socket must exist");
     let mode = fs::metadata(env.socket()).expect("metadata").permissions();
     assert_eq!(mode.mode() & 0o777, 0o600, "socket must be 0600");

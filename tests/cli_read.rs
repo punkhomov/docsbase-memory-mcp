@@ -81,6 +81,44 @@ fn search_without_daemon() {
 }
 
 #[test]
+fn config_prints_effective_values() {
+    let env = Env::new(&[("README.md", DOC)]);
+    write_file(
+        env.root.path(),
+        ".docsbase.toml",
+        b"max_file_size = 1234\nignores = [\"vendor/**\"]\n",
+    );
+
+    let output = env
+        .cmd()
+        .arg("config")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let json = stdout_json(&output);
+    assert_eq!(json["max_file_size"], 1234);
+    assert_eq!(json["ignores"][0], "vendor/**");
+    assert_eq!(json["auto_index"], false);
+}
+
+#[test]
+fn sync_direct_mode_indexes() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    env.cmd().arg("sync").assert().success();
+
+    let output = env
+        .cmd()
+        .args(["search", "widgets"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let hits = stdout_json(&output);
+    assert!(!hits.as_array().expect("hits").is_empty(), "sync indexed");
+}
+
+#[test]
 fn not_indexed_message() {
     let env = Env::new(&[("docs/a.md", DOC)]);
     let mut db = Db::open(env.cache.path()).expect("db");

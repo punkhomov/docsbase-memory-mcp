@@ -328,6 +328,13 @@ impl Watchers {
         u64::try_from(self.map().len()).unwrap_or(u64::MAX)
     }
 
+    /// True while a watcher thread is alive for `project_id`; a dead watcher
+    /// is visible in `status` instead of silently dropping edits.
+    #[must_use]
+    pub fn watching(&self, project_id: i64) -> bool {
+        self.map().contains_key(&project_id)
+    }
+
     /// Starts a watcher for `project` when it is indexed and not yet watched;
     /// returns `true` when a new watcher was started. `config` is the project
     /// configuration as of open time (OQ-6).

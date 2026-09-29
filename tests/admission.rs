@@ -108,6 +108,40 @@ fn schema_mismatch_refuses() {
 }
 
 #[test]
+fn root_mismatch_refused_and_logs() {
+    let env = Env::new();
+    let other = TempDir::new().expect("other cache root");
+    let state = serde_json::json!({
+        "pid": std::process::id(),
+        "socket": env.socket(),
+        "build_id": build_id(),
+        "schema_version": docsbase_memory::store::migrations::SCHEMA_VERSION,
+        "cache_root": other.path(),
+    });
+    fs::create_dir_all(env.cache().join("state")).expect("state dir");
+    fs::write(
+        env.cache().join("state/daemon.json"),
+        serde_json::to_vec(&state).expect("json"),
+    )
+    .expect("write state");
+
+    let err = Lease::acquire(
+        env.cache(),
+        &build_id(),
+        docsbase_memory::store::migrations::SCHEMA_VERSION,
+    )
+    .expect_err("root mismatch must refuse");
+    assert!(matches!(err, Error::Admission { .. }), "{err:?}");
+    assert!(err.to_string().contains("root"), "{err}");
+
+    let lines = conflict_lines(&env);
+    assert_eq!(
+        lines.last().expect("conflict recorded")["kind"],
+        "root_mismatch"
+    );
+}
+
+#[test]
 fn second_daemon_refused() {
     let env = Env::new();
     ensure_daemon_with(env.cache(), Some(&daemon_bin())).expect("start");

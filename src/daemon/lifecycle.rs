@@ -3,7 +3,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -348,9 +348,16 @@ fn spawn_detached(cache: &Path, exe: Option<&Path>) -> Result<()> {
         .arg("--detached")
         .env("DOCSBASE_CACHE_DIR", cache)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
         .process_group(0);
+    // NFR-8: the detached daemon's diagnostics belong in logs/daemon.log
+    // (0600), not /dev/null; a missing log file is a setup error.
+    let log = open_daemon_log(cache)?;
+    let log_err = log
+        .try_clone()
+        .map_err(|err| Error::internal_with_source("clone daemon log", err))?;
+    command
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
     if let Some(config_dir) = std::env::var_os("DOCSBASE_CONFIG_DIR") {
         command.env("DOCSBASE_CONFIG_DIR", config_dir);
     }
@@ -358,6 +365,24 @@ fn spawn_detached(cache: &Path, exe: Option<&Path>) -> Result<()> {
         .spawn()
         .map_err(|err| Error::internal_with_source("spawn daemon", err))?;
     Ok(())
+}
+
+/// Opens (creating if needed) `logs/daemon.log` with owner-only permissions.
+fn open_daemon_log(cache: &Path) -> Result<File> {
+    let dir = cache.join("logs");
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder
+        .create(&dir)
+        .map_err(|err| Error::internal_with_source("create logs dir", err))?;
+    let path = dir.join("daemon.log");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|err| Error::internal_with_source(format!("open {}", path.display()), err))?;
+    Ok(file)
 }
 
 fn daemon_exe() -> PathBuf {

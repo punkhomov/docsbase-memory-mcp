@@ -101,6 +101,7 @@ Project: .docsbase.toml, .docsbaseignore              # FR-14, FR-28
 pub enum Request {
     Hello { protocol_version: u32, build_id: String, client: String },
     RegisterSession { pid: u32, cwd: PathBuf },
+    RegisterUnbound { pid: u32, cwd: PathBuf }, // C8 fallback: index_project from cwd
     CallTool { name: String, args: serde_json::Value },
     StopDaemon,
 }
@@ -109,8 +110,8 @@ pub enum Request {
 pub enum Response {
     Hello { protocol_version: u32, build_id: String, schema_version: u32 },
     ToolResult { value: serde_json::Value },
-    Error { code: ErrorCode, message: String },
-    Stats { fd_count: usize, sessions: usize, threads: usize },
+    Error { code: i32, message: String, instruction: Option<String> },
+    Stats { fd_count: u64, sessions: u64, threads: u64 },
 }
 
 // index/chunk.rs — FR-22, NFR-1
@@ -230,7 +231,7 @@ pub struct Project {
 | `directories` | XDG пути (cache/config) | FR-28, FR-29 |
 | `fd-lock` | RAII flock для admission/locks | FR-4, FR-9 |
 | `thiserror`, `anyhow` | таксономия ошибок | constitution |
-| `tracing`, `tracing-subscriber` | структурные логи, conflict-log | NFR-8 |
+| (без крейта) файловый лог `logs/daemon.log` 0600 + `logs/conflicts.ndjson` | диагностика и admission-конфликты | NFR-8 |
 | dev: `tempfile`, `assert_cmd`, `insta`, `criterion` | интеграционные, golden и perf-тесты (T27, T30) | NFR-1, NFR-7 |
 
 **Точечные альтернативы:** вместо `serde_yaml` — минимальный flat-парсер frontmatter
@@ -341,7 +342,7 @@ src/
 │   ├── mod.rs
 │   ├── index.rs            # docsbase index [path] (FR-11)
 │   ├── search.rs           # docsbase search (FR-20)
-│   ├── daemon.rs           # start/stop/status (FR-2, FR-6)
+│   ├── status.rs           # list/status snapshots (FR-25, FR-26)
 │   └── install.rs          # install/uninstall (FR-1, FR-31)
 ├── mcp/
 │   ├── mod.rs
@@ -368,6 +369,7 @@ src/
 ├── store/
 │   ├── mod.rs
 │   ├── migrations.rs       # schema_version (NFR-7)
+│   ├── repo.rs             # SQL repositories (docs/chunks/sync_jobs)
 │   └── models.rs           # projects/docs/chunks/sync_jobs
 ├── config/
 │   ├── mod.rs              # load + precedence (FR-28, FR-29)
@@ -375,14 +377,12 @@ src/
 └── error.rs                # taxonomy (NFR-8)
 
 tests/
-├── lifecycle.rs
-├── cleanup.rs
-├── admission.rs
-├── registry_indexing.rs
-├── watcher.rs
-├── search_golden.rs
-├── cli_snapshot.rs
-└── offline.rs
+├── lifecycle.rs / cleanup.rs / admission.rs / admission_ux.rs
+├── watcher.rs / index_job.rs / index_incremental.rs
+├── search_golden.rs (+ snapshots) / mcp_docs.rs / error_surface.rs
+├── install.rs / config_runtime.rs / perf_budget.rs / artifact.rs
+├── soak.rs / offline.rs
+└── …
 ```
 
 ## 14. Traceability
@@ -406,5 +406,5 @@ tests/
 | FR-33 | `ipc/` (Unix socket, 0600) |
 | FR-34 | `mcp/tools.rs` (read-only набор) |
 | NFR-2, NFR-3, NFR-6 | `store`, `index/`, сборка |
-| NFR-5, NFR-8 | `tracing`, conflict-log, отсутствие сетевых крейтов |
+| NFR-5, NFR-8 | `logs/daemon.log` + conflict-log, отсутствие сетевых крейтов |
 | NFR-7 | `store/migrations.rs` |

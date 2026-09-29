@@ -76,6 +76,31 @@ fn legacy_schema_is_recreated_for_writes() {
 }
 
 #[test]
+fn corrupt_meta_is_recreated() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("tantivy");
+    std::fs::create_dir_all(&path).expect("mkdir");
+    std::fs::write(path.join("meta.json"), b"not a real index").expect("write corrupt meta");
+
+    let mut index = IndexHandle::open_or_create(&path).expect("corrupt index must be recreated");
+    assert!(index.was_recreated(), "corrupt directory is replaced");
+    index
+        .add_chunks(&[chunk(1, 0, "T", "searchable after recovery")])
+        .expect("add");
+    index.commit().expect("commit");
+    assert!(
+        !index.search("searchable", 5).expect("search").is_empty(),
+        "recovered index must be usable"
+    );
+    index.mark_rebuilt().expect("mark rebuilt");
+    let reopened = ReadIndex::open(&path).expect("read-only open after recovery");
+    assert!(
+        !reopened.search("searchable", 5).expect("search").is_empty(),
+        "recovered index must stay readable"
+    );
+}
+
+#[test]
 fn legacy_schema_is_rejected_for_reads() {
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("tantivy");

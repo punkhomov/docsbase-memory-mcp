@@ -23,6 +23,11 @@ const WRITER_HEAP_BYTES: usize = 20_000_000;
 /// (FR-20, T27).
 const LONG_CHUNK_PENALTY: f32 = 0.5;
 
+/// Upper bound for a single search's `limit`. Tantivy's top-k collector
+/// allocates proportional to the requested limit, so an unbounded
+/// client-supplied value would abort the shared daemon (final review C1).
+pub const MAX_HITS: usize = 1_000;
+
 /// Marker written when the on-disk index must be rebuilt from `SQLite` (T27).
 /// It survives crashes: the wipe and reindex happen in the next job, and
 /// reads refuse an index that still carries it.
@@ -91,18 +96,32 @@ impl IndexHandle {
         let marker = dir.join(REBUILD_MARKER);
         let mut recreated = false;
         let index = if dir.join("meta.json").exists() {
-            let existing = open_index(dir)?;
-            if fields_from(&existing.schema()).is_ok() && !marker.exists() {
-                existing
-            } else {
-                // An index written by an older build, or one whose rebuild
-                // was interrupted: the directory is a derived cache, so
-                // recreate it and signal the caller to re-index from SQLite
-                // (T27).
-                drop(existing);
-                create_fresh(dir, &marker)?;
-                recreated = true;
-                open_index(dir)?
+            match open_index(dir) {
+                Ok(existing) if fields_from(&existing.schema()).is_ok() && !marker.exists() => {
+                    existing
+                }
+                Ok(existing) => {
+                    // An index written by an older build, or one whose
+                    // rebuild was interrupted: the directory is a derived
+                    // cache, so recreate it and signal the caller to
+                    // re-index from SQLite (T27).
+                    drop(existing);
+                    create_fresh(dir, &marker)?;
+                    recreated = true;
+                    open_index(dir)?
+                }
+                Err(err) => {
+                    // Corrupt/truncated `meta.json` must not brick search and
+                    // indexing forever: the derived cache is recreated and
+                    // rebuilt (final review).
+                    eprintln!(
+                        "warning: index {} is unreadable ({err}); recreating",
+                        dir.display()
+                    );
+                    create_fresh(dir, &marker)?;
+                    recreated = true;
+                    open_index(dir)?
+                }
             }
         } else {
             // A brand-new directory cannot hold any chunks, so whatever
@@ -291,6 +310,7 @@ fn search_reader(
     if limit == 0 {
         return Ok(Vec::new());
     }
+    let limit = limit.min(MAX_HITS);
     let parsed = parser.parse_query(query).map_err(|err| Error::Query {
         message: format!("parse query {query:?}: {err}"),
     })?;

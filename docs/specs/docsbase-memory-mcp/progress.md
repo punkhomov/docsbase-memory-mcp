@@ -179,3 +179,12 @@ Task 32: Ruling: release profile lto/codegen-units=1/strip/panic=abort; artifact
 Task 32: fix rounds: CI `RUSTUP_TOOLCHAIN=1.88.0` (иначе rust-toolchain.toml nightly перебивает action), components+`--locked`, checksum по basename; doc-backticks для clippy 1.88; STOP_TIMEOUT 5→15s и NO_LISTENER_TIMEOUT 2s (флейк `concurrent_stops_do_not_wedge`)
 Task 32: minor (deferred): artifact-пути игнорируют CARGO_TARGET_DIR; отсутствие ldd = panic; RSS-половина NFR-2 не измеряется бенчем
 Task 32: complete (tests: artifact 2, всего 209+3 ignored, clippy clean nightly+1.88, fmt clean; review CHANGES(2 Important) → fixes → verified)
+Final review fix pass: C1 — `search_docs.limit` клампится до `MAX_HITS = 1000` (в tools и defensively в search_reader); регрессионный тест `limit: u64::MAX` держит daemon живым
+Final review fix pass: FR-4 — `Lease::acquire` сверяет `cache_root` (canonicalized) с `daemon.json`, новый kind `root_mismatch`; тест `root_mismatch_refused_and_logs`
+Final review fix pass: NFR-8 — detached daemon направляет stdout/stderr в `logs/daemon.log` (0600, создаётся при старте); тест в lifecycle; design §7 без tracing
+Final review fix pass: NFR-2 — release-тест `rss_budget`: idle RSS ~9.5 МБ при бюджете 150 МБ; 10k-doc RSS остаётся Ruling (не измеряется)
+Final review fix pass: corrupt `meta.json` больше не dead-end: `open_or_create` пересоздаёт индекс через `create_fresh`; тест `corrupt_meta_is_recreated`
+Final review fix pass: frontend повторяет bind при stale project hint (после `docsbase index` из терминала) — e2e тест `stale_project_hint_recovers_after_cli_index`
+Final review fix pass: FR-30 — `docsbase sync` (daemon `sync_start` + poll `sync_status`, direct-fallback) и `docsbase config`; тесты cli_read/cli_routing; FR-29 CLI-флаги (with_overrides) — Ruling: should-уровень, отложены
+Final review fix pass: watcher visibility — `status.projects[].watched`; design §5 (RegisterUnbound, instruction, u64) и §13 (cli/status.rs, store/repo.rs) приведены в соответствие; тест в mcp_registry
+Final review fix pass: Ruling: SC-9 (агентская метрика) — вне автотестов; grouped minors финального ревью остаются в deferred

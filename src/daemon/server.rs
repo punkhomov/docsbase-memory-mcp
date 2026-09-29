@@ -511,7 +511,13 @@ fn route_tool(
         "status" => {
             let stats = shared.sessions.stats();
             let notice = shared.restart_notice();
-            tools::status(&db, &stats, shared.watchers.count(), notice.as_deref())
+            tools::status(
+                &db,
+                &stats,
+                shared.watchers.count(),
+                notice.as_deref(),
+                &|id| shared.watchers.watching(id),
+            )
         }
         "list_projects" => tools::list_projects(&db),
         "search_docs" => {

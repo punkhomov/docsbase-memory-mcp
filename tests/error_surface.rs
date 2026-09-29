@@ -281,6 +281,28 @@ fn mcp_error_codes_stable() {
 }
 
 #[test]
+fn stale_project_hint_recovers_after_cli_index() {
+    let env = Env::new(&[("docs/a.md", b"# Guide\n\ninstaller prose.\n")]);
+    let mut mcp = Mcp::start(&env);
+    let before = mcp.call("search_docs", &json!({ "query": "installer" }));
+    assert_eq!(error_code(&before), -32012, "unindexed project: {before}");
+
+    // Out-of-band indexing while the MCP frontend keeps running.
+    let output = env.cmd().arg("index").output().expect("run index");
+    assert!(output.status.success(), "index failed: {output:?}");
+
+    let after = mcp.call("search_docs", &json!({ "query": "installer" }));
+    assert_eq!(
+        after["result"]["isError"], false,
+        "frontend must recover without a restart: {after}"
+    );
+    assert!(
+        after["result"]["structuredContent"].is_array(),
+        "search payload: {after}"
+    );
+}
+
+#[test]
 fn project_error_has_instruction() {
     let env = Env::new(&[("docs/a.md", b"# Guide\n\ninstaller prose.\n")]);
     // The project is deliberately not indexed: the frontend keeps the
