@@ -244,7 +244,7 @@ wrote.*
 | `docs` | `id`, `project_id`, `rel_path`, `abs_path`, `title`, `frontmatter_json`, `size`, `mtime`, `content_hash`, `indexed_at` |
 | `chunks` | `id`, `doc_id`, `seq`, `heading_path`, `kind` (prose/code/table), `lang`, `line_start`, `line_end`, `text` |
 | `sync_jobs` | `id`, `project_id`, `state`, `started_at`, `finished_at`, `stats_json` |
-| daemon state (файл) | `pid`, `socket_path`, `build_id`, `schema_version`, `cache_root`, `started_at` |
+| daemon state (файл) | `pid`, `socket` (строка-endpoint), `build_id`, `schema_version`, `cache_root` |
 
 - Хранилище: `~/.cache/docsbase-memory-mcp/` (SQLite WAL + tantivy-индекс per project).
 - Реестр — единственный источник списка индексируемых проектов.

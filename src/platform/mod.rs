@@ -1,8 +1,8 @@
 //! OS seam (ADR-9): the only module that touches platform transport.
 //!
-//! v1 ships the Unix implementation behind a small facade (`Endpoint`,
-//! `Listener`, `Stream`, `BlockingStream`). Signals, process lifecycle,
-//! filesystem permissions and path semantics move here in T35/T36.
+//! v1 ships the Unix implementation behind a small facade: transport
+//! (`Endpoint`, `Listener`, `Stream`, `BlockingStream`), signals, process
+//! lifecycle, filesystem permissions and path semantics (T34–T36).
 //!
 //! The module is `pub` like the other internal modules of the crate
 //! (`daemon`, `ipc`, `store`, …) so integration tests can exercise the seam

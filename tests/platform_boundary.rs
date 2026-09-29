@@ -9,13 +9,43 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Patterns that must not appear outside `src/platform/` (ADR-9).
+const BANNED: &[&str] = &[
+    "std::os::unix::net",
+    "tokio::net::Unix",
+    "/proc/",
+    "SignalKind",
+    "process_group",
+    "PermissionsExt",
+    "DirBuilderExt",
+    "OpenOptionsExt",
+    "var_os(\"HOME\")",
+    "var(\"HOME\")",
+    "env!(\"HOME\")",
+    // Bare types catch grouped/aliased imports where the module prefix is
+    // split across braces (`use tokio::net::{TcpListener, UnixListener}`).
+    "UnixListener",
+    "UnixStream",
+    "UnixDatagram",
+    "std::os::unix",
+    "tokio::net",
+];
+
 /// Test modules may use OS facilities to build fakes; only production code
-/// counts, so each file is truncated at its first `#[cfg(test)]` marker.
+/// counts, so each file is truncated at its first `#[cfg(test)] mod` marker.
+/// Any other `#[cfg(test)]` item fails safe: the scan continues past it.
 fn production_prefix(text: &str) -> &str {
-    match text.find("#[cfg(test)]") {
-        Some(index) => &text[..index],
-        None => text,
+    let marker = "#[cfg(test)]";
+    let mut search_from = 0;
+    while let Some(found) = text[search_from..].find(marker) {
+        let index = search_from + found;
+        let rest = text[index + marker.len()..].trim_start();
+        if rest.starts_with("mod") {
+            return &text[..index];
+        }
+        search_from = index + marker.len();
     }
+    text
 }
 
 fn check_file(path: &Path, banned: &[&str], violations: &mut Vec<String>) {
@@ -56,57 +86,48 @@ fn scan_dir(dir: &Path, banned: &[&str], violations: &mut Vec<String>) {
 #[test]
 fn scanner_catches_grouped_and_multiline_imports() {
     let dir = tempfile::TempDir::new().expect("tempdir");
-    let grouped = dir.path().join("grouped.rs");
-    fs::write(
-        &grouped,
-        "use std::os::unix::{net::UnixStream, fs::PermissionsExt};\n",
-    )
-    .expect("write");
-    let multiline = dir.path().join("multiline.rs");
-    fs::write(&multiline, "use tokio::net::{\n    UnixListener,\n};\n").expect("write");
-
-    let banned = ["std::os::unix::net", "tokio::net::Unix"];
-    let mut violations = Vec::new();
-    check_file(&grouped, &banned, &mut violations);
-    check_file(&multiline, &banned, &mut violations);
-    assert_eq!(
-        violations.len(),
-        2,
-        "grouped and multiline imports must be caught: {violations:?}"
-    );
+    let samples = [
+        (
+            "grouped",
+            "use std::os::unix::{net::UnixStream, fs::PermissionsExt};\n",
+        ),
+        (
+            "sorted_group",
+            "use tokio::net::{TcpListener, UnixListener};\n",
+        ),
+        ("multiline", "use tokio::net::{\n    UnixListener,\n};\n"),
+        ("aliased", "use tokio::net as local_net;\n"),
+    ];
+    for (name, body) in samples {
+        let path = dir.path().join(format!("{name}.rs"));
+        fs::write(&path, body).expect("write sample");
+        let mut violations = Vec::new();
+        check_file(&path, BANNED, &mut violations);
+        assert!(
+            !violations.is_empty(),
+            "{name} import must be caught: {body:?}"
+        );
+    }
 }
 
 #[test]
 fn no_os_transport_outside_platform() {
     let src = manifest_dir().join("src");
-    let banned = [
-        "std::os::unix::net",
-        "tokio::net::Unix",
-        "/proc/",
-        "SignalKind",
-        "process_group",
-        "PermissionsExt",
-        "DirBuilderExt",
-        "OpenOptionsExt",
-        "var_os(\"HOME\")",
-        "var(\"HOME\")",
-        "env!(\"HOME\")",
-    ];
     let mut violations = Vec::new();
     for entry in fs::read_dir(&src).expect("read src") {
         let path = entry.expect("entry").path();
+        if path.file_name().is_some_and(|name| name == "platform") {
+            continue;
+        }
         if path.is_dir() {
-            if path.file_name().is_some_and(|name| name == "platform") {
-                continue;
-            }
-            scan_dir(&path, &banned, &mut violations);
+            scan_dir(&path, BANNED, &mut violations);
         } else if path.extension().is_some_and(|ext| ext == "rs") {
-            check_file(&path, &banned, &mut violations);
+            check_file(&path, BANNED, &mut violations);
         }
     }
     assert!(
         violations.is_empty(),
-        "OS transport outside src/platform/ (ADR-9):\n{}",
+        "OS calls outside src/platform/ (ADR-9):\n{}",
         violations.join("\n")
     );
 }

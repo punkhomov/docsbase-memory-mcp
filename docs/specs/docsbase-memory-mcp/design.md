@@ -352,7 +352,8 @@ Rustflags заданы через alias `cargo release-static` (`--target` + tar
 
 **ADR-9. Platform seam: ядро vs `src/platform/` (фаза 3 prep, T33…T37).**
 Выбрано **вынести все ОС-вызовы в `src/platform/` за внутренний фасад**
-(local transport, signals, process spawn/liveness, fs-permissions, path semantics),
+(local transport, signals, process detach/liveness/counters, fs-permissions,
+path semantics); spawn процесса остаётся в lifecycle как portable `std::process`,
 оставив ядро (`store`, `index`, `watch`-логика, `mcp`, `ipc`-протокол, `cli`)
 платформенно-нейтральным. Фасад объявляется `pub` как остальные внутренние модули
 крейта (`daemon`, `ipc`, `store`…): интеграционные тесты и `platform::daemon_endpoint`
