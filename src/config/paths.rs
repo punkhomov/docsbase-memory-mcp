@@ -29,6 +29,19 @@ pub fn cache_dir() -> Result<PathBuf> {
     project_dirs().map(|dirs| dirs.cache_dir().to_path_buf())
 }
 
+/// Data directory (`$XDG_DATA_HOME/docsbase-memory-mcp`), overridable via
+/// `DOCSBASE_DATA_DIR`; owns the installed binary and the install manifest.
+///
+/// # Errors
+/// Returns [`Error::Internal`] when neither the override nor XDG discovery
+/// yields a path.
+pub fn data_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("DOCSBASE_DATA_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    project_dirs().map(|dirs| dirs.data_dir().to_path_buf())
+}
+
 /// Config directory (`$XDG_CONFIG_HOME/docsbase-memory-mcp`), overridable via
 /// `DOCSBASE_CONFIG_DIR`.
 ///

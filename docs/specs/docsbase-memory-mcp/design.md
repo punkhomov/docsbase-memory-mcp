@@ -63,6 +63,9 @@ $CACHE = ~/.cache/docsbase-memory-mcp (0700)
 └── logs/{daemon.log, conflicts.ndjson}   # NFR-8, FR-4
 
 $CONFIG = ~/.config/docsbase-memory-mcp/config.toml   # FR-28
+$DATA = ~/.local/share/docsbase-memory-mcp            # FR-1, FR-5 (T25)
+├── bin/docsbase               # installed binary (0755)
+└── install.json               # owned manifest: binary, socket, cache_root, versions
 Project: .docsbase.toml, .docsbaseignore              # FR-14, FR-28
 ```
 

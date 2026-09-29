@@ -21,6 +21,17 @@ pub struct Lease {
     guard: RwLockWriteGuard<'static, File>,
 }
 
+/// True when `err` is the admission lock being held by a live daemon; callers
+/// such as `install` wait and retry instead of failing.
+#[must_use]
+pub fn is_lock_busy(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Admission { message }
+            if message.starts_with("another daemon holds") || message.starts_with("daemon (pid")
+    )
+}
+
 impl Lease {
     /// Acquires the admission lock, then checks the recorded build/schema.
     ///

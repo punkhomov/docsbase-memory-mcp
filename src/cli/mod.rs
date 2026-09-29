@@ -1,6 +1,7 @@
 //! CLI entry points (FR-30).
 
 pub mod index;
+pub mod install;
 pub mod search;
 pub mod status;
 
@@ -62,6 +63,14 @@ pub enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    /// Install (or update) the binary and register owned artifacts.
+    Install,
+    /// Remove owned artifacts and, with `--yes`, the indexes.
+    Uninstall {
+        /// Delete without an interactive confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// Daemon control subcommands.
@@ -87,6 +96,8 @@ pub fn run() -> anyhow::Result<()> {
         Command::Daemon { command } => match command {
             DaemonCommand::Stop => daemon_stop(),
         },
+        Command::Install => install::install(),
+        Command::Uninstall { yes } => install::uninstall(yes),
     }
 }
 

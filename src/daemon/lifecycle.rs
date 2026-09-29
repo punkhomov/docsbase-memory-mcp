@@ -144,9 +144,13 @@ pub fn stop_daemon(cache: &Path) -> Result<()> {
             .map_err(|err| Error::internal_with_source("flush stop request", err))?;
     }
 
+    // Wait for the process itself, not just the socket: `serve` unlinks its
+    // state and socket before the process (and its admission lease) is gone
+    // (FR-5).
     let deadline = Instant::now() + STOP_TIMEOUT;
     while Instant::now() < deadline {
-        if !is_running(cache) {
+        if !pid_alive(state.pid) {
+            cleanup_stale(cache)?;
             return Ok(());
         }
         std::thread::sleep(POLL_INTERVAL);

@@ -2,7 +2,7 @@
 //! FR-33; I2, I6, I8).
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::oneshot;
@@ -31,6 +31,8 @@ pub struct Shared {
     pub sessions: SessionRegistry,
     /// Per-project filesystem watchers (FR-15).
     pub watchers: Arc<Watchers>,
+    /// Set by the first `StopDaemon`; later stops return immediately (FR-6).
+    stopping: AtomicBool,
 }
 
 impl Shared {
@@ -49,6 +51,7 @@ impl Shared {
             db: Mutex::new(db),
             sessions: SessionRegistry::new(),
             watchers: Arc::new(Watchers::new()),
+            stopping: AtomicBool::new(false),
         });
         match shared.watchers.start_registered(cache, &shared.db()) {
             Ok(started) if started > 0 => eprintln!("watching {started} indexed project(s)"),
@@ -93,6 +96,7 @@ pub async fn handle_connection(
         let (response, close) = handle_request(
             &shared,
             &shutdown,
+            &in_flight,
             &mut hello_done,
             &mut session_id,
             &mut cancel_rx,
@@ -130,6 +134,7 @@ pub async fn handle_connection(
 async fn handle_request(
     shared: &Arc<Shared>,
     shutdown: &watch::Sender<bool>,
+    in_flight: &Arc<AtomicUsize>,
     hello_done: &mut bool,
     session_id: &mut Option<u64>,
     cancel_rx: &mut Option<oneshot::Receiver<()>>,
@@ -210,7 +215,16 @@ async fn handle_request(
             }
         }
         Request::StopDaemon => {
-            let _ = shutdown.send(true);
+            // Idempotent: only the first stop drains and signals shutdown, so
+            // concurrent stops (install retries) cannot wait on each other
+            // (FR-5, FR-6). The drain lets every other request finish; the
+            // process then lives until background jobs complete.
+            if !shared.stopping.swap(true, Ordering::SeqCst) {
+                while in_flight.load(Ordering::SeqCst) > 1 {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                let _ = shutdown.send(true);
+            }
             (Response::ToolResult { value: Value::Null }, false)
         }
     }
