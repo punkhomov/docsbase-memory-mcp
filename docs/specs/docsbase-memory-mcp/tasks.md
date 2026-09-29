@@ -3,15 +3,17 @@
 **Goal:** один Rust-бинарь `docsbase`: per-project индекс `.md`, общий daemon для
 нескольких агентов, тонкие stdio-MCP-frontend'ы, явная индексация, BM25-поиск.
 **Architecture:** daemon владеет реестром, per-project tantivy-индексами, watcher'ами и
-jobs; frontend'ы ходят через Unix-socket (JSON-RPC, версия протокола); индексация явная
-(`index_project`, `auto_index=false`); источник истины — файлы, MCP read-only.
+jobs; frontend'ы ходят через local socket (platform transport, ADR-9; JSON-RPC, версия
+протокола); индексация явная (`index_project`, `auto_index=false`); источник истины —
+файлы, MCP read-only.
 **Spec:** `docs/specs/docsbase-memory-mcp/requirements.md` (rev 2)
 **Design:** `docs/specs/docsbase-memory-mcp/design.md`
 **Constitution:** `docs/specs/constitution.md`
 
 **Global constraints (verbatim из design/constitution):**
 - Rust edition 2024, MSRV 1.88; `cargo fmt`; `cargo clippy --all-targets -- -D warnings`.
-- Linux/WSL2 x86_64, `#[cfg(unix)]`; один статический бинарь; офлайн, ноль сетевых крейтов.
+- Linux/WSL2 x86_64; ОС-зависимый код — только в `src/platform/` (ADR-9); один
+  статический бинарь; офлайн, ноль сетевых крейтов.
 - `unwrap`/`expect` запрещены в библиотечном коде; `thiserror` в libs, `anyhow` на границе.
 - Крейты — только из design.md; в шапке задачи указывать `New crates:` с обоснованием.
 - Runtime layout: `$CACHE=~/.cache/docsbase-memory-mcp` (0700), socket 0600; один writer;
@@ -440,8 +442,132 @@ release profile `lto = true`, `codegen-units = 1`, `strip = true`, `panic = "abo
    во всех задачах.
 3. **Review focus:** 5 failure modes привязаны к T19, T17, T22, T8/T27, T13.
 4. **Proportion:** план не содержит тел функций — только сигнатуры, имена тестов и команды.
+5. **Phase 3 prep (T33…T37):** ADR-9 platform seam — behavior-preserving рефактор без
+   новых FR/крейтов/wire-изменений; секция идемпотентно проверяема `platform_boundary`
+   (T37) и не меняет acceptance T1…T32.
 
 ## Открытые риски плана
 
 - C1 (полный CBM-протокол) разбит на T17/T18/T24/T25 (S1→S4); при перерасходе первым
   режется T24, затем S3-часть T18 — с ADR.
+
+---
+
+## Phase 3 prep — platform seam (T33…T37)
+
+**Goal:** изолировать весь ОС-зависимый код (local transport, signals, process
+lifecycle, fs-permissions, path semantics) в `src/platform/` за внутренним `pub`-фасадом
+(design ADR-9), не меняя поведение Linux, wire-контракты, `schema_version` и
+CLI/MCP-поверхность. Новых крейтов нет; macOS/Windows-реализации — фаза 3.
+**Depends:** T1…T32 (фаза 1 converged, commit 4587f9d).
+**Review focus (failure modes):** (1) шов протекает — ядро импортирует `std::os::unix`;
+(2) transport меняет NDJSON-фрейминг или таймауты; (3) `Endpoint` ломает совместимость
+`daemon.json`; (4) path-семантика меняет containment-проверки (FR-32, I4); (5) рефактор
+задел поведение T17–T25 (lifecycle/session/cleanup).
+
+Инвариант секции: вне `src/platform/` нет transport/process/perms-вызовов ОС;
+проверяется `tests/platform_boundary.rs` (паттерны расширяются в T34/T35) и
+grep-шагом в CI (T37).
+
+### T33 — Spec delta: ADR-9 + план (docs-only)
+**Depends:** T32
+**New crates:** —
+**Files:** Modify `docs/specs/docsbase-memory-mcp/design.md` (§2, §3, §4, §5, §7, §12
+ADR-9, §13, §14), `docs/specs/docsbase-memory-mcp/tasks.md` (эта секция),
+`docs/specs/docsbase-memory-mcp/progress.md`
+**Interfaces:** Produces ADR-9 и задачи T34…T37; код и тесты не меняются
+**RED:** — (docs-only; инвариант проверяется начиная с T34)
+**GREEN:** delta в текущий спек: ADR-9, §5-sketch фасада, компонент/дерево/трассируемость `platform/`,
+global constraints; отдельная спека не заводится
+**Verify:** `grep -n "ADR-9" docs/specs/docsbase-memory-mcp/design.md docs/specs/docsbase-memory-mcp/tasks.md`
+→ ссылки в §2/§4/§12/§13/§14 и T33…T37
+**Acceptance:** решения зафиксированы (швы без смены поведения, модуль в крейте,
+тесты на фасад); phase-3 follow-ups перечислены в ADR-9.
+
+### T34 — Transport seam (`Endpoint`, listener/stream фасад)
+**Depends:** T33
+**New crates:** —
+**Files:** Create `src/platform/mod.rs`, `src/platform/unix.rs`, `tests/platform_transport.rs`,
+`tests/platform_boundary.rs`; Modify `src/lib.rs`, `src/ipc/client.rs`, `src/ipc/mod.rs`,
+`src/daemon/server.rs`, `src/daemon/lifecycle.rs`; Test `tests/cli_routing.rs`,
+`tests/mcp_frontend.rs`, `tests/ipc_server.rs`, `tests/cleanup.rs`,
+`tests/admission_ux.rs`, `tests/install.rs`, `tests/lifecycle.rs`
+**Interfaces:** Produces `pub mod platform` (`pub` как остальные внутренние модули, ADR-9),
+`platform::Endpoint` (serde как строка; для Unix — путь, совместим с `daemon.json.socket`),
+`platform::daemon_endpoint(cache)`, `bind/accept/connect_blocking/connect_probe/remove/exists`,
+`Listener`/`Stream` (Stream: `AsyncRead + AsyncWrite`, сервер использует `tokio::io::split`),
+`BlockingStream::set_read_timeout` (сохраняет `SO_RCVTIMEO`-таймауты `Client`);
+Consumes tokio `net`/`io-util`; `ipc::client::socket_path` заменяется на
+`platform::daemon_endpoint` (breaking для lib-потребителей — допустимо в 0.1.0)
+**RED:** `platform_transport::(roundtrip_and_remove, endpoint_serde_roundtrip)` — падают
+(модуля нет); `platform_boundary::(no_os_transport_outside_platform)` — падает на `ipc/daemon`;
+boundary-скан: `src/**` без `src/platform/**` и без `#[cfg(test)]`-блоков, паттерны
+`std::os::unix::net`, `tokio::net::Unix`, `std::os::unix::net` в импортах
+**GREEN:** перенос Unix-кода как есть; тест-фейки (fake daemon) — через `platform::bind`
+**Verify:** `cargo test --test platform_transport --test platform_boundary && cargo test && cargo clippy --all-targets -- -D warnings` → OK
+**Acceptance:** `ipc/`/`daemon` не импортируют `std::os::unix::net`/`tokio::net::Unix`;
+NDJSON-фрейминг, IO-таймауты, порядок handshake и содержимое `daemon.json` (поле `socket`
+строкой) не изменились.
+
+### T35 — Process/signals/permissions seam
+**Depends:** T34
+**New crates:** —
+**Files:** Modify `src/platform/unix.rs`, `tests/platform_boundary.rs` (расширить паттерны);
+Create `tests/platform_process.rs`; Modify `src/daemon/lifecycle.rs`, `src/conflict.rs`,
+`src/daemon/session.rs`, `src/store/mod.rs`, `src/cli/install.rs`;
+Test `tests/lifecycle.rs`, `tests/admission.rs`, `tests/store.rs`, `tests/install.rs`,
+`tests/cleanup.rs`
+**Interfaces:** Produces `platform::{ShutdownSignal, process::{detach, process_alive,
+fd_count, thread_count}, fs::{secure_dir, secure_file, secure_executable, open_private_log}}`;
+Consumes tokio `signal`
+**RED:** `platform_process::(alive_detects_self, alive_rejects_dead_pid, private_log_is_0600)`
+— падают (модуля нет); boundary-паттерны process/perms (`/proc/`, `SignalKind`,
+`process_group`, `PermissionsExt`, `DirBuilderExt`, `OpenOptionsExt`) — падают на
+`lifecycle/conflict/session/store/install`
+**GREEN:** перенос `/proc/{pid}/stat` (`lifecycle::pid_alive` → `platform::process::process_alive`,
+session использует его же), `/proc/self/{fd,task}` (`fd_count`/`thread_count`),
+chmod 0700/0600/0755 (`secure_dir`/`secure_file`/`secure_executable`/`open_private_log`),
+`process_group(0)`, `SignalKind`; `#[cfg(unix)]`-блок `store/mod.rs::ensure_private_dir`
+заменяется на `platform::fs::secure_dir`; boundary-скан исключает `#[cfg(test)]`
+(в `session.rs` тестовый `child.kill` — не ОС-слой)
+**Verify:** `cargo test --test platform_process --test platform_boundary && cargo test && cargo clippy --all-targets -- -D warnings` → OK
+**Acceptance:** счётчики fd/thread остаются `u64` (0 на не-Linux); режимы 0600/0700 и
+SIGTERM/SIGINT-grace не изменились; `install`-chmod переведён на `secure_executable`;
+`secure_*` идемпотентны на существующих путях.
+
+### T36 — Path semantics seam
+**Depends:** T34
+**New crates:** —
+**Files:** Create `src/platform/paths.rs` (unit-тесты внутри); Modify `src/platform/mod.rs`,
+`src/daemon/registry.rs`, `src/daemon/tools.rs`, `src/daemon/admission.rs`, `src/watch/mod.rs`
+**Interfaces:** Produces `platform::paths::{home_dir, is_under, normalize_for_compare}`;
+windows-нормализация (case-insensitive key) — чистая функция под
+`#[cfg(any(windows, test))]` (тестируется на Linux)
+**RED:** unit `paths::(home_dir_available, is_under_rejects_siblings, windows_key_normalizes)`
+— падают (модуля нет)
+**GREEN:** `directories::BaseDirs::home_dir` вместо `$HOME` (`registry::home_dir`);
+`is_under` в `resolve_by_cwd`/`normalize_root` (`registry.rs`), `get_doc`
+(`tools.rs:152`), containment watcher'а (`watch/mod.rs:inside_root`/`is_pruned`);
+`normalize_for_compare` в root_mismatch-сравнении (`admission.rs`)
+**Verify:** `cargo test platform::paths && cargo test --test registry --test watch --test admission && cargo test` → OK
+**Acceptance:** `$HOME` не читается вне `platform/paths.rs` (`config/paths.rs` уже через
+`directories::ProjectDirs`); containment-семантика Linux (FR-32, I4) и `root_mismatch`
+не изменились.
+
+### T37 — CI guard + docs sync
+**Depends:** T34, T35, T36
+**New crates:** —
+**Files:** Modify `.github/workflows/nightly.yml`, `.github/workflows/release.yml`,
+`docs/specs/docsbase-memory-mcp/design.md` (§7/§13 при расхождениях),
+`docs/specs/docsbase-memory-mcp/progress.md`
+**Interfaces:** Consumes `tests/platform_boundary.rs`; Produces обязательный CI-шаг
+**RED:** — (wire-up: boundary-тест существует с T34/T35)
+**GREEN:** шаг `cargo test --locked --test platform_boundary` в nightly и release
+workflow; синхронизация design §7/§13; ledger
+**Verify:** `cargo test --test platform_boundary && cargo fmt --check` → OK
+**Acceptance:** инвариант шва проверяется в CI (nightly + release); секция закрыта в ledger.
+
+**Self-review секции:** T34→T35/T36 (T36 не зависит от T35) и все зависят от T33;
+каждая задача независимо верифицируема `Verify`-командой; новых крейтов и wire-изменений
+нет; macOS/Windows impl и транспортный ADR фазы 3 сознательно вне секции; пропорция —
+сигнатуры, имена тестов и команды, без тел функций.

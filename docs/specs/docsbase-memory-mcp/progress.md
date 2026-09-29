@@ -190,3 +190,9 @@ Final review fix pass: watcher visibility — `status.projects[].watched`; desig
 Final review fix pass: Ruling: SC-9 (агентская метрика) — вне автотестов; grouped minors финального ревью остаются в deferred
 Final review re-review: N1 (sync polling терял сессию и ловил grace-exit) — `docsbase sync` держит одно bound-соединение на sync_start и все poll'ы; тест cli_routing считает accept'ы == 1; e2e-репро (grace 4000ms, 8000 файлов) теперь exit 0
 Final review: вердикт ревьюера ПОСЛЕ fix pass + N1 fix — **converged** (все Critical/Important закрыты, residual — только принятые minors/Rulings)
+
+Task 33: Ruling: platform seam вписан дельтой в текущий спек (ADR-9 + T34–T37), отдельная спека отклонена; поведение Linux, wire-контракты, schema_version и CLI/MCP-поверхность не меняются; новых крейтов нет
+Task 33: Ruling: инвариант шва — вне `src/platform/` нет transport/process/perms-вызовов ОС; проверка `tests/platform_boundary.rs` (T34/T35) + CI-шаг (T37); Linux-only тесты (offline/perf_budget) остаются под явным cfg
+Task 33: minor (deferred): `socket_path` публичный API заменяется на `platform::daemon_endpoint` в T34 (breaking для внешних потребителей lib — допустимо, 0.1.0); точный список путь-семантики для `watch/mod.rs` уточняется в T36
+Task 33: complete (docs-only: design §2/§3/§4/§7/§12 ADR-9/§13/§14, tasks.md T34–T37 + self-review секции; код и тесты не затронуты, cargo test/clippy не запускались — нечего проверять)
+Task 33: fix round: сверка дельты с кодом — фасад `pub` (а не crate-internal: `tests/platform_transport.rs` и `daemon_endpoint` иначе недоступны), §5-sketch фасада, T34 +`tests/lifecycle.rs` (использует UnixListener/UnixStream), boundary-скан исключает `#[cfg(test)]` (тестовый `child.kill` в session), T35 точные паттерны/файлы, T36 +`admission.rs` (normalize_for_compare), T37 boundary-шаг в nightly и release, main self-review ссылается на T33–T37

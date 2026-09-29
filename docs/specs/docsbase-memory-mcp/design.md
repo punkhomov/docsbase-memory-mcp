@@ -10,7 +10,7 @@
 `docsbase` — один Rust-бинарь с тремя ролями: CLI, тонкий stdio-MCP-frontend и
 per-account daemon. Daemon владеет реестром проектов, per-project индексами
 (SQLite + tantivy), watcher'ами и sync-джобами; frontend'ы подключаются к нему через
-Unix socket и пробрасывают MCP tool-calls. Индексация явная (`index_project`), опционально
+local socket (platform transport, ADR-9) и пробрасывают MCP tool-calls. Индексация явная (`index_project`), опционально
 автоматическая (`auto_index`, default false). Реализует FR-1…FR-34, NFR-1…NFR-9.
 
 ## 2. Global constraints
@@ -18,7 +18,9 @@ Unix socket и пробрасывают MCP tool-calls. Индексация я�
 Скопировано из constitution:
 
 - Rust, edition 2024, MSRV 1.88; `cargo fmt`, `cargo clippy -- -D warnings`.
-- v1 — Linux/WSL2 (x86_64) только; `#[cfg(unix)]` там, где нужно.
+- v1 — Linux/WSL2 (x86_64) только; весь ОС-зависимый код изолирован в `src/platform/`
+  (`pub`-фасад, внутренний контракт; `#[cfg(unix)]` — только там), остальные модули
+  к ОС не обращаются (ADR-9).
 - Один статический бинарь; ноль сетевых вызовов и внешних сервисов в рантайме.
 - `unwrap`/`expect` запрещены в библиотечном коде; `thiserror` в libs, `anyhow` на границе.
 - Один canonical cache root; версия схемы; один writer.
@@ -35,8 +37,8 @@ flowchart LR
     end
     A1 -->|stdio JSON-RPC| F1[docsbase mcp<br/>frontend]
     A2 -->|stdio JSON-RPC| F2[docsbase mcp<br/>frontend]
-    F1 -->|Unix socket| D[daemon]
-    F2 -->|Unix socket| D
+    F1 -->|local socket| D[daemon]
+    F2 -->|local socket| D
     CLI[docsbase CLI] -->|lease / snapshot| D
     D --> R[(registry.db<br/>SQLite WAL)]
     D --> T[(projects/id/tantivy)]
@@ -54,7 +56,7 @@ flowchart LR
 ```
 $CACHE = ~/.cache/docsbase-memory-mcp (0700)
 ├── state/daemon.json          # pid, socket, build_id, schema_version, cache_root
-├── state/daemon.sock          # Unix socket, 0600 (FR-33)
+├── state/daemon.sock          # local socket (Endpoint), 0600 (FR-33, ADR-9)
 ├── state/daemon.start.lock    # flock: гонка старта (FR-9)
 ├── state/admission.lock       # flock: admission/lease (FR-4)
 ├── registry.db                # SQLite WAL: projects/docs/chunks/sync_jobs (NFR-3)
@@ -87,7 +89,9 @@ Project: .docsbase.toml, .docsbaseignore              # FR-14, FR-28
 | `index::job` | Полный/инкрементальный прогон, sync-джобы | `run_job(project)` | walk, chunk, store, tantivy | FR-15…FR-17, NFR-1 |
 | `watch` | Debounce и коалесценция событий | `WatcherEvents` | notify | FR-15, NFR-4 |
 | `store` | SQLite-модель, миграции, реестр | repositories | rusqlite | FR-10, FR-16, FR-26, NFR-7 |
-| `config` | Global/project config, precedence, paths | `Config::load` | toml, directories | FR-28, FR-29 || `ipc` | Версионированный JSON-RPC поверх UnixStream | `Request/Response` | serde, tokio | FR-7, FR-33 |
+| `config` | Global/project config, precedence, paths | `Config::load` | toml, directories | FR-28, FR-29 |
+| `ipc` | Версионированный JSON-RPC поверх local transport | `Request/Response` | serde, tokio, platform | FR-7, FR-33 |
+| `platform` | Изоляция ОС: transport, signals, process, perms, path semantics | внутренний `pub`-фасад (ADR-9) | tokio, fd-lock, directories | NFR-6, FR-33 |
 | `error` | Таксономия ошибок и маппинг в MCP/CLI | `enum Error` | thiserror | NFR-8 |
 
 ## 5. Module interfaces
@@ -113,6 +117,16 @@ pub enum Response {
     Error { code: i32, message: String, instruction: Option<String> },
     Stats { fd_count: u64, sessions: u64, threads: u64 },
 }
+
+// platform/mod.rs — ADR-9 (внутренний pub-фасад; не стабильный API 0.1.0)
+pub enum Endpoint { Unix(PathBuf) }      // serde как строка: daemon.json.socket
+pub fn daemon_endpoint(cache: &Path) -> Endpoint;
+pub fn bind(endpoint: &Endpoint) -> Result<Listener>;   // Unix: 0600 (FR-33)
+impl Listener { pub async fn accept(&self) -> io::Result<Stream>;
+                pub fn exists(&self) -> bool; pub fn remove(&self); }
+impl Stream {}                            // AsyncRead + AsyncWrite (tokio::io::split)
+pub struct BlockingStream {}              // connect_blocking + set_read_timeout (SO_RCVTIMEO)
+pub fn connect_probe(endpoint: &Endpoint) -> bool;
 
 // index/chunk.rs — FR-22, NFR-1
 pub struct Chunk {
@@ -228,7 +242,7 @@ pub struct Project {
 | `blake3` | content hash | FR-16 |
 | `serde`, `serde_json` | IPC и MCP payloads | FR-7 |
 | `toml` | конфиги | FR-28 |
-| `directories` | XDG пути (cache/config) | FR-28, FR-29 |
+| `directories` | XDG/known-folders пути (cache/config/data), home_dir | FR-28, FR-29 |
 | `fd-lock` | RAII flock для admission/locks | FR-4, FR-9 |
 | `thiserror`, `anyhow` | таксономия ошибок | constitution |
 | (без крейта) файловый лог `logs/daemon.log` 0600 + `logs/conflicts.ndjson` | диагностика и admission-конфликты | NFR-8 |
@@ -333,6 +347,22 @@ Rustflags заданы через alias `cargo release-static` (`--target` + tar
 `--config`), чтобы обычные host-сборки оставались динамическими (proc-macro не
 собираются с `+crt-static`).
 
+**ADR-9. Platform seam: ядро vs `src/platform/` (фаза 3 prep, T33…T37).**
+Выбрано **вынести все ОС-вызовы в `src/platform/` за внутренний фасад**
+(local transport, signals, process spawn/liveness, fs-permissions, path semantics),
+оставив ядро (`store`, `index`, `watch`-логика, `mcp`, `ipc`-протокол, `cli`)
+платформенно-нейтральным. Фасад объявляется `pub` как остальные внутренние модули
+крейта (`daemon`, `ipc`, `store`…): интеграционные тесты и `platform::daemon_endpoint`
+обращаются к нему напрямую, но это внутренний контракт, не стабильный API (0.1.0).
+Рассматривали: (a) оставить `#[cfg(unix)]` по месту — дешевле для v1, но порт фазы 3
+трогает ядро и тесты; (b) отдельный workspace-крейт — жёсткая граница, но структурная
+перестройка при 16k строк; (c) модуль в текущем крейте — выбрано как баланс.
+Цена: разовый behavior-preserving рефактор (T34–T36) без смены wire-контрактов и
+`schema_version`; инвариант проверяется `tests/platform_boundary.rs`.
+Отложено в фазу 3 с отдельными ADR: транспорт Windows (AF_UNIX через `interprocess`
+vs named pipes — новый крейт), замена запущенного бинаря в `install`, read-timeout
+на named pipes, CI-матрица macOS/Windows.
+
 ## 13. Directory structure
 
 ```
@@ -374,6 +404,10 @@ src/
 ├── config/
 │   ├── mod.rs              # load + precedence (FR-28, FR-29)
 │   └── paths.rs            # XDG dirs
+├── platform/               # ОС-изоляция (ADR-9)
+│   ├── mod.rs              # фасад: Endpoint/Listener/Stream, cfg-выбор ОС
+│   ├── unix.rs             # Unix-реализация v1 (перенос из lifecycle/ipc)
+│   └── paths.rs            # home_dir, is_under, normalize_for_compare
 └── error.rs                # taxonomy (NFR-8)
 
 tests/
@@ -381,6 +415,7 @@ tests/
 ├── watcher.rs / index_job.rs / index_incremental.rs
 ├── search_golden.rs (+ snapshots) / mcp_docs.rs / error_surface.rs
 ├── install.rs / config_runtime.rs / perf_budget.rs / artifact.rs
+├── platform_{transport,process,boundary}.rs (ADR-9)
 ├── soak.rs / offline.rs
 └── …
 ```
@@ -403,8 +438,8 @@ tests/
 | FR-20, FR-22…FR-26 | `index/`, `mcp/tools.rs` |
 | FR-28, FR-29 | `config/` |
 | FR-30 | `cli/` |
-| FR-33 | `ipc/` (Unix socket, 0600) |
+| FR-33 | `ipc/` + `platform/` (local socket, 0600, ADR-9) |
 | FR-34 | `mcp/tools.rs` (read-only набор) |
-| NFR-2, NFR-3, NFR-6 | `store`, `index/`, сборка |
+| NFR-2, NFR-3, NFR-6 | `store`, `index/`, сборка, `platform/` (seam, ADR-9) |
 | NFR-5, NFR-8 | `logs/daemon.log` + conflict-log, отсутствие сетевых крейтов |
 | NFR-7 | `store/migrations.rs` |
