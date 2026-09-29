@@ -107,7 +107,7 @@ pub enum Response {
     Hello { protocol_version: u32, build_id: String, schema_version: u32 },
     ToolResult { value: serde_json::Value },
     Error { code: ErrorCode, message: String },
-    Stats { fd_count: usize, sessions: usize },
+    Stats { fd_count: usize, sessions: usize, threads: usize },
 }
 
 // index/chunk.rs — FR-22, NFR-1

@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use docsbase_memory::error::Error;
 use docsbase_memory::ipc::protocol::{
-    PROTOCOL_VERSION, Request, Response, decode_request, encode, ensure_protocol_version,
+    PROTOCOL_VERSION, Request, Response, decode_request, decode_response, encode,
+    ensure_protocol_version,
 };
 use serde_json::json;
 
@@ -67,4 +68,16 @@ fn version_checked() {
 fn malformed_json_is_protocol_error() {
     let err = decode_request(b"{not json}").expect_err("must reject");
     assert!(matches!(err, Error::Protocol { .. }), "{err:?}");
+}
+
+#[test]
+fn stats_response_round_trips_threads() {
+    let response = Response::Stats {
+        fd_count: 7,
+        sessions: 2,
+        threads: 11,
+    };
+    let line = encode(&response).expect("encode");
+    let decoded = decode_response(&line).expect("decode");
+    assert_eq!(decoded, response);
 }

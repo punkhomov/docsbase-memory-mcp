@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use tokio::sync::oneshot;
+
 /// One registered frontend session.
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
@@ -23,15 +25,18 @@ pub struct SessionInfo {
 pub struct SessionRegistry {
     next_id: AtomicU64,
     sessions: Mutex<HashMap<u64, SessionInfo>>,
+    cancels: Mutex<HashMap<u64, oneshot::Sender<()>>>,
 }
 
 /// Runtime counters (design §5 `Response::Stats`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Stats {
     /// Live sessions.
     pub sessions: u64,
     /// Open file descriptors held by the daemon.
     pub fd_count: u64,
+    /// OS threads of the daemon process.
+    pub threads: u64,
 }
 
 impl SessionRegistry {
@@ -41,10 +46,20 @@ impl SessionRegistry {
         Self::default()
     }
 
-    /// Registers a session and returns its id.
-    pub fn join(&self, pid: u32, cwd: PathBuf, project_id: Option<i64>) -> u64 {
+    /// Registers a session and returns its id plus the receiver that fires
+    /// when the daemon reaps it because the frontend died (NFR-9).
+    pub fn join(
+        &self,
+        pid: u32,
+        cwd: PathBuf,
+        project_id: Option<i64>,
+    ) -> (u64, oneshot::Receiver<()>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        self.map().insert(
+        // Hold the session lock across both inserts so a concurrent
+        // `prune_dead` can never observe the session without its cancel
+        // sender (lock order is always sessions -> cancels).
+        let mut sessions = self.map();
+        sessions.insert(
             id,
             SessionInfo {
                 id,
@@ -53,12 +68,22 @@ impl SessionRegistry {
                 project_id,
             },
         );
-        id
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        self.cancels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, cancel_tx);
+        drop(sessions);
+        (id, cancel_rx)
     }
 
     /// Removes a session (EOF, error or client death) (FR-8).
     pub fn leave(&self, id: u64) {
         self.map().remove(&id);
+        self.cancels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
     }
 
     /// Snapshot of one session.
@@ -79,7 +104,28 @@ impl SessionRegistry {
         Stats {
             sessions: u64::try_from(self.count()).unwrap_or(u64::MAX),
             fd_count: open_fd_count(),
+            threads: open_thread_count(),
         }
+    }
+
+    /// Drops sessions whose frontend process is gone (NFR-9, C6), cancelling
+    /// their connections so no descriptor outlives the 2 s cleanup bound;
+    /// returns the removed session ids.
+    pub fn prune_dead(&self) -> Vec<u64> {
+        let mut sessions = self.map();
+        let dead: Vec<u64> = sessions
+            .iter()
+            .filter(|(_, session)| !crate::daemon::lifecycle::pid_alive(session.pid))
+            .map(|(id, _)| *id)
+            .collect();
+        let mut cancels = self.cancels.lock().unwrap_or_else(PoisonError::into_inner);
+        for id in &dead {
+            sessions.remove(id);
+            if let Some(cancel) = cancels.remove(id) {
+                let _ = cancel.send(());
+            }
+        }
+        dead
     }
 
     fn map(&self) -> MutexGuard<'_, HashMap<u64, SessionInfo>> {
@@ -95,6 +141,14 @@ pub fn open_fd_count() -> u64 {
     })
 }
 
+/// OS threads of this process (Linux `/proc`; 0 elsewhere).
+#[must_use]
+pub fn open_thread_count() -> u64 {
+    std::fs::read_dir("/proc/self/task").map_or(0, |entries| {
+        u64::try_from(entries.count()).unwrap_or(u64::MAX)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,8 +156,8 @@ mod tests {
     #[test]
     fn join_leave_round_trip() {
         let registry = SessionRegistry::new();
-        let first = registry.join(1, PathBuf::from("/a"), None);
-        let second = registry.join(2, PathBuf::from("/b"), None);
+        let (first, _first_cancel) = registry.join(1, PathBuf::from("/a"), None);
+        let (second, _second_cancel) = registry.join(2, PathBuf::from("/b"), None);
         assert_ne!(first, second);
         assert_eq!(registry.count(), 2);
         assert_eq!(registry.get(first).expect("first").pid, 1);
@@ -112,5 +166,27 @@ mod tests {
         registry.leave(999);
         assert_eq!(registry.count(), 1);
         assert!(registry.stats().sessions >= 1);
+    }
+
+    #[test]
+    fn prune_dead_reaps_and_cancels() {
+        let registry = SessionRegistry::new();
+        let dead_pid = {
+            let mut child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn");
+            let pid = child.id();
+            child.kill().expect("kill");
+            let _ = child.wait();
+            pid
+        };
+        let (live, _live_cancel) = registry.join(std::process::id(), PathBuf::from("/live"), None);
+        let (dead, mut dead_cancel) = registry.join(dead_pid, PathBuf::from("/dead"), None);
+        let pruned = registry.prune_dead();
+        assert_eq!(pruned, vec![dead]);
+        assert!(registry.get(dead).is_none());
+        assert!(registry.get(live).is_some());
+        assert!(dead_cancel.try_recv().is_ok(), "cancel must fire");
     }
 }

@@ -201,7 +201,7 @@ async fn accept_loop(
     listener: &UnixListener,
     grace: Duration,
 ) -> Result<()> {
-    let sessions = Arc::new(AtomicUsize::new(0));
+    let in_flight = Arc::new(AtomicUsize::new(0));
     let (events_tx, mut events_rx) = mpsc::unbounded_channel::<()>();
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let mut sigterm = signal(SignalKind::terminate())
@@ -209,6 +209,12 @@ async fn accept_loop(
     let mut sigint = signal(SignalKind::interrupt())
         .map_err(|err| Error::internal_with_source("install SIGINT handler", err))?;
     let mut grace_deadline: Option<tokio::time::Instant> = None;
+
+    // Sessions whose frontend died without closing its socket must not keep
+    // the daemon alive (NFR-9, C6).
+    let mut janitor = tokio::time::interval(JANITOR_INTERVAL);
+    janitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    janitor.tick().await;
 
     loop {
         let grace_sleep = async {
@@ -222,28 +228,64 @@ async fn accept_loop(
             accepted = listener.accept() => {
                 let (stream, _) = accepted
                     .map_err(|err| Error::internal_with_source("accept connection", err))?;
-                sessions.fetch_add(1, Ordering::SeqCst);
-                grace_deadline = None;
-                let connections = Arc::clone(&sessions);
+                let in_flight = Arc::clone(&in_flight);
                 let events = events_tx.clone();
                 let shutdown = shutdown_tx.clone();
                 let shared = Arc::clone(&shared);
                 tokio::spawn(crate::daemon::server::handle_connection(
-                    shared, stream, connections, events, shutdown,
+                    shared, stream, in_flight, events, shutdown,
                 ));
             }
             Some(()) = events_rx.recv() => {
-                if sessions.load(Ordering::SeqCst) == 0 {
-                    grace_deadline = Some(tokio::time::Instant::now() + grace);
+                // Only live frontend sessions keep the daemon alive; plain
+                // connections (CLI handshakes) do not. A pending deadline is
+                // not extended by connection churn, only reset by a session.
+                if idle(&shared, &in_flight) {
+                    if grace_deadline.is_none() {
+                        grace_deadline = Some(tokio::time::Instant::now() + grace);
+                    }
+                } else {
+                    grace_deadline = None;
                 }
             }
+            // An armed deadline must never cut off a session-less request or
+            // a registration that is still running. The check happens in the
+            // body: the timeout may resolve in the same instant a request
+            // arrives, after the select already polled the other branches.
+            () = grace_sleep => {
+                if idle(&shared, &in_flight) {
+                    break;
+                }
+                grace_deadline = None;
+            },
             _ = shutdown_rx.changed() => break,
             _ = sigterm.recv() => break,
             _ = sigint.recv() => break,
-            () = grace_sleep => break,
+            _ = janitor.tick() => {
+                let shared_for_prune = Arc::clone(&shared);
+                let pruned = tokio::task::spawn_blocking(move || {
+                    shared_for_prune.sessions.prune_dead()
+                })
+                .await
+                .unwrap_or_default();
+                if !pruned.is_empty() {
+                    eprintln!("cleanup: pruned {} dead session(s)", pruned.len());
+                }
+                if idle(&shared, &in_flight) && grace_deadline.is_none() {
+                    grace_deadline = Some(tokio::time::Instant::now() + grace);
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// How often dead frontends are reaped (NFR-9: cleanup within 2 s).
+const JANITOR_INTERVAL: Duration = Duration::from_millis(500);
+
+/// No live sessions and no request in flight.
+fn idle(shared: &crate::daemon::server::Shared, in_flight: &AtomicUsize) -> bool {
+    shared.sessions.count() == 0 && in_flight.load(Ordering::SeqCst) == 0
 }
 
 fn is_running(cache: &Path) -> bool {
@@ -339,7 +381,7 @@ pub(crate) fn read_state(cache: &Path) -> Result<Option<DaemonState>> {
     Ok(Some(state))
 }
 
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     if !Path::new("/proc").is_dir() {
         // No /proc (unusual on Linux): keep the daemon considered alive and
         // rely on the socket check in `is_running`.

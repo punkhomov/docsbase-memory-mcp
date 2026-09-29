@@ -6,6 +6,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::config::Config;
+use crate::daemon::session::Stats;
 use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
 use crate::index::job::{JobStats, run_full};
@@ -85,7 +86,7 @@ pub fn list_projects(db: &Db) -> Result<Value> {
 ///
 /// # Errors
 /// Returns [`Error::Internal`] on SQLite failures.
-pub fn status(db: &Db, sessions: u64, fd_count: u64, watchers: u64) -> Result<Value> {
+pub fn status(db: &Db, stats: &Stats, watchers: u64) -> Result<Value> {
     let mut projects = Vec::new();
     for project in registry::list_projects(db)? {
         projects.push(project_entry(db, &project)?);
@@ -98,8 +99,9 @@ pub fn status(db: &Db, sessions: u64, fd_count: u64, watchers: u64) -> Result<Va
         "build_id": build_id(),
         "schema_version": db.schema_version()?,
         "projects": projects,
-        "sessions": sessions,
-        "fd_count": fd_count,
+        "sessions": stats.sessions,
+        "fd_count": stats.fd_count,
+        "threads": stats.threads,
         "watchers": watchers,
         "hint": hint,
     }))

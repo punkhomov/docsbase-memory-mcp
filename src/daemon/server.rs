@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use tokio::sync::oneshot;
+
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -65,33 +67,55 @@ impl Shared {
 pub async fn handle_connection(
     shared: Arc<Shared>,
     stream: UnixStream,
-    connections: Arc<AtomicUsize>,
+    in_flight: Arc<AtomicUsize>,
     events: mpsc::UnboundedSender<()>,
     shutdown: watch::Sender<bool>,
 ) {
     let (read_half, mut writer) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
     let mut session_id: Option<u64> = None;
+    let mut cancel_rx: Option<oneshot::Receiver<()>> = None;
     let mut hello_done = false;
 
     loop {
-        let Ok(Some(line)) = lines.next_line().await else {
+        let next_line = match cancel_rx.as_mut() {
+            Some(cancel) => tokio::select! {
+                line = lines.next_line() => line,
+                // The janitor reaped this session: stop holding the socket.
+                _ = cancel => break,
+            },
+            None => lines.next_line().await,
+        };
+        let Ok(Some(line)) = next_line else {
             break;
         };
+        let guard = InFlightGuard::new(&in_flight);
         let (response, close) = handle_request(
             &shared,
             &shutdown,
             &mut hello_done,
             &mut session_id,
+            &mut cancel_rx,
             line.as_bytes(),
         )
         .await;
+        // The request is only settled once its response is on the wire:
+        // otherwise an armed grace deadline could tear the socket down
+        // between completing the work and delivering the reply.
         let Ok(bytes) = protocol::encode(&response) else {
+            drop(guard);
+            let _ = events.send(());
             break;
         };
         if writer.write_all(&bytes).await.is_err() {
+            drop(guard);
+            let _ = events.send(());
             break;
         }
+        drop(guard);
+        // Any request may change liveness accounting (registration, EOF of a
+        // session, completion of a request).
+        let _ = events.send(());
         if close {
             break;
         }
@@ -100,7 +124,6 @@ pub async fn handle_connection(
     if let Some(id) = session_id {
         shared.sessions.leave(id);
     }
-    connections.fetch_sub(1, Ordering::SeqCst);
     let _ = events.send(());
 }
 
@@ -109,6 +132,7 @@ async fn handle_request(
     shutdown: &watch::Sender<bool>,
     hello_done: &mut bool,
     session_id: &mut Option<u64>,
+    cancel_rx: &mut Option<oneshot::Receiver<()>>,
     line: &[u8],
 ) -> (Response, bool) {
     let request = match protocol::decode_request(line) {
@@ -150,13 +174,13 @@ async fn handle_request(
             if !*hello_done {
                 return (hello_required(), true);
             }
-            register_and_respond(shared, session_id, pid, &cwd, false).await
+            register_and_respond(shared, session_id, cancel_rx, pid, &cwd, false).await
         }
         Request::RegisterUnbound { pid, cwd } => {
             if !*hello_done {
                 return (hello_required(), true);
             }
-            register_and_respond(shared, session_id, pid, &cwd, true).await
+            register_and_respond(shared, session_id, cancel_rx, pid, &cwd, true).await
         }
         Request::CallTool { name, args } => {
             if !*hello_done {
@@ -178,15 +202,17 @@ async fn handle_request(
 async fn register_and_respond(
     shared: &Arc<Shared>,
     session_id: &mut Option<u64>,
+    cancel_rx: &mut Option<oneshot::Receiver<()>>,
     pid: u32,
     cwd: &Path,
     allow_unbound: bool,
 ) -> (Response, bool) {
     match register_session(shared, pid, cwd, allow_unbound).await {
-        Ok((id, value)) => {
+        Ok((id, value, cancel)) => {
             if let Some(previous) = session_id.replace(id) {
                 shared.sessions.leave(previous);
             }
+            *cancel_rx = Some(cancel);
             (Response::ToolResult { value }, false)
         }
         Err(err) => (error_response(&err), false),
@@ -198,7 +224,7 @@ async fn register_session(
     pid: u32,
     cwd: &Path,
     allow_unbound: bool,
-) -> Result<(u64, Value)> {
+) -> Result<(u64, Value, oneshot::Receiver<()>)> {
     let shared_for_task = Arc::clone(shared);
     let cwd = cwd.to_path_buf();
     let cwd_for_task = cwd.clone();
@@ -240,7 +266,7 @@ async fn register_session(
 
     match outcome {
         Ok(project) => {
-            let id = shared.sessions.join(pid, cwd, Some(project.id));
+            let (id, cancel) = shared.sessions.join(pid, cwd, Some(project.id));
             Ok((
                 id,
                 json!({
@@ -249,10 +275,11 @@ async fn register_session(
                     "name": project.name,
                     "status": project.status.as_str(),
                 }),
+                cancel,
             ))
         }
         Err(err) if allow_unbound => {
-            let id = shared.sessions.join(pid, cwd, None);
+            let (id, cancel) = shared.sessions.join(pid, cwd, None);
             Ok((
                 id,
                 json!({
@@ -262,6 +289,7 @@ async fn register_session(
                     "status": "unregistered",
                     "hint": err.to_string(),
                 }),
+                cancel,
             ))
         }
         Err(err) => Err(err),
@@ -291,7 +319,7 @@ fn route_tool(
     match name {
         "status" => {
             let stats = shared.sessions.stats();
-            tools::status(&db, stats.sessions, stats.fd_count, shared.watchers.count())
+            tools::status(&db, &stats, shared.watchers.count())
         }
         "list_projects" => tools::list_projects(&db),
         "search_docs" => {
@@ -428,6 +456,22 @@ fn session_cwd(shared: &Arc<Shared>, session_id: Option<u64>) -> Result<PathBuf>
             message: "session is not bound to a project".to_owned(),
             instruction: Some("index_project needs a path or a bound session".to_owned()),
         })
+}
+
+/// Keeps `in_flight` balanced even if request handling ever panics.
+struct InFlightGuard<'a>(&'a AtomicUsize);
+
+impl<'a> InFlightGuard<'a> {
+    fn new(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 fn hello_required() -> Response {

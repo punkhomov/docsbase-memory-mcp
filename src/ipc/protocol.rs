@@ -87,12 +87,14 @@ pub enum Response {
         /// Human-readable message.
         message: String,
     },
-    /// Runtime counters (sessions, descriptors).
+    /// Runtime counters (sessions, descriptors, threads).
     Stats {
         /// Open file descriptors held by the daemon.
         fd_count: u64,
         /// Live sessions.
         sessions: u64,
+        /// OS threads of the daemon process.
+        threads: u64,
     },
 }
 
