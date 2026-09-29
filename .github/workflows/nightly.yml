@@ -1,0 +1,36 @@
+name: nightly
+
+on:
+  schedule:
+    # Daily at 03:17 UTC.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  soak-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      SOAK_SECS: "3600"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Offline guarantee (SC-8, NFR-5)
+        run: cargo test --test offline -- --nocapture
+      - name: Performance budgets (NFR-1, SC-7)
+        run: cargo test --release --test perf_budget -- --nocapture
+      - name: Soak, 3 agents + watcher, 1 hour (SC-5)
+        run: cargo test --release --test soak -- --ignored --nocapture
+      - name: Full release suite
+        run: cargo test --release
+      - name: Lints
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings

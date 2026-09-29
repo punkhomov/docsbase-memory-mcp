@@ -170,3 +170,7 @@ Task 29: complete (tests: error_surface 3, всего 206, clippy clean, fmt cle
 Task 30: Ruling: бюджеты NFR-1 проверяются release-only тестами (`#[cfg_attr(debug_assertions, ignore)]`), criterion-бенчи как отдельные замеры; факт: search p95 594µs/50k чанков, full index 1000 md 122ms (запас >200x)
 Task 30: minor (deferred): бюджет меряет `IndexHandle::search` (не e2e IPC+SQLite join); index-бенч включает teardown (консервативно); single cold run без медианы; дублирование корпусов bench/test; нет бенча incremental ≤300ms
 Task 30: complete (tests: perf_budget 2 release + cargo bench 2, debug suite 206 (2 ignored), clippy clean, fmt clean; review PASS/APPROVED, minors deferred)
+Task 31: Ruling: soak ограничивает корпус (32 слота на агента, `NOTE_SLOTS`) — иначе за час full index вырастает за freshness-бюджет и watcher голодает; `SOAK_SECS` для локального короткого прогона
+Task 31: Ruling: offline-тест гоняет весь workflow в `unshare -rn` (fallback: только fd-scan), проверяет `/proc/<pid>/net/*` на TCP/UDP сокеты daemon (fail-closed) и отсутствие `conflicts.ndjson` в soak
+Task 31: minor (deferred): tantivy integrity проверяется неявно (поиск после рестарта); namespace-путь не подтверждён на ubuntu-latest
+Task 31: complete (tests: offline 1, soak ignored (12s при SOAK_SECS=10), всего 207+3 ignored, clippy clean, fmt clean; review CHANGES(2 Important) → fixes → verified)
