@@ -67,6 +67,7 @@ fn roundtrip_and_remove() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn endpoint_serde_roundtrip() {
     let endpoint = Endpoint::Unix(PathBuf::from("/tmp/docsbase.sock"));
@@ -86,4 +87,56 @@ fn endpoint_serde_roundtrip() {
     let socket = state["socket"].as_str().expect("socket string");
     let parsed: Endpoint = serde_json::from_value(serde_json::json!(socket)).expect("parse");
     assert_eq!(parsed, endpoint);
+}
+
+#[cfg(windows)]
+#[test]
+fn endpoint_serde_roundtrip() {
+    let endpoint = Endpoint::Pipe("docsbase-abc123".to_owned());
+    let json = serde_json::to_string(&endpoint).expect("serialize");
+    assert_eq!(json, "\"docsbase-abc123\"", "daemon.json compatible");
+    let parsed: Endpoint = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(parsed, endpoint);
+
+    let state = serde_json::json!({
+        "pid": 1,
+        "socket": "docsbase-abc123",
+        "build_id": "docsbase 0.0.0",
+        "schema_version": 1,
+        "cache_root": "C:/cache",
+    });
+    let socket = state["socket"].as_str().expect("socket string");
+    let parsed: Endpoint = serde_json::from_value(serde_json::json!(socket)).expect("parse");
+    assert_eq!(parsed, endpoint);
+}
+
+#[test]
+fn endpoint_pipe_serializes_as_string() {
+    let endpoint = Endpoint::Pipe("docsbase-abc123".to_owned());
+    let json = serde_json::to_string(&endpoint).expect("serialize");
+    assert_eq!(json, "\"docsbase-abc123\"", "daemon.json compatible");
+    assert_eq!(
+        endpoint.as_path().to_string_lossy(),
+        "docsbase-abc123",
+        "diagnostic path view"
+    );
+}
+
+#[test]
+fn pipe_name_is_cache_unique() {
+    let first = TempDir::new().expect("cache");
+    let second = TempDir::new().expect("other cache");
+    let name = platform::pipe_name(first.path());
+    assert_eq!(
+        name,
+        platform::pipe_name(first.path()),
+        "deterministic per cache"
+    );
+    assert_ne!(
+        name,
+        platform::pipe_name(second.path()),
+        "distinct caches must not collide"
+    );
+    assert!(name.starts_with("docsbase-"), "{name}");
+    assert!(name.len() <= 64, "pipe name stays short: {name}");
 }

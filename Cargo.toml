@@ -58,3 +58,6 @@ harness = false
 [[bench]]
 name = "index"
 harness = false
+
+[target."cfg(windows)".dependencies]
+interprocess = { version = "2.4.4", features = ["tokio"] }

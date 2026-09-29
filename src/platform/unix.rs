@@ -199,6 +199,30 @@ pub fn connect_probe(endpoint: &Endpoint) -> bool {
     UnixStream::connect(endpoint.as_path()).is_ok()
 }
 
+/// Endpoint of the daemon serving `cache` (design §3).
+#[must_use]
+pub fn daemon_endpoint(cache: &std::path::Path) -> Endpoint {
+    Endpoint::Unix(cache.join("state").join("daemon.sock"))
+}
+
+/// True when the endpoint file exists.
+#[must_use]
+pub fn exists(endpoint: &Endpoint) -> bool {
+    endpoint.as_path().exists()
+}
+
+/// Removes the endpoint file; a missing endpoint is already clean.
+///
+/// # Errors
+/// Returns the raw IO error when the file exists but cannot be removed.
+pub fn remove(endpoint: &Endpoint) -> std::io::Result<()> {
+    match std::fs::remove_file(endpoint.as_path()) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
 /// Terminates the daemon's accept loop on SIGTERM or SIGINT.
 pub struct ShutdownSignal {
     sigterm: Signal,

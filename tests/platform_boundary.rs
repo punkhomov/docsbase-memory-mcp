@@ -29,6 +29,9 @@ const BANNED: &[&str] = &[
     "UnixDatagram",
     "std::os::unix",
     "tokio::net",
+    "os::windows",
+    "windows_sys",
+    "interprocess",
 ];
 
 /// Test modules may use OS facilities to build fakes; only production code

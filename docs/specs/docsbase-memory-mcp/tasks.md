@@ -614,7 +614,7 @@ connect_probe/remove/exists` на `interprocess::{tokio,}LocalSocket*`; `remove`
 **RED:** `platform_transport::endpoint_pipe_roundtrip` — падает (варианта нет);
 `platform_transport::daemon_endpoint_is_cache_unique` — падает (модуля нет)
 **GREEN:** Windows-backend; Linux-ветка (`unix.rs`) не меняется; `Client::connect` без exists
-**Verify:** Linux: `cargo test --locked --test platform_transport --test platform_boundary && cargo test --locked`; локальный кросс-чек: `rustup target add x86_64-pc-windows-gnu && cargo check --locked --target x86_64-pc-windows-gnu --all-targets`; Windows CI (T43): `cargo test --locked`
+**Verify:** Linux: `cargo test --locked --test platform_transport --test platform_boundary && cargo test --locked`; локальный кросс-чек transport-слоя через scratch-крейт (копия `windows.rs` против `interprocess 2.4.4`, `cargo check --target x86_64-pc-windows-gnu`); полный `--all-targets` кросс-чек и Windows CI — T40/T43
 **Acceptance:** endpoint уникален на кэш и переживает serde; NDJSON/таймауты/handshake те же;
 Linux-тесты без изменений зелёные.
 

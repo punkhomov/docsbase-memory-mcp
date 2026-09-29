@@ -25,10 +25,9 @@ impl Client {
     /// which callers treat as "fall back to direct mode".
     #[must_use]
     pub fn connect(cache: &Path) -> Option<Self> {
+        // No existence pre-check: on Windows a named pipe has no file to
+        // stat, and a failed connect already means "no daemon".
         let endpoint = platform::daemon_endpoint(cache);
-        if !platform::exists(&endpoint) {
-            return None;
-        }
         let stream = platform::connect_blocking(&endpoint).ok()?;
         stream.set_read_timeout(Some(IO_TIMEOUT)).ok()?;
         stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
