@@ -231,7 +231,7 @@ pub struct Project {
 | `fd-lock` | RAII flock для admission/locks | FR-4, FR-9 |
 | `thiserror`, `anyhow` | таксономия ошибок | constitution |
 | `tracing`, `tracing-subscriber` | структурные логи, conflict-log | NFR-8 |
-| dev: `tempfile`, `assert_cmd`, `insta` | интеграционные и golden тесты | NFR-7 |
+| dev: `tempfile`, `assert_cmd`, `insta`, `criterion` | интеграционные, golden и perf-тесты (T27, T30) | NFR-1, NFR-7 |
 
 **Точечные альтернативы:** вместо `serde_yaml` — минимальный flat-парсер frontmatter
 (только `key: value`, вложенность не нужна); при росте требований заменить через ADR.

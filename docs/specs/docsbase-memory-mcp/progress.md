@@ -167,3 +167,6 @@ Task 29: Ruling: `status.warnings` берутся из newest job и показ�
 Task 29: Ruling: frontend отдаёт стабильные коды в `structuredContent` ошибочного tool-result `{code, message, instruction}`; IPC `Response::Error` получил `instruction` (сердечно), `user_message` не нужен
 Task 29: minor (deferred): нет маркера truncation при >100 warnings; старый daemon + новый frontend дают двойной префикс; harness без read-timeout
 Task 29: complete (tests: error_surface 3, всего 206, clippy clean, fmt clean; review CHANGES(2 Important, 1 Ruling) → fixes → verified)
+Task 30: Ruling: бюджеты NFR-1 проверяются release-only тестами (`#[cfg_attr(debug_assertions, ignore)]`), criterion-бенчи как отдельные замеры; факт: search p95 594µs/50k чанков, full index 1000 md 122ms (запас >200x)
+Task 30: minor (deferred): бюджет меряет `IndexHandle::search` (не e2e IPC+SQLite join); index-бенч включает teardown (консервативно); single cold run без медианы; дублирование корпусов bench/test; нет бенча incremental ≤300ms
+Task 30: complete (tests: perf_budget 2 release + cargo bench 2, debug suite 206 (2 ignored), clippy clean, fmt clean; review PASS/APPROVED, minors deferred)
