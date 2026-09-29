@@ -1,35 +1,35 @@
 //! Socket-first CLI client (FR-30, design §6).
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::error::{Error, Result};
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
+use crate::platform::{self, BlockingStream};
 
 /// Timeout for a single request/response exchange.
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Connected daemon client.
 pub struct Client {
-    stream: BufReader<UnixStream>,
+    stream: BufReader<BlockingStream>,
 }
 
 impl Client {
-    /// Connects to `$CACHE/state/daemon.sock`.
+    /// Connects to the daemon endpoint under `cache`.
     ///
     /// Returns `None` when no daemon is listening (missing or stale socket),
     /// which callers treat as "fall back to direct mode".
     #[must_use]
     pub fn connect(cache: &Path) -> Option<Self> {
-        let path = socket_path(cache);
-        if !path.exists() {
+        let endpoint = platform::daemon_endpoint(cache);
+        if !platform::exists(&endpoint) {
             return None;
         }
-        let stream = UnixStream::connect(path).ok()?;
+        let stream = platform::connect_blocking(&endpoint).ok()?;
         stream.set_read_timeout(Some(IO_TIMEOUT)).ok()?;
         stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
         Some(Self {
@@ -166,12 +166,6 @@ impl Client {
             }),
         }
     }
-}
-
-/// Path of the daemon socket inside the cache root (design §3).
-#[must_use]
-pub fn socket_path(cache: &Path) -> PathBuf {
-    cache.join("state").join("daemon.sock")
 }
 
 fn io_error(err: std::io::Error) -> Error {

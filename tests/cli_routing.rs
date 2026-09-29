@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,8 +7,8 @@ use std::thread;
 use std::time::Duration;
 
 use assert_cmd::Command;
-use docsbase_memory::ipc::client::socket_path;
 use docsbase_memory::ipc::protocol::{PROTOCOL_VERSION, Request, Response, encode};
+use docsbase_memory::platform;
 use tempfile::TempDir;
 
 struct Env {
@@ -54,10 +53,9 @@ fn stdout_text(output: &std::process::Output) -> String {
 
 /// Minimal daemon: answers the handshake and echoes the tool name back.
 fn spawn_fake_daemon(cache: &Path) -> thread::JoinHandle<()> {
-    let path = socket_path(cache);
-    fs::create_dir_all(path.parent().expect("state dir")).expect("mkdir state");
-    let listener = UnixListener::bind(&path).expect("bind socket");
-    listener.set_nonblocking(false).expect("blocking listener");
+    let endpoint = platform::daemon_endpoint(cache);
+    fs::create_dir_all(endpoint.as_path().parent().expect("state dir")).expect("mkdir state");
+    let listener = platform::bind_blocking(&endpoint).expect("bind socket");
 
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
@@ -133,9 +131,9 @@ fn falls_back_when_dead() {
     let env = Env::new(&[("docs/a.md", DOC)]);
     env.index();
 
-    let path = socket_path(env.cache.path());
-    fs::create_dir_all(path.parent().expect("state dir")).expect("mkdir state");
-    let listener = UnixListener::bind(&path).expect("bind stale socket");
+    let endpoint = platform::daemon_endpoint(env.cache.path());
+    fs::create_dir_all(endpoint.as_path().parent().expect("state dir")).expect("mkdir state");
+    let listener = platform::bind_blocking(&endpoint).expect("bind stale socket");
     drop(listener);
     thread::sleep(Duration::from_millis(20));
 
@@ -154,9 +152,9 @@ fn falls_back_when_dead() {
 #[test]
 fn sync_via_daemon_polls_until_done() {
     let env = Env::new(&[("docs/a.md", DOC)]);
-    let path = socket_path(env.cache.path());
-    fs::create_dir_all(path.parent().expect("state dir")).expect("mkdir state");
-    let listener = UnixListener::bind(&path).expect("bind socket");
+    let endpoint = platform::daemon_endpoint(env.cache.path());
+    fs::create_dir_all(endpoint.as_path().parent().expect("state dir")).expect("mkdir state");
+    let listener = platform::bind_blocking(&endpoint).expect("bind socket");
 
     let connections = Arc::new(AtomicUsize::new(0));
     let accepted = Arc::clone(&connections);
@@ -231,12 +229,12 @@ fn sync_via_daemon_polls_until_done() {
 #[test]
 fn daemon_errors_surface() {
     let env = Env::new(&[("docs/a.md", DOC)]);
-    let path = socket_path(env.cache.path());
-    fs::create_dir_all(path.parent().expect("state dir")).expect("mkdir state");
-    let listener = UnixListener::bind(&path).expect("bind socket");
+    let endpoint = platform::daemon_endpoint(env.cache.path());
+    fs::create_dir_all(endpoint.as_path().parent().expect("state dir")).expect("mkdir state");
+    let listener = platform::bind_blocking(&endpoint).expect("bind socket");
 
     let handle = thread::spawn(move || {
-        let (stream, _) = listener.accept().expect("accept");
+        let stream = listener.accept().expect("accept");
         let mut reader = BufReader::new(stream.try_clone().expect("clone"));
         let mut writer = stream;
         let mut line = String::new();

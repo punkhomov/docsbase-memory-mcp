@@ -4,7 +4,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -14,13 +13,12 @@ use std::time::{Duration, Instant};
 
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 
 use crate::error::{Error, Result};
-use crate::ipc::client::socket_path;
 use crate::ipc::protocol::{self, Request};
+use crate::platform::{self, Endpoint, Listener};
 use crate::store::migrations;
 
 /// How long [`ensure_daemon`] waits for the socket after spawning a child.
@@ -44,8 +42,8 @@ const NO_LISTENER_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) struct DaemonState {
     /// Daemon process id.
     pub(crate) pid: u32,
-    /// Socket path recorded at startup.
-    pub(crate) socket: PathBuf,
+    /// Local endpoint recorded at startup (serialized as its path string).
+    pub(crate) socket: Endpoint,
     /// Build identity of the daemon binary (I1).
     pub(crate) build_id: String,
     /// Schema version the daemon was built against (I1).
@@ -141,7 +139,8 @@ pub fn stop_daemon(cache: &Path) -> Result<()> {
         cleanup_stale(cache)?;
         return Ok(());
     }
-    let sent = if let Ok(mut stream) = UnixStream::connect(socket_path(cache)) {
+    let endpoint = platform::daemon_endpoint(cache);
+    let sent = if let Ok(mut stream) = platform::connect_blocking(&endpoint) {
         let bytes = protocol::encode(&Request::StopDaemon)?;
         stream
             .write_all(&bytes)
@@ -154,7 +153,7 @@ pub fn stop_daemon(cache: &Path) -> Result<()> {
         false
     };
 
-    if !sent && !socket_path(cache).exists() {
+    if !sent && !platform::exists(&endpoint) {
         let deadline = Instant::now() + NO_LISTENER_TIMEOUT;
         while Instant::now() < deadline {
             if !pid_alive(state.pid) {
@@ -201,22 +200,26 @@ async fn serve(cache: &Path, grace: Duration) -> Result<()> {
     }
     cleanup_stale(cache)?;
 
-    let sock = socket_path(cache);
-    if sock.exists() {
-        fs::remove_file(&sock)
+    let endpoint = platform::daemon_endpoint(cache);
+    if platform::exists(&endpoint) {
+        platform::remove(&endpoint)
             .map_err(|err| Error::internal_with_source("remove stale socket", err))?;
     }
-    let listener = UnixListener::bind(&sock)
-        .map_err(|err| Error::internal_with_source(format!("bind {}", sock.display()), err))?;
-    fs::set_permissions(&sock, fs::Permissions::from_mode(0o600))
+    let listener = platform::bind(&endpoint).map_err(|err| {
+        Error::internal_with_source(format!("bind {}", endpoint.as_path().display()), err)
+    })?;
+    fs::set_permissions(endpoint.as_path(), fs::Permissions::from_mode(0o600))
         .map_err(|err| Error::internal_with_source("chmod 0600 socket", err))?;
     write_state(cache)?;
 
     let shared = crate::daemon::server::Shared::open(cache)?;
     let result = accept_loop(shared, &listener, grace).await;
 
-    if let Err(err) = fs::remove_file(&sock) {
-        eprintln!("warning: cannot remove {}: {err}", sock.display());
+    if let Err(err) = platform::remove(&endpoint) {
+        eprintln!(
+            "warning: cannot remove {}: {err}",
+            endpoint.as_path().display()
+        );
     }
     if let Err(err) = fs::remove_file(state_file(cache)) {
         eprintln!("warning: cannot remove state file: {err}");
@@ -226,7 +229,7 @@ async fn serve(cache: &Path, grace: Duration) -> Result<()> {
 
 async fn accept_loop(
     shared: Arc<crate::daemon::server::Shared>,
-    listener: &UnixListener,
+    listener: &Listener,
     grace: Duration,
 ) -> Result<()> {
     let in_flight = Arc::new(AtomicUsize::new(0));
@@ -254,7 +257,7 @@ async fn accept_loop(
         tokio::select! {
             biased;
             accepted = listener.accept() => {
-                let (stream, _) = accepted
+                let stream = accepted
                     .map_err(|err| Error::internal_with_source("accept connection", err))?;
                 let in_flight = Arc::clone(&in_flight);
                 let events = events_tx.clone();
@@ -324,20 +327,23 @@ fn is_running(cache: &Path) -> bool {
 }
 
 fn socket_connectable(cache: &Path) -> bool {
-    UnixStream::connect(socket_path(cache)).is_ok()
+    platform::connect_probe(&platform::daemon_endpoint(cache))
 }
 
 fn cleanup_stale(cache: &Path) -> Result<()> {
     if is_running(cache) {
         return Ok(());
     }
-    for path in [state_file(cache), socket_path(cache)] {
-        if path.exists() {
-            fs::remove_file(&path).map_err(|err| {
-                Error::internal_with_source(format!("remove {}", path.display()), err)
-            })?;
-        }
+    let state = state_file(cache);
+    if state.exists() {
+        fs::remove_file(&state).map_err(|err| {
+            Error::internal_with_source(format!("remove {}", state.display()), err)
+        })?;
     }
+    let endpoint = platform::daemon_endpoint(cache);
+    platform::remove(&endpoint).map_err(|err| {
+        Error::internal_with_source(format!("remove {}", endpoint.as_path().display()), err)
+    })?;
     Ok(())
 }
 
@@ -409,7 +415,7 @@ fn wait_for_daemon(cache: &Path, timeout: Duration) -> Result<()> {
 fn write_state(cache: &Path) -> Result<()> {
     let state = DaemonState {
         pid: std::process::id(),
-        socket: socket_path(cache),
+        socket: platform::daemon_endpoint(cache),
         build_id: protocol::build_id(),
         schema_version: migrations::SCHEMA_VERSION,
         cache_root: cache.to_path_buf(),

@@ -121,12 +121,15 @@ pub enum Response {
 // platform/mod.rs — ADR-9 (внутренний pub-фасад; не стабильный API 0.1.0)
 pub enum Endpoint { Unix(PathBuf) }      // serde как строка: daemon.json.socket
 pub fn daemon_endpoint(cache: &Path) -> Endpoint;
-pub fn bind(endpoint: &Endpoint) -> Result<Listener>;   // Unix: 0600 (FR-33)
-impl Listener { pub async fn accept(&self) -> io::Result<Stream>;
-                pub fn exists(&self) -> bool; pub fn remove(&self); }
-impl Stream {}                            // AsyncRead + AsyncWrite (tokio::io::split)
-pub struct BlockingStream {}              // connect_blocking + set_read_timeout (SO_RCVTIMEO)
+pub fn bind(endpoint: &Endpoint) -> io::Result<Listener>;
+pub fn bind_blocking(endpoint: &Endpoint) -> io::Result<BlockingListener>; // фейки/тесты
+pub fn connect_blocking(endpoint: &Endpoint) -> io::Result<BlockingStream>;
 pub fn connect_probe(endpoint: &Endpoint) -> bool;
+pub fn exists(endpoint: &Endpoint) -> bool;
+pub fn remove(endpoint: &Endpoint) -> io::Result<()>;
+impl Listener { pub async fn accept(&self) -> io::Result<Stream>; }
+impl Stream {}                            // AsyncRead + AsyncWrite (tokio::io::split)
+impl BlockingStream {}                    // Read + Write + set_read_timeout (SO_RCVTIMEO)
 
 // index/chunk.rs — FR-22, NFR-1
 pub struct Chunk {

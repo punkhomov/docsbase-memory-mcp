@@ -9,7 +9,8 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 use docsbase_memory::daemon::lifecycle::{daemon_pid, stop_daemon};
-use docsbase_memory::ipc::client::{Client, socket_path};
+use docsbase_memory::ipc::client::Client;
+use docsbase_memory::platform;
 
 struct Env {
     cache: TempDir,
@@ -106,8 +107,9 @@ impl Env {
             .expect("spawn daemon");
         self.daemon = Some(child);
         assert!(
-            wait_until(Duration::from_secs(10), || socket_path(self.cache())
-                .exists()),
+            wait_until(Duration::from_secs(10), || platform::exists(
+                &platform::daemon_endpoint(self.cache())
+            )),
             "socket must appear"
         );
     }
@@ -209,7 +211,7 @@ fn update_stops_and_waits() {
     );
     assert!(daemon_pid(env.cache()).is_none(), "no daemon may remain");
     assert!(
-        !socket_path(env.cache()).exists(),
+        !platform::exists(&platform::daemon_endpoint(env.cache())),
         "socket must be gone after install"
     );
     let installed = fs::read(env.binary()).expect("read installed binary");

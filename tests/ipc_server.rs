@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -9,6 +8,7 @@ use docsbase_memory::daemon::lifecycle::stop_daemon;
 use docsbase_memory::error::Error;
 use docsbase_memory::ipc::client::Client;
 use docsbase_memory::ipc::protocol::{PROTOCOL_VERSION, Request, Response, encode};
+use docsbase_memory::platform::{self, BlockingStream};
 use fd_lock::RwLock;
 use tempfile::TempDir;
 
@@ -118,7 +118,7 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
     false
 }
 
-fn read_response(reader: &mut BufReader<UnixStream>) -> Response {
+fn read_response(reader: &mut BufReader<BlockingStream>) -> Response {
     let mut line = Vec::new();
     reader.read_until(b'\n', &mut line).expect("read response");
     docsbase_memory::ipc::protocol::decode_response(&line).expect("decode response")
@@ -131,7 +131,8 @@ fn hello_version_mismatch_rejected() {
     let mut env = Env::new(&[]);
     env.start_daemon();
 
-    let stream = UnixStream::connect(env.socket()).expect("connect");
+    let stream =
+        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("connect");
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     let mut writer = stream;
     let hello = Request::Hello {
@@ -158,7 +159,8 @@ fn hello_build_mismatch_rejected() {
     let mut env = Env::new(&[]);
     env.start_daemon();
 
-    let stream = UnixStream::connect(env.socket()).expect("connect");
+    let stream =
+        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("connect");
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     let mut writer = stream;
     let hello = Request::Hello {
@@ -181,7 +183,8 @@ fn call_tool_requires_hello() {
     let mut env = Env::new(&[]);
     env.start_daemon();
 
-    let stream = UnixStream::connect(env.socket()).expect("connect");
+    let stream =
+        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("connect");
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     let mut writer = stream;
     let call = Request::CallTool {
