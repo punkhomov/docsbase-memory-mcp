@@ -1,7 +1,6 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -10,10 +9,11 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use docsbase_memory::daemon::lifecycle::{daemon_pid, stop_daemon};
-use docsbase_memory::ipc::client::{Client, socket_path};
+use docsbase_memory::ipc::client::Client;
 use docsbase_memory::ipc::protocol::{
     PROTOCOL_VERSION, Request, Response, build_id, decode_response, encode,
 };
+use docsbase_memory::platform::{self, BlockingStream};
 
 struct Env {
     cache: TempDir,
@@ -74,8 +74,9 @@ impl Env {
             .expect("spawn daemon");
         self.daemon = Some(child);
         assert!(
-            wait_until(Duration::from_secs(10), || socket_path(self.cache())
-                .exists()),
+            wait_until(Duration::from_secs(10), || platform::exists(
+                &platform::daemon_endpoint(self.cache())
+            )),
             "socket must appear"
         );
     }
@@ -163,7 +164,7 @@ fn mcp_call(
     serde_json::from_str(&line).expect("json-rpc line")
 }
 
-fn hello(stream: &mut UnixStream) {
+fn hello(stream: &mut BlockingStream) {
     let request = Request::Hello {
         protocol_version: PROTOCOL_VERSION,
         build_id: build_id(),
@@ -173,7 +174,7 @@ fn hello(stream: &mut UnixStream) {
     assert!(matches!(response, Response::Hello { .. }), "{response:?}");
 }
 
-fn exchange(stream: &mut UnixStream, request: &Request) -> Response {
+fn exchange(stream: &mut BlockingStream, request: &Request) -> Response {
     stream
         .write_all(&encode(request).expect("encode"))
         .expect("write");
@@ -322,7 +323,8 @@ fn dead_session_does_not_block_shutdown() {
         .expect("spawn sleep");
     let live_pid = zombie.id();
 
-    let mut raw = UnixStream::connect(socket_path(env.cache())).expect("raw connect");
+    let mut raw =
+        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("raw connect");
     hello(&mut raw);
     let response = exchange(
         &mut raw,
@@ -385,14 +387,16 @@ fn registration_survives_armed_grace() {
     env.start_daemon_with_grace(300);
 
     // A session-less connection closing arms the grace timer.
-    let mut idle_conn = UnixStream::connect(socket_path(env.cache())).expect("idle connect");
+    let mut idle_conn =
+        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("idle connect");
     hello(&mut idle_conn);
     drop(idle_conn);
     std::thread::sleep(Duration::from_millis(100));
 
     // Registration of the big project runs a full auto-index far longer than
     // the remaining grace; it must not be cut off.
-    let mut raw = UnixStream::connect(socket_path(env.cache())).expect("raw connect");
+    let mut raw =
+        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("raw connect");
     hello(&mut raw);
     let response = exchange(
         &mut raw,

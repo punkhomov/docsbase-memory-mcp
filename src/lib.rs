@@ -8,5 +8,6 @@ pub mod error;
 pub mod index;
 pub mod ipc;
 pub mod mcp;
+pub mod platform;
 pub mod store;
 pub mod watch;

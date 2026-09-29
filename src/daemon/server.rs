@@ -11,7 +11,6 @@ use tokio::sync::oneshot;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::sync::{mpsc, watch};
 
 use crate::config::{Config, paths};
@@ -20,6 +19,7 @@ use crate::daemon::session::SessionRegistry;
 use crate::daemon::tools;
 use crate::error::{Error, Result};
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
+use crate::platform::Stream;
 use crate::store::Db;
 use crate::store::migrations;
 use crate::watch::Watchers;
@@ -224,12 +224,12 @@ fn global_config_stamp() -> Option<u64> {
 /// Serves one connection until EOF, cleanup included (FR-8, I2).
 pub async fn handle_connection(
     shared: Arc<Shared>,
-    stream: UnixStream,
+    stream: Stream,
     in_flight: Arc<AtomicUsize>,
     events: mpsc::UnboundedSender<()>,
     shutdown: watch::Sender<bool>,
 ) {
-    let (read_half, mut writer) = stream.into_split();
+    let (read_half, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(read_half).lines();
     let mut session_id: Option<u64> = None;
     let mut cancel_rx: Option<oneshot::Receiver<()>> = None;

@@ -1,11 +1,11 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use docsbase_memory::daemon::lifecycle::{ensure_daemon_with, stop_daemon};
+use docsbase_memory::platform;
 use tempfile::TempDir;
 
 struct Env {
@@ -131,8 +131,8 @@ fn stale_state_recovered() {
         br#"{"pid":999999,"socket":"/nonexistent","build_id":"old","schema_version":1,"cache_root":"/tmp"}"#,
     )
     .expect("stale state");
-    let stale = env.socket();
-    let listener = UnixListener::bind(&stale).expect("stale socket");
+    let listener =
+        platform::bind_blocking(&platform::daemon_endpoint(env.cache())).expect("stale socket");
     drop(listener);
 
     let pid = env.start();
@@ -155,7 +155,8 @@ fn grace_shutdown_after_last_session() {
         "socket must appear"
     );
 
-    let session = UnixStream::connect(env.socket()).expect("connect session");
+    let session = platform::connect_blocking(&platform::daemon_endpoint(env.cache()))
+        .expect("connect session");
     std::thread::sleep(Duration::from_millis(100));
     drop(session);
 

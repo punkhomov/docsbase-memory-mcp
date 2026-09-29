@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -10,10 +9,11 @@ use tempfile::TempDir;
 
 use docsbase_memory::daemon::admission::Lease;
 use docsbase_memory::daemon::lifecycle::stop_daemon;
-use docsbase_memory::ipc::client::{Client, socket_path};
+use docsbase_memory::ipc::client::Client;
 use docsbase_memory::ipc::protocol::{
     PROTOCOL_VERSION, Request, Response, build_id, decode_response, encode,
 };
+use docsbase_memory::platform;
 use docsbase_memory::store::migrations::SCHEMA_VERSION;
 
 struct Env {
@@ -71,8 +71,9 @@ impl Env {
             .expect("spawn daemon");
         self.daemon = Some(child);
         assert!(
-            wait_until(Duration::from_secs(10), || socket_path(self.cache())
-                .exists()),
+            wait_until(Duration::from_secs(10), || platform::exists(
+                &platform::daemon_endpoint(self.cache())
+            )),
             "socket must appear"
         );
     }
@@ -90,7 +91,7 @@ impl Env {
     fn write_state(&self, build: &str, schema: u32) {
         let state = json!({
             "pid": 999_999,
-            "socket": socket_path(self.cache()),
+            "socket": platform::daemon_endpoint(self.cache()),
             "build_id": build,
             "schema_version": schema,
             "cache_root": self.cache(),
@@ -195,7 +196,8 @@ fn mismatch_message_actionable() {
     // A live daemon refuses a foreign build with an actionable message too.
     let mut env2 = Env::new(&[("README.md", DOC)]);
     env2.start_daemon();
-    let mut stream = UnixStream::connect(socket_path(env2.cache())).expect("connect");
+    let mut stream =
+        platform::connect_blocking(&platform::daemon_endpoint(env2.cache())).expect("connect");
     let request = Request::Hello {
         protocol_version: PROTOCOL_VERSION,
         build_id: "docsbase 0.0.0-foreign".to_owned(),

@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -9,8 +8,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use docsbase_memory::ipc::client::socket_path;
 use docsbase_memory::ipc::protocol::{PROTOCOL_VERSION, Request, Response, encode};
+use docsbase_memory::platform;
 
 struct Env {
     cache: TempDir,
@@ -77,13 +76,13 @@ impl FakeDaemon {
     fn start(cache: &Path, seen: Arc<Mutex<Vec<String>>>) -> Self {
         use std::sync::atomic::Ordering;
 
-        let path = socket_path(cache);
-        fs::create_dir_all(path.parent().expect("state")).expect("mkdir");
-        let listener = UnixListener::bind(&path).expect("bind");
+        let endpoint = platform::daemon_endpoint(cache);
+        fs::create_dir_all(endpoint.as_path().parent().expect("state")).expect("mkdir");
+        let listener = platform::bind_blocking(&endpoint).expect("bind");
         listener.set_nonblocking(true).expect("nonblocking");
         let state = json!({
             "pid": std::process::id(),
-            "socket": path,
+            "socket": endpoint,
             "build_id": docsbase_memory::ipc::protocol::build_id(),
             "schema_version": 1,
             "cache_root": cache,
@@ -99,7 +98,7 @@ impl FakeDaemon {
         let handle = std::thread::spawn(move || {
             while !stop_flag.load(Ordering::SeqCst) {
                 match listener.accept() {
-                    Ok((stream, _)) => serve_fake_connection(stream, &seen, &stop_flag),
+                    Ok(stream) => serve_fake_connection(stream, &seen, &stop_flag),
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(10));
                     }
@@ -122,12 +121,12 @@ impl Drop for FakeDaemon {
             let _ = handle.join();
         }
         let _ = fs::remove_file(self.cache.join("state/daemon.json"));
-        let _ = fs::remove_file(socket_path(&self.cache));
+        let _ = platform::remove(&platform::daemon_endpoint(&self.cache));
     }
 }
 
 fn serve_fake_connection(
-    stream: std::os::unix::net::UnixStream,
+    stream: platform::BlockingStream,
     seen: &Arc<Mutex<Vec<String>>>,
     stop: &Arc<std::sync::atomic::AtomicBool>,
 ) {
@@ -394,8 +393,9 @@ fn recovers_after_daemon_stop() {
         .spawn()
         .expect("spawn daemon");
     assert!(
-        wait_until(Duration::from_secs(10), || socket_path(env.cache.path())
-            .exists()),
+        wait_until(Duration::from_secs(10), || platform::exists(
+            &platform::daemon_endpoint(env.cache.path())
+        )),
         "socket must appear"
     );
 
@@ -440,8 +440,9 @@ fn unregistered_project_hint() {
         .spawn()
         .expect("spawn daemon");
     assert!(
-        wait_until(Duration::from_secs(10), || socket_path(env.cache.path())
-            .exists()),
+        wait_until(Duration::from_secs(10), || platform::exists(
+            &platform::daemon_endpoint(env.cache.path())
+        )),
         "socket must appear"
     );
 
