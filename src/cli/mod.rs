@@ -12,6 +12,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 use crate::config::{Config, paths};
+use crate::error::Error;
 use crate::ipc::client::Client;
 
 /// `docsbase` command-line interface.
@@ -119,24 +120,37 @@ fn serve(_detached: bool, grace_ms: u64) -> anyhow::Result<()> {
 
 /// Runs `docsbase sync`: a daemon sync job when one is reachable (FR-17),
 /// otherwise a direct full index (FR-30).
+///
+/// The sync job is started and polled over one bound connection: an idle
+/// daemon arms its grace deadline when no session is live, so a long job
+/// would otherwise outlive the accept loop mid-poll (final review N1).
 fn sync(path: Option<&std::path::Path>) -> anyhow::Result<()> {
-    if let Some(job) = try_daemon("sync_start", serde_json::json!({}), true)? {
-        let id = job["job_id"].as_i64().context("sync_start: job_id")?;
-        let deadline = Instant::now() + Duration::from_secs(610);
-        let mut job = job;
-        while matches!(job["state"].as_str(), Some("queued" | "running")) {
-            if Instant::now() >= deadline {
-                anyhow::bail!("sync job {id} did not finish within the budget");
+    let cache = paths::cache_dir()?;
+    if let Some(mut client) = Client::connect(&cache) {
+        let cwd = std::env::current_dir().context("resolve current directory")?;
+        match client.handshake(&cwd) {
+            Ok(()) => {
+                let job = client.call_tool("sync_start", serde_json::json!({}))?;
+                let id = job["job_id"].as_i64().context("sync_start: job_id")?;
+                let deadline = Instant::now() + Duration::from_secs(610);
+                let mut job = job;
+                while matches!(job["state"].as_str(), Some("queued" | "running")) {
+                    if Instant::now() >= deadline {
+                        anyhow::bail!("sync job {id} did not finish within the budget");
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                    job = client.call_tool("sync_status", serde_json::json!({ "job_id": id }))?;
+                }
+                println!("{}", serde_json::to_string_pretty(&job)?);
+                if job["state"] == "error" {
+                    anyhow::bail!("sync job {id} failed: {}", job["stats"]);
+                }
+                return Ok(());
             }
-            std::thread::sleep(Duration::from_millis(250));
-            job = try_daemon("sync_status", serde_json::json!({ "job_id": id }), false)?
-                .context("daemon exited while a sync job was running")?;
+            // Not indexed yet: the direct path registers the project first.
+            Err(Error::Project { .. }) => {}
+            Err(err) => return Err(err.into()),
         }
-        println!("{}", serde_json::to_string_pretty(&job)?);
-        if job["state"] == "error" {
-            anyhow::bail!("sync job {id} failed: {}", job["stats"]);
-        }
-        return Ok(());
     }
     index::run(path)
 }

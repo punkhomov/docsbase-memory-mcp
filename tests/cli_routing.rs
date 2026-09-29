@@ -2,6 +2,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -156,8 +158,11 @@ fn sync_via_daemon_polls_until_done() {
     fs::create_dir_all(path.parent().expect("state dir")).expect("mkdir state");
     let listener = UnixListener::bind(&path).expect("bind socket");
 
+    let connections = Arc::new(AtomicUsize::new(0));
+    let accepted = Arc::clone(&connections);
     let _handle = thread::spawn(move || {
         for stream in listener.incoming().flatten() {
+            accepted.fetch_add(1, Ordering::SeqCst);
             let mut reader = BufReader::new(stream.try_clone().expect("clone"));
             let mut writer = stream;
             loop {
@@ -213,6 +218,11 @@ fn sync_via_daemon_polls_until_done() {
         .success()
         .get_output()
         .clone();
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        1,
+        "sync must hold one bound connection while polling (final review N1)"
+    );
     let json: serde_json::Value = serde_json::from_str(stdout_text(&output).trim()).expect("json");
     assert_eq!(json["job_id"], 7);
     assert_eq!(json["state"], "done");
