@@ -46,17 +46,27 @@ pub fn catalogue() -> Vec<Tool> {
         ),
         tool(
             "read_neighbors",
-            "Return chunks adjacent to the given chunk id.",
+            "Return chunks adjacent to the given chunk id for progressive disclosure.",
             json!({
                 "type": "object",
-                "properties": { "chunk_id": { "type": "integer" } },
+                "properties": {
+                    "chunk_id": { "type": "integer", "description": "Chunk id from search_docs." },
+                    "before": { "type": "integer", "minimum": 0, "description": "Earlier chunks (default 1)." },
+                    "after": { "type": "integer", "minimum": 0, "description": "Later chunks (default 1)." }
+                },
                 "required": ["chunk_id"]
             }),
         ),
         tool(
             "list_docs",
-            "List indexed documents with title, size and chunk count.",
-            json!({ "type": "object", "properties": {} }),
+            "List indexed documents with title, size and chunk count; keyset-paginated.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "description": "Page size (default 50)." },
+                    "cursor": { "type": "string", "description": "next_cursor from the previous page." }
+                }
+            }),
         ),
         tool(
             "list_projects",

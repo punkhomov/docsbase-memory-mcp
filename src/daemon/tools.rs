@@ -1,7 +1,7 @@
 //! Tool implementations shared by the daemon and the direct CLI mode so both
 //! return identical payloads (FR-20…FR-26, FR-30).
 
-use std::path::Path;
+use std::path::{Component, Path};
 
 use serde_json::{Value, json};
 
@@ -10,7 +10,7 @@ use crate::daemon::session::Stats;
 use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
 use crate::index::job::{JobStats, run_full};
-use crate::index::tantivy_index::{ReadIndex, chunk_id_parts};
+use crate::index::tantivy_index::{ReadIndex, chunk_id, chunk_id_parts};
 use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
 use crate::store::migrations;
 use crate::store::models::{Project, ProjectStatus, SyncJob, SyncState};
@@ -41,6 +41,7 @@ pub fn search_docs(db: &Db, cache: &Path, project: &Project, args: &Value) -> Re
         let (doc_id, seq) = chunk_id_parts(hit.chunk_id);
         if let Some(citation) = repo::citation_for(db.connection(), doc_id, seq)? {
             rows.push(json!({
+                "chunk_id": hit.chunk_id,
                 "path": citation.path,
                 "heading_path": citation.heading_path,
                 "lines": [citation.line_start, citation.line_end],
@@ -51,13 +52,48 @@ pub fn search_docs(db: &Db, cache: &Path, project: &Project, args: &Value) -> Re
     Ok(Value::Array(rows))
 }
 
-/// `list_docs`: documents of one project (FR-25).
+/// `list_docs`: keyset-paginated documents of one project (FR-25).
+///
+/// `limit` defaults to 50; `cursor` is the `next_cursor` of the previous page.
+/// A stable cursor is the last `rel_path` seen, so late inserts before it do
+/// not shift the following pages.
 ///
 /// # Errors
-/// Returns [`Error::Project`] when the project is not indexed.
-pub fn list_docs(db: &Db, project: &Project) -> Result<Value> {
+/// Returns [`Error::Project`] when the project is not indexed and
+/// [`Error::Protocol`] for malformed arguments.
+pub fn list_docs(db: &Db, project: &Project, args: &Value) -> Result<Value> {
     ensure_indexed(project)?;
-    let docs: Vec<Value> = repo::docs_overview(db.connection(), project.id)?
+    let limit = match args.get("limit") {
+        None | Some(Value::Null) => 50,
+        Some(value) => {
+            value
+                .as_u64()
+                .filter(|limit| *limit > 0)
+                .ok_or_else(|| Error::Protocol {
+                    message: format!("list_docs: limit must be a positive integer, got {value}"),
+                })?
+        }
+    };
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let cursor = match args.get("cursor") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(other) => {
+            return Err(Error::Protocol {
+                message: format!("list_docs: cursor must be a string, got {other}"),
+            });
+        }
+    };
+    let mut docs =
+        repo::docs_overview_page(db.connection(), project.id, cursor, limit.saturating_add(1))?;
+    let next_cursor = if docs.len() > limit {
+        let last = docs[limit - 1].path.clone();
+        docs.truncate(limit);
+        Some(last)
+    } else {
+        None
+    };
+    let docs: Vec<Value> = docs
         .into_iter()
         .map(|doc| {
             json!({
@@ -68,8 +104,147 @@ pub fn list_docs(db: &Db, project: &Project) -> Result<Value> {
             })
         })
         .collect();
-    Ok(json!({ "project": project.name, "docs": docs }))
+    Ok(json!({ "project": project.name, "docs": docs, "next_cursor": next_cursor }))
 }
+
+/// `get_doc`: full document text for a path strictly inside the project root
+/// (FR-23, FR-32; I4).
+///
+/// # Errors
+/// Returns [`Error::Project`] when the path is absolute, escapes the root,
+/// resolves through a symlink outside it, is not a markdown file, or cannot
+/// be read.
+pub fn get_doc(project: &Project, args: &Value) -> Result<Value> {
+    let raw = args
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Protocol {
+            message: "get_doc: missing path".to_owned(),
+        })?;
+    let escape = || Error::Project {
+        message: format!("path {raw:?} must stay inside the project root"),
+        instruction: Some("pass a relative path of a markdown file".to_owned()),
+    };
+    if raw.is_empty() {
+        return Err(escape());
+    }
+    let path = Path::new(raw);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err(escape());
+    }
+    let outside_root = || Error::Project {
+        message: format!(
+            "path {raw:?} resolves outside the project root {}",
+            project.canonical_root.display()
+        ),
+        instruction: Some("symlinks leaving the root are rejected (FR-32)".to_owned()),
+    };
+    let joined = project.canonical_root.join(path);
+    let canonical = joined.canonicalize().map_err(|err| Error::Project {
+        message: format!("cannot open {raw:?}: {err}"),
+        instruction: Some("check the path exists inside the project root".to_owned()),
+    })?;
+    if !canonical.starts_with(&project.canonical_root) {
+        return Err(outside_root());
+    }
+    if !canonical.is_file() {
+        return Err(Error::Project {
+            message: format!("{raw:?} is not a file"),
+            instruction: None,
+        });
+    }
+    if !canonical
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+    {
+        return Err(Error::Project {
+            message: format!("{raw:?} is not a markdown document"),
+            instruction: Some("only `.md` documents are exposed".to_owned()),
+        });
+    }
+    let content = std::fs::read_to_string(&canonical).map_err(|err| Error::Project {
+        message: format!("cannot read {}: {err}", canonical.display()),
+        instruction: None,
+    })?;
+    let rel = canonical
+        .strip_prefix(&project.canonical_root)
+        .unwrap_or(Path::new(raw))
+        .to_string_lossy()
+        .into_owned();
+    Ok(json!({
+        "path": rel,
+        "content": content,
+        "size": content.len(),
+        "lines": content.lines().count(),
+    }))
+}
+
+/// `read_neighbors`: chunks around `chunk_id` inside its document (FR-24).
+///
+/// `before`/`after` default to 1 and are capped at [`NEIGHBOR_CAP`] each.
+///
+/// # Errors
+/// Returns [`Error::Project`] for unknown chunk ids and [`Error::Protocol`]
+/// for malformed arguments.
+pub fn read_neighbors(db: &Db, project: &Project, args: &Value) -> Result<Value> {
+    ensure_indexed(project)?;
+    let raw = args
+        .get("chunk_id")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| Error::Protocol {
+            message: format!(
+                "read_neighbors: chunk_id must be a non-negative integer, got {:?}",
+                args.get("chunk_id")
+            ),
+        })?;
+    let side = |key: &str| -> Result<i64> {
+        match args.get(key) {
+            None | Some(Value::Null) => Ok(1),
+            Some(value) => {
+                let parsed = value.as_u64().ok_or_else(|| Error::Protocol {
+                    message: format!(
+                        "read_neighbors: {key} must be a non-negative integer, got {value}"
+                    ),
+                })?;
+                Ok(i64::try_from(parsed.min(NEIGHBOR_CAP)).unwrap_or(i64::MAX))
+            }
+        }
+    };
+    let before = side("before")?;
+    let after = side("after")?;
+    let (doc_id, seq) = chunk_id_parts(raw);
+    let from = i64::from(seq).saturating_sub(before);
+    let to = i64::from(seq).saturating_add(after);
+    let rows = repo::chunk_window(db.connection(), project.id, doc_id, from, to)?;
+    if !rows.iter().any(|row| row.seq == seq) {
+        return Err(Error::Project {
+            message: format!("unknown chunk_id {raw} for project '{}'", project.name),
+            instruction: Some("use search_docs to obtain chunk ids".to_owned()),
+        });
+    }
+    let chunks: Vec<Value> = rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "chunk_id": chunk_id(doc_id, row.seq),
+                "seq": row.seq,
+                "path": row.path,
+                "heading_path": row.heading_path,
+                "lines": [row.line_start, row.line_end],
+                "kind": row.kind,
+                "text": row.text,
+            })
+        })
+        .collect();
+    Ok(Value::Array(chunks))
+}
+
+/// Per-side cap for [`read_neighbors`] payloads.
+pub const NEIGHBOR_CAP: u64 = 100;
 
 /// `list_projects`: registry entries with statuses (FR-10, FR-25).
 ///

@@ -158,3 +158,8 @@ Task 27: Ruling: поле `title` = верхний заголовок докум
 Task 27: Ruling: смена tantivy-схемы — durable `docsbase.rebuild` маркер (пишется до create_in_dir), пересоздание индекса + wipe docs/chunks + полный reindex; ReadIndex отказывает по маркеру; fallback incremental→full у watcher
 Task 27: minor (deferred): frontmatter title не индексируется; огромный `limit` без clamp на границе MCP; corrupt meta.json не восстанавливается; fsync маркера/meta на power-loss
 Task 27: complete (tests: search_golden 4, tokenizer 14, tantivy_index 11, index_job 11, всего 199, clippy clean, fmt clean; review 3 fix rounds → verified PASS)
+Task 28: Ruling: `list_docs` — keyset по последнему `rel_path` (`next_cursor`), ответ `{project, docs, next_cursor}`; CLI `list` листает страницы до конца (без усечения на 50)
+Task 28: Ruling: `search_docs` дополнительно отдаёт `chunk_id` (additive) — иначе агенту неоткуда взять id для `read_neighbors`; снапшоты T27 перегенерированы
+Task 28: Ruling: `get_doc` — только относительные `.md` внутри canonical root (realpath), absolute/`..`/symlink наружу отвергаются (I4/FR-32); `read_neighbors` — окно seq с cap 100 на сторону и проверкой принадлежности проекту
+Task 28: minor (deferred): tasks.md указывает `store/mod.rs` вместо `store/repo.rs`; нет теста на `limit = 0`; косметика `project_name`
+Task 28: complete (tests: mcp_docs 4, всего 203, clippy clean, fmt clean; review PASS/APPROVED → minors fixed → verified)

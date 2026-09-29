@@ -520,7 +520,15 @@ fn route_tool(
         }
         "list_docs" => {
             let project = bound_project(shared, &db, session_id)?;
-            tools::list_docs(&db, &project)
+            tools::list_docs(&db, &project, args)
+        }
+        "get_doc" => {
+            let project = bound_project(shared, &db, session_id)?;
+            tools::get_doc(&project, args)
+        }
+        "read_neighbors" => {
+            let project = bound_project(shared, &db, session_id)?;
+            tools::read_neighbors(&db, &project, args)
         }
         "index_project" => {
             drop(db);

@@ -4,6 +4,7 @@ expression: hits
 ---
 [
   {
+    "chunk_id": 21474836481,
     "heading_path": "Sheet Metal Rules > Common errors",
     "lines": [
       5,
@@ -13,6 +14,7 @@ expression: hits
     "score": 67.44320678710938
   },
   {
+    "chunk_id": 25769803777,
     "heading_path": "Thickness > Body and component rule thickness",
     "lines": [
       3,
@@ -22,6 +24,7 @@ expression: hits
     "score": 44.52811813354492
   },
   {
+    "chunk_id": 21474836482,
     "heading_path": "Sheet Metal Rules > Diagnostics",
     "lines": [
       18,

@@ -260,25 +260,90 @@ pub struct DocOverview {
     pub chunks: i64,
 }
 
-/// Lists documents of `project_id` ordered by path.
+/// One keyset page of documents ordered by `rel_path`, starting strictly
+/// after `after` (FR-25); `limit` is the caller's fetch size.
 ///
 /// # Errors
 /// Returns [`Error::Internal`] on SQLite failures.
-pub fn docs_overview(conn: &Connection, project_id: i64) -> Result<Vec<DocOverview>> {
+pub fn docs_overview_page(
+    conn: &Connection,
+    project_id: i64,
+    after: Option<&str>,
+    limit: usize,
+) -> Result<Vec<DocOverview>> {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     let mut stmt = conn
         .prepare(
             "SELECT d.rel_path, d.title, d.size,
                     (SELECT COUNT(*) FROM chunks c WHERE c.doc_id = d.id)
-             FROM docs d WHERE d.project_id = ?1 ORDER BY d.rel_path",
+             FROM docs d
+             WHERE d.project_id = ?1 AND d.rel_path > COALESCE(?2, '')
+             ORDER BY d.rel_path LIMIT ?3",
         )
         .map_err(db_error)?;
     let rows = stmt
-        .query_map([project_id], |row| {
+        .query_map(params![project_id, after, limit], |row| {
             Ok(DocOverview {
                 path: row.get(0)?,
                 title: row.get(1)?,
                 size: row.get(2)?,
                 chunks: row.get(3)?,
+            })
+        })
+        .map_err(db_error)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(db_error)
+}
+
+/// One chunk row of a neighbour window (FR-24).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkWindowRow {
+    /// Owning document path relative to the project root.
+    pub path: String,
+    /// Sequence within the document.
+    pub seq: u32,
+    /// Breadcrumb `H1 > H2 > H3`.
+    pub heading_path: String,
+    /// Chunk kind (`prose`, `code`, `table`).
+    pub kind: String,
+    /// First line (1-based, inclusive).
+    pub line_start: u32,
+    /// Last line (1-based, inclusive).
+    pub line_end: u32,
+    /// Chunk text.
+    pub text: String,
+}
+
+/// Chunks of `doc_id` with `seq` in `from_seq..=to_seq`, owned by
+/// `project_id`, ordered by sequence (FR-24).
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn chunk_window(
+    conn: &Connection,
+    project_id: i64,
+    doc_id: i64,
+    from_seq: i64,
+    to_seq: i64,
+) -> Result<Vec<ChunkWindowRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT d.rel_path, c.seq, c.heading_path, c.kind, c.line_start, c.line_end, c.text
+             FROM chunks c JOIN docs d ON d.id = c.doc_id
+             WHERE c.doc_id = ?1 AND d.project_id = ?2 AND c.seq BETWEEN ?3 AND ?4
+             ORDER BY c.seq",
+        )
+        .map_err(db_error)?;
+    let rows = stmt
+        .query_map(params![doc_id, project_id, from_seq, to_seq], |row| {
+            Ok(ChunkWindowRow {
+                path: row.get(0)?,
+                seq: row.get(1)?,
+                heading_path: row.get(2)?,
+                kind: row.get(3)?,
+                line_start: row.get(4)?,
+                line_end: row.get(5)?,
+                text: row.get(6)?,
             })
         })
         .map_err(db_error)?;

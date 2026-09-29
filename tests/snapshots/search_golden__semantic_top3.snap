@@ -4,6 +4,7 @@ expression: hits
 ---
 [
   {
+    "chunk_id": 8589934593,
     "heading_path": "Authentication > Refreshing tokens",
     "lines": [
       5,
@@ -13,6 +14,7 @@ expression: hits
     "score": 56.18712615966797
   },
   {
+    "chunk_id": 8589934592,
     "heading_path": "Authentication",
     "lines": [
       1,
@@ -22,6 +24,7 @@ expression: hits
     "score": 15.17506217956543
   },
   {
+    "chunk_id": 8589934594,
     "heading_path": "Authentication > Revocation",
     "lines": [
       12,

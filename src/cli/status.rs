@@ -66,13 +66,44 @@ pub fn status() -> anyhow::Result<()> {
 /// Returns an error when the project is unregistered/not indexed or the
 /// snapshot cannot be opened.
 pub fn list() -> anyhow::Result<()> {
-    if let Some(value) = crate::cli::try_daemon("list_docs", serde_json::json!({}), true)? {
-        println!("{}", serde_json::to_string_pretty(&value)?);
-        return Ok(());
+    const PAGE: usize = 500;
+    let mut cursor: Option<String> = None;
+    let mut docs: Vec<serde_json::Value> = Vec::new();
+    let mut project_name: Option<String> = None;
+    // Bound the loop so a broken cursor cannot spin forever.
+    for _ in 0..10_000 {
+        let args = match &cursor {
+            Some(cursor) => serde_json::json!({ "limit": PAGE, "cursor": cursor }),
+            None => serde_json::json!({ "limit": PAGE }),
+        };
+        let daemon_value = crate::cli::try_daemon("list_docs", args.clone(), true)?;
+        let value = if let Some(value) = daemon_value {
+            value
+        } else {
+            let (db, project) = read_project()?;
+            let value = crate::daemon::tools::list_docs(&db, &project, &args)?;
+            project_name.get_or_insert_with(|| project.name.clone());
+            value
+        };
+        if let Some(name) = value.get("project").and_then(serde_json::Value::as_str) {
+            project_name = Some(name.to_owned());
+        }
+        if let Some(items) = value.get("docs").and_then(serde_json::Value::as_array) {
+            docs.extend(items.iter().cloned());
+        }
+        cursor = value
+            .get("next_cursor")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
     }
-
-    let (db, project) = read_project()?;
-    let value = crate::daemon::tools::list_docs(&db, &project)?;
+    let value = serde_json::json!({
+        "project": project_name,
+        "docs": docs,
+        "next_cursor": serde_json::Value::Null,
+    });
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
