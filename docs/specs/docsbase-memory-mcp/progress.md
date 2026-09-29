@@ -188,3 +188,5 @@ Final review fix pass: frontend повторяет bind при stale project hin
 Final review fix pass: FR-30 — `docsbase sync` (daemon `sync_start` + poll `sync_status`, direct-fallback) и `docsbase config`; тесты cli_read/cli_routing; FR-29 CLI-флаги (with_overrides) — Ruling: should-уровень, отложены
 Final review fix pass: watcher visibility — `status.projects[].watched`; design §5 (RegisterUnbound, instruction, u64) и §13 (cli/status.rs, store/repo.rs) приведены в соответствие; тест в mcp_registry
 Final review fix pass: Ruling: SC-9 (агентская метрика) — вне автотестов; grouped minors финального ревью остаются в deferred
+Final review re-review: N1 (sync polling терял сессию и ловил grace-exit) — `docsbase sync` держит одно bound-соединение на sync_start и все poll'ы; тест cli_routing считает accept'ы == 1; e2e-репро (grace 4000ms, 8000 файлов) теперь exit 0
+Final review: вердикт ревьюера ПОСЛЕ fix pass + N1 fix — **converged** (все Critical/Important закрыты, residual — только принятые minors/Rulings)
