@@ -224,3 +224,4 @@ Task 39: Ruling: локальная валидация Windows-слоя до CI 
 Task 39: fix round по ревью: `endpoint_serde_roundtrip` получил cfg-ветки Unix/Windows (Unix-версия упала бы на Windows из-за cfg-сплита десериализации); doc `windows.rs` без преждевременного windows-sys
 Task 39: minor (deferred): no-op таймауты на пайпах (зависший daemon не отсекается клиентом); `exists`/`connect_probe` = реальный коннект (churn в `wait_for_daemon`); `as_path()` для Pipe без префикса `\\.\pipe\`
 Task 39: complete (tests: platform_transport 4 + platform_boundary 2, всего 236, clippy Linux nightly+1.88 и scratch windows-gnu clean, fmt clean; review FAIL(1 deliverable+ledger) → fixes → scoped re-review)
+Task 39: fix round 2: `PathBuf` в tests/platform_transport.rs под `#[cfg(unix)]` (на Windows был unused import → падал бы `-D warnings` в T43)

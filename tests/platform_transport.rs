@@ -2,6 +2,7 @@
 //! serde compatible with `daemon.json`'s `"socket"` string, and cleanup.
 
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::path::PathBuf;
 
 use tempfile::TempDir;
