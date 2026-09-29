@@ -208,3 +208,6 @@ Task 36: Ruling: семантика путей за фасадом — `platform
 Task 36: fix (minor hardening): `walk::resolve_in_root` тоже переведён на `is_under`; boundary-паттерн HOME уточнён до трёх конкретных форм (без ложных срабатываний на комментарии)
 Task 36: minor (deferred): `home_dir_available` зависит от resolvable HOME; Windows-рантайм `windows_key`/BaseDirs не проверяется на Linux (только чистая функция)
 Task 36: complete (tests: platform::paths 3 + boundary 2, всего 230, clippy clean nightly+1.88, fmt clean; review PASS/APPROVED → minors applied)
+Task 37: Ruling: инвариант шва закреплён в CI (`cargo test --locked --test platform_boundary`) в nightly и release на 1.88; design §5/§7/§13 приведены к коду (tokio io-util/sync/macros, platform deps tokio/serde/directories)
+Task 37: fix round по ревью: добавлена запись ledger (acceptance «секция закрыта»); boundary-скан больше не пропускает вложенные каталоги с именем `platform` (исключён ровно `src/platform`)
+Task 37: complete (tests: platform_boundary 2, всего 230, clippy clean nightly+1.88, fmt clean; review FAIL(missing ledger, §7) → fixes → scoped re-review)

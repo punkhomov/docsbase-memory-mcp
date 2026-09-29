@@ -29,6 +29,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Offline guarantee (SC-8, NFR-5)
         run: cargo test --locked --test offline -- --nocapture
+      - name: Platform seam invariant (ADR-9)
+        run: cargo test --locked --test platform_boundary
       - name: Performance budgets (NFR-1, SC-7)
         run: cargo test --locked --release --test perf_budget -- --nocapture
       - name: Soak, 3 agents + watcher, 1 hour (SC-5)
