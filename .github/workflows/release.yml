@@ -26,6 +26,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build static binary (NFR-6, ADR-8)
         run: cargo release-static --locked
+      - name: Platform seam invariant (ADR-9)
+        run: cargo test --locked --test platform_boundary
       - name: Artifact checks (NFR-2, NFR-6)
         run: |
           cargo test --locked --test artifact

@@ -44,9 +44,8 @@ fn scan_dir(dir: &Path, banned: &[&str], violations: &mut Vec<String>) {
     for entry in fs::read_dir(dir).expect("read src dir") {
         let path = entry.expect("entry").path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|name| name == "platform") {
-                continue;
-            }
+            // Only `src/platform/` itself is exempt; a nested directory with
+            // the same name must not escape the invariant.
             scan_dir(&path, banned, violations);
         } else if path.extension().is_some_and(|ext| ext == "rs") {
             check_file(&path, banned, violations);

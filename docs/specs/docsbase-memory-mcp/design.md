@@ -91,7 +91,7 @@ Project: .docsbase.toml, .docsbaseignore              # FR-14, FR-28
 | `store` | SQLite-модель, миграции, реестр | repositories | rusqlite | FR-10, FR-16, FR-26, NFR-7 |
 | `config` | Global/project config, precedence, paths | `Config::load` | toml, directories | FR-28, FR-29 |
 | `ipc` | Версионированный JSON-RPC поверх local transport | `Request/Response` | serde, tokio, platform | FR-7, FR-33 |
-| `platform` | Изоляция ОС: transport, signals, process, perms, path semantics | внутренний `pub`-фасад (ADR-9) | tokio, fd-lock, directories | NFR-6, FR-33 |
+| `platform` | Изоляция ОС: transport, signals, process, perms, path semantics | внутренний `pub`-фасад (ADR-9) | tokio, serde, directories | NFR-6, FR-33 |
 | `error` | Таксономия ошибок и маппинг в MCP/CLI | `enum Error` | thiserror | NFR-8 |
 
 ## 5. Module interfaces
@@ -235,7 +235,7 @@ pub struct Project {
 | Крейт | Зачем | FR/NFR |
 |---|---|---|
 | `rmcp` | официальный MCP SDK (stdio, типы tools) | FR-7, FR-20…27 |
-| `tokio` (`rt-multi-thread`, `net`, `fs`, `time`, `signal`) | runtime для rmcp, socket, watcher | FR-2, FR-7 |
+| `tokio` (`rt-multi-thread`, `net`, `fs`, `time`, `signal`, `io-util`, `sync`, `macros`) | runtime для rmcp, socket, watcher, NDJSON-half'ов | FR-2, FR-7 |
 | `clap` (derive) | CLI и subcommand'ы | FR-30 |
 | `tantivy` | BM25/FTS, кастомный токенизатор, реляционная выдача | FR-19, FR-21, NFR-1 |
 | `pulldown-cmark` | Markdown → события с byte-offset (line ranges, fences, tables) | FR-22 |
@@ -408,8 +408,8 @@ src/
 │   ├── mod.rs              # load + precedence (FR-28, FR-29)
 │   └── paths.rs            # XDG dirs
 ├── platform/               # ОС-изоляция (ADR-9)
-│   ├── mod.rs              # фасад: Endpoint/Listener/Stream, cfg-выбор ОС
-│   ├── unix.rs             # Unix-реализация v1 (перенос из lifecycle/ipc)
+│   ├── mod.rs              # фасад: Endpoint/Listener/Stream, process/fs/paths
+│   ├── unix.rs             # Unix-реализация v1 (transport/signals/process/perms)
 │   └── paths.rs            # home_dir, is_under, normalize_for_compare
 └── error.rs                # taxonomy (NFR-8)
 
