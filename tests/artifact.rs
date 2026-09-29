@@ -11,11 +11,17 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// `cargo release-static` honors `CARGO_TARGET_DIR`; mirror it here.
+fn target_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| manifest_dir().join("target"), PathBuf::from)
+}
+
 /// Static artifact path produced by `cargo release-static` (ADR-8): the
 /// target-scoped rustflags only apply to real `--target` builds, so the host
 /// `target/release` binary stays dynamic for local runs.
 fn static_binary() -> PathBuf {
-    manifest_dir().join("target/x86_64-unknown-linux-gnu/release/docsbase")
+    target_dir().join("x86_64-unknown-linux-gnu/release/docsbase")
 }
 
 /// Builds the static artifact on demand (fast when fresh) and never falls

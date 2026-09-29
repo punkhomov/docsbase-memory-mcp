@@ -107,10 +107,11 @@ impl Env {
             .expect("spawn daemon");
         self.daemon = Some(child);
         assert!(
-            wait_until(Duration::from_secs(10), || platform::exists(
-                &platform::daemon_endpoint(self.cache())
-            )),
-            "socket must appear"
+            wait_until(Duration::from_secs(10), || {
+                platform::exists(&platform::daemon_endpoint(self.cache()))
+                    && self.cache().join("state/daemon.json").exists()
+            }),
+            "socket and daemon state must appear"
         );
     }
 }

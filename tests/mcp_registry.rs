@@ -363,6 +363,36 @@ fn huge_search_limit_is_clamped() {
 }
 
 #[test]
+fn search_rejects_bad_limit_and_scope() {
+    let mut env = Env::new(&[("README.md", DOC)]);
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake_registry().expect("hello");
+    Env::index_project(&mut client, env.root());
+    let mut bound = env.client();
+    bound.handshake(env.root()).expect("bind session");
+
+    let err = bound
+        .call_tool("search_docs", json!({ "query": "widgets", "limit": "ten" }))
+        .expect_err("bad limit type must fail");
+    assert!(err.to_string().contains("positive integer"), "{err}");
+
+    let err = bound
+        .call_tool(
+            "search_docs",
+            json!({ "query": "widgets", "scope": "shared" }),
+        )
+        .expect_err("v1 supports only the project scope");
+    assert!(err.to_string().contains("scope"), "{err}");
+
+    // Zero means "no hits" rather than an error (documented).
+    let empty = bound
+        .call_tool("search_docs", json!({ "query": "widgets", "limit": 0 }))
+        .expect("zero limit is an empty result");
+    assert_eq!(empty.as_array().expect("array").len(), 0, "zero limit");
+}
+
+#[test]
 fn sync_job_runs_and_reports() {
     let mut env = Env::new(&[("README.md", DOC)]);
     env.start_daemon();
