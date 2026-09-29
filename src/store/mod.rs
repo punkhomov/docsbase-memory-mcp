@@ -27,7 +27,7 @@ impl Db {
     /// document text and absolute paths (design §3 runtime layout).
     ///
     /// # Errors
-    /// Returns [`Error::Internal`] on IO/SQLite failures and [`Error::Admission`]
+    /// Returns [`Error::Internal`] on IO/`SQLite` failures and [`Error::Admission`]
     /// when the on-disk schema is newer than this build supports.
     pub fn open(cache_dir: &Path) -> Result<Self> {
         ensure_private_dir(cache_dir)?;

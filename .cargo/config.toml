@@ -3,3 +3,18 @@ global-min-publish-age = "14 days"
 
 [resolver]
 incompatible-publish-age = "deny"
+
+# NFR-6: one static binary for Linux/WSL2 (ADR-8). Target-scoped rustflags are
+# only picked up for real cross/multi-target builds (`--target ...` or the
+# `release-static` alias); plain host builds stay dynamic so proc-macros keep
+# working. musl is not used: its C cross toolchain is unavailable for the
+# bundled C sources (SQLite, zstd).
+[alias]
+release-static = [
+    "build",
+    "--release",
+    "--target",
+    "x86_64-unknown-linux-gnu",
+    "--config",
+    "target.x86_64-unknown-linux-gnu.rustflags=[\"-C\", \"target-feature=+crt-static\"]",
+]

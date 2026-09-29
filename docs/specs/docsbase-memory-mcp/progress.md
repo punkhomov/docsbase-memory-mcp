@@ -174,3 +174,8 @@ Task 31: Ruling: soak ограничивает корпус (32 слота на 
 Task 31: Ruling: offline-тест гоняет весь workflow в `unshare -rn` (fallback: только fd-scan), проверяет `/proc/<pid>/net/*` на TCP/UDP сокеты daemon (fail-closed) и отсутствие `conflicts.ndjson` в soak
 Task 31: minor (deferred): tantivy integrity проверяется неявно (поиск после рестарта); namespace-путь не подтверждён на ubuntu-latest
 Task 31: complete (tests: offline 1, soak ignored (12s при SOAK_SECS=10), всего 207+3 ignored, clippy clean, fmt clean; review CHANGES(2 Important) → fixes → verified)
+Task 32: Ruling: статика — gnu `+crt-static` через alias `cargo release-static` (`--target` + target-scoped `--config`), musl отложен (нет x86_64-linux-musl-gcc для bundled C); обычные host-сборки остаются динамическими (proc-macro не переносят crt-static); ADR-8
+Task 32: Ruling: release profile lto/codegen-units=1/strip/panic=abort; artifact-тест всегда прогоняет `cargo release-static` (без exists-shortcut) и жёстко проверяет ldd/размер: 11.9 МБ static, `ldd` → statically linked
+Task 32: fix rounds: CI `RUSTUP_TOOLCHAIN=1.88.0` (иначе rust-toolchain.toml nightly перебивает action), components+`--locked`, checksum по basename; doc-backticks для clippy 1.88; STOP_TIMEOUT 5→15s и NO_LISTENER_TIMEOUT 2s (флейк `concurrent_stops_do_not_wedge`)
+Task 32: minor (deferred): artifact-пути игнорируют CARGO_TARGET_DIR; отсутствие ldd = panic; RSS-половина NFR-2 не измеряется бенчем
+Task 32: complete (tests: artifact 2, всего 209+3 ignored, clippy clean nightly+1.88, fmt clean; review CHANGES(2 Important) → fixes → verified)

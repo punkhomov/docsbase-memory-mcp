@@ -60,7 +60,7 @@ pub fn ensure_project(db: &mut Db, path: &Path) -> Result<Project> {
 /// Every registered project, ordered by name.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures or a corrupt status value.
+/// Returns [`Error::Internal`] on `SQLite` failures or a corrupt status value.
 pub fn list_projects(db: &Db) -> Result<Vec<Project>> {
     let conn = db.connection();
     let mut stmt = conn
@@ -94,7 +94,7 @@ pub fn list_projects(db: &Db) -> Result<Vec<Project>> {
 ///
 /// # Errors
 /// Returns [`Error::Project`] for an unknown id and [`Error::Internal`] on
-/// SQLite failures.
+/// `SQLite` failures.
 pub fn mark_indexed(db: &Db, id: i64) -> Result<()> {
     let conn = db.connection();
     let updated = conn
@@ -123,7 +123,7 @@ pub fn mark_indexed(db: &Db, id: i64) -> Result<()> {
 ///
 /// # Errors
 /// Returns [`Error::Project`] for an unknown id and [`Error::Internal`] on
-/// SQLite failures.
+/// `SQLite` failures.
 pub fn set_status(db: &Db, id: i64, status: ProjectStatus) -> Result<()> {
     let conn = db.connection();
     let updated = if status == ProjectStatus::Indexed {
@@ -171,7 +171,7 @@ pub fn resolve_by_cwd(db: &Db, cwd: &Path) -> Result<Project> {
 /// Loads one project by id.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures or a corrupt status value.
+/// Returns [`Error::Internal`] on `SQLite` failures or a corrupt status value.
 pub fn project_by_id(db: &Db, id: i64) -> Result<Option<Project>> {
     let row = db
         .connection()

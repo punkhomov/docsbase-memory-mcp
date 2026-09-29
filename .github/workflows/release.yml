@@ -1,0 +1,43 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # rust-toolchain.toml pins nightly for local development; CI builds the
+  # MSRV toolchain explicitly (the env var overrides the file).
+  RUSTUP_TOOLCHAIN: "1.88.0"
+
+jobs:
+  static-artifact:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build static binary (NFR-6, ADR-8)
+        run: cargo release-static --locked
+      - name: Artifact checks (NFR-2, NFR-6)
+        run: |
+          cargo test --locked --test artifact
+          ldd target/x86_64-unknown-linux-gnu/release/docsbase
+          stat -c%s target/x86_64-unknown-linux-gnu/release/docsbase
+      - name: Checksum
+        working-directory: target/x86_64-unknown-linux-gnu/release
+        run: sha256sum docsbase > docsbase.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docsbase-linux-x86_64
+          path: |
+            target/x86_64-unknown-linux-gnu/release/docsbase
+            target/x86_64-unknown-linux-gnu/release/docsbase.sha256
+          if-no-files-found: error

@@ -1,4 +1,4 @@
-//! Full index job: walk → hash → diff → tantivy + SQLite (FR-16, FR-18; A4; R2).
+//! Full index job: walk → hash → diff → tantivy + `SQLite` (FR-16, FR-18; A4; R2).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -44,7 +44,7 @@ fn push_warning(stats: &mut JobStats, path: impl Into<String>, message: impl Int
 pub struct JobStats {
     /// New or changed documents written.
     pub docs: usize,
-    /// Chunks added to tantivy and SQLite.
+    /// Chunks added to tantivy and `SQLite`.
     pub chunks: usize,
     /// Documents skipped because the content hash matched.
     pub skipped: usize,
@@ -75,12 +75,12 @@ struct Pending {
 /// abort the job (A4).
 ///
 /// Order: mark in-flight (allocating ids inside the marker transaction) →
-/// tantivy commit → short SQLite write transaction (R2). A crash between the
+/// tantivy commit → short `SQLite` write transaction (R2). A crash between the
 /// commits makes the next run reprocess marked documents instead of trusting
 /// a stale hash.
 ///
 /// # Errors
-/// Returns errors for walk setup failures and SQLite/tantivy failures that
+/// Returns errors for walk setup failures and `SQLite`/tantivy failures that
 /// affect the whole job.
 pub fn run_full(
     db: &mut Db,

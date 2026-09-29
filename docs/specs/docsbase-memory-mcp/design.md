@@ -323,6 +323,15 @@ WAL-конкурентность, миграции; изоляция обесп�
 Выбрано **tokio** из-за `rmcp`; тяжёлые операции (tantivy, SQLite, walk) — через
 `spawn_blocking`; это держит IPC отзывчивым (NFR-1).
 
+**ADR-8. Статическая сборка: gnu `+crt-static` vs musl (NFR-6, T32).**
+Выбрано **`x86_64-unknown-linux-gnu` с `+crt-static`** (static-pie, 12 МБ stripped):
+системный GCC линкует bundled C-код (SQLite, zstd) без кросс-тулчейна, бинарь
+работает на любой glibc/WSL2. musl дал бы libc-free артефакт, но требует
+`x86_64-linux-musl-gcc` для C-зависимостей; отложено до появления тулчейна в CI.
+Rustflags заданы через alias `cargo release-static` (`--target` + target-scoped
+`--config`), чтобы обычные host-сборки оставались динамическими (proc-macro не
+собираются с `+crt-static`).
+
 ## 13. Directory structure
 
 ```

@@ -23,7 +23,7 @@ const WRITER_HEAP_BYTES: usize = 20_000_000;
 /// (FR-20, T27).
 const LONG_CHUNK_PENALTY: f32 = 0.5;
 
-/// Marker written when the on-disk index must be rebuilt from SQLite (T27).
+/// Marker written when the on-disk index must be rebuilt from `SQLite` (T27).
 /// It survives crashes: the wipe and reindex happen in the next job, and
 /// reads refuse an index that still carries it.
 pub const REBUILD_MARKER: &str = "docsbase.rebuild";
@@ -135,7 +135,7 @@ impl IndexHandle {
     }
 
     /// True when the index was created fresh or a stale/incomplete one was
-    /// replaced on open: callers must rebuild from SQLite instead of trusting
+    /// replaced on open: callers must rebuild from `SQLite` instead of trusting
     /// incremental state. Survives crashes via [`REBUILD_MARKER`].
     #[must_use]
     pub fn was_recreated(&self) -> bool {

@@ -39,6 +39,12 @@ unsafe_code = "warn"
 all = "warn"
 pedantic = "warn"
 
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
 [dev-dependencies]
 assert_cmd = "2.2.2"
 criterion = "0.8.2"

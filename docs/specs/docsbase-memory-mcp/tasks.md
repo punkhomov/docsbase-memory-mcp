@@ -420,7 +420,7 @@ namespace / отсутствие connect)
 **RED:** `artifact::(static_link_check, size_budget)` — падают, пока профиль не настроен.
 **GREEN:** ADR в design.md о способе статики (`x86_64-unknown-linux-musl` или `+crt-static`);
 release profile `lto = true`, `codegen-units = 1`, `strip = true`, `panic = "abort"`.
-**Verify:** `cargo build --release && ldd target/release/docsbase && stat -c%s target/release/docsbase` → в бюджете
+**Verify:** `cargo release-static && ldd target/x86_64-unknown-linux-gnu/release/docsbase && stat -c%s target/x86_64-unknown-linux-gnu/release/docsbase` → в бюджете (ADR-8)
 **Acceptance:** NFR-6, NFR-2.
 
 ---

@@ -31,7 +31,14 @@ pub const START_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DEFAULT_GRACE_MS: u64 = 5_000;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
-const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Upper bound for `daemon stop` while the daemon drains and exits; a busy
+/// machine can stretch the 3 s grace window well past 5 s (T32 flake).
+const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+/// When there is no listener at all the stop request cannot be delivered:
+/// wait briefly for a daemon that is already shutting down (it unlinks its
+/// socket first), then report success without touching its state while the
+/// process may still drain its lease.
+const NO_LISTENER_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DaemonState {
@@ -134,7 +141,7 @@ pub fn stop_daemon(cache: &Path) -> Result<()> {
         cleanup_stale(cache)?;
         return Ok(());
     }
-    if let Ok(mut stream) = UnixStream::connect(socket_path(cache)) {
+    let sent = if let Ok(mut stream) = UnixStream::connect(socket_path(cache)) {
         let bytes = protocol::encode(&Request::StopDaemon)?;
         stream
             .write_all(&bytes)
@@ -142,6 +149,23 @@ pub fn stop_daemon(cache: &Path) -> Result<()> {
         stream
             .flush()
             .map_err(|err| Error::internal_with_source("flush stop request", err))?;
+        true
+    } else {
+        false
+    };
+
+    if !sent && !socket_path(cache).exists() {
+        let deadline = Instant::now() + NO_LISTENER_TIMEOUT;
+        while Instant::now() < deadline {
+            if !pid_alive(state.pid) {
+                cleanup_stale(cache)?;
+                return Ok(());
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        // Already unlinked its socket: the stop is under way even if the
+        // process needs longer to release the admission lease (FR-5/FR-6).
+        return Ok(());
     }
 
     // Wait for the process itself, not just the socket: `serve` unlinks its

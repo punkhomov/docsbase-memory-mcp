@@ -11,6 +11,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # rust-toolchain.toml pins nightly for local development; CI validates the
+  # MSRV toolchain explicitly (the env var overrides the file).
+  RUSTUP_TOOLCHAIN: "1.88.0"
 
 jobs:
   soak-offline:
@@ -21,15 +24,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Offline guarantee (SC-8, NFR-5)
-        run: cargo test --test offline -- --nocapture
+        run: cargo test --locked --test offline -- --nocapture
       - name: Performance budgets (NFR-1, SC-7)
-        run: cargo test --release --test perf_budget -- --nocapture
+        run: cargo test --locked --release --test perf_budget -- --nocapture
       - name: Soak, 3 agents + watcher, 1 hour (SC-5)
-        run: cargo test --release --test soak -- --ignored --nocapture
+        run: cargo test --locked --release --test soak -- --ignored --nocapture
       - name: Full release suite
-        run: cargo test --release
+        run: cargo test --locked --release
       - name: Lints
         run: |
           cargo fmt --check

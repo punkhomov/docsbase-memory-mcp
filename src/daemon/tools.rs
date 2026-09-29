@@ -249,7 +249,7 @@ pub const NEIGHBOR_CAP: u64 = 100;
 /// `list_projects`: registry entries with statuses (FR-10, FR-25).
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn list_projects(db: &Db) -> Result<Value> {
     let mut projects = Vec::new();
     for project in registry::list_projects(db)? {
@@ -261,7 +261,7 @@ pub fn list_projects(db: &Db) -> Result<Value> {
 /// `status`: registry-wide snapshot with runtime counters and versions (FR-26).
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn status(
     db: &Db,
     stats: &Stats,
@@ -317,7 +317,7 @@ fn project_entry(db: &Db, project: &Project) -> Result<Value> {
 /// exists, returns its id with `false` (FR-17).
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn enqueue_sync(db: &Db, project: &Project) -> Result<(i64, bool)> {
     for _ in 0..3 {
         if let Some(id) = repo::create_sync_job(db.connection(), project.id)? {

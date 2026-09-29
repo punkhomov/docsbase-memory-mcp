@@ -62,7 +62,7 @@ pub struct NewChunk<'a> {
 /// Loads `(id, rel_path, hash)` for every document of `project_id`.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn doc_states(conn: &Connection, project_id: i64) -> Result<Vec<DocState>> {
     let mut stmt = conn
         .prepare("SELECT id, rel_path, content_hash FROM docs WHERE project_id = ?1")
@@ -82,24 +82,24 @@ pub fn doc_states(conn: &Connection, project_id: i64) -> Result<Vec<DocState>> {
 
 /// Invalidates the stored hash of a document slated for removal (R2).
 ///
-/// A crash after the tantivy purge but before the SQLite delete must not let a
+/// A crash after the tantivy purge but before the `SQLite` delete must not let a
 /// rerun skip a restored file whose bytes still match the old hash.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn invalidate_doc(conn: &Connection, doc_id: i64) -> Result<()> {
     conn.execute("UPDATE docs SET content_hash = '' WHERE id = ?1", [doc_id])
         .map_err(db_error)?;
     Ok(())
 }
 
-/// Inserts an in-flight document row (R2) and returns its SQLite row id.
+/// Inserts an in-flight document row (R2) and returns its `SQLite` row id.
 ///
 /// Allocation happens inside the write transaction, so concurrent index jobs
 /// (different projects, same registry) cannot compute the same id.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn insert_pending_doc(
     conn: &Connection,
     project_id: i64,
@@ -119,7 +119,7 @@ pub fn insert_pending_doc(
 /// Inserts or updates one document row.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn upsert_doc(conn: &Connection, project_id: i64, doc_id: i64, doc: &NewDoc<'_>) -> Result<()> {
     conn.execute(
         "INSERT INTO docs (id, project_id, rel_path, abs_path, title, frontmatter_json,
@@ -155,7 +155,7 @@ pub fn upsert_doc(conn: &Connection, project_id: i64, doc_id: i64, doc: &NewDoc<
 /// Deletes all chunk rows of `doc_id` and inserts `chunks`.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn replace_chunks(conn: &Connection, doc_id: i64, chunks: &[NewChunk<'_>]) -> Result<()> {
     conn.execute("DELETE FROM chunks WHERE doc_id = ?1", [doc_id])
         .map_err(db_error)?;
@@ -186,7 +186,7 @@ pub fn replace_chunks(conn: &Connection, doc_id: i64, chunks: &[NewChunk<'_>]) -
 /// from scratch (T27).
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn delete_project_docs(conn: &Connection, project_id: i64) -> Result<usize> {
     conn.execute(
         "DELETE FROM chunks WHERE doc_id IN (SELECT id FROM docs WHERE project_id = ?1)",
@@ -200,7 +200,7 @@ pub fn delete_project_docs(conn: &Connection, project_id: i64) -> Result<usize> 
 /// Deletes a document row; `chunks` rows follow via `ON DELETE CASCADE`.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn delete_doc(conn: &Connection, doc_id: i64) -> Result<()> {
     conn.execute("DELETE FROM docs WHERE id = ?1", [doc_id])
         .map_err(db_error)?;
@@ -227,7 +227,7 @@ pub struct Citation {
 /// Looks up citation metadata for `(doc_id, seq)`.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn citation_for(conn: &Connection, doc_id: i64, seq: u32) -> Result<Option<Citation>> {
     conn.query_row(
         "SELECT d.rel_path, c.heading_path, c.line_start, c.line_end
@@ -264,7 +264,7 @@ pub struct DocOverview {
 /// after `after` (FR-25); `limit` is the caller's fetch size.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn docs_overview_page(
     conn: &Connection,
     project_id: i64,
@@ -318,7 +318,7 @@ pub struct ChunkWindowRow {
 /// `project_id`, ordered by sequence (FR-24).
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn chunk_window(
     conn: &Connection,
     project_id: i64,
@@ -358,7 +358,7 @@ pub fn chunk_window(
 /// (FR-26): the caller decides based on the returned state.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn latest_job(conn: &Connection, project_id: i64) -> Result<Option<(String, Option<String>)>> {
     conn.query_row(
         "SELECT state, stats_json FROM sync_jobs
@@ -382,7 +382,7 @@ pub struct ProjectCounts {
 /// Counts documents and chunks of `project_id`.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn project_counts(conn: &Connection, project_id: i64) -> Result<ProjectCounts> {
     conn.query_row(
         "SELECT (SELECT COUNT(*) FROM docs WHERE project_id = ?1),
@@ -406,7 +406,7 @@ pub fn project_counts(conn: &Connection, project_id: i64) -> Result<ProjectCount
 /// cannot both enqueue.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn create_sync_job(conn: &Connection, project_id: i64) -> Result<Option<i64>> {
     let inserted = conn
         .execute(
@@ -430,7 +430,7 @@ pub fn create_sync_job(conn: &Connection, project_id: i64) -> Result<Option<i64>
 /// Newest active (`queued`/`running`) job of `project_id`.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures or a corrupt state value.
+/// Returns [`Error::Internal`] on `SQLite` failures or a corrupt state value.
 pub fn active_sync_job(conn: &Connection, project_id: i64) -> Result<Option<SyncJob>> {
     sync_job_query(
         conn,
@@ -445,7 +445,7 @@ pub fn active_sync_job(conn: &Connection, project_id: i64) -> Result<Option<Sync
 /// Loads one sync job by id.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures or a corrupt state value.
+/// Returns [`Error::Internal`] on `SQLite` failures or a corrupt state value.
 pub fn sync_job(conn: &Connection, id: i64) -> Result<Option<SyncJob>> {
     sync_job_query(
         conn,
@@ -459,7 +459,7 @@ pub fn sync_job(conn: &Connection, id: i64) -> Result<Option<SyncJob>> {
 /// accepted, so a finished job is never resurrected.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] for an unknown or non-queued id and on SQLite
+/// Returns [`Error::Internal`] for an unknown or non-queued id and on `SQLite`
 /// failures.
 pub fn mark_sync_running(conn: &Connection, id: i64) -> Result<()> {
     let updated = conn
@@ -481,7 +481,7 @@ pub fn mark_sync_running(conn: &Connection, id: i64) -> Result<()> {
 ///
 /// # Errors
 /// Returns [`Error::Internal`] for an unknown or already finished id and on
-/// SQLite failures.
+/// `SQLite` failures.
 pub fn finish_sync_job(
     conn: &Connection,
     id: i64,
@@ -514,7 +514,7 @@ pub fn finish_sync_job(
 /// (their executor is gone); run once at daemon start.
 ///
 /// # Errors
-/// Returns [`Error::Internal`] on SQLite failures.
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn fail_orphan_sync_jobs(conn: &Connection) -> Result<usize> {
     conn.execute(
         "UPDATE sync_jobs SET state = ?1, finished_at = ?2, stats_json = ?3
