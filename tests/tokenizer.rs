@@ -116,6 +116,22 @@ fn offsets_match_text() {
 }
 
 #[test]
+fn punctuation_wrapped_identifier_keeps_clean_token() {
+    // Backticks/commas around an identifier must not hide its exact form:
+    // the query `assessment_plan_id` has to match `assessment_plan_id`.
+    let wrapped = tokens("`assessment_plan_id`,");
+    assert!(
+        wrapped.contains(&"assessment_plan_id".to_owned()),
+        "clean identifier token missing: {wrapped:?}"
+    );
+    let json = tokens("\"assessment_plan_id\":");
+    assert!(
+        json.contains(&"assessment_plan_id".to_owned()),
+        "clean identifier token missing: {json:?}"
+    );
+}
+
+#[test]
 fn positions_are_contiguous() {
     let text = "defineStore assessment_plan_id";
     let positions: Vec<usize> = token_list(text).into_iter().map(|t| t.position).collect();

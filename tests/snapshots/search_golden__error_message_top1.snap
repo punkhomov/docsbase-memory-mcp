@@ -1,0 +1,33 @@
+---
+source: tests/search_golden.rs
+expression: hits
+---
+[
+  {
+    "heading_path": "Sheet Metal Rules > Common errors",
+    "lines": [
+      5,
+      17
+    ],
+    "path": "cad/sheet-metal-rules.md",
+    "score": 67.44320678710938
+  },
+  {
+    "heading_path": "Thickness > Body and component rule thickness",
+    "lines": [
+      3,
+      6
+    ],
+    "path": "cad/thickness-glossary.md",
+    "score": 44.52811813354492
+  },
+  {
+    "heading_path": "Sheet Metal Rules > Diagnostics",
+    "lines": [
+      18,
+      21
+    ],
+    "path": "cad/sheet-metal-rules.md",
+    "score": 28.462812423706055
+  }
+]

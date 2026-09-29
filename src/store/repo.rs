@@ -181,6 +181,22 @@ pub fn replace_chunks(conn: &Connection, doc_id: i64, chunks: &[NewChunk<'_>]) -
     Ok(())
 }
 
+/// Deletes every document (chunks included) of `project`; used when the
+/// tantivy index was recreated after a schema upgrade and must be rebuilt
+/// from scratch (T27).
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn delete_project_docs(conn: &Connection, project_id: i64) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM chunks WHERE doc_id IN (SELECT id FROM docs WHERE project_id = ?1)",
+        [project_id],
+    )
+    .map_err(db_error)?;
+    conn.execute("DELETE FROM docs WHERE project_id = ?1", [project_id])
+        .map_err(db_error)
+}
+
 /// Deletes a document row; `chunks` rows follow via `ON DELETE CASCADE`.
 ///
 /// # Errors

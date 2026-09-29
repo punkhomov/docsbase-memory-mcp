@@ -4,7 +4,7 @@ use std::path::Path;
 use docsbase_memory::config::Config;
 use docsbase_memory::index::chunk::{Chunk, ChunkKind};
 use docsbase_memory::index::job::{JobStats, run_full};
-use docsbase_memory::index::tantivy_index::{Hit, IndexHandle};
+use docsbase_memory::index::tantivy_index::{Hit, IndexHandle, REBUILD_MARKER};
 use docsbase_memory::store::models::{Project, ProjectStatus};
 use docsbase_memory::store::{DB_FILE, Db};
 use rusqlite::Connection;
@@ -84,6 +84,71 @@ fn write_file(root: &Path, rel: &str, bytes: &[u8]) {
 
 const GUIDE: &str = "---\ntitle: Setup Guide\ntags: setup, guide\n---\n\n# Install\n\nRun the installer quickly.\n\n## Example\n\n```rust\nlet x = 1;\n```\n";
 const PLAIN: &str = "# Plain\n\nSome prose about widgets and gadgets.\n";
+
+fn legacy_schema_index(dir: &Path) {
+    use tantivy::Index;
+    use tantivy::schema::{
+        IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions,
+    };
+    let text = TextOptions::default().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer("default")
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+    );
+    let numeric = NumericOptions::default().set_stored().set_indexed();
+    let mut builder = Schema::builder();
+    builder.add_u64_field("chunk_id", numeric.clone());
+    builder.add_i64_field("doc_id", numeric);
+    builder.add_text_field("text", text.clone());
+    builder.add_text_field("title", text.clone());
+    builder.add_text_field("heading_path", text.clone());
+    builder.add_text_field("identifiers", text);
+    Index::create_in_dir(dir, builder.build()).expect("create legacy index");
+}
+
+#[test]
+fn legacy_schema_rebuild_repopulates_docs() {
+    let mut env = Env::new(&[
+        ("a.md", "# A\n\nalphawidget prose\n"),
+        ("b.md", "# B\n\nbetawidget prose\n"),
+    ]);
+    env.run();
+    assert_eq!(env.count("SELECT COUNT(*) FROM docs"), 2);
+    assert!(!env.search("alphawidget").is_empty(), "initial index");
+
+    // Simulate an index written by an older build (no `text_len` field).
+    let path = env.cache.path().join("projects/1/tantivy");
+    std::fs::remove_dir_all(&path).expect("remove index");
+    std::fs::create_dir_all(&path).expect("mkdir");
+    legacy_schema_index(&path);
+
+    let handle = IndexHandle::open_or_create(&path).expect("reopen");
+    assert!(handle.was_recreated());
+    // A crash before the rebuild must leave the durable marker behind.
+    drop(handle);
+    let handle = IndexHandle::open_or_create(&path).expect("reopen after crash");
+    assert!(
+        handle.was_recreated(),
+        "rebuild requirement must survive a crash"
+    );
+    env.index = handle;
+    env.run();
+    assert!(
+        !path.join(REBUILD_MARKER).exists(),
+        "marker cleared after a successful rebuild"
+    );
+
+    assert_eq!(
+        env.count("SELECT COUNT(*) FROM docs"),
+        2,
+        "doc ids must be recreated once"
+    );
+    assert!(
+        !env.search("alphawidget").is_empty(),
+        "upgraded index must be repopulated"
+    );
+    assert!(!env.search("betawidget").is_empty(), "second doc rebuilt");
+}
 
 #[test]
 fn fresh_corpus() {

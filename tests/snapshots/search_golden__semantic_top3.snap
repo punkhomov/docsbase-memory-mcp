@@ -1,0 +1,33 @@
+---
+source: tests/search_golden.rs
+expression: hits
+---
+[
+  {
+    "heading_path": "Authentication > Refreshing tokens",
+    "lines": [
+      5,
+      11
+    ],
+    "path": "auth/token-refresh.md",
+    "score": 56.18712615966797
+  },
+  {
+    "heading_path": "Authentication",
+    "lines": [
+      1,
+      4
+    ],
+    "path": "auth/token-refresh.md",
+    "score": 15.17506217956543
+  },
+  {
+    "heading_path": "Authentication > Revocation",
+    "lines": [
+      12,
+      14
+    ],
+    "path": "auth/token-refresh.md",
+    "score": 8.508451461791992
+  }
+]

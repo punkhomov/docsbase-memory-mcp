@@ -1,5 +1,7 @@
+use std::path::Path;
+
 use docsbase_memory::index::chunk::{Chunk, ChunkKind};
-use docsbase_memory::index::tantivy_index::{IndexHandle, chunk_id, chunk_id_parts};
+use docsbase_memory::index::tantivy_index::{IndexHandle, ReadIndex, chunk_id, chunk_id_parts};
 use tempfile::TempDir;
 
 fn chunk(doc_id: i64, seq: u32, heading: &str, text: &str) -> Chunk {
@@ -16,8 +18,78 @@ fn chunk(doc_id: i64, seq: u32, heading: &str, text: &str) -> Chunk {
 
 fn handle() -> (TempDir, IndexHandle) {
     let dir = TempDir::new().expect("tempdir");
-    let index = IndexHandle::open_or_create(dir.path()).expect("open");
+    let mut index = IndexHandle::open_or_create(dir.path()).expect("open");
+    // Unit tests populate the index directly, so the fresh-index rebuild
+    // marker must be cleared explicitly (production: `run_full` does it).
+    index.mark_rebuilt().expect("mark rebuilt");
     (dir, index)
+}
+
+fn legacy_schema_index(dir: &Path) {
+    use tantivy::Index;
+    use tantivy::schema::{
+        IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions,
+    };
+    let text = TextOptions::default().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer("default")
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+    );
+    let numeric = NumericOptions::default().set_stored().set_indexed();
+    let mut builder = Schema::builder();
+    builder.add_u64_field("chunk_id", numeric.clone());
+    builder.add_i64_field("doc_id", numeric);
+    builder.add_text_field("text", text.clone());
+    builder.add_text_field("title", text.clone());
+    builder.add_text_field("heading_path", text.clone());
+    builder.add_text_field("identifiers", text);
+    Index::create_in_dir(dir, builder.build()).expect("create legacy index");
+}
+
+#[test]
+fn legacy_schema_is_recreated_for_writes() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("tantivy");
+    std::fs::create_dir_all(&path).expect("mkdir");
+    legacy_schema_index(&path);
+
+    let mut index = IndexHandle::open_or_create(&path).expect("open");
+    assert!(index.was_recreated(), "stale schema must be replaced");
+    index
+        .add_chunks(&[chunk(1, 0, "T", "searchable prose")])
+        .expect("add");
+    index.commit().expect("commit");
+    assert!(
+        !index.search("searchable", 5).expect("search").is_empty(),
+        "recreated index must be usable"
+    );
+    let Err(err) = ReadIndex::open(&path) else {
+        panic!("reads must refuse an index awaiting rebuild");
+    };
+    assert!(err.to_string().contains("rebuild"), "message: {err}");
+    index.mark_rebuilt().expect("mark rebuilt");
+    let reopened = ReadIndex::open(&path).expect("read-only open after rebuild");
+    assert!(
+        !reopened.search("searchable", 5).expect("search").is_empty(),
+        "rebuilt index must be readable"
+    );
+}
+
+#[test]
+fn legacy_schema_is_rejected_for_reads() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("tantivy");
+    std::fs::create_dir_all(&path).expect("mkdir");
+    legacy_schema_index(&path);
+
+    let Err(err) = ReadIndex::open(&path) else {
+        panic!("read-only open must refuse a legacy schema");
+    };
+    let text = err.to_string();
+    assert!(
+        text.contains("docsbase index"),
+        "instruction missing: {text}"
+    );
 }
 
 #[test]
@@ -120,6 +192,25 @@ fn exact_identifier_beats_prose() {
     assert_eq!(
         hits[0].doc_id, 2,
         "exact identifier must rank first: {hits:?}"
+    );
+}
+
+#[test]
+fn long_chunk_ranks_below_compact_match() {
+    let (_dir, mut index) = handle();
+    let long_text = "longwidget ".repeat(600);
+    index
+        .add_chunks(&[
+            chunk(1, 0, "Long", &long_text),
+            chunk(2, 0, "Short", "longwidget compact"),
+        ])
+        .expect("add");
+    index.commit().expect("commit");
+
+    let hits = index.search("longwidget", 2).expect("search");
+    assert_eq!(
+        hits[0].doc_id, 2,
+        "over-long chunk must be penalized: {hits:?}"
     );
 }
 

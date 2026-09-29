@@ -208,7 +208,9 @@ pub struct Project {
 2. Запрос токенизируется `IdentifierTokenizer`; строится `BooleanQuery` по полям
    `text^1.0`, `title^2.0`, `heading_path^1.5`, `identifiers^2.5`, BM25.
 3. Top-k → join с SQLite для citation (`path`, `heading_path`, `lines`).
-4. Ответ через IPC → MCP.
+4. Чанки длиннее `max_chunk_chars` получают штраф 0.5 до усечения top-k; поле
+   `title` — верхний заголовок документа, а не последний (T27).
+5. Ответ через IPC → MCP.
 
 ## 7. Dependencies + rationale
 

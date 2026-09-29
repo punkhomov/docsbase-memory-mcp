@@ -64,6 +64,16 @@ pub fn run_full(
     project: &Project,
     config: &Config,
 ) -> Result<JobStats> {
+    if index.was_recreated() {
+        // The index was rebuilt from an upgraded schema: SQLite rows still
+        // describe the previous index, so every document must be re-added
+        // instead of being skipped as unchanged (T27).
+        let dropped = repo::delete_project_docs(db.connection(), project.id)?;
+        eprintln!(
+            "index schema upgraded for project {}; reindexing {dropped} document(s)",
+            project.id
+        );
+    }
     let existing = repo::doc_states(db.connection(), project.id)?;
     let by_path: HashMap<&str, &DocState> = existing
         .iter()
@@ -132,6 +142,9 @@ pub fn run_full(
     }
 
     finish_plan(db, index, project.id, &mut plan, &removed, &mut stats)?;
+    if index.was_recreated() {
+        index.mark_rebuilt()?;
+    }
     Ok(stats)
 }
 
@@ -166,6 +179,11 @@ pub fn run_incremental_with(
     changed: &[PathBuf],
     config: &Config,
 ) -> Result<JobStats> {
+    if index.was_recreated() {
+        // Incremental batches cannot repopulate a freshly recreated index;
+        // rebuild everything under the same writer lease instead (T27).
+        return run_full(db, index, project, config);
+    }
     let existing = repo::doc_states(db.connection(), project.id)?;
     let by_path: HashMap<&str, &DocState> = existing
         .iter()
@@ -258,6 +276,9 @@ pub fn run_incremental_with(
     removed.retain(|state| !planned_ids.contains(&state.id) && !still_present.contains(&state.id));
 
     finish_plan(db, index, project.id, &mut plan, &removed, &mut stats)?;
+    if index.was_recreated() {
+        index.mark_rebuilt()?;
+    }
     Ok(stats)
 }
 

@@ -89,6 +89,24 @@ fn tokenize(text: &str) -> Vec<Token> {
             &mut position,
         );
 
+        // Emit the identifier with surrounding punctuation stripped so that
+        // `` `assessment_plan_id`, `` still carries the exact identifier token
+        // (FR-21); only spans made purely of alphanumerics/underscores count.
+        if let Some((from, to)) = identifier_span(raw)
+            && (from > 0 || to < raw.len())
+        {
+            let trimmed = &raw[from..to];
+            let trimmed_lower = trimmed.to_lowercase();
+            emit(
+                &mut tokens,
+                &mut emitted,
+                &trimmed_lower,
+                offset + from,
+                offset + to,
+                &mut position,
+            );
+        }
+
         for (part_from, part_to) in alnum_runs(raw) {
             let part = &raw[part_from..part_to];
             let part_lower = part.to_lowercase();
@@ -152,6 +170,25 @@ fn raw_segments(text: &str) -> Vec<(usize, &str)> {
         segments.push((from, &text[from..]));
     }
     segments
+}
+
+/// Byte span of `raw` once leading/trailing punctuation is stripped, when
+/// every character inside the span is alphanumeric or `_`; `None` when the
+/// segment is empty or contains punctuation in the middle (`PA.data`).
+fn identifier_span(raw: &str) -> Option<(usize, usize)> {
+    let is_ident = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let mut first: Option<usize> = None;
+    let mut last = 0;
+    for (index, ch) in raw.char_indices() {
+        if is_ident(ch) {
+            if first.is_none() {
+                first = Some(index);
+            }
+            last = index + ch.len_utf8();
+        }
+    }
+    let (from, to) = (first?, last);
+    raw[from..to].chars().all(is_ident).then_some((from, to))
 }
 
 fn alnum_runs(raw: &str) -> Vec<(usize, usize)> {

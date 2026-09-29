@@ -1,0 +1,33 @@
+---
+source: tests/search_golden.rs
+expression: hits
+---
+[
+  {
+    "heading_path": "Pinia Stores > Setup store syntax",
+    "lines": [
+      5,
+      19
+    ],
+    "path": "frontend/pinia-setup-stores.md",
+    "score": 68.19570922851563
+  },
+  {
+    "heading_path": "Store Setup > Options",
+    "lines": [
+      7,
+      9
+    ],
+    "path": "frontend/store-setup-guide.md",
+    "score": 21.8886775970459
+  },
+  {
+    "heading_path": "Store Setup > Store setup syntax",
+    "lines": [
+      3,
+      6
+    ],
+    "path": "frontend/store-setup-guide.md",
+    "score": 19.44947052001953
+  }
+]

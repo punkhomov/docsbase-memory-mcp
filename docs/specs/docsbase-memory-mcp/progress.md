@@ -153,3 +153,8 @@ Task 26: Ruling: невалидный global config на старте не ро�
 Task 26: fix rounds по ревью: watcher получает сменяемый config-slot (`Watchers::revise`) вместо рестарта (не плодит notify/threads, не флашит pending-батчи в writer-lease), `IndexFilter.dirs` сбрасывается при смене конфига, stamp global-файла снимается до загрузки
 Task 26: minor (deferred): filter/runner не атомарны по конфигу (runner игноры не применяет); stamp false-positive при гонке записи во время старта
 Task 26: complete (tests: config_runtime 5, всего 190, clippy clean, fmt clean; review 2 fix rounds → verified PASS)
+Task 27: Ruling: токенизатор дополнительно эмитит identifier-токен без обрамляющей пунктуации (`assessment_plan_id`), иначе exact-запрос становится phrase и не матчится (FR-21, SC-1)
+Task 27: Ruling: поле `title` = верхний заголовок документа (heading_path.first()), согласовано с SQLite `docs.title`; штраф 0.5 на чанки > max_chunk_chars применяется до усечения top-k (over-fetch limit*4+16), `text_len` в байтах (как границы chunker)
+Task 27: Ruling: смена tantivy-схемы — durable `docsbase.rebuild` маркер (пишется до create_in_dir), пересоздание индекса + wipe docs/chunks + полный reindex; ReadIndex отказывает по маркеру; fallback incremental→full у watcher
+Task 27: minor (deferred): frontmatter title не индексируется; огромный `limit` без clamp на границе MCP; corrupt meta.json не восстанавливается; fsync маркера/meta на power-loss
+Task 27: complete (tests: search_golden 4, tokenizer 14, tantivy_index 11, index_job 11, всего 199, clippy clean, fmt clean; review 3 fix rounds → verified PASS)

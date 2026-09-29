@@ -1,0 +1,15 @@
+---
+source: tests/search_golden.rs
+expression: hits
+---
+[
+  {
+    "heading_path": "Assessment Plan API > Identifiers",
+    "lines": [
+      5,
+      18
+    ],
+    "path": "backend/assessment-plan-api.md",
+    "score": 46.73659133911133
+  }
+]
