@@ -230,3 +230,7 @@ Task 40: Ruling: локальная проверка Windows окна — пол
 Task 40: fix round по ревью: ADR-10/§7 уточнили, что windows-sys даёт и флаги detach (std их не экспортирует); doc `windows.rs` в present tense; boundary-самотест пинит windows-API образец (`use windows_sys::...::OpenProcess`)
 Task 40: minor (deferred): OpenProcess с EACCES на живом процессе трактуется как «мёртвый» (stale-cleanup при несовпадении прав); на Windows нет I/O-таймаутов (см. T39)
 Task 40: complete (tests: platform_process 7 (Linux) + boundary 2, всего 236, Linux clippy clean, windows-gnu clippy/check lib+bins и platform-тесты clean, fmt clean; review PASS/APPROVED → minors applied)
+Task 41: Ruling: Windows-containment — `is_under` сравнивает fold-ключи (`windows_key` + `key_under`: равенство или граница сегмента, base с хвостовым `/` учтён); `is_filesystem_root` = `has_root() && parent().is_none()` (Unix `/`, диск-корни и UNC на Windows); отказ `$HOME` теперь канонизирует его и сравнивает через `normalize_for_compare` (заодно закрыт symlink-HOME bypass на Linux)
+Task 41: fix round по ревью (minors): хвостовой разделитель в base, пустой/относительный путь не считается корнем; прямой тест диск-корня возможен только в Windows CI (T43)
+Task 41: minor (deferred): Windows-рантайм fold/roots проверяется только компиляцией до T43
+Task 41: complete (tests: platform::paths 5 + registry 7, всего 238, Linux clippy, windows-gnu clippy lib+bins и unit-test compile, fmt clean; review PASS/APPROVED → minors applied)

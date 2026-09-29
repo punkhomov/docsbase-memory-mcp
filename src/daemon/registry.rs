@@ -265,8 +265,15 @@ fn normalize_root(path: &Path, home: Option<&Path>, cache: &Path) -> Result<Path
     }
     let root = git_root(&canonical);
     let cache = cache.canonicalize().unwrap_or_else(|_| cache.to_path_buf());
-    let rejected = root == Path::new("/")
-        || home.is_some_and(|home| root == home)
+    // Canonicalize and fold so a symlinked/case-variant HOME is still refused
+    // (I7; ADR-10 for Windows verbatim paths).
+    let home = home.map(|home| home.canonicalize().unwrap_or_else(|_| home.to_path_buf()));
+    let home_is_root = home.as_deref().is_some_and(|home| {
+        crate::platform::paths::normalize_for_compare(&root)
+            == crate::platform::paths::normalize_for_compare(home)
+    });
+    let rejected = crate::platform::paths::is_filesystem_root(&root)
+        || home_is_root
         || crate::platform::paths::is_under(&root, &cache)
         || crate::platform::paths::is_under(&canonical, &cache);
     if rejected {
