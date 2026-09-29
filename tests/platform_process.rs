@@ -1,12 +1,15 @@
-//! Process/signals/permissions seam contract (ADR-9, T35).
+//! Process/signals/permissions seam contract (ADR-9/10, T35/T40).
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 
 use tempfile::TempDir;
 
 use docsbase_memory::platform::{self, fs as platform_fs, process};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+#[cfg(unix)]
 fn mode(path: &std::path::Path) -> u32 {
     fs::metadata(path).expect("metadata").permissions().mode() & 0o777
 }
@@ -19,6 +22,7 @@ fn alive_detects_self() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn alive_rejects_dead_pid() {
     let mut child = std::process::Command::new("sleep")
@@ -31,6 +35,16 @@ fn alive_rejects_dead_pid() {
     assert!(!process::process_alive(pid), "reaped pid must be dead");
 }
 
+#[cfg(windows)]
+#[test]
+fn alive_rejects_dead_pid() {
+    assert!(
+        !process::process_alive(u32::MAX),
+        "unknown pid must be dead"
+    );
+}
+
+#[cfg(unix)]
 #[test]
 fn private_log_is_0600() {
     let dir = TempDir::new().expect("tempdir");
@@ -48,6 +62,20 @@ fn private_log_is_0600() {
     assert_eq!(mode(&logs.join("daemon.log")), 0o600, "tightened again");
 }
 
+#[cfg(windows)]
+#[test]
+fn private_log_opens_on_windows() {
+    let dir = TempDir::new().expect("tempdir");
+    let logs = dir.path().join("logs");
+    platform_fs::secure_dir(&logs).expect("secure dir");
+    let file = platform_fs::open_private_log(&logs.join("daemon.log")).expect("log");
+    drop(file);
+    let file = platform_fs::open_private_log(&logs.join("daemon.log")).expect("reopen");
+    drop(file);
+    assert!(logs.join("daemon.log").is_file(), "log file exists");
+}
+
+#[cfg(unix)]
 #[test]
 fn secure_file_and_executable_modes() {
     let dir = TempDir::new().expect("tempdir");
@@ -62,12 +90,32 @@ fn secure_file_and_executable_modes() {
     assert_eq!(mode(&binary), 0o755);
 }
 
+#[cfg(windows)]
+#[test]
+fn secure_helpers_are_best_effort_on_windows() {
+    let dir = TempDir::new().expect("tempdir");
+    let file = dir.path().join("plain");
+    fs::write(&file, b"x").expect("write");
+    platform_fs::secure_file(&file).expect("no-op");
+    platform_fs::secure_executable(&file).expect("no-op");
+    assert!(file.is_file(), "file survives the no-op");
+}
+
+#[cfg(unix)]
 #[test]
 fn counts_are_positive() {
     assert!(process::fd_count() > 0, "fd count");
     assert!(process::thread_count() > 0, "thread count");
 }
 
+#[cfg(windows)]
+#[test]
+fn counts_are_zero_on_windows() {
+    assert_eq!(process::fd_count(), 0, "fd counter degrades to 0");
+    assert_eq!(process::thread_count(), 0, "thread counter degrades to 0");
+}
+
+#[cfg(unix)]
 #[test]
 fn detach_sets_own_process_group() {
     let mut command = std::process::Command::new("sleep");
@@ -87,6 +135,20 @@ fn detach_sets_own_process_group() {
         child.id(),
         "detach must place the child in its own group"
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn detach_spawns_a_detached_process() {
+    let mut command = std::process::Command::new("cmd");
+    command.args(["/C", "exit 0"]);
+    process::detach(&mut command);
+    let status = command
+        .spawn()
+        .expect("spawn detached")
+        .wait()
+        .expect("wait");
+    assert!(status.success(), "detached child must run: {status:?}");
 }
 
 #[test]

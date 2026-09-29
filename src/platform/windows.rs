@@ -1,12 +1,15 @@
 //! Windows x64 backend of the platform seam (ADR-10, T39–T41).
 //!
 //! Transport is built on the `interprocess` crate's local sockets (named
-//! pipes); signals/process/permissions land in T40 (ADR-10). Behavior mirrors
-//! the Unix backend: byte-stream NDJSON, blocking client, async server.
+//! pipes); signals, process liveness and permissions complete the backend
+//! (ADR-10). Behavior mirrors the Unix backend: byte-stream NDJSON, blocking
+//! client, async server.
 
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::pin::Pin;
+use std::process::Command;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -18,6 +21,12 @@ use interprocess::local_socket::{
     ListenerOptions, Name, Stream as SyncStream, ToNsName as _,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::signal::windows::{CtrlC, CtrlClose, ctrl_c, ctrl_close};
+use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+use windows_sys::Win32::System::Threading::{
+    CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS, GetExitCodeProcess, OpenProcess,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 use super::Endpoint;
 
@@ -239,4 +248,104 @@ pub fn exists(endpoint: &Endpoint) -> bool {
 /// Never fails today; the signature mirrors the Unix backend.
 pub fn remove(_endpoint: &Endpoint) -> io::Result<()> {
     Ok(())
+}
+
+/// Terminates the daemon's accept loop on `CTRL_C` or a console close event
+/// (equivalent of the Unix SIGTERM/SIGINT pair; ADR-10).
+pub struct ShutdownSignal {
+    ctrl_c: CtrlC,
+    ctrl_close: CtrlClose,
+}
+
+impl ShutdownSignal {
+    /// Installs both handlers (must be called inside a Tokio runtime).
+    ///
+    /// # Errors
+    /// Returns the raw IO error when a handler cannot be installed.
+    pub fn new() -> io::Result<Self> {
+        Ok(Self {
+            ctrl_c: ctrl_c()?,
+            ctrl_close: ctrl_close()?,
+        })
+    }
+
+    /// Resolves when `CTRL_C` or a console close event arrives.
+    pub async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.ctrl_c.recv() => {}
+            _ = self.ctrl_close.recv() => {}
+        }
+    }
+}
+
+/// True while `pid` exists and has not exited (ADR-10).
+#[allow(unsafe_code)] // windows-sys FFI: SAFETY comments on each block
+#[must_use]
+pub fn process_alive(pid: u32) -> bool {
+    // SAFETY: OpenProcess only queries the kernel; an unknown pid yields NULL.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    let mut code = 0_u32;
+    // SAFETY: `handle` is a valid process handle returned by OpenProcess.
+    let ok = unsafe { GetExitCodeProcess(handle, std::ptr::from_mut(&mut code)) };
+    // SAFETY: `handle` is still valid and unused after this call.
+    unsafe { CloseHandle(handle) };
+    ok != 0 && code == STILL_ACTIVE as u32
+}
+
+/// Open file descriptors are not exposed as a cheap counter on Windows
+/// (ADR-10): reported as 0 like the kernel-independent Unix fallback.
+#[must_use]
+pub fn fd_count() -> u64 {
+    0
+}
+
+/// OS thread count is not exposed as a cheap counter on Windows (ADR-10):
+/// reported as 0 like the kernel-independent Unix fallback.
+#[must_use]
+pub fn thread_count() -> u64 {
+    0
+}
+
+/// Detaches the child into its own process group without a console window
+/// (ADR-10), mirroring `process_group(0)` on Unix.
+pub fn detach(command: &mut Command) {
+    use std::os::windows::process::CommandExt as _;
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+}
+
+/// Creates `dir` (and parents); privacy comes from `%LOCALAPPDATA%` ACLs
+/// (ADR-10), so no chmod-style step is attempted.
+///
+/// # Errors
+/// Returns the raw IO error when creation fails.
+pub fn secure_dir(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)
+}
+
+/// No chmod equivalent on Windows (ADR-10): best-effort no-op.
+///
+/// # Errors
+/// Never fails today; the signature mirrors the Unix backend.
+pub fn secure_file(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// No chmod equivalent on Windows (ADR-10): best-effort no-op.
+///
+/// # Errors
+/// Never fails today; the signature mirrors the Unix backend.
+pub fn secure_executable(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Opens (creating if needed) an append-only diagnostics log (ADR-10); file
+/// privacy relies on the containing `%LOCALAPPDATA%` ACLs.
+///
+/// # Errors
+/// Returns the raw IO error when the file cannot be opened.
+pub fn open_private_log(path: &Path) -> io::Result<File> {
+    OpenOptions::new().create(true).append(true).open(path)
 }

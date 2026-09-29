@@ -249,7 +249,7 @@ pub struct Project {
 | `thiserror`, `anyhow` | таксономия ошибок | constitution |
 | (без крейта) файловый лог `logs/daemon.log` 0600 + `logs/conflicts.ndjson` | диагностика и admission-конфликты | NFR-8 |
 | `interprocess` (`cfg(windows)`, feature `tokio`) | local sockets: daemon-транспорт на Windows | FR-33, ADR-10 |
-| `windows-sys` (`cfg(windows)`, `Win32_System_Threading`, `Win32_Foundation`) | `process_alive` (OpenProcess/GetExitCodeProcess) | ADR-10 |
+| `windows-sys` (`cfg(windows)`, `Win32_System_Threading`, `Win32_Foundation`) | `process_alive` (OpenProcess/GetExitCodeProcess) и флаги `detach` (std не экспортирует `CREATE_*`) | ADR-10 |
 | dev: `tempfile`, `assert_cmd`, `insta`, `criterion` | интеграционные, golden и perf-тесты (T27, T30) | NFR-1, NFR-7 |
 
 **Точечные альтернативы:** вместо `serde_yaml` — минимальный flat-парсер frontmatter
@@ -370,7 +370,8 @@ vs named pipes — новый крейт), замена запущенного �
 
 **ADR-10. Windows backend: local sockets через `interprocess` (T38…T43).**
 Выбрано: `src/platform/windows.rs` использует крейт **`interprocess`** (feature `tokio`)
-как local-socket транспорт (named pipes), а `windows-sys` — только для `process_alive`.
+как local-socket транспорт (named pipes), а `windows-sys` — для `process_alive` и
+флагов `detach` (std экспортирует `creation_flags`, но не сами `CREATE_*`).
 Рассматривали: (a) tokio named pipes + `std File` без крейта — дешевле по зависимостям,
 но ручная ротация pipe-инстансов и собственный blocking-listener для тестов;
 (b) `interprocess` — выбрано: blocking/tokio listener из коробки, единая обработка краёв,

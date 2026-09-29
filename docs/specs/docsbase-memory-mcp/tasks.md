@@ -631,7 +631,7 @@ best-effort no-op (документировано)
 **RED:** Windows-ветки тестов компилируются только в CI; на Linux добавляется
 `platform_process::windows_only_api_is_seam_bound` (boundary) — падает до паттернов
 **GREEN:** Windows-реализация; Linux (`/proc`, `chmod`, `SignalKind`) не меняется
-**Verify:** Linux: `cargo test --locked --test platform_process --test platform_boundary && cargo test --locked`; Windows CI: `cargo test --locked`
+**Verify:** Linux: `cargo test --locked --test platform_process --test platform_boundary && cargo test --locked`; локальный кросс-чек: `cargo check --locked --target x86_64-pc-windows-gnu --lib --bins` (тесты — T42/T43); Windows CI: `cargo test --locked`
 **Acceptance:** stop/grace/cleanup работают через pipe+ctrl-события; `secure_*` на Windows
 не падают и не ослабляют `%LOCALAPPDATA%`; счётчики остаются `u64` (0).
 

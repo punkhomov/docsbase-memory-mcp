@@ -98,6 +98,10 @@ fn scanner_catches_grouped_and_multiline_imports() {
             "sorted_group",
             "use tokio::net::{TcpListener, UnixListener};\n",
         ),
+        (
+            "windows_api",
+            "use windows_sys::Win32::System::Threading::OpenProcess;\n",
+        ),
         ("multiline", "use tokio::net::{\n    UnixListener,\n};\n"),
         ("aliased", "use tokio::net as local_net;\n"),
     ];

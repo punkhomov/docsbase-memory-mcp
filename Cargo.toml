@@ -61,3 +61,4 @@ harness = false
 
 [target."cfg(windows)".dependencies]
 interprocess = { version = "2.4.4", features = ["tokio"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_Threading", "Win32_Foundation"] }
