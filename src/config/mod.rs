@@ -73,25 +73,64 @@ impl Config {
         Self::load_from(&paths::config_dir()?, project_root)
     }
 
+    /// Loads the global config only (read once at daemon start, OQ-6).
+    ///
+    /// # Errors
+    /// Returns [`Error::Internal`] when the config directory cannot be
+    /// determined or the file exists but cannot be read or parsed, and
+    /// [`Error::Admission`] when a limit is zero.
+    pub fn global() -> Result<Self> {
+        Self::global_from(&paths::config_dir()?)
+    }
+
+    /// Same as [`Config::global`] but with an explicit config directory.
+    ///
+    /// # Errors
+    /// Returns [`Error::Internal`] when the file exists but cannot be read or
+    /// parsed, and [`Error::Admission`] when a limit is zero.
+    pub fn global_from(config_dir: &Path) -> Result<Self> {
+        let mut config = Config::default();
+        let global = config_dir.join("config.toml");
+        if global.exists() {
+            config.apply(read_file(&global)?);
+        }
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Layers the project config on top of a global snapshot (read when the
+    /// project is opened, OQ-6).
+    ///
+    /// # Errors
+    /// Returns [`Error::Internal`] when the project file exists but cannot be
+    /// read or parsed, and [`Error::Admission`] when a limit is zero.
+    pub fn for_project(global: &Config, root: &Path) -> Result<Self> {
+        let mut config = global.clone();
+        config.apply_project(root)?;
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Same as [`Config::load`] but with an explicit config directory (testable).
     ///
     /// # Errors
     /// Returns [`Error::Internal`] when a config file exists but cannot be read
     /// or parsed, and [`Error::Admission`] when a limit is zero.
     pub fn load_from(config_dir: &Path, project_root: Option<&Path>) -> Result<Self> {
-        let mut config = Config::default();
-        let global = config_dir.join("config.toml");
-        if global.exists() {
-            config.apply(read_file(&global)?);
-        }
+        let mut config = Self::global_from(config_dir)?;
         if let Some(root) = project_root {
-            let project = root.join(".docsbase.toml");
-            if project.exists() {
-                config.apply(read_file(&project)?);
-            }
+            config.apply_project(root)?;
         }
         config.validate()?;
         Ok(config)
+    }
+
+    fn apply_project(&mut self, root: &Path) -> Result<()> {
+        let project = root.join(".docsbase.toml");
+        if project.exists() {
+            self.apply(read_file(&project)?);
+        }
+        Ok(())
     }
 
     /// Applies CLI overrides on top of the merged configuration.

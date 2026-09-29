@@ -87,7 +87,12 @@ pub fn list_projects(db: &Db) -> Result<Value> {
 ///
 /// # Errors
 /// Returns [`Error::Internal`] on SQLite failures.
-pub fn status(db: &Db, stats: &Stats, watchers: u64) -> Result<Value> {
+pub fn status(
+    db: &Db,
+    stats: &Stats,
+    watchers: u64,
+    restart_notice: Option<&str>,
+) -> Result<Value> {
     let mut projects = Vec::new();
     for project in registry::list_projects(db)? {
         projects.push(project_entry(db, &project)?);
@@ -105,6 +110,8 @@ pub fn status(db: &Db, stats: &Stats, watchers: u64) -> Result<Value> {
         "threads": stats.threads,
         "watchers": watchers,
         "hint": hint,
+        "restart_required": restart_notice.is_some(),
+        "notice": restart_notice,
     }))
 }
 
@@ -152,18 +159,21 @@ pub fn enqueue_sync(db: &Db, project: &Project) -> Result<(i64, bool)> {
 ///
 /// # Errors
 /// Propagates setup and indexing errors after persisting them.
-pub fn execute_sync_job(cache: &Path, job_id: i64, project_id: i64) -> Result<Project> {
+pub fn execute_sync_job(
+    cache: &Path,
+    job_id: i64,
+    project_id: i64,
+    config: &Config,
+) -> Result<Project> {
     let mut db = Db::open(cache)?;
-    let setup = (|| -> Result<(Project, Config)> {
-        let project = registry::project_by_id(&db, project_id)?.ok_or_else(|| Error::Project {
+    let setup = (|| -> Result<Project> {
+        registry::project_by_id(&db, project_id)?.ok_or_else(|| Error::Project {
             message: format!("project {project_id} disappeared from the registry"),
             instruction: None,
-        })?;
-        let config = Config::load(Some(&project.canonical_root))?;
-        Ok((project, config))
+        })
     })();
     let outcome = match setup {
-        Ok((project, config)) => run_sync_job_in(&mut db, cache, job_id, &project, &config),
+        Ok(project) => run_sync_job_in(&mut db, cache, job_id, &project, config),
         Err(err) => {
             let stats = json!({ "error": err.to_string() }).to_string();
             if let Err(record) =

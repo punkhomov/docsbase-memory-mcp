@@ -100,7 +100,10 @@ impl Env {
 
     fn watch_with(&self, cache: &Path) -> (WatcherGuard, Receiver<Vec<PathBuf>>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let guard = spawn_watcher(&self.project, cache, &self.config, tx).expect("spawn watcher");
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(
+            self.config.clone(),
+        )));
+        let guard = spawn_watcher(&self.project, cache, slot, tx).expect("spawn watcher");
         (guard, rx)
     }
 }

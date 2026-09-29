@@ -45,7 +45,9 @@ pub struct WatcherGuard {
 }
 
 /// Watches `project.canonical_root` and sends deduplicated batches of
-/// changed paths through `tx` (FR-15).
+/// changed paths through `tx` (FR-15). `config` is a swappable open-time
+/// configuration slot: reopens replace it without restarting the watcher
+/// (OQ-6).
 ///
 /// # Errors
 /// Returns [`Error::Internal`] when the notify backend cannot be created or
@@ -53,7 +55,7 @@ pub struct WatcherGuard {
 pub fn spawn_watcher(
     project: &Project,
     cache: &Path,
-    config: &Config,
+    config: Arc<Mutex<Arc<Config>>>,
     tx: Sender<Vec<PathBuf>>,
 ) -> Result<WatcherGuard> {
     let root = project.canonical_root.clone();
@@ -102,12 +104,21 @@ pub fn spawn_watcher(
     let project_id = project.id;
     let filter_root = root;
     let filter_cache = cache;
-    let filter_config = config.clone();
+    let initial = config
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
     let forwarder = std::thread::Builder::new()
         .name(format!("docsbase-debounce-{project_id}"))
         .spawn(move || {
-            let mut filter = IndexFilter::new(filter_root, filter_cache, &filter_config);
+            let mut filter = IndexFilter::new(filter_root, filter_cache, &initial);
+            drop(initial);
             while let Ok(first) = event_rx.recv() {
+                let batch_config = config
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                filter.set_config(&batch_config);
                 let deadline = Instant::now() + MAX_DEBOUNCE;
                 let mut raw = Batch::new();
                 raw.push(first);
@@ -171,6 +182,15 @@ struct IndexFilter {
 }
 
 impl IndexFilter {
+    /// Swaps the config after a reopen; cached directory verdicts were made
+    /// under the old ignores and must be dropped (OQ-6).
+    fn set_config(&mut self, config: &Config) {
+        if self.config != *config {
+            self.config = config.clone();
+            self.dirs.clear();
+        }
+    }
+
     fn new(root: PathBuf, cache: PathBuf, config: &Config) -> Self {
         Self {
             root,
@@ -284,6 +304,9 @@ fn expand_dir_inner(filter: &mut IndexFilter, batch: &mut Batch, dir: &Path, dep
 struct WatcherEntry {
     _guard: WatcherGuard,
     _consumer: std::thread::JoinHandle<()>,
+    /// Open-time config, swappable on reopen so batch filtering follows
+    /// `.docsbase.toml` edits without restarting notify/threads (OQ-6).
+    config: Arc<Mutex<Arc<Config>>>,
 }
 
 /// Per-project watchers owned by the daemon (design §5).
@@ -306,11 +329,17 @@ impl Watchers {
     }
 
     /// Starts a watcher for `project` when it is indexed and not yet watched;
-    /// returns `true` when a new watcher was started.
+    /// returns `true` when a new watcher was started. `config` is the project
+    /// configuration as of open time (OQ-6).
     ///
     /// # Errors
-    /// Returns config/spawn errors; a failed start is not fatal to callers.
-    pub fn ensure(self: &Arc<Self>, cache: &Path, project: &Project) -> Result<bool> {
+    /// Returns spawn errors; a failed start is not fatal to callers.
+    pub fn ensure(
+        self: &Arc<Self>,
+        cache: &Path,
+        project: &Project,
+        config: Arc<Config>,
+    ) -> Result<bool> {
         if project.status != ProjectStatus::Indexed {
             return Ok(false);
         }
@@ -318,13 +347,13 @@ impl Watchers {
         if map.contains_key(&project.id) {
             return Ok(false);
         }
-        let config = Config::load(Some(&project.canonical_root))?;
         let (tx, rx) = std::sync::mpsc::channel();
-        let guard = spawn_watcher(project, cache, &config, tx)?;
+        let slot = Arc::new(Mutex::new(config));
+        let guard = spawn_watcher(project, cache, Arc::clone(&slot), tx)?;
         let consumer = spawn_consumer(
             cache.to_path_buf(),
             project.clone(),
-            config,
+            Arc::clone(&slot),
             rx,
             Arc::downgrade(self),
         )?;
@@ -333,28 +362,26 @@ impl Watchers {
             WatcherEntry {
                 _guard: guard,
                 _consumer: consumer,
+                config: slot,
             },
         );
         Ok(true)
     }
 
-    /// Starts watchers for every indexed project in the registry (daemon
-    /// startup); returns how many were started.
-    ///
-    /// # Errors
-    /// Returns [`Error::Internal`] when the registry cannot be listed.
-    pub fn start_registered(self: &Arc<Self>, cache: &Path, db: &Db) -> Result<usize> {
-        let mut started = 0;
-        for project in registry::list_projects(db)? {
-            match self.ensure(cache, &project) {
-                Ok(true) => started += 1,
-                Ok(false) => {}
-                Err(err) => {
-                    eprintln!("warning: cannot watch project {}: {err}", project.id);
-                }
+    /// Swaps the config an existing watcher filters with (OQ-6 reopen);
+    /// returns `false` when the project is not watched.
+    pub fn revise(&self, project_id: i64, config: Arc<Config>) -> bool {
+        let slot = self
+            .map()
+            .get(&project_id)
+            .map(|entry| Arc::clone(&entry.config));
+        match slot {
+            Some(slot) => {
+                *slot.lock().unwrap_or_else(PoisonError::into_inner) = config;
+                true
             }
+            None => false,
         }
-        Ok(started)
     }
 
     fn remove(&self, project_id: i64) {
@@ -369,7 +396,7 @@ impl Watchers {
 fn spawn_consumer(
     cache: PathBuf,
     project: Project,
-    config: Config,
+    config: Arc<Mutex<Arc<Config>>>,
     rx: Receiver<Vec<PathBuf>>,
     watchers: Weak<Watchers>,
 ) -> Result<std::thread::JoinHandle<()>> {
@@ -395,6 +422,12 @@ fn spawn_consumer(
                     pending.push(path);
                 }
                 loop {
+                    // Clone and release the slot: a reopen must not stall
+                    // behind a long incremental batch.
+                    let config = config
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone();
                     match run_batch(&mut db, &cache, &project, &config, &pending.paths) {
                         Ok(stats) => {
                             eprintln!(

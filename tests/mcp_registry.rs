@@ -464,23 +464,36 @@ fn malformed_config_does_not_stick_queued() {
     let mut bound = env.client();
     bound.handshake(env.root()).expect("bind session");
     fs::write(env.root().join(".docsbase.toml"), "not = [valid").expect("break config");
-    let err = bound
+
+    // Open sessions keep the config they opened with (OQ-6), so the running
+    // session is unaffected until the project is reopened.
+    let started = bound
         .call_tool("sync_start", json!({}))
-        .expect_err("broken config must fail sync_start");
+        .expect("cached open-time config");
+    let finished = wait_job_done(&mut bound, started["job_id"].as_i64().expect("job id"));
+    assert_eq!(finished["state"], "done", "job: {finished}");
+
+    // Reopening the project surfaces the parse error before any job exists.
+    let mut reopened = env.client();
+    let err = reopened
+        .handshake(env.root())
+        .expect_err("broken config must fail project open");
     assert!(
         matches!(err, docsbase_memory::error::Error::Internal { .. }),
         "unexpected error: {err}"
     );
 
     fs::remove_file(env.root().join(".docsbase.toml")).expect("fix config");
-    let started = bound
+    let mut fixed = env.client();
+    fixed.handshake(env.root()).expect("reopen after fix");
+    let started = fixed
         .call_tool("sync_start", json!({}))
         .expect("sync_start after fix");
     assert!(
         matches!(started["state"].as_str(), Some("queued" | "running")),
         "fresh job expected: {started}"
     );
-    let finished = wait_job_done(&mut bound, started["job_id"].as_i64().expect("job id"));
+    let finished = wait_job_done(&mut fixed, started["job_id"].as_i64().expect("job id"));
     assert_eq!(finished["state"], "done", "job: {finished}");
 }
 

@@ -52,7 +52,10 @@ pub fn status() -> anyhow::Result<()> {
     }
     let db = Db::open_readonly(&cache)?;
     // Direct mode has no daemon: sessions/fd/threads are not applicable.
-    let value = crate::daemon::tools::status(&db, &crate::daemon::session::Stats::default(), 0)?;
+    // Direct mode reloads the config every run, so there is no stale snapshot
+    // to warn about (OQ-6).
+    let value =
+        crate::daemon::tools::status(&db, &crate::daemon::session::Stats::default(), 0, None)?;
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
