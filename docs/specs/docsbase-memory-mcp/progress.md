@@ -204,3 +204,7 @@ Task 35: Ruling: process/signals/perms за фасадом — `ShutdownSignal` 
 Task 35: fix (minor): `secure_dir` создаёт каталог сразу с mode 0700 (DirBuilder) и затем chmod — без окна world-readable; `open_private_log` идемпотентно ужесточает существующие логи (chmod-ошибка теперь warning в conflict::record, NFR-5)
 Task 35: minor (deferred): тесты counts_are_positive/detach требуют /proc (Linux-only по A2); семантика без /proc — alive=true, counters=0 (как раньше)
 Task 35: complete (tests: platform_process 7 + platform_boundary 2, всего 227, clippy clean nightly+1.88, fmt clean; review PASS/APPROVED → minor fix applied)
+Task 36: Ruling: семантика путей за фасадом — `platform::paths::{home_dir (directories::BaseDirs), is_under (компонентный starts_with), normalize_for_compare (identity на Unix, fold регистра/слэшей на Windows)}`; `$HOME` больше не читается вне paths.rs (boundary-паттерны `var_os("HOME")`/`var("HOME")`/`env!("HOME")`), `is_under` проведён через registry/tools/watch/admission, `normalize_for_compare` — в root_mismatch
+Task 36: fix (minor hardening): `walk::resolve_in_root` тоже переведён на `is_under`; boundary-паттерн HOME уточнён до трёх конкретных форм (без ложных срабатываний на комментарии)
+Task 36: minor (deferred): `home_dir_available` зависит от resolvable HOME; Windows-рантайм `windows_key`/BaseDirs не проверяется на Linux (только чистая функция)
+Task 36: complete (tests: platform::paths 3 + boundary 2, всего 230, clippy clean nightly+1.88, fmt clean; review PASS/APPROVED → minors applied)

@@ -149,7 +149,7 @@ pub fn get_doc(project: &Project, args: &Value) -> Result<Value> {
         message: format!("cannot open {raw:?}: {err}"),
         instruction: Some("check the path exists inside the project root".to_owned()),
     })?;
-    if !canonical.starts_with(&project.canonical_root) {
+    if !crate::platform::paths::is_under(&canonical, &project.canonical_root) {
         return Err(outside_root());
     }
     if !canonical.is_file() {

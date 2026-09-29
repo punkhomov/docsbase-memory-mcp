@@ -166,7 +166,7 @@ pub fn resolve_in_root(root: &Path, path: &Path) -> Result<PathBuf> {
         message: format!("canonicalize {}: {err}", candidate.display()),
         instruction: None,
     })?;
-    if !resolved.starts_with(&root) {
+    if !crate::platform::paths::is_under(&resolved, &root) {
         return Err(Error::Project {
             message: format!("{} escapes root {}", resolved.display(), root.display()),
             instruction: None,

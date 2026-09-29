@@ -85,8 +85,9 @@ impl Lease {
         };
 
         if let Some(state) = lifecycle::read_state(cache)? {
-            let expected_root = normalized(cache);
-            let recorded_root = normalized(&state.cache_root);
+            let expected_root = crate::platform::paths::normalize_for_compare(&normalized(cache));
+            let recorded_root =
+                crate::platform::paths::normalize_for_compare(&normalized(&state.cache_root));
             let mismatch: Option<(&str, String, String)> = if state.build_id != build_id {
                 Some((
                     "build_mismatch",
@@ -100,11 +101,7 @@ impl Lease {
                     state.schema_version.to_string(),
                 ))
             } else if recorded_root != expected_root {
-                Some((
-                    "root_mismatch",
-                    expected_root.display().to_string(),
-                    recorded_root.display().to_string(),
-                ))
+                Some(("root_mismatch", expected_root, recorded_root))
             } else {
                 None
             };

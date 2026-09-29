@@ -19,7 +19,7 @@ use crate::store::repo::db_error;
 /// Returns [`Error::Project`] when the path is missing, not a directory, or
 /// resolves to `/`, `$HOME` or the cache root (I7).
 pub fn ensure_project(db: &mut Db, path: &Path) -> Result<Project> {
-    let home = home_dir();
+    let home = crate::platform::paths::home_dir();
     let canonical_root = normalize_root(path, home.as_deref(), db.cache_root())?;
     if let Some(project) = find_by_root(db.connection(), &canonical_root)? {
         return Ok(project);
@@ -160,7 +160,7 @@ pub fn resolve_by_cwd(db: &Db, cwd: &Path) -> Result<Project> {
     })?;
     list_projects(db)?
         .into_iter()
-        .filter(|project| canonical.starts_with(&project.canonical_root))
+        .filter(|project| crate::platform::paths::is_under(&canonical, &project.canonical_root))
         .max_by_key(|project| project.canonical_root.components().count())
         .ok_or_else(|| Error::Project {
             message: format!("no project registered for {}", canonical.display()),
@@ -243,7 +243,7 @@ fn to_project(row: Row) -> Result<Project> {
 /// # Errors
 /// Same as [`ensure_project`].
 pub fn project_root_for(path: &Path, cache: &Path) -> Result<PathBuf> {
-    normalize_root(path, home_dir().as_deref(), cache)
+    normalize_root(path, crate::platform::paths::home_dir().as_deref(), cache)
 }
 
 fn normalize_root(path: &Path, home: Option<&Path>, cache: &Path) -> Result<PathBuf> {
@@ -267,8 +267,8 @@ fn normalize_root(path: &Path, home: Option<&Path>, cache: &Path) -> Result<Path
     let cache = cache.canonicalize().unwrap_or_else(|_| cache.to_path_buf());
     let rejected = root == Path::new("/")
         || home.is_some_and(|home| root == home)
-        || root == cache
-        || canonical.starts_with(&cache);
+        || crate::platform::paths::is_under(&root, &cache)
+        || crate::platform::paths::is_under(&canonical, &cache);
     if rejected {
         return Err(Error::Project {
             message: format!(
@@ -290,10 +290,6 @@ fn git_root(canonical: &Path) -> PathBuf {
         current = dir.parent();
     }
     canonical.to_path_buf()
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 fn unix_now() -> i64 {
