@@ -3,13 +3,18 @@
 //! Everything here is a thin delegation to `std`/`tokio` Unix primitives;
 //! behavior (framing, timeouts, backlog) is unchanged from the pre-seam code.
 
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::pin::Pin;
+use std::process::Command;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::signal::unix::{Signal, SignalKind};
 
 use super::Endpoint;
 
@@ -192,4 +197,114 @@ pub fn connect_blocking(endpoint: &Endpoint) -> io::Result<BlockingStream> {
 #[must_use]
 pub fn connect_probe(endpoint: &Endpoint) -> bool {
     UnixStream::connect(endpoint.as_path()).is_ok()
+}
+
+/// Terminates the daemon's accept loop on SIGTERM or SIGINT.
+pub struct ShutdownSignal {
+    sigterm: Signal,
+    sigint: Signal,
+}
+
+impl ShutdownSignal {
+    /// Installs both handlers (must be called inside a Tokio runtime).
+    ///
+    /// # Errors
+    /// Returns the raw IO error when a handler cannot be installed.
+    pub fn new() -> io::Result<Self> {
+        Ok(Self {
+            sigterm: tokio::signal::unix::signal(SignalKind::terminate())?,
+            sigint: tokio::signal::unix::signal(SignalKind::interrupt())?,
+        })
+    }
+
+    /// Resolves when SIGTERM or SIGINT arrives.
+    pub async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.sigterm.recv() => {}
+            _ = self.sigint.recv() => {}
+        }
+    }
+}
+
+/// True while `pid` exists and is not a zombie (Linux `/proc`; without
+/// `/proc` the process is assumed alive and other liveness checks decide).
+#[must_use]
+pub fn process_alive(pid: u32) -> bool {
+    if !Path::new("/proc").is_dir() {
+        return true;
+    }
+    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .is_some_and(|state| state != "Z")
+    })
+}
+
+/// Open file descriptors of this process (Linux `/proc`; 0 elsewhere).
+#[must_use]
+pub fn fd_count() -> u64 {
+    fs::read_dir("/proc/self/fd").map_or(0, |entries| {
+        u64::try_from(entries.count()).unwrap_or(u64::MAX)
+    })
+}
+
+/// OS threads of this process (Linux `/proc`; 0 elsewhere).
+#[must_use]
+pub fn thread_count() -> u64 {
+    fs::read_dir("/proc/self/task").map_or(0, |entries| {
+        u64::try_from(entries.count()).unwrap_or(u64::MAX)
+    })
+}
+
+/// Puts the child in its own process group so signals to the daemon's group
+/// do not hit unrelated processes (FR-2).
+pub fn detach(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+/// Creates `dir` (and parents) with owner-only `0700`, idempotently.
+///
+/// # Errors
+/// Returns the raw IO error when creation or chmod fails.
+pub fn secure_dir(dir: &Path) -> io::Result<()> {
+    if !dir.exists() {
+        // Create with the final mode so there is no world-readable window
+        // (umask may still mask bits; the chmod below corrects it).
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(dir)?;
+    }
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+}
+
+/// Restricts an existing path to `0600` (sockets, manifests, logs).
+///
+/// # Errors
+/// Returns the raw IO error when chmod fails.
+pub fn secure_file(path: &Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+/// Marks an existing path executable as `0755` (installed binary).
+///
+/// # Errors
+/// Returns the raw IO error when chmod fails.
+pub fn secure_executable(path: &Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+}
+
+/// Opens (creating if needed) a `0600` append-only log file; pre-existing
+/// files are tightened too (`mode` only applies at creation).
+///
+/// # Errors
+/// Returns the raw IO error when the file cannot be opened or chmod'ed.
+pub fn open_private_log(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
 }

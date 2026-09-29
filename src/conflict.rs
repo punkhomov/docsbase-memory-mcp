@@ -4,9 +4,7 @@
 //! Records never contain document content — only paths, versions and pids
 //! (NFR-5).
 
-use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -49,9 +47,8 @@ pub fn record(cache: &Path, conflict: &Conflict<'_>) {
 
 fn append(cache: &Path, conflict: &Conflict<'_>) -> Result<()> {
     let dir = cache.join("logs");
-    fs::create_dir_all(&dir).map_err(|err| Error::internal_with_source("create logs dir", err))?;
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
-        .map_err(|err| Error::internal_with_source("chmod 0700 logs dir", err))?;
+    crate::platform::fs::secure_dir(&dir)
+        .map_err(|err| Error::internal_with_source("create logs dir", err))?;
     let mut line = serde_json::to_vec(&ConflictLine {
         ts: unix_now(),
         kind: conflict.kind.to_owned(),
@@ -67,14 +64,8 @@ fn append(cache: &Path, conflict: &Conflict<'_>) -> Result<()> {
     })
     .map_err(|err| Error::internal_with_source("serialize conflict", err))?;
     line.push(b'\n');
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(dir.join("conflicts.ndjson"))
+    let mut file = crate::platform::fs::open_private_log(&dir.join("conflicts.ndjson"))
         .map_err(|err| Error::internal_with_source("open conflicts log", err))?;
-    // `mode` only applies at creation; tighten pre-existing files too.
-    let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
     file.write_all(&line)
         .map_err(|err| Error::internal_with_source("append conflict", err))
 }

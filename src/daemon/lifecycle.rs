@@ -3,8 +3,6 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -13,7 +11,6 @@ use std::time::{Duration, Instant};
 
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 
 use crate::error::{Error, Result};
@@ -208,7 +205,7 @@ async fn serve(cache: &Path, grace: Duration) -> Result<()> {
     let listener = platform::bind(&endpoint).map_err(|err| {
         Error::internal_with_source(format!("bind {}", endpoint.as_path().display()), err)
     })?;
-    fs::set_permissions(endpoint.as_path(), fs::Permissions::from_mode(0o600))
+    platform::fs::secure_file(endpoint.as_path())
         .map_err(|err| Error::internal_with_source("chmod 0600 socket", err))?;
     write_state(cache)?;
 
@@ -235,10 +232,8 @@ async fn accept_loop(
     let in_flight = Arc::new(AtomicUsize::new(0));
     let (events_tx, mut events_rx) = mpsc::unbounded_channel::<()>();
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-    let mut sigterm = signal(SignalKind::terminate())
-        .map_err(|err| Error::internal_with_source("install SIGTERM handler", err))?;
-    let mut sigint = signal(SignalKind::interrupt())
-        .map_err(|err| Error::internal_with_source("install SIGINT handler", err))?;
+    let mut shutdown_signal = platform::ShutdownSignal::new()
+        .map_err(|err| Error::internal_with_source("install signal handlers", err))?;
     let mut grace_deadline: Option<tokio::time::Instant> = None;
 
     // Sessions whose frontend died without closing its socket must not keep
@@ -290,8 +285,7 @@ async fn accept_loop(
                 grace_deadline = None;
             },
             _ = shutdown_rx.changed() => break,
-            _ = sigterm.recv() => break,
-            _ = sigint.recv() => break,
+            () = shutdown_signal.recv() => break,
             _ = janitor.tick() => {
                 let shared_for_prune = Arc::clone(&shared);
                 let pruned = tokio::task::spawn_blocking(move || {
@@ -349,12 +343,12 @@ fn cleanup_stale(cache: &Path) -> Result<()> {
 
 fn spawn_detached(cache: &Path, exe: Option<&Path>) -> Result<()> {
     let mut command = Command::new(exe.map_or_else(daemon_exe, Path::to_path_buf));
+    platform::process::detach(&mut command);
     command
         .arg("serve")
         .arg("--detached")
         .env("DOCSBASE_CACHE_DIR", cache)
-        .stdin(Stdio::null())
-        .process_group(0);
+        .stdin(Stdio::null());
     // NFR-8: the detached daemon's diagnostics belong in logs/daemon.log
     // (0600), not /dev/null; a missing log file is a setup error.
     let log = open_daemon_log(cache)?;
@@ -376,19 +370,11 @@ fn spawn_detached(cache: &Path, exe: Option<&Path>) -> Result<()> {
 /// Opens (creating if needed) `logs/daemon.log` with owner-only permissions.
 fn open_daemon_log(cache: &Path) -> Result<File> {
     let dir = cache.join("logs");
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true).mode(0o700);
-    builder
-        .create(&dir)
+    platform::fs::secure_dir(&dir)
         .map_err(|err| Error::internal_with_source("create logs dir", err))?;
     let path = dir.join("daemon.log");
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|err| Error::internal_with_source(format!("open {}", path.display()), err))?;
-    Ok(file)
+    platform::fs::open_private_log(&path)
+        .map_err(|err| Error::internal_with_source(format!("open {}", path.display()), err))
 }
 
 fn daemon_exe() -> PathBuf {
@@ -441,27 +427,13 @@ pub(crate) fn read_state(cache: &Path) -> Result<Option<DaemonState>> {
 }
 
 pub(crate) fn pid_alive(pid: u32) -> bool {
-    if !Path::new("/proc").is_dir() {
-        // No /proc (unusual on Linux): keep the daemon considered alive and
-        // rely on the socket check in `is_running`.
-        return true;
-    }
-    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().next())
-            .is_some_and(|state| state != "Z")
-    })
+    platform::process::process_alive(pid)
 }
 
 pub(crate) fn create_state_dir(cache: &Path) -> Result<()> {
     let dir = state_dir(cache);
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true).mode(0o700);
-    builder
-        .create(&dir)
-        .map_err(|err| Error::internal_with_source("create state dir", err))?;
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
-        .map_err(|err| Error::internal_with_source("chmod 0700 state dir", err))
+    platform::fs::secure_dir(&dir)
+        .map_err(|err| Error::internal_with_source("create state dir", err))
 }
 
 fn open_lock_file(path: &Path) -> Result<File> {

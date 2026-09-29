@@ -80,7 +80,16 @@ fn scanner_catches_grouped_and_multiline_imports() {
 #[test]
 fn no_os_transport_outside_platform() {
     let src = manifest_dir().join("src");
-    let banned = ["std::os::unix::net", "tokio::net::Unix"];
+    let banned = [
+        "std::os::unix::net",
+        "tokio::net::Unix",
+        "/proc/",
+        "SignalKind",
+        "process_group",
+        "PermissionsExt",
+        "DirBuilderExt",
+        "OpenOptionsExt",
+    ];
     let mut violations = Vec::new();
     for entry in fs::read_dir(&src).expect("read src") {
         let path = entry.expect("entry").path();
