@@ -21,7 +21,7 @@ use crate::mcp::tools;
 struct Conn {
     client: Client,
     cwd: PathBuf,
-    project_hint: Option<String>,
+    project_hint: Option<(String, Option<String>)>,
 }
 
 /// MCP frontend state shared across requests.
@@ -56,11 +56,11 @@ impl Frontend {
                     .as_mut()
                     .ok_or_else(|| Error::internal("daemon connection lost"))?;
                 if tools::PROJECT_TOOLS.contains(&name.as_str())
-                    && let Some(hint) = &conn.project_hint
+                    && let Some((hint, instruction)) = &conn.project_hint
                 {
                     return Err(Error::Project {
                         message: hint.clone(),
-                        instruction: None,
+                        instruction: instruction.clone(),
                     });
                 }
                 let timeout = if tools::LONG_TOOLS.contains(&name.as_str()) {
@@ -108,11 +108,9 @@ fn open_conn(cache: &Path) -> Result<Conn, Error> {
             message,
             instruction,
         }) => {
-            let hint =
-                instruction.map_or(message.clone(), |hint| format!("{message} (hint: {hint})"));
             client.handshake_registry()?;
             client.register_unbound(&cwd)?;
-            Some(hint)
+            Some((message, instruction))
         }
         Err(err) => return Err(err),
     };
@@ -169,7 +167,10 @@ impl ServerHandler for Frontend {
     ) -> Result<CallToolResponse, McpError> {
         let name = request.name.to_string();
         if !TOOL_ALLOWLIST.contains(&name.as_str()) {
-            return Ok(tool_error(format!("unknown tool: {name}")).into());
+            return Ok(tool_error(&Error::Protocol {
+                message: format!("unknown tool: {name}"),
+            })
+            .into());
         }
         let args = request.arguments.map_or_else(|| json!({}), Value::Object);
         match self.proxy(&name, args).await {
@@ -179,13 +180,24 @@ impl ServerHandler for Frontend {
                 result.structured_content = Some(value);
                 Ok(result.into())
             }
-            Err(err) => Ok(tool_error(err.to_string()).into()),
+            Err(err) => Ok(tool_error(&err).into()),
         }
     }
 }
 
-fn tool_error(message: String) -> CallToolResult {
-    CallToolResult::error(vec![ContentBlock::text(message)])
+/// Tool error result carrying the stable MCP code and, when available, the
+/// actionable instruction (design §9).
+fn tool_error(err: &Error) -> CallToolResult {
+    let text = err.to_string();
+    let mut result = CallToolResult::error(vec![ContentBlock::text(text)]);
+    let mut structured = serde_json::Map::new();
+    structured.insert("code".to_owned(), json!(err.mcp_code()));
+    structured.insert("message".to_owned(), json!(err.inner_message()));
+    if let Some(instruction) = err.instruction() {
+        structured.insert("instruction".to_owned(), json!(instruction));
+    }
+    result.structured_content = Some(Value::Object(structured));
+    result
 }
 
 /// Runs the stdio MCP server until stdin closes.

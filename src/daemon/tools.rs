@@ -292,6 +292,15 @@ pub fn status(
 
 fn project_entry(db: &Db, project: &Project) -> Result<Value> {
     let counts = repo::project_counts(db.connection(), project.id)?;
+    // Warnings come from the newest job only when it succeeded: a newer
+    // failed job must not leave an older job's warnings looking current.
+    let warnings = match repo::latest_job(db.connection(), project.id)? {
+        Some((state, Some(raw))) if state == "done" => serde_json::from_str::<Value>(&raw)
+            .ok()
+            .and_then(|stats| stats.get("warnings").cloned())
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+        _ => Value::Array(Vec::new()),
+    };
     Ok(json!({
         "id": project.id,
         "name": project.name,
@@ -300,6 +309,7 @@ fn project_entry(db: &Db, project: &Project) -> Result<Value> {
         "docs": counts.docs,
         "chunks": counts.chunks,
         "last_indexed_at": project.last_indexed_at,
+        "warnings": warnings,
     }))
 }
 

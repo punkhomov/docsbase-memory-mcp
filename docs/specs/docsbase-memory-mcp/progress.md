@@ -163,3 +163,7 @@ Task 28: Ruling: `search_docs` дополнительно отдаёт `chunk_id
 Task 28: Ruling: `get_doc` — только относительные `.md` внутри canonical root (realpath), absolute/`..`/symlink наружу отвергаются (I4/FR-32); `read_neighbors` — окно seq с cap 100 на сторону и проверкой принадлежности проекту
 Task 28: minor (deferred): tasks.md указывает `store/mod.rs` вместо `store/repo.rs`; нет теста на `limit = 0`; косметика `project_name`
 Task 28: complete (tests: mcp_docs 4, всего 203, clippy clean, fmt clean; review PASS/APPROVED → minors fixed → verified)
+Task 29: Ruling: `status.warnings` берутся из newest job и показываются только при state=done (новый failed job не оставляет старых предупреждений); CLI-direct и watcher логируют per-file ошибки в daemon log, durable per-project warnings отложены (нужны retention/семантика job-строк)
+Task 29: Ruling: frontend отдаёт стабильные коды в `structuredContent` ошибочного tool-result `{code, message, instruction}`; IPC `Response::Error` получил `instruction` (сердечно), `user_message` не нужен
+Task 29: minor (deferred): нет маркера truncation при >100 warnings; старый daemon + новый frontend дают двойной префикс; harness без read-timeout
+Task 29: complete (tests: error_surface 3, всего 206, clippy clean, fmt clean; review CHANGES(2 Important, 1 Ruling) → fixes → verified)

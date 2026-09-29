@@ -17,8 +17,30 @@ use crate::store::repo::{self, DocState, NewChunk, NewDoc};
 /// Longest section body kept in one chunk when no paragraph boundary splits it.
 pub const MAX_CHUNK_CHARS: usize = 4_000;
 
+/// One non-fatal per-file problem, surfaced by `status` (FR-19, A4; NFR-8).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FileWarning {
+    /// Path relative to the project root when known, absolute otherwise.
+    pub path: String,
+    /// Human-readable reason (size limit, read/parse failure, budget).
+    pub message: String,
+}
+
+/// Warnings kept per job before the list is truncated.
+pub const MAX_WARNINGS: usize = 100;
+
+/// Collects a warning while staying under [`MAX_WARNINGS`].
+fn push_warning(stats: &mut JobStats, path: impl Into<String>, message: impl Into<String>) {
+    if stats.warnings.len() < MAX_WARNINGS {
+        stats.warnings.push(FileWarning {
+            path: path.into(),
+            message: message.into(),
+        });
+    }
+}
+
 /// Outcome of one indexing run.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct JobStats {
     /// New or changed documents written.
     pub docs: usize,
@@ -30,6 +52,8 @@ pub struct JobStats {
     pub removed: usize,
     /// Files skipped non-fatally (IO/parse/size/limit problems, A4).
     pub errors: usize,
+    /// Detailed non-fatal problems (capped at [`MAX_WARNINGS`]).
+    pub warnings: Vec<FileWarning>,
 }
 
 #[derive(Debug)]
@@ -89,7 +113,10 @@ pub fn run_full(
     for entry in walk::walk(&project.canonical_root, config)? {
         match entry {
             Ok(path) => paths.push(path),
-            Err(_) => walk_errors += 1,
+            Err(err) => {
+                walk_errors += 1;
+                push_warning(&mut stats, "", err.to_string());
+            }
         }
     }
     stats.errors += walk_errors;
@@ -97,13 +124,17 @@ pub fn run_full(
 
     let mut files: Vec<(PathBuf, String)> = Vec::new();
     for path in paths {
-        match path.strip_prefix(&project.canonical_root) {
-            Ok(rel) => {
-                let rel = rel.to_string_lossy().into_owned();
-                walked.insert(rel.clone());
-                files.push((path, rel));
-            }
-            Err(_) => stats.errors += 1,
+        if let Ok(rel) = path.strip_prefix(&project.canonical_root) {
+            let rel = rel.to_string_lossy().into_owned();
+            walked.insert(rel.clone());
+            files.push((path, rel));
+        } else {
+            stats.errors += 1;
+            push_warning(
+                &mut stats,
+                path.display().to_string(),
+                "path is not inside the project root",
+            );
         }
     }
 
@@ -129,6 +160,11 @@ pub fn run_full(
                 if previous.is_none() {
                     if new_budget == 0 {
                         stats.errors += 1;
+                        push_warning(
+                            &mut stats,
+                            rel.clone(),
+                            "max_docs_per_project reached; file skipped",
+                        );
                         continue;
                     }
                     new_budget -= 1;
@@ -137,7 +173,10 @@ pub fn run_full(
                 plan.push(prepared);
             }
             Ok(None) => stats.skipped += 1,
-            Err(_) => stats.errors += 1,
+            Err(err) => {
+                stats.errors += 1;
+                push_warning(&mut stats, rel.clone(), err.to_string());
+            }
         }
     }
 
@@ -202,6 +241,11 @@ pub fn run_incremental_with(
     for path in changed {
         let Ok(rel) = path.strip_prefix(&project.canonical_root) else {
             stats.errors += 1;
+            push_warning(
+                &mut stats,
+                path.display().to_string(),
+                "path is not inside the project root",
+            );
             continue;
         };
         let rel = rel.to_string_lossy().into_owned();
@@ -233,6 +277,7 @@ pub fn run_incremental_with(
         }
         if exact.is_none() && !prefixed && walk::is_markdown(path) {
             stats.errors += 1;
+            push_warning(&mut stats, rel.clone(), "file disappeared before indexing");
         }
     }
 
@@ -256,6 +301,11 @@ pub fn run_incremental_with(
         } else {
             if new_budget == 0 {
                 stats.errors += 1;
+                push_warning(
+                    &mut stats,
+                    rel.clone(),
+                    "max_docs_per_project reached; file skipped",
+                );
                 continue;
             }
             new_budget -= 1;
@@ -266,7 +316,10 @@ pub fn run_incremental_with(
                 plan.push(prepared);
             }
             Ok(None) => stats.skipped += 1,
-            Err(_) => stats.errors += 1,
+            Err(err) => {
+                stats.errors += 1;
+                push_warning(&mut stats, rel.clone(), err.to_string());
+            }
         }
     }
 

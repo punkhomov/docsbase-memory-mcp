@@ -683,6 +683,7 @@ fn hello_required() -> Response {
 fn error_response(err: &Error) -> Response {
     Response::Error {
         code: err.mcp_code(),
-        message: err.to_string(),
+        message: err.inner_message(),
+        instruction: err.instruction().map(str::to_owned),
     }
 }

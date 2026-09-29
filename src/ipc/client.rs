@@ -87,7 +87,11 @@ impl Client {
             Response::Hello {
                 protocol_version, ..
             } => protocol::ensure_protocol_version(protocol_version),
-            Response::Error { code, message } => Err(Error::from_mcp_code(code, message)),
+            Response::Error {
+                code,
+                message,
+                instruction,
+            } => Err(Error::from_mcp_code(code, message, instruction)),
             other => Err(Error::Protocol {
                 message: format!("unexpected hello reply: {other:?}"),
             }),
@@ -107,7 +111,11 @@ impl Client {
             cwd: cwd.to_path_buf(),
         })? {
             Response::ToolResult { .. } => Ok(()),
-            Response::Error { code, message } => Err(Error::from_mcp_code(code, message)),
+            Response::Error {
+                code,
+                message,
+                instruction,
+            } => Err(Error::from_mcp_code(code, message, instruction)),
             other => Err(Error::Protocol {
                 message: format!("unexpected session reply: {other:?}"),
             }),
@@ -126,7 +134,11 @@ impl Client {
             cwd: cwd.to_path_buf(),
         })? {
             Response::ToolResult { .. } => Ok(()),
-            Response::Error { code, message } => Err(Error::from_mcp_code(code, message)),
+            Response::Error {
+                code,
+                message,
+                instruction,
+            } => Err(Error::from_mcp_code(code, message, instruction)),
             other => Err(Error::Protocol {
                 message: format!("unexpected session reply: {other:?}"),
             }),
@@ -144,7 +156,11 @@ impl Client {
             args,
         })? {
             Response::ToolResult { value } => Ok(value),
-            Response::Error { code, message } => Err(Error::from_mcp_code(code, message)),
+            Response::Error {
+                code,
+                message,
+                instruction,
+            } => Err(Error::from_mcp_code(code, message, instruction)),
             other => Err(Error::Protocol {
                 message: format!("unexpected tool reply: {other:?}"),
             }),

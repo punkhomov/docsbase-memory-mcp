@@ -351,6 +351,25 @@ pub fn chunk_window(
         .map_err(db_error)
 }
 
+/// State and JSON statistics of the newest sync job of `project_id`, in any
+/// state; `None` when the project has no jobs yet.
+///
+/// `status` must not show warnings from an older job once a newer one exists
+/// (FR-26): the caller decides based on the returned state.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn latest_job(conn: &Connection, project_id: i64) -> Result<Option<(String, Option<String>)>> {
+    conn.query_row(
+        "SELECT state, stats_json FROM sync_jobs
+         WHERE project_id = ?1 ORDER BY id DESC LIMIT 1",
+        [project_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(db_error)
+}
+
 /// Aggregate document/chunk counts for one project (FR-26).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectCounts {

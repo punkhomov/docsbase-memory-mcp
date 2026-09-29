@@ -210,7 +210,7 @@ fn mismatch_message_actionable() {
         .read_until(b'\n', &mut line)
         .expect("read");
     let response = decode_response(&line).expect("decode");
-    let Response::Error { code, message } = response else {
+    let Response::Error { code, message, .. } = response else {
         panic!("unexpected hello response: {response:?}");
     };
     assert_eq!(code, -32010, "admission code: {message}");

@@ -136,6 +136,7 @@ fn unchanged_skipped() {
             skipped: 1,
             removed: 0,
             errors: 0,
+            warnings: Vec::new(),
         }
     );
 }

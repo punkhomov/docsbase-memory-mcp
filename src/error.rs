@@ -91,15 +91,42 @@ impl Error {
         }
     }
 
+    /// Instruction attached to this error, when it has one.
+    #[must_use]
+    pub fn instruction(&self) -> Option<&str> {
+        match self {
+            Error::Project { instruction, .. } => instruction.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Client-facing message without the category prefix and without the
+    /// hint (the hint travels separately as [`Error::instruction`]).
+    #[must_use]
+    pub fn inner_message(&self) -> String {
+        match self {
+            Error::Project { message, .. }
+            | Error::Admission { message }
+            | Error::Protocol { message }
+            | Error::Query { message }
+            | Error::Internal { message, .. }
+            | Error::Transport { message, .. } => message.clone(),
+            Error::Index { path, message } => match path {
+                Some(path) => format!("{message} ({})", path.display()),
+                None => message.clone(),
+            },
+        }
+    }
+
     /// Rebuilds a category error from an MCP code sent by the daemon.
     #[must_use]
-    pub fn from_mcp_code(code: i32, message: String) -> Self {
+    pub fn from_mcp_code(code: i32, message: String, instruction: Option<String>) -> Self {
         match code {
             -32010 => Self::Admission { message },
             -32011 => Self::Protocol { message },
             -32012 => Self::Project {
                 message,
-                instruction: None,
+                instruction,
             },
             -32013 => Self::Index {
                 path: None,

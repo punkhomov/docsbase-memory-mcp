@@ -86,6 +86,9 @@ pub enum Response {
         code: i32,
         /// Human-readable message.
         message: String,
+        /// Actionable instruction, when the category carries one.
+        #[serde(default)]
+        instruction: Option<String>,
     },
     /// Runtime counters (sessions, descriptors, threads).
     Stats {

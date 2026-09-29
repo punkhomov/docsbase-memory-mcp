@@ -163,6 +163,7 @@ fn fresh_corpus() {
             skipped: 0,
             removed: 0,
             errors: 0,
+            warnings: Vec::new(),
         }
     );
     assert!(stats.chunks > 0, "chunks indexed");
@@ -316,6 +317,7 @@ fn skip_identical() {
             skipped: 2,
             removed: 0,
             errors: 0,
+            warnings: Vec::new(),
         }
     );
     assert!(!env.search("installer").is_empty(), "index intact");

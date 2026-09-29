@@ -165,6 +165,7 @@ fn daemon_errors_surface() {
         let response = Response::Error {
             code: -32012,
             message: "no project registered for /tmp/x".to_owned(),
+            instruction: Some("call index_project first".to_owned()),
         };
         writer
             .write_all(&encode(&response).expect("encode"))
