@@ -16,9 +16,19 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub use unix::{
-    BlockingListener, BlockingStream, Listener, Stream, bind, bind_blocking, connect_blocking,
-    connect_probe,
+    BlockingListener, BlockingStream, Listener, ShutdownSignal, Stream, bind, bind_blocking,
+    connect_blocking, connect_probe,
 };
+
+/// Private directory/file modes and logs (NFR-5).
+pub mod fs {
+    pub use super::unix::{open_private_log, secure_dir, secure_executable, secure_file};
+}
+
+/// Process liveness, counters and detach (Linux `/proc`; no-op elsewhere).
+pub mod process {
+    pub use super::unix::{detach, fd_count, process_alive, thread_count};
+}
 
 /// Address of a local daemon endpoint (FR-33).
 ///

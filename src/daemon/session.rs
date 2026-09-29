@@ -115,7 +115,7 @@ impl SessionRegistry {
         let mut sessions = self.map();
         let dead: Vec<u64> = sessions
             .iter()
-            .filter(|(_, session)| !crate::daemon::lifecycle::pid_alive(session.pid))
+            .filter(|(_, session)| !crate::platform::process::process_alive(session.pid))
             .map(|(id, _)| *id)
             .collect();
         let mut cancels = self.cancels.lock().unwrap_or_else(PoisonError::into_inner);
@@ -133,20 +133,16 @@ impl SessionRegistry {
     }
 }
 
-/// Open file descriptors of this process (Linux `/proc`; 0 elsewhere).
+/// Open file descriptors of this process (`platform::process` counters).
 #[must_use]
 pub fn open_fd_count() -> u64 {
-    std::fs::read_dir("/proc/self/fd").map_or(0, |entries| {
-        u64::try_from(entries.count()).unwrap_or(u64::MAX)
-    })
+    crate::platform::process::fd_count()
 }
 
-/// OS threads of this process (Linux `/proc`; 0 elsewhere).
+/// OS threads of this process (`platform::process` counters).
 #[must_use]
 pub fn open_thread_count() -> u64 {
-    std::fs::read_dir("/proc/self/task").map_or(0, |entries| {
-        u64::try_from(entries.count()).unwrap_or(u64::MAX)
-    })
+    crate::platform::process::thread_count()
 }
 
 #[cfg(test)]

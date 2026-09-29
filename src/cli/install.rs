@@ -8,7 +8,6 @@
 //! touched.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -241,7 +240,7 @@ fn swap_binary(source: &Path, target: &Path) -> anyhow::Result<()> {
     let tmp = target.with_extension("tmp");
     fs::copy(source, &tmp)
         .with_context(|| format!("copy {} -> {}", source.display(), tmp.display()))?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))
+    crate::platform::fs::secure_executable(&tmp)
         .with_context(|| format!("chmod {}", tmp.display()))?;
     fs::rename(&tmp, target).with_context(|| format!("replace {}", target.display()))?;
     Ok(())

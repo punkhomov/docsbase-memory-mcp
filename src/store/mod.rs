@@ -147,16 +147,7 @@ fn sql_error(path: &Path, err: rusqlite::Error) -> Error {
 }
 
 fn ensure_private_dir(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir).map_err(|err| {
-        Error::internal_with_source(format!("create cache dir {}: {err}", dir.display()), err)
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(dir, mode).map_err(|err| {
-            Error::internal_with_source(format!("set 0700 on {}: {err}", dir.display()), err)
-        })?;
-    }
-    Ok(())
+    crate::platform::fs::secure_dir(dir).map_err(|err| {
+        Error::internal_with_source(format!("secure cache dir {}: {err}", dir.display()), err)
+    })
 }
