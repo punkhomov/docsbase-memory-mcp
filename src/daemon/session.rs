@@ -28,7 +28,7 @@ pub struct SessionRegistry {
     cancels: Mutex<HashMap<u64, oneshot::Sender<()>>>,
 }
 
-/// Runtime counters (design §5 `Response::Stats`).
+/// Runtime counters surfaced by `status` (design §5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Stats {
     /// Live sessions.

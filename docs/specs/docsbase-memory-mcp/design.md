@@ -115,7 +115,6 @@ pub enum Response {
     Hello { protocol_version: u32, build_id: String, schema_version: u32 },
     ToolResult { value: serde_json::Value },
     Error { code: i32, message: String, instruction: Option<String> },
-    Stats { fd_count: u64, sessions: u64, threads: u64 },
 }
 
 // platform/mod.rs — ADR-9 (внутренний pub-фасад; не стабильный API 0.1.0)

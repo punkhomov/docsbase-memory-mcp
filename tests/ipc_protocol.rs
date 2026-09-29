@@ -71,11 +71,9 @@ fn malformed_json_is_protocol_error() {
 }
 
 #[test]
-fn stats_response_round_trips_threads() {
-    let response = Response::Stats {
-        fd_count: 7,
-        sessions: 2,
-        threads: 11,
+fn tool_result_round_trips_payloads() {
+    let response = Response::ToolResult {
+        value: serde_json::json!({ "threads": 11, "fd_count": 7 }),
     };
     let line = encode(&response).expect("encode");
     let decoded = decode_response(&line).expect("decode");

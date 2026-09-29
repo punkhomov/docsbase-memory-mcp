@@ -98,7 +98,15 @@ fn admission_lock_held(cache: &Path) -> bool {
             false
         }
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => true,
-        Err(_) => false,
+        Err(err) => {
+            // Fail closed: an unreadable lock (EACCES/EMFILE) must not let a
+            // second daemon start against the same cache.
+            eprintln!(
+                "warning: cannot probe admission lock {}: {err}",
+                path.display()
+            );
+            true
+        }
     }
 }
 
@@ -410,17 +418,22 @@ fn write_state(cache: &Path) -> Result<()> {
         .map_err(|err| Error::internal_with_source("serialize daemon state", err))?;
     let path = state_file(cache);
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json).map_err(|err| Error::internal_with_source("write daemon state", err))?;
+    let mut file = fs::File::create(&tmp)
+        .map_err(|err| Error::internal_with_source("create daemon state", err))?;
+    file.write_all(&json)
+        .map_err(|err| Error::internal_with_source("write daemon state", err))?;
+    file.sync_all()
+        .map_err(|err| Error::internal_with_source("sync daemon state", err))?;
     fs::rename(&tmp, &path).map_err(|err| Error::internal_with_source("publish daemon state", err))
 }
 
 pub(crate) fn read_state(cache: &Path) -> Result<Option<DaemonState>> {
     let path = state_file(cache);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let bytes =
-        fs::read(&path).map_err(|err| Error::internal_with_source("read daemon state", err))?;
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(Error::internal_with_source("read daemon state", err)),
+    };
     let state = serde_json::from_slice(&bytes)
         .map_err(|err| Error::internal_with_source("parse daemon state", err))?;
     Ok(Some(state))

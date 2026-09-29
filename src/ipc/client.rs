@@ -92,7 +92,7 @@ impl Client {
                 message,
                 instruction,
             } => Err(Error::from_mcp_code(code, message, instruction)),
-            other => Err(Error::Protocol {
+            other @ Response::ToolResult { .. } => Err(Error::Protocol {
                 message: format!("unexpected hello reply: {other:?}"),
             }),
         }
@@ -116,7 +116,7 @@ impl Client {
                 message,
                 instruction,
             } => Err(Error::from_mcp_code(code, message, instruction)),
-            other => Err(Error::Protocol {
+            other @ Response::Hello { .. } => Err(Error::Protocol {
                 message: format!("unexpected session reply: {other:?}"),
             }),
         }
@@ -139,7 +139,7 @@ impl Client {
                 message,
                 instruction,
             } => Err(Error::from_mcp_code(code, message, instruction)),
-            other => Err(Error::Protocol {
+            other @ Response::Hello { .. } => Err(Error::Protocol {
                 message: format!("unexpected session reply: {other:?}"),
             }),
         }
@@ -161,7 +161,7 @@ impl Client {
                 message,
                 instruction,
             } => Err(Error::from_mcp_code(code, message, instruction)),
-            other => Err(Error::Protocol {
+            other @ Response::Hello { .. } => Err(Error::Protocol {
                 message: format!("unexpected tool reply: {other:?}"),
             }),
         }

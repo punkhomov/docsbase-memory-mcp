@@ -8,6 +8,7 @@
 //! touched.
 
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -53,7 +54,9 @@ pub fn install() -> anyhow::Result<()> {
         protocol_version: PROTOCOL_VERSION,
         schema_version: SCHEMA_VERSION,
         binary: target.clone(),
-        socket: cache.join("state").join("daemon.sock"),
+        socket: crate::platform::daemon_endpoint(&cache)
+            .as_path()
+            .to_path_buf(),
         cache_root: cache.clone(),
         installed_at: unix_now(),
     };
@@ -221,7 +224,12 @@ fn write_manifest(data: &Path, manifest: &Manifest) -> anyhow::Result<()> {
     let bytes = serde_json::to_vec_pretty(manifest).context("serialize manifest")?;
     let path = data.join(MANIFEST);
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+    let mut file = fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    file.write_all(&bytes)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    file.sync_all()
+        .with_context(|| format!("sync {}", tmp.display()))?;
+    drop(file);
     fs::rename(&tmp, &path).with_context(|| format!("publish {}", path.display()))
 }
 
@@ -240,6 +248,11 @@ fn swap_binary(source: &Path, target: &Path) -> anyhow::Result<()> {
     let tmp = target.with_extension("tmp");
     fs::copy(source, &tmp)
         .with_context(|| format!("copy {} -> {}", source.display(), tmp.display()))?;
+    let copied = fs::File::open(&tmp).with_context(|| format!("open {}", tmp.display()))?;
+    copied
+        .sync_all()
+        .with_context(|| format!("sync {}", tmp.display()))?;
+    drop(copied);
     crate::platform::fs::secure_executable(&tmp)
         .with_context(|| format!("chmod {}", tmp.display()))?;
     fs::rename(&tmp, target).with_context(|| format!("replace {}", target.display()))?;

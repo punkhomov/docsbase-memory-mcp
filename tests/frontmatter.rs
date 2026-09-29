@@ -53,3 +53,19 @@ fn crlf() {
     assert_eq!(meta.tags, vec!["a".to_owned()]);
     assert_eq!(body, "body\r\n");
 }
+
+#[test]
+fn unpaired_quote_is_preserved() {
+    let text = "---\ntitle: 'Twas the night\n---\n\nbody\n";
+    let (meta, body) = parse(text);
+    assert_eq!(meta.title.as_deref(), Some("'Twas the night"));
+    assert_eq!(body, "\nbody\n");
+}
+
+#[test]
+fn closing_fence_accepts_trailing_whitespace() {
+    let text = "---\ntitle: Guide\n--- \nbody\n";
+    let (meta, body) = parse(text);
+    assert_eq!(meta.title.as_deref(), Some("Guide"));
+    assert_eq!(body, "body\n");
+}

@@ -376,7 +376,7 @@ code_api_top3)` — падают (SC-1..SC-4).
 
 ### T28 — `list_docs` pagination + `read_neighbors`
 **Depends:** T21
-**Files:** Modify `src/mcp/tools.rs`, `src/store/mod.rs`; Test `tests/mcp_docs.rs`
+**Files:** Modify `src/mcp/tools.rs`, `src/store/repo.rs`; Test `tests/mcp_docs.rs`
 **Interfaces:** Produces `list_docs(limit, cursor)`, `read_neighbors(chunk_id, before, after)`,
 `get_doc(path)`; `get_doc` внутри roots (I4)
 **RED:** `mcp_docs::(pagination_stable, neighbors_window, get_doc_rejects_escape,

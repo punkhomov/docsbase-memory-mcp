@@ -30,10 +30,27 @@ pub fn search_docs(db: &Db, cache: &Path, project: &Project, args: &Value) -> Re
             message: "search_docs: missing query".to_owned(),
         })?;
     // Client-supplied limits are clamped: the top-k collector allocates
-    // proportional to the request (final review C1).
-    let limit = args.get("limit").and_then(Value::as_u64).map_or(10, |v| {
-        usize::try_from(v).unwrap_or(usize::MAX).min(MAX_HITS)
-    });
+    // proportional to the request (final review C1). A wrong type is a
+    // protocol error instead of a silent default.
+    let limit = match args.get("limit") {
+        None | Some(Value::Null) => 10,
+        Some(value) => {
+            let raw = value.as_u64().ok_or_else(|| Error::Protocol {
+                message: format!("search_docs: limit must be a positive integer, got {value}"),
+            })?;
+            if raw == 0 {
+                return Ok(Value::Array(Vec::new()));
+            }
+            usize::try_from(raw).unwrap_or(usize::MAX).min(MAX_HITS)
+        }
+    };
+    if let Some(scope) = args.get("scope")
+        && scope.as_str() != Some("project")
+    {
+        return Err(Error::Protocol {
+            message: format!("search_docs: scope must be \"project\", got {scope}"),
+        });
+    }
 
     let index = ReadIndex::open(&lifecycle::index_dir(cache, project.id))?;
     let hits = index.search(query, limit)?;

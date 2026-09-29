@@ -30,7 +30,7 @@ pub fn parse(text: &str) -> (Frontmatter, &str) {
     for line in after_open.split_inclusive('\n') {
         consumed += line.len();
         let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
-        if trimmed == "---" {
+        if trimmed.trim_end() == "---" {
             closed = true;
             break;
         }
@@ -78,9 +78,14 @@ fn parse_block(meta: &mut Frontmatter, block: &str) {
 }
 
 fn unquote(value: &str) -> String {
-    value
-        .trim()
-        .trim_matches(|c| c == '"' || c == '\'')
-        .trim()
-        .to_owned()
+    let trimmed = value.trim();
+    for quote in ['"', '\''] {
+        if let Some(inner) = trimmed
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner.to_owned();
+        }
+    }
+    trimmed.to_owned()
 }

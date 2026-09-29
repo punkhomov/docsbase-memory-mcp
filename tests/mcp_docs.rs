@@ -220,6 +220,28 @@ fn pagination_stable() {
 }
 
 #[test]
+fn list_docs_rejects_zero_limit() {
+    let mut env = Env::new(&[("a.md", "# A\n\nbody.\n")]);
+    env.start_daemon();
+    let mut registry = env.client();
+    registry.handshake_registry().expect("registry hello");
+    registry
+        .call_tool(
+            "index_project",
+            json!({ "path": env.root().to_str().expect("utf8") }),
+        )
+        .expect("index_project");
+    let mut client = env.bound();
+    let err = client
+        .call_tool("list_docs", json!({ "limit": 0 }))
+        .expect_err("zero limit must be a protocol error");
+    assert!(
+        err.to_string().contains("positive integer"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn neighbors_window() {
     let mut env = Env::new(&[("guide.md", GUIDE)]);
     env.start_daemon();
