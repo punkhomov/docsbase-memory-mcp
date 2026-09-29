@@ -89,8 +89,37 @@ pub fn list_projects(db: &Db) -> Result<Vec<Project>> {
     Ok(projects)
 }
 
-/// Updates the lifecycle status of one project; `Indexed` also stamps
-/// `last_indexed_at` (FR-26).
+/// Records a successful full index: `Indexed`, `last_indexed_at` and the
+/// schema version the index was built with (FR-26, T24).
+///
+/// # Errors
+/// Returns [`Error::Project`] for an unknown id and [`Error::Internal`] on
+/// SQLite failures.
+pub fn mark_indexed(db: &Db, id: i64) -> Result<()> {
+    let conn = db.connection();
+    let updated = conn
+        .execute(
+            "UPDATE projects SET status = ?1, last_indexed_at = ?2, schema_version = ?3 WHERE id = ?4",
+            params![
+                ProjectStatus::Indexed.as_str(),
+                unix_now(),
+                migrations::SCHEMA_VERSION,
+                id
+            ],
+        )
+        .map_err(db_error)?;
+    if updated == 0 {
+        return Err(Error::Project {
+            message: format!("unknown project id {id}"),
+            instruction: None,
+        });
+    }
+    Ok(())
+}
+
+/// Updates the lifecycle status of one project (FR-26). Incremental runs must
+/// not touch `schema_version`, so a schema bump keeps refusing reads until a
+/// full rebuild (T24).
 ///
 /// # Errors
 /// Returns [`Error::Project`] for an unknown id and [`Error::Internal`] on

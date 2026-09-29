@@ -433,6 +433,24 @@ fn run_batch(
     config: &Config,
     batch: &[PathBuf],
 ) -> Result<crate::index::job::JobStats> {
+    // Incremental chunks are only valid for an index built with the current
+    // schema; a stale or errored project must be rebuilt by a full index
+    // first (T24). The stamp itself is only written by `registry::mark_indexed`.
+    let current = registry::project_by_id(db, project.id)?.ok_or_else(|| Error::Project {
+        message: format!("project {} disappeared from the registry", project.id),
+        instruction: None,
+    })?;
+    if current.status != ProjectStatus::Indexed
+        || current.schema_version != crate::store::migrations::SCHEMA_VERSION
+    {
+        return Err(Error::Project {
+            message: format!(
+                "project {} needs a full rebuild before incremental updates",
+                project.id
+            ),
+            instruction: Some("run `docsbase index` to rebuild".to_owned()),
+        });
+    }
     // The writer handle is opened per batch: holding it between batches would
     // block full index jobs on the tantivy lock.
     lifecycle::with_writer_lease(cache, project.id, || {

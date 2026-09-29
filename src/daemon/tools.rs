@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{ReadIndex, chunk_id_parts};
 use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
+use crate::store::migrations;
 use crate::store::models::{Project, ProjectStatus, SyncJob, SyncState};
 use crate::store::{Db, repo};
 
@@ -270,7 +271,7 @@ pub fn run_project_index(
         })();
         match outcome {
             Ok(stats) => {
-                registry::set_status(db, project.id, ProjectStatus::Indexed)?;
+                registry::mark_indexed(db, project.id)?;
                 Ok(stats)
             }
             Err(err) => {
@@ -296,6 +297,17 @@ fn ensure_indexed(project: &Project) -> Result<()> {
                 project.status.as_str()
             ),
             instruction: Some("run `docsbase index`".to_owned()),
+        });
+    }
+    if project.schema_version != migrations::SCHEMA_VERSION {
+        return Err(Error::Project {
+            message: format!(
+                "project '{}' indexes use schema {} while this build expects {}",
+                project.name,
+                project.schema_version,
+                migrations::SCHEMA_VERSION
+            ),
+            instruction: Some("run `docsbase index` to rebuild".to_owned()),
         });
     }
     Ok(())

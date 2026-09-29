@@ -152,10 +152,27 @@ async fn handle_request(
                 return (error_response(&err), true);
             }
             if build_id != protocol::build_id() {
+                let daemon_build = protocol::build_id();
+                crate::conflict::record(
+                    &shared.cache,
+                    &crate::conflict::Conflict {
+                        kind: "hello_build_mismatch",
+                        expected: &daemon_build,
+                        actual: &build_id,
+                        build_id: &build_id,
+                        // The refused frontend's schema is unknown; record
+                        // the daemon's own expectation here.
+                        schema_version: migrations::SCHEMA_VERSION,
+                        cache_root: &shared.cache,
+                        pid: std::process::id(),
+                        recorded_build_id: Some(&daemon_build),
+                        recorded_schema_version: Some(migrations::SCHEMA_VERSION),
+                        holder_pid: None,
+                    },
+                );
                 let err = Error::Admission {
                     message: format!(
-                        "build {build_id:?} != {:?} (I1); restart the frontend",
-                        protocol::build_id()
+                        "build {build_id:?} != {daemon_build:?}; run `docsbase install` or restart the daemon and frontend"
                     ),
                 };
                 return (error_response(&err), true);

@@ -1,14 +1,12 @@
 //! Admission S1: build/schema checks and the daemon-lifetime lock
 //! (FR-4, FR-9; I1; R5; NFR-7).
 
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use fd_lock::{RwLock, RwLockWriteGuard};
 
+use crate::conflict::{self, Conflict};
 use crate::daemon::lifecycle::{self, DaemonState};
 use crate::error::{Error, Result};
 
@@ -42,20 +40,31 @@ impl Lease {
         let guard = match lock.try_write() {
             Ok(guard) => guard,
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                let actual = recorded(cache).map(|state| state.build_id);
-                log_best_effort(
+                let incumbent = recorded(cache);
+                let recorded_build = incumbent.as_ref().map(|state| state.build_id.as_str());
+                let recorded_schema = incumbent.as_ref().map(|state| state.schema_version);
+                conflict::record(
                     cache,
                     &Conflict {
                         kind: "lock_busy",
                         expected: build_id,
-                        actual: actual.as_deref().unwrap_or(""),
+                        actual: recorded_build.unwrap_or(""),
+                        build_id,
+                        schema_version,
                         cache_root: cache,
+                        pid: std::process::id(),
+                        recorded_build_id: recorded_build,
+                        recorded_schema_version: recorded_schema,
+                        holder_pid: incumbent.as_ref().map(|state| state.pid),
                     },
+                );
+                let holder = incumbent.as_ref().map_or_else(
+                    || format!("another daemon holds {}", path.display()),
+                    |state| format!("daemon (pid {}) holds {}", state.pid, path.display()),
                 );
                 return Err(Error::Admission {
                     message: format!(
-                        "another daemon holds {}; stop it with `docsbase daemon stop`",
-                        path.display()
+                        "{holder}; run `docsbase daemon stop` to free it, or `docsbase install` to update after replacing the binary"
                     ),
                 });
             }
@@ -79,18 +88,24 @@ impl Lease {
                 None
             };
             if let Some((kind, expected, actual)) = mismatch {
-                log_best_effort(
+                conflict::record(
                     cache,
                     &Conflict {
                         kind,
                         expected,
                         actual,
+                        build_id,
+                        schema_version,
                         cache_root: cache,
+                        pid: std::process::id(),
+                        recorded_build_id: Some(state.build_id.as_str()),
+                        recorded_schema_version: Some(state.schema_version),
+                        holder_pid: Some(state.pid),
                     },
                 );
                 return Err(Error::Admission {
                     message: format!(
-                        "daemon.json records build {:?} schema {}, this build is {:?} schema {schema_version}; run `docsbase daemon stop` and retry",
+                        "cache was created by build {:?} schema {}, this build is {:?} schema {schema_version}; run `docsbase install` to update, then `docsbase index` to rebuild stale indexes",
                         state.build_id, state.schema_version, build_id
                     ),
                 });
@@ -100,61 +115,8 @@ impl Lease {
     }
 }
 
-struct Conflict<'a> {
-    kind: &'a str,
-    expected: &'a str,
-    actual: &'a str,
-    cache_root: &'a Path,
-}
-
 fn recorded(cache: &Path) -> Option<DaemonState> {
     lifecycle::read_state(cache).ok().flatten()
-}
-
-fn log_best_effort(cache: &Path, conflict: &Conflict<'_>) {
-    if let Err(err) = append_conflict(cache, conflict) {
-        eprintln!("warning: cannot append conflict log: {err}");
-    }
-}
-
-fn append_conflict(cache: &Path, conflict: &Conflict<'_>) -> Result<()> {
-    let dir = cache.join("logs");
-    fs::create_dir_all(&dir).map_err(|err| Error::internal_with_source("create logs dir", err))?;
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
-        .map_err(|err| Error::internal_with_source("chmod 0700 logs dir", err))?;
-    let mut line = serde_json::to_vec(&ConflictLine {
-        ts: unix_now(),
-        kind: conflict.kind.to_owned(),
-        expected: conflict.expected.to_owned(),
-        actual: conflict.actual.to_owned(),
-        cache_root: conflict.cache_root.to_path_buf(),
-    })
-    .map_err(|err| Error::internal_with_source("serialize conflict", err))?;
-    line.push(b'\n');
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("conflicts.ndjson"))
-        .map_err(|err| Error::internal_with_source("open conflicts log", err))?;
-    file.write_all(&line)
-        .map_err(|err| Error::internal_with_source("append conflict", err))
-}
-
-#[derive(serde::Serialize)]
-struct ConflictLine {
-    ts: i64,
-    kind: String,
-    expected: String,
-    actual: String,
-    cache_root: PathBuf,
-}
-
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
-        })
 }
 
 fn lock_path(cache: &Path) -> PathBuf {

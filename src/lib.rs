@@ -2,6 +2,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod conflict;
 pub mod daemon;
 pub mod error;
 pub mod index;

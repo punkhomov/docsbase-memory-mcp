@@ -242,7 +242,7 @@ pub struct Project {
 
 | Категория | Пример | Поведение | Код MCP |
 |---|---|---|---|
-| `Admission` | build/schema/root mismatch | отказ до работы, conflict-log, сообщение с командой | `-32010` |
+| `Admission` | build/schema/root mismatch | отказ до работы, conflict-log (`build_id`, `schema_version`, `cache_root`, `pid`), сообщение с командой (`docsbase install`, rebuild через `docsbase index`) | `-32010` |
 | `Protocol` | несовпадение `protocol_version` | закрыть соединение с понятной ошибкой | `-32011` |
 | `Project` | проект не зарегистрирован, путь вне root | инструкция вызвать `index_project` | `-32012` |
 | `Index` | IO/parse ошибка файла | файл пропускается, остальные индексируются, warning в `status` | `-32013` |

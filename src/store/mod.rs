@@ -39,7 +39,29 @@ impl Db {
             .map_err(|err| sql_error(&path, err))?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|err| sql_error(&path, err))?;
-        migrations::migrate(&conn)?;
+        if let Err(err) = migrations::migrate(&conn) {
+            if matches!(err, Error::Admission { .. }) {
+                let version = migrations::read_version(&conn).ok();
+                let expected = migrations::SCHEMA_VERSION.to_string();
+                let actual = version.map_or_else(|| "?".to_owned(), |v| v.to_string());
+                crate::conflict::record(
+                    cache_dir,
+                    &crate::conflict::Conflict {
+                        kind: "db_schema_newer",
+                        expected: &expected,
+                        actual: &actual,
+                        build_id: &crate::ipc::protocol::build_id(),
+                        schema_version: migrations::SCHEMA_VERSION,
+                        cache_root: cache_dir,
+                        pid: std::process::id(),
+                        recorded_build_id: None,
+                        recorded_schema_version: version,
+                        holder_pid: None,
+                    },
+                );
+            }
+            return Err(err);
+        }
         Ok(Self {
             conn,
             cache_root: cache_dir.to_path_buf(),
@@ -63,9 +85,32 @@ impl Db {
             .map_err(|err| sql_error(&path, err))?;
         let version = migrations::read_version(&conn)?;
         if version != migrations::SCHEMA_VERSION {
+            let expected = migrations::SCHEMA_VERSION.to_string();
+            let actual = version.to_string();
+            let newer = version > migrations::SCHEMA_VERSION;
+            crate::conflict::record(
+                cache_dir,
+                &crate::conflict::Conflict {
+                    kind: "db_schema_mismatch",
+                    expected: &expected,
+                    actual: &actual,
+                    build_id: &crate::ipc::protocol::build_id(),
+                    schema_version: migrations::SCHEMA_VERSION,
+                    cache_root: cache_dir,
+                    pid: std::process::id(),
+                    recorded_build_id: None,
+                    recorded_schema_version: Some(version),
+                    holder_pid: None,
+                },
+            );
+            let hint = if newer {
+                "run `docsbase install` (this database was written by a newer build)"
+            } else {
+                "run `docsbase index` with the current build to rebuild"
+            };
             return Err(Error::Admission {
                 message: format!(
-                    "database schema {version} != supported {}; run `docsbase index` with the current build",
+                    "database schema {version} != supported {}; {hint}",
                     migrations::SCHEMA_VERSION
                 ),
             });
