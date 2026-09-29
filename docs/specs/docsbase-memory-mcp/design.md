@@ -18,9 +18,9 @@ local socket (platform transport, ADR-9) и пробрасывают MCP tool-ca
 Скопировано из constitution:
 
 - Rust, edition 2024, MSRV 1.88; `cargo fmt`, `cargo clippy -- -D warnings`.
-- v1 — Linux/WSL2 (x86_64) только; весь ОС-зависимый код изолирован в `src/platform/`
-  (`pub`-фасад, внутренний контракт; `#[cfg(unix)]` — только там), остальные модули
-  к ОС не обращаются (ADR-9).
+- v1 — Linux/WSL2 (x86_64); первая рабочая версия также Windows x64 (ADR-10).
+  Весь ОС-зависимый код изолирован в `src/platform/` (`pub`-фасад, внутренний контракт;
+  `#[cfg]`-выбор backend'а — только там), остальные модули к ОС не обращаются (ADR-9).
 - Один статический бинарь; ноль сетевых вызовов и внешних сервисов в рантайме.
 - `unwrap`/`expect` запрещены в библиотечном коде; `thiserror` в libs, `anyhow` на границе.
 - Один canonical cache root; версия схемы; один writer.
@@ -91,7 +91,7 @@ Project: .docsbase.toml, .docsbaseignore              # FR-14, FR-28
 | `store` | SQLite-модель, миграции, реестр | repositories | rusqlite | FR-10, FR-16, FR-26, NFR-7 |
 | `config` | Global/project config, precedence, paths | `Config::load` | toml, directories | FR-28, FR-29 |
 | `ipc` | Версионированный JSON-RPC поверх local transport | `Request/Response` | serde, tokio, platform | FR-7, FR-33 |
-| `platform` | Изоляция ОС: transport, signals, process, perms, path semantics | внутренний `pub`-фасад (ADR-9) | tokio, serde, directories | NFR-6, FR-33 |
+| `platform` | Изоляция ОС: transport, signals, process, perms, path semantics | внутренний `pub`-фасад (ADR-9/10) | tokio, serde, directories; Windows: interprocess, windows-sys | NFR-6, FR-33 |
 | `error` | Таксономия ошибок и маппинг в MCP/CLI | `enum Error` | thiserror | NFR-8 |
 
 ## 5. Module interfaces
@@ -248,6 +248,8 @@ pub struct Project {
 | `fd-lock` | RAII flock для admission/locks | FR-4, FR-9 |
 | `thiserror`, `anyhow` | таксономия ошибок | constitution |
 | (без крейта) файловый лог `logs/daemon.log` 0600 + `logs/conflicts.ndjson` | диагностика и admission-конфликты | NFR-8 |
+| `interprocess` (`cfg(windows)`, feature `tokio`) | local sockets: daemon-транспорт на Windows | FR-33, ADR-10 |
+| `windows-sys` (`cfg(windows)`, `Win32_System_Threading`, `Win32_Foundation`) | `process_alive` (OpenProcess/GetExitCodeProcess) | ADR-10 |
 | dev: `tempfile`, `assert_cmd`, `insta`, `criterion` | интеграционные, golden и perf-тесты (T27, T30) | NFR-1, NFR-7 |
 
 **Точечные альтернативы:** вместо `serde_yaml` — минимальный flat-парсер frontmatter
@@ -366,6 +368,22 @@ path semantics); spawn процесса остаётся в lifecycle как por
 vs named pipes — новый крейт), замена запущенного бинаря в `install`, read-timeout
 на named pipes, CI-матрица macOS/Windows.
 
+**ADR-10. Windows backend: local sockets через `interprocess` (T38…T43).**
+Выбрано: `src/platform/windows.rs` использует крейт **`interprocess`** (feature `tokio`)
+как local-socket транспорт (named pipes), а `windows-sys` — только для `process_alive`.
+Рассматривали: (a) tokio named pipes + `std File` без крейта — дешевле по зависимостям,
+но ручная ротация pipe-инстансов и собственный blocking-listener для тестов;
+(b) `interprocess` — выбрано: blocking/tokio listener из коробки, единая обработка краёв,
+задел под SDDL-ACL, условная зависимость `[target.'cfg(windows)']` (Linux крейт не
+компилирует); (c) AF_UNIX на Windows — отвергнуто: неоднородная поддержка по сборкам,
+std/tokio не предоставляют, мало боевых кейсов. Инварианты: Linux-реализация не
+меняется; `Endpoint` получает вариант `Pipe(String)` (serde строкой; `daemon.json.socket`
+совместим); имя `\\.\pipe\docsbase-<blake3(canonical cache)>` уникально на кэш;
+`Client::connect` теряет exists-precheck (connect-ошибка → None). Деградации:
+`secure_*` — best-effort no-op (приватность через `%LOCALAPPDATA%` и дефолтный DACL
+пайпа), `fd_count/thread_count` = 0, `remove` пайпа — no-op. Вне этой фазы: SDDL-ACL,
+статический `.exe` (msvc `+crt-static`), 10k-doc RSS (см. T43).
+
 ## 13. Directory structure
 
 ```
@@ -410,6 +428,7 @@ src/
 ├── platform/               # ОС-изоляция (ADR-9)
 │   ├── mod.rs              # фасад: Endpoint/Listener/Stream, process/fs/paths
 │   ├── unix.rs             # Unix-реализация v1 (transport/signals/process/perms)
+│   ├── windows.rs          # Windows x64 backend (T39–T41, interprocess + windows-sys)
 │   └── paths.rs            # home_dir, is_under, normalize_for_compare
 └── error.rs                # taxonomy (NFR-8)
 
@@ -444,5 +463,6 @@ tests/
 | FR-33 | `ipc/` + `platform/` (local socket, 0600, ADR-9) |
 | FR-34 | `mcp/tools.rs` (read-only набор) |
 | NFR-2, NFR-3, NFR-6 | `store`, `index/`, сборка, `platform/` (seam, ADR-9) |
+| NFR-6 (Windows x64) | `platform/windows.rs`, CI-матрица (ADR-10, T38–T43) |
 | NFR-5, NFR-8 | `logs/daemon.log` + conflict-log, отсутствие сетевых крейтов |
 | NFR-7 | `store/migrations.rs` |

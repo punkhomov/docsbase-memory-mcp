@@ -571,3 +571,114 @@ workflow; синхронизация design §7/§13; ledger
 каждая задача независимо верифицируема `Verify`-командой; новых крейтов и wire-изменений
 нет; macOS/Windows impl и транспортный ADR фазы 3 сознательно вне секции; пропорция —
 сигнатуры, имена тестов и команды, без тел функций.
+
+---
+
+## Windows support — первая рабочая версия (T38…T43)
+
+**Goal:** `docsbase` работает на Windows x64 (daemon + CLI + MCP frontend, тесты в CI) без
+изменения Linux-поведения; транспорт — local sockets через `interprocess` (ADR-10),
+`process_alive` — `windows-sys`.
+**Depends:** T33…T37 (platform seam, converged `dbf95e3`).
+**Review focus (failure modes):** (1) Windows-ветка протекает в ядро/тесты незаметно;
+(2) endpoint-naming: коллизии между кэшами, длина/кодировка имени; (3) pipe-семантика
+connect/EOF отличается от UDS (probe, stop, session cleanup); (4) на Windows права
+молча «широкие»; (5) Linux-поведение/тесты регрессируют при добавлении `cfg`.
+
+Инвариант секции: `#[cfg(windows)]`/`std::os::windows` — только в `src/platform/`;
+Linux-набор тестов и поведение не меняются; новых FR нет.
+
+### T38 — Spec delta: ADR-10 + план (docs-only)
+**Depends:** T37
+**New crates:** —
+**Files:** Modify `docs/specs/docsbase-memory-mcp/{design,requirements,tasks,progress}.md`
+**Interfaces:** Produces ADR-10 и T39…T43; код и тесты не меняются
+**RED:** — (docs-only)
+**GREEN:** фиксация решений: `interprocess`+`tokio` (Windows transport), `windows-sys`
+OpenProcess (`process_alive`), деградации `secure_*`/`fd_count`/`thread_count`/`remove`,
+naming `\\.\pipe\docsbase-<blake3(cache)>`, вне фазы — SDDL-ACL, статический `.exe`, 10k-RSS
+**Verify:** `grep -n "ADR-10" docs/specs/docsbase-memory-mcp/{design,tasks}.md` → ссылки в §2/§4/§7/§12/§13/§14, NFR-6/FR-33/A2 и T39–T43
+**Acceptance:** решения и границы фазы зафиксированы; traceability обновлена.
+
+### T39 — Windows transport (interprocess)
+**Depends:** T38
+**New crates:** `interprocess` 2.4.4 (`[target.'cfg(windows)']`, feature `tokio`) — ADR-10
+**Files:** Create `src/platform/windows.rs`; Modify `src/platform/mod.rs` (`Endpoint::Pipe`,
+`cfg`-выбор backend'а), `src/ipc/client.rs` (без exists-precheck: connect-ошибка → `None`),
+`tests/platform_transport.rs` (serde-вариант `Pipe`, cfg-ветки), `tests/platform_boundary.rs`
+(+`interprocess`, `windows_sys`, `os::windows`)
+**Interfaces:** `Endpoint::Pipe(String)` (serde строкой), `daemon_endpoint` →
+`\\.\pipe\docsbase-<blake3(canonical cache)>`; `bind/bind_blocking/connect_blocking/
+connect_probe/remove/exists` на `interprocess::{tokio,}LocalSocket*`; `remove` — no-op,
+`exists`/`connect_probe` — connect-попытка
+**RED:** `platform_transport::endpoint_pipe_roundtrip` — падает (варианта нет);
+`platform_transport::daemon_endpoint_is_cache_unique` — падает (модуля нет)
+**GREEN:** Windows-backend; Linux-ветка (`unix.rs`) не меняется; `Client::connect` без exists
+**Verify:** Linux: `cargo test --locked --test platform_transport --test platform_boundary && cargo test --locked`; локальный кросс-чек: `rustup target add x86_64-pc-windows-gnu && cargo check --locked --target x86_64-pc-windows-gnu --all-targets`; Windows CI (T43): `cargo test --locked`
+**Acceptance:** endpoint уникален на кэш и переживает serde; NDJSON/таймауты/handshake те же;
+Linux-тесты без изменений зелёные.
+
+### T40 — Windows process/signals/permissions backend
+**Depends:** T39
+**New crates:** `windows-sys` (`[target.'cfg(windows)']`, `Win32_System_Threading`,
+`Win32_Foundation`) — ADR-10
+**Files:** Modify `src/platform/windows.rs`, `tests/platform_process.rs` (cfg-ветки),
+`tests/platform_boundary.rs` (+паттерн на `windows_sys` вне platform)
+**Interfaces:** `ShutdownSignal` → `tokio::signal::windows` (ctrl_c/ctrl_close);
+`process::detach` → `creation_flags(DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP|CREATE_NO_WINDOW)`;
+`process_alive` → OpenProcess+GetExitCodeProcess; `fd_count/thread_count` → 0; `fs::secure_*` →
+best-effort no-op (документировано)
+**RED:** Windows-ветки тестов компилируются только в CI; на Linux добавляется
+`platform_process::windows_only_api_is_seam_bound` (boundary) — падает до паттернов
+**GREEN:** Windows-реализация; Linux (`/proc`, `chmod`, `SignalKind`) не меняется
+**Verify:** Linux: `cargo test --locked --test platform_process --test platform_boundary && cargo test --locked`; Windows CI: `cargo test --locked`
+**Acceptance:** stop/grace/cleanup работают через pipe+ctrl-события; `secure_*` на Windows
+не падают и не ослабляют `%LOCALAPPDATA%`; счётчики остаются `u64` (0).
+
+### T41 — Windows path semantics (containment)
+**Depends:** T39
+**New crates:** —
+**Files:** Modify `src/platform/unix.rs`/`src/platform/windows.rs`, `src/platform/paths.rs`,
+`tests/platform_boundary.rs` (при необходимости)
+**Interfaces:** `paths::is_under` на Windows — сравнение через `normalize_for_compare`
+(case/`\`-fold); `normalize_root` дополнительно запрещает диск-корень (`C:\`);
+`home_dir` — `directories` known-folders (уже так)
+**RED:** unit `paths::is_under_is_case_insensitive_on_windows` под `cfg(any(windows, test))`
+для чистого key-хелпера — падает до реализации
+**GREEN:** fold-версия `is_under`; Linux identity (I4/FR-32 без изменений)
+**Verify:** Linux: `cargo test platform::paths && cargo test --locked`; Windows CI: `cargo test --locked`
+**Acceptance:** containment на Windows нечувствителен к регистру и разделителям; Linux-семантика
+не изменилась.
+
+### T42 — Test portability pass
+**Depends:** T39, T40, T41
+**New crates:** —
+**Files:** Modify `tests/{admission,config_runtime,error_surface,install,ipc_server,lifecycle,mcp_docs,mcp_registry,offline,soak,artifact,cleanup,perf_budget}.rs`
+**Interfaces:** Consumes `platform::{exists, daemon_endpoint}`; Produces портируемые harness'ы:
+ожидание endpoint'а вместо файла `state/daemon.sock`, `#[cfg(unix)]`-гейты для `/proc`/`unshare`/
+`PermissionsExt`/symlink/`kill -9`/`ldd`/0600-режимов, фейки — через `platform::bind_blocking`
+**RED:** на Windows CI падают harness'ы (файл `daemon.sock` не появляется) — фиксируется прогоном
+job'а до правок (временно допустимо локально проверить grep'ом по `state/daemon.sock`)
+**GREEN:** harness'ы на `platform`; Linux-набор остаётся зелёным без потери покрытия (Unix-only
+тесты помечены `cfg(unix)` и продолжают исполняться в Linux CI)
+**Verify:** Linux: `cargo test --locked && cargo test --locked --release --test perf_budget`; Windows CI: `cargo test --locked`
+**Acceptance:** нет ожиданий файла сокета; Unix-only проверки явно помечены; на Windows
+исполняется функциональный набор (lifecycle/install/admission/mcp/docs/search).
+
+### T43 — Windows CI + docs sync
+**Depends:** T42
+**New crates:** —
+**Files:** Modify `.github/workflows/nightly.yml` (+job `windows-latest`),
+`docs/specs/docsbase-memory-mcp/{design,progress}.md` (§7/§13 при расхождениях)
+**Interfaces:** Produces windows-матрицу CI (build + `cargo test --locked`, `--release`
+бюджеты не гоняются на Windows), финальную синхронизацию docs/ledger
+**RED:** — (wire-up)
+**GREEN:** job `windows-latest` (toolchain 1.88, `Swatinem/rust-cache`), шаги: `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, `cargo test --locked`
+**Verify:** локально `cargo test --locked && cargo fmt --check`; на GitHub — зелёный windows-job
+**Acceptance:** Windows x64 собирается и проходит функциональный набор в CI; Linux nightly/release
+не затронуты; секция закрыта в ledger.
+
+**Self-review секции:** T39→T40/T41 (T41 не зависит от T40); каждая задача верифицируема
+командой; новых FR нет; macOS, SDDL-ACL, статический `.exe`, 10k-RSS и 1h-soak на Windows —
+следующие фазы.
