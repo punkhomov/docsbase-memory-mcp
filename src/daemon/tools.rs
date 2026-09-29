@@ -10,7 +10,8 @@ use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
 use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{ReadIndex, chunk_id_parts};
-use crate::store::models::{Project, ProjectStatus};
+use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
+use crate::store::models::{Project, ProjectStatus, SyncJob, SyncState};
 use crate::store::{Db, repo};
 
 /// `search_docs`: top-k chunks with citation (FR-20).
@@ -68,34 +69,178 @@ pub fn list_docs(db: &Db, project: &Project) -> Result<Value> {
     Ok(json!({ "project": project.name, "docs": docs }))
 }
 
-/// `status`: registry-wide snapshot with runtime counters (FR-26).
+/// `list_projects`: registry entries with statuses (FR-10, FR-25).
 ///
 /// # Errors
 /// Returns [`Error::Internal`] on SQLite failures.
-pub fn status(db: &Db, sessions: u64, fd_count: u64) -> Result<Value> {
+pub fn list_projects(db: &Db) -> Result<Value> {
     let mut projects = Vec::new();
     for project in registry::list_projects(db)? {
-        let counts = repo::project_counts(db.connection(), project.id)?;
-        projects.push(json!({
-            "id": project.id,
-            "name": project.name,
-            "root": project.canonical_root,
-            "status": project.status.as_str(),
-            "docs": counts.docs,
-            "chunks": counts.chunks,
-            "last_indexed_at": project.last_indexed_at,
-        }));
+        projects.push(project_entry(db, &project)?);
+    }
+    Ok(Value::Array(projects))
+}
+
+/// `status`: registry-wide snapshot with runtime counters and versions (FR-26).
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn status(db: &Db, sessions: u64, fd_count: u64, watchers: u64) -> Result<Value> {
+    let mut projects = Vec::new();
+    for project in registry::list_projects(db)? {
+        projects.push(project_entry(db, &project)?);
     }
     let hint = projects
         .is_empty()
         .then_some("run `docsbase index` in your project");
     Ok(json!({
+        "protocol_version": PROTOCOL_VERSION,
+        "build_id": build_id(),
         "schema_version": db.schema_version()?,
         "projects": projects,
         "sessions": sessions,
         "fd_count": fd_count,
+        "watchers": watchers,
         "hint": hint,
     }))
+}
+
+fn project_entry(db: &Db, project: &Project) -> Result<Value> {
+    let counts = repo::project_counts(db.connection(), project.id)?;
+    Ok(json!({
+        "id": project.id,
+        "name": project.name,
+        "root": project.canonical_root,
+        "status": project.status.as_str(),
+        "docs": counts.docs,
+        "chunks": counts.chunks,
+        "last_indexed_at": project.last_indexed_at,
+    }))
+}
+
+/// Creates a `queued` sync job for `project`; when an active job already
+/// exists, returns its id with `false` (FR-17).
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn enqueue_sync(db: &Db, project: &Project) -> Result<(i64, bool)> {
+    for _ in 0..3 {
+        if let Some(id) = repo::create_sync_job(db.connection(), project.id)? {
+            return Ok((id, true));
+        }
+        // The blocking insert lost to an active job; it may finish before the
+        // select (its runner uses another connection), so retry the pair.
+        if let Some(active) = repo::active_sync_job(db.connection(), project.id)? {
+            return Ok((active.id, false));
+        }
+    }
+    Err(Error::internal(format!(
+        "sync jobs for project {} are racing repeatedly",
+        project.id
+    )))
+}
+
+/// Runs a queued job to completion on its own database connection (daemon
+/// background task, FR-17); job state survives restarts.
+///
+/// Setup failures (missing project, unreadable config) also record `error`,
+/// so the project never keeps a stuck `queued` job that would block FR-17
+/// syncs; only an unopenable registry leaves the row untouched.
+///
+/// # Errors
+/// Propagates setup and indexing errors after persisting them.
+pub fn execute_sync_job(cache: &Path, job_id: i64, project_id: i64) -> Result<()> {
+    let mut db = Db::open(cache)?;
+    let setup = (|| -> Result<(Project, Config)> {
+        let project = registry::project_by_id(&db, project_id)?.ok_or_else(|| Error::Project {
+            message: format!("project {project_id} disappeared from the registry"),
+            instruction: None,
+        })?;
+        let config = Config::load(Some(&project.canonical_root))?;
+        Ok((project, config))
+    })();
+    match setup {
+        Ok((project, config)) => {
+            run_sync_job_in(&mut db, cache, job_id, &project, &config).map(|_| ())
+        }
+        Err(err) => {
+            let stats = json!({ "error": err.to_string() }).to_string();
+            if let Err(record) =
+                repo::finish_sync_job(db.connection(), job_id, SyncState::Error, Some(&stats))
+            {
+                eprintln!("warning: cannot record sync job {job_id} failure: {record}");
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Marks `job_id` running, runs the full index and records the terminal
+/// state with statistics (FR-17).
+///
+/// # Errors
+/// Propagates indexing errors after persisting them in `sync_jobs`.
+pub fn run_sync_job_in(
+    db: &mut Db,
+    cache: &Path,
+    job_id: i64,
+    project: &Project,
+    config: &Config,
+) -> Result<JobStats> {
+    repo::mark_sync_running(db.connection(), job_id)?;
+    let outcome = run_project_index(db, cache, project, config);
+    let (state, stats_json) = match &outcome {
+        Ok(stats) => (SyncState::Done, serde_json::to_string(stats).ok()),
+        Err(err) => (
+            SyncState::Error,
+            Some(json!({ "error": err.to_string() }).to_string()),
+        ),
+    };
+    if let Err(finish_err) =
+        repo::finish_sync_job(db.connection(), job_id, state, stats_json.as_deref())
+    {
+        eprintln!("warning: cannot finish sync job {job_id}: {finish_err}");
+    }
+    outcome
+}
+
+/// `sync_status(job_id)`: persistent job state and statistics (FR-17).
+///
+/// # Errors
+/// Returns [`Error::Protocol`] when `job_id` is missing and
+/// [`Error::Project`] for an unknown id.
+pub fn sync_status(db: &Db, args: &Value) -> Result<Value> {
+    let job_id = match args.get("job_id") {
+        Some(value) => value.as_i64().ok_or_else(|| Error::Protocol {
+            message: format!("sync_status: job_id must be an integer, got {value}"),
+        })?,
+        None => {
+            return Err(Error::Protocol {
+                message: "sync_status: missing job_id".to_owned(),
+            });
+        }
+    };
+    let job = repo::sync_job(db.connection(), job_id)?.ok_or_else(|| Error::Project {
+        message: format!("unknown sync job id {job_id}"),
+        instruction: None,
+    })?;
+    Ok(sync_job_value(&job))
+}
+
+/// JSON view of a sync job row.
+#[must_use]
+pub fn sync_job_value(job: &SyncJob) -> Value {
+    json!({
+        "job_id": job.id,
+        "project_id": job.project_id,
+        "state": job.state.as_str(),
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "stats": job
+            .stats_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok()),
+    })
 }
 
 /// Registers (by the caller) and indexes `project` under the per-project

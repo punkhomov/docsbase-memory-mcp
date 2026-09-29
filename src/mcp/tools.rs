@@ -8,8 +8,9 @@ use serde_json::{Value, json};
 /// Tools that need a session bound to a registered project (I6).
 pub const PROJECT_TOOLS: &[&str] = &["search_docs", "get_doc", "read_neighbors", "list_docs"];
 
-/// Tools that may run for the full indexing budget (NFR-1).
-pub const LONG_TOOLS: &[&str] = &["index_project", "sync_start", "sync_status"];
+/// Tools that may run for the full indexing budget (NFR-1); `sync_start` and
+/// `sync_status` only enqueue/read job rows and stay quick.
+pub const LONG_TOOLS: &[&str] = &["index_project"];
 
 /// Default IPC read timeout for fast tools.
 pub const QUICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -72,17 +73,26 @@ pub fn catalogue() -> Vec<Tool> {
         ),
         tool(
             "sync_start",
-            "Start a full synchronization job for the current project.",
-            json!({ "type": "object", "properties": {} }),
+            "Start (or return the already active) full synchronization job; returns its job_id.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project_id": { "type": "integer", "description": "Defaults to the session's project." }
+                }
+            }),
         ),
         tool(
             "sync_status",
-            "Report progress of the current project's sync job.",
-            json!({ "type": "object", "properties": {} }),
+            "Report the persistent state and statistics of a sync job.",
+            json!({
+                "type": "object",
+                "properties": { "job_id": { "type": "integer" } },
+                "required": ["job_id"]
+            }),
         ),
         tool(
             "status",
-            "Registry-wide status: projects, documents, chunks, sessions.",
+            "Registry-wide status: projects, documents, chunks, sessions, watcher and versions.",
             json!({ "type": "object", "properties": {} }),
         ),
     ]

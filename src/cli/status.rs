@@ -51,7 +51,7 @@ pub fn status() -> anyhow::Result<()> {
         return Ok(());
     }
     let db = Db::open_readonly(&cache)?;
-    let value = crate::daemon::tools::status(&db, 0, 0)?;
+    let value = crate::daemon::tools::status(&db, 0, 0, 0)?;
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }

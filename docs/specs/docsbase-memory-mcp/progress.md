@@ -122,3 +122,8 @@ MSRV-раунд (после T20): design §2/tasks.md/Cargo.toml — MSRV 1.85 �
 MSRV-раунд: rmcp 2.2.0 → 3.3.0 (`default-features = false`, features server/transport-io; 3.5.0 придержан min-publish-age); адаптация `CallToolResponse` (SEP-2322) в frontend
 MSRV-раунд: S6 закрыт — let-chains применены в `Request::validate` и в проектно-сессионной проверке frontend
 MSRV-раунд: 144 теста зелёные, clippy/fmt чисты
+Task 21: Ruling: новый `Request::RegisterUnbound` — cwd-only сессия, чтобы `index_project()` без path работал из непривязанного frontend (закрывает C8-петлю из T20); `index_project` пишется в `sync_jobs` и выполняется синхронно, `sync_start` — фоном через `spawn_blocking`
+Task 21: Ruling: один активный job на проект гарантируется атомарным `INSERT..SELECT..WHERE NOT EXISTS` (без unique-index); при старте daemon `queued/running` от прежнего процесса помечаются `error` ({"orphaned":true}); `sync_start`/`sync_status` переведены в quick-таймаут
+Task 21: fix round 1: setup-ошибка job'а пишется как `error` (не виснет queued) + eager `Config::load` в `sync_start`; frontend re-handshake после успешного `index_project` (hint снимается); enqueue retry ×3 (TOCTOU); state-guards в repo; строгие типы args (`opt_str`/`opt_i64`); doc-комментарии repo
+Task 21: minor (deferred): unknown `job_id` остаётся `Project` (-32012) до T29; `started_at` = время enqueue, не старта прогона; `sync_jobs` без retention; флак-риск `second_sync_start_returns_current` (40×200 секций, 20/20 локально); `Db::open`-фейл не может записать `error` (теоретический)
+Task 21: complete (tests: mcp_registry 9, всего 153, clippy clean, fmt clean; review CHANGES(High) → fixed → verified PASS)

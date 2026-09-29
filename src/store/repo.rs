@@ -1,8 +1,12 @@
 //! Repository helpers for documents and chunks (FR-16).
 
+use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Error, Result};
+use crate::store::models::{SyncJob, SyncState};
 
 /// Identity and hash of an already indexed document.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,4 +297,180 @@ pub fn project_counts(conn: &Connection, project_id: i64) -> Result<ProjectCount
         },
     )
     .map_err(db_error)
+}
+
+/// Inserts a `queued` sync job unless the project already has an active one
+/// (FR-17: at most one queued/running job per project).
+///
+/// Guard and insert are a single SQL statement, so two concurrent callers
+/// cannot both enqueue.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn create_sync_job(conn: &Connection, project_id: i64) -> Result<Option<i64>> {
+    let inserted = conn
+        .execute(
+            "INSERT INTO sync_jobs (project_id, state, started_at)
+             SELECT ?1, ?2, ?3
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM sync_jobs
+                 WHERE project_id = ?1 AND state IN (?2, ?4)
+             )",
+            params![
+                project_id,
+                SyncState::Queued.as_str(),
+                unix_now(),
+                SyncState::Running.as_str()
+            ],
+        )
+        .map_err(db_error)?;
+    Ok((inserted == 1).then(|| conn.last_insert_rowid()))
+}
+
+/// Newest active (`queued`/`running`) job of `project_id`.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures or a corrupt state value.
+pub fn active_sync_job(conn: &Connection, project_id: i64) -> Result<Option<SyncJob>> {
+    sync_job_query(
+        conn,
+        "SELECT id, project_id, state, started_at, finished_at, stats_json
+         FROM sync_jobs
+         WHERE project_id = ?1 AND state IN ('queued', 'running')
+         ORDER BY id DESC LIMIT 1",
+        params![project_id],
+    )
+}
+
+/// Loads one sync job by id.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures or a corrupt state value.
+pub fn sync_job(conn: &Connection, id: i64) -> Result<Option<SyncJob>> {
+    sync_job_query(
+        conn,
+        "SELECT id, project_id, state, started_at, finished_at, stats_json
+         FROM sync_jobs WHERE id = ?1",
+        params![id],
+    )
+}
+
+/// Moves a `queued` job to `running` (FR-17); only the `queued` state is
+/// accepted, so a finished job is never resurrected.
+///
+/// # Errors
+/// Returns [`Error::Internal`] for an unknown or non-queued id and on SQLite
+/// failures.
+pub fn mark_sync_running(conn: &Connection, id: i64) -> Result<()> {
+    let updated = conn
+        .execute(
+            "UPDATE sync_jobs SET state = ?1 WHERE id = ?2 AND state = ?3",
+            params![SyncState::Running.as_str(), id, SyncState::Queued.as_str()],
+        )
+        .map_err(db_error)?;
+    if updated == 0 {
+        return Err(Error::internal(format!(
+            "sync job {id} is unknown or not queued"
+        )));
+    }
+    Ok(())
+}
+
+/// Records a terminal job state with its serialized statistics (FR-17);
+/// only `queued`/`running` jobs can be finished.
+///
+/// # Errors
+/// Returns [`Error::Internal`] for an unknown or already finished id and on
+/// SQLite failures.
+pub fn finish_sync_job(
+    conn: &Connection,
+    id: i64,
+    state: SyncState,
+    stats_json: Option<&str>,
+) -> Result<()> {
+    let updated = conn
+        .execute(
+            "UPDATE sync_jobs SET state = ?1, finished_at = ?2, stats_json = ?3
+             WHERE id = ?4 AND state IN (?5, ?6)",
+            params![
+                state.as_str(),
+                unix_now(),
+                stats_json,
+                id,
+                SyncState::Queued.as_str(),
+                SyncState::Running.as_str()
+            ],
+        )
+        .map_err(db_error)?;
+    if updated == 0 {
+        return Err(Error::internal(format!(
+            "sync job {id} is unknown or already finished"
+        )));
+    }
+    Ok(())
+}
+
+/// Marks jobs left `queued`/`running` by a previous daemon as `error`
+/// (their executor is gone); run once at daemon start.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on SQLite failures.
+pub fn fail_orphan_sync_jobs(conn: &Connection) -> Result<usize> {
+    conn.execute(
+        "UPDATE sync_jobs SET state = ?1, finished_at = ?2, stats_json = ?3
+         WHERE state IN (?4, ?5)",
+        params![
+            SyncState::Error.as_str(),
+            unix_now(),
+            serde_json::json!({ "orphaned": true }).to_string(),
+            SyncState::Queued.as_str(),
+            SyncState::Running.as_str()
+        ],
+    )
+    .map_err(db_error)
+}
+
+type SyncRow = (i64, i64, String, i64, Option<i64>, Option<String>);
+
+fn sync_job_query(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Option<SyncJob>> {
+    let row = conn
+        .query_row(sql, params, |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .optional()
+        .map_err(db_error)?;
+    row.map(to_sync_job).transpose()
+}
+
+fn to_sync_job(row: SyncRow) -> Result<SyncJob> {
+    let (id, project_id, state, started_at, finished_at, stats_json) = row;
+    let state = SyncState::from_str(&state)
+        .map_err(|err| Error::internal_with_source(format!("sync job {id}: {err}"), err))?;
+    Ok(SyncJob {
+        id,
+        project_id,
+        state,
+        started_at,
+        finished_at,
+        stats_json,
+    })
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
 }

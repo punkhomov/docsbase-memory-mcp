@@ -114,6 +114,25 @@ impl Client {
         }
     }
 
+    /// Registers a cwd-only session (no project binding) after a failed
+    /// [`Self::handshake`]; `index_project` can then default to the cwd (C8).
+    ///
+    /// # Errors
+    /// Returns protocol/admission errors on version mismatch; a failed
+    /// registration is reported as a daemon error.
+    pub fn register_unbound(&mut self, cwd: &Path) -> Result<()> {
+        match self.call(Request::RegisterUnbound {
+            pid: std::process::id(),
+            cwd: cwd.to_path_buf(),
+        })? {
+            Response::ToolResult { .. } => Ok(()),
+            Response::Error { code, message } => Err(Error::from_mcp_code(code, message)),
+            other => Err(Error::Protocol {
+                message: format!("unexpected session reply: {other:?}"),
+            }),
+        }
+    }
+
     /// Sends a `CallTool` request and returns the tool payload.
     ///
     /// # Errors

@@ -20,6 +20,7 @@ use crate::mcp::tools;
 
 struct Conn {
     client: Client,
+    cwd: PathBuf,
     project_hint: Option<String>,
 }
 
@@ -78,7 +79,15 @@ impl Frontend {
                         *guard = None;
                         ensure_daemon(&cache)?;
                     }
-                    other => return other,
+                    Ok(value) => {
+                        if name == "index_project" {
+                            // The cwd project is registered now: rebind so the
+                            // same frontend can search without a restart.
+                            rebind_after_index(&mut guard);
+                        }
+                        return Ok(value);
+                    }
+                    Err(err) => return Err(err),
                 }
             }
             Err(Error::internal("daemon unreachable after reconnect"))
@@ -102,14 +111,32 @@ fn open_conn(cache: &Path) -> Result<Conn, Error> {
             let hint =
                 instruction.map_or(message.clone(), |hint| format!("{message} (hint: {hint})"));
             client.handshake_registry()?;
+            client.register_unbound(&cwd)?;
             Some(hint)
         }
         Err(err) => return Err(err),
     };
     Ok(Conn {
         client,
+        cwd,
         project_hint,
     })
+}
+
+/// After a successful `index_project`, tries to bind the (previously
+/// unbound) session to the now-registered project (FR-11, C8).
+fn rebind_after_index(guard: &mut Option<Conn>) {
+    let Some(conn) = guard.as_mut() else {
+        return;
+    };
+    let Conn {
+        client,
+        cwd,
+        project_hint,
+    } = conn;
+    if project_hint.is_some() && client.handshake(cwd).is_ok() {
+        *project_hint = None;
+    }
 }
 
 impl ServerHandler for Frontend {

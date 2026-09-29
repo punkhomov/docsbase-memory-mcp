@@ -42,6 +42,15 @@ pub enum Request {
         /// Frontend working directory.
         cwd: PathBuf,
     },
+    /// Registers a live session without a project binding; used by the
+    /// frontend fallback so `index_project` can still default to the cwd
+    /// (C8).
+    RegisterUnbound {
+        /// Frontend process id.
+        pid: u32,
+        /// Frontend working directory.
+        cwd: PathBuf,
+    },
     /// Proxied MCP tool call; `name` must be in [`TOOL_ALLOWLIST`].
     CallTool {
         /// Tool name.

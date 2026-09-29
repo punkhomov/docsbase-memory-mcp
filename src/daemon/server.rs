@@ -35,6 +35,10 @@ impl Shared {
     /// Returns [`Error::Internal`]/[`Error::Admission`] from [`Db::open`].
     pub fn open(cache: &Path) -> Result<Arc<Self>> {
         let db = Db::open(cache)?;
+        let orphans = crate::store::repo::fail_orphan_sync_jobs(db.connection())?;
+        if orphans > 0 {
+            eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
+        }
         Ok(Arc::new(Self {
             cache: cache.to_path_buf(),
             db: Mutex::new(db),
@@ -136,15 +140,13 @@ async fn handle_request(
             if !*hello_done {
                 return (hello_required(), true);
             }
-            match register_session(shared, pid, &cwd).await {
-                Ok((id, value)) => {
-                    if let Some(previous) = session_id.replace(id) {
-                        shared.sessions.leave(previous);
-                    }
-                    (Response::ToolResult { value }, false)
-                }
-                Err(err) => (error_response(&err), false),
+            register_and_respond(shared, session_id, pid, &cwd, false).await
+        }
+        Request::RegisterUnbound { pid, cwd } => {
+            if !*hello_done {
+                return (hello_required(), true);
             }
+            register_and_respond(shared, session_id, pid, &cwd, true).await
         }
         Request::CallTool { name, args } => {
             if !*hello_done {
@@ -163,7 +165,30 @@ async fn handle_request(
     }
 }
 
-async fn register_session(shared: &Arc<Shared>, pid: u32, cwd: &Path) -> Result<(u64, Value)> {
+async fn register_and_respond(
+    shared: &Arc<Shared>,
+    session_id: &mut Option<u64>,
+    pid: u32,
+    cwd: &Path,
+    allow_unbound: bool,
+) -> (Response, bool) {
+    match register_session(shared, pid, cwd, allow_unbound).await {
+        Ok((id, value)) => {
+            if let Some(previous) = session_id.replace(id) {
+                shared.sessions.leave(previous);
+            }
+            (Response::ToolResult { value }, false)
+        }
+        Err(err) => (error_response(&err), false),
+    }
+}
+
+async fn register_session(
+    shared: &Arc<Shared>,
+    pid: u32,
+    cwd: &Path,
+    allow_unbound: bool,
+) -> Result<(u64, Value)> {
     let shared_for_task = Arc::clone(shared);
     let cwd = cwd.to_path_buf();
     let cwd_for_task = cwd.clone();
@@ -201,18 +226,36 @@ async fn register_session(shared: &Arc<Shared>, pid: u32, cwd: &Path) -> Result<
         })
     })
     .await
-    .map_err(|err| Error::internal_with_source("session task join", err))??;
+    .map_err(|err| Error::internal_with_source("session task join", err))?;
 
-    let id = shared.sessions.join(pid, cwd, Some(outcome.id));
-    Ok((
-        id,
-        json!({
-            "session_id": id,
-            "project_id": outcome.id,
-            "name": outcome.name,
-            "status": outcome.status.as_str(),
-        }),
-    ))
+    match outcome {
+        Ok(project) => {
+            let id = shared.sessions.join(pid, cwd, Some(project.id));
+            Ok((
+                id,
+                json!({
+                    "session_id": id,
+                    "project_id": project.id,
+                    "name": project.name,
+                    "status": project.status.as_str(),
+                }),
+            ))
+        }
+        Err(err) if allow_unbound => {
+            let id = shared.sessions.join(pid, cwd, None);
+            Ok((
+                id,
+                json!({
+                    "session_id": id,
+                    "project_id": null,
+                    "name": null,
+                    "status": "unregistered",
+                    "hint": err.to_string(),
+                }),
+            ))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 async fn call_tool(
@@ -238,8 +281,9 @@ fn route_tool(
     match name {
         "status" => {
             let stats = shared.sessions.stats();
-            tools::status(&db, stats.sessions, stats.fd_count)
+            tools::status(&db, stats.sessions, stats.fd_count, 0)
         }
+        "list_projects" => tools::list_projects(&db),
         "search_docs" => {
             let project = bound_project(shared, &db, session_id)?;
             tools::search_docs(&db, &shared.cache, &project, args)
@@ -250,28 +294,88 @@ fn route_tool(
         }
         "index_project" => {
             drop(db);
-            let session_cwd = session_cwd(shared, session_id)?;
-            let path = match args.get("path").and_then(Value::as_str) {
+            let path = match opt_str(args, "path")? {
                 Some(raw) => {
                     let raw = PathBuf::from(raw);
                     if raw.is_absolute() {
                         raw
                     } else {
-                        session_cwd.join(raw)
+                        session_cwd(shared, session_id)?.join(raw)
                     }
                 }
-                None => session_cwd,
+                None => session_cwd(shared, session_id)?,
             };
             let root = registry::project_root_for(&path, &shared.cache)?;
             let config = Config::load(Some(&root))?;
             let mut job_db = Db::open(&shared.cache)?;
             let project = registry::ensure_project(&mut job_db, &root)?;
-            let stats = tools::run_project_index(&mut job_db, &shared.cache, &project, &config)?;
-            Ok(json!({ "project_id": project.id, "stats": stats }))
+            let (job_id, created) = tools::enqueue_sync(&job_db, &project)?;
+            if created {
+                tools::run_sync_job_in(&mut job_db, &shared.cache, job_id, &project, &config)?;
+            }
+            current_job(&job_db, job_id)
         }
+        "sync_start" => {
+            let project = match opt_i64(args, "project_id")? {
+                Some(id) => registry::project_by_id(&db, id)?.ok_or_else(|| Error::Project {
+                    message: format!("unknown project id {id}"),
+                    instruction: Some("call list_projects".to_owned()),
+                })?,
+                None => bound_project(shared, &db, session_id)?,
+            };
+            // Fail fast on a broken project config instead of leaving a job
+            // that would only error out in the background.
+            Config::load(Some(&project.canonical_root))?;
+            let (job_id, created) = tools::enqueue_sync(&db, &project)?;
+            if created {
+                spawn_sync_job(shared.cache.clone(), job_id, project.id);
+            }
+            current_job(&db, job_id)
+        }
+        "sync_status" => tools::sync_status(&db, args),
         other => Err(Error::internal(format!(
             "tool {other:?} is not implemented yet"
         ))),
+    }
+}
+
+fn opt_str(args: &Value, key: &str) -> Result<Option<String>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(other) => Err(Error::Protocol {
+            message: format!("{key} must be a string, got {other}"),
+        }),
+    }
+}
+
+fn opt_i64(args: &Value, key: &str) -> Result<Option<i64>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_i64().map(Some).ok_or_else(|| Error::Protocol {
+            message: format!("{key} must be an integer, got {value}"),
+        }),
+    }
+}
+
+fn current_job(db: &Db, job_id: i64) -> Result<Value> {
+    let job = crate::store::repo::sync_job(db.connection(), job_id)?
+        .ok_or_else(|| Error::internal(format!("sync job {job_id} vanished after enqueue")))?;
+    Ok(tools::sync_job_value(&job))
+}
+
+fn spawn_sync_job(cache: PathBuf, job_id: i64, project_id: i64) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn_blocking(move || {
+                if let Err(err) = tools::execute_sync_job(&cache, job_id, project_id) {
+                    eprintln!("warning: sync job {job_id} failed: {err}");
+                }
+            });
+        }
+        Err(err) => {
+            eprintln!("warning: sync job {job_id} not started (no runtime: {err})");
+        }
     }
 }
 

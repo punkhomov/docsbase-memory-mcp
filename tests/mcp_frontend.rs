@@ -163,7 +163,9 @@ fn serve_fake_connection(
                 build_id: docsbase_memory::ipc::protocol::build_id(),
                 schema_version: 1,
             },
-            Request::RegisterSession { .. } => Response::ToolResult { value: Value::Null },
+            Request::RegisterSession { .. } | Request::RegisterUnbound { .. } => {
+                Response::ToolResult { value: Value::Null }
+            }
             Request::CallTool { name, .. } => {
                 seen.lock().expect("lock").push(name.clone());
                 Response::ToolResult {

@@ -75,9 +75,11 @@ fn spawn_fake_daemon(cache: &Path) -> thread::JoinHandle<()> {
                         build_id: "test-daemon".to_owned(),
                         schema_version: 1,
                     },
-                    Request::RegisterSession { .. } => Response::ToolResult {
-                        value: serde_json::Value::Null,
-                    },
+                    Request::RegisterSession { .. } | Request::RegisterUnbound { .. } => {
+                        Response::ToolResult {
+                            value: serde_json::Value::Null,
+                        }
+                    }
                     Request::CallTool { name, .. } => Response::ToolResult {
                         value: serde_json::json!({ "routed_tool": name }),
                     },
