@@ -155,6 +155,15 @@ pub fn is_pruned(root: &Path, path: &Path) -> bool {
     })
 }
 
+/// Repository-relative path with `/` separators on every platform.
+///
+/// JSON and CLI output stay POSIX-style (git-style); Windows would otherwise
+/// leak `\` into `path` fields and break consumers.
+#[must_use]
+pub fn portable_rel(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 /// Canonicalizes `path` and guarantees it stays inside `root` (I4).
 ///
 /// # Errors
@@ -288,4 +297,16 @@ fn reject_escape(root: &Path, pattern: &str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::portable_rel;
+    use std::path::Path;
+
+    #[test]
+    fn portable_rel_uses_forward_slashes() {
+        assert_eq!(portable_rel(Path::new("docs/a.md")), "docs/a.md");
+        assert_eq!(portable_rel(Path::new("docs\\a.md")), "docs/a.md");
+    }
 }

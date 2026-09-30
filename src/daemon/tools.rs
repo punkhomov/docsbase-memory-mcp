@@ -206,11 +206,11 @@ pub fn get_doc(project: &Project, config: &Config, args: &Value) -> Result<Value
         message: format!("cannot read {}: {err}", canonical.display()),
         instruction: None,
     })?;
-    let rel = canonical
-        .strip_prefix(&project.canonical_root)
-        .unwrap_or(Path::new(raw))
-        .to_string_lossy()
-        .into_owned();
+    let rel = crate::index::walk::portable_rel(
+        canonical
+            .strip_prefix(&project.canonical_root)
+            .unwrap_or(Path::new(raw)),
+    );
     Ok(json!({
         "path": rel,
         "content": content,

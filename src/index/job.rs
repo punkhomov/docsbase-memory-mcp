@@ -125,7 +125,7 @@ pub fn run_full(
     let mut files: Vec<(PathBuf, String)> = Vec::new();
     for path in paths {
         if let Ok(rel) = path.strip_prefix(&project.canonical_root) {
-            let rel = rel.to_string_lossy().into_owned();
+            let rel = crate::index::walk::portable_rel(rel);
             walked.insert(rel.clone());
             files.push((path, rel));
         } else {
@@ -248,7 +248,7 @@ pub fn run_incremental_with(
             );
             continue;
         };
-        let rel = rel.to_string_lossy().into_owned();
+        let rel = crate::index::walk::portable_rel(rel);
         if !seen.insert(rel.clone()) {
             continue;
         }
