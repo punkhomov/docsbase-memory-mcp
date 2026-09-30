@@ -91,7 +91,7 @@ wt$ git rev-parse --show-toplevel --git-dir --git-common-dir
 - **gix**: `Repository::common_dir()`, `worktrees()`, `is_bare()` — если когда-нибудь понадобится
   полноценный git-клиент.
 - **ignore 0.4.30**: `resolve_git_commondir` ( `.git`-файл → gitdir → `commondir` relative/
-  absolute), апстрим-тест `git_info_exclude_in_linked_worktree`; precedence
+  absolute), апстрим-тест `git_info_exclude_in_linked_worktree` (у нас в walker — через `apply_git_exclude`, см. T51); precedence
   `.ignore > .gitignore > .git/info/exclude > global` (global у нас выключен).
 
 ## 4. Решения по вопросам
