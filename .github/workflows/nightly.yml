@@ -32,7 +32,9 @@ jobs:
       - name: Platform seam invariant (ADR-9)
         run: cargo test --locked --test platform_boundary
       - name: Performance budgets (NFR-1, SC-7)
-        run: cargo test --locked --release --test perf_budget -- --nocapture
+        # Single-threaded: the 10k RSS delta is process-wide and must not
+        # race allocations from the 50k-chunk search budget (T52 review).
+        run: cargo test --locked --release --test perf_budget -- --nocapture --test-threads=1
       - name: Soak, 3 agents + watcher, 1 hour (SC-5)
         run: cargo test --locked --release --test soak -- --ignored --nocapture
       - name: Full release suite

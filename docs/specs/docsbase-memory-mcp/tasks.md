@@ -922,9 +922,11 @@ RSS/время», Task 32);
 criterion `benches/index.rs`: группы `sync_noop` и `sync_changed_5pct` для трендов
 **RED:** бюджеты/ассерты падают при регрессии (проверка: временно отключить hash-skip)
 **GREEN:** бюджеты с 10–100× запасом к локальным замерам; меряются только `--release`
-**Verify:** `cargo test --locked --release --test perf_budget`; `cargo bench --bench index -- --quick` (локально)
-**Acceptance:** регрессии «случайно полный reindex» и «O(n) запись» ловятся CI; цифры
-зафиксированы в ledger (локально: 160/19/36 мс на 1000 docs).
+**Verify:** `cargo test --locked --release --test perf_budget -- --test-threads=1` (RSS-дельта process-wide); `cargo bench --bench index -- --quick` (локально)
+**Acceptance:** регрессия «случайно полный reindex» ловится correctness-ассертами (`docs==changed`),
+порядковые регрессии — time-бюджетами с запасом; цифры зафиксированы в ledger
+(локально release: no-op 1k ≈10 мс, switch 5% ≈27 мс, полный 1k ≈124 мс, 10k no-op ≈79 мс,
+RSS-дельта 10k ≈21–32 МиБ).
 
 ### T53 — Контракт контент-адресуемого кэша векторов (ADR-12 + fake-embedder)
 **Depends:** T43; согласуется с T49 (branch-метаданные — только диагностика)

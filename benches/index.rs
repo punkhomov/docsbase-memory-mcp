@@ -145,7 +145,10 @@ fn sync_benchmarks(c: &mut Criterion) {
                     .expect("incremental sync");
                 assert_eq!(stats.docs, FILES / 20);
             },
-            BatchSize::SmallInput,
+            // All setups in a batch run before the timed routines, so every
+            // routine needs its own two-step (write, then sync) pair (T52
+            // review finding).
+            BatchSize::PerIteration,
         );
     });
 }
