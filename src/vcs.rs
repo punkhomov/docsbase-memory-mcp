@@ -140,7 +140,7 @@ fn resolve_ref(common_dir: &Path, branch: &str) -> Option<String> {
 }
 
 fn scan_packed_refs(path: &Path, wanted: &str) -> Option<String> {
-    let file = File::open(path).ok()?;
+    let file = open_regular(path)?;
     let mut reader = BufReader::new(file.take(PACKED_REFS_LIMIT));
     let mut line = String::new();
     loop {
@@ -159,8 +159,16 @@ fn scan_packed_refs(path: &Path, wanted: &str) -> Option<String> {
     }
 }
 
+fn open_regular(path: &Path) -> Option<File> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    File::open(path).ok()
+}
+
 fn read_first_line(path: &Path) -> Option<String> {
-    let file = File::open(path).ok()?;
+    let file = open_regular(path)?;
     let mut reader = BufReader::new(file.take(META_READ_LIMIT));
     let mut line = String::new();
     if reader.read_line(&mut line).ok()? == 0 {
@@ -308,6 +316,58 @@ mod tests {
         assert!(state.is_worktree);
         assert_eq!(state.common_dir, common);
         assert_eq!(state.head.as_deref(), Some(sha('f').as_str()));
+    }
+
+    #[test]
+    fn relative_gitlink_is_supported() {
+        let main = TempDir::new().expect("main");
+        let wt_parent = TempDir::new().expect("wt-parent");
+        let wt = wt_parent.path().join("wt");
+        std::fs::create_dir_all(&wt).expect("mkdir wt");
+        let common = main.path().join(".git");
+        let worktree_git = common.join("worktrees/wt");
+        write(&worktree_git.join("HEAD"), "ref: refs/heads/feature\n");
+        write(&worktree_git.join("commondir"), "../..\n");
+        write(
+            &common.join("refs/heads/feature"),
+            &format!("{}\n", sha('1')),
+        );
+        let link = pathdiff(&wt, &worktree_git);
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", link.display())).expect("gitlink");
+        let state = state(&wt).expect("state");
+        assert!(state.is_worktree);
+        assert_eq!(state.branch.as_deref(), Some("feature"));
+        assert_eq!(state.head.as_deref(), Some(sha('1').as_str()));
+    }
+
+    #[test]
+    fn sha256_object_ids_are_accepted() {
+        let dir = TempDir::new().expect("dir");
+        write(&dir.path().join(".git/HEAD"), "ref: refs/heads/main\n");
+        let long = std::iter::repeat_n('a', 64).collect::<String>();
+        write(
+            &dir.path().join(".git/refs/heads/main"),
+            &format!("{long}\n"),
+        );
+        let state = state(dir.path()).expect("state");
+        let head = state.head.expect("head");
+        assert_eq!(head.len(), 64);
+        assert_eq!(head, long);
+    }
+
+    /// Relative path from `base` to `target` (both absolute, `target` need not exist).
+    fn pathdiff(base: &Path, target: &Path) -> PathBuf {
+        let base: Vec<_> = base.components().collect();
+        let target: Vec<_> = target.components().collect();
+        let common = base.iter().zip(&target).take_while(|(a, b)| a == b).count();
+        let mut out = PathBuf::new();
+        for _ in common..base.len() {
+            out.push("..");
+        }
+        for component in &target[common..] {
+            out.push(component.as_os_str());
+        }
+        out
     }
 
     #[test]

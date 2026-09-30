@@ -271,7 +271,7 @@ pub const NEIGHBOR_CAP: u64 = 100;
 pub fn list_projects(db: &Db) -> Result<Value> {
     let mut projects = Vec::new();
     for project in registry::list_projects(db)? {
-        projects.push(project_entry(db, &project, None)?);
+        projects.push(project_entry(db, &project, None, false)?);
     }
     Ok(Value::Array(projects))
 }
@@ -289,7 +289,12 @@ pub fn status(
 ) -> Result<Value> {
     let mut projects = Vec::new();
     for project in registry::list_projects(db)? {
-        projects.push(project_entry(db, &project, Some(watching(project.id)))?);
+        projects.push(project_entry(
+            db,
+            &project,
+            Some(watching(project.id)),
+            true,
+        )?);
     }
     let hint = projects
         .is_empty()
@@ -309,7 +314,12 @@ pub fn status(
     }))
 }
 
-fn project_entry(db: &Db, project: &Project, watched: Option<bool>) -> Result<Value> {
+fn project_entry(
+    db: &Db,
+    project: &Project,
+    watched: Option<bool>,
+    with_git: bool,
+) -> Result<Value> {
     let counts = repo::project_counts(db.connection(), project.id)?;
     // Warnings come from the newest job only when it succeeded: a newer
     // failed job must not leave an older job's warnings looking current.
@@ -333,7 +343,7 @@ fn project_entry(db: &Db, project: &Project, watched: Option<bool>) -> Result<Va
     if let Some(watched) = watched {
         entry["watched"] = json!(watched);
     }
-    if let Some(git) = crate::vcs::state(&project.canonical_root) {
+    if with_git && let Some(git) = crate::vcs::state(&project.canonical_root) {
         entry["git"] = json!({
             "branch": git.branch,
             "head": git.head,

@@ -15,7 +15,7 @@ fn write(path: &std::path::Path, text: &str) {
 }
 
 #[test]
-fn status_reports_branch_and_head() {
+fn vcs_status_reports_branch_and_head() {
     let cache = TempDir::new().expect("cache");
     let project = TempDir::new().expect("project");
     let root = project.path();
@@ -41,7 +41,7 @@ fn status_reports_branch_and_head() {
 }
 
 #[test]
-fn status_omits_git_outside_repository() {
+fn vcs_status_omits_git_outside_repository() {
     let cache = TempDir::new().expect("cache");
     let project = TempDir::new().expect("project");
     let mut db = Db::open(cache.path()).expect("db");
