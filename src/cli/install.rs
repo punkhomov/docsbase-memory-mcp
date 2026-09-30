@@ -256,7 +256,12 @@ fn swap_binary(source: &Path, target: &Path) -> anyhow::Result<()> {
     let tmp = target.with_extension("tmp");
     fs::copy(source, &tmp)
         .with_context(|| format!("copy {} -> {}", source.display(), tmp.display()))?;
-    let copied = fs::File::open(&tmp).with_context(|| format!("open {}", tmp.display()))?;
+    // Windows `FlushFileBuffers` (sync_all) needs write access; open for
+    // writing instead of the read-only default.
+    let copied = fs::OpenOptions::new()
+        .write(true)
+        .open(&tmp)
+        .with_context(|| format!("open {}", tmp.display()))?;
     copied
         .sync_all()
         .with_context(|| format!("sync {}", tmp.display()))?;
