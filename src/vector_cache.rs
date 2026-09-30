@@ -14,7 +14,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Error, Result};
 
-/// Separate SQLite file in the cache root; one cache per machine user.
+/// Separate `SQLite` file in the cache root; one cache per machine user.
 pub const VECTOR_DB_FILE: &str = "vectors.db";
 
 /// Cache size bounds; eviction drops the least recently used rows first.
