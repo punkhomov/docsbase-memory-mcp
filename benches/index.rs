@@ -122,7 +122,7 @@ fn sync_benchmarks(c: &mut Criterion) {
 
     c.bench_function("sync_changed_5pct_1000_files", |b| {
         let Prepared {
-            _cache: _cache,
+            _cache,
             _root: root,
             mut db,
             mut index,
