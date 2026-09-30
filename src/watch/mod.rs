@@ -130,11 +130,6 @@ pub fn spawn_watcher(
             let mut filter = IndexFilter::new(filter_root, filter_cache, &initial);
             drop(initial);
             while let Ok(first) = event_rx.recv() {
-                let batch_config = config
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone();
-                filter.set_config(&batch_config);
                 let deadline = Instant::now() + MAX_DEBOUNCE;
                 let mut raw = Batch::new();
                 raw.push(first);
@@ -152,6 +147,15 @@ pub fn spawn_watcher(
                         }
                     }
                 }
+                // Apply the config as of the END of the debounce window: a
+                // reopen that lands while events are still arriving must
+                // govern this batch (OQ-6; Windows CI showed the old
+                // start-of-window capture losing freshly written ignores).
+                let batch_config = config
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                filter.set_config(&batch_config);
                 let batch = finalize(&mut filter, raw);
                 if !batch.is_empty() && tx.send(batch).is_err() {
                     return;
