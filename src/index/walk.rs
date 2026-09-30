@@ -234,6 +234,26 @@ fn validate_patterns(root: &Path, config: &Config) -> Result<()> {
         reject_escape(root, pattern)?;
     }
     let ignore_file = root.join(IGNORE_FILE);
+    match std::fs::metadata(&ignore_file) {
+        Ok(metadata) if metadata.len() > MAX_IGNORE_FILE_SIZE => {
+            return Err(Error::Project {
+                message: format!(
+                    "{} is {} bytes, over the {MAX_IGNORE_FILE_SIZE} byte ignore-file limit",
+                    ignore_file.display(),
+                    metadata.len()
+                ),
+                instruction: Some("trim the ignore patterns or split the file".to_owned()),
+            });
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(Error::internal_with_source(
+                format!("read {}: {err}", ignore_file.display()),
+                err,
+            ));
+        }
+    }
     match std::fs::read_to_string(&ignore_file) {
         Ok(text) => {
             for line in text.lines() {

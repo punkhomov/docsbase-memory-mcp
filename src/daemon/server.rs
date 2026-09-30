@@ -530,7 +530,8 @@ fn route_tool(
         }
         "get_doc" => {
             let project = bound_project(shared, &db, session_id)?;
-            tools::get_doc(&project, args)
+            let config = shared.project_config(&project)?;
+            tools::get_doc(&project, &config, args)
         }
         "read_neighbors" => {
             let project = bound_project(shared, &db, session_id)?;

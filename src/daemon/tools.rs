@@ -92,7 +92,9 @@ pub fn list_docs(db: &Db, project: &Project, args: &Value) -> Result<Value> {
                 })?
         }
     };
-    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    // Clamp exactly like `search_docs`: pagination allocates proportional to
+    // the requested limit even though the store caps projects at 20k docs.
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX).min(MAX_HITS);
     let cursor = match args.get("cursor") {
         None | Some(Value::Null) => None,
         Some(Value::String(value)) => Some(value.as_str()),
@@ -130,9 +132,9 @@ pub fn list_docs(db: &Db, project: &Project, args: &Value) -> Result<Value> {
 ///
 /// # Errors
 /// Returns [`Error::Project`] when the path is absolute, escapes the root,
-/// resolves through a symlink outside it, is not a markdown file, or cannot
-/// be read.
-pub fn get_doc(project: &Project, args: &Value) -> Result<Value> {
+/// resolves through a symlink outside it, is not a markdown file, exceeds
+/// [`Config::max_file_size`], or cannot be read.
+pub fn get_doc(project: &Project, config: &Config, args: &Value) -> Result<Value> {
     let raw = args
         .get("path")
         .and_then(Value::as_str)
@@ -182,6 +184,22 @@ pub fn get_doc(project: &Project, args: &Value) -> Result<Value> {
         return Err(Error::Project {
             message: format!("{raw:?} is not a markdown document"),
             instruction: Some("only `.md` documents are exposed".to_owned()),
+        });
+    }
+    let metadata = std::fs::metadata(&canonical).map_err(|err| Error::Project {
+        message: format!("cannot stat {}: {err}", canonical.display()),
+        instruction: None,
+    })?;
+    if metadata.len() > config.max_file_size {
+        return Err(Error::Project {
+            message: format!(
+                "{raw:?} is {} bytes, over max_file_size {}",
+                metadata.len(),
+                config.max_file_size
+            ),
+            instruction: Some(
+                "raise max_file_size in .docsbase.toml to read larger documents".to_owned(),
+            ),
         });
     }
     let content = std::fs::read_to_string(&canonical).map_err(|err| Error::Project {

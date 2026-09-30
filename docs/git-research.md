@@ -59,7 +59,8 @@ wt$ git rev-parse --show-toplevel --git-dir --git-common-dir
 
 - `docsbase index .` в `wt` + `.gitignore(ignored.md)` + `.git/info/exclude(secret.md)`:
   проиндексированы ровно `a.md` и `docs/b.md`, проекта `wt`, root = `/tmp/opencode/gitexp/wt`.
-  → exclude из common dir **соблюдается** (ignore crate), worktree-root = ключ.
+  → exclude из common dir **соблюдается** (наша обёртка `apply_git_exclude`, T51: `ignore`
+  crate сам не разбирает gitlink-файл в walker), worktree-root = ключ.
 - `docsbase index .` в `wt/docs`: root всё тот же `wt` (walk-up до git root), второй проект
   не создан.
 - `docsbase index .` в `main`: создан **второй проект** `main` — идентичное содержимое

@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use docsbase_memory::daemon::lifecycle::stop_daemon;
+use docsbase_memory::index::tantivy_index::MAX_HITS;
 use docsbase_memory::ipc::client::Client;
 use docsbase_memory::platform;
 
@@ -338,4 +339,51 @@ fn get_doc_outside_project() {
             "error message missing for {path:?}"
         );
     }
+}
+
+#[test]
+fn get_doc_rejects_oversized_file() {
+    let big = format!("# Big\n\n{}\n", "a".repeat(2048));
+    let size = big.len();
+    let mut env = Env::new(&[("big.md", big.as_str())]);
+    write_file(env.root(), ".docsbase.toml", b"max_file_size = 1024\n");
+    env.start_daemon();
+    index_project(&env);
+    let mut client = env.bound();
+
+    let err = client
+        .call_tool("get_doc", json!({ "path": "big.md" }))
+        .expect_err("oversized document must be rejected");
+    let text = err.to_string();
+    assert!(
+        text.contains("over max_file_size"),
+        "unexpected error: {text}"
+    );
+    assert!(
+        text.contains(&size.to_string()),
+        "size missing from error: {text}"
+    );
+}
+
+#[test]
+fn list_docs_limit_is_clamped() {
+    let mut env = Env::new(&[]);
+    for index in 0..=MAX_HITS {
+        write_file(
+            env.root(),
+            &format!("d/{index:04}.md"),
+            format!("# D{index}\n\nclamp page body.\n").as_bytes(),
+        );
+    }
+    env.start_daemon();
+    index_project(&env);
+    let mut client = env.bound();
+
+    let value = page(&mut client, MAX_HITS + 5, None);
+    let docs = value["docs"].as_array().expect("docs");
+    assert_eq!(docs.len(), MAX_HITS, "limit must clamp to MAX_HITS");
+    assert!(
+        value["next_cursor"].is_string(),
+        "clamped page must expose a cursor: {value}"
+    );
 }

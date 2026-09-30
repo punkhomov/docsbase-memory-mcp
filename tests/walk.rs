@@ -3,7 +3,7 @@ use std::path::Path;
 
 use docsbase_memory::config::{Config, ConfigOverrides};
 use docsbase_memory::error::Error;
-use docsbase_memory::index::walk::{IGNORE_FILE, resolve_in_root, walk};
+use docsbase_memory::index::walk::{IGNORE_FILE, MAX_IGNORE_FILE_SIZE, resolve_in_root, walk};
 use tempfile::TempDir;
 
 fn write(dir: &Path, rel: &str, body: &str) {
@@ -136,4 +136,20 @@ fn ignore_dotdot_patterns() {
         .err()
         .expect("must reject config pattern");
     assert!(matches!(err, Error::Project { .. }), "{err:?}");
+}
+
+#[test]
+fn oversized_docsbaseignore_is_rejected() {
+    let root = TempDir::new().expect("tempdir");
+    write(root.path(), "a.md", "# a");
+    let big = "x".repeat(MAX_IGNORE_FILE_SIZE as usize + 1);
+    write(root.path(), IGNORE_FILE, &big);
+
+    let err = walk(root.path(), &Config::default())
+        .err()
+        .expect("oversized ignore file must fail closed");
+    assert!(
+        err.to_string().contains("ignore-file limit"),
+        "unexpected error: {err}"
+    );
 }
