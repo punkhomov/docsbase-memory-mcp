@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use docsbase_memory::daemon::registry::{
-    ensure_project, list_projects, resolve_by_cwd, set_status,
+    RootState, ensure_project, list_projects, resolve_by_cwd, root_state, set_status,
 };
 use docsbase_memory::error::Error;
 use docsbase_memory::store::Db;
@@ -155,4 +155,57 @@ fn system_dirs_are_refused() {
             "unexpected error for {dir}: {err}"
         );
     }
+}
+
+#[test]
+fn status_marks_missing_root() {
+    let cache = TempDir::new().expect("cache");
+    let project = TempDir::new().expect("project");
+    let mut db = Db::open(cache.path()).expect("db");
+    let registered = ensure_project(&mut db, project.path()).expect("project");
+    assert_eq!(root_state(&registered.canonical_root), RootState::Present);
+
+    // A root replaced by a regular file is missing too.
+    fs::remove_dir_all(project.path()).expect("remove");
+    fs::write(project.path(), b"not a directory").expect("file");
+    assert_eq!(root_state(&registered.canonical_root), RootState::Missing);
+
+    let stats = docsbase_memory::daemon::session::Stats {
+        sessions: 0,
+        fd_count: 0,
+        threads: 0,
+    };
+    let value =
+        docsbase_memory::daemon::tools::status(&db, &stats, 0, None, &|_| false).expect("status");
+    assert_eq!(value["projects"][0]["root_state"], "missing");
+    assert_eq!(
+        list_projects(&db).expect("registry").len(),
+        1,
+        "the registry entry must survive"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn uncertain_root_is_not_missing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Root users bypass permissions; the uncertainty path cannot be
+    // reproduced there.
+    let probe = std::env::temp_dir().join(format!("docsbase-euid-{}", std::process::id()));
+    fs::write(&probe, b"x").expect("probe");
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o000)).expect("chmod probe");
+    let unreadable = fs::read(&probe).is_err();
+    let _ = fs::remove_file(&probe);
+    if !unreadable {
+        eprintln!("skipping: effective root bypasses permissions");
+        return;
+    }
+
+    let parent = TempDir::new().expect("parent");
+    let root = parent.path().join("project");
+    fs::create_dir_all(&root).expect("mkdir");
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o000)).expect("chmod parent");
+    assert_eq!(root_state(&root), RootState::Uncertain);
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).expect("restore");
 }

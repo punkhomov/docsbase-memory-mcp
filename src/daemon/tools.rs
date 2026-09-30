@@ -307,12 +307,9 @@ pub fn status(
 ) -> Result<Value> {
     let mut projects = Vec::new();
     for project in registry::list_projects(db)? {
-        projects.push(project_entry(
-            db,
-            &project,
-            Some(watching(project.id)),
-            true,
-        )?);
+        let mut entry = project_entry(db, &project, Some(watching(project.id)), true)?;
+        entry["root_state"] = json!(registry::root_state(&project.canonical_root).as_str());
+        projects.push(entry);
     }
     let hint = projects
         .is_empty()

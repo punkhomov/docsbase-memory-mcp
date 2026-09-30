@@ -662,6 +662,7 @@ fn route_tool(
                 })?,
                 None => bound_project(shared, &db, session_id)?,
             };
+            registry::ensure_root_present(&project)?;
             // Fail fast on a broken project config instead of leaving a job
             // that would only error out in the background.
             let config = shared.project_config(&project)?;

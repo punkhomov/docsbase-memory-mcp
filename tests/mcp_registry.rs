@@ -613,3 +613,43 @@ fn watcher_refreshes_search() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+#[test]
+fn sync_missing_root_gives_hint() {
+    let mut env = Env::new(&[("README.md", DOC)]);
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake_registry().expect("hello");
+    Env::index_project(&mut client, env.root());
+
+    let status = client
+        .call_tool("status", json!({}))
+        .expect("status before deletion");
+    assert_eq!(status["projects"][0]["root_state"], "present");
+    let project_id = status["projects"][0]["id"].as_i64().expect("project id");
+
+    std::fs::remove_dir_all(env.root()).expect("remove project root");
+
+    let status = client.call_tool("status", json!({})).expect("status");
+    assert_eq!(
+        status["projects"][0]["root_state"], "missing",
+        "status: {status}"
+    );
+    let err = client
+        .call_tool("sync_start", json!({ "project_id": project_id }))
+        .expect_err("missing root must fail fast");
+    let text = err.to_string();
+    assert!(
+        text.contains("no longer exists"),
+        "unexpected error: {text}"
+    );
+    assert!(
+        text.contains("remove the project from the registry"),
+        "hint missing: {text}"
+    );
+    // The registry entry and its data survive the failed sync.
+    let projects = client
+        .call_tool("list_projects", json!({}))
+        .expect("list_projects");
+    assert_eq!(projects.as_array().expect("array").len(), 1);
+}

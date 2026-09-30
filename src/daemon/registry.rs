@@ -237,6 +237,65 @@ fn to_project(row: Row) -> Result<Project> {
     })
 }
 
+/// Filesystem state of a registered project root (T50).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootState {
+    /// Root exists and is a directory.
+    Present,
+    /// Root is genuinely gone (`ENOENT`/`ENOTDIR`) or no longer a directory.
+    Missing,
+    /// Existence could not be determined (permissions, IO); never destructive.
+    Uncertain,
+}
+
+impl RootState {
+    /// Stable string for wire output.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Present => "present",
+            Self::Missing => "missing",
+            Self::Uncertain => "uncertain",
+        }
+    }
+}
+
+/// Classifies the project root without mutating anything (T50).
+#[must_use]
+pub fn root_state(canonical_root: &Path) -> RootState {
+    match std::fs::metadata(canonical_root) {
+        Ok(metadata) if metadata.is_dir() => RootState::Present,
+        Ok(_) => RootState::Missing,
+        Err(err)
+            if err.kind() == std::io::ErrorKind::NotFound
+                || err.kind() == std::io::ErrorKind::NotADirectory =>
+        {
+            RootState::Missing
+        }
+        Err(_) => RootState::Uncertain,
+    }
+}
+
+/// Fails fast when a project root is missing; uncertainty proceeds (T50).
+///
+/// # Errors
+/// Returns [`Error::Project`] with an actionable hint for a missing root.
+pub fn ensure_root_present(project: &crate::store::models::Project) -> Result<()> {
+    if root_state(&project.canonical_root) == RootState::Missing {
+        return Err(Error::Project {
+            message: format!(
+                "project root {} no longer exists",
+                project.canonical_root.display()
+            ),
+            instruction: Some(
+                "re-create the worktree/directory or remove the project from the registry"
+                    .to_owned(),
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Canonical project root (realpath + git root) with I7 validation, without
 /// touching the registry; used for config lookup before registration.
 ///
@@ -250,7 +309,9 @@ fn normalize_root(path: &Path, home: Option<&Path>, cache: &Path) -> Result<Path
     if !path.exists() {
         return Err(Error::Project {
             message: format!("{} does not exist", path.display()),
-            instruction: None,
+            instruction: Some(
+                "re-create the worktree/directory or run from a valid project root".to_owned(),
+            ),
         });
     }
     let canonical = path.canonicalize().map_err(|err| Error::Project {

@@ -357,6 +357,13 @@ impl Watchers {
         if project.status != ProjectStatus::Indexed {
             return Ok(false);
         }
+        // A missing root is surfaced in `status`; watching it would only
+        // produce retry noise (T50).
+        if crate::daemon::registry::root_state(&project.canonical_root)
+            == crate::daemon::registry::RootState::Missing
+        {
+            return Ok(false);
+        }
         let mut map = self.map();
         if map.contains_key(&project.id) {
             return Ok(false);
@@ -457,6 +464,18 @@ fn spawn_consumer(
                             std::thread::sleep(LEASE_RETRY);
                         }
                         Err(err) => {
+                            if crate::daemon::registry::root_state(
+                                &project.canonical_root,
+                            ) == crate::daemon::registry::RootState::Missing
+                            {
+                                eprintln!(
+                                    "watch: project {project_id} root is missing; stopping watcher"
+                                );
+                                if let Some(watchers) = watchers.upgrade() {
+                                    watchers.remove(project_id);
+                                }
+                                return;
+                            }
                             eprintln!(
                                 "warning: watcher batch for project {project_id}: {err}"
                             );
