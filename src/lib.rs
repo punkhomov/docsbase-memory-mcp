@@ -12,4 +12,5 @@ pub mod mcp;
 pub mod platform;
 pub mod store;
 pub mod vcs;
+pub mod vector_cache;
 pub mod watch;
