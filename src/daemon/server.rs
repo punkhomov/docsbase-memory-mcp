@@ -285,7 +285,12 @@ pub async fn handle_connection(
         };
         let line = match next_frame {
             Ok(Frame::Line(line)) => line,
-            Ok(Frame::Eof) | Err(_) => break,
+            Ok(Frame::Eof) | Err(_) => {
+                if std::env::var_os("DOCSBASE_IPC_DEBUG").is_some() {
+                    eprintln!("ipc-debug: connection read ended: {next_frame:?}");
+                }
+                break;
+            }
             Ok(frame @ (Frame::Incomplete | Frame::TooLarge)) => {
                 let message = match frame {
                     Frame::TooLarge => {
@@ -355,6 +360,9 @@ pub async fn handle_connection(
     }
 
     if let Some(id) = session_id {
+        if std::env::var_os("DOCSBASE_IPC_DEBUG").is_some() {
+            eprintln!("ipc-debug: leaving session {id}");
+        }
         shared.sessions.leave(id);
     }
     let _ = events.try_send(());
