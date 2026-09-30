@@ -372,7 +372,6 @@ fn get_doc_rejects_oversized_file() {
         .call_tool("get_doc", json!({ "path": "exact.md" }))
         .expect("at-limit document must be readable");
     assert_eq!(doc["size"], json!(1024));
-    let _ = size;
 }
 
 #[test]
