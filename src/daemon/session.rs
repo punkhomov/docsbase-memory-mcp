@@ -164,14 +164,30 @@ mod tests {
         assert!(registry.stats().sessions >= 1);
     }
 
+    /// A process that outlives the assertion window (portable fixture).
+    fn spawn_test_process() -> std::process::Child {
+        #[cfg(unix)]
+        {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn")
+        }
+        #[cfg(windows)]
+        {
+            std::process::Command::new("cmd")
+                .args(["/C", "ping", "-n", "30", "127.0.0.1"])
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn")
+        }
+    }
+
     #[test]
     fn prune_dead_reaps_and_cancels() {
         let registry = SessionRegistry::new();
         let dead_pid = {
-            let mut child = std::process::Command::new("sleep")
-                .arg("30")
-                .spawn()
-                .expect("spawn");
+            let mut child = spawn_test_process();
             let pid = child.id();
             child.kill().expect("kill");
             let _ = child.wait();

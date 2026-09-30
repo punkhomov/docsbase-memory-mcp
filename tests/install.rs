@@ -49,7 +49,9 @@ impl Env {
     }
 
     fn binary(&self) -> PathBuf {
-        self.data().join("bin/docsbase")
+        self.data()
+            .join("bin")
+            .join(format!("docsbase{}", std::env::consts::EXE_SUFFIX))
     }
 
     fn manifest(&self) -> PathBuf {
@@ -131,6 +133,11 @@ fn daemon_bin() -> PathBuf {
     assert_cmd::cargo::cargo_bin!("docsbase").to_path_buf()
 }
 
+/// Windows canonicalize yields verbatim `\\?\` paths; compare like values.
+fn canon(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn write_file(root: &Path, rel: &str, bytes: &[u8]) {
     let path = root.join(rel);
     if let Some(parent) = path.parent() {
@@ -174,8 +181,11 @@ fn install_owned_artifacts() {
         let perms = fs::metadata(&binary).expect("metadata").permissions();
         assert_eq!(perms.mode() & 0o777, 0o755, "binary must be executable");
     }
-    assert_eq!(manifest["binary"], serde_json::json!(binary));
-    assert_eq!(manifest["cache_root"], serde_json::json!(env.cache()));
+    assert_eq!(manifest["binary"], serde_json::json!(canon(&binary)));
+    assert_eq!(
+        manifest["cache_root"],
+        serde_json::json!(canon(env.cache()))
+    );
     assert_eq!(manifest["schema_version"], 1);
     assert!(
         manifest["build_id"]
@@ -205,7 +215,7 @@ fn update_stops_and_waits() {
 
     let pid = daemon_state_pid(env.cache());
     let manifest = env.install();
-    assert_eq!(manifest["binary"], serde_json::json!(env.binary()));
+    assert_eq!(manifest["binary"], serde_json::json!(canon(&env.binary())));
     assert!(
         wait_until(Duration::from_secs(2), || !process_alive(pid)),
         "install must wait for the daemon process to exit"
@@ -302,7 +312,7 @@ fn update_waits_for_running_job() {
     // The full sync job runs in the daemon; install must wait for it and the
     // process before swapping the binary (FR-5).
     let manifest = env.install();
-    assert_eq!(manifest["binary"], serde_json::json!(env.binary()));
+    assert_eq!(manifest["binary"], serde_json::json!(canon(&env.binary())));
     assert!(
         wait_until(Duration::from_secs(2), || !process_alive(pid)),
         "install must wait for the busy daemon to exit"
@@ -380,7 +390,7 @@ fn update_waits_for_synchronous_job() {
     let started = Instant::now();
     let manifest = env.install();
     let waited = started.elapsed();
-    assert_eq!(manifest["binary"], serde_json::json!(env.binary()));
+    assert_eq!(manifest["binary"], serde_json::json!(canon(&env.binary())));
     assert!(
         waited >= Duration::from_secs(2),
         "install must wait for the running job, waited {waited:?}"
@@ -440,7 +450,7 @@ fn install_recovers_from_stale_state() {
     .expect("write state");
 
     let manifest = env.install();
-    assert_eq!(manifest["binary"], serde_json::json!(env.binary()));
+    assert_eq!(manifest["binary"], serde_json::json!(canon(&env.binary())));
     assert!(
         !state_dir.join("daemon.json").exists(),
         "stale state must be cleared"

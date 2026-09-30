@@ -167,8 +167,11 @@ pub fn stop_daemon(cache: &Path) -> Result<()> {
             }
             std::thread::sleep(POLL_INTERVAL);
         }
-        // Already unlinked its socket: the stop is under way even if the
-        // process needs longer to release the admission lease (FR-5/FR-6).
+        // Unix: the socket file is unlinked only once shutdown is committed,
+        // so the stop is under way even if the process needs longer to
+        // release the admission lease (FR-5/FR-6). Windows pipes have no
+        // file to observe, so fall through and verify the pid really exits.
+        #[cfg(unix)]
         return Ok(());
     }
 

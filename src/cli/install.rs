@@ -46,7 +46,7 @@ pub fn install() -> anyhow::Result<()> {
     let source = std::env::current_exe().context("resolve current executable")?;
     let bin_dir = data.join("bin");
     fs::create_dir_all(&bin_dir).with_context(|| format!("create {}", bin_dir.display()))?;
-    let target = bin_dir.join("docsbase");
+    let target = bin_dir.join(format!("docsbase{}", std::env::consts::EXE_SUFFIX));
     swap_binary(&source, &target)?;
 
     let manifest = Manifest {
