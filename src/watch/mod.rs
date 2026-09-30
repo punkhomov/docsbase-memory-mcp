@@ -439,6 +439,20 @@ fn spawn_consumer(
             };
             let mut pending = Batch::new();
             while let Ok(batch) = rx.recv() {
+                // A vanished root must stop the watcher before any batch runs:
+                // the deletion events themselves would otherwise look like a
+                // successful purge and leave a zombie `watched=true` (T50).
+                if crate::daemon::registry::root_state(&project.canonical_root)
+                    == crate::daemon::registry::RootState::Missing
+                {
+                    eprintln!(
+                        "watch: project {project_id} root is missing; stopping watcher"
+                    );
+                    if let Some(watchers) = watchers.upgrade() {
+                        watchers.remove(project_id);
+                    }
+                    return;
+                }
                 for path in batch {
                     pending.push(path);
                 }

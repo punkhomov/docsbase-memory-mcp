@@ -18,9 +18,16 @@ use crate::store::Db;
 pub fn run(path: Option<&Path>) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let target = path.map_or(cwd, Path::to_path_buf);
-    let target = target
-        .canonicalize()
-        .with_context(|| format!("resolve {}", target.display()))?;
+    let target = target.canonicalize().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            anyhow::anyhow!(
+                "{} does not exist: re-create the worktree/directory or run from a valid project root",
+                target.display()
+            )
+        } else {
+            anyhow::anyhow!("resolve {}: {err}", target.display())
+        }
+    })?;
 
     let mut db = Db::open(&paths::cache_dir()?)?;
     let project = registry::ensure_project(&mut db, &target)?;

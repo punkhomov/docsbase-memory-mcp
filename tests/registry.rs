@@ -183,6 +183,7 @@ fn status_marks_missing_root() {
         1,
         "the registry entry must survive"
     );
+    let _ = fs::remove_file(project.path());
 }
 
 #[cfg(unix)]

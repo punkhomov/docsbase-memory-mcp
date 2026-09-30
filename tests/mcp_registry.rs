@@ -653,3 +653,47 @@ fn sync_missing_root_gives_hint() {
         .expect("list_projects");
     assert_eq!(projects.as_array().expect("array").len(), 1);
 }
+
+#[test]
+fn watcher_stops_when_root_disappears_and_restarts() {
+    let mut env = Env::new(&[("README.md", DOC)]);
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake_registry().expect("hello");
+    Env::index_project(&mut client, env.root());
+
+    let status = client.call_tool("status", json!({})).expect("status");
+    assert_eq!(status["projects"][0]["watched"], true, "status: {status}");
+    let project_id = status["projects"][0]["id"].as_i64().expect("id");
+
+    std::fs::remove_dir_all(env.root()).expect("remove root");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut stopped = false;
+    while Instant::now() < deadline {
+        let status = client.call_tool("status", json!({})).expect("status");
+        if status["projects"][0]["watched"] == false {
+            stopped = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(stopped, "watcher must stop once the root is missing");
+
+    // Recreating the root and syncing closes the loop: the watcher restarts.
+    std::fs::create_dir_all(env.root()).expect("recreate root");
+    write_file(env.root(), "NEW.md", DOC.as_bytes());
+    client
+        .call_tool("sync_start", json!({ "project_id": project_id }))
+        .expect("sync_start");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut restarted = false;
+    while Instant::now() < deadline {
+        let status = client.call_tool("status", json!({})).expect("status");
+        if status["projects"][0]["watched"] == true {
+            restarted = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(restarted, "watcher must restart after the root returns");
+}
