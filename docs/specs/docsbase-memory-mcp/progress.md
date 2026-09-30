@@ -246,3 +246,14 @@ Windows phase review fix pass (C1/C2/I1/I2): `session.rs` unit-фикстура 
 Windows phase review fix pass: complete (Linux 238/4, windows-gnu clippy --tests clean, линковка lib+install exe; фазовое ре-ревью)
 Windows phase review: вердикт ре-ревью — **converged** (C1/C2/I1/I2 закрыты; Unix-поведение сохранено); residual: windows-job не исполнялся на реальном раннере до первого пуша (msvc vs локальный gnu)
 Windows phase review: minor (deferred): на Windows stale `daemon stop` с живым чужим pid ждёт ~17с и возвращает ошибку (осознанный trade-off I1; Unix — быстрый Ok); orphan `ping.exe` ~29с в тестовой фикстуре; design §3 обновлён (`docsbase[.exe]`)
+
+## Security audit v1 (rules: `docs/specs/security-review.md`)
+
+security: ручной прогон правил §3–§7 (без субагента) по всем триггерным зонам §4; итог — 0 Critical, 4 Important, 7 Minor; findings → задачи T44–T48
+security: Important I-1 — `get_doc` читает `.md` без лимита (`tools.rs`, `max_file_size` применяется только в `job.rs:406`) → T44
+security: Important I-2 — нет cap на NDJSON-кадр: daemon `lines()` (`server.rs:233`), client `read_until` (`client.rs:66`), rmcp stdio `max_length = usize::MAX` (3.5.0) → T45; ранее числился deferred minor, переклассифицирован по §3.7
+security: Important I-3 — нет cap на соединения/очередь: accept-спавн на соединение, `events` unbounded (`lifecycle.rs:244,272`) → T46; ранее числился deferred minor, переклассифицирован
+security: Important I-4 — `index_project` принимает произвольный абсолютный путь (кроме `/`, `$HOME`, cache) → регистрация/индексация/чтение любого каталога; для same-user агента не эскалация, но вектор prompt-injection-эксфильтрации → T47 (ADR-11)
+security: Minor-группы → T44 (M-1 `list_docs.limit` без `MAX_HITS`, M-2 `.docsbaseignore` unbounded), T46 (M-7 рост sessions), T48 (M-3 ротация `daemon.log`/`conflicts.ndjson`, M-4 cap `daemon.json`/`install.json`, M-5 TOCTOU canonicalize→open, M-6 валидация `install.json` при uninstall)
+security: проверено ОК — сеть (нет сетевых API/dep в `src/`), unsafe (только `platform/windows.rs`, SAFETY + boundary-тест), shell (нет `Command` с входными args), containment (`get_doc`/`resolve_in_root`/walk `follow_links(false)`/registry/watch, escape-паттерны отклоняются), права (0700/0600, chmod сокета после bind), fail-closed (probe admission-лока, `root_mismatch`), лимиты (`MAX_HITS`/`MAX_CHUNK_CHARS`/`MAX_WARNINGS`/`EXPAND_*`/`MAX_DEBOUNCE`/`max_docs_per_project`), логи без содержимого/секретов, конфиг без path/command-полей (`deny_unknown_fields`), изоляция по bound-проекту
+security: residual — TOCTOU canonicalize→open (M-5/T48), Windows pipe default DACL (ADR-10, вне фазы), rmcp-stdio framing без публичного лимита (T45 проверит обёртку либо зафиксирует residual)

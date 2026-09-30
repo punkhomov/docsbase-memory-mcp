@@ -682,3 +682,117 @@ job'а до правок (временно допустимо локально �
 **Self-review секции:** T39→T40/T41 (T41 не зависит от T40); каждая задача верифицируема
 командой; новых FR нет; macOS, SDDL-ACL, статический `.exe`, 10k-RSS и 1h-soak на Windows —
 следующие фазы.
+
+---
+
+## Security hardening — закрытие находок аудита (T44…T48)
+
+**Goal:** закрыть 4 Important и Minor-группы security-аудита v1 (правила —
+`docs/specs/security-review.md`; Critical не найдено); только лимиты и политика, без новых
+FR и крейтов.
+**Depends:** T43 (Windows phase, converged); ledger-запись аудита в `progress.md`.
+**Review focus (failure modes):** (1) лимиты ломают легитимные сценарии
+(`max_file_size` настраиваемый); (2) «магические» числа вместо констант/Config;
+(3) oversize-кадр должен давать явный Protocol/transport-отказ, а не тихий пропуск или
+обрыв без диагностики; (4) wire-совместимость `PROTOCOL_VERSION = 1` и Linux-набор без
+регрессий; (5) T47 не ломает CLI-режим (`docsbase index <path>` — явное действие
+пользователя) и регистрацию проекта из cwd (C8/FR-30).
+
+Инвариант секции: изменения — только лимиты и политика; каждый лимит — именованная
+константа или Config-поле с дефолтом; `src/platform/` не затрагивается; Linux-тесты и
+release-бюджеты остаются зелёными.
+
+### T44 — Лимиты чтения документов и ignore-файлов (I-1, M-1, M-2)
+**Depends:** T43
+**New crates:** —
+**Files:** Modify `src/daemon/tools.rs`, `src/daemon/server.rs` (route_tool: config для
+`get_doc`), `src/index/walk.rs`; Modify `tests/{mcp_docs,walk}.rs`
+**Interfaces:** `get_doc` читает файл только после `metadata().len() <= Config::max_file_size`
+(превышение → `Error::Project` с фактическим размером и лимитом, без чтения содержимого);
+`list_docs.limit` клампится `MAX_HITS` (как `search_docs`); `.docsbaseignore` — кап
+`MAX_IGNORE_FILE_SIZE` (1 МиБ): больше → fail-closed `Error::Project` при индексации
+(проверка escape-паттернов не пропускается)
+**RED:** `mcp_docs::get_doc_rejects_oversized_file` (проектный `.docsbase.toml` c малым
+`max_file_size`), `walk::oversized_docsbaseignore_is_rejected`,
+`mcp_docs::list_docs_limit_is_clamped` — падают до реализации
+**GREEN:** лимиты на месте; для файлов в пределах лимита поведение не меняется; индексация
+(`job.rs`) уже капнута и не трогается
+**Verify:** `cargo test --locked --test mcp_docs --test walk && cargo test --locked`
+**Acceptance:** ни один read недоверенного файла в `src/` не остаётся без cap; oversized
+`get_doc` не аллоцирует содержимое; wire-формат ответов не меняется.
+
+### T45 — Cap NDJSON/JSON-RPC кадра (I-2)
+**Depends:** T43
+**New crates:** —
+**Files:** Modify `src/ipc/protocol.rs`, `src/daemon/server.rs`, `src/ipc/client.rs`,
+`src/mcp/frontend.rs` (обёртка лимита вокруг stdin, если API rmcp позволяет);
+Modify `tests/ipc_server.rs`, `tests/error_surface.rs`
+**Interfaces:** `MAX_FRAME_BYTES` (4 МиБ) в `protocol`; daemon-сервер читает кадр capped
+reader'ом — превышение → Protocol-ответ и закрытие соединения; клиент — та же граница с
+transport-ошибкой; frontend: проверить, даёт ли rmcp 3.5 публичный лимит кадра; если нет —
+обернуть stdin capped `AsyncRead` (или зафиксировать residual c обоснованием)
+**RED:** `ipc_server::oversized_frame_gets_protocol_error` (клиент шлёт строку без `\n`
+больше лимита; daemon жив после), `error_surface::client_rejects_oversized_response` — падают
+**GREEN:** границы на всех inbound-кадрах daemon↔frontend; валидные кадры не затронуты
+**Verify:** `cargo test --locked --test ipc_server --test error_surface && cargo test --locked`
+**Acceptance:** память под кадр ограничена константой на обеих сторонах; при невозможности
+ограничить rmcp-stdio residual записан в ledger/ADR с указанием upstream.
+
+### T46 — Cap соединений, очередей, сессий (I-3, M-7)
+**Depends:** T43
+**New crates:** —
+**Files:** Modify `src/daemon/lifecycle.rs` (accept/events), `src/daemon/session.rs`;
+Modify `tests/{lifecycle,admission}.rs`
+**Interfaces:** `MAX_CONNECTIONS` (64) — семафор в `accept_loop`: сверх лимита соединение
+закрывается сразу (без ответа или с `Error::Admission`); `events` — bounded `mpsc`
+(`MAX_EVENTS`), `try_send` без блокировки (полнота очереди не теряет grace-wake: тик
+janitor/select переобрабатывает); `MAX_SESSIONS` (256) — `SessionRegistry` отказывает в
+`join` с явной ошибкой; janitor не меняется
+**RED:** `lifecycle::connection_flood_is_refused_and_daemon_survives`,
+`lifecycle::session_cap_is_enforced` — падают
+**GREEN:** caps на месте; существующие grace/janitor/stop тесты зелёные без правок семантики
+**Verify:** `cargo test --locked --test lifecycle --test admission && cargo test --locked`
+**Acceptance:** флуд соединениями/сессиями не растит память и fd линейно; корректные сценарии
+(3 агента, stop, grace) не затронуты.
+
+### T47 — Политика путей `index_project` (I-4)
+**Depends:** T43
+**New crates:** —
+**Files:** Modify `src/daemon/server.rs` (route_tool `index_project`),
+`docs/specs/docsbase-memory-mcp/design.md` (ADR-11 + §4/§12), `tests/mcp_registry.rs`
+**Interfaces:** MCP-инструмент `index_project` принимает путь только под session cwd
+(canonicalize + `is_under`) или уже зарегистрированный корень; произвольный абсолютный
+путь → `Error::Project` с инструкцией; CLI `docsbase index <path>` не ограничивается;
+ADR-11 фиксирует модель (агент недоверен; явное действие пользователя = CLI)
+**RED:** `mcp_registry::index_project_rejects_outside_cwd` — падает (сейчас проходит любой
+абсолютный путь вне `/`, `$HOME`, cache)
+**GREEN:** ограничение на месте; flow «проект из cwd» (C8/FR-30) и registry-тесты зелёные
+**Verify:** `cargo test --locked --test mcp_registry && cargo test --locked`
+**Acceptance:** prompt-injected агент не может зарегистрировать/проиндексировать произвольный
+каталог через MCP; поведение CLI и traceability (ADR-11) зафиксированы.
+
+### T48 — Security minors batch (M-3…M-6)
+**Depends:** T44, T47 (для uninstall-валидации использует те же canonicalized пути)
+**New crates:** —
+**Files:** Modify `src/daemon/lifecycle.rs`, `src/conflict.rs`, `src/cli/install.rs`;
+Modify `tests/{lifecycle,install}.rs`; Modify `docs/specs/security-review.md` (residual M-5)
+**Interfaces:** ротация `daemon.log`/`conflicts.ndjson` при превышении `MAX_LOG_BYTES`
+(8 МиБ): rename в `.old` + пересоздание 0600 (ошибки — warning); cap чтения
+`daemon.json`/`install.json` (`MAX_STATE_BYTES`, 1 МиБ) — превышение трактуется как
+повреждение (fail-closed / `create_fresh`); `uninstall` валидирует `manifest.cache_root` под
+ожидаемым cache dir и `binary` под `data/bin`, иначе отказывает; M-5 (TOCTOU
+canonicalize→open) — решение: закрыть для последнего компонента (`O_NOFOLLOW`/эквивалент)
+или зафиксировать residual в `security-review.md`
+**RED:** `install::uninstall_rejects_tampered_manifest`,
+`lifecycle::oversized_daemon_state_is_treated_as_corrupt`,
+`conflict::log_rotates_at_cap` — падают
+**GREEN:** caps/валидация/ротация на месте; существующие corrupt-state и uninstall тесты
+зелёные
+**Verify:** `cargo test --locked --test lifecycle --test install && cargo test --locked`
+**Acceptance:** подмена `install.json` не приводит к удалению путей вне owned-артефактов;
+логи не растут безгранично; residual по TOCTOU либо закрыт, либо явно записан.
+
+**Self-review секции:** T44, T45, T46, T47 независимы (after T43); T48 зависит от T44/T47
+из-за общей валидации путей; каждая задача верифицируема `Verify`-командой; новых крейтов
+нет; wire-изменений нет (только отказы при превышении лимитов); пропорция — имена тестов и
+константы, без тел функций.
