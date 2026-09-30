@@ -26,8 +26,8 @@ pub const MAX_IGNORE_FILE_SIZE: u64 = 1_048_576;
 /// root (`..`) are rejected up front (FR-32).
 ///
 /// # Errors
-/// Returns [`Error::Project`] for an escaping ignore pattern and
-/// [`Error::Internal`] when the walker cannot be built.
+/// Returns [`Error::Project`] for an escaping ignore pattern or an oversized
+/// ignore file, and [`Error::Internal`] when the walker cannot be built.
 pub fn walk(root: &Path, config: &Config) -> Result<impl Iterator<Item = Result<PathBuf>>> {
     validate_patterns(root, config)?;
 

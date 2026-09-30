@@ -363,6 +363,16 @@ fn get_doc_rejects_oversized_file() {
         text.contains(&size.to_string()),
         "size missing from error: {text}"
     );
+
+    // A file of exactly `max_file_size` bytes is still readable (`>`, not `>=`).
+    let exact = format!("# S\n\n{}\n", "b".repeat(1024 - 6));
+    assert_eq!(exact.len(), 1024);
+    write_file(env.root(), "exact.md", exact.as_bytes());
+    let doc = client
+        .call_tool("get_doc", json!({ "path": "exact.md" }))
+        .expect("at-limit document must be readable");
+    assert_eq!(doc["size"], json!(1024));
+    let _ = size;
 }
 
 #[test]
@@ -382,8 +392,12 @@ fn list_docs_limit_is_clamped() {
     let value = page(&mut client, MAX_HITS + 5, None);
     let docs = value["docs"].as_array().expect("docs");
     assert_eq!(docs.len(), MAX_HITS, "limit must clamp to MAX_HITS");
+    let cursor = value["next_cursor"]
+        .as_str()
+        .expect("clamped page must expose a cursor");
+    let second = page(&mut client, 10, Some(cursor));
     assert!(
-        value["next_cursor"].is_string(),
-        "clamped page must expose a cursor: {value}"
+        paths_of(&second).contains(&format!("d/{MAX_HITS:04}.md")),
+        "clamped pagination must still reach the last document: {second}"
     );
 }
