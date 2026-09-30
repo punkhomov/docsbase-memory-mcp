@@ -79,7 +79,7 @@ impl FakeDaemon {
         use std::sync::atomic::Ordering;
 
         let endpoint = platform::daemon_endpoint(cache);
-        fs::create_dir_all(endpoint.as_path().parent().expect("state")).expect("mkdir");
+        fs::create_dir_all(cache.join("state")).expect("mkdir state");
         let listener = platform::bind_blocking(&endpoint).expect("bind");
         listener.set_nonblocking(true).expect("nonblocking");
         let state = json!({

@@ -13,7 +13,9 @@ use docsbase_memory::platform::{self, Endpoint};
 fn roundtrip_and_remove() {
     let dir = TempDir::new().expect("cache");
     let endpoint = platform::daemon_endpoint(dir.path());
-    std::fs::create_dir_all(endpoint.as_path().parent().expect("state")).expect("mkdir state");
+    // The endpoint path is a pipe name on Windows, so derive the state dir
+    // from the cache root, not from the endpoint (ADR-10).
+    std::fs::create_dir_all(dir.path().join("state")).expect("mkdir state");
 
     // Async bind needs a runtime context; production always binds inside the
     // daemon runtime.

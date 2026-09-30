@@ -54,7 +54,7 @@ fn stdout_text(output: &std::process::Output) -> String {
 /// Minimal daemon: answers the handshake and echoes the tool name back.
 fn spawn_fake_daemon(cache: &Path) -> thread::JoinHandle<()> {
     let endpoint = platform::daemon_endpoint(cache);
-    fs::create_dir_all(endpoint.as_path().parent().expect("state dir")).expect("mkdir state");
+    fs::create_dir_all(cache.join("state")).expect("mkdir state");
     let listener = platform::bind_blocking(&endpoint).expect("bind socket");
 
     thread::spawn(move || {
@@ -132,7 +132,7 @@ fn falls_back_when_dead() {
     env.index();
 
     let endpoint = platform::daemon_endpoint(env.cache.path());
-    fs::create_dir_all(endpoint.as_path().parent().expect("state dir")).expect("mkdir state");
+    fs::create_dir_all(env.cache.path().join("state")).expect("mkdir state");
     let listener = platform::bind_blocking(&endpoint).expect("bind stale socket");
     drop(listener);
     thread::sleep(Duration::from_millis(20));
@@ -153,7 +153,7 @@ fn falls_back_when_dead() {
 fn sync_via_daemon_polls_until_done() {
     let env = Env::new(&[("docs/a.md", DOC)]);
     let endpoint = platform::daemon_endpoint(env.cache.path());
-    fs::create_dir_all(endpoint.as_path().parent().expect("state dir")).expect("mkdir state");
+    fs::create_dir_all(env.cache.path().join("state")).expect("mkdir state");
     let listener = platform::bind_blocking(&endpoint).expect("bind socket");
 
     let connections = Arc::new(AtomicUsize::new(0));
@@ -230,7 +230,7 @@ fn sync_via_daemon_polls_until_done() {
 fn daemon_errors_surface() {
     let env = Env::new(&[("docs/a.md", DOC)]);
     let endpoint = platform::daemon_endpoint(env.cache.path());
-    fs::create_dir_all(endpoint.as_path().parent().expect("state dir")).expect("mkdir state");
+    fs::create_dir_all(env.cache.path().join("state")).expect("mkdir state");
     let listener = platform::bind_blocking(&endpoint).expect("bind socket");
 
     let handle = thread::spawn(move || {
