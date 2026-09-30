@@ -3,7 +3,9 @@ use std::path::Path;
 
 use docsbase_memory::config::{Config, ConfigOverrides};
 use docsbase_memory::error::Error;
-use docsbase_memory::index::walk::{IGNORE_FILE, MAX_IGNORE_FILE_SIZE, resolve_in_root, walk};
+use docsbase_memory::index::walk::{
+    IGNORE_FILE, MAX_IGNORE_FILE_SIZE, portable_rel, resolve_in_root, walk,
+};
 use tempfile::TempDir;
 
 fn write(dir: &Path, rel: &str, body: &str) {
@@ -19,10 +21,7 @@ fn collect(root: &Path, config: &Config) -> Vec<String> {
         .expect("walk")
         .map(|item| {
             let path = item.expect("entry");
-            path.strip_prefix(root)
-                .expect("relative")
-                .to_string_lossy()
-                .into_owned()
+            portable_rel(path.strip_prefix(root).expect("relative"))
         })
         .collect();
     paths.sort();
