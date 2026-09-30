@@ -32,6 +32,10 @@
 1. **Offline.** Никакого сетевого I/O и телеметрии в рантайме; новые зависимости с сетью
    запрещены. Доказательство: `tests/offline.rs` (SC-8/NFR-5) в CI.
 2. **Containment.** Каждый путь из MCP/CLI/конфига проходит канонизацию и containment:
+   - *Residual (T48):* между `canonicalize` и `open` остаётся TOCTOU-окно
+     (component-swap в `get_doc`/`resolve_in_root`, same-user); закрытие требует
+     `openat2(RESOLVE_BENEATH)`/цепочки `O_NOFOLLOW` — кандидат на будущее.
+
    symlink/junction, case-fold и verbatim `\\?\` (Windows), filesystem roots. Новых
    «сырых» использований входных путей быть не должно.
 3. **MD-only.** Создание/запись/чтение вне `*.md` запрещены; frontmatter — данные, не код.

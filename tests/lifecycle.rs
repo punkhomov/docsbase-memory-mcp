@@ -369,3 +369,50 @@ fn stop_escalates_with_sigterm_when_wedged() {
     drop(writer);
     drop(reader);
 }
+
+#[test]
+fn daemon_log_rotates_at_spawn() {
+    let env = Env::new();
+    let logs = env.cache().join("logs");
+    fs::create_dir_all(&logs).expect("logs dir");
+    let log = logs.join("daemon.log");
+    let file = fs::File::create(&log).expect("create log");
+    file.set_len(docsbase_memory::limits::MAX_LOG_BYTES + 1)
+        .expect("grow log");
+    drop(file);
+
+    env.start();
+    assert!(
+        logs.join("daemon.log.old").is_file(),
+        "rotated copy expected"
+    );
+    let current = fs::metadata(&log).expect("current log");
+    assert!(
+        current.len() <= docsbase_memory::limits::MAX_LOG_BYTES,
+        "fresh log must be small, got {}",
+        current.len()
+    );
+    env.stop();
+}
+
+#[test]
+fn oversized_daemon_state_recovers() {
+    let env = Env::new();
+    let state = env.cache().join("state");
+    fs::create_dir_all(&state).expect("state dir");
+    let file = fs::File::create(state.join("daemon.json")).expect("create state");
+    file.set_len(docsbase_memory::limits::MAX_STATE_BYTES + 1)
+        .expect("grow state");
+    drop(file);
+
+    // Oversized state is corrupt input: it is discarded (recovery) instead of
+    // being loaded into memory.
+    env.start();
+    let rewritten = fs::metadata(state.join("daemon.json")).expect("rewritten state");
+    assert!(
+        rewritten.len() <= docsbase_memory::limits::MAX_STATE_BYTES,
+        "state must be rewritten small, got {}",
+        rewritten.len()
+    );
+    env.stop();
+}

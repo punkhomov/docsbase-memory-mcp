@@ -64,7 +64,13 @@ fn append(cache: &Path, conflict: &Conflict<'_>) -> Result<()> {
     })
     .map_err(|err| Error::internal_with_source("serialize conflict", err))?;
     line.push(b'\n');
-    let mut file = crate::platform::fs::open_private_log(&dir.join("conflicts.ndjson"))
+    let path = dir.join("conflicts.ndjson");
+    match crate::limits::rotate_log(&path) {
+        Ok(true) => eprintln!("rotated {}", path.display()),
+        Ok(false) => {}
+        Err(err) => eprintln!("warning: cannot rotate {}: {err}", path.display()),
+    }
+    let mut file = crate::platform::fs::open_private_log(&path)
         .map_err(|err| Error::internal_with_source("open conflicts log", err))?;
     file.write_all(&line)
         .map_err(|err| Error::internal_with_source("append conflict", err))
@@ -94,4 +100,41 @@ fn unix_now() -> i64 {
         .map_or(0, |since| {
             i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_rotates_at_cap() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let cache = dir.path();
+        let logs = cache.join("logs");
+        std::fs::create_dir_all(&logs).expect("logs");
+        let file = std::fs::File::create(logs.join("conflicts.ndjson")).expect("create");
+        file.set_len(crate::limits::MAX_LOG_BYTES + 1)
+            .expect("grow");
+        drop(file);
+
+        record(
+            cache,
+            &Conflict {
+                kind: "test",
+                expected: "expected",
+                actual: "actual",
+                build_id: "build",
+                schema_version: 1,
+                cache_root: cache,
+                pid: 1,
+                recorded_build_id: None,
+                recorded_schema_version: None,
+                holder_pid: None,
+            },
+        );
+
+        assert!(logs.join("conflicts.ndjson.old").is_file());
+        let current = std::fs::metadata(logs.join("conflicts.ndjson")).expect("current");
+        assert!(current.len() < crate::limits::MAX_LOG_BYTES);
+    }
 }

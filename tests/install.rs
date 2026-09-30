@@ -456,3 +456,58 @@ fn install_recovers_from_stale_state() {
         "stale state must be cleared"
     );
 }
+
+#[test]
+fn oversized_manifest_is_rejected() {
+    let env = Env::new(&[("a.md", "# A\n")]);
+    env.install();
+    let file = fs::File::create(env.manifest()).expect("create manifest");
+    file.set_len(docsbase_memory::limits::MAX_STATE_BYTES + 1)
+        .expect("grow manifest");
+    drop(file);
+
+    let output = env
+        .cmd()
+        .args(["uninstall", "--yes"])
+        .output()
+        .expect("run uninstall");
+    assert!(
+        !output.status.success(),
+        "oversized manifest must be refused"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("over the"), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn uninstall_rejects_tampered_manifest() {
+    let env = Env::new(&[("a.md", "# A\n")]);
+    env.install();
+
+    let victim = TempDir::new().expect("victim");
+    fs::create_dir_all(victim.path().join("state")).expect("victim state");
+    fs::write(victim.path().join("state/daemon.json"), b"{}").expect("decoy state");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(env.manifest()).expect("read manifest"))
+            .expect("manifest json");
+    manifest["cache_root"] = serde_json::json!(victim.path());
+    fs::write(
+        env.manifest(),
+        serde_json::to_vec_pretty(&manifest).expect("serialize"),
+    )
+    .expect("write manifest");
+
+    let output = env
+        .cmd()
+        .args(["uninstall", "--yes"])
+        .output()
+        .expect("run uninstall");
+    assert!(
+        !output.status.success(),
+        "tampered cache root must be refused"
+    );
+    assert!(
+        victim.path().join("state/daemon.json").is_file(),
+        "victim directory must survive"
+    );
+}

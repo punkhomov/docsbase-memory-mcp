@@ -195,6 +195,17 @@ fn validate_manifest(data: &Path, manifest: &Manifest) -> anyhow::Result<()> {
     let configured = paths::cache_dir()
         .ok()
         .and_then(|root| root.canonicalize().ok());
+    // A tampered manifest must never redirect the recursive delete: the cache
+    // root has to be the configured one when that is resolvable (T48).
+    if let Some(configured) = configured.as_ref()
+        && manifest.cache_root != *configured
+    {
+        anyhow::bail!(
+            "manifest cache root {} is not the configured cache {} (tampered or stale?)",
+            manifest.cache_root.display(),
+            configured.display()
+        );
+    }
     let looks_like_cache = manifest.cache_root.join(crate::store::DB_FILE).is_file()
         || manifest.cache_root.join("state/daemon.json").exists()
         || configured.as_deref() == Some(manifest.cache_root.as_path())
@@ -237,6 +248,17 @@ fn read_manifest(data: &Path) -> anyhow::Result<Option<Manifest>> {
     let path = data.join(MANIFEST);
     if !path.exists() {
         return Ok(None);
+    }
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.len() > crate::limits::MAX_STATE_BYTES => {
+            anyhow::bail!(
+                "manifest {} is {} bytes, over the {} byte limit (corrupt?)",
+                path.display(),
+                metadata.len(),
+                crate::limits::MAX_STATE_BYTES
+            );
+        }
+        _ => {}
     }
     let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_slice(&bytes)

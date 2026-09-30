@@ -428,6 +428,13 @@ fn open_daemon_log(cache: &Path) -> Result<File> {
     platform::fs::secure_dir(&dir)
         .map_err(|err| Error::internal_with_source("create logs dir", err))?;
     let path = dir.join("daemon.log");
+    // The daemon holds this file as stdout/stderr for its whole life, so it
+    // can only be rotated between processes — here, before spawning (T48).
+    match crate::limits::rotate_log(&path) {
+        Ok(true) => eprintln!("rotated {}", path.display()),
+        Ok(false) => {}
+        Err(err) => eprintln!("warning: cannot rotate {}: {err}", path.display()),
+    }
     platform::fs::open_private_log(&path)
         .map_err(|err| Error::internal_with_source(format!("open {}", path.display()), err))
 }
@@ -476,6 +483,21 @@ fn write_state(cache: &Path) -> Result<()> {
 
 pub(crate) fn read_state(cache: &Path) -> Result<Option<DaemonState>> {
     let path = state_file(cache);
+    // Bound the read: an oversized state file is corrupt input, not something
+    // to load into memory (T48).
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.len() > crate::limits::MAX_STATE_BYTES => {
+            return Err(Error::internal(format!(
+                "daemon state {} is {} bytes, over the {} byte limit",
+                path.display(),
+                metadata.len(),
+                crate::limits::MAX_STATE_BYTES
+            )));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(Error::internal_with_source("stat daemon state", err)),
+    }
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
