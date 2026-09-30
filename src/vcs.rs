@@ -38,6 +38,15 @@ pub struct GitState {
     pub detached: bool,
 }
 
+/// Common git directory of `canonical_root`; `None` outside a repository.
+///
+/// The walker uses this to read `.git/info/exclude` of linked worktrees,
+/// which lives in the common dir rather than below the worktree root.
+#[must_use]
+pub fn common_dir(canonical_root: &Path) -> Option<PathBuf> {
+    locate(canonical_root, &canonical_root.join(".git")).map(|(_, common)| common)
+}
+
 /// Probes the git state of `canonical_root`; `None` outside a repository.
 #[must_use]
 pub fn state(canonical_root: &Path) -> Option<GitState> {

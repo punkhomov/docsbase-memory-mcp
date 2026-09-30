@@ -37,6 +37,8 @@ pub fn walk(root: &Path, config: &Config) -> Result<impl Iterator<Item = Result<
         .require_git(false)
         .add_custom_ignore_filename(IGNORE_FILE);
 
+    apply_git_exclude(&mut builder, root);
+
     if !config.ignores.is_empty() {
         let mut overrides = OverrideBuilder::new(root);
         for pattern in &config.ignores {
@@ -101,6 +103,8 @@ pub fn indexable_files(
         .require_git(false)
         .max_depth(Some(1))
         .add_custom_ignore_filename(IGNORE_FILE);
+
+    apply_git_exclude(&mut builder, root);
 
     if !config.ignores.is_empty() {
         let mut overrides = OverrideBuilder::new(root);
@@ -173,6 +177,26 @@ pub fn resolve_in_root(root: &Path, path: &Path) -> Result<PathBuf> {
         });
     }
     Ok(resolved)
+}
+
+/// Adds the common dir's `info/exclude` for linked worktrees.
+///
+/// The `ignore` crate reads `.git/info/exclude` itself only when `.git` is a
+/// directory; in a linked worktree (or submodule) `.git` is a gitlink file and
+/// the exclude file lives in the common dir, so it is added explicitly with
+/// the lowest precedence (matching git).
+fn apply_git_exclude(builder: &mut WalkBuilder, root: &Path) {
+    let dot_git = root.join(".git");
+    if !dot_git.is_file() {
+        return;
+    }
+    let Some(common) = crate::vcs::common_dir(root) else {
+        return;
+    };
+    let exclude = common.join("info").join("exclude");
+    if exclude.is_file() {
+        let _ = builder.add_ignore(&exclude);
+    }
 }
 
 pub(crate) fn is_markdown(path: &Path) -> bool {
