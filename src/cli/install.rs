@@ -32,10 +32,11 @@ pub const MANIFEST: &str = "install.json";
 /// the copy/rename fails.
 pub fn install() -> anyhow::Result<()> {
     let cache = paths::cache_dir()?;
-    fs::create_dir_all(&cache).with_context(|| format!("create {}", cache.display()))?;
+    crate::platform::fs::secure_dir(&cache)
+        .with_context(|| format!("create {}", cache.display()))?;
     let cache = cache.canonicalize().context("canonicalize cache dir")?;
     let data = paths::data_dir()?;
-    fs::create_dir_all(&data).with_context(|| format!("create {}", data.display()))?;
+    crate::platform::fs::secure_dir(&data).with_context(|| format!("create {}", data.display()))?;
     let data = data.canonicalize().context("canonicalize data dir")?;
 
     // The lease is held from before the stale-state cleanup until the binary
@@ -160,20 +161,6 @@ fn acquire_after_stop(cache: &Path) -> anyhow::Result<Lease> {
 /// True when the cache root holds only entries docsbase creates
 /// (`state/`, `logs/`, `projects/`, `registry.db*`); used when the current
 /// `DOCSBASE_CACHE_DIR` no longer matches the manifest.
-fn contains_only_owned_entries(cache: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(cache) else {
-        return false;
-    };
-    entries.flatten().all(|entry| {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        matches!(
-            name.as_ref(),
-            "state" | "logs" | "projects" | "registry.db" | "registry.db-wal" | "registry.db-shm"
-        )
-    })
-}
-
 /// Refuses manifests whose paths are not owned locations; a tampered or
 /// copied manifest must never turn uninstall into arbitrary deletion.
 fn validate_manifest(data: &Path, manifest: &Manifest) -> anyhow::Result<()> {
@@ -197,23 +184,24 @@ fn validate_manifest(data: &Path, manifest: &Manifest) -> anyhow::Result<()> {
         .and_then(|root| root.canonicalize().ok());
     // A tampered manifest must never redirect the recursive delete: the cache
     // root has to be the configured one when that is resolvable (T48).
-    if let Some(configured) = configured.as_ref()
-        && manifest.cache_root != *configured
-    {
+    let Some(configured) = configured else {
+        // Without a resolvable configured cache, only unmistakable cache
+        // layouts pass (a bare empty directory must not be deleted).
+        let unmistakable = manifest.cache_root.join(crate::store::DB_FILE).is_file()
+            || manifest.cache_root.join("state/daemon.json").exists();
+        if !unmistakable {
+            anyhow::bail!(
+                "manifest cache root {} does not look like a docsbase cache",
+                manifest.cache_root.display()
+            );
+        }
+        return Ok(());
+    };
+    if manifest.cache_root != configured {
         anyhow::bail!(
             "manifest cache root {} is not the configured cache {} (tampered or stale?)",
             manifest.cache_root.display(),
             configured.display()
-        );
-    }
-    let looks_like_cache = manifest.cache_root.join(crate::store::DB_FILE).is_file()
-        || manifest.cache_root.join("state/daemon.json").exists()
-        || configured.as_deref() == Some(manifest.cache_root.as_path())
-        || contains_only_owned_entries(&manifest.cache_root);
-    if !looks_like_cache {
-        anyhow::bail!(
-            "manifest cache root {} does not look like a docsbase cache",
-            manifest.cache_root.display()
         );
     }
     Ok(())
@@ -241,6 +229,7 @@ fn write_manifest(data: &Path, manifest: &Manifest) -> anyhow::Result<()> {
     file.sync_all()
         .with_context(|| format!("sync {}", tmp.display()))?;
     drop(file);
+    crate::platform::fs::secure_file(&tmp).with_context(|| format!("chmod {}", tmp.display()))?;
     fs::rename(&tmp, &path).with_context(|| format!("publish {}", path.display()))
 }
 

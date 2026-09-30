@@ -396,19 +396,31 @@ fn daemon_log_rotates_at_spawn() {
 }
 
 #[test]
-fn oversized_daemon_state_recovers() {
+fn oversized_daemon_state_is_treated_as_corrupt() {
     let env = Env::new();
     let state = env.cache().join("state");
     fs::create_dir_all(&state).expect("state dir");
-    let file = fs::File::create(state.join("daemon.json")).expect("create state");
+    let path = state.join("daemon.json");
+    let file = fs::File::create(&path).expect("create state");
     file.set_len(docsbase_memory::limits::MAX_STATE_BYTES + 1)
         .expect("grow state");
     drop(file);
 
-    // Oversized state is corrupt input: it is discarded (recovery) instead of
-    // being loaded into memory.
+    // The cap is enforced before reading: stop reports the corrupt file
+    // instead of loading it into memory.
+    let output = env
+        .cli()
+        .args(["daemon", "stop"])
+        .output()
+        .expect("run daemon stop");
+    assert!(!output.status.success(), "oversized state must be refused");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("over the"), "unexpected stderr: {stderr}");
+    assert!(path.is_file(), "stop must not delete the corrupt state");
+
+    // Recovery: a fresh daemon replaces the corrupt state.
     env.start();
-    let rewritten = fs::metadata(state.join("daemon.json")).expect("rewritten state");
+    let rewritten = fs::metadata(&path).expect("rewritten state");
     assert!(
         rewritten.len() <= docsbase_memory::limits::MAX_STATE_BYTES,
         "state must be rewritten small, got {}",

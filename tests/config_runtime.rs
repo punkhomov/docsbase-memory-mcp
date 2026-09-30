@@ -416,3 +416,21 @@ fn max_file_size_at_frame_boundary_is_accepted() {
         "exact boundary must be accepted: {status}"
     );
 }
+
+#[test]
+fn oversized_global_config_is_rejected() {
+    let mut env = Env::new(&[("keep.md", &doc("publicwidget"))]);
+    let file = fs::File::create(env.global_config()).expect("create config");
+    file.set_len(docsbase_memory::limits::MAX_STATE_BYTES + 1)
+        .expect("grow config");
+    drop(file);
+    env.start_daemon();
+
+    let mut registry = env.client();
+    registry.handshake_registry().expect("registry hello");
+    let status = registry
+        .call_tool("status", serde_json::json!({}))
+        .expect("status");
+    let notice = status["notice"].as_str().expect("notice");
+    assert!(notice.contains("over the"), "notice: {notice}");
+}

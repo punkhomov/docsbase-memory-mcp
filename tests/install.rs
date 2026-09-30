@@ -485,8 +485,9 @@ fn uninstall_rejects_tampered_manifest() {
     env.install();
 
     let victim = TempDir::new().expect("victim");
-    fs::create_dir_all(victim.path().join("state")).expect("victim state");
-    fs::write(victim.path().join("state/daemon.json"), b"{}").expect("decoy state");
+    // A decoy that passes the old looks-like-cache heuristics: a bare
+    // `registry.db` is enough for the pre-fix code to recurse into it.
+    fs::write(victim.path().join("registry.db"), b"decoy").expect("decoy db");
     let mut manifest: Value =
         serde_json::from_slice(&fs::read(env.manifest()).expect("read manifest"))
             .expect("manifest json");
@@ -507,7 +508,22 @@ fn uninstall_rejects_tampered_manifest() {
         "tampered cache root must be refused"
     );
     assert!(
-        victim.path().join("state/daemon.json").is_file(),
+        victim.path().join("registry.db").is_file(),
         "victim directory must survive"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn install_manifest_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = Env::new(&[("a.md", "# A\n")]);
+    env.install();
+    let mode = fs::metadata(env.manifest())
+        .expect("manifest")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "install.json must be owner-only");
 }

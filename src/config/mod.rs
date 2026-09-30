@@ -204,6 +204,18 @@ impl Config {
 }
 
 fn read_file(path: &Path) -> Result<FileConfig> {
+    // Config files are repo-controlled: cap them before reading (T48).
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.len() > crate::limits::MAX_STATE_BYTES => {
+            return Err(Error::internal(format!(
+                "config {} is {} bytes, over the {} byte limit",
+                path.display(),
+                metadata.len(),
+                crate::limits::MAX_STATE_BYTES
+            )));
+        }
+        _ => {}
+    }
     let text = std::fs::read_to_string(path).map_err(|err| {
         Error::internal_with_source(format!("read {}: {err}", path.display()), err)
     })?;
