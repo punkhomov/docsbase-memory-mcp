@@ -35,6 +35,12 @@ pub const DEBOUNCE: Duration = Duration::from_millis(1_500);
 /// continuous churn cannot starve indexing (NFR-4).
 pub const MAX_DEBOUNCE: Duration = Duration::from_millis(2_000);
 
+/// Watcher tracing: set `DOCSBASE_WATCH_DEBUG=1` to log raw events and
+/// batches to stderr (diagnostics; no behavior change).
+fn watch_debug() -> bool {
+    std::env::var_os("DOCSBASE_WATCH_DEBUG").is_some()
+}
+
 /// Bound for the notify and batch channels of one watcher (T46).
 const MAX_WATCH_EVENTS: usize = 4096;
 
@@ -75,6 +81,9 @@ pub fn spawn_watcher(
         };
         if matches!(event.kind, EventKind::Access(_)) {
             return;
+        }
+        if watch_debug() {
+            eprintln!("watch-debug: event {:?} {:?}", event.kind, event.paths);
         }
         for path in event.paths {
             if crate::platform::paths::is_under(&path, &watch_cache)
@@ -248,6 +257,7 @@ impl IndexFilter {
 /// recursive watch registration are still found; missing paths stay as purge
 /// markers, resolved by the incremental job (FR-16).
 fn finalize(filter: &mut IndexFilter, raw: Batch) -> Vec<PathBuf> {
+    let raw_paths = raw.paths.clone();
     let mut batch = Batch::new();
     for path in raw.into_vec() {
         if path.is_dir() {
@@ -260,7 +270,11 @@ fn finalize(filter: &mut IndexFilter, raw: Batch) -> Vec<PathBuf> {
             batch.push(path);
         }
     }
-    batch.into_vec()
+    let finished = batch.into_vec();
+    if watch_debug() {
+        eprintln!("watch-debug: finalize raw={raw_paths:?} batch={finished:?}");
+    }
+    finished
 }
 
 /// Maximum files and depth for one directory expansion, bounding the work a

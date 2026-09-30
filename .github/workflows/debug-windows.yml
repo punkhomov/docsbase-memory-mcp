@@ -1,0 +1,25 @@
+name: debug-windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: "1.88.0"
+  DOCSBASE_WATCH_DEBUG: "1"
+
+jobs:
+  debug:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Watcher reopen test with debug tracing
+        run: cargo test --locked --test config_runtime watcher_uses_reopened_config -- --nocapture
