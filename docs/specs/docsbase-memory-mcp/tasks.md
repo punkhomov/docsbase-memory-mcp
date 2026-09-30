@@ -725,34 +725,47 @@ release-бюджеты остаются зелёными.
 **Depends:** T43
 **New crates:** —
 **Files:** Modify `src/ipc/protocol.rs`, `src/daemon/server.rs`, `src/ipc/client.rs`,
-`src/mcp/frontend.rs` (обёртка лимита вокруг stdin, если API rmcp позволяет);
-Modify `tests/ipc_server.rs`, `tests/error_surface.rs`
-**Interfaces:** `MAX_FRAME_BYTES` (4 МиБ) в `protocol`; daemon-сервер читает кадр capped
-reader'ом — превышение → Protocol-ответ и закрытие соединения; клиент — та же граница с
-transport-ошибкой; frontend: проверить, даёт ли rmcp 3.5 публичный лимит кадра; если нет —
-обернуть stdin capped `AsyncRead` (или зафиксировать residual c обоснованием)
+`src/mcp/frontend.rs` (capped stdin через `AsyncRwTransport::new_server`), `src/config/mod.rs`
+(инвариант); Modify `tests/{ipc_server,error_surface,config_runtime}.rs`
+**Interfaces:** `MAX_FRAME_BYTES` (8 МиБ) + `FRAME_OVERHEAD` (64 КиБ) в `protocol`;
+daemon-сервер читает кадр capped reader'ом — превышение → Protocol-ответ и закрытие
+соединения; клиент — та же граница с transport-ошибкой; frontend: rmcp 3.5 `AsyncRwTransport`
+читает `read_until` без лимита, поэтому stdin оборачивается в `CappedRead` (`AsyncRead`:
+ошибка при > `MAX_FRAME_BYTES` байт без `\n`) и подаётся в публичный
+`AsyncRwTransport::new_server(capped_stdin, stdout)` (blanket `IntoTransport`); инвариант
+`Config::validate`: `max_file_size + FRAME_OVERHEAD ≤ MAX_FRAME_BYTES` (fail-closed), чтобы
+валидный `get_doc` (T44) при любом допустимом `max_file_size` проходил по кадру
 **RED:** `ipc_server::oversized_frame_gets_protocol_error` (клиент шлёт строку без `\n`
-больше лимита; daemon жив после), `error_surface::client_rejects_oversized_response` — падают
-**GREEN:** границы на всех inbound-кадрах daemon↔frontend; валидные кадры не затронуты
-**Verify:** `cargo test --locked --test ipc_server --test error_surface && cargo test --locked`
-**Acceptance:** память под кадр ограничена константой на обеих сторонах; при невозможности
-ограничить rmcp-stdio residual записан в ledger/ADR с указанием upstream.
+больше лимита; daemon жив после), `error_surface::client_rejects_oversized_response`,
+`config_runtime::max_file_size_above_frame_cap_is_rejected` — падают
+**GREEN:** границы на всех inbound-кадрах daemon↔frontend; валидные кадры и `get_doc`
+в пределах лимита не затронуты
+**Verify:** `cargo test --locked --test ipc_server --test error_surface --test config_runtime && cargo test --locked`
+**Acceptance:** память под кадр ограничена константой на всех inbound-сторонах (daemon,
+client, rmcp-stdio); residual не требуется — лимит реализован обёрткой.
 
 ### T46 — Cap соединений, очередей, сессий (I-3, M-7)
 **Depends:** T43
 **New crates:** —
-**Files:** Modify `src/daemon/lifecycle.rs` (accept/events), `src/daemon/session.rs`;
-Modify `tests/{lifecycle,admission}.rs`
+**Files:** Modify `src/daemon/lifecycle.rs` (accept/events/drain), `src/daemon/session.rs`,
+`src/watch/mod.rs` (bounded канал), `src/store/repo.rs` (retention); Modify
+`tests/{lifecycle,admission,watcher}.rs`
 **Interfaces:** `MAX_CONNECTIONS` (64) — семафор в `accept_loop`: сверх лимита соединение
 закрывается сразу (без ответа или с `Error::Admission`); `events` — bounded `mpsc`
 (`MAX_EVENTS`), `try_send` без блокировки (полнота очереди не теряет grace-wake: тик
 janitor/select переобрабатывает); `MAX_SESSIONS` (256) — `SessionRegistry` отказывает в
-`join` с явной ошибкой; janitor не меняется
+`join` с явной ошибкой; janitor не меняется; **хвосты:** `DRAIN_TIMEOUT` (5 с) на
+`StopDaemon` (зависший запрос не держит stop вечно; SIGTERM остаётся путём отступления);
+watcher-mpsc (`watch/mod.rs:63,359`) — `sync_channel(MAX_WATCH_EVENTS)` + `try_send`
+(bounded, дроп события допустим — следующий батч/скан увидит состояние); `sync_jobs`
+retention — при enqueue удаляются старые `done/error` сверх `MAX_SYNC_JOBS` на проект
 **RED:** `lifecycle::connection_flood_is_refused_and_daemon_survives`,
-`lifecycle::session_cap_is_enforced` — падают
+`lifecycle::session_cap_is_enforced`, `lifecycle::stop_daemon_drain_is_bounded`,
+`lifecycle::sync_jobs_retention_keeps_recent` — падают
 **GREEN:** caps на месте; существующие grace/janitor/stop тесты зелёные без правок семантики
-**Verify:** `cargo test --locked --test lifecycle --test admission && cargo test --locked`
-**Acceptance:** флуд соединениями/сессиями не растит память и fd линейно; корректные сценарии
+**Verify:** `cargo test --locked --test lifecycle --test admission --test watcher && cargo test --locked`
+**Acceptance:** флуд соединениями/сессиями/событиями не растит память и fd линейно; stop не
+висит дольше `DRAIN_TIMEOUT`; `sync_jobs` не растёт безгранично; корректные сценарии
 (3 агента, stop, grace) не затронуты.
 
 ### T47 — Системный blacklist для `index_project` (I-4, ADR-11)
@@ -788,8 +801,12 @@ same-user daemon-протокол доверенный, подтверждени
 **New crates:** —
 **Files:** Modify `src/daemon/lifecycle.rs`, `src/conflict.rs`, `src/cli/install.rs`;
 Modify `tests/{lifecycle,install}.rs`; Modify `docs/specs/security-review.md` (residual M-5)
-**Interfaces:** ротация `daemon.log`/`conflicts.ndjson` при превышении `MAX_LOG_BYTES`
-(8 МиБ): rename в `.old` + пересоздание 0600 (ошибки — warning); cap чтения
+**Interfaces:** ротация логов: `daemon.log` — **только при старте/спавне** (демон держит
+fd как stdout/stderr, rename на лету не переключает поток): родитель перед `spawn_detached`
+при > `MAX_LOG_BYTES` (8 МиБ) делает `remove_file(.old)` + `rename` (Windows-safe) и открывает
+новый 0600; `conflicts.ndjson` — при append (открывается каждый раз): > `MAX_LOG_BYTES` →
+`remove_file(.old)` + rename + пересоздание 0600, гонки редких писателей допустимы
+(ошибки — warning); cap чтения
 `daemon.json`/`install.json` (`MAX_STATE_BYTES`, 1 МиБ) — превышение трактуется как
 повреждение (fail-closed / `create_fresh`); `uninstall` валидирует `manifest.cache_root` под
 ожидаемым cache dir и `binary` под `data/bin`, иначе отказывает; M-5 (TOCTOU
@@ -797,7 +814,7 @@ canonicalize→open) — решение: закрыть для последне�
 или зафиксировать residual в `security-review.md`
 **RED:** `install::uninstall_rejects_tampered_manifest`,
 `lifecycle::oversized_daemon_state_is_treated_as_corrupt`,
-`conflict::log_rotates_at_cap` — падают
+`lifecycle::daemon_log_rotates_at_spawn`, `conflict::log_rotates_at_cap` — падают
 **GREEN:** caps/валидация/ротация на месте; существующие corrupt-state и uninstall тесты
 зелёные
 **Verify:** `cargo test --locked --test lifecycle --test install && cargo test --locked`
@@ -838,8 +855,12 @@ branch/worktree-специфичных индексных ключей; git чи
 is_worktree, branch: Option<String>, head: Option<String>, detached: bool }` — read-only,
 без shell/крейтов: `.git`-файл (`gitdir: …`, relative → join с root) → `commondir`
 (relative → join с git_dir) → per-worktree `HEAD` (`ref: refs/heads/x` | 40/64-hex) → `refs/…`
-из common dir, `packed-refs` fallback (`#`/`^` пропускаются); каждый read ≤ 4 КиБ, симлинки/
-выход за ожидаемые каталоги отвергаются, любая ошибка → поле `None` (никогда не валит tool);
+из common dir, `packed-refs` — **потоковый скан** до целевой ref с общим капом
+(`MAX_PACKED_REFS_BYTES`, 16 МиБ; файл не читается целиком), `#`/`^` пропускаются; HEAD/
+commondir ≤ 4 КиБ; значения валидируются по формату (branch `[A-Za-z0-9._/-]+` без `..`,
+sha — 40/64 hex), иначе `None`; `gitdir` из `.git`-файла нормализуется, читаются только
+`HEAD`/`commondir`/`packed-refs` (никакого обхода дерева/симлинков), любая ошибка → поле
+`None` (никогда не валит tool); residual «чтение HEAD по чужому gitdir» — записать в ADR/`security-review.md`;
 `status.projects[].git = { branch, head, detached, is_worktree }` (объект отсутствует вне git)
 **RED:** `vcs::tests::{dir_repo, gitlink_worktree, detached_head, packed_refs, unborn_branch,
 garbage_dot_git_is_none}`, `tests/vcs.rs::status_reports_branch` — падают
@@ -856,11 +877,14 @@ garbage_dot_git_is_none}`, `tests/vcs.rs::status_reports_branch` — падаю�
 `tests/{mcp_registry,lifecycle}.rs`
 **Interfaces:** `root_status(canonical_root) -> Present | Missing | Uncertain` — только
 `ENOENT/ENOTDIR` = `Missing` (EACCES/прочее = `Uncertain`, деструктивных решений нет);
-`status.projects[].root = "missing"` (без изменения схемы); `sync_start`/`sync` для missing
-→ `Error::Project` с инструкцией («worktree удалён: пере-создай или удали проект из реестра»);
-watcher пропускает missing root с одним warning без цикла ретраев; данные/кэш не удаляются
+`status.projects[].root_state = "present|missing|uncertain"` — **вычисляется на лету при
+чтении, БД не мутируется** (без изменения схемы); `sync_start`/`sync` для missing →
+`Error::Project` с инструкцией («worktree удалён: пере-создай или удали проект из реестра»);
+watcher при missing — однократный `unwatch` + один warning, без цикла ретраев; данные/кэш
+не удаляются
 **RED:** `mcp_registry::sync_missing_root_gives_hint`, `lifecycle::status_marks_missing_root`,
-`lifecycle::uncertain_root_is_not_missing` — падают
+`lifecycle::uncertain_root_is_not_missing` (`#[cfg(unix)]` — EACCES через `chmod 000`;
+на Windows не воспроизводится) — падают
 **GREEN:** диагностика и fail-fast; существующие проекты/индексы остаются на диске
 **Verify:** `cargo test --locked --test mcp_registry --test lifecycle && cargo test --locked`
 **Acceptance:** удаление worktree/каталога не приводит к панике, утечке или молчаливому
@@ -892,8 +916,9 @@ Windows CI: `cargo test --locked` (скип при отсутствии git)
 `SYNC_NOOP_BUDGET` (ориентир 19 мс release, бюджет с запасом); B2 «switch» (изменено 5 %
 файлов) — бюджет `SYNC_INCREMENTAL_BUDGET` **и** correctness-ассерты
 `stats.docs == changed && stats.skipped == rest` (главный гейт: никакого полного re-parse);
-B3 полный индекс — существующий `INDEX_BUDGET`; B4 no-op на 10k docs — бюджет
-`SYNC_NOOP_10K_BUDGET` (кандидат на закрытие deferred-хвоста «10k-doc RSS/время»);
+B3 полный индекс — существующий `INDEX_BUDGET`; B4 no-op на 10k docs — бюджет времени
+`SYNC_NOOP_10K_BUDGET` **и RSS после индексации** (закрывает deferred-хвост «10k-doc
+RSS/время», Task 32);
 criterion `benches/index.rs`: группы `sync_noop` и `sync_changed_5pct` для трендов
 **RED:** бюджеты/ассерты падают при регрессии (проверка: временно отключить hash-skip)
 **GREEN:** бюджеты с 10–100× запасом к локальным замерам; меряются только `--release`
