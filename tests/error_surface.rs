@@ -12,6 +12,7 @@ use tempfile::TempDir;
 
 use docsbase_memory::daemon::lifecycle::stop_daemon;
 use docsbase_memory::ipc::client::Client;
+use docsbase_memory::platform;
 
 struct Env {
     cache: TempDir,
@@ -37,10 +38,9 @@ impl Env {
             .spawn()
             .expect("spawn daemon");
         assert!(
-            wait_until(Duration::from_secs(10), || cache
-                .path()
-                .join("state/daemon.sock")
-                .exists()),
+            wait_until(Duration::from_secs(10), || platform::exists(
+                &platform::daemon_endpoint(cache.path())
+            )),
             "socket must appear"
         );
         Self {

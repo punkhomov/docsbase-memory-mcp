@@ -263,9 +263,8 @@ fn swap_binary(source: &Path, target: &Path) -> anyhow::Result<()> {
 /// documented remedy for stale state, so clear it before admission.
 fn clear_stale_state(cache: &Path) {
     let state = lifecycle::state_dir(cache);
-    for path in [state.join("daemon.json"), state.join("daemon.sock")] {
-        let _ = fs::remove_file(path);
-    }
+    let _ = fs::remove_file(state.join("daemon.json"));
+    let _ = crate::platform::remove(&crate::platform::daemon_endpoint(cache));
 }
 
 fn list_projects(cache: &Path) -> Vec<String> {

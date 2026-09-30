@@ -11,10 +11,12 @@ use tempfile::TempDir;
 
 use docsbase_memory::daemon::lifecycle::stop_daemon;
 use docsbase_memory::ipc::client::Client;
+use docsbase_memory::platform;
 
 struct Env {
     cache: TempDir,
     root: TempDir,
+    #[cfg(unix)]
     outside: TempDir,
     daemon: Option<Child>,
 }
@@ -23,6 +25,7 @@ impl Env {
     fn new(files: &[(&str, &str)]) -> Self {
         let cache = TempDir::new().expect("cache");
         let root = TempDir::new().expect("root");
+        #[cfg(unix)]
         let outside = TempDir::new().expect("outside");
         for (rel, body) in files {
             write_file(root.path(), rel, body.as_bytes());
@@ -30,6 +33,7 @@ impl Env {
         Self {
             cache,
             root,
+            #[cfg(unix)]
             outside,
             daemon: None,
         }
@@ -43,6 +47,7 @@ impl Env {
         self.root.path()
     }
 
+    #[cfg(unix)]
     fn outside(&self) -> &Path {
         self.outside.path()
     }
@@ -67,10 +72,9 @@ impl Env {
             .expect("spawn daemon");
         self.daemon = Some(child);
         assert!(
-            wait_until(Duration::from_secs(10), || self
-                .cache()
-                .join("state/daemon.sock")
-                .exists()),
+            wait_until(Duration::from_secs(10), || platform::exists(
+                &platform::daemon_endpoint(self.cache())
+            )),
             "socket must appear"
         );
     }
@@ -283,6 +287,7 @@ fn neighbors_window() {
     assert!(chunks[0]["lines"].is_array() && chunks[0]["heading_path"].is_string());
 }
 
+#[cfg(unix)]
 #[test]
 fn get_doc_rejects_escape() {
     let mut env = Env::new(&[("ok.md", "# ok\n\nfine.\n")]);

@@ -16,6 +16,7 @@ use tempfile::TempDir;
 
 use docsbase_memory::daemon::lifecycle::{daemon_pid, stop_daemon};
 use docsbase_memory::ipc::client::Client;
+use docsbase_memory::platform;
 use docsbase_memory::store::DB_FILE;
 
 const DEFAULT_SOAK_SECS: u64 = 3_600;
@@ -73,7 +74,7 @@ impl Env {
         self.daemon = Some(child);
         assert!(
             wait_until(Duration::from_secs(10), || {
-                self.cache().join("state/daemon.sock").exists()
+                platform::exists(&platform::daemon_endpoint(self.cache()))
                     && self.cache().join("state/daemon.json").exists()
             }),
             "socket and daemon state must appear"

@@ -40,10 +40,6 @@ impl Env {
         self.root.path()
     }
 
-    fn socket(&self) -> PathBuf {
-        self.cache().join("state/daemon.sock")
-    }
-
     fn cmd(&self) -> Command {
         let mut command = Command::new(daemon_bin());
         command.env("DOCSBASE_CACHE_DIR", self.cache());
@@ -69,7 +65,9 @@ impl Env {
             .expect("spawn daemon");
         self.daemon = Some(child);
         assert!(
-            wait_until(Duration::from_secs(10), || self.socket().exists()),
+            wait_until(Duration::from_secs(10), || platform::exists(
+                &platform::daemon_endpoint(self.cache())
+            )),
             "socket must appear"
         );
     }

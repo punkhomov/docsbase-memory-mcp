@@ -11,6 +11,7 @@ use tempfile::TempDir;
 use docsbase_memory::daemon::lifecycle::stop_daemon;
 use docsbase_memory::ipc::client::Client;
 use docsbase_memory::ipc::protocol::{PROTOCOL_VERSION, build_id};
+use docsbase_memory::platform;
 
 struct Env {
     cache: TempDir,
@@ -40,10 +41,6 @@ impl Env {
         self.root.path()
     }
 
-    fn socket(&self) -> PathBuf {
-        self.cache().join("state/daemon.sock")
-    }
-
     fn cmd(&self) -> Command {
         let mut command = Command::new(daemon_bin());
         command
@@ -63,7 +60,9 @@ impl Env {
             let _ = previous.wait();
         }
         assert!(
-            wait_until(Duration::from_secs(10), || self.socket().exists()),
+            wait_until(Duration::from_secs(10), || platform::exists(
+                &platform::daemon_endpoint(self.cache())
+            )),
             "socket must appear"
         );
     }

@@ -95,6 +95,7 @@ fn honors_config_ignores() {
     assert_eq!(found, vec!["keep.md"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn rejects_symlink_escape() {
     let root = TempDir::new().expect("tempdir");

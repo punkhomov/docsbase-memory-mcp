@@ -1,4 +1,5 @@
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,6 +9,7 @@ use docsbase_memory::daemon::admission::Lease;
 use docsbase_memory::daemon::lifecycle::{ensure_daemon_with, stop_daemon};
 use docsbase_memory::error::Error;
 use docsbase_memory::ipc::protocol::build_id;
+use docsbase_memory::platform;
 use tempfile::TempDir;
 
 struct Env {
@@ -26,7 +28,9 @@ impl Env {
     }
 
     fn socket(&self) -> PathBuf {
-        self.cache().join("state/daemon.sock")
+        platform::daemon_endpoint(self.cache())
+            .as_path()
+            .to_path_buf()
     }
 
     fn conflicts(&self) -> String {
@@ -85,12 +89,15 @@ fn build_mismatch_refuses_and_logs() {
     assert_eq!(lines[0]["kind"], "build_mismatch");
     assert_eq!(lines[0]["actual"], "docsbase 0.0.0-old");
 
-    let mode = fs::metadata(env.cache().join("logs"))
-        .expect("logs metadata")
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(mode, 0o700, "conflict log dir must be private");
+    #[cfg(unix)]
+    {
+        let mode = fs::metadata(env.cache().join("logs"))
+            .expect("logs metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "conflict log dir must be private");
+    }
 }
 
 #[test]
@@ -162,7 +169,9 @@ fn lock_recovered_after_kill() {
         .spawn()
         .expect("spawn daemon");
     assert!(
-        wait_until(Duration::from_secs(10), || env.socket().exists()),
+        wait_until(Duration::from_secs(10), || {
+            platform::exists(&platform::daemon_endpoint(env.cache()))
+        }),
         "socket must appear"
     );
 

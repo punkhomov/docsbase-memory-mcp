@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")]
 //! Release artifact guarantees (NFR-2, NFR-6): the release binary is static
 //! (no dynamic library dependencies) and fits the size budget.
 

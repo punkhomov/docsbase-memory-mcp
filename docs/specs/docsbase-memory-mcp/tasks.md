@@ -653,7 +653,7 @@ best-effort no-op (документировано)
 ### T42 — Test portability pass
 **Depends:** T39, T40, T41
 **New crates:** —
-**Files:** Modify `tests/{admission,config_runtime,error_surface,install,ipc_server,lifecycle,mcp_docs,mcp_registry,offline,soak,artifact,cleanup,perf_budget}.rs`
+**Files:** Modify `tests/{admission,config_runtime,error_surface,install,ipc_server,lifecycle,mcp_docs,mcp_registry,offline,soak,artifact,cleanup,perf_budget,walk,watcher}.rs`
 **Interfaces:** Consumes `platform::{exists, daemon_endpoint}`; Produces портируемые harness'ы:
 ожидание endpoint'а вместо файла `state/daemon.sock`, `#[cfg(unix)]`-гейты для `/proc`/`unshare`/
 `PermissionsExt`/symlink/`kill -9`/`ldd`/0600-режимов, фейки — через `platform::bind_blocking`

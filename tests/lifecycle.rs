@@ -1,4 +1,5 @@
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,8 +24,8 @@ impl Env {
         self.cache.path()
     }
 
-    fn socket(&self) -> PathBuf {
-        self.cache().join("state/daemon.sock")
+    fn endpoint_up(&self) -> bool {
+        platform::exists(&platform::daemon_endpoint(self.cache()))
     }
 
     fn start(&self) -> u32 {
@@ -54,11 +55,7 @@ fn read_pid(cache: &Path) -> u32 {
 }
 
 fn pid_alive(pid: u32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().next())
-            .is_some_and(|state| state != "Z")
-    })
+    docsbase_memory::platform::process::process_alive(pid)
 }
 
 fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
@@ -79,19 +76,26 @@ fn first_start_creates_daemon() {
 
     assert!(pid_alive(pid), "daemon pid must be alive");
     let log = env.cache().join("logs/daemon.log");
-    let metadata = fs::metadata(&log).expect("NFR-8: detached daemon writes logs/daemon.log");
-    assert_eq!(
-        metadata.permissions().mode() & 0o777,
-        0o600,
-        "daemon log must be owner-only"
-    );
-    assert!(env.socket().exists(), "socket must exist");
-    let mode = fs::metadata(env.socket()).expect("metadata").permissions();
-    assert_eq!(mode.mode() & 0o777, 0o600, "socket must be 0600");
+    fs::metadata(&log).expect("NFR-8: detached daemon writes logs/daemon.log");
+    assert!(env.endpoint_up(), "endpoint must exist");
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(&log).expect("log metadata");
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o600,
+            "daemon log must be owner-only"
+        );
+        let socket = platform::daemon_endpoint(env.cache());
+        let mode = fs::metadata(socket.as_path())
+            .expect("metadata")
+            .permissions();
+        assert_eq!(mode.mode() & 0o777, 0o600, "socket must be 0600");
+    }
     assert!(env.cache().join("state/daemon.json").exists());
 
     env.stop();
-    assert!(!env.socket().exists(), "socket removed on stop");
+    assert!(!env.endpoint_up(), "endpoint removed on stop");
     assert!(!pid_alive(pid), "process exited");
 }
 
@@ -115,7 +119,7 @@ fn stop_command_terminates() {
         .map(|output| assert!(output.status.success(), "stop must succeed"))
         .expect("run stop");
 
-    assert!(!env.socket().exists(), "socket removed");
+    assert!(!env.endpoint_up(), "endpoint removed");
     assert!(wait_until(Duration::from_secs(2), || !pid_alive(pid)));
 }
 
@@ -151,7 +155,7 @@ fn grace_shutdown_after_last_session() {
         .expect("spawn serve");
 
     assert!(
-        wait_until(Duration::from_secs(10), || env.socket().exists()),
+        wait_until(Duration::from_secs(10), || env.endpoint_up()),
         "socket must appear"
     );
 
@@ -161,7 +165,7 @@ fn grace_shutdown_after_last_session() {
     drop(session);
 
     assert!(
-        wait_until(Duration::from_secs(5), || !env.socket().exists()),
+        wait_until(Duration::from_secs(5), || !env.endpoint_up()),
         "daemon must exit after grace"
     );
     let status = child.wait().expect("wait child");

@@ -279,6 +279,7 @@ fn dir_rename_purges_subtree() {
     assert_ne!(env.search("beta").len(), 0);
 }
 
+#[cfg(unix)]
 #[test]
 fn symlinks_not_followed() {
     let mut env = Env::new(&[("a.md", PLAIN)]);

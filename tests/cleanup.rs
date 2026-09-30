@@ -114,6 +114,25 @@ fn write_file(root: &Path, rel: &str, bytes: &[u8]) {
     fs::write(path, bytes).expect("write file");
 }
 
+/// A process that stays alive past the test, so its pid is a live session.
+fn spawn_long_lived() -> std::process::Child {
+    #[cfg(unix)]
+    {
+        Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep")
+    }
+    #[cfg(windows)]
+    {
+        Command::new("cmd")
+            .args(["/C", "ping", "-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn ping")
+    }
+}
+
 fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -246,11 +265,7 @@ fn kill9_frontend_frees_resources() {
     );
 
     let start = Instant::now();
-    let killed = Command::new("kill")
-        .args(["-9", &frontend.id().to_string()])
-        .status()
-        .expect("kill -9");
-    assert!(killed.success(), "kill must succeed");
+    frontend.kill().expect("kill -9");
     let _ = frontend.wait();
 
     session_count(&mut admin, Duration::from_secs(2));
@@ -317,10 +332,7 @@ fn dead_session_does_not_block_shutdown() {
     let mut admin = env.client();
     admin.handshake_registry().expect("hello");
 
-    let mut zombie = Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn sleep");
+    let mut zombie = spawn_long_lived();
     let live_pid = zombie.id();
 
     let mut raw =
@@ -344,11 +356,7 @@ fn dead_session_does_not_block_shutdown() {
         "registration must be visible before the pid dies"
     );
 
-    let killed = Command::new("kill")
-        .args(["-9", &live_pid.to_string()])
-        .status()
-        .expect("kill -9");
-    assert!(killed.success(), "kill must succeed");
+    zombie.kill().expect("kill -9");
     let _ = zombie.wait();
 
     // The pid is dead but this socket stays open; the janitor must prune the

@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -139,11 +140,7 @@ fn write_file(root: &Path, rel: &str, bytes: &[u8]) {
 }
 
 fn process_alive(pid: u32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().next())
-            .is_some_and(|state| state != "Z")
-    })
+    docsbase_memory::platform::process::process_alive(pid)
 }
 
 fn daemon_state_pid(cache: &Path) -> u32 {
@@ -172,8 +169,11 @@ fn install_owned_artifacts() {
 
     let binary = env.binary();
     assert!(binary.is_file(), "binary must be installed");
-    let perms = fs::metadata(&binary).expect("metadata").permissions();
-    assert_eq!(perms.mode() & 0o777, 0o755, "binary must be executable");
+    #[cfg(unix)]
+    {
+        let perms = fs::metadata(&binary).expect("metadata").permissions();
+        assert_eq!(perms.mode() & 0o777, 0o755, "binary must be executable");
+    }
     assert_eq!(manifest["binary"], serde_json::json!(binary));
     assert_eq!(manifest["cache_root"], serde_json::json!(env.cache()));
     assert_eq!(manifest["schema_version"], 1);
@@ -428,7 +428,7 @@ fn install_recovers_from_stale_state() {
     fs::create_dir_all(&state_dir).expect("state dir");
     let state = serde_json::json!({
         "pid": std::process::id(),
-        "socket": env.cache().join("state/daemon.sock"),
+        "socket": platform::daemon_endpoint(env.cache()).as_path().to_path_buf(),
         "build_id": "docsbase 0.0.0-old",
         "schema_version": 0,
         "cache_root": env.cache(),

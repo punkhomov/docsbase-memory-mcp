@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")]
 //! NFR-1 performance budgets in release mode: search p95 over 50k chunks and
 //! a full index of 1000 markdown files (SC-7).
 //!
@@ -206,6 +207,7 @@ fn read_vm_rss_kb(pid: u32) -> u64 {
         .expect("VmRSS in /proc status")
 }
 
+#[cfg(unix)]
 #[test]
 #[cfg_attr(debug_assertions, ignore = "perf budget requires --release")]
 fn rss_budget() {
