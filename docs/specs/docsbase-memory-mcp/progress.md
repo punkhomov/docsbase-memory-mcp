@@ -244,3 +244,5 @@ Task 43: minor (deferred): job не исполнялся на реальном �
 Task 43: complete (docs+CI: nightly.yml windows-job, tasks.md Verify; локально Linux 238/4 + fmt/clippy clean; review секции — фазовое ревью T38–T43)
 Windows phase review fix pass (C1/C2/I1/I2): `session.rs` unit-фикстура портируема (`sleep`/`cmd /C ping`); install кладёт бинарь с `EXE_SUFFIX` (`docsbase.exe` на Windows) и тесты сравнивают canonicalized manifest-пути (verbatim `\\?\`); `stop_daemon` на Windows больше не рапортует успех для живого pid после 2с-ветки (фоллбэк в полный STOP_TIMEOUT), на Unix поведение прежнее
 Windows phase review fix pass: complete (Linux 238/4, windows-gnu clippy --tests clean, линковка lib+install exe; фазовое ре-ревью)
+Windows phase review: вердикт ре-ревью — **converged** (C1/C2/I1/I2 закрыты; Unix-поведение сохранено); residual: windows-job не исполнялся на реальном раннере до первого пуша (msvc vs локальный gnu)
+Windows phase review: minor (deferred): на Windows stale `daemon stop` с живым чужим pid ждёт ~17с и возвращает ошибку (осознанный trade-off I1; Unix — быстрый Ok); orphan `ping.exe` ~29с в тестовой фикстуре; design §3 обновлён (`docsbase[.exe]`)
