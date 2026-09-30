@@ -68,7 +68,9 @@ pub fn spawn_watcher(
     tx: std::sync::mpsc::SyncSender<Vec<PathBuf>>,
 ) -> Result<WatcherGuard> {
     let root = project.canonical_root.clone();
-    let cache = cache.to_path_buf();
+    // Canonicalize once: notify reports verbatim paths on Windows, while the
+    // configured cache dir may use the short/drive spelling (T48-era CI).
+    let cache = cache.canonicalize().unwrap_or_else(|_| cache.to_path_buf());
     // Bounded with blocking send: the notify callback applies backpressure
     // instead of growing without bound; no path is dropped (T46).
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(MAX_WATCH_EVENTS);

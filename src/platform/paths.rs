@@ -163,7 +163,10 @@ pub fn normalize_for_compare(path: &Path) -> String {
 #[cfg(any(windows, test))]
 #[must_use]
 pub(crate) fn windows_key(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/").to_lowercase()
+    let key = path.to_string_lossy().replace('\\', "/").to_lowercase();
+    // Windows canonicalization yields verbatim (`\\?\`) paths; they denote
+    // the same file as the plain spelling, so fold the prefix away.
+    key.strip_prefix("//?/").map_or(key.clone(), str::to_owned)
 }
 
 #[cfg(test)]
@@ -281,6 +284,18 @@ mod tests {
             !is_system_key("c:/windows2", &subtrees, &equals),
             "component boundary"
         );
+    }
+
+    #[test]
+    fn windows_key_strips_verbatim_prefix() {
+        assert_eq!(
+            windows_key(Path::new(r"\\?\C:\Users\X\Docs")),
+            "c:/users/x/docs"
+        );
+        assert!(key_under(
+            &windows_key(Path::new(r"\\?\C:\Root\Docs\a.md")),
+            &windows_key(Path::new(r"C:\Root\Docs"))
+        ));
     }
 
     #[test]
