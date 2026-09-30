@@ -239,6 +239,11 @@ fn unknown_tool_rejected() {
     }
 }
 
+// Windows residual (ADR-10): `interprocess` local sockets do not reliably
+// deliver EOF after a session has exchanged several frames, so this socket
+// close is only asserted on Unix. The production cleanup path on Windows is
+// the janitor reaping dead frontend pids (NFR-9).
+#[cfg(unix)]
 #[test]
 fn eof_removes_session() {
     let mut env = Env::new(&[("docs/a.md", DOC)]);
