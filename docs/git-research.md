@@ -129,15 +129,17 @@ wt$ git rev-parse --show-toplevel --git-dir --git-common-dir
   путь нужно канонизировать и валидировать (symlink/абсолютность), не выходя за
   `canonical_root`.
 
-## 7. Кандидаты задач (не созданы)
+## 7. Кандидаты задач → оформлены как T49–T53 (`tasks.md`)
 
-- **G1 (тесты, малая)**: worktree-регресс в `tests/walk.rs`/`tests/registry.rs` — `.git`-файл +
-  `commondir` + `info/exclude` соблюдается; subdir → git root; main+wt = два проекта.
-- **G2 (фаза 2, опционально)**: `branch`/`head_sha` в `status`/`list_projects` (schema
-  migration; чтение per-worktree HEAD).
-- **G3 (по необходимости)**: диагностика `status` — показывать git root/common dir.
-- **G4 (по необходимости)**: удалённый worktree — понятная ошибка `sync`/`status` (если G1 не
-  покроет).
+- **G1** → **T51**: worktree-регресс (`.git`-файл + `commondir` + `info/exclude`; subdir →
+  git root; main+wt = два проекта).
+- **G2** → **T49**: `branch`/`head` в `status` — без schema migration, чтение per-worktree
+  HEAD на лету (`src/vcs.rs`).
+- **G3** → **T49** (git root/dirs в `GitState`, `status.git`).
+- **G4** → **T50**: удалённый worktree/missing root — понятная ошибка, без destructive prune.
+- **Бенчмарки** → **T52** (branch-switch/incremental бюджеты B1–B4).
+- **Фаза 2 (embeddings §8)** → **T53**: контракт контент-адресуемого кэша векторов (ADR-12,
+  fake-embedder, без модели и крейтов).
 - Кандидат в watcher-оптимизацию (HEAD-watch для очень больших репо) сознательно не включён:
   сначала замер на реальных репо.
 

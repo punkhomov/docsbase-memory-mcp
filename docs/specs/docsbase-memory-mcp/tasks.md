@@ -796,3 +796,121 @@ canonicalize→open) — решение: закрыть для последне�
 из-за общей валидации путей; каждая задача верифицируема `Verify`-командой; новых крейтов
 нет; wire-изменений нет (только отказы при превышении лимитов); пропорция — имена тестов и
 константы, без тел функций.
+
+---
+
+## Git integration & phase-2 readiness (T49…T53)
+
+**Goal:** сделать git-состояние проекта видимым и устойчивым к worktree/checkout-сценариям
+(`docs/git-research.md`), закрепить инкрементальность тестами/бенчмарками и зафиксировать
+контракт контент-адресуемого кэша векторов до внедрения embeddings (фаза 2, FR-27).
+**Depends:** T43 (Windows phase), T44–T48 (security hardening) — T51/T53 могут идти параллельно.
+**Review focus (failure modes):** (1) `.git`-файл — недоверенный вход: path traversal/symlink,
+циклы; ридер не должен выходить за ожидаемые каталоги и не падать; (2) `status.git` — только
+additive, контракт PROTOCOL v1 не ломается; (3) missing root не должен удалять данные (в
+отличие от CBM: никакого destructive prune); (4) git в тестах — скип при отсутствии бинаря,
+без флаков на CI; (5) бюджеты — release, с запасом на шум раннеров, первичны correctness-
+ассерты; (6) T53 — без реальной модели и новых крейтов, `hybrid` остаётся off.
+
+Инвариант секции: containment остаётся на `canonical_root` (никогда на `common_dir`); никаких
+branch/worktree-специфичных индексных ключей; git читается только read-only (никогда не
+пишем в `.git`, не парсим команды из репозитория).
+
+### T49 — `src/vcs.rs`: git-состояние проекта + `status.git`
+**Depends:** T43
+**New crates:** —
+**Files:** Create `src/vcs.rs`; Modify `src/lib.rs`, `src/daemon/tools.rs` (`status`),
+`tests/vcs.rs` (новый)
+**Interfaces:** `vcs::state(canonical_root) -> GitState { root, git_dir, common_dir,
+is_worktree, branch: Option<String>, head: Option<String>, detached: bool }` — read-only,
+без shell/крейтов: `.git`-файл (`gitdir: …`, relative → join с root) → `commondir`
+(relative → join с git_dir) → per-worktree `HEAD` (`ref: refs/heads/x` | 40/64-hex) → `refs/…`
+из common dir, `packed-refs` fallback (`#`/`^` пропускаются); каждый read ≤ 4 КиБ, симлинки/
+выход за ожидаемые каталоги отвергаются, любая ошибка → поле `None` (никогда не валит tool);
+`status.projects[].git = { branch, head, detached, is_worktree }` (объект отсутствует вне git)
+**RED:** `vcs::tests::{dir_repo, gitlink_worktree, detached_head, packed_refs, unborn_branch,
+garbage_dot_git_is_none}`, `tests/vcs.rs::status_reports_branch` — падают
+**GREEN:** ридер + additive-поле; containment/поиск не затрагиваются
+**Verify:** `cargo test --locked vcs && cargo test --locked --test lifecycle && cargo test --locked`
+**Acceptance:** `status` показывает branch/head/worktree-флаг без schema migration; чтение
+недоверенного `.git` безопасно (bounded, no traversal, no panic); Linux и Windows.
+
+### T50 — Missing root / удалённый worktree
+**Depends:** T43
+**New crates:** —
+**Files:** Modify `src/daemon/registry.rs`, `src/daemon/server.rs` (route_tool),
+`src/daemon/lifecycle.rs` (watcher), `src/daemon/tools.rs` (`status`); Modify
+`tests/{mcp_registry,lifecycle}.rs`
+**Interfaces:** `root_status(canonical_root) -> Present | Missing | Uncertain` — только
+`ENOENT/ENOTDIR` = `Missing` (EACCES/прочее = `Uncertain`, деструктивных решений нет);
+`status.projects[].root = "missing"` (без изменения схемы); `sync_start`/`sync` для missing
+→ `Error::Project` с инструкцией («worktree удалён: пере-создай или удали проект из реестра»);
+watcher пропускает missing root с одним warning без цикла ретраев; данные/кэш не удаляются
+**RED:** `mcp_registry::sync_missing_root_gives_hint`, `lifecycle::status_marks_missing_root`,
+`lifecycle::uncertain_root_is_not_missing` — падают
+**GREEN:** диагностика и fail-fast; существующие проекты/индексы остаются на диске
+**Verify:** `cargo test --locked --test mcp_registry --test lifecycle && cargo test --locked`
+**Acceptance:** удаление worktree/каталога не приводит к панике, утечке или молчаливому
+«успеху»; понятная ошибка и маркер `missing`; uncertainty не считается удалением.
+
+### T51 — Worktree/ignore регресс-сьют
+**Depends:** T43
+**New crates:** —
+**Files:** Create `tests/git_worktrees.rs`; Modify `tests/walk.rs` (при необходимости хелперы)
+**Interfaces:** реальный `git` в tempdir, хелпер `require_git()` (скип, если бинарь недоступен;
+на CI Git есть и в Linux, и в windows-latest); кейсы: (а) `.git/info/exclude` соблюдается;
+(б) linked worktree (`.git`-файл + `commondir`) → root = путь worktree, exclude из common dir
+соблюдается, subdir → git root без второго проекта; (в) main + worktree = два проекта;
+(г) garbage `.git`-файл → проект как обычный каталог, без паники; (д) detached HEAD и
+unborn branch индексируются
+**RED:** новые тесты падают до правок/уточнения поведения
+**GREEN:** поведение закреплено (ожидаемо: только тестовая работа; фиксы — если RED вскроет
+баги)
+**Verify:** Linux: `cargo test --locked --test git_worktrees && cargo test --locked`;
+Windows CI: `cargo test --locked` (скип при отсутствии git)
+**Acceptance:** worktree/ignore-поведение из `git-research.md` §1/§5 защищено тестами;
+тесты детерминированы и не флакают.
+
+### T52 — Branch-switch / инкрементальные бенчмарки и бюджеты (B1–B4)
+**Depends:** T43
+**New crates:** —
+**Files:** Modify `tests/perf_budget.rs` (release, linux-gated), `benches/index.rs`
+**Interfaces:** корпус 1000 docs (существующий стиль `perf_budget`): B1 no-op sync — бюджет
+`SYNC_NOOP_BUDGET` (ориентир 19 мс release, бюджет с запасом); B2 «switch» (изменено 5 %
+файлов) — бюджет `SYNC_INCREMENTAL_BUDGET` **и** correctness-ассерты
+`stats.docs == changed && stats.skipped == rest` (главный гейт: никакого полного re-parse);
+B3 полный индекс — существующий `INDEX_BUDGET`; B4 no-op на 10k docs — бюджет
+`SYNC_NOOP_10K_BUDGET` (кандидат на закрытие deferred-хвоста «10k-doc RSS/время»);
+criterion `benches/index.rs`: группы `sync_noop` и `sync_changed_5pct` для трендов
+**RED:** бюджеты/ассерты падают при регрессии (проверка: временно отключить hash-skip)
+**GREEN:** бюджеты с 10–100× запасом к локальным замерам; меряются только `--release`
+**Verify:** `cargo test --locked --release --test perf_budget`; `cargo bench --bench index -- --quick` (локально)
+**Acceptance:** регрессии «случайно полный reindex» и «O(n) запись» ловятся CI; цифры
+зафиксированы в ledger (локально: 160/19/36 мс на 1000 docs).
+
+### T53 — Контракт контент-адресуемого кэша векторов (ADR-12 + fake-embedder)
+**Depends:** T43; согласуется с T49 (branch-метаданные — только диагностика)
+**New crates:** —
+**Files:** Create `src/vector_cache.rs`, `docs/specs/docsbase-memory-mcp/design.md` (ADR-12);
+Modify `src/lib.rs`, `tests/vector_cache.rs` (новый), `benches/vector_cache.rs` (новый)
+**Interfaces:** `Embedder` trait (`model_id()`, `embed(&[chunk]) -> Vec<Vec<f32>>`);
+`VectorCache` — глобальный (per cache root) контент-адресуемый кэш `(model_id, chunk_hash) →
+vector` (отдельный SQLite-файл в cache root, не проект-специфичный; LRU/size-cap; проверка
+dim); никакой реальной модели и сети — в тестах fake-embedder со счётчиком вызовов;
+`Config::hybrid` остаётся off, wire не меняется
+**RED:** `tests/vector_cache.rs::{unchanged_chunk_no_embed, edit_embeds_one_chunk,
+branch_switch_back_is_free, worktrees_share_cache, model_change_invalidates, dim_mismatch_is_error,
+lru_eviction_capped}` (счётчик вызовов == число различных chunk_hash), критерий
+`vector_cache` — lookup/lru throughput — падают до реализации
+**GREEN:** кэш + ADR-12 (ключи `(model_id, chunk_hash)`; два слоя: глобальный кэш vs live-индекс
+проекта; фоновая стадия с перепроверкой хэша; смена модели инвалидирует)
+**Verify:** `cargo test --locked --test vector_cache && cargo test --locked`;
+`cargo bench --bench vector_cache -- --quick` (локально)
+**Acceptance:** контракт зафиксирован и проверен без модели: switch ветки не эмбеддит
+неизменённые чанки; worktree-дубли не считаются; смена модели — полная инвалидация;
+подготовка фазы 2 не меняет текущее поведение (`hybrid` off).
+
+**Self-review секции:** T49/T50/T51/T52/T53 независимы (after T43–T48); T53 не блокирует
+T49–T52 и наоборот; каждая задача верифицируема `Verify`-командой; новых крейтов нет;
+единственное wire-изменение — additive `status.git`/`root: missing` (T49/T50); git-тесты
+скипаются без бинаря и не флакают; бюджеты меряются только в release.
