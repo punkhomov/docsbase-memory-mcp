@@ -388,8 +388,8 @@ std/tokio не предоставляют, мало боевых кейсов. �
 **ADR-11. `index_project`: системный blacklist вместо allowlist (T47).**
 Выбрано: отвергать в `registry::normalize_root` корни, попадающие в системные каталоги
 (`platform::paths::is_system_dir`: поддеревья `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`,
-`/boot`, `/proc`, `/sys`, `/dev`, `/run`, `/root`, `/snap`, `/var/lib|cache|log|spool`;
-равенство `/home`, `/var`, `/mnt`, `/media`; Windows — `%SystemRoot%`, `%ProgramFiles%`,
+`/boot`, `/proc`, `/sys`, `/dev`, `/snap`, `/var/lib|cache|log|spool`; равенство `/home`,
+`/root`, `/var`, `/mnt`, `/media`, `/run` (`/run/media` — исключение); Windows — `%SystemRoot%`, `%ProgramFiles%`,
 `%ProgramFiles(x86)%`, `%ProgramData%`, `$Recycle.Bin`, `Recovery`, `PerfLogs`,
 `System Volume Information`, равенство `<drive>/Users`), плюс уже существующие отказы
 `/`, `$HOME` и cache root. **Любой другой каталог** регистрируется и индексируется
