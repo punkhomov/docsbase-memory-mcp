@@ -9,6 +9,7 @@ use tempfile::TempDir;
 
 use docsbase_memory::daemon::lifecycle::stop_daemon;
 use docsbase_memory::ipc::client::Client;
+use docsbase_memory::ipc::protocol::{FRAME_OVERHEAD, MAX_FRAME_BYTES};
 use docsbase_memory::platform;
 
 struct Env {
@@ -395,5 +396,23 @@ fn max_file_size_above_frame_cap_is_rejected() {
     assert!(
         err.to_string().contains("max_file_size"),
         "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn max_file_size_at_frame_boundary_is_accepted() {
+    let boundary = u64::try_from(MAX_FRAME_BYTES).expect("usize fits u64") - FRAME_OVERHEAD;
+    let mut env = Env::new(&[("keep.md", &doc("publicwidget"))]);
+    fs::write(env.global_config(), format!("max_file_size = {boundary}\n")).expect("global config");
+    env.start_daemon();
+
+    let mut registry = env.client();
+    registry.handshake_registry().expect("registry hello");
+    let status = registry
+        .call_tool("status", serde_json::json!({}))
+        .expect("status");
+    assert_eq!(
+        status["restart_required"], false,
+        "exact boundary must be accepted: {status}"
     );
 }

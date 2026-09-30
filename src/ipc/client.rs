@@ -16,6 +16,8 @@ const IO_TIMEOUT: Duration = Duration::from_secs(2);
 /// Connected daemon client.
 pub struct Client {
     stream: BufReader<BlockingStream>,
+    /// Set when framing desynced the stream; the client must not be reused.
+    poisoned: bool,
 }
 
 impl Client {
@@ -33,6 +35,7 @@ impl Client {
         stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
         Some(Self {
             stream: BufReader::new(stream),
+            poisoned: false,
         })
     }
 
@@ -57,28 +60,48 @@ impl Client {
         reason = "requests are consumed once sent; keeps the brief's `call(Request)` contract"
     )]
     pub fn call(&mut self, request: Request) -> Result<Response> {
+        if self.poisoned {
+            return Err(Error::transport(
+                "client connection is poisoned by a framing error; reconnect",
+            ));
+        }
         let bytes = protocol::encode(&request)?;
-        let stream = self.stream.get_mut();
-        stream.write_all(&bytes).map_err(io_error)?;
-        stream.flush().map_err(io_error)?;
+        {
+            let stream = self.stream.get_mut();
+            stream.write_all(&bytes).map_err(io_error)?;
+            stream.flush().map_err(io_error)?;
+        }
 
         let limit = protocol::MAX_FRAME_BYTES as u64 + 2;
         let mut line = Vec::new();
-        let read = (&mut self.stream)
-            .take(limit)
-            .read_until(b'\n', &mut line)
-            .map_err(io_error)?;
+        let read = match (&mut self.stream).take(limit).read_until(b'\n', &mut line) {
+            Ok(read) => read,
+            Err(err) => {
+                self.poisoned = true;
+                return Err(io_error(err));
+            }
+        };
         if read == 0 {
             return Err(Error::transport("connection closed"));
         }
-        if !line.ends_with(b"\n") || line.len() > protocol::MAX_FRAME_BYTES + 1 {
+        if line.len() > protocol::MAX_FRAME_BYTES + 1 {
+            self.poisoned = true;
             return Err(Error::transport(format!(
                 "response frame exceeds {} bytes",
                 protocol::MAX_FRAME_BYTES
             )));
         }
-        protocol::decode_response(&line)
-            .map_err(|err| Error::transport(format!("bad response: {err}")))
+        if !line.ends_with(b"\n") {
+            self.poisoned = true;
+            return Err(Error::transport("incomplete response frame"));
+        }
+        match protocol::decode_response(&line) {
+            Ok(response) => Ok(response),
+            Err(err) => {
+                self.poisoned = true;
+                Err(Error::transport(format!("bad response: {err}")))
+            }
+        }
     }
 
     /// Performs the `Hello` exchange only; used by registry-wide tools that

@@ -432,5 +432,76 @@ fn client_rejects_oversized_response() {
         })
         .expect_err("oversized response must be rejected");
     assert!(err.to_string().contains("frame"), "unexpected error: {err}");
+    let again = client
+        .call(Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            build_id: "test".to_owned(),
+            client: "test".to_owned(),
+        })
+        .expect_err("poisoned client must refuse reuse");
+    assert!(
+        again.to_string().contains("poisoned"),
+        "unexpected error: {again}"
+    );
     let _ = server.join();
+}
+
+#[test]
+fn frame_boundary_is_exact() {
+    let mut env = Env::new(&[("a.md", "# A\n")]);
+    env.start_daemon();
+
+    // Payload of exactly MAX_FRAME_BYTES bytes is accepted as a frame and
+    // fails JSON parsing instead of the frame bound.
+    let stream =
+        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    let mut writer = stream.try_clone().expect("clone");
+    let mut reader = BufReader::new(stream);
+    let chunk = vec![b'x'; 64 * 1024];
+    let mut remaining = MAX_FRAME_BYTES;
+    while remaining > 0 {
+        let take = remaining.min(chunk.len());
+        writer.write_all(&chunk[..take]).expect("write");
+        remaining -= take;
+    }
+    writer.write_all(b"\n").expect("newline");
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read response");
+    let message = match decode_response(line.as_bytes()).expect("decode") {
+        Response::Error { message, .. } => message,
+        other => panic!("expected parse error, got {other:?}"),
+    };
+    assert!(
+        !message.contains("frame exceeds"),
+        "exactly MAX payload must be accepted as a frame: {message}"
+    );
+
+    // One byte over is rejected as an oversized frame.
+    let stream =
+        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("connect2");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    let mut writer = stream.try_clone().expect("clone2");
+    let mut reader = BufReader::new(stream);
+    let mut remaining = MAX_FRAME_BYTES + 1;
+    while remaining > 0 {
+        let take = remaining.min(chunk.len());
+        writer.write_all(&chunk[..take]).expect("write2");
+        remaining -= take;
+    }
+    let _ = writer.write_all(b"\n");
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read second response");
+    let message = match decode_response(line.as_bytes()).expect("decode2") {
+        Response::Error { message, .. } => message,
+        other => panic!("expected frame error, got {other:?}"),
+    };
+    assert!(
+        message.contains("frame exceeds"),
+        "MAX+1 payload must be rejected as oversize: {message}"
+    );
 }

@@ -400,3 +400,23 @@ fn list_docs_limit_is_clamped() {
         "clamped pagination must still reach the last document: {second}"
     );
 }
+
+#[test]
+fn get_doc_escaping_never_overflows_the_frame() {
+    // JSON escaping expands control characters up to 6x; an accepted
+    // max_file_size must still fail cleanly instead of emitting an
+    // oversized frame (T45 review finding).
+    let body = "\u{1}".repeat(2_000_000);
+    let mut env = Env::new(&[]);
+    write_file(env.root(), "control.md", body.as_bytes());
+    write_file(env.root(), ".docsbase.toml", b"max_file_size = 2_000_000\n");
+    env.start_daemon();
+    index_project(&env);
+    let mut client = env.bound();
+
+    let err = client
+        .call_tool("get_doc", json!({ "path": "control.md" }))
+        .expect_err("oversized encoded response must be refused cleanly");
+    let text = err.to_string();
+    assert!(text.contains("response frame"), "unexpected error: {text}");
+}

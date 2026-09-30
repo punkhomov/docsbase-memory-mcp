@@ -227,6 +227,8 @@ enum Frame {
     Line(Vec<u8>),
     /// Peer closed the stream.
     Eof,
+    /// Stream ended without a delimiter before the cap.
+    Incomplete,
     /// No delimiter within [`protocol::MAX_FRAME_BYTES`].
     TooLarge,
 }
@@ -242,8 +244,14 @@ where
     if read == 0 {
         return Ok(Frame::Eof);
     }
-    if !line.ends_with(b"\n") || line.len() > protocol::MAX_FRAME_BYTES + 1 {
+    let complete = line.ends_with(b"\n");
+    if line.len() > protocol::MAX_FRAME_BYTES + 1
+        || (u64::try_from(read).unwrap_or(u64::MAX) >= limit && !complete)
+    {
         return Ok(Frame::TooLarge);
+    }
+    if !complete {
+        return Ok(Frame::Incomplete);
     }
     Ok(Frame::Line(line))
 }
@@ -274,10 +282,14 @@ pub async fn handle_connection(
         let line = match next_frame {
             Ok(Frame::Line(line)) => line,
             Ok(Frame::Eof) | Err(_) => break,
-            Ok(Frame::TooLarge) => {
-                let err = Error::Protocol {
-                    message: format!("frame exceeds {} bytes", protocol::MAX_FRAME_BYTES),
+            Ok(frame @ (Frame::Incomplete | Frame::TooLarge)) => {
+                let message = match frame {
+                    Frame::TooLarge => {
+                        format!("frame exceeds {} bytes", protocol::MAX_FRAME_BYTES)
+                    }
+                    _ => "incomplete frame without delimiter".to_owned(),
                 };
+                let err = Error::Protocol { message };
                 let response = error_response(&err);
                 if let Ok(bytes) = protocol::encode(&response) {
                     let _ = writer.write_all(&bytes).await;
@@ -303,6 +315,26 @@ pub async fn handle_connection(
             drop(guard);
             let _ = events.send(());
             break;
+        };
+        // JSON escaping can expand a document up to 6x, so the config-level
+        // reserve is not enough on adversarial content: never emit a frame
+        // the peers would reject (T45 review finding).
+        let bytes = if bytes.len() > protocol::MAX_FRAME_BYTES {
+            let err = Error::Protocol {
+                message: format!(
+                    "response frame is {} bytes, over {}; reduce max_file_size or the document size",
+                    bytes.len(),
+                    protocol::MAX_FRAME_BYTES
+                ),
+            };
+            let Ok(fallback) = protocol::encode(&error_response(&err)) else {
+                drop(guard);
+                let _ = events.send(());
+                break;
+            };
+            fallback
+        } else {
+            bytes
         };
         if writer.write_all(&bytes).await.is_err() {
             drop(guard);
