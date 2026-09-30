@@ -51,8 +51,16 @@ impl Env {
     }
 
     fn start_daemon(&mut self) {
+        let cwd = self.root.path().to_path_buf();
+        self.start_daemon_in(&cwd);
+    }
+
+    /// Starts the daemon with an explicit working directory (the project
+    /// root may be deleted already in missing-root tests).
+    fn start_daemon_in(&mut self, cwd: &Path) {
         let child = self
             .cmd()
+            .current_dir(cwd)
             .args(["serve", "--detached", "--grace-ms", "3000"])
             .spawn()
             .expect("spawn daemon");
@@ -628,7 +636,8 @@ fn sync_missing_root_gives_hint() {
         .expect("run index");
     assert!(output.status.success(), "index failed: {output:?}");
     std::fs::remove_dir_all(env.root()).expect("remove project root");
-    env.start_daemon();
+    let cache = env.cache.path().to_path_buf();
+    env.start_daemon_in(&cache);
 
     let mut client = env.client();
     client.handshake_registry().expect("hello");
@@ -714,7 +723,8 @@ fn watcher_restarts_after_missing_root_returns() {
         .expect("run index");
     assert!(output.status.success(), "index failed: {output:?}");
     std::fs::remove_dir_all(env.root()).expect("remove project root");
-    env.start_daemon();
+    let cache = env.cache.path().to_path_buf();
+    env.start_daemon_in(&cache);
 
     let mut client = env.client();
     client.handshake_registry().expect("hello");
