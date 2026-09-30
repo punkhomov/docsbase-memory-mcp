@@ -142,7 +142,8 @@ fn ignore_dotdot_patterns() {
 fn oversized_docsbaseignore_is_rejected() {
     let root = TempDir::new().expect("tempdir");
     write(root.path(), "a.md", "# a");
-    let big = "x".repeat(MAX_IGNORE_FILE_SIZE as usize + 1);
+    let limit = usize::try_from(MAX_IGNORE_FILE_SIZE).expect("limit fits usize");
+    let big = "x".repeat(limit + 1);
     write(root.path(), IGNORE_FILE, &big);
 
     let err = walk(root.path(), &Config::default())
