@@ -333,6 +333,14 @@ fn project_entry(db: &Db, project: &Project, watched: Option<bool>) -> Result<Va
     if let Some(watched) = watched {
         entry["watched"] = json!(watched);
     }
+    if let Some(git) = crate::vcs::state(&project.canonical_root) {
+        entry["git"] = json!({
+            "branch": git.branch,
+            "head": git.head,
+            "detached": git.detached,
+            "is_worktree": git.is_worktree,
+        });
+    }
     Ok(entry)
 }
 

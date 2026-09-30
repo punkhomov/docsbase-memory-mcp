@@ -10,4 +10,5 @@ pub mod ipc;
 pub mod mcp;
 pub mod platform;
 pub mod store;
+pub mod vcs;
 pub mod watch;
