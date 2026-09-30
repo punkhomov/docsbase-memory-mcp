@@ -226,6 +226,7 @@ fn global_config_stamp() -> Option<u64> {
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One bounded NDJSON frame from a connection.
+#[derive(Debug)]
 enum Frame {
     /// Complete line, delimiter included.
     Line(Vec<u8>),
@@ -285,9 +286,15 @@ pub async fn handle_connection(
         };
         let line = match next_frame {
             Ok(Frame::Line(line)) => line,
-            Ok(Frame::Eof) | Err(_) => {
+            Ok(Frame::Eof) => {
                 if std::env::var_os("DOCSBASE_IPC_DEBUG").is_some() {
-                    eprintln!("ipc-debug: connection read ended: {next_frame:?}");
+                    eprintln!("ipc-debug: connection EOF");
+                }
+                break;
+            }
+            Err(err) => {
+                if std::env::var_os("DOCSBASE_IPC_DEBUG").is_some() {
+                    eprintln!("ipc-debug: connection read error: {err}");
                 }
                 break;
             }
