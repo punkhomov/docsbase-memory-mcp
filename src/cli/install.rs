@@ -158,9 +158,6 @@ fn acquire_after_stop(cache: &Path) -> anyhow::Result<Lease> {
     }
 }
 
-/// True when the cache root holds only entries docsbase creates
-/// (`state/`, `logs/`, `projects/`, `registry.db*`); used when the current
-/// `DOCSBASE_CACHE_DIR` no longer matches the manifest.
 /// Refuses manifests whose paths are not owned locations; a tampered or
 /// copied manifest must never turn uninstall into arbitrary deletion.
 fn validate_manifest(data: &Path, manifest: &Manifest) -> anyhow::Result<()> {
