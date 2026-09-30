@@ -285,7 +285,15 @@ pub async fn handle_connection(
             None => read_frame(&mut reader).await,
         };
         let line = match next_frame {
-            Ok(Frame::Line(line)) => line,
+            Ok(Frame::Line(line)) => {
+                if std::env::var_os("DOCSBASE_IPC_DEBUG").is_some() {
+                    eprintln!(
+                        "ipc-debug: frame {} bytes on session {session_id:?}",
+                        line.len()
+                    );
+                }
+                line
+            }
             Ok(Frame::Eof) => {
                 if std::env::var_os("DOCSBASE_IPC_DEBUG").is_some() {
                     eprintln!("ipc-debug: connection EOF");
@@ -559,6 +567,9 @@ async fn register_session(
     match outcome {
         Ok(project) => {
             let (id, cancel) = shared.sessions.join(pid, cwd, Some(project.id))?;
+            if std::env::var_os("DOCSBASE_IPC_DEBUG").is_some() {
+                eprintln!("ipc-debug: bound session {id} (pid {pid})");
+            }
             Ok((
                 id,
                 json!({
