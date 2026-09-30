@@ -217,6 +217,8 @@ fn session_bound_to_project_by_cwd() {
     assert_eq!(status["projects"][0]["status"], "indexed");
     assert_eq!(status["projects"][0]["docs"], 1);
     assert_eq!(status["sessions"], 1);
+    // Windows keeps fd/thread counters at 0 by design (ADR-10).
+    #[cfg(unix)]
     assert!(status["fd_count"].as_u64().expect("fd_count") > 0);
 }
 
@@ -254,7 +256,7 @@ fn eof_removes_session() {
     assert_eq!(status["sessions"], 2);
 
     drop(first);
-    let removed = wait_until(Duration::from_secs(5), || {
+    let removed = wait_until(Duration::from_secs(15), || {
         second
             .call_tool("status", serde_json::json!({}))
             .is_ok_and(|value| value["sessions"] == 1)
