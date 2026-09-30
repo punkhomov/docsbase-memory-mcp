@@ -53,7 +53,7 @@ pub fn is_filesystem_root(path: &Path) -> bool {
 pub fn is_system_dir(path: &Path) -> bool {
     #[cfg(unix)]
     {
-        const EQUALS: &[&str] = &["/home", "/var", "/mnt", "/media"];
+        const EQUALS: &[&str] = &["/home", "/root", "/var", "/mnt", "/media", "/run"];
         const SUBTREES: &[&str] = &[
             "/etc",
             "/usr",
@@ -66,14 +66,16 @@ pub fn is_system_dir(path: &Path) -> bool {
             "/proc",
             "/sys",
             "/dev",
-            "/run",
-            "/root",
             "/snap",
             "/var/lib",
             "/var/cache",
             "/var/log",
             "/var/spool",
         ];
+        // Removable mounts live below /run/media (udisks); real projects.
+        if path.starts_with("/run/media") {
+            return false;
+        }
         EQUALS.iter().any(|dir| path == Path::new(dir))
             || SUBTREES.iter().any(|dir| path.starts_with(Path::new(dir)))
     }
@@ -87,20 +89,38 @@ pub fn is_system_dir(path: &Path) -> bool {
 /// Windows system trees from the environment, as folded keys.
 #[cfg(windows)]
 fn windows_system_dirs() -> (Vec<String>, Vec<String>) {
+    let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    let program_files = std::env::var_os("ProgramFiles");
+    let program_files_x86 = std::env::var_os("ProgramFiles(x86)");
+    let program_data = std::env::var_os("ProgramData");
+    windows_system_dirs_from(
+        &system_root,
+        program_files.as_deref(),
+        program_files_x86.as_deref(),
+        program_data.as_deref(),
+    )
+}
+
+/// Pure builder behind [`windows_system_dirs`], unit-testable everywhere.
+#[cfg(any(windows, test))]
+#[must_use]
+fn windows_system_dirs_from(
+    system_root: &std::ffi::OsStr,
+    program_files: Option<&std::ffi::OsStr>,
+    program_files_x86: Option<&std::ffi::OsStr>,
+    program_data: Option<&std::ffi::OsStr>,
+) -> (Vec<String>, Vec<String>) {
     fn key(value: &std::ffi::OsStr) -> String {
         windows_key(Path::new(value))
     }
-    let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-    let drive = key(&system_root)
-        .split('/')
-        .next()
-        .unwrap_or("c:")
-        .to_owned();
-    let mut subtrees = vec![key(&system_root)];
-    for var in ["ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
-        if let Some(value) = std::env::var_os(var) {
-            subtrees.push(key(&value));
-        }
+    let system_root = key(system_root);
+    let drive = system_root.split('/').next().unwrap_or("c:").to_owned();
+    let mut subtrees = vec![system_root];
+    for value in [program_files, program_files_x86, program_data]
+        .into_iter()
+        .flatten()
+    {
+        subtrees.push(key(value));
     }
     subtrees.push(format!("{drive}/$recycle.bin"));
     subtrees.push(format!("{drive}/recovery"));
@@ -115,6 +135,11 @@ fn windows_system_dirs() -> (Vec<String>, Vec<String>) {
 #[cfg(any(windows, test))]
 #[must_use]
 fn is_system_key(candidate: &str, subtrees: &[String], equals: &[String]) -> bool {
+    // Windows `canonicalize` yields verbatim (`\\?\`) paths; the comparison
+    // keys are plain, so drop the prefix first (T47 review finding).
+    let candidate = candidate
+        .strip_prefix("//?/")
+        .map_or(candidate, |stripped| stripped);
     equals.iter().any(|dir| candidate == dir)
         || subtrees.iter().any(|dir| key_under(candidate, dir))
 }
@@ -196,7 +221,6 @@ mod tests {
                 "/sys/fs/cgroup",
                 "/dev",
                 "/run",
-                "/root/x",
                 "/var",
                 "/var/lib/docker",
                 "/var/log",
@@ -209,12 +233,19 @@ mod tests {
             }
             for dir in [
                 "/home/user/project",
+                "/root/project",
                 "/tmp/x",
                 "/var/www/site",
                 "/opt/app",
                 "/mnt/disk/project",
                 "/media/user/disk/project",
+                "/run/media/user/disk/project",
                 "/srv/www",
+                "/usr2/x",
+                "/libx/x",
+                "/var/www2",
+                "/home2/x",
+                "/etcetera/x",
             ] {
                 assert!(!is_system_dir(Path::new(dir)), "{dir} must stay allowed");
             }
@@ -223,19 +254,27 @@ mod tests {
 
     #[test]
     fn windows_system_keys_are_refused() {
-        let subtrees = vec![
-            "c:/windows".to_owned(),
-            "c:/program files".to_owned(),
-            "c:/program files (x86)".to_owned(),
-            "c:/programdata".to_owned(),
-            "c:/$recycle.bin".to_owned(),
-            "d:/recovery".to_owned(),
-        ];
-        let equals = vec!["c:/users".to_owned()];
+        let (subtrees, equals) = windows_system_dirs_from(
+            std::ffi::OsStr::new(r"C:\Windows"),
+            Some(std::ffi::OsStr::new(r"C:\Program Files")),
+            Some(std::ffi::OsStr::new(r"C:\Program Files (x86)")),
+            Some(std::ffi::OsStr::new(r"C:\ProgramData")),
+        );
         assert!(is_system_key("c:/windows/system32", &subtrees, &equals));
         assert!(is_system_key("c:/program files/app", &subtrees, &equals));
+        assert!(is_system_key(
+            "c:/program files (x86)/app",
+            &subtrees,
+            &equals
+        ));
+        assert!(is_system_key("c:/programdata/x", &subtrees, &equals));
+        assert!(is_system_key("c:/$recycle.bin", &subtrees, &equals));
+        assert!(is_system_key("c:/perflogs", &subtrees, &equals));
         assert!(is_system_key("c:/users", &subtrees, &equals), "equality");
-        assert!(is_system_key("d:/recovery", &subtrees, &equals));
+        assert!(
+            is_system_key("//?/c:/windows/system32", &subtrees, &equals),
+            "verbatim canonical paths must still match"
+        );
         assert!(!is_system_key("c:/users/me/project", &subtrees, &equals));
         assert!(!is_system_key("d:/projects/x", &subtrees, &equals));
         assert!(

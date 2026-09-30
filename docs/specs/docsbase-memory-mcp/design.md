@@ -177,7 +177,7 @@ pub struct Project {
   ancestor; незарегистрированный проект → `Project`-ошибка с инструкцией вызвать
   `index_project`.
 - **I7 (FR-32):** регистрировать можно только существующую директорию; realpath не может
-  быть `/`, `$HOME` или cache root; хранится realpath (FR-13).
+  быть `/`, `$HOME`, системным каталогом (ADR-11) или cache root; хранится realpath (FR-13).
 - **I8 (FR-34):** frontend валидирует имя tool по allowlist; неизвестное имя не уходит в
   daemon.
 
@@ -401,7 +401,9 @@ worktree); (b) серверный `confirm=true`-токен — отвергну
 сам, подтверждение без ценности; (c) серверный elicitation — возможное будущее (rmcp
 feature, многие хосты авто-деклайнят), не обязательство. Граница доверия: подтверждение
 индексации сторонних путей — ответственность MCP-хоста (permission prompt вне yolo);
-blacklist — гигиена/анти-footgun, а не confidentiality-барьер.
+blacklist — гигиена/анти-footgun, а не confidentiality-барьер. Известные ограничения:
+`$Recycle.Bin`/`Recovery`/`PerfLogs` покрываются только для диска `%SystemRoot%`;
+macOS-канонизация (`/private/*`, `/Users`) — фаза 3.
 
 ## 13. Directory structure
 

@@ -775,9 +775,9 @@ retention — при enqueue удаляются старые `done/error` све
 `src/daemon/registry.rs` (`normalize_root`), `docs/specs/docsbase-memory-mcp/design.md`
 (ADR-11 + §4/§12), `tests/registry.rs`
 **Interfaces:** `paths::is_system_dir(path) -> bool` — cfg-списки: Linux/Unix-поддеревья
-(`/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/proc`, `/sys`, `/dev`, `/run`, `/root`,
-`/var/lib|cache|log|spool`); равенство только для «родителей домашних» (`/home`, `/var`?
-нет — только `/home`); Windows-поддеревья (`%SystemRoot%`, `%ProgramFiles%`,
+(`/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/proc`, `/sys`, `/dev`, `/snap`,
+`/var/lib|cache|log|spool`); равенство для «родителей домашних» и mount-точек (`/home`,
+`/root`, `/var`, `/mnt`, `/media`, `/run`; `/run/media` — исключение); Windows-поддеревья (`%SystemRoot%`, `%ProgramFiles%`,
 `%ProgramFiles(x86)%`, `%ProgramData%`, `$Recycle.Bin`, `Recovery`, `PerfLogs`) и равенство
 `%SystemDrive%\Users`; `normalize_root` отвергает `is_system_dir(root)` с `Error::Project`
 и hint; **никаких других ограничений путей нет** — любой не-системный каталог можно
