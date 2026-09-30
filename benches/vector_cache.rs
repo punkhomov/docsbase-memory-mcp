@@ -3,7 +3,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use docsbase_memory::error::Result;
 use docsbase_memory::vector_cache::{Embedder, VectorCache, chunk_hash};
 use tempfile::TempDir;
@@ -55,13 +55,10 @@ fn cache_benchmarks(c: &mut Criterion) {
         let embedder = FakeEmbedder {
             calls: AtomicUsize::new(0),
         };
-        b.iter_batched(
-            || cache.embed_missing(&embedder, &texts).expect("batch"),
-            |vectors| {
-                assert_eq!(vectors.len(), CHUNKS);
-            },
-            BatchSize::SmallInput,
-        );
+        b.iter(|| {
+            let vectors = cache.embed_missing(&embedder, &texts).expect("batch");
+            assert_eq!(vectors.len(), CHUNKS);
+        });
     });
 
     c.bench_function("vector_cache_lookup_1000", |b| {

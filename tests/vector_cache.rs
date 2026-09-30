@@ -125,6 +125,8 @@ fn worktrees_share_the_content_addressed_cache() {
     let (_dir, mut cache) = cache();
     let embedder = FakeEmbedder::new("m1");
     // Two worktrees with overlapping files: the overlap embeds once.
+    // The gate is structural: the cache is keyed by a user-level cache root,
+    // never by project/worktree, so both trees hit the same store.
     cache
         .embed_missing(&embedder, &texts(&["shared", "main only"]))
         .expect("main worktree");
@@ -132,6 +134,18 @@ fn worktrees_share_the_content_addressed_cache() {
         .embed_missing(&embedder, &texts(&["shared", "worktree only"]))
         .expect("linked worktree");
     assert_eq!(embedder.calls(), 3);
+}
+
+#[test]
+fn duplicate_chunks_in_one_batch_embed_once() {
+    let (_dir, mut cache) = cache();
+    let embedder = FakeEmbedder::new("m1");
+    let batch = texts(&["same", "other", "same"]);
+    let vectors = cache.embed_missing(&embedder, &batch).expect("batch");
+
+    assert_eq!(embedder.calls(), 2, "duplicates embed once per batch");
+    assert_eq!(vectors[0], vectors[2], "duplicates share the vector");
+    assert_eq!(cache.len().expect("len"), 2);
 }
 
 #[test]
@@ -173,6 +187,39 @@ fn direct_entries_match_chunk_hashes() {
         cache.get("m2", &hash).expect("get other model").is_none(),
         "model id is part of the key"
     );
+}
+
+#[test]
+fn byte_limits_are_enforced() {
+    let dir = TempDir::new().expect("dir");
+    let limits = CacheLimits {
+        max_entries: 1_000,
+        max_bytes: 8,
+    };
+    let mut cache = VectorCache::open_with_limits(dir.path(), limits).expect("cache");
+    cache.put("m", "h1", &[1.0, 2.0]).expect("put h1");
+    cache.put("m", "h2", &[3.0, 4.0]).expect("put h2");
+    assert_eq!(cache.len().expect("len"), 1, "byte cap enforced");
+    assert!(cache.get("m", "h2").expect("get").is_some(), "newest kept");
+}
+
+#[test]
+fn corrupt_rows_are_rejected() {
+    let dir = TempDir::new().expect("dir");
+    let mut cache = VectorCache::open(dir.path()).expect("cache");
+    let conn = rusqlite::Connection::open(dir.path().join("vectors.db")).expect("raw db");
+    conn.execute(
+        "INSERT INTO vector_cache (model_id, chunk_hash, dim, vector, used_at)
+         VALUES ('m', 'bad', 3, X'0000', 1)",
+        [],
+    )
+    .expect("insert corrupt row");
+    drop(conn);
+
+    let err = cache
+        .get("m", "bad")
+        .expect_err("corrupt row must be an error");
+    assert!(matches!(err, Error::Internal { .. }), "unexpected: {err}");
 }
 
 #[test]

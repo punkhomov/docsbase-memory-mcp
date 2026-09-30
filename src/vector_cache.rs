@@ -6,6 +6,7 @@
 //! `(doc_id, seq)`, so switching branches, rebasing or duplicating a
 //! worktree never re-embeds unchanged bytes.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -79,6 +80,8 @@ impl VectorCache {
             .map_err(|err| Error::internal_with_source("open vector cache", err))?;
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(|err| Error::internal_with_source("set vector cache timeout", err))?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|err| Error::internal_with_source("set vector cache journal", err))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS vector_cache (
                  model_id TEXT NOT NULL,
@@ -176,13 +179,21 @@ impl VectorCache {
     ) -> Result<Vec<Vec<f32>>> {
         let model_id = embedder.model_id().to_owned();
         let hashes: Vec<String> = texts.iter().map(|text| chunk_hash(text)).collect();
-        let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(texts.len());
-        let mut missing = Vec::new();
+        // Duplicate hashes within one batch are embedded and stored once.
+        let mut first_seen: HashMap<&str, usize> = HashMap::new();
+        let mut unique: Vec<(usize, &str)> = Vec::new();
         for (index, hash) in hashes.iter().enumerate() {
+            if !first_seen.contains_key(hash.as_str()) {
+                first_seen.insert(hash.as_str(), index);
+                unique.push((index, hash.as_str()));
+            }
+        }
+        let mut vectors: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
+        let mut missing = Vec::new();
+        for (index, hash) in unique {
             if let Some(vector) = self.get(&model_id, hash)? {
-                vectors.push(Some(vector));
+                vectors[index] = Some(vector);
             } else {
-                vectors.push(None);
                 missing.push(index);
             }
         }
@@ -211,6 +222,14 @@ impl VectorCache {
             for (vector, index) in batch_vectors.into_iter().zip(missing) {
                 self.put(&model_id, &hashes[index], &vector)?;
                 vectors[index] = Some(vector);
+            }
+        }
+        // Fill duplicate occurrences from their first-seen sibling.
+        for (index, hash) in hashes.iter().enumerate() {
+            if vectors[index].is_none() {
+                let source = first_seen.get(hash.as_str()).copied().unwrap_or(index);
+                let sibling = vectors[source].clone();
+                vectors[index] = sibling;
             }
         }
         vectors
@@ -280,7 +299,11 @@ impl VectorCache {
 }
 
 fn decode_vector(dim: usize, bytes: &[u8]) -> Result<Vec<f32>> {
-    if bytes.len() != dim * 4 {
+    let expected = dim
+        .checked_mul(4)
+        .filter(|size| *size > 0)
+        .ok_or_else(|| Error::internal(format!("corrupt vector dim {dim}")))?;
+    if bytes.len() != expected {
         return Err(Error::internal(format!(
             "corrupt vector: {} bytes for dim {dim}",
             bytes.len()
