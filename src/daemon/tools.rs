@@ -380,7 +380,11 @@ fn project_entry(
 pub fn enqueue_sync(db: &Db, project: &Project) -> Result<(i64, bool)> {
     for _ in 0..3 {
         if let Some(id) = repo::create_sync_job(db.connection(), project.id)? {
-            repo::prune_sync_jobs(db.connection(), project.id)?;
+            // Best effort: a prune failure must not strand a queued job with
+            // no runner blocking later syncs (FR-17).
+            if let Err(err) = repo::prune_sync_jobs(db.connection(), project.id) {
+                eprintln!("warning: cannot prune sync jobs: {err}");
+            }
             return Ok((id, true));
         }
         // The blocking insert lost to an active job; it may finish before the

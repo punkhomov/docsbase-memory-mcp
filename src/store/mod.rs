@@ -4,6 +4,8 @@ pub mod migrations;
 pub mod models;
 pub(crate) mod repo;
 
+pub use repo::MAX_SYNC_JOBS;
+
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;

@@ -254,6 +254,9 @@ async fn accept_loop(
     let mut shutdown_signal = platform::ShutdownSignal::new()
         .map_err(|err| Error::internal_with_source("install signal handlers", err))?;
     let mut grace_deadline: Option<tokio::time::Instant> = None;
+    // True when the loop ended because a graceful StopDaemon was requested;
+    // signal-driven shutdown keeps the pre-T46 semantics (abandon in-flight).
+    let mut graceful_stop = false;
 
     // Sessions whose frontend died without closing its socket must not keep
     // the daemon alive (NFR-9, C6).
@@ -313,7 +316,10 @@ async fn accept_loop(
                 }
                 grace_deadline = None;
             },
-            _ = shutdown_rx.changed() => break,
+            _ = shutdown_rx.changed() => {
+                graceful_stop = true;
+                break;
+            }
             () = shutdown_signal.recv() => break,
             _ = janitor.tick() => {
                 let shared_for_prune = Arc::clone(&shared);
@@ -334,10 +340,22 @@ async fn accept_loop(
     // Shutdown was requested: the StopDaemon reply itself is bounded by
     // `DRAIN_TIMEOUT` (T46), but running requests must still deliver their
     // replies and publish their state before the runtime drops the handler
-    // tasks (T25: install waits for an in-flight index job). A truly wedged
-    // request keeps the process alive; SIGTERM remains the escalation path.
-    while in_flight.load(Ordering::SeqCst) > 0 {
-        tokio::time::sleep(POLL_INTERVAL).await;
+    // tasks (T25: install waits for an in-flight index job). A second
+    // SIGTERM/SIGINT aborts the wait so a wedged request (a peer that stopped
+    // reading its response) cannot pin the process: Tokio keeps the only
+    // signal handler installed, so the escalation must be polled here.
+    if graceful_stop {
+        let drained = async {
+            while in_flight.load(Ordering::SeqCst) > 0 {
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+        };
+        tokio::select! {
+            () = drained => {}
+            () = shutdown_signal.recv() => {
+                eprintln!("shutdown: signal while draining; abandoning in-flight requests");
+            }
+        }
     }
     Ok(())
 }

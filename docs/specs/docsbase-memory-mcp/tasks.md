@@ -756,8 +756,8 @@ client, rmcp-stdio); residual не требуется — лимит реали�
 janitor/select переобрабатывает); `MAX_SESSIONS` (256) — `SessionRegistry` отказывает в
 `join` с явной ошибкой; janitor не меняется; **хвосты:** `DRAIN_TIMEOUT` (5 с) на
 `StopDaemon` (зависший запрос не держит stop вечно; SIGTERM остаётся путём отступления);
-watcher-mpsc (`watch/mod.rs:63,359`) — `sync_channel(MAX_WATCH_EVENTS)` + `try_send`
-(bounded, дроп события допустим — следующий батч/скан увидит состояние); `sync_jobs`
+watcher-mpsc (`watch/mod.rs:63,359`) — `sync_channel(MAX_WATCH_EVENTS)` + blocking
+`send` (bounded-память без потери путей; notify-колбэк получает backpressure); `sync_jobs`
 retention — при enqueue удаляются старые `done/error` сверх `MAX_SYNC_JOBS` на проект
 **RED:** `lifecycle::connection_flood_is_refused_and_daemon_survives`,
 `lifecycle::session_cap_is_enforced`, `lifecycle::stop_daemon_drain_is_bounded`,

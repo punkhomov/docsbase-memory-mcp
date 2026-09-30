@@ -10,6 +10,10 @@ use docsbase_memory::daemon::lifecycle::{MAX_CONNECTIONS, ensure_daemon_with, st
 use docsbase_memory::ipc::client::Client;
 use docsbase_memory::ipc::protocol::{PROTOCOL_VERSION, Request, encode};
 use docsbase_memory::platform;
+#[cfg(unix)]
+use docsbase_memory::platform::process::process_alive;
+use docsbase_memory::store::DB_FILE;
+use docsbase_memory::store::MAX_SYNC_JOBS;
 use tempfile::TempDir;
 
 struct Env {
@@ -218,4 +222,150 @@ fn connection_flood_is_refused_and_daemon_survives() {
         .call_tool("status", serde_json::json!({}))
         .expect("status");
     assert!(status["projects"].is_array());
+    drop(held);
+    env.stop();
+}
+
+#[test]
+fn sync_jobs_retention_via_enqueue() {
+    let env = Env::new();
+    let project_dir = TempDir::new().expect("project");
+    let project = project_dir.path();
+    fs::write(project.join("a.md"), "# A\n").expect("doc");
+    let output = env
+        .cli()
+        .args(["index"])
+        .arg(project)
+        .output()
+        .expect("index");
+    assert!(output.status.success(), "index failed: {output:?}");
+    env.start();
+
+    let mut client = Client::connect(env.cache()).expect("connect");
+    client.handshake(project).expect("bind session");
+    for _ in 0..(MAX_SYNC_JOBS + 5) {
+        let job = client
+            .call_tool("sync_start", serde_json::json!({}))
+            .expect("sync_start");
+        let job_id = job["job_id"].as_i64().expect("job id");
+        loop {
+            let status = client
+                .call_tool("sync_status", serde_json::json!({ "job_id": job_id }))
+                .expect("sync_status");
+            let state = status["state"].as_str().unwrap_or_default();
+            if state == "done" || state == "error" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    drop(client);
+
+    let conn = rusqlite::Connection::open(env.cache().join(DB_FILE)).expect("db");
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sync_jobs", [], |row| row.get(0))
+        .expect("count");
+    assert!(
+        usize::try_from(count).unwrap_or(usize::MAX) <= MAX_SYNC_JOBS,
+        "retention must bound sync_jobs, got {count}"
+    );
+    env.stop();
+}
+
+#[cfg(unix)]
+#[test]
+fn stop_escalates_with_sigterm_when_wedged() {
+    let env = Env::new();
+    let project_dir = TempDir::new().expect("project");
+    let project = project_dir.path().to_path_buf();
+    let body = "a".repeat(7_000_000);
+    fs::write(project.join("big.md"), format!("# Big\n\n{body}\n")).expect("doc");
+    fs::write(
+        project.join(".docsbase.toml"),
+        "max_file_size = 7_000_000\n",
+    )
+    .expect("config");
+    let output = env
+        .cli()
+        .args(["index"])
+        .arg(&project)
+        .output()
+        .expect("index");
+    assert!(output.status.success(), "index failed: {output:?}");
+    env.start();
+    let pid = read_pid(env.cache());
+
+    // Raw client: complete the handshake, request the big document and then
+    // stop reading so the daemon's response write blocks.
+    let stream =
+        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("connect");
+    let mut writer = stream.try_clone().expect("clone");
+    let mut reader = BufReader::new(stream);
+    writer
+        .write_all(
+            &encode(&Request::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                build_id: docsbase_memory::ipc::protocol::build_id(),
+                client: "wedge".to_owned(),
+            })
+            .expect("encode hello"),
+        )
+        .expect("hello");
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("hello reply");
+    writer
+        .write_all(
+            &encode(&Request::RegisterSession {
+                pid: std::process::id(),
+                cwd: project.clone(),
+            })
+            .expect("encode register"),
+        )
+        .expect("register");
+    line.clear();
+    reader.read_line(&mut line).expect("register reply");
+    writer
+        .write_all(
+            &encode(&Request::CallTool {
+                name: "get_doc".to_owned(),
+                args: serde_json::json!({ "path": "big.md" }),
+            })
+            .expect("encode call"),
+        )
+        .expect("call");
+    std::thread::sleep(Duration::from_millis(700));
+
+    let mut stopper = Client::connect(env.cache()).expect("stopper");
+    stopper.handshake_registry().expect("hello");
+    let stop = std::thread::spawn(move || {
+        let _ = stopper.call(Request::StopDaemon);
+    });
+    // The graceful drain elapses; the daemon is now waiting for the wedged
+    // request. A signal must abort that wait instead of being swallowed.
+    std::thread::sleep(Duration::from_secs(6));
+    if !process_alive(pid) {
+        // This host auto-tuned the socket buffers enough to absorb the whole
+        // response, so the write never blocks and the daemon stops cleanly.
+        // Typical CI runners keep the default 208 KiB buffers and do wedge.
+        eprintln!("skipping: socket buffers absorbed the response; no wedge on this host");
+        let _ = stop.join();
+        return;
+    }
+
+    let _ = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut dead = false;
+    while Instant::now() < deadline {
+        if !process_alive(pid) {
+            dead = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(dead, "SIGTERM must abort the wedged drain");
+    let _ = stop.join();
+    drop(writer);
+    drop(reader);
 }
