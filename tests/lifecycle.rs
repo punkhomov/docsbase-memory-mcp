@@ -278,7 +278,7 @@ fn stop_escalates_with_sigterm_when_wedged() {
     let env = Env::new();
     let project_dir = TempDir::new().expect("project");
     let project = project_dir.path().to_path_buf();
-    let body = "a".repeat(7_000_000);
+    let body = "a".repeat(6_999_000);
     fs::write(project.join("big.md"), format!("# Big\n\n{body}\n")).expect("doc");
     fs::write(
         project.join(".docsbase.toml"),
