@@ -1,6 +1,6 @@
 //! Socket-first CLI client (FR-30, design §6).
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -62,10 +62,20 @@ impl Client {
         stream.write_all(&bytes).map_err(io_error)?;
         stream.flush().map_err(io_error)?;
 
+        let limit = protocol::MAX_FRAME_BYTES as u64 + 2;
         let mut line = Vec::new();
-        let read = self.stream.read_until(b'\n', &mut line).map_err(io_error)?;
+        let read = (&mut self.stream)
+            .take(limit)
+            .read_until(b'\n', &mut line)
+            .map_err(io_error)?;
         if read == 0 {
             return Err(Error::transport("connection closed"));
+        }
+        if !line.ends_with(b"\n") || line.len() > protocol::MAX_FRAME_BYTES + 1 {
+            return Err(Error::transport(format!(
+                "response frame exceeds {} bytes",
+                protocol::MAX_FRAME_BYTES
+            )));
         }
         protocol::decode_response(&line)
             .map_err(|err| Error::transport(format!("bad response: {err}")))

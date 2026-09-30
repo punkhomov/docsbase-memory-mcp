@@ -367,3 +367,33 @@ fn watcher_uses_reopened_config() {
         "watcher must not index newly ignored bbb/**"
     );
 }
+
+#[test]
+fn max_file_size_above_frame_cap_is_rejected() {
+    let mut env = Env::new(&[("keep.md", &doc("publicwidget"))]);
+    fs::write(env.global_config(), "max_file_size = 99999999\n").expect("global config");
+    env.start_daemon();
+
+    let mut registry = env.client();
+    registry.handshake_registry().expect("registry hello");
+    let status = registry
+        .call_tool("status", serde_json::json!({}))
+        .expect("status");
+    assert_eq!(status["restart_required"], true, "status: {status}");
+    let notice = status["notice"].as_str().expect("notice");
+    assert!(
+        notice.contains("max_file_size"),
+        "notice must name the limit: {notice}"
+    );
+
+    let err = registry
+        .call_tool(
+            "index_project",
+            serde_json::json!({ "path": env.root().to_str().expect("utf8") }),
+        )
+        .expect_err("out-of-frame max_file_size must block indexing");
+    assert!(
+        err.to_string().contains("max_file_size"),
+        "unexpected error: {err}"
+    );
+}

@@ -1,7 +1,9 @@
 //! stdio MCP server proxying tool calls to the daemon (FR-7, FR-34; I8).
 
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll};
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
@@ -15,7 +17,7 @@ use crate::config::paths;
 use crate::daemon::lifecycle::ensure_daemon;
 use crate::error::Error;
 use crate::ipc::client::{Client, is_transport_error};
-use crate::ipc::protocol::TOOL_ALLOWLIST;
+use crate::ipc::protocol::{MAX_FRAME_BYTES, TOOL_ALLOWLIST};
 use crate::mcp::tools;
 
 struct Conn {
@@ -208,6 +210,54 @@ fn tool_error(err: &Error) -> CallToolResult {
     result
 }
 
+/// Caps a single JSON-RPC frame before it reaches the MCP service (T45).
+///
+/// The agent-facing side is the untrusted one: a client that never sends a
+/// newline must not grow the transport buffer without bound.
+struct CappedRead<R> {
+    inner: R,
+    limit: usize,
+    pending: usize,
+}
+
+impl<R> CappedRead<R> {
+    fn new(inner: R, limit: usize) -> Self {
+        Self {
+            inner,
+            limit,
+            pending: 0,
+        }
+    }
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for CappedRead<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let result = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = &result {
+            for byte in &buf.filled()[before..] {
+                if *byte == b'\n' {
+                    this.pending = 0;
+                } else {
+                    this.pending += 1;
+                }
+            }
+            if this.pending > this.limit {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "frame exceeds the protocol limit",
+                )));
+            }
+        }
+        result
+    }
+}
+
 /// Runs the stdio MCP server until stdin closes.
 ///
 /// # Errors
@@ -215,7 +265,12 @@ fn tool_error(err: &Error) -> CallToolResult {
 pub async fn run() -> anyhow::Result<()> {
     let cache = paths::cache_dir()?;
     let service = Frontend::new(cache);
-    let running = rmcp::serve_server(service, rmcp::transport::io::stdio())
+    let stdin = CappedRead::new(tokio::io::stdin(), MAX_FRAME_BYTES);
+    let transport = rmcp::transport::async_rw::AsyncRwTransport::<RoleServer, _, _>::new_server(
+        stdin,
+        tokio::io::stdout(),
+    );
+    let running = rmcp::serve_server(service, transport)
         .await
         .map_err(|err| anyhow::anyhow!("mcp server init: {err}"))?;
     running

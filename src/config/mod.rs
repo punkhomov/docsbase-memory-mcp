@@ -171,6 +171,16 @@ impl Config {
                 message: "max_docs_per_project must be > 0".to_owned(),
             });
         }
+        let frame_payload = (crate::ipc::protocol::MAX_FRAME_BYTES as u64)
+            .saturating_sub(crate::ipc::protocol::FRAME_OVERHEAD);
+        if self.max_file_size > frame_payload {
+            return Err(Error::Admission {
+                message: format!(
+                    "max_file_size must not exceed {frame_payload} bytes so a get_doc response fits the {} byte protocol frame",
+                    crate::ipc::protocol::MAX_FRAME_BYTES
+                ),
+            });
+        }
         Ok(())
     }
 

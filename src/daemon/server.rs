@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::oneshot;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, watch};
 
 use crate::config::{Config, paths};
@@ -221,6 +221,33 @@ fn global_config_stamp() -> Option<u64> {
     Some(hasher.finish())
 }
 
+/// One bounded NDJSON frame from a connection.
+enum Frame {
+    /// Complete line, delimiter included.
+    Line(Vec<u8>),
+    /// Peer closed the stream.
+    Eof,
+    /// No delimiter within [`protocol::MAX_FRAME_BYTES`].
+    TooLarge,
+}
+
+/// Reads one frame, capping the buffer at the protocol limit (I-2; T45).
+async fn read_frame<R>(reader: &mut R) -> std::io::Result<Frame>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let limit = protocol::MAX_FRAME_BYTES as u64 + 2;
+    let mut line = Vec::new();
+    let read = reader.take(limit).read_until(b'\n', &mut line).await?;
+    if read == 0 {
+        return Ok(Frame::Eof);
+    }
+    if !line.ends_with(b"\n") || line.len() > protocol::MAX_FRAME_BYTES + 1 {
+        return Ok(Frame::TooLarge);
+    }
+    Ok(Frame::Line(line))
+}
+
 /// Serves one connection until EOF, cleanup included (FR-8, I2).
 pub async fn handle_connection(
     shared: Arc<Shared>,
@@ -230,22 +257,33 @@ pub async fn handle_connection(
     shutdown: watch::Sender<bool>,
 ) {
     let (read_half, mut writer) = tokio::io::split(stream);
-    let mut lines = BufReader::new(read_half).lines();
+    let mut reader = BufReader::new(read_half);
     let mut session_id: Option<u64> = None;
     let mut cancel_rx: Option<oneshot::Receiver<()>> = None;
     let mut hello_done = false;
 
     loop {
-        let next_line = match cancel_rx.as_mut() {
+        let next_frame = match cancel_rx.as_mut() {
             Some(cancel) => tokio::select! {
-                line = lines.next_line() => line,
+                frame = read_frame(&mut reader) => frame,
                 // The janitor reaped this session: stop holding the socket.
                 _ = cancel => break,
             },
-            None => lines.next_line().await,
+            None => read_frame(&mut reader).await,
         };
-        let Ok(Some(line)) = next_line else {
-            break;
+        let line = match next_frame {
+            Ok(Frame::Line(line)) => line,
+            Ok(Frame::Eof) | Err(_) => break,
+            Ok(Frame::TooLarge) => {
+                let err = Error::Protocol {
+                    message: format!("frame exceeds {} bytes", protocol::MAX_FRAME_BYTES),
+                };
+                let response = error_response(&err);
+                if let Ok(bytes) = protocol::encode(&response) {
+                    let _ = writer.write_all(&bytes).await;
+                }
+                break;
+            }
         };
         let guard = InFlightGuard::new(&in_flight);
         let (response, close) = handle_request(
@@ -255,7 +293,7 @@ pub async fn handle_connection(
             &mut hello_done,
             &mut session_id,
             &mut cancel_rx,
-            line.as_bytes(),
+            &line,
         )
         .await;
         // The request is only settled once its response is on the wire:

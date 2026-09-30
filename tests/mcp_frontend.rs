@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use docsbase_memory::ipc::protocol::{PROTOCOL_VERSION, Request, Response, encode};
+use docsbase_memory::ipc::protocol::{
+    MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, encode,
+};
 use docsbase_memory::platform;
 
 struct Env {
@@ -465,4 +467,31 @@ fn unregistered_project_hint() {
 
     let _ = daemon.kill();
     let _ = daemon.wait();
+}
+
+#[test]
+fn frontend_rejects_oversized_frame() {
+    let env = Env::new(&[("docs/a.md", "# A\n")]);
+    let mut mcp = Mcp::start(&env);
+    let chunk = vec![b'x'; 64 * 1024];
+    let mut remaining = MAX_FRAME_BYTES + 64;
+    while remaining > 0 {
+        let take = remaining.min(chunk.len());
+        if mcp.stdin.write_all(&chunk[..take]).is_err() {
+            break;
+        }
+        remaining -= take;
+    }
+    let _ = mcp.stdin.flush();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut exited = false;
+    while Instant::now() < deadline {
+        if mcp.child.try_wait().expect("try_wait").is_some() {
+            exited = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(exited, "frontend must exit on an oversized frame");
 }

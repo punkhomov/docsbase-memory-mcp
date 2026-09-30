@@ -9,6 +9,14 @@ use crate::error::{Error, Result};
 /// Wire protocol version; a mismatch refuses the connection (FR-7).
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Maximum accepted NDJSON/JSON-RPC frame on the daemon, client and
+/// frontend stdin wires (I-2; T45).
+pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+/// Reserve for the JSON envelope around a `get_doc` payload so that a
+/// response of `Config::max_file_size` bytes still fits [`MAX_FRAME_BYTES`].
+pub const FRAME_OVERHEAD: u64 = 64 * 1024;
+
 /// Tools the frontend may proxy to the daemon (I8, FR-34).
 pub const TOOL_ALLOWLIST: &[&str] = &[
     "search_docs",

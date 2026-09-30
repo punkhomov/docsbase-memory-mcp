@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use docsbase_memory::daemon::lifecycle::stop_daemon;
 use docsbase_memory::error::Error;
 use docsbase_memory::ipc::client::Client;
-use docsbase_memory::ipc::protocol::{PROTOCOL_VERSION, Request, Response, encode};
+use docsbase_memory::ipc::protocol::{
+    MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, decode_response, encode,
+};
 use docsbase_memory::platform::{self, BlockingStream};
 use fd_lock::RwLock;
 use tempfile::TempDir;
@@ -366,4 +368,69 @@ fn auto_index_registers_and_indexes() {
         .call_tool("status", serde_json::json!({}))
         .expect("status");
     assert_eq!(status["projects"][0]["status"], "indexed");
+}
+
+#[test]
+fn oversized_frame_gets_protocol_error() {
+    let mut env = Env::new(&[("a.md", "# A\n")]);
+    env.start_daemon();
+    let stream =
+        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    let mut writer = stream.try_clone().expect("clone");
+    let mut reader = BufReader::new(stream);
+
+    let chunk = vec![b'x'; 64 * 1024];
+    let mut remaining = MAX_FRAME_BYTES + 64;
+    while remaining > 0 {
+        let take = remaining.min(chunk.len());
+        if writer.write_all(&chunk[..take]).is_err() {
+            break;
+        }
+        remaining -= take;
+    }
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .expect("daemon must answer oversized frames");
+    match decode_response(line.as_bytes()).expect("decode") {
+        Response::Error { message, .. } => {
+            assert!(message.contains("frame"), "unexpected message: {message}");
+        }
+        other => panic!("expected protocol error, got {other:?}"),
+    }
+}
+
+#[test]
+fn client_rejects_oversized_response() {
+    let cache = TempDir::new().expect("cache");
+    std::fs::create_dir_all(cache.path().join("state")).expect("mkdir");
+    let endpoint = platform::daemon_endpoint(cache.path());
+    let listener = platform::bind_blocking(&endpoint).expect("bind");
+    let server = std::thread::spawn(move || {
+        let mut stream = listener.accept().expect("accept");
+        let chunk = vec![b'x'; 64 * 1024];
+        let mut remaining = MAX_FRAME_BYTES + 64;
+        while remaining > 0 {
+            let take = remaining.min(chunk.len());
+            if stream.write_all(&chunk[..take]).is_err() {
+                return;
+            }
+            remaining -= take;
+        }
+        let _ = stream.write_all(b"\n");
+    });
+
+    let mut client = Client::connect(cache.path()).expect("connect");
+    let err = client
+        .call(Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            build_id: "test".to_owned(),
+            client: "test".to_owned(),
+        })
+        .expect_err("oversized response must be rejected");
+    assert!(err.to_string().contains("frame"), "unexpected error: {err}");
+    let _ = server.join();
 }
