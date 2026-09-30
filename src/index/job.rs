@@ -124,8 +124,7 @@ pub fn run_full(
 
     let mut files: Vec<(PathBuf, String)> = Vec::new();
     for path in paths {
-        if let Ok(rel) = path.strip_prefix(&project.canonical_root) {
-            let rel = crate::index::walk::portable_rel(rel);
+        if let Some(rel) = relative_to_root(&path, &project.canonical_root) {
             walked.insert(rel.clone());
             files.push((path, rel));
         } else {
@@ -239,7 +238,7 @@ pub fn run_incremental_with(
     // Pass 1: deduplicate inputs and collect removals (files and whole
     // subtrees), so pass 2 sees the final document count.
     for path in changed {
-        let Ok(rel) = path.strip_prefix(&project.canonical_root) else {
+        let Some(rel) = relative_to_root(path, &project.canonical_root) else {
             stats.errors += 1;
             push_warning(
                 &mut stats,
@@ -248,7 +247,6 @@ pub fn run_incremental_with(
             );
             continue;
         };
-        let rel = crate::index::walk::portable_rel(rel);
         if !seen.insert(rel.clone()) {
             continue;
         }
@@ -392,6 +390,27 @@ fn mark_pending(
     }
     tx.commit()
         .map_err(|err| Error::internal_with_source(format!("commit sqlite: {err}"), err))
+}
+
+/// Project-relative slash path for one input of a full or incremental run.
+///
+/// Watcher events arrive canonical, but callers may pass the OS temp spelling
+/// (Windows 8.3 short names) or a case variant; resolve those before giving
+/// up. Missing files resolve through their parent directory.
+fn relative_to_root(path: &Path, root: &Path) -> Option<String> {
+    if let Ok(rel) = path.strip_prefix(root) {
+        return Some(crate::index::walk::portable_rel(rel));
+    }
+    let resolved = if let Ok(resolved) = path.canonicalize() {
+        resolved
+    } else {
+        let parent = path.parent()?.canonicalize().ok()?;
+        parent.join(path.file_name()?)
+    };
+    resolved
+        .strip_prefix(root)
+        .ok()
+        .map(crate::index::walk::portable_rel)
 }
 
 /// Reads and hashes one walked file. Returns `Ok(None)` when the stored hash
