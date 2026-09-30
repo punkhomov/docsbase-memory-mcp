@@ -399,6 +399,36 @@ pub fn project_counts(conn: &Connection, project_id: i64) -> Result<ProjectCount
     .map_err(db_error)
 }
 
+/// Finished sync jobs retained per project (T46).
+pub const MAX_SYNC_JOBS: usize = 50;
+
+/// Drops finished (`done`/`error`) jobs older than the newest
+/// [`MAX_SYNC_JOBS`] rows of a project; active jobs are never touched.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on `SQLite` failures.
+pub fn prune_sync_jobs(conn: &Connection, project_id: i64) -> Result<usize> {
+    let keep = i64::try_from(MAX_SYNC_JOBS).unwrap_or(i64::MAX);
+    conn.execute(
+        "DELETE FROM sync_jobs
+         WHERE project_id = ?1
+           AND state IN (?2, ?3)
+           AND id < (
+               SELECT id FROM sync_jobs
+               WHERE project_id = ?1
+               ORDER BY id DESC
+               LIMIT 1 OFFSET ?4
+           )",
+        params![
+            project_id,
+            SyncState::Done.as_str(),
+            SyncState::Error.as_str(),
+            keep - 1
+        ],
+    )
+    .map_err(db_error)
+}
+
 /// Inserts a `queued` sync job unless the project already has an active one
 /// (FR-17: at most one queued/running job per project).
 ///
@@ -573,4 +603,55 @@ fn unix_now() -> i64 {
         .map_or(0, |since| {
             i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::registry;
+    use crate::store::Db;
+    use tempfile::TempDir;
+
+    #[test]
+    fn sync_jobs_retention_keeps_recent() {
+        let cache = TempDir::new().expect("cache");
+        let project_dir = TempDir::new().expect("project");
+        let mut db = Db::open(cache.path()).expect("db");
+        let project = registry::ensure_project(&mut db, project_dir.path()).expect("project");
+
+        let total = MAX_SYNC_JOBS + 10;
+        let mut last = 0;
+        for _ in 0..total {
+            let id = create_sync_job(db.connection(), project.id)
+                .expect("create")
+                .expect("queued");
+            db.connection()
+                .execute(
+                    "UPDATE sync_jobs SET state = 'done', finished_at = 1 WHERE id = ?1",
+                    [id],
+                )
+                .expect("finish");
+            prune_sync_jobs(db.connection(), project.id).expect("prune");
+            last = id;
+        }
+
+        let count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM sync_jobs WHERE project_id = ?1",
+                [project.id],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(usize::try_from(count).unwrap_or(0), MAX_SYNC_JOBS);
+        let newest: i64 = db
+            .connection()
+            .query_row(
+                "SELECT MAX(id) FROM sync_jobs WHERE project_id = ?1",
+                [project.id],
+                |row| row.get(0),
+            )
+            .expect("newest");
+        assert_eq!(newest, last, "newest job must be retained");
+    }
 }

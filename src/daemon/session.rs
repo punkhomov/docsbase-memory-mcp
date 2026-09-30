@@ -7,6 +7,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::oneshot;
 
+use crate::error::{Error, Result};
+
 /// One registered frontend session.
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
@@ -19,6 +21,9 @@ pub struct SessionInfo {
     /// Project id bound by cwd (I6); `None` for registry-wide sessions.
     pub project_id: Option<i64>,
 }
+
+/// Sessions a single daemon serves at once (T46).
+pub const MAX_SESSIONS: usize = 256;
 
 /// Sessions currently served by the daemon.
 #[derive(Debug, Default)]
@@ -48,17 +53,25 @@ impl SessionRegistry {
 
     /// Registers a session and returns its id plus the receiver that fires
     /// when the daemon reaps it because the frontend died (NFR-9).
+    ///
+    /// # Errors
+    /// Returns [`Error::Admission`] when [`MAX_SESSIONS`] sessions are live.
     pub fn join(
         &self,
         pid: u32,
         cwd: PathBuf,
         project_id: Option<i64>,
-    ) -> (u64, oneshot::Receiver<()>) {
+    ) -> Result<(u64, oneshot::Receiver<()>)> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         // Hold the session lock across both inserts so a concurrent
         // `prune_dead` can never observe the session without its cancel
         // sender (lock order is always sessions -> cancels).
         let mut sessions = self.map();
+        if sessions.len() >= MAX_SESSIONS {
+            return Err(Error::Admission {
+                message: format!("session limit reached ({MAX_SESSIONS})"),
+            });
+        }
         sessions.insert(
             id,
             SessionInfo {
@@ -74,7 +87,7 @@ impl SessionRegistry {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, cancel_tx);
         drop(sessions);
-        (id, cancel_rx)
+        Ok((id, cancel_rx))
     }
 
     /// Removes a session (EOF, error or client death) (FR-8).
@@ -150,10 +163,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn session_cap_is_enforced() {
+        let registry = SessionRegistry::new();
+        for index in 0..MAX_SESSIONS {
+            registry
+                .join(
+                    u32::try_from(index).unwrap_or(0),
+                    PathBuf::from("/cap"),
+                    None,
+                )
+                .expect("join under cap");
+        }
+        assert_eq!(registry.count(), MAX_SESSIONS);
+        let err = registry
+            .join(1, PathBuf::from("/cap"), None)
+            .expect_err("cap must refuse");
+        assert!(
+            err.to_string().contains("session limit"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn join_leave_round_trip() {
         let registry = SessionRegistry::new();
-        let (first, _first_cancel) = registry.join(1, PathBuf::from("/a"), None);
-        let (second, _second_cancel) = registry.join(2, PathBuf::from("/b"), None);
+        let (first, _first_cancel) = registry.join(1, PathBuf::from("/a"), None).expect("join");
+        let (second, _second_cancel) = registry.join(2, PathBuf::from("/b"), None).expect("join");
         assert_ne!(first, second);
         assert_eq!(registry.count(), 2);
         assert_eq!(registry.get(first).expect("first").pid, 1);
@@ -193,8 +228,12 @@ mod tests {
             let _ = child.wait();
             pid
         };
-        let (live, _live_cancel) = registry.join(std::process::id(), PathBuf::from("/live"), None);
-        let (dead, mut dead_cancel) = registry.join(dead_pid, PathBuf::from("/dead"), None);
+        let (live, _live_cancel) = registry
+            .join(std::process::id(), PathBuf::from("/live"), None)
+            .expect("join");
+        let (dead, mut dead_cancel) = registry
+            .join(dead_pid, PathBuf::from("/dead"), None)
+            .expect("join");
         let pruned = registry.prune_dead();
         assert_eq!(pruned, vec![dead]);
         assert!(registry.get(dead).is_none());

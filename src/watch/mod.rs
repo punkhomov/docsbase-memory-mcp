@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
@@ -35,6 +35,9 @@ pub const DEBOUNCE: Duration = Duration::from_millis(1_500);
 /// continuous churn cannot starve indexing (NFR-4).
 pub const MAX_DEBOUNCE: Duration = Duration::from_millis(2_000);
 
+/// Bound for the notify and batch channels of one watcher (T46).
+const MAX_WATCH_EVENTS: usize = 4096;
+
 /// Delay between writer-lease retries of a pending batch.
 const LEASE_RETRY: Duration = Duration::from_millis(250);
 
@@ -56,11 +59,13 @@ pub fn spawn_watcher(
     project: &Project,
     cache: &Path,
     config: Arc<Mutex<Arc<Config>>>,
-    tx: Sender<Vec<PathBuf>>,
+    tx: std::sync::mpsc::SyncSender<Vec<PathBuf>>,
 ) -> Result<WatcherGuard> {
     let root = project.canonical_root.clone();
     let cache = cache.to_path_buf();
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    // Bounded with blocking send: the notify callback applies backpressure
+    // instead of growing without bound; no path is dropped (T46).
+    let (event_tx, event_rx) = std::sync::mpsc::sync_channel(MAX_WATCH_EVENTS);
     let watch_cache = cache.clone();
     let watch_root = root.clone();
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<Event>| {
@@ -356,7 +361,7 @@ impl Watchers {
         if map.contains_key(&project.id) {
             return Ok(false);
         }
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(MAX_WATCH_EVENTS);
         let slot = Arc::new(Mutex::new(config));
         let guard = spawn_watcher(project, cache, Arc::clone(&slot), tx)?;
         let consumer = spawn_consumer(

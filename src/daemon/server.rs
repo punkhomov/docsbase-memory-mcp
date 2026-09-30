@@ -6,6 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use tokio::sync::oneshot;
 
@@ -221,6 +222,9 @@ fn global_config_stamp() -> Option<u64> {
     Some(hasher.finish())
 }
 
+/// Bound for waiting until in-flight requests settle before shutdown (T46).
+pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// One bounded NDJSON frame from a connection.
 enum Frame {
     /// Complete line, delimiter included.
@@ -261,7 +265,7 @@ pub async fn handle_connection(
     shared: Arc<Shared>,
     stream: Stream,
     in_flight: Arc<AtomicUsize>,
-    events: mpsc::UnboundedSender<()>,
+    events: mpsc::Sender<()>,
     shutdown: watch::Sender<bool>,
 ) {
     let (read_half, mut writer) = tokio::io::split(stream);
@@ -313,7 +317,7 @@ pub async fn handle_connection(
         // between completing the work and delivering the reply.
         let Ok(bytes) = protocol::encode(&response) else {
             drop(guard);
-            let _ = events.send(());
+            let _ = events.try_send(());
             break;
         };
         // JSON escaping can expand a document up to 6x, so the config-level
@@ -329,7 +333,7 @@ pub async fn handle_connection(
             };
             let Ok(fallback) = protocol::encode(&error_response(&err)) else {
                 drop(guard);
-                let _ = events.send(());
+                let _ = events.try_send(());
                 break;
             };
             fallback
@@ -338,13 +342,13 @@ pub async fn handle_connection(
         };
         if writer.write_all(&bytes).await.is_err() {
             drop(guard);
-            let _ = events.send(());
+            let _ = events.try_send(());
             break;
         }
         drop(guard);
         // Any request may change liveness accounting (registration, EOF of a
         // session, completion of a request).
-        let _ = events.send(());
+        let _ = events.try_send(());
         if close {
             break;
         }
@@ -353,7 +357,7 @@ pub async fn handle_connection(
     if let Some(id) = session_id {
         shared.sessions.leave(id);
     }
-    let _ = events.send(());
+    let _ = events.try_send(());
 }
 
 async fn handle_request(
@@ -445,14 +449,26 @@ async fn handle_request(
             // (FR-5, FR-6). The drain lets every other request finish; the
             // process then lives until background jobs complete.
             if !shared.stopping.swap(true, Ordering::SeqCst) {
-                while in_flight.load(Ordering::SeqCst) > 1 {
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
+                wait_for_drain(in_flight, DRAIN_TIMEOUT).await;
                 let _ = shutdown.send(true);
             }
             (Response::ToolResult { value: Value::Null }, false)
         }
     }
+}
+
+/// Waits until only the stopping request itself is in flight; `false` on
+/// timeout so a wedged request cannot hold shutdown forever (T46). SIGTERM
+/// remains the operator's escalation path.
+async fn wait_for_drain(in_flight: &AtomicUsize, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while in_flight.load(Ordering::SeqCst) > 1 {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
 }
 
 async fn register_and_respond(
@@ -527,7 +543,7 @@ async fn register_session(
 
     match outcome {
         Ok(project) => {
-            let (id, cancel) = shared.sessions.join(pid, cwd, Some(project.id));
+            let (id, cancel) = shared.sessions.join(pid, cwd, Some(project.id))?;
             Ok((
                 id,
                 json!({
@@ -540,7 +556,7 @@ async fn register_session(
             ))
         }
         Err(err) if allow_unbound => {
-            let (id, cancel) = shared.sessions.join(pid, cwd, None);
+            let (id, cancel) = shared.sessions.join(pid, cwd, None)?;
             Ok((
                 id,
                 json!({
@@ -762,5 +778,24 @@ fn error_response(err: &Error) -> Response {
         code: err.mcp_code(),
         message: err.inner_message(),
         instruction: err.instruction().map(str::to_owned),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn drain_timeout_is_bounded() {
+        let stuck = AtomicUsize::new(2);
+        let started = tokio::time::Instant::now();
+        assert!(!wait_for_drain(&stuck, Duration::from_millis(50)).await);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "drain must stop at the timeout"
+        );
+
+        let idle = AtomicUsize::new(1);
+        assert!(wait_for_drain(&idle, Duration::from_millis(50)).await);
     }
 }

@@ -25,6 +25,13 @@ pub const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// (OQ-7: 5 s).
 pub const DEFAULT_GRACE_MS: u64 = 5_000;
 
+/// Concurrent connections a daemon accepts (T46); excess clients are shed
+/// immediately so fd/memory stay bounded.
+pub const MAX_CONNECTIONS: usize = 64;
+
+/// Bound for the internal connection-event queue (T46).
+const MAX_EVENTS: usize = 1024;
+
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Upper bound for `daemon stop` while the daemon drains and exits; a busy
 /// machine can stretch the 3 s grace window well past 5 s (T32 flake).
@@ -241,7 +248,8 @@ async fn accept_loop(
     grace: Duration,
 ) -> Result<()> {
     let in_flight = Arc::new(AtomicUsize::new(0));
-    let (events_tx, mut events_rx) = mpsc::unbounded_channel::<()>();
+    let (events_tx, mut events_rx) = mpsc::channel::<()>(MAX_EVENTS);
+    let connections = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let mut shutdown_signal = platform::ShutdownSignal::new()
         .map_err(|err| Error::internal_with_source("install signal handlers", err))?;
@@ -265,13 +273,23 @@ async fn accept_loop(
             accepted = listener.accept() => {
                 let stream = accepted
                     .map_err(|err| Error::internal_with_source("accept connection", err))?;
+                let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
+                    // Over MAX_CONNECTIONS: shed the connection immediately
+                    // (T46); the client sees EOF and the daemon keeps serving.
+                    drop(stream);
+                    continue;
+                };
                 let in_flight = Arc::clone(&in_flight);
                 let events = events_tx.clone();
                 let shutdown = shutdown_tx.clone();
                 let shared = Arc::clone(&shared);
-                tokio::spawn(crate::daemon::server::handle_connection(
-                    shared, stream, in_flight, events, shutdown,
-                ));
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    crate::daemon::server::handle_connection(
+                        shared, stream, in_flight, events, shutdown,
+                    )
+                    .await;
+                });
             }
             Some(()) = events_rx.recv() => {
                 // Only live frontend sessions keep the daemon alive; plain
@@ -312,6 +330,14 @@ async fn accept_loop(
                 }
             }
         }
+    }
+    // Shutdown was requested: the StopDaemon reply itself is bounded by
+    // `DRAIN_TIMEOUT` (T46), but running requests must still deliver their
+    // replies and publish their state before the runtime drops the handler
+    // tasks (T25: install waits for an in-flight index job). A truly wedged
+    // request keeps the process alive; SIGTERM remains the escalation path.
+    while in_flight.load(Ordering::SeqCst) > 0 {
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
     Ok(())
 }

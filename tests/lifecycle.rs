@@ -1,11 +1,14 @@
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use docsbase_memory::daemon::lifecycle::{ensure_daemon_with, stop_daemon};
+use docsbase_memory::daemon::lifecycle::{MAX_CONNECTIONS, ensure_daemon_with, stop_daemon};
+use docsbase_memory::ipc::client::Client;
+use docsbase_memory::ipc::protocol::{PROTOCOL_VERSION, Request, encode};
 use docsbase_memory::platform;
 use tempfile::TempDir;
 
@@ -170,4 +173,49 @@ fn grace_shutdown_after_last_session() {
     );
     let status = child.wait().expect("wait child");
     assert!(status.success(), "graceful exit: {status:?}");
+}
+
+#[test]
+fn connection_flood_is_refused_and_daemon_survives() {
+    let env = Env::new();
+    env.start();
+
+    let mut held = Vec::new();
+    for _ in 0..MAX_CONNECTIONS {
+        held.push(
+            platform::connect_blocking(&platform::daemon_endpoint(env.cache()))
+                .expect("connect within cap"),
+        );
+    }
+    // Give the accept loop time to consume every slot before the extra one.
+    std::thread::sleep(Duration::from_millis(500));
+
+    let extra = platform::connect_blocking(&platform::daemon_endpoint(env.cache()))
+        .expect("connect handshake");
+    extra
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("timeout");
+    let mut extra = extra;
+    let hello = encode(&Request::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        build_id: "flood".to_owned(),
+        client: "flood".to_owned(),
+    })
+    .expect("encode");
+    let _ = extra.write_all(&hello);
+    let mut line = String::new();
+    match BufReader::new(extra).read_line(&mut line) {
+        Ok(0) | Err(_) => {}
+        Ok(_) => panic!("over-cap connection must be shed, got: {line}"),
+    }
+
+    // Freeing one slot restores service.
+    drop(held.pop());
+    std::thread::sleep(Duration::from_millis(100));
+    let mut client = Client::connect(env.cache()).expect("client under cap");
+    client.handshake_registry().expect("hello under cap");
+    let status = client
+        .call_tool("status", serde_json::json!({}))
+        .expect("status");
+    assert!(status["projects"].is_array());
 }
