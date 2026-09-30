@@ -755,21 +755,33 @@ janitor/select переобрабатывает); `MAX_SESSIONS` (256) — `Sess
 **Acceptance:** флуд соединениями/сессиями не растит память и fd линейно; корректные сценарии
 (3 агента, stop, grace) не затронуты.
 
-### T47 — Политика путей `index_project` (I-4)
+### T47 — Системный blacklist для `index_project` (I-4, ADR-11)
 **Depends:** T43
 **New crates:** —
-**Files:** Modify `src/daemon/server.rs` (route_tool `index_project`),
-`docs/specs/docsbase-memory-mcp/design.md` (ADR-11 + §4/§12), `tests/mcp_registry.rs`
-**Interfaces:** MCP-инструмент `index_project` принимает путь только под session cwd
-(canonicalize + `is_under`) или уже зарегистрированный корень; произвольный абсолютный
-путь → `Error::Project` с инструкцией; CLI `docsbase index <path>` не ограничивается;
-ADR-11 фиксирует модель (агент недоверен; явное действие пользователя = CLI)
-**RED:** `mcp_registry::index_project_rejects_outside_cwd` — падает (сейчас проходит любой
-абсолютный путь вне `/`, `$HOME`, cache)
-**GREEN:** ограничение на месте; flow «проект из cwd» (C8/FR-30) и registry-тесты зелёные
-**Verify:** `cargo test --locked --test mcp_registry && cargo test --locked`
-**Acceptance:** prompt-injected агент не может зарегистрировать/проиндексировать произвольный
-каталог через MCP; поведение CLI и traceability (ADR-11) зафиксированы.
+**Files:** Modify `src/platform/paths.rs` (blacklist per-platform),
+`src/daemon/registry.rs` (`normalize_root`), `docs/specs/docsbase-memory-mcp/design.md`
+(ADR-11 + §4/§12), `tests/registry.rs`
+**Interfaces:** `paths::is_system_dir(path) -> bool` — cfg-списки: Linux/Unix-поддеревья
+(`/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/proc`, `/sys`, `/dev`, `/run`, `/root`,
+`/var/lib|cache|log|spool`); равенство только для «родителей домашних» (`/home`, `/var`?
+нет — только `/home`); Windows-поддеревья (`%SystemRoot%`, `%ProgramFiles%`,
+`%ProgramFiles(x86)%`, `%ProgramData%`, `$Recycle.Bin`, `Recovery`, `PerfLogs`) и равенство
+`%SystemDrive%\Users`; `normalize_root` отвергает `is_system_dir(root)` с `Error::Project`
+и hint; **никаких других ограничений путей нет** — любой не-системный каталог можно
+зарегистрировать/проиндексировать (MCP и CLI одинаково); ADR-11 фиксирует модель:
+same-user daemon-протокол доверенный, подтверждение индексации сторонних путей —
+ответственность MCP-хоста (permission prompt вне yolo); серверный elicitation — возможное
+будущее (rmcp feature, хосты авто-деклайнят), не обязательство
+**RED:** unit `paths::is_system_dir_*` (чистые пути, без ФС; Windows-ветка через
+`#[cfg(any(windows, test))]`-ключ) + `registry::system_dirs_are_refused` — падают
+**GREEN:** blacklist в `normalize_root`; `$HOME`, `/`, cache-отказы сохраняются; все
+существующие tempdir-тесты и registry-only клиенты зелёные
+**Verify:** `cargo test --locked --test registry && cargo test --locked`
+**Acceptance:** системные каталоги отвергаются на Linux и Windows (логика проверяется
+чистыми функциями); рабочие локации (`/home/user/...`, `/tmp/...`, `/var/www/...`) не
+затронуты; ADR-11 фиксирует границу («гигиена + граница доверия остаётся за хостом»).
+**Не делаем:** ограничение «только session cwd», allowlist-конфиг, серверное
+подтверждение (`confirm=true`-токены без ценности).
 
 ### T48 — Security minors batch (M-3…M-6)
 **Depends:** T44, T47 (для uninstall-валидации использует те же canonicalized пути)
@@ -792,10 +804,11 @@ canonicalize→open) — решение: закрыть для последне�
 **Acceptance:** подмена `install.json` не приводит к удалению путей вне owned-артефактов;
 логи не растут безгранично; residual по TOCTOU либо закрыт, либо явно записан.
 
-**Self-review секции:** T44, T45, T46, T47 независимы (after T43); T48 зависит от T44/T47
-из-за общей валидации путей; каждая задача верифицируема `Verify`-командой; новых крейтов
-нет; wire-изменений нет (только отказы при превышении лимитов); пропорция — имена тестов и
-константы, без тел функций.
+**Self-review секции:** T44, T45, T46, T47 независимы (after T43); T48 зависит от T44
+(общие капы чтения/путей) и T47 (валидация manifest-путей использует те же canonicalized
+сравнения); каждая задача верифицируема `Verify`-командой; новых крейтов нет; wire-изменений
+нет (только отказы при превышении лимитов); пропорция — имена тестов и константы, без тел
+функций.
 
 ---
 
