@@ -207,7 +207,7 @@ fn write_sync_corpus(root: &Path, files: usize) {
 }
 
 fn sync_project(cache: &Path, root: &Path) -> (Db, Project, IndexHandle) {
-    let mut db = Db::open(cache).expect("db");
+    let db = Db::open(cache).expect("db");
     let canonical_root = root.canonicalize().expect("canonical");
     let conn = Connection::open(cache.join(DB_FILE)).expect("raw db");
     conn.execute(
