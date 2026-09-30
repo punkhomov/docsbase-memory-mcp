@@ -319,7 +319,7 @@ pub async fn handle_connection(
         // JSON escaping can expand a document up to 6x, so the config-level
         // reserve is not enough on adversarial content: never emit a frame
         // the peers would reject (T45 review finding).
-        let bytes = if bytes.len() > protocol::MAX_FRAME_BYTES {
+        let bytes = if bytes.len() > protocol::MAX_FRAME_BYTES + 1 {
             let err = Error::Protocol {
                 message: format!(
                     "response frame is {} bytes, over {}; reduce max_file_size or the document size",
