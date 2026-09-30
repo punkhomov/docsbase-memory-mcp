@@ -103,5 +103,52 @@ fn full_index(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, full_index);
+fn sync_benchmarks(c: &mut Criterion) {
+    c.bench_function("sync_noop_1000_files", |b| {
+        let Prepared {
+            _cache,
+            _root,
+            mut db,
+            mut index,
+            project,
+        } = prepare();
+        run_full(&mut db, &mut index, &project, &Config::default()).expect("warm index");
+        b.iter(|| {
+            let stats =
+                run_full(&mut db, &mut index, &project, &Config::default()).expect("no-op sync");
+            assert_eq!(stats.docs, 0);
+        });
+    });
+
+    c.bench_function("sync_changed_5pct_1000_files", |b| {
+        let Prepared {
+            _cache: _cache,
+            _root: root,
+            mut db,
+            mut index,
+            project,
+        } = prepare();
+        run_full(&mut db, &mut index, &project, &Config::default()).expect("warm index");
+        b.iter_batched(
+            || {
+                for i in (0..FILES).step_by(20) {
+                    let rel = format!("docs/section-{:02}/file-{i}.md", i % 20);
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |since| since.as_nanos());
+                    let body = format!("# Document {i}\n\nchanged at {stamp} widget{i}.\n");
+                    fs::write(root.path().join(&rel), body).expect("write");
+                }
+            },
+            |()| {
+                let stats = run_full(&mut db, &mut index, &project, &Config::default())
+                    .expect("incremental sync");
+                assert_eq!(stats.docs, FILES / 20);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
+criterion_group!(benches, full_index, sync_benchmarks);
 criterion_main!(benches);
