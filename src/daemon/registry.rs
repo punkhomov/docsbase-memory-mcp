@@ -274,12 +274,13 @@ fn normalize_root(path: &Path, home: Option<&Path>, cache: &Path) -> Result<Path
     });
     let rejected = crate::platform::paths::is_filesystem_root(&root)
         || home_is_root
+        || crate::platform::paths::is_system_dir(&root)
         || crate::platform::paths::is_under(&root, &cache)
         || crate::platform::paths::is_under(&canonical, &cache);
     if rejected {
         return Err(Error::Project {
             message: format!(
-                "{} is not a valid project root (/, $HOME and the cache root are refused)",
+                "{} is not a valid project root (/, $HOME, system directories and the cache root are refused)",
                 root.display()
             ),
             instruction: Some("pick a project directory below your home".to_owned()),

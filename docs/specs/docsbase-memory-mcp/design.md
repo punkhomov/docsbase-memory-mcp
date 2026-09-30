@@ -385,6 +385,24 @@ std/tokio не предоставляют, мало боевых кейсов. �
 пайпа), `fd_count/thread_count` = 0, `remove` пайпа — no-op. Вне этой фазы: SDDL-ACL,
 статический `.exe` (msvc `+crt-static`), 10k-doc RSS (см. T43).
 
+**ADR-11. `index_project`: системный blacklist вместо allowlist (T47).**
+Выбрано: отвергать в `registry::normalize_root` корни, попадающие в системные каталоги
+(`platform::paths::is_system_dir`: поддеревья `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`,
+`/boot`, `/proc`, `/sys`, `/dev`, `/run`, `/root`, `/snap`, `/var/lib|cache|log|spool`;
+равенство `/home`, `/var`, `/mnt`, `/media`; Windows — `%SystemRoot%`, `%ProgramFiles%`,
+`%ProgramFiles(x86)%`, `%ProgramData%`, `$Recycle.Bin`, `Recovery`, `PerfLogs`,
+`System Volume Information`, равенство `<drive>/Users`), плюс уже существующие отказы
+`/`, `$HOME` и cache root. **Любой другой каталог** регистрируется и индексируется
+свободно — и из MCP, и из CLI. Рассматривали: (a) allowlist/ограничение «только session
+cwd» — отвергнуто: same-user daemon-протокол не аутентифицирован (`RegisterSession {cwd}`
+может отправить любой процесс пользователя), поэтому path-ограничение не даёт
+конфиденциальности, лишь ограничивает легитимные сценарии (монорепо-родитель, соседний
+worktree); (b) серверный `confirm=true`-токен — отвергнуто: агент может подставить его
+сам, подтверждение без ценности; (c) серверный elicitation — возможное будущее (rmcp
+feature, многие хосты авто-деклайнят), не обязательство. Граница доверия: подтверждение
+индексации сторонних путей — ответственность MCP-хоста (permission prompt вне yolo);
+blacklist — гигиена/анти-footgun, а не confidentiality-барьер.
+
 ## 13. Directory structure
 
 ```

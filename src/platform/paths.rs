@@ -47,6 +47,78 @@ pub fn is_filesystem_root(path: &Path) -> bool {
     path.has_root() && path.parent().is_none()
 }
 
+/// Directories that never become a project root (T47, ADR-11): system trees
+/// and parents of user homes. `path` is expected canonicalized.
+#[must_use]
+pub fn is_system_dir(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        const EQUALS: &[&str] = &["/home", "/var", "/mnt", "/media"];
+        const SUBTREES: &[&str] = &[
+            "/etc",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib32",
+            "/lib64",
+            "/boot",
+            "/proc",
+            "/sys",
+            "/dev",
+            "/run",
+            "/root",
+            "/snap",
+            "/var/lib",
+            "/var/cache",
+            "/var/log",
+            "/var/spool",
+        ];
+        EQUALS.iter().any(|dir| path == Path::new(dir))
+            || SUBTREES.iter().any(|dir| path.starts_with(Path::new(dir)))
+    }
+    #[cfg(windows)]
+    {
+        let (subtrees, equals) = windows_system_dirs();
+        is_system_key(&windows_key(path), &subtrees, &equals)
+    }
+}
+
+/// Windows system trees from the environment, as folded keys.
+#[cfg(windows)]
+fn windows_system_dirs() -> (Vec<String>, Vec<String>) {
+    fn key(value: &std::ffi::OsStr) -> String {
+        windows_key(Path::new(value))
+    }
+    let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    let drive = key(&system_root)
+        .split('/')
+        .next()
+        .unwrap_or("c:")
+        .to_owned();
+    let mut subtrees = vec![key(&system_root)];
+    for var in ["ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
+        if let Some(value) = std::env::var_os(var) {
+            subtrees.push(key(&value));
+        }
+    }
+    subtrees.push(format!("{drive}/$recycle.bin"));
+    subtrees.push(format!("{drive}/recovery"));
+    subtrees.push(format!("{drive}/perflogs"));
+    subtrees.push(format!("{drive}/system volume information"));
+    let equals = vec![format!("{drive}/users")];
+    (subtrees, equals)
+}
+
+/// Folded-key version of [`is_system_dir`] (Windows semantics; unit-testable
+/// on every host).
+#[cfg(any(windows, test))]
+#[must_use]
+fn is_system_key(candidate: &str, subtrees: &[String], equals: &[String]) -> bool {
+    equals.iter().any(|dir| candidate == dir)
+        || subtrees.iter().any(|dir| key_under(candidate, dir))
+}
+
 /// Comparison key for root paths: identity on Unix; separator and case
 /// folded on Windows, where the filesystem is case-insensitive.
 #[must_use]
@@ -107,6 +179,69 @@ mod tests {
         let sibling = windows_key(Path::new(r"C:\Users\X\Docs2\a.md"));
         assert!(!key_under(&sibling, &base), "component boundary");
         assert!(key_under("c:/users/x", "c:/"), "trailing separator in base");
+    }
+
+    #[test]
+    fn system_dirs_are_refused_and_workdirs_allowed() {
+        #[cfg(unix)]
+        {
+            for dir in [
+                "/etc",
+                "/etc/nginx",
+                "/usr",
+                "/usr/local/x",
+                "/bin",
+                "/boot/grub",
+                "/proc",
+                "/sys/fs/cgroup",
+                "/dev",
+                "/run",
+                "/root/x",
+                "/var",
+                "/var/lib/docker",
+                "/var/log",
+                "/home",
+                "/mnt",
+                "/media",
+                "/snap/x",
+            ] {
+                assert!(is_system_dir(Path::new(dir)), "{dir} must be refused");
+            }
+            for dir in [
+                "/home/user/project",
+                "/tmp/x",
+                "/var/www/site",
+                "/opt/app",
+                "/mnt/disk/project",
+                "/media/user/disk/project",
+                "/srv/www",
+            ] {
+                assert!(!is_system_dir(Path::new(dir)), "{dir} must stay allowed");
+            }
+        }
+    }
+
+    #[test]
+    fn windows_system_keys_are_refused() {
+        let subtrees = vec![
+            "c:/windows".to_owned(),
+            "c:/program files".to_owned(),
+            "c:/program files (x86)".to_owned(),
+            "c:/programdata".to_owned(),
+            "c:/$recycle.bin".to_owned(),
+            "d:/recovery".to_owned(),
+        ];
+        let equals = vec!["c:/users".to_owned()];
+        assert!(is_system_key("c:/windows/system32", &subtrees, &equals));
+        assert!(is_system_key("c:/program files/app", &subtrees, &equals));
+        assert!(is_system_key("c:/users", &subtrees, &equals), "equality");
+        assert!(is_system_key("d:/recovery", &subtrees, &equals));
+        assert!(!is_system_key("c:/users/me/project", &subtrees, &equals));
+        assert!(!is_system_key("d:/projects/x", &subtrees, &equals));
+        assert!(
+            !is_system_key("c:/windows2", &subtrees, &equals),
+            "component boundary"
+        );
     }
 
     #[test]

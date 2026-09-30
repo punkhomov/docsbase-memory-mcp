@@ -136,3 +136,23 @@ fn status_round_trip() {
     let err = set_status(&env.db, 999, ProjectStatus::Error).expect_err("unknown");
     assert!(matches!(err, Error::Project { .. }), "{err:?}");
 }
+
+#[test]
+fn system_dirs_are_refused() {
+    let cache = tempfile::TempDir::new().expect("cache");
+    #[cfg(unix)]
+    let dirs = ["/etc", "/usr", "/boot", "/proc"];
+    #[cfg(windows)]
+    let dirs = ["C:\\Windows", "C:\\Program Files"];
+    for dir in dirs {
+        let err = docsbase_memory::daemon::registry::project_root_for(
+            std::path::Path::new(dir),
+            cache.path(),
+        )
+        .expect_err("system dir must be refused");
+        assert!(
+            err.to_string().contains("system directories"),
+            "unexpected error for {dir}: {err}"
+        );
+    }
+}
