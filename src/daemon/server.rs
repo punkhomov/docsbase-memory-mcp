@@ -225,6 +225,13 @@ fn global_config_stamp() -> Option<u64> {
 /// Bound for waiting until in-flight requests settle before shutdown (T46).
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Stderr tracing for connection lifecycle (`DOCSBASE_IPC_DEBUG=1`).
+fn ipc_debug(message: &str) {
+    if std::env::var_os("DOCSBASE_IPC_DEBUG").is_some() {
+        eprintln!("ipc-debug: {message}");
+    }
+}
+
 /// One bounded NDJSON frame from a connection.
 #[derive(Debug)]
 enum Frame {
@@ -286,24 +293,18 @@ pub async fn handle_connection(
         };
         let line = match next_frame {
             Ok(Frame::Line(line)) => {
-                if std::env::var_os("DOCSBASE_IPC_DEBUG").is_some() {
-                    eprintln!(
-                        "ipc-debug: frame {} bytes on session {session_id:?}",
-                        line.len()
-                    );
-                }
+                ipc_debug(&format!(
+                    "frame {} bytes on session {session_id:?}",
+                    line.len()
+                ));
                 line
             }
             Ok(Frame::Eof) => {
-                if std::env::var_os("DOCSBASE_IPC_DEBUG").is_some() {
-                    eprintln!("ipc-debug: connection EOF");
-                }
+                ipc_debug("connection EOF");
                 break;
             }
             Err(err) => {
-                if std::env::var_os("DOCSBASE_IPC_DEBUG").is_some() {
-                    eprintln!("ipc-debug: connection read error: {err}");
-                }
+                ipc_debug(&format!("connection read error: {err}"));
                 break;
             }
             Ok(frame @ (Frame::Incomplete | Frame::TooLarge)) => {
@@ -375,9 +376,7 @@ pub async fn handle_connection(
     }
 
     if let Some(id) = session_id {
-        if std::env::var_os("DOCSBASE_IPC_DEBUG").is_some() {
-            eprintln!("ipc-debug: leaving session {id}");
-        }
+        ipc_debug(&format!("leaving session {id}"));
         shared.sessions.leave(id);
     }
     let _ = events.try_send(());
@@ -567,9 +566,7 @@ async fn register_session(
     match outcome {
         Ok(project) => {
             let (id, cancel) = shared.sessions.join(pid, cwd, Some(project.id))?;
-            if std::env::var_os("DOCSBASE_IPC_DEBUG").is_some() {
-                eprintln!("ipc-debug: bound session {id} (pid {pid})");
-            }
+            ipc_debug(&format!("bound session {id} (pid {pid})"));
             Ok((
                 id,
                 json!({
