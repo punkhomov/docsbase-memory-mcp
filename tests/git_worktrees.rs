@@ -1,6 +1,6 @@
 //! Real-git regression suite for worktree roots and ignore layers (T51).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use tempfile::TempDir;
@@ -18,6 +18,7 @@ fn git_available() -> bool {
 }
 
 fn git(dir: &Path, args: &[&str]) {
+    let empty_global = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -30,8 +31,14 @@ fn git(dir: &Path, args: &[&str]) {
             "commit.gpgsign=false",
             "-c",
             "init.defaultBranch=main",
+            "-c",
+            "core.hooksPath=",
+            "-c",
+            "core.fsmonitor=false",
         ])
         .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", empty_global)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
@@ -110,21 +117,37 @@ fn linked_worktree_root_and_common_excludes() {
         ],
     );
     write(&worktree, "secret.md", "# Secret\n");
+    write(&worktree, "anchored.md", "# Anchored\n");
+    write(&worktree, "docs/nested.md", "# Nested\n");
+    write(
+        &main,
+        ".git/info/exclude",
+        "secret.md\n/anchored.md\ndocs/nested.md\n",
+    );
 
-    // `.git/info/exclude` from the common dir applies inside the worktree.
+    // `.git/info/exclude` from the common dir applies inside the worktree,
+    // including anchored patterns (rooted at the worktree root, not the CWD).
     assert_eq!(walked(&worktree), vec!["a.md".to_owned()]);
     // The watcher's per-directory expansion honors it too.
+    let rel = |path: &Path| {
+        path.strip_prefix(&worktree)
+            .expect("inside root")
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
     let files = walk::indexable_files(&worktree, &worktree, &Config::default())
         .expect("indexable_files")
         .into_iter()
-        .map(|path| {
-            path.strip_prefix(&worktree)
-                .expect("inside root")
-                .to_string_lossy()
-                .into_owned()
-        })
+        .map(|path| rel(&path))
         .collect::<Vec<_>>();
     assert_eq!(files, vec!["a.md".to_owned()]);
+    // Watcher-style call for a subdirectory: anchored patterns still apply.
+    let nested = walk::indexable_files(&worktree.join("docs"), &worktree, &Config::default())
+        .expect("indexable_files docs");
+    assert!(
+        nested.is_empty(),
+        "docs/nested.md must stay excluded: {nested:?}"
+    );
 
     let cache = TempDir::new().expect("cache");
     let mut db = Db::open(cache.path()).expect("db");
@@ -226,5 +249,4 @@ fn detached_worktree_and_unborn_branch_are_indexable() {
     let unborn_project = registry::ensure_project(&mut db, &unborn).expect("unborn");
     assert_eq!(walked(&unborn), vec!["draft.md".to_owned()]);
     assert_ne!(detached_project.id, unborn_project.id);
-    let _ = PathBuf::new();
 }

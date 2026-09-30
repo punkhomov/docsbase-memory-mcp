@@ -15,6 +15,10 @@ pub const DEFAULT_IGNORED_DIRS: &[&str] =
 /// Custom ignore file consulted in addition to `.gitignore`.
 pub const IGNORE_FILE: &str = ".docsbaseignore";
 
+/// Bound for ignore-pattern files read as a whole (`.docsbaseignore`, the
+/// common-dir `info/exclude` of a linked worktree).
+pub const MAX_IGNORE_FILE_SIZE: u64 = 1_048_576;
+
 /// Walks `root` and yields every indexable `.md` file.
 ///
 /// Skips hidden entries, built-in directories, `.gitignore` and
@@ -194,9 +198,17 @@ fn apply_git_exclude(builder: &mut WalkBuilder, root: &Path) {
         return;
     };
     let exclude = common.join("info").join("exclude");
-    if exclude.is_file() {
-        let _ = builder.add_ignore(&exclude);
+    let Ok(metadata) = exclude.metadata() else {
+        return;
+    };
+    if !metadata.is_file() || metadata.len() > MAX_IGNORE_FILE_SIZE {
+        return;
     }
+    // Explicit ignore files are matched relative to the builder's current
+    // directory; anchor them at the project root so both bare and anchored
+    // patterns keep git semantics regardless of the daemon's CWD.
+    builder.current_dir(root);
+    let _ = builder.add_ignore(&exclude);
 }
 
 pub(crate) fn is_markdown(path: &Path) -> bool {

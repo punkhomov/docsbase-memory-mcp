@@ -17,9 +17,11 @@
   (дублирование содержимого).
 - **Ignore-слои**: `.gitignore`/`.docsbaseignore`/`info/exclude` обычного репо работают через
   `ignore` 0.4.30; в linked worktree апстрим-разбор gitlink+`commondir` покрывает
-  `IgnoreBuilder`, но **не** reader `WalkBuilder` — `info/exclude` из common dir соблюдается
-  только после нашей обёртки `apply_git_exclude` (`src/index/walk.rs`, T51; первый
-  эксперимент вводил в заблуждение: excluded-файла в worktree просто не было).
+  `IgnoreBuilder`, но **не** reader `WalkBuilder` — `info/exclude` из common dir добавляется
+  нашей обёрткой `apply_git_exclude` (`src/index/walk.rs`, T51): `add_ignore` +
+  `current_dir(root)`, иначе анкорные паттерны матчились бы от CWD процесса, а не от корня
+  проекта (первый эксперимент вводил в заблуждение: excluded-файла в worktree просто не
+  было).
 - **Git-зависимостей не добавляем** (`gix`/`git2`/shell-out отклонены): наш hash-walk
   (blake3) не зависит от git и корректен для грязного/detached состояния.
 - **Канонический root = worktree-root** (как сейчас); `git_common_root` — потенциальные
@@ -97,7 +99,7 @@ wt$ git rev-parse --show-toplevel --git-dir --git-common-dir
 | # | Вопрос | Решение | Почему |
 |---|---|---|---|
 | Q1 | Ключ проекта для worktree | **worktree-root** (как сейчас); `git_common_root` — только метаданные позже | Нет общего индекса → нет «чужого» содержимого в containment и citations; main+wt — два независимых контекста, как у Claude Code worktree-сессий |
-| Q2 | Ignore в worktree | `apply_git_exclude`: добавлять common-dir `info/exclude` как lowest-precedence ignore | walker `ignore` crate читает gitlink/commondir только в `IgnoreBuilder`, не в `WalkBuilder` (выявлено тестом T51) |
+| Q2 | Ignore в worktree | `apply_git_exclude`: common-dir `info/exclude` как lowest-precedence ignore c `current_dir(root)` (анкорные паттерны от корня проекта) | walker `ignore` crate читает gitlink/commondir только в `IgnoreBuilder`, не в `WalkBuilder` (выявлено тестом T51) |
 | Q3 | Детект изменений | **notify остаётся**; git-поллинг не добавлять | checkout = burst файловых событий, уже коалесцируется в один батч-джоб; polling = дублирующий механизм и таймеры |
 | Q4 | git-инкремент (diff/HEAD) | **Не внедрять** | blake3-walk корректен для грязного дерева/untracked; git-diff добавляет submodule/rename/quote-краевые случаи без выигрыша на docs-репо |
 | Q5 | Метаданные branch/head_sha | Кандидат фазы 2 (`status`, `list_projects`), через schema migration | Retrieval не меняет; полезно для диагностики, но требует чтения refs (per-worktree HEAD) — не сейчас |
