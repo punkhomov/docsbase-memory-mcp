@@ -239,3 +239,6 @@ Task 42: Ruling: локальная Windows-валидация — `cargo clippy
 Task 42: fix round по ревью: `install::clear_stale_state` использует `platform::remove(daemon_endpoint)` (был жёсткий `state/daemon.sock`); tasks.md Files дополнен walk/watcher
 Task 42: minor (deferred): на Windows `spawn_long_lived` убивает только `cmd.exe`, `ping` живёт ~29с; wording «kill -9» в expect; `mcp_docs` фид `/etc/hostname` на Windows проверяется только статически
 Task 42: complete (tests: 238 Linux passed, 4 ignored; windows-gnu clippy tests и линковка 38 exe чисто; clippy/fmt Linux+Windows clean; review PASS/APPROVED → minors applied)
+Task 43: Ruling: Windows-гейт в CI — отдельный job `windows-latest` в nightly (RUSTUP_TOOLCHAIN=1.88.0, rust-cache): fmt --check, clippy --all-targets -D warnings, `cargo test --locked` (функциональный набор daemon+CLI+MCP; soak/perf/offline/artifact остаются Linux-only); job исполнится при первом пуше — локально доказаны компиляция/линковка/линт всех тестов под windows-gnu
+Task 43: minor (deferred): job не исполнялся на реальном раннере (нет пуша); msvc-специфика (msvcrt/DACL) отличается от локального gnu-кросс-чека
+Task 43: complete (docs+CI: nightly.yml windows-job, tasks.md Verify; локально Linux 238/4 + fmt/clippy clean; review секции — фазовое ревью T38–T43)
