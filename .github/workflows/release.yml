@@ -72,7 +72,7 @@ jobs:
           (cd "$STAGE" && sha256sum "docsbase-$VERSION-linux-x86_64.tar.gz" > "docsbase-$VERSION-linux-x86_64.tar.gz.sha256")
           ls -la "$STAGE"
       - name: Attest linux artifact (SLSA provenance, Sigstore)
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: "dist/linux/docsbase-*.tar.gz"
       - uses: actions/upload-artifact@v4
@@ -117,7 +117,7 @@ jobs:
           "$hash  docsbase-$version-windows-x86_64.zip" | Out-File -FilePath "$zip.sha256" -Encoding ascii
           Get-ChildItem $stage
       - name: Attest windows artifact (SLSA provenance, Sigstore)
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: "dist/windows/docsbase-*.zip"
       - uses: actions/upload-artifact@v4
@@ -156,7 +156,7 @@ jobs:
           find dist/sbom -type f ! -name "docsbase-$VERSION*" -delete
           ls -la dist/sbom
       - name: Attest SBOM
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: "dist/sbom/docsbase-*.spdx.json"
       - uses: actions/upload-artifact@v4
