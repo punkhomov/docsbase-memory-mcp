@@ -41,6 +41,20 @@ fn watch_debug() -> bool {
     std::env::var_os("DOCSBASE_WATCH_DEBUG").is_some()
 }
 
+/// Canonical spelling of `path`, tolerating a missing leaf (Windows verbatim
+/// paths would otherwise disagree with the configured spelling).
+fn canonicalize_allow_missing(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    match path.parent().and_then(|parent| parent.canonicalize().ok()) {
+        Some(parent) => path
+            .file_name()
+            .map_or_else(|| parent.clone(), |name| parent.join(name)),
+        None => path.to_path_buf(),
+    }
+}
+
 /// Bound for the notify and batch channels of one watcher (T46).
 const MAX_WATCH_EVENTS: usize = 4096;
 
