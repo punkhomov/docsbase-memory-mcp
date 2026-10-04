@@ -2,7 +2,7 @@
 //!
 //! This is the only network-touching code path in the binary; like the install
 //! scripts it shells out to the platform tooling they already require
-//! (`curl`, `sha256sum`, `tar` on Linux; PowerShell on Windows), so the crate
+//! (`curl`, `sha256sum`, `tar` on Linux; `PowerShell` on Windows), so the crate
 //! gains no HTTP stack and the daemon stays strictly local. The daemon
 //! coordination (stop, admission lease, owned manifest) is shared with
 //! `cli::install`. The `.sha256` from the release is checked so a truncated
@@ -255,7 +255,7 @@ fn parse_hash(text: &str) -> Option<String> {
         .then(|| token.to_ascii_lowercase())
 }
 
-/// Downloads `url` to `dest` with the platform tooling (`curl` / PowerShell).
+/// Downloads `url` to `dest` with the platform tooling (`curl` / `PowerShell`).
 fn download(url: &str, dest: &Path) -> anyhow::Result<()> {
     if cfg!(windows) {
         let script = format!(
@@ -351,7 +351,7 @@ fn powershell(script: &str) -> Vec<&str> {
     ]
 }
 
-/// Escapes a single-quoted PowerShell literal.
+/// Escapes a single-quoted `PowerShell` literal.
 fn ps_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
