@@ -1,7 +1,10 @@
 # Constitution — docsbase-memory-mcp
 
 > Принципы проекта. Действуют для всех спеков. Меняются осознанно, а не под задачу.
-> Версия: 1.0.0. Дата: 2026-09-28.
+> Версия: 1.1.0. Дата: 2026-10-04.
+> Изменение 1.1.0: платформа v1 — Linux x86_64 + Windows x64 (ADR-10 реализован,
+> T38–T43); macOS out of scope. Версионирование — SemVer с `alpha`-пререлизами
+> (`v0.1.0-alpha.1`); тег обязан совпадать с `version` в `Cargo.toml`.
 
 ## Платформа и язык
 
@@ -20,9 +23,20 @@
 - Точечный обход только через
   `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update <crate> --precise <ver>`
   с обоснованием в задаче; молчаливый обход запрещён.
+- Релизы — только через GitHub Releases по тегу `v*` (GitHub Flow):
+  артефакты Linux + Windows, `sha256sum`, SBOM и SLSA-provenance
+  (Sigstore, `actions/attest-build-provenance`). Только checksums без
+  provenance — недостаточно для релиза.
 - `Cargo.lock` коммитится; CI собирает с `--locked`.
-- v1 — только Linux/WSL2. macOS/Windows не поддерживаются до фазы 3.
-- Один статический бинарь `docsbase`; никаких внешних сервисов в рантайме (никаких
+- v1 — Linux x86_64 и Windows x64 (ADR-10 реализован: daemon + CLI + MCP,
+  зелёные тесты в CI на обеих ОС). macOS out of scope до отдельного решения.
+- Версионирование — SemVer. До стабилизации — пререлизы `0.1.0-alpha.N`;
+  Git-тег `v<version>` обязан совпадать с `version` в `Cargo.toml` (проверяется в CI).
+  Ломающее изменение публичных контрактов — только мажорная версия.
+- Один бинарь `docsbase` на платформу: Linux x86_64 — статический
+  (`+crt-static`, без динамических зависимостей); Windows x64 — `.exe`
+  (статик не требуется, SDDL-ACL hardening — backlog после T43).
+  Никаких внешних сервисов в рантайме (никаких
   Docker/Postgres/Python).
 - Сеть не используется: после установки ни одного сетевого запроса, включая телеметрию.
 

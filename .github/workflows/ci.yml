@@ -20,6 +20,31 @@ env:
   RUSTUP_TOOLCHAIN: "1.88.0"
 
 jobs:
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Repo hygiene (README/docs/installers/version)
+        run: |
+          set -e
+          test -f README.md
+          test -f README.ru.md
+          test -f CHANGELOG.md
+          test -f install.sh
+          test -f install.ps1
+          test -f docs/INSTALL.md
+          test -f docs/QUICKSTART.md
+          test -f docs/CONFIG.md
+          test -f docs/MCP.md
+          test -f docs/ARCHITECTURE.md
+          sh -n install.sh
+          VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          grep -q "\[$VERSION\]" CHANGELOG.md || (echo "::error::CHANGELOG.md has no [$VERSION] entry" && exit 1)
+          grep -q 'README.ru.md' README.md
+          grep -q 'README.md' README.ru.md
+          echo "docs gate OK (version $VERSION)"
+
   linux:
     runs-on: ubuntu-latest
     timeout-minutes: 30

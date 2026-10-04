@@ -1,5 +1,8 @@
 name: release
 
+# Serious-project release pipeline (constitution §Supply-chain):
+# tag v* -> version check -> linux + windows builds -> SBOM ->
+# GitHub Release (prerelease for alpha/beta/rc) -> SLSA provenance.
 on:
   push:
     tags:
@@ -16,8 +19,34 @@ env:
   RUSTUP_TOOLCHAIN: "1.88.0"
 
 jobs:
-  static-artifact:
+  version-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches Cargo.toml
+        run: |
+          VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          echo "Cargo.toml version: $VERSION"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            echo "Git tag version: $TAG"
+            if [[ "$VERSION" != "$TAG" ]]; then
+              echo "::error::tag v$TAG != Cargo.toml version $VERSION (constitution: must match)"
+              exit 1
+            fi
+          else
+            echo "manual run: skipping tag equality (Cargo version $VERSION)"
+          fi
+
+  linux:
+    needs: version-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88.0
@@ -33,13 +62,133 @@ jobs:
           cargo test --locked --test artifact
           ldd target/x86_64-unknown-linux-gnu/release/docsbase
           stat -c%s target/x86_64-unknown-linux-gnu/release/docsbase
-      - name: Checksum
-        working-directory: target/x86_64-unknown-linux-gnu/release
-        run: sha256sum docsbase > docsbase.sha256
+      - name: Package + checksum
+        run: |
+          VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          STAGE="dist/linux"
+          mkdir -p "$STAGE"
+          cp target/x86_64-unknown-linux-gnu/release/docsbase "$STAGE/docsbase"
+          tar -czf "$STAGE/docsbase-$VERSION-linux-x86_64.tar.gz" -C "$STAGE" docsbase
+          (cd "$STAGE" && sha256sum "docsbase-$VERSION-linux-x86_64.tar.gz" > "docsbase-$VERSION-linux-x86_64.tar.gz.sha256")
+          ls -la "$STAGE"
+      - name: Attest linux artifact (SLSA provenance, Sigstore)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "dist/linux/docsbase-*.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
           name: docsbase-linux-x86_64
           path: |
-            target/x86_64-unknown-linux-gnu/release/docsbase
-            target/x86_64-unknown-linux-gnu/release/docsbase.sha256
+            dist/linux/docsbase-*.tar.gz
+            dist/linux/docsbase-*.tar.gz.sha256
           if-no-files-found: error
+
+  windows:
+    needs: version-check
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (ADR-10)
+        run: cargo build --release --locked
+      - name: Platform seam invariant (ADR-9)
+        run: cargo test --locked --test platform_boundary
+      - name: Smoke the exe
+        run: .\target\release\docsbase.exe --help
+      - name: Package + checksum
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version' | Select-Object -First 1).Line.Split('"')[1]
+          $stage = "dist/windows"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item target/release/docsbase.exe (Join-Path $stage "docsbase.exe")
+          $zip = Join-Path $stage "docsbase-$version-windows-x86_64.zip"
+          if (Test-Path $zip) { Remove-Item $zip }
+          Compress-Archive -Path (Join-Path $stage "docsbase.exe") -DestinationPath $zip
+          $hash = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  docsbase-$version-windows-x86_64.zip" | Out-File -FilePath "$zip.sha256" -Encoding ascii
+          Get-ChildItem $stage
+      - name: Attest windows artifact (SLSA provenance, Sigstore)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "dist/windows/docsbase-*.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docsbase-windows-x86_64
+          path: |
+            dist/windows/docsbase-*.zip
+            dist/windows/docsbase-*.zip.sha256
+          if-no-files-found: error
+
+  sbom:
+    needs: version-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          path: ./
+          format: spdx-json
+          output-file: docsbase.sbom.spdx.json
+      - name: Rename per version + checksum
+        run: |
+          VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          mkdir -p dist/sbom
+          mv docsbase.sbom.spdx.json "dist/sbom/docsbase-$VERSION.sbom.spdx.json"
+          (cd dist/sbom && sha256sum "docsbase-$VERSION.sbom.spdx.json" > "docsbase-$VERSION.sbom.spdx.json.sha256")
+          ls -la dist/sbom
+      - name: Attest SBOM
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "dist/sbom/docsbase-*.spdx.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docsbase-sbom
+          path: |
+            dist/sbom/docsbase-*.spdx.json
+            dist/sbom/docsbase-*.spdx.json.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: [linux, windows, sbom]
+    # Publish only on tag pushes; manual runs stop at artifacts.
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/artifacts
+      - name: Stage release files
+        run: |
+          mkdir -p dist/release
+          find dist/artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' -o -name '*.spdx.json' \) -exec cp {} dist/release/ \;
+          ls -la dist/release
+          sha256sum -c dist/release/*.sha256
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/release/*
+          generate_release_notes: true
+          # Alpha/beta/rc tags are marked as prereleases automatically.
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          fail_on_unmatched_files: true
