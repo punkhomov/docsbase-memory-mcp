@@ -190,7 +190,7 @@ jobs:
           # .sha256 files hold bare filenames: verify from inside the dir.
           (cd dist/release && sha256sum -c -- *.sha256)
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/release/*
           generate_release_notes: true
