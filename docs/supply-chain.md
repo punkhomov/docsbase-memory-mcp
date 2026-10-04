@@ -25,7 +25,7 @@ lock file alone proves nothing about age. Any age check must happen at version
 | Dependabot security updates | known CVEs, immediately (bypass all delays) | direct + transitive (via lock) | active |
 | `cooldown: default-days 14` (dependabot) | fresh releases: PR opens only 14+ days after publish | **direct only** — transitives are resolved by cargo with no age check (confirmed upstream, dependabot-core#14683) | active |
 | `min-publish-age = 14 days` (`.cargo/config.toml`, nightly-only) | fresh releases at resolve time | direct + transitive, **but enforced only under nightly**; stable cargo prints `unused config key` and ignores it, and `--locked` builds skip resolution entirely | partial (see gaps) |
-| SLSA provenance + sha256 (releases) | tampered artifacts after build | release assets | active |
+| SLSA provenance + sha256 (releases) | tampered artifacts after build | release assets | attestations published per release; installers/`docsbase update` check sha256 (integrity) and point to `gh attestation verify` for authenticity |
 | `cargo-vet` audit gate | untrusted code, including transitives, regardless of age | everything in the build graph | **stage 2** |
 | CI age gate over the lock (all entries < 14d → red) | fresh transitives smuggled via lock | `Cargo.lock` fully | **TODO, blocked on cargo ~1.100** |
 

@@ -54,6 +54,9 @@ Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 | Cargo | `cargo install --locked docsbase --version 0.1.0-alpha.1` | Builds from source, MSRV 1.88 |
 | Manual | Download asset from [Releases](https://github.com/punkhomov/docsbase-memory-mcp/releases), `sha256sum -c`, then `docsbase install` | Verify SLSA provenance, see [`docs/INSTALL.md`](docs/INSTALL.md) |
 
+Updates: `docsbase update` (checks the latest release, verifies it, replaces
+the binary). Pin a version with `docsbase update --version v0.1.0-alpha.1`.
+
 Every release ships: `sha256sum` files, SBOM, and SLSA build provenance
 (Sigstore). Verify with `gh attestation verify`.
 
@@ -61,6 +64,7 @@ Every release ships: `sha256sum` files, SBOM, and SLSA build provenance
 
 ```text
 docsbase install            # install/update the binary + owned manifest
+docsbase update             # fetch the latest release, verify, replace the binary
 docsbase index [PATH]       # register and index a project (default: cwd)
 docsbase search QUERY [--limit N]
 docsbase list               # indexed documents of the current project

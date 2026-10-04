@@ -31,6 +31,23 @@ pub const MANIFEST: &str = "install.json";
 /// Fails when the daemon cannot be stopped, the admission lease is busy, or
 /// the copy/rename fails.
 pub fn install() -> anyhow::Result<()> {
+    let source = std::env::current_exe().context("resolve current executable")?;
+    let (target, data) = install_from(&source)?;
+    println!("installed {} ({})", target.display(), protocol::build_id());
+    println!("manifest: {}", data.join(MANIFEST).display());
+    Ok(())
+}
+
+/// Shared install/update coordination (FR-5): stop the daemon, wait for every
+/// process to exit, take the admission lease, atomically install `source` and
+/// record the owned manifest.
+///
+/// Returns the installed binary path and the canonical data directory.
+///
+/// # Errors
+/// Fails when the daemon cannot be stopped, the admission lease is busy, or
+/// the copy/rename fails.
+pub(crate) fn install_from(source: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
     let cache = paths::cache_dir()?;
     crate::platform::fs::secure_dir(&cache)
         .with_context(|| format!("create {}", cache.display()))?;
@@ -44,11 +61,10 @@ pub fn install() -> anyhow::Result<()> {
     let _lease = acquire_after_stop(&cache)?;
     clear_stale_state(&cache);
 
-    let source = std::env::current_exe().context("resolve current executable")?;
     let bin_dir = data.join("bin");
     fs::create_dir_all(&bin_dir).with_context(|| format!("create {}", bin_dir.display()))?;
     let target = bin_dir.join(format!("docsbase{}", std::env::consts::EXE_SUFFIX));
-    swap_binary(&source, &target)?;
+    swap_binary(source, &target)?;
 
     let manifest = Manifest {
         build_id: protocol::build_id(),
@@ -63,9 +79,7 @@ pub fn install() -> anyhow::Result<()> {
     };
     write_manifest(&data, &manifest)?;
 
-    println!("installed {} ({})", target.display(), manifest.build_id);
-    println!("manifest: {}", data.join(MANIFEST).display());
-    Ok(())
+    Ok((target, data))
 }
 
 /// Removes every owned artifact; without `yes` it only prints them and the
@@ -252,7 +266,10 @@ fn read_manifest(data: &Path) -> anyhow::Result<Option<Manifest>> {
         .with_context(|| format!("parse {}", path.display()))
 }
 
-fn swap_binary(source: &Path, target: &Path) -> anyhow::Result<()> {
+/// Atomically replaces `target` with `source` through a same-directory temp
+/// file, tolerating a running `target` (self-update on Windows cannot rename
+/// over the live image; it is moved aside first).
+pub(crate) fn swap_binary(source: &Path, target: &Path) -> anyhow::Result<()> {
     let tmp = target.with_extension("tmp");
     fs::copy(source, &tmp)
         .with_context(|| format!("copy {} -> {}", source.display(), tmp.display()))?;
@@ -268,8 +285,33 @@ fn swap_binary(source: &Path, target: &Path) -> anyhow::Result<()> {
     drop(copied);
     crate::platform::fs::secure_executable(&tmp)
         .with_context(|| format!("chmod {}", tmp.display()))?;
-    fs::rename(&tmp, target).with_context(|| format!("replace {}", target.display()))?;
+    if let Err(err) = fs::rename(&tmp, target) {
+        // Windows refuses to replace a running executable: move it aside and
+        // drop the new file in. The running process keeps the old image.
+        if !is_current_exe(target) {
+            return Err(anyhow::Error::new(err))
+                .with_context(|| format!("replace {}", target.display()));
+        }
+        let old = target.with_extension("old");
+        let _ = fs::remove_file(&old);
+        fs::rename(target, &old).with_context(|| format!("move aside {}", target.display()))?;
+        fs::rename(&tmp, target).with_context(|| format!("replace {}", target.display()))?;
+        // Removal may fail on Windows while this process still maps the file;
+        // the next self-replace cleans it before moving that binary aside.
+        let _ = fs::remove_file(&old);
+    }
     Ok(())
+}
+
+/// Whether `path` is the executable this process is running from.
+fn is_current_exe(path: &Path) -> bool {
+    let Ok(current) = std::env::current_exe() else {
+        return false;
+    };
+    match (path.canonicalize(), current.canonicalize()) {
+        (Ok(path), Ok(current)) => path == current,
+        _ => path == current,
+    }
 }
 
 /// A daemon that crashed may leave `daemon.json` behind; install is the

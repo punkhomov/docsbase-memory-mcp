@@ -8,6 +8,17 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ## [Unreleased]
 
+### Added
+
+- `docsbase update` — fetch the latest GitHub release, verify its sha256,
+  then atomically replace both the owned copy and the invoking binary (FR-5).
+  Flags: `--check`, `--force`, `--version TAG`, `--from PATH`.
+
+### Changed
+
+- `install.json`/binary swap is now safe when the target is the running
+  executable (Windows self-update moves the live image aside first).
+
 ## [0.1.0-alpha.1] — 2026-10-04
 
 First public alpha. Expect breaking changes before `0.1.0`.

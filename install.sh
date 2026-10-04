@@ -51,6 +51,8 @@ curl -fsSL -o "$TMP/$ASSET" "$BASE_URL/$ASSET" \
 curl -fsSL -o "$TMP/$ASSET.sha256" "$BASE_URL/$ASSET.sha256" \
   || fail "checksum download failed: $BASE_URL/$ASSET.sha256"
 
+# Integrity only: the .sha256 ships in the same release as the asset, so it
+# catches truncated/corrupt downloads, not a compromised release.
 info "verifying sha256..."
 if command -v sha256sum >/dev/null 2>&1; then
   (cd "$TMP" && sha256sum -c "$ASSET.sha256") || fail "checksum mismatch for $ASSET"

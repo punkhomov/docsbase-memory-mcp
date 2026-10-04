@@ -4,6 +4,7 @@ pub mod index;
 pub mod install;
 pub mod search;
 pub mod status;
+pub mod update;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -74,6 +75,21 @@ pub enum Command {
     },
     /// Install (or update) the binary and register owned artifacts.
     Install,
+    /// Update the installed binary from a GitHub release (network).
+    Update {
+        /// Only check whether a newer release exists.
+        #[arg(long, conflicts_with_all = ["from", "version"])]
+        check: bool,
+        /// Reinstall even when the running version already matches the target.
+        #[arg(long)]
+        force: bool,
+        /// Release tag to install instead of the latest (e.g. v0.1.0-alpha.2).
+        #[arg(long, value_name = "TAG", conflicts_with = "from")]
+        version: Option<String>,
+        /// Install a local binary, skipping download and verification.
+        #[arg(long, value_name = "PATH")]
+        from: Option<PathBuf>,
+    },
     /// Remove owned artifacts and, with `--yes`, the indexes.
     Uninstall {
         /// Delete without an interactive confirmation prompt.
@@ -108,6 +124,17 @@ pub fn run() -> anyhow::Result<()> {
             DaemonCommand::Stop => daemon_stop(),
         },
         Command::Install => install::install(),
+        Command::Update {
+            check,
+            force,
+            version,
+            from,
+        } => update::run(&update::Options {
+            check,
+            force,
+            version,
+            from,
+        }),
         Command::Uninstall { yes } => install::uninstall(yes),
     }
 }

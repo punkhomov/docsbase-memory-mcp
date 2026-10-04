@@ -231,6 +231,51 @@ fn update_stops_and_waits() {
 }
 
 #[test]
+fn update_from_local_binary_replaces_invoked_and_owned() {
+    let env = Env::new(&[("README.md", DOC)]);
+    env.install();
+
+    // Run a throwaway copy of the CLI so self-replacement never touches the
+    // shared test binary.
+    let invoked = env
+        .data()
+        .join(format!("invoked{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(daemon_bin(), &invoked).expect("copy invoked binary");
+    let candidate = env.data().join("candidate");
+    fs::write(&candidate, b"candidate build").expect("write candidate");
+
+    let output = Command::new(&invoked)
+        .env("DOCSBASE_CACHE_DIR", env.cache())
+        .env("DOCSBASE_CONFIG_DIR", env.cache().join("config"))
+        .env("DOCSBASE_DATA_DIR", env.data())
+        .current_dir(env.root())
+        .args(["update", "--from"])
+        .arg(&candidate)
+        .output()
+        .expect("run update");
+    assert!(
+        output.status.success(),
+        "update failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(&invoked).expect("read invoked"),
+        b"candidate build",
+        "the invoking binary must be replaced"
+    );
+    assert_eq!(
+        fs::read(env.binary()).expect("read owned"),
+        b"candidate build",
+        "the owned binary must be replaced"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("updated invoked binary"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
 fn uninstall_lists_indexes_with_confirmation() {
     let env = Env::new(&[("README.md", DOC)]);
     env.index();

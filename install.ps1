@@ -52,6 +52,8 @@ try {
     Fail "download failed: $BaseUrl/$Asset (check the tag exists). $_"
   }
 
+  # Integrity only: the .sha256 ships in the same release as the asset, so it
+  # catches truncated/corrupt downloads, not a compromised release.
   Info "verifying sha256..."
   $expected = ((Get-Content (Join-Path $tmp "$Asset.sha256") -Raw) -split '\s+')[0].ToLowerInvariant()
   $actual = (Get-FileHash -Path (Join-Path $tmp $Asset) -Algorithm SHA256).Hash.ToLowerInvariant()
