@@ -149,7 +149,11 @@ jobs:
           VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
           mkdir -p dist/sbom
           mv docsbase.sbom.spdx.json "dist/sbom/docsbase-$VERSION.sbom.spdx.json"
+          # Drop the action's default-named leftover so only versioned files ship.
+          rm -f ./*.spdx.json
           (cd dist/sbom && sha256sum "docsbase-$VERSION.sbom.spdx.json" > "docsbase-$VERSION.sbom.spdx.json.sha256")
+          # Belt and suspenders: keep only the versioned pair in the stage dir.
+          find dist/sbom -type f ! -name "docsbase-$VERSION*" -delete
           ls -la dist/sbom
       - name: Attest SBOM
         uses: actions/attest-build-provenance@v2
@@ -183,7 +187,8 @@ jobs:
           mkdir -p dist/release
           find dist/artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' -o -name '*.spdx.json' \) -exec cp {} dist/release/ \;
           ls -la dist/release
-          sha256sum -c dist/release/*.sha256
+          # .sha256 files hold bare filenames: verify from inside the dir.
+          (cd dist/release && sha256sum -c -- *.sha256)
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
