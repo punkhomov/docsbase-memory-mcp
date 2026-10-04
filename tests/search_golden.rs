@@ -97,6 +97,23 @@ impl Bench {
     }
 }
 
+/// The stable part of each citation in rank order. BM25 scores are
+/// engine-internal and drift across tantivy upgrades (see the 0.25→0.26
+/// migration), while SC-1…SC-4 judge *which* chunks rank where — so scores
+/// are never snapshotted.
+fn citations(hits: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    hits.iter()
+        .map(|hit| {
+            json!({
+                "chunk_id": hit["chunk_id"],
+                "path": hit["path"],
+                "heading_path": hit["heading_path"],
+                "lines": hit["lines"],
+            })
+        })
+        .collect()
+}
+
 /// SC-1: exact identifier → relevant document within top-3.
 #[test]
 fn exact_identifier_top3() {
@@ -107,7 +124,7 @@ fn exact_identifier_top3() {
         top.iter().any(|p| p == "backend/assessment-plan-api.md"),
         "expected assessment-plan-api.md in top-3, got {top:?}"
     );
-    insta::assert_json_snapshot!(hits);
+    insta::assert_json_snapshot!(citations(&hits));
 }
 
 /// SC-2: exact error message → relevant chunk in top-1.
@@ -123,7 +140,7 @@ fn error_message_top1() {
         "cad/sheet-metal-rules.md",
         "top-1 path"
     );
-    insta::assert_json_snapshot!(hits);
+    insta::assert_json_snapshot!(citations(&hits));
 }
 
 /// SC-3: natural-language question → relevant chunk in top-3.
@@ -136,7 +153,7 @@ fn semantic_top3() {
         top.iter().any(|p| p == "auth/token-refresh.md"),
         "expected token-refresh.md in top-3, got {top:?}"
     );
-    insta::assert_json_snapshot!(hits);
+    insta::assert_json_snapshot!(citations(&hits));
 }
 
 /// SC-4: code/API wording → relevant chunk in top-3.
@@ -149,5 +166,5 @@ fn code_api_top3() {
         top.iter().any(|p| p == "frontend/pinia-setup-stores.md"),
         "expected pinia-setup-stores.md in top-3, got {top:?}"
     );
-    insta::assert_json_snapshot!(hits);
+    insta::assert_json_snapshot!(citations(&hits));
 }

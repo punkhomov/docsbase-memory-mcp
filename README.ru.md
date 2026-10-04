@@ -54,6 +54,9 @@ docsbase status
 | Cargo | `cargo install --locked docsbase --version 0.1.0-alpha.1` | Сборка из исходников, MSRV 1.88 |
 | Вручную | Скачать ассет из [Releases](https://github.com/punkhomov/docsbase-memory-mcp/releases), `sha256sum -c`, затем `docsbase install` | Проверяйте SLSA-provenance, см. [`docs/INSTALL.md`](docs/INSTALL.md) |
 
+Обновление: `docsbase update` (проверяет последний релиз, верифицирует и
+заменяет бинарь). Зафиксировать версию: `docsbase update --version v0.1.0-alpha.1`.
+
 Каждый релиз содержит: файлы `sha256sum`, SBOM и SLSA-provenance сборки
 (Sigstore). Проверка: `gh attestation verify`.
 
@@ -61,6 +64,7 @@ docsbase status
 
 ```text
 docsbase install            # установка/обновление бинаря + манифеста
+docsbase update             # скачать последний релиз, проверить и заменить бинарь
 docsbase index [PATH]       # регистрация и индексация проекта (по умолч. cwd)
 docsbase search QUERY [--limit N]
 docsbase list               # документы текущего проекта в индексе
