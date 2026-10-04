@@ -27,6 +27,11 @@
   артефакты Linux + Windows, `sha256sum`, SBOM и SLSA-provenance
   (Sigstore, `actions/attest-build-provenance`). Только checksums без
   provenance — недостаточно для релиза.
+- Enforcement `min-publish-age` сегодня — только локально под nightly
+  (solo-режим: весь lock генерируется там; Dependabot сдержан `cooldown` +
+  выключенными version-апдейтами). CI на stable ключ игнорирует — см.
+  `docs/supply-chain.md`; нативный CI-гейт — после стабилизации механизма
+  (~cargo 1.100).
 - `Cargo.lock` коммитится; CI собирает с `--locked`.
 - v1 — Linux x86_64 и Windows x64 (ADR-10 реализован: daemon + CLI + MCP,
   зелёные тесты в CI на обеих ОС). macOS out of scope до отдельного решения.
