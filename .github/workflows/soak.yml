@@ -1,0 +1,53 @@
+name: soak
+
+on:
+  schedule:
+    # Weekly on Sunday at 04:23 UTC; the gate skips weeks without new commits.
+    - cron: "23 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      soak_secs:
+        description: "Soak duration in seconds (3600 = one hour)"
+        required: false
+        default: "3600"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: soak
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: "1.88.0"
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        uses: ./.github/actions/new-commits
+        with:
+          workflow-file: soak.yml
+
+  soak:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      SOAK_SECS: ${{ github.event.inputs.soak_secs || '3600' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Soak, 3 agents + watcher (SC-5)
+        run: cargo test --locked --release --test soak -- --ignored --nocapture

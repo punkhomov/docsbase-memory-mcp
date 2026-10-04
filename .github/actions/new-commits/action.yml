@@ -1,0 +1,40 @@
+name: new-commits
+description: >-
+  Sets run=true when the branch has new commits since the last completed run
+  of the calling workflow. Manual workflow_dispatch runs always pass.
+
+inputs:
+  workflow-file:
+    description: Workflow file name to compare against (e.g. nightly.yml).
+    required: true
+
+outputs:
+  run:
+    description: "true when downstream jobs should run"
+    value: ${{ steps.check.outputs.run }}
+
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        WORKFLOW_FILE: ${{ inputs.workflow-file }}
+        REF: ${{ github.ref_name }}
+        SHA: ${{ github.sha }}
+        EVENT: ${{ github.event_name }}
+      run: |
+        # Manual runs are an explicit override.
+        if [ "$EVENT" = "workflow_dispatch" ]; then
+          echo "run=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        last=$(gh run list --workflow="$WORKFLOW_FILE" --branch="$REF" \
+                 --status=completed --limit=1 --json headSha \
+                 --jq '.[0].headSha // ""')
+        if [ -n "$last" ] && [ "$last" = "$SHA" ]; then
+          echo "run=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "run=true" >> "$GITHUB_OUTPUT"
+        fi

@@ -11,16 +11,29 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # rust-toolchain.toml pins nightly for local development; CI validates the
-  # MSRV toolchain explicitly (the env var overrides the file).
   RUSTUP_TOOLCHAIN: "1.88.0"
 
 jobs:
-  soak-offline:
+  gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
-    env:
-      SOAK_SECS: "3600"
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        uses: ./.github/actions/new-commits
+        with:
+          workflow-file: nightly.yml
+
+  release-checks:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88.0
@@ -35,27 +48,9 @@ jobs:
         # Single-threaded: the 10k RSS delta is process-wide and must not
         # race allocations from the 50k-chunk search budget (T52 review).
         run: cargo test --locked --release --test perf_budget -- --nocapture --test-threads=1
-      - name: Soak, 3 agents + watcher, 1 hour (SC-5)
-        run: cargo test --locked --release --test soak -- --ignored --nocapture
       - name: Full release suite
         run: cargo test --locked --release
       - name: Lints
         run: |
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
-
-  windows:
-    runs-on: windows-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Lints (ADR-10)
-        run: |
-          cargo fmt --check
-          cargo clippy --all-targets -- -D warnings
-      - name: Functional suite (daemon + CLI + MCP, ADR-10)
-        run: cargo test --locked -- --nocapture
