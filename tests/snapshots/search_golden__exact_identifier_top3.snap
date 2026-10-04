@@ -1,6 +1,6 @@
 ---
 source: tests/search_golden.rs
-expression: hits
+expression: citations(&hits)
 ---
 [
   {
@@ -10,7 +10,6 @@ expression: hits
       5,
       18
     ],
-    "path": "backend/assessment-plan-api.md",
-    "score": 46.73659133911133
+    "path": "backend/assessment-plan-api.md"
   }
 ]
