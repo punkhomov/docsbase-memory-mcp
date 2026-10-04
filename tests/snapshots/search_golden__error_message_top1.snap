@@ -1,5 +1,6 @@
 ---
 source: tests/search_golden.rs
+assertion_line: 126
 expression: hits
 ---
 [
@@ -11,7 +12,7 @@ expression: hits
       17
     ],
     "path": "cad/sheet-metal-rules.md",
-    "score": 67.44320678710938
+    "score": 56.12126159667969
   },
   {
     "chunk_id": 25769803777,
@@ -21,7 +22,7 @@ expression: hits
       6
     ],
     "path": "cad/thickness-glossary.md",
-    "score": 44.52811813354492
+    "score": 32.88945007324219
   },
   {
     "chunk_id": 21474836482,
@@ -31,6 +32,6 @@ expression: hits
       21
     ],
     "path": "cad/sheet-metal-rules.md",
-    "score": 28.462812423706055
+    "score": 25.271564483642578
   }
 ]

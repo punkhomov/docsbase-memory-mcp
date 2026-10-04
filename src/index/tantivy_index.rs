@@ -318,7 +318,7 @@ fn search_reader(
     // Over-fetch so the long-chunk penalty can reorder before truncation.
     let fetch = limit.saturating_mul(4).max(limit.saturating_add(16));
     let top = searcher
-        .search(&parsed, &TopDocs::with_limit(fetch))
+        .search(&parsed, &TopDocs::with_limit(fetch).order_by_score())
         .map_err(tantivy_error)?;
 
     let mut hits = Vec::with_capacity(top.len());
