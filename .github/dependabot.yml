@@ -4,7 +4,22 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Solo-maintainer policy (docs/supply-chain.md): version churn is off,
+    # security updates still flow. Manual bumps happen under nightly where
+    # min-publish-age = 14 days bites.
+    open-pull-requests-limit: 0
+    # Mirror min-publish-age: a new release is not proposed until 14 days
+    # after publish. Security updates bypass cooldown automatically.
+    cooldown:
+      default-days: 14
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 14
+    ignore:
+      # dtolnay/rust-toolchain uses the git ref as the toolchain version,
+      # so "updates" like @1.120.0 mean "install Rust 1.120.0" and 404.
+      - dependency-name: "dtolnay/rust-toolchain"

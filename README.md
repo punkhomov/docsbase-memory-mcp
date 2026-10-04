@@ -136,7 +136,9 @@ Releases only from tags, with provenance — see
 
 Local-only by design: socket/pipe on localhost, `0600`/`0700` on Unix
 (best-effort ACLs on Windows), file ops confined to registered roots,
-manifest-validated uninstall. Report issues per [`SECURITY.md`](SECURITY.md).
+manifest-validated uninstall. Supply-chain policy (threat model, quarantine,
+what Dependabot does and does not cover): [`docs/supply-chain.md`](docs/supply-chain.md).
+Report issues per [`SECURITY.md`](SECURITY.md).
 
 ## License
 

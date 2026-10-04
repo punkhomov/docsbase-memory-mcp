@@ -137,6 +137,8 @@ cargo test --locked --release   # включая перф-бюджеты (одн
 По дизайну — только локально: сокет/pipe на localhost, `0600`/`0700` на Unix
 (на Windows — best-effort ACL), файловые операции только внутри
 зарегистрированных roots, удаление только по валидированному манифесту.
+Политика supply chain (модель угроз, карантин, что покрывает Dependabot, а что нет):
+[`docs/supply-chain.md`](docs/supply-chain.md) (EN).
 Репорты — по [`SECURITY.md`](SECURITY.md).
 
 ## Лицензия

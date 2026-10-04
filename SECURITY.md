@@ -27,4 +27,6 @@ within 14 days for confirmed High/Critical issues.
   Windows (tracked as backlog after ADR-10), DoS via pathological local
   inputs beyond documented limits.
 - Supply chain: releases carry sha256 + SBOM + SLSA provenance — verify with
-  `gh attestation verify` before installing from an asset.
+  `gh attestation verify` before installing from an asset. Full policy
+  (threat model, quarantine layers, Dependabot scope, deferred items):
+  [`docs/supply-chain.md`](docs/supply-chain.md).

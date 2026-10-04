@@ -1,4 +1,6 @@
 [registry]
+# TODO(cargo-1.100): when min-publish-age stabilizes, add a CI job that
+# enforces it (stable ignores this key today) — see docs/supply-chain.md.
 global-min-publish-age = "14 days"
 
 [resolver]
