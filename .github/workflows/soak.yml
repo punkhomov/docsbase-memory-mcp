@@ -47,7 +47,7 @@ jobs:
       SOAK_SECS: ${{ github.event.inputs.soak_secs || '3600' }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.120.0
       - uses: Swatinem/rust-cache@v2
       - name: Soak, 3 agents + watcher (SC-5)
         run: cargo test --locked --release --test soak -- --ignored --nocapture
