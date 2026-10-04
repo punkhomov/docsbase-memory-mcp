@@ -152,6 +152,8 @@ jobs:
           # Drop the action's default-named leftover so only versioned files ship.
           rm -f ./*.spdx.json
           (cd dist/sbom && sha256sum "docsbase-$VERSION.sbom.spdx.json" > "docsbase-$VERSION.sbom.spdx.json.sha256")
+          # Belt and suspenders: keep only the versioned pair in the stage dir.
+          find dist/sbom -type f ! -name "docsbase-$VERSION*" -delete
           ls -la dist/sbom
       - name: Attest SBOM
         uses: actions/attest-build-provenance@v2
