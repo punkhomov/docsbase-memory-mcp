@@ -8,6 +8,8 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] — 2026-10-05
+
 ### Added
 
 - `docsbase update` — fetch the latest GitHub release, verify its sha256,
@@ -18,6 +20,10 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 - `install.json`/binary swap is now safe when the target is the running
   executable (Windows self-update moves the live image aside first).
+- Dependencies: tantivy 0.25 → 0.26 (TopDocs builder API), rmcp 3.3 → 3.4
+  (`ServerInfo` renamed to `ServerConfig`), clap 4.6.7, ignore 0.4.33.
+- Release pipeline: action bumps (checkout v7, download-artifact v8,
+  attest-build-provenance v4, action-gh-release v3) and SBOM staging fix.
 
 ## [0.1.0-alpha.1] — 2026-10-04
 
@@ -44,5 +50,6 @@ First public alpha. Expect breaking changes before `0.1.0`.
   `min-publish-age = 14 days`, GitHub Releases with sha256, SBOM
   and SLSA build provenance.
 
-[Unreleased]: https://github.com/punkhomov/docsbase-memory-mcp/compare/v0.1.0-alpha.1...HEAD
+[Unreleased]: https://github.com/punkhomov/docsbase-memory-mcp/compare/v0.1.0-alpha.2...HEAD
+[0.1.0-alpha.2]: https://github.com/punkhomov/docsbase-memory-mcp/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/punkhomov/docsbase-memory-mcp/releases/tag/v0.1.0-alpha.1

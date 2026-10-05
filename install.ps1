@@ -8,7 +8,7 @@
 .EXAMPLE
   irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1 | iex
 .EXAMPLE
-  $env:DOCSBASE_VERSION = "v0.1.0-alpha.1"; iex (irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1)
+  $env:DOCSBASE_VERSION = "v0.1.0-alpha.2"; iex (irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1)
 #>
 [CmdletBinding()]
 param()

@@ -1,7 +1,7 @@
 # Install
 
 Supported: **Linux x86_64** and **Windows x64**. macOS is out of scope for v1.
-Alpha version: `0.1.0-alpha.1` (`v0.1.0-alpha.1` tag).
+Alpha version: `0.1.0-alpha.2` (`v0.1.0-alpha.2` tag).
 
 ## Option A — script (recommended)
 
@@ -33,11 +33,11 @@ What the script does:
 Pin a version explicitly:
 
 ```sh
-DOCSBASE_VERSION=v0.1.0-alpha.1 sh install.sh
+DOCSBASE_VERSION=v0.1.0-alpha.2 sh install.sh
 ```
 
 ```powershell
-$env:DOCSBASE_VERSION = "v0.1.0-alpha.1"; iex (irm .../install.ps1)
+$env:DOCSBASE_VERSION = "v0.1.0-alpha.2"; iex (irm .../install.ps1)
 ```
 
 ## Option B — Cargo

@@ -2,7 +2,7 @@
 # docsbase installer — Linux x86_64.
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | sh
-#   DOCSBASE_VERSION=v0.1.0-alpha.1 sh install.sh
+#   DOCSBASE_VERSION=v0.1.0-alpha.2 sh install.sh
 # Env:
 #   DOCSBASE_VERSION  release tag (default: latest GitHub Release)
 #   DOCSBASE_BIN_DIR  install dir (default: $HOME/.local/bin)
