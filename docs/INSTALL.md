@@ -120,7 +120,7 @@ Environment:
 
 ```sh
 docsbase uninstall        # dry-run: lists owned artifacts + indexed projects
-docsbase uninstall --yes  # deletes the binary, manifest and cache root
+docsbase uninstall --yes  # deletes the binary, launcher, manifest and cache root
 ```
 
 Only paths recorded in the owned manifest (plus the wholly owned cache root)

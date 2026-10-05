@@ -16,6 +16,9 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ### Fixed
 
+- `uninstall` now also removes the `PATH` launcher copy recorded at install
+  time and leaves no empty data directories; a tampered manifest cannot point
+  the launcher removal at a foreign file (byte-equality check).
 - Document the `status` MCP tool (9 tools total) in `docs/MCP.md` and both
   READMEs.
 

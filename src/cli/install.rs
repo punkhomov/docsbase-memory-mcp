@@ -32,7 +32,7 @@ pub const MANIFEST: &str = "install.json";
 /// the copy/rename fails.
 pub fn install() -> anyhow::Result<()> {
     let source = std::env::current_exe().context("resolve current executable")?;
-    let (target, data) = install_from(&source)?;
+    let (target, data) = install_from(&source, Some(&source))?;
     println!("installed {} ({})", target.display(), protocol::build_id());
     println!("manifest: {}", data.join(MANIFEST).display());
     Ok(())
@@ -42,12 +42,19 @@ pub fn install() -> anyhow::Result<()> {
 /// process to exit, take the admission lease, atomically install `source` and
 /// record the owned manifest.
 ///
+/// `launcher` is the invoking binary; it is recorded so `uninstall` can remove
+/// the copy that lives on the user's `PATH` (skipped when it *is* the owned
+/// copy, e.g. `docsbase install` run from the data directory).
+///
 /// Returns the installed binary path and the canonical data directory.
 ///
 /// # Errors
 /// Fails when the daemon cannot be stopped, the admission lease is busy, or
 /// the copy/rename fails.
-pub(crate) fn install_from(source: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+pub(crate) fn install_from(
+    source: &Path,
+    launcher: Option<&Path>,
+) -> anyhow::Result<(PathBuf, PathBuf)> {
     let cache = paths::cache_dir()?;
     crate::platform::fs::secure_dir(&cache)
         .with_context(|| format!("create {}", cache.display()))?;
@@ -71,6 +78,10 @@ pub(crate) fn install_from(source: &Path) -> anyhow::Result<(PathBuf, PathBuf)> 
         protocol_version: PROTOCOL_VERSION,
         schema_version: SCHEMA_VERSION,
         binary: target.clone(),
+        launcher: match launcher {
+            Some(path) if path != target.as_path() => Some(path.to_path_buf()),
+            _ => None,
+        },
         socket: crate::platform::daemon_endpoint(&cache)
             .as_path()
             .to_path_buf(),
@@ -105,6 +116,11 @@ pub fn uninstall(yes: bool) -> anyhow::Result<()> {
     validate_manifest(&data, &manifest)?;
     println!("owned artifacts:");
     println!("  binary: {}", manifest.binary.display());
+    if let Some(launcher) = manifest.launcher.as_deref()
+        && launcher != manifest.binary.as_path()
+    {
+        println!("  launcher: {}", launcher.display());
+    }
     println!("  manifest: {}", data.join(MANIFEST).display());
     println!("  cache root: {}", manifest.cache_root.display());
     println!("  socket: {}", manifest.socket.display());
@@ -130,12 +146,28 @@ pub fn uninstall(yes: bool) -> anyhow::Result<()> {
     }
 
     let _lease = acquire_after_stop(&manifest.cache_root)?;
-    remove_file(&manifest.binary)?;
+    // The launcher is only removed while it is still our binary (byte-equal to
+    // the owned copy), checked before the owned copy disappears: a tampered
+    // manifest must not turn uninstall into arbitrary deletion.
+    let launcher = manifest
+        .launcher
+        .as_deref()
+        .filter(|path| *path != manifest.binary.as_path())
+        .filter(|path| path.is_file() && same_contents(path, &manifest.binary));
+    if let Some(launcher) = launcher {
+        remove_owned(launcher)?;
+    }
+    remove_owned(&manifest.binary)?;
     remove_file(&data.join(MANIFEST))?;
     if manifest.cache_root.is_dir() {
         fs::remove_dir_all(&manifest.cache_root)
             .with_context(|| format!("remove {}", manifest.cache_root.display()))?;
     }
+    // Leave no empty scaffolding behind; foreign files keep the dir alive.
+    if let Some(bin_dir) = manifest.binary.parent() {
+        let _ = fs::remove_dir(bin_dir);
+    }
+    let _ = fs::remove_dir(&data);
     println!("uninstalled docsbase");
     Ok(())
 }
@@ -224,6 +256,10 @@ struct Manifest {
     protocol_version: u32,
     schema_version: u32,
     binary: PathBuf,
+    /// Copy of the binary that invoked `install`/`update` (usually the
+    /// `PATH` launcher placed by the installer script).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launcher: Option<PathBuf>,
     socket: PathBuf,
     cache_root: PathBuf,
     installed_at: i64,
@@ -352,6 +388,35 @@ fn remove_file(path: &Path) -> anyhow::Result<()> {
         Err(err) => {
             Err(anyhow::Error::new(err)).with_context(|| format!("remove {}", path.display()))
         }
+    }
+}
+
+/// Removes an owned executable, moving the running image aside on Windows,
+/// where a locked executable cannot be deleted. A leftover `.old` is cleaned
+/// by the next install.
+fn remove_owned(path: &Path) -> anyhow::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) if is_current_exe(path) => {
+            let old = path.with_extension("old");
+            let _ = fs::remove_file(&old);
+            fs::rename(path, &old).with_context(|| format!("move aside {}", path.display()))?;
+            let _ = fs::remove_file(&old);
+            Ok(())
+        }
+        Err(err) => {
+            Err(anyhow::Error::new(err)).with_context(|| format!("remove {}", path.display()))
+        }
+    }
+}
+
+/// Whether two files have identical contents (used to re-verify ownership of
+/// the recorded launcher before deleting it).
+fn same_contents(a: &Path, b: &Path) -> bool {
+    match (fs::read(a), fs::read(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }
 

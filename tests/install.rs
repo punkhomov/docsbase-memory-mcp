@@ -17,6 +17,7 @@ struct Env {
     cache: TempDir,
     root: TempDir,
     data: TempDir,
+    launcher: TempDir,
     daemon: Option<Child>,
 }
 
@@ -25,6 +26,7 @@ impl Env {
         let cache = TempDir::new().expect("cache");
         let root = TempDir::new().expect("root");
         let data = TempDir::new().expect("data");
+        let launcher = TempDir::new().expect("launcher");
         for (rel, body) in files {
             write_file(root.path(), rel, body.as_bytes());
         }
@@ -32,6 +34,7 @@ impl Env {
             cache,
             root,
             data,
+            launcher,
             daemon: None,
         }
     }
@@ -59,13 +62,26 @@ impl Env {
     }
 
     fn cmd(&self) -> Command {
-        let mut command = Command::new(daemon_bin());
+        self.cmd_at(daemon_bin())
+    }
+
+    fn cmd_at(&self, program: impl AsRef<Path>) -> Command {
+        let mut command = Command::new(program.as_ref());
         command
             .env("DOCSBASE_CACHE_DIR", self.cache())
             .env("DOCSBASE_CONFIG_DIR", self.cache().join("config"))
             .env("DOCSBASE_DATA_DIR", self.data())
             .current_dir(self.root());
         command
+    }
+
+    fn launcher_dir(&self) -> &Path {
+        self.launcher.path()
+    }
+
+    fn launcher(&self) -> PathBuf {
+        self.launcher_dir()
+            .join(format!("docsbase{}", std::env::consts::EXE_SUFFIX))
     }
 
     fn index(&self) {
@@ -78,8 +94,13 @@ impl Env {
         assert!(output.status.success(), "index failed: {output:?}");
     }
 
+    /// Installs from a throwaway launcher copy, exactly like the installer
+    /// script does; uninstall then targets that copy, never the shared test
+    /// binary.
     fn install(&self) -> Value {
-        let output = self.cmd().arg("install").output().expect("run install");
+        let launcher = self.launcher();
+        fs::copy(daemon_bin(), &launcher).expect("copy launcher");
+        let output = output_retry(self.cmd_at(&launcher).arg("install"));
         assert!(
             output.status.success(),
             "install failed: {}",
@@ -131,6 +152,21 @@ impl Drop for Env {
 
 fn daemon_bin() -> PathBuf {
     assert_cmd::cargo::cargo_bin!("docsbase").to_path_buf()
+}
+
+/// Runs a command, retrying `ETXTBSY`: in a parallel test process a fork by
+/// another thread can briefly inherit a write fd for a freshly copied binary,
+/// making the immediately following exec fail with `ExecutableFileBusy`.
+fn output_retry(command: &mut Command) -> std::process::Output {
+    for _ in 0..100 {
+        match command.output() {
+            Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            other => return other.expect("run command"),
+        }
+    }
+    panic!("command kept failing with ExecutableFileBusy");
 }
 
 /// Windows canonicalize yields verbatim `\\?\` paths; compare like values.
@@ -244,15 +280,15 @@ fn update_from_local_binary_replaces_invoked_and_owned() {
     let candidate = env.data().join("candidate");
     fs::write(&candidate, b"candidate build").expect("write candidate");
 
-    let output = Command::new(&invoked)
-        .env("DOCSBASE_CACHE_DIR", env.cache())
-        .env("DOCSBASE_CONFIG_DIR", env.cache().join("config"))
-        .env("DOCSBASE_DATA_DIR", env.data())
-        .current_dir(env.root())
-        .args(["update", "--from"])
-        .arg(&candidate)
-        .output()
-        .expect("run update");
+    let output = output_retry(
+        Command::new(&invoked)
+            .env("DOCSBASE_CACHE_DIR", env.cache())
+            .env("DOCSBASE_CONFIG_DIR", env.cache().join("config"))
+            .env("DOCSBASE_DATA_DIR", env.data())
+            .current_dir(env.root())
+            .args(["update", "--from"])
+            .arg(&candidate),
+    );
     assert!(
         output.status.success(),
         "update failed: {}",
@@ -296,9 +332,14 @@ fn uninstall_lists_indexes_with_confirmation() {
         "project must be listed: {stdout}"
     );
     assert!(stdout.contains("--yes"), "confirmation hint: {stdout}");
+    assert!(
+        stdout.contains("launcher:"),
+        "launcher must be listed: {stdout}"
+    );
     assert!(env.binary().is_file(), "no deletion without --yes");
     assert!(env.manifest().is_file(), "no deletion without --yes");
     assert!(env.cache().exists(), "no deletion without --yes");
+    assert!(env.launcher().is_file(), "no deletion without --yes");
 
     let output = env
         .cmd()
@@ -309,6 +350,8 @@ fn uninstall_lists_indexes_with_confirmation() {
     assert!(!env.binary().exists(), "binary must be removed");
     assert!(!env.manifest().exists(), "manifest must be removed");
     assert!(!env.cache().exists(), "cache root must be removed");
+    assert!(!env.launcher().exists(), "launcher must be removed");
+    assert!(!env.data().exists(), "empty data dir must be removed");
 }
 
 #[test]
@@ -317,6 +360,8 @@ fn uninstall_preserves_foreign() {
     env.install();
     let foreign = env.data().join("bin/other-tool");
     fs::write(&foreign, b"foreign").expect("foreign file");
+    let foreign_launcher = env.launcher_dir().join("keep-me");
+    fs::write(&foreign_launcher, b"foreign").expect("foreign launcher file");
 
     let output = env
         .cmd()
@@ -325,7 +370,45 @@ fn uninstall_preserves_foreign() {
         .expect("run uninstall");
     assert!(output.status.success(), "uninstall must succeed");
     assert!(foreign.is_file(), "foreign binary must survive");
+    assert!(
+        foreign_launcher.is_file(),
+        "foreign file next to the launcher must survive"
+    );
     assert!(!env.binary().exists(), "owned binary must be removed");
+    assert!(!env.launcher().exists(), "owned launcher must be removed");
+}
+
+#[test]
+fn uninstall_ignores_tampered_launcher() {
+    let env = Env::new(&[("README.md", DOC)]);
+    env.install();
+    let decoy = env.data().join("decoy.bin");
+    fs::write(&decoy, b"not the docsbase binary").expect("decoy");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(env.manifest()).expect("manifest")).expect("json");
+    manifest["launcher"] = serde_json::json!(decoy);
+    fs::write(
+        env.manifest(),
+        serde_json::to_vec_pretty(&manifest).expect("encode"),
+    )
+    .expect("rewrite manifest");
+
+    let output = env
+        .cmd()
+        .args(["uninstall", "--yes"])
+        .output()
+        .expect("run uninstall");
+    assert!(
+        output.status.success(),
+        "uninstall must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        decoy.is_file(),
+        "tampered launcher path must not be deleted"
+    );
+    assert!(!env.binary().exists(), "owned binary must be removed");
+    assert!(!env.manifest().exists(), "manifest must be removed");
 }
 
 #[test]
