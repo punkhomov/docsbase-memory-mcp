@@ -29,6 +29,7 @@ tools bind correctly.
 | `index_project` | registry | `{path?: string}` | Register + full index (defaults to session dir); long-running (600 s budget) |
 | `sync_start` | registry | `{project_id?: int}` | Start (or return active) sync job → `{job_id}`; quick |
 | `sync_status` | registry | `{job_id: int}` | Job `{state: queued\|running\|done\|error, stats}`; poll every ~250 ms |
+| `status` | registry | `{}` | Registry-wide status: projects, documents, chunks, sessions, watcher and versions |
 
 Project tools require a session bound to a registered project; otherwise the
 server returns a `Project` error with a fix-up instruction (e.g. run

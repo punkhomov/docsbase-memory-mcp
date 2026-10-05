@@ -23,10 +23,12 @@ Supported platforms: **Linux x86_64** (static binary) and **Windows x64**
 ## Quickstart (5 minutes)
 
 ```sh
-# 1. Install from a GitHub Release asset (see docs/INSTALL.md for options)
-curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | sh
+# 1. Install from a GitHub Release asset (see docs/INSTALL.md for options).
+# Alpha period: every release is a prerelease, so opt in to that channel;
+# stable is the default once 0.1.0 ships.
+curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | DOCSBASE_CHANNEL=prerelease sh
 # Windows (PowerShell):
-# irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1 | iex
+# $env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1 | iex
 
 # 2. Register the owned binary + manifest
 docsbase install
@@ -91,7 +93,7 @@ Details: [`docs/CONFIG.md`](docs/CONFIG.md), `docsbase --help`.
 ```
 
 Tools: `search_docs`, `get_doc`, `read_neighbors`, `list_docs`,
-`list_projects`, `index_project`, `sync_start`, `sync_status`.
+`list_projects`, `index_project`, `sync_start`, `sync_status`, `status`.
 Details and timeouts: [`docs/MCP.md`](docs/MCP.md).
 
 ## How it works

@@ -30,7 +30,21 @@ What the script does:
 4. Installs the binary into `~/.local/bin` (`%USERPROFILE%\.local\bin` on
    Windows, added to `PATH` for the current user) and runs `docsbase install`.
 
-Pin a version explicitly:
+Channels and pinning:
+
+The scripts install the latest **stable** release by default. While the
+project publishes only prereleases (all `0.x` tags today), the stable channel
+has nothing to resolve; opt in to the prerelease channel explicitly:
+
+```sh
+DOCSBASE_CHANNEL=prerelease sh install.sh
+```
+
+```powershell
+$env:DOCSBASE_CHANNEL = "prerelease"; iex (irm .../install.ps1)
+```
+
+`DOCSBASE_VERSION` pins an exact tag and overrides the channel:
 
 ```sh
 DOCSBASE_VERSION=v0.1.0-alpha.2 sh install.sh

@@ -23,10 +23,12 @@
 ## Быстрый старт (5 минут)
 
 ```sh
-# 1. Установка из ассета GitHub Releases (варианты — в docs/INSTALL.md)
-curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | sh
+# 1. Установка из ассета GitHub Releases (варианты — в docs/INSTALL.md).
+# Альфа-период: все релизы — пререлизы, включаем канал явно; после 0.1.0
+# по умолчанию стабильный канал.
+curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | DOCSBASE_CHANNEL=prerelease sh
 # Windows (PowerShell):
-# irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1 | iex
+# $env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1 | iex
 
 # 2. Регистрация бинаря + манифеста
 docsbase install
@@ -91,7 +93,7 @@ docsbase uninstall [--yes]  # без --yes только показывает; с
 ```
 
 Инструменты: `search_docs`, `get_doc`, `read_neighbors`, `list_docs`,
-`list_projects`, `index_project`, `sync_start`, `sync_status`.
+`list_projects`, `index_project`, `sync_start`, `sync_status`, `status`.
 Детали и таймауты: [`docs/MCP.md`](docs/MCP.md) (EN).
 
 ## Как устроено
