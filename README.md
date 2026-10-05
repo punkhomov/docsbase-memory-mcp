@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![MSRV 1.88](https://img.shields.io/badge/MSRV-1.88-blue.svg)](rust-toolchain.toml)
 
-> **Alpha:** current version [`0.1.0-alpha.1`](CHANGELOG.md). Breaking changes
+> **Alpha:** current version [`0.1.0-alpha.2`](CHANGELOG.md). Breaking changes
 > are expected before `0.1.0`. Git tag `v<version>` always equals
 > `version` in `Cargo.toml`.
 >
@@ -51,11 +51,11 @@ Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 |---|---|---|
 | Linux script | `curl -fsSL …/install.sh \| sh` | Downloads the release asset, verifies sha256, runs `docsbase install` |
 | Windows script | `irm …/install.ps1 \| iex` | Same for the `.exe` asset |
-| Cargo | `cargo install --locked docsbase --version 0.1.0-alpha.1` | Builds from source, MSRV 1.88 |
+| Cargo | `cargo install --locked docsbase --version 0.1.0-alpha.2` | Builds from source, MSRV 1.88 |
 | Manual | Download asset from [Releases](https://github.com/punkhomov/docsbase-memory-mcp/releases), `sha256sum -c`, then `docsbase install` | Verify SLSA provenance, see [`docs/INSTALL.md`](docs/INSTALL.md) |
 
 Updates: `docsbase update` (checks the latest release, verifies it, replaces
-the binary). Pin a version with `docsbase update --version v0.1.0-alpha.1`.
+the binary). Pin a version with `docsbase update --version v0.1.0-alpha.2`.
 
 Every release ships: `sha256sum` files, SBOM, and SLSA build provenance
 (Sigstore). Verify with `gh attestation verify`.
