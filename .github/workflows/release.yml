@@ -144,6 +144,9 @@ jobs:
           path: ./
           format: spdx-json
           output-file: docsbase.sbom.spdx.json
+          # The action's own artifact (repo-named, unversioned) would otherwise
+          # be downloaded by `publish` and attached to the release.
+          upload-artifact: false
       - name: Rename per version + checksum
         run: |
           VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
