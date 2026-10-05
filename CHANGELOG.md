@@ -8,6 +8,8 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] — 2026-10-05
+
 ### Added
 
 - `DOCSBASE_CHANNEL=prerelease` opt-in for `install.sh` / `install.ps1`;
@@ -21,6 +23,8 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
   the launcher removal at a foreign file (byte-equality check).
 - Document the `status` MCP tool (9 tools total) in `docs/MCP.md` and both
   READMEs.
+- Release pipeline no longer attaches the stray unversioned `sbom-action`
+  artifact; only the versioned SBOM pair ships.
 
 ## [0.1.0-alpha.2] — 2026-10-05
 
@@ -64,6 +68,7 @@ First public alpha. Expect breaking changes before `0.1.0`.
   `min-publish-age = 14 days`, GitHub Releases with sha256, SBOM
   and SLSA build provenance.
 
-[Unreleased]: https://github.com/punkhomov/docsbase-memory-mcp/compare/v0.1.0-alpha.2...HEAD
+[Unreleased]: https://github.com/punkhomov/docsbase-memory-mcp/compare/v0.1.0-alpha.3...HEAD
+[0.1.0-alpha.3]: https://github.com/punkhomov/docsbase-memory-mcp/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/punkhomov/docsbase-memory-mcp/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/punkhomov/docsbase-memory-mcp/releases/tag/v0.1.0-alpha.1

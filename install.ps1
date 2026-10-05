@@ -10,7 +10,7 @@
 .EXAMPLE
   $env:DOCSBASE_CHANNEL = "prerelease"; iex (irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1)
 .EXAMPLE
-  $env:DOCSBASE_VERSION = "v0.1.0-alpha.2"; iex (irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1)
+  $env:DOCSBASE_VERSION = "v0.1.0-alpha.3"; iex (irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1)
 #>
 [CmdletBinding()]
 param()
