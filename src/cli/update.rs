@@ -79,8 +79,9 @@ pub fn run(opts: &Options) -> anyhow::Result<()> {
     verify_sha256(&archive, &checksum)?;
     let newbin = extract(&archive, tmp.path())?;
 
-    let (target, data) =
-        install::install_from(&newbin).with_context(|| format!("install {}", newbin.display()))?;
+    let launcher = std::env::current_exe().ok();
+    let (target, data) = install::install_from(&newbin, launcher.as_deref())
+        .with_context(|| format!("install {}", newbin.display()))?;
     self_replace(&target);
     println!("updated docsbase {current} -> {version}");
     println!(
@@ -94,8 +95,9 @@ pub fn run(opts: &Options) -> anyhow::Result<()> {
 }
 
 fn install_local(current: &str, from: &Path) -> anyhow::Result<()> {
-    let (target, data) =
-        install::install_from(from).with_context(|| format!("install {}", from.display()))?;
+    let launcher = std::env::current_exe().ok();
+    let (target, data) = install::install_from(from, launcher.as_deref())
+        .with_context(|| format!("install {}", from.display()))?;
     self_replace(&target);
     println!("updated docsbase {current} -> {}", from.display());
     println!(
