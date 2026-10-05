@@ -8,6 +8,17 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ## [Unreleased]
 
+### Added
+
+- `DOCSBASE_CHANNEL=prerelease` opt-in for `install.sh` / `install.ps1`;
+  `stable` is the default channel, and prerelease-only repositories now fail
+  with an actionable hint instead of a raw 404.
+
+### Fixed
+
+- Document the `status` MCP tool (9 tools total) in `docs/MCP.md` and both
+  READMEs.
+
 ## [0.1.0-alpha.2] — 2026-10-05
 
 ### Added
