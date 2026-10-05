@@ -2,9 +2,11 @@
 # docsbase installer — Linux x86_64.
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | sh
+#   DOCSBASE_CHANNEL=prerelease sh install.sh
 #   DOCSBASE_VERSION=v0.1.0-alpha.2 sh install.sh
 # Env:
-#   DOCSBASE_VERSION  release tag (default: latest GitHub Release)
+#   DOCSBASE_CHANNEL  stable (default) | prerelease — channel for "latest"
+#   DOCSBASE_VERSION  exact release tag (overrides the channel)
 #   DOCSBASE_BIN_DIR  install dir (default: $HOME/.local/bin)
 #   DOCSBASE_REPO     owner/repo (default: punkhomov/docsbase-memory-mcp)
 set -eu
@@ -12,6 +14,7 @@ set -eu
 REPO="${DOCSBASE_REPO:-punkhomov/docsbase-memory-mcp}"
 BIN_DIR="${DOCSBASE_BIN_DIR:-$HOME/.local/bin}"
 VERSION="${DOCSBASE_VERSION:-latest}"
+CHANNEL="${DOCSBASE_CHANNEL:-stable}"
 
 fail() { echo "install.sh: error: $*" >&2; exit 1; }
 info() { echo "install.sh: $*"; }
@@ -28,9 +31,21 @@ case "$ARCH" in
 esac
 
 if [ "$VERSION" = "latest" ]; then
-  info "resolving latest release tag for $REPO..."
-  TAG="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep -m1 '"tag_name"' | cut -d'"' -f4)"
-  [ -n "$TAG" ] || fail "could not resolve latest release (set DOCSBASE_VERSION=vX.Y.Z)"
+  case "$CHANNEL" in
+    stable)
+      info "resolving latest stable release tag for $REPO..."
+      TAG="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+      [ -n "$TAG" ] || fail "no stable release published yet; rerun with DOCSBASE_CHANNEL=prerelease (or pin DOCSBASE_VERSION=vX.Y.Z)"
+      ;;
+    prerelease)
+      info "resolving newest release tag (prereleases included) for $REPO..."
+      TAG="$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+      [ -n "$TAG" ] || fail "could not resolve any release (set DOCSBASE_VERSION=vX.Y.Z)"
+      ;;
+    *)
+      fail "unknown DOCSBASE_CHANNEL '$CHANNEL' (expected: stable or prerelease)"
+      ;;
+  esac
   VERSION="$TAG"
 fi
 case "$VERSION" in
