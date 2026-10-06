@@ -8,6 +8,12 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- `install.sh`: no more `curl: (23)` EPIPE noise while resolving the release
+  tag (`grep -m1` closes the pipe early); network failures still surface via
+  the actionable empty-tag message.
+
 ## [0.1.0-alpha.3] — 2026-10-05
 
 ### Added

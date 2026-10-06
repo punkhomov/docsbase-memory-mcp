@@ -31,15 +31,18 @@ case "$ARCH" in
 esac
 
 if [ "$VERSION" = "latest" ]; then
+  # curl stderr is dropped: `grep -m1` closes the pipe early, which makes curl
+  # report EPIPE (23) while it is still writing the JSON body. A real network
+  # failure still surfaces through the empty-tag checks below.
   case "$CHANNEL" in
     stable)
       info "resolving latest stable release tag for $REPO..."
-      TAG="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+      TAG="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | grep -m1 '"tag_name"' | cut -d'"' -f4)"
       [ -n "$TAG" ] || fail "no stable release published yet; rerun with DOCSBASE_CHANNEL=prerelease (or pin DOCSBASE_VERSION=vX.Y.Z)"
       ;;
     prerelease)
       info "resolving newest release tag (prereleases included) for $REPO..."
-      TAG="$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+      TAG="$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=1" 2>/dev/null | grep -m1 '"tag_name"' | cut -d'"' -f4)"
       [ -n "$TAG" ] || fail "could not resolve any release (set DOCSBASE_VERSION=vX.Y.Z)"
       ;;
     *)
