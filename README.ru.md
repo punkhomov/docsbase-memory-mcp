@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![MSRV 1.88](https://img.shields.io/badge/MSRV-1.88-blue.svg)](rust-toolchain.toml)
 
-> **Альфа:** текущая версия [`0.1.0-alpha.2`](CHANGELOG.md). До `0.1.0`
+> **Альфа:** текущая версия [`0.1.0-alpha.3`](CHANGELOG.md). До `0.1.0`
 > возможны ломающие изменения. Git-тег `v<version>` всегда равен
 > `version` в `Cargo.toml`.
 >
@@ -53,11 +53,11 @@ docsbase status
 |---|---|---|
 | Linux-скрипт | `curl -fsSL …/install.sh \| sh` | Качает ассет релиза, проверяет sha256, вызывает `docsbase install` |
 | Windows-скрипт | `irm …/install.ps1 \| iex` | То же для `.exe`-ассета |
-| Cargo | `cargo install --locked docsbase --version 0.1.0-alpha.2` | Сборка из исходников, MSRV 1.88 |
+| Cargo | `cargo install --locked docsbase --version 0.1.0-alpha.3` | Сборка из исходников, MSRV 1.88 |
 | Вручную | Скачать ассет из [Releases](https://github.com/punkhomov/docsbase-memory-mcp/releases), `sha256sum -c`, затем `docsbase install` | Проверяйте SLSA-provenance, см. [`docs/INSTALL.md`](docs/INSTALL.md) |
 
 Обновление: `docsbase update` (проверяет последний релиз, верифицирует и
-заменяет бинарь). Зафиксировать версию: `docsbase update --version v0.1.0-alpha.2`.
+заменяет бинарь). Зафиксировать версию: `docsbase update --version v0.1.0-alpha.3`.
 
 Каждый релиз содержит: файлы `sha256sum`, SBOM и SLSA-provenance сборки
 (Sigstore). Проверка: `gh attestation verify`.

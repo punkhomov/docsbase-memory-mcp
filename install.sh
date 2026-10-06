@@ -3,7 +3,7 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | sh
 #   DOCSBASE_CHANNEL=prerelease sh install.sh
-#   DOCSBASE_VERSION=v0.1.0-alpha.2 sh install.sh
+#   DOCSBASE_VERSION=v0.1.0-alpha.3 sh install.sh
 # Env:
 #   DOCSBASE_CHANNEL  stable (default) | prerelease — channel for "latest"
 #   DOCSBASE_VERSION  exact release tag (overrides the channel)
