@@ -10,7 +10,7 @@ use tantivy::schema::{
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 
 use crate::error::{Error, Result};
-use crate::index::chunk::Chunk;
+use crate::index::chunk::{CHUNK_OVERLAP, Chunk};
 use crate::index::job::MAX_CHUNK_CHARS;
 use crate::index::tokenizer::{self, IdentifierTokenizer};
 
@@ -209,7 +209,7 @@ impl IndexHandle {
             document.add_text(self.fields.identifiers, extract_identifiers(&chunk.text));
             document.add_u64(
                 self.fields.text_len,
-                u64::try_from(chunk.text.len()).unwrap_or(u64::MAX),
+                u64::try_from(chunk.text.chars().count()).unwrap_or(u64::MAX),
             );
             self.writer.add_document(document).map_err(tantivy_error)?;
         }
@@ -336,7 +336,7 @@ fn search_reader(
             .get_first(fields.text_len)
             .and_then(|value| value.as_u64())
             .ok_or_else(|| Error::internal(format!("index doc {address:?}: missing text_len")))?;
-        let score = if text_len > MAX_CHUNK_CHARS as u64 {
+        let score = if text_len > (MAX_CHUNK_CHARS + CHUNK_OVERLAP) as u64 {
             score * LONG_CHUNK_PENALTY
         } else {
             score

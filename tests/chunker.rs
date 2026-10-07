@@ -203,3 +203,15 @@ fn crlf_line_ranges() {
     assert_eq!(chunks.len(), 1);
     assert!(chunks[0].text.contains("text"));
 }
+
+/// FR-5: the cap counts Unicode chars, not bytes — a 1402-char RU section
+/// (2804 bytes) must not split at a middle blank line against a 1500-char cap.
+#[test]
+fn cap_counts_unicode_chars_not_bytes() {
+    let body = format!("{}\n\n{}", "а".repeat(800), "а".repeat(600));
+    assert_eq!(body.chars().count(), 1402);
+    assert!(body.len() > 2800, "bytes >> chars: {}", body.len());
+    let chunks = chunk_markdown(&body, 1500);
+    assert_eq!(chunks.len(), 1, "{chunks:?}");
+    assert_eq!(chunks[0].text.chars().count(), 1402);
+}

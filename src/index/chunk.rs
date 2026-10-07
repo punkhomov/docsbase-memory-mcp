@@ -20,6 +20,10 @@ pub enum ChunkKind {
     Table,
 }
 
+/// Tail of the previous chunk carried into the next one at paragraph splits
+/// (≈10% of the char cap); consumed by the recursive splitter (SQ4).
+pub const CHUNK_OVERLAP: usize = 150;
+
 /// One indexed chunk with citation metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
@@ -188,6 +192,7 @@ fn split_ranges(text: &str, max: usize) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut start = 0_usize;
     let mut pos = 0_usize;
+    let mut chars_since_start = 0_usize;
     let mut fence: Option<(char, usize)> = None;
 
     for line in text.split_inclusive('\n') {
@@ -199,10 +204,12 @@ fn split_ranges(text: &str, max: usize) -> Vec<(usize, usize)> {
             fence = Some(opened);
         }
         pos += line.len();
+        chars_since_start += line.chars().count();
         let boundary = fence.is_none() && line.trim().is_empty();
-        if boundary && pos - start > max {
+        if boundary && chars_since_start > max {
             ranges.push((start, pos));
             start = pos;
+            chars_since_start = 0;
         }
     }
     if start < text.len() {

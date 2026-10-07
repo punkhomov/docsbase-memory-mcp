@@ -14,8 +14,10 @@ use crate::store::Db;
 use crate::store::models::{ChunkKind as StoredChunkKind, Project};
 use crate::store::repo::{self, DocState, NewChunk, NewDoc};
 
-/// Longest section body kept in one chunk when no paragraph boundary splits it.
-pub const MAX_CHUNK_CHARS: usize = 4_000;
+/// Longest section body kept in one chunk when no paragraph boundary splits
+/// it, in Unicode characters (not bytes; FR-5). Initial calibration ≈300–500
+/// tokens; refined by the S2 measurement (ADR-S1).
+pub const MAX_CHUNK_CHARS: usize = 1_500;
 
 /// One non-fatal per-file problem, surfaced by `status` (FR-19, A4; NFR-8).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

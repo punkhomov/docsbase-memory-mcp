@@ -279,3 +279,70 @@ fn chunk_id_parts_inverse() {
     assert_eq!(chunk_id_parts(chunk_id(7, 42)), (7, 42));
     assert_eq!(chunk_id_parts(chunk_id(0, 0)), (0, 0));
 }
+
+/// FR-5: the stored `text_len` is a Unicode-char count, not a byte count.
+#[test]
+fn stored_text_len_counts_unicode_chars() {
+    use tantivy::collector::TopDocs;
+    use tantivy::query::TermQuery;
+    use tantivy::schema::{IndexRecordOption, Value};
+    use tantivy::{TantivyDocument, Term};
+
+    let (_dir, mut index) = handle();
+    let text = format!("{} refreshed", "а".repeat(999));
+    assert_eq!(text.chars().count(), 1009);
+    index
+        .add_chunks(&[chunk(1, 0, "T", &text)])
+        .expect("add chunks");
+    index.commit().expect("commit");
+
+    let reader = index.reader();
+    reader.reload().expect("reload");
+    let searcher = reader.searcher();
+    let schema = searcher.schema();
+    let text_field = schema.get_field("text").expect("text field");
+    let len_field = schema.get_field("text_len").expect("text_len field");
+    let query = TermQuery::new(
+        Term::from_field_text(text_field, "refreshed"),
+        IndexRecordOption::WithFreqsAndPositions,
+    );
+    let top = searcher
+        .search(&query, &TopDocs::with_limit(1).order_by_score())
+        .expect("term search");
+    let (_, address) = top[0];
+    let document: TantivyDocument = searcher.doc(address).expect("stored doc");
+    let stored = document
+        .get_first(len_field)
+        .and_then(|value| value.as_u64())
+        .expect("stored text_len");
+    assert_eq!(
+        stored,
+        1009,
+        "text_len must count Unicode chars, not {} bytes",
+        text.len()
+    );
+}
+
+/// FR-5: the long-chunk penalty uses the char cap plus the overlap allowance,
+/// so a chunk sized within `MAX_CHUNK_CHARS + CHUNK_OVERLAP` is not punished
+/// while an oversized one is.
+#[test]
+fn penalty_uses_char_threshold_and_overlap() {
+    let (_dir, mut index) = handle();
+    let legal = format!("{} refreshed", "а".repeat(1590));
+    let oversized = format!("{} refreshed", "а".repeat(1690));
+    assert_eq!(legal.chars().count(), 1600);
+    assert_eq!(oversized.chars().count(), 1700);
+    index
+        .add_chunks(&[chunk(1, 0, "T", &legal), chunk(2, 0, "T", &oversized)])
+        .expect("add chunks");
+    index.commit().expect("commit");
+
+    let hits = index.search("refreshed", 5).expect("search");
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    assert_eq!(hits[0].doc_id, 1, "legal chunk must rank first: {hits:?}");
+    assert!(
+        hits[0].score > hits[1].score * 1.1,
+        "oversized chunk must be penalized: {hits:?}"
+    );
+}
