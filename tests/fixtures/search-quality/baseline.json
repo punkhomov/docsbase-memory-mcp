@@ -1,0 +1,117 @@
+{
+  "tolerance": {
+    "ndcg": 0.02
+  },
+  "cases": [
+    {
+      "query": "замена",
+      "class": "ru",
+      "k": 3,
+      "hit": true,
+      "ndcg": 1.0
+    },
+    {
+      "query": "замены",
+      "class": "ru",
+      "k": 3,
+      "hit": false,
+      "ndcg": 0.0
+    },
+    {
+      "query": "заменой",
+      "class": "ru",
+      "k": 3,
+      "hit": false,
+      "ndcg": 0.0
+    },
+    {
+      "query": "каталоги",
+      "class": "ru",
+      "k": 3,
+      "hit": true,
+      "ndcg": 1.0
+    },
+    {
+      "query": "каталогов",
+      "class": "ru",
+      "k": 3,
+      "hit": false,
+      "ndcg": 0.0
+    },
+    {
+      "query": "atomic replace",
+      "class": "en",
+      "k": 3,
+      "hit": true,
+      "ndcg": 1.0
+    },
+    {
+      "query": "system directories",
+      "class": "en",
+      "k": 3,
+      "hit": true,
+      "ndcg": 1.0
+    },
+    {
+      "query": "assessment_plan_id",
+      "class": "identifiers",
+      "k": 3,
+      "hit": true,
+      "ndcg": 1.0
+    },
+    {
+      "query": "MAX_FRAME_BYTES",
+      "class": "identifiers",
+      "k": 3,
+      "hit": true,
+      "ndcg": 1.0
+    },
+    {
+      "query": "\"plan id\"",
+      "class": "phrases",
+      "k": 3,
+      "hit": false,
+      "ndcg": 0.0
+    },
+    {
+      "query": "東京",
+      "class": "cjk",
+      "k": 3,
+      "hit": false,
+      "ndcg": 0.0
+    },
+    {
+      "query": "مطار",
+      "class": "arabic",
+      "k": 3,
+      "hit": false,
+      "ndcg": 0.0
+    }
+  ],
+  "classes": {
+    "arabic": {
+      "hit_rate": 0.0,
+      "ndcg": 0.0
+    },
+    "cjk": {
+      "hit_rate": 0.0,
+      "ndcg": 0.0
+    },
+    "en": {
+      "hit_rate": 1.0,
+      "ndcg": 1.0
+    },
+    "identifiers": {
+      "hit_rate": 1.0,
+      "ndcg": 1.0
+    },
+    "phrases": {
+      "hit_rate": 0.0,
+      "ndcg": 0.0
+    },
+    "ru": {
+      "hit_rate": 0.4,
+      "ndcg": 0.4
+    }
+  }
+}
