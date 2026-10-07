@@ -1,4 +1,4 @@
-use docsbase_memory::index::chunk::{ChunkKind, chunk_markdown};
+use docsbase_memory::index::chunk::{CHUNK_OVERLAP, ChunkKind, chunk_markdown};
 
 #[test]
 fn breadcrumb_path() {
@@ -15,22 +15,37 @@ fn breadcrumb_path() {
 fn fence_not_split() {
     let body = "# T\n\n```rust\nlet x = 1;\n\nlet y = 2;\n```\n";
     let chunks = chunk_markdown(body, 8);
-    assert_eq!(chunks.len(), 1, "{chunks:?}");
+    let code = chunks
+        .iter()
+        .find(|chunk| chunk.text.contains("let y = 2;"))
+        .expect("code chunk");
+    assert!(
+        code.text.contains("let x = 1;"),
+        "fence must stay intact: {:?}",
+        code.text
+    );
     assert_eq!(
-        chunks[0].kind,
+        code.kind,
         ChunkKind::Code {
             lang: Some("rust".to_owned())
         }
     );
-    assert!(chunks[0].text.contains("let y = 2;"), "{}", chunks[0].text);
 }
 
 #[test]
 fn nested_fence_not_split() {
     let body = "# T\n\n````\n```\ninner\n\nstill inner\n```\n````\n";
     let chunks = chunk_markdown(body, 6);
-    assert_eq!(chunks.len(), 1, "{chunks:?}");
-    assert!(chunks[0].text.contains("still inner"), "{}", chunks[0].text);
+    let fenced: Vec<_> = chunks
+        .iter()
+        .filter(|chunk| chunk.text.contains("still inner"))
+        .collect();
+    assert_eq!(fenced.len(), 1, "{chunks:?}");
+    assert!(
+        fenced[0].text.contains("````"),
+        "fence must stay intact: {}",
+        fenced[0].text
+    );
 }
 
 #[test]
@@ -53,7 +68,11 @@ fn unterminated_fence_not_split() {
 fn fenced_section_is_code() {
     let body = "# T\n\n```\nplain\n```\n";
     let chunks = chunk_markdown(body, 10_000);
-    assert_eq!(chunks[0].kind, ChunkKind::Code { lang: None });
+    let code = chunks
+        .iter()
+        .find(|chunk| chunk.text.contains("plain"))
+        .expect("code chunk");
+    assert_eq!(code.kind, ChunkKind::Code { lang: None });
 }
 
 #[test]
@@ -84,7 +103,7 @@ fn table_intact() {
 #[test]
 fn kind_is_per_chunk() {
     let body = "# T\n\nintro paragraph\n\n```rust\ncode();\n```\n";
-    let chunks = chunk_markdown(body, 12);
+    let chunks = chunk_markdown(body, 16);
     assert!(chunks.len() >= 2, "{chunks:?}");
     assert!(
         chunks
@@ -116,20 +135,36 @@ fn long_section_split_at_paragraph() {
     }
 }
 
+/// FR-4: an oversized paragraph is cut at line/token boundaries instead of
+/// staying unbounded; all words survive, chunks stay ≤ cap + overlap.
 #[test]
-fn oversized_paragraph_not_cut() {
-    let body = "# T\n\none very long paragraph without blank lines at all\n";
-    let chunks = chunk_markdown(body, 4);
-    let long: Vec<_> = chunks
-        .iter()
-        .filter(|chunk| chunk.text.contains("one very long"))
-        .collect();
-    assert_eq!(long.len(), 1, "{chunks:?}");
-    assert!(
-        long[0].text.contains("without blank lines at all"),
-        "{}",
-        long[0].text
-    );
+fn oversized_paragraph_splits_at_token_boundary() {
+    let words: Vec<String> = (0..120).map(|i| format!("слово{i:03}")).collect();
+    let paragraph = words.join(" ");
+    let body = format!("# T\n\n{paragraph}\n");
+    let chunks = chunk_markdown(&body, 60);
+    assert!(chunks.len() > 1, "{chunks:?}");
+    for chunk in &chunks {
+        assert!(
+            chunk.text.chars().count() <= 60 + CHUNK_OVERLAP,
+            "chunk over cap+overlap: {} chars",
+            chunk.text.chars().count()
+        );
+    }
+    let joined: String = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
+    for word in [&words[0], &words[59], &words[119]] {
+        assert!(joined.contains(word.as_str()), "missing {word}");
+    }
+    // No word may be cut in half: every token is a complete source word.
+    for chunk in &chunks {
+        for token in chunk.text.split_whitespace() {
+            assert!(
+                words.iter().any(|word| word == token) || token == "#" || token == "T",
+                "broken token {token:?} in {:?}",
+                chunk.text
+            );
+        }
+    }
 }
 
 #[test]
@@ -214,4 +249,118 @@ fn cap_counts_unicode_chars_not_bytes() {
     let chunks = chunk_markdown(&body, 1500);
     assert_eq!(chunks.len(), 1, "{chunks:?}");
     assert_eq!(chunks[0].text.chars().count(), 1402);
+}
+
+/// FR-4/SC-5: a long headingless section yields bounded chunks with valid
+/// source line ranges.
+#[test]
+fn section_bounded_with_valid_lines() {
+    let mut body = String::new();
+    for paragraph in 0..40 {
+        let words: Vec<String> = (0..8).map(|w| format!("п{paragraph:02}с{w}")).collect();
+        body.push_str(&words.join(" "));
+        body.push_str("\n\n");
+    }
+    let total_lines = body.lines().count();
+    let chunks = chunk_markdown(&body, 600);
+    assert!(chunks.len() > 1, "section must split: {}", chunks.len());
+    for chunk in &chunks {
+        let chars = chunk.text.chars().count();
+        assert!(chars <= 600 + 600 / 10, "over cap+overlap: {chars}");
+        assert!(chunk.line_start >= 1 && chunk.line_end >= chunk.line_start);
+        let line_end = usize::try_from(chunk.line_end).expect("u32 fits");
+        let line_start = usize::try_from(chunk.line_start).expect("u32 fits");
+        assert!(line_end <= total_lines, "{chunk:?}");
+        let slice = body
+            .lines()
+            .skip(line_start - 1)
+            .take(line_end - line_start + 1)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let first = chunk.text.split_whitespace().next().expect("token");
+        assert!(
+            slice.contains(first),
+            "line range must cover {first:?}: {chunk:?}"
+        );
+    }
+    let joined: String = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
+    assert!(joined.contains("п39с7"), "tail must be covered: {joined}");
+}
+
+/// FR-4: consecutive pieces share a tail so citations keep context.
+#[test]
+fn overlap_carries_tail() {
+    let alpha: Vec<String> = (0..40).map(|i| format!("альфа{i:02}")).collect();
+    let beta: Vec<String> = (0..40).map(|i| format!("бета{i:02}")).collect();
+    let body = format!("{}\n\n{}\n", alpha.join(" "), beta.join(" "));
+    let chunks = chunk_markdown(&body, 100);
+    assert!(chunks.len() >= 3, "{chunks:?}");
+    let shared = chunks
+        .windows(2)
+        .filter(|pair| {
+            pair[0]
+                .text
+                .split_whitespace()
+                .last()
+                .is_some_and(|last| pair[1].text.contains(last))
+        })
+        .count();
+    assert!(shared >= 1, "no overlapping tail found: {chunks:?}");
+}
+
+/// FR-4: punctuation (except `_`) is a token boundary too — a comma-separated
+/// list must not be cut in the middle of an identifier.
+#[test]
+fn punctuation_line_cuts_at_boundaries() {
+    let ids: Vec<String> = (0..200).map(|i| format!("tok{i:03}")).collect();
+    let body = format!("{}\n", ids.join(","));
+    let chunks = chunk_markdown(&body, 64);
+    assert!(chunks.len() > 1, "{chunks:?}");
+    let mut seen = 0;
+    for chunk in &chunks {
+        for part in chunk.text.split(',').filter(|part| !part.trim().is_empty()) {
+            let part = part.trim();
+            assert!(
+                ids.iter().any(|id| id == part),
+                "broken token {part:?} in {:?}",
+                chunk.text
+            );
+            seen += 1;
+        }
+    }
+    assert!(seen >= ids.len(), "all ids covered: {seen} < {}", ids.len());
+}
+
+/// FR-4: an overlong identifier line is cut at token boundaries; an unbroken
+/// blob falls back to a char cut without losing content.
+#[test]
+fn identifier_line_and_blob_splitting() {
+    let ids: Vec<String> = (0..40)
+        .map(|i| format!("assessment_plan_id_{i:02}"))
+        .collect();
+    let body = format!("{}\n", ids.join(" "));
+    let chunks = chunk_markdown(&body, 100);
+    assert!(chunks.len() > 1, "{chunks:?}");
+    for chunk in &chunks {
+        for token in chunk.text.split_whitespace() {
+            assert!(
+                ids.iter().any(|id| id == token),
+                "broken identifier {token:?} in {:?}",
+                chunk.text
+            );
+        }
+    }
+    let joined: String = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
+    for id in [&ids[0], &ids[19], &ids[39]] {
+        assert!(joined.contains(id.as_str()), "missing {id}");
+    }
+
+    let blob = "б".repeat(500);
+    let chunks = chunk_markdown(&blob, 100);
+    assert_eq!(chunks.len(), 5, "emergency char cuts: {chunks:?}");
+    let joined: String = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
+    assert_eq!(joined, blob, "emergency cuts must not lose content");
+    for chunk in &chunks {
+        assert!(chunk.text.chars().count() <= 100);
+    }
 }

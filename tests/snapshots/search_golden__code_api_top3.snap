@@ -13,20 +13,20 @@ expression: citations(&hits)
     "path": "frontend/pinia-setup-stores.md"
   },
   {
-    "chunk_id": 34359738370,
-    "heading_path": "Store Setup > Options",
-    "lines": [
-      7,
-      9
-    ],
-    "path": "frontend/store-setup-guide.md"
-  },
-  {
     "chunk_id": 34359738369,
     "heading_path": "Store Setup > Store setup syntax",
     "lines": [
       3,
-      6
+      5
+    ],
+    "path": "frontend/store-setup-guide.md"
+  },
+  {
+    "chunk_id": 34359738371,
+    "heading_path": "Store Setup > Store setup syntax",
+    "lines": [
+      5,
+      5
     ],
     "path": "frontend/store-setup-guide.md"
   }

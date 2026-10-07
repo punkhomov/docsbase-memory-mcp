@@ -13,21 +13,21 @@ expression: citations(&hits)
     "path": "cad/sheet-metal-rules.md"
   },
   {
-    "chunk_id": 25769803777,
+    "chunk_id": 25769803780,
     "heading_path": "Thickness > Body and component rule thickness",
     "lines": [
-      3,
-      6
+      5,
+      5
     ],
     "path": "cad/thickness-glossary.md"
   },
   {
-    "chunk_id": 21474836482,
-    "heading_path": "Sheet Metal Rules > Diagnostics",
+    "chunk_id": 25769803779,
+    "heading_path": "Thickness > Body and component rule thickness",
     "lines": [
-      18,
-      21
+      5,
+      5
     ],
-    "path": "cad/sheet-metal-rules.md"
+    "path": "cad/thickness-glossary.md"
   }
 ]
