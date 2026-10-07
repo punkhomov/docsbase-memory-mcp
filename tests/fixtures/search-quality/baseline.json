@@ -8,6 +8,7 @@
       "class": "ru",
       "k": 3,
       "hit": true,
+      "absent_hit": false,
       "ndcg": 1.0
     },
     {
@@ -15,6 +16,7 @@
       "class": "ru",
       "k": 3,
       "hit": false,
+      "absent_hit": false,
       "ndcg": 0.0
     },
     {
@@ -22,6 +24,7 @@
       "class": "ru",
       "k": 3,
       "hit": false,
+      "absent_hit": false,
       "ndcg": 0.0
     },
     {
@@ -29,6 +32,7 @@
       "class": "ru",
       "k": 3,
       "hit": true,
+      "absent_hit": false,
       "ndcg": 1.0
     },
     {
@@ -36,6 +40,7 @@
       "class": "ru",
       "k": 3,
       "hit": false,
+      "absent_hit": false,
       "ndcg": 0.0
     },
     {
@@ -43,6 +48,7 @@
       "class": "en",
       "k": 3,
       "hit": true,
+      "absent_hit": false,
       "ndcg": 1.0
     },
     {
@@ -50,6 +56,7 @@
       "class": "en",
       "k": 3,
       "hit": true,
+      "absent_hit": false,
       "ndcg": 1.0
     },
     {
@@ -57,6 +64,7 @@
       "class": "identifiers",
       "k": 3,
       "hit": true,
+      "absent_hit": false,
       "ndcg": 1.0
     },
     {
@@ -64,6 +72,7 @@
       "class": "identifiers",
       "k": 3,
       "hit": true,
+      "absent_hit": false,
       "ndcg": 1.0
     },
     {
@@ -71,6 +80,7 @@
       "class": "phrases",
       "k": 3,
       "hit": false,
+      "absent_hit": true,
       "ndcg": 0.0
     },
     {
@@ -78,6 +88,7 @@
       "class": "cjk",
       "k": 3,
       "hit": false,
+      "absent_hit": false,
       "ndcg": 0.0
     },
     {
@@ -85,6 +96,7 @@
       "class": "arabic",
       "k": 3,
       "hit": false,
+      "absent_hit": false,
       "ndcg": 0.0
     }
   ],

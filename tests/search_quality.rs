@@ -143,6 +143,9 @@ struct CaseReport {
     class: String,
     k: usize,
     hit: bool,
+    /// Whether a document from `absent` reached top-k (negative half of SC-3:
+    /// `"plan id"` must not match `assessment_plan_id`).
+    absent_hit: bool,
     ndcg: f64,
 }
 
@@ -242,10 +245,10 @@ impl Bench {
     }
 }
 
-/// Discounted gain of the first relevant document in top-10 (IDCG = 1 for a
-/// single expected document); 0.0 when it is missing.
-fn ndcg_at_10(paths: &[String], expected: &[&str]) -> f64 {
-    for (rank, path) in paths.iter().take(10).enumerate() {
+/// Discounted gain of the first relevant document within the fetched top-`k`
+/// (IDCG = 1 for a single expected document); 0.0 when it is missing.
+fn ndcg_at_k(paths: &[String], expected: &[&str]) -> f64 {
+    for (rank, path) in paths.iter().enumerate() {
         if expected.contains(&path.as_str()) {
             return 1.0 / (count(rank) + 2.0).log2();
         }
@@ -278,7 +281,7 @@ fn evaluate(bench: &Bench) -> Baseline {
         let ndcg = if absent_found {
             0.0
         } else {
-            ndcg_at_10(&paths, case.expected)
+            ndcg_at_k(&paths, case.expected)
         };
         let entry = class_hits.entry(case.class).or_insert((0, 0));
         entry.0 += usize::from(hit);
@@ -291,6 +294,7 @@ fn evaluate(bench: &Bench) -> Baseline {
             class: case.class.to_owned(),
             k: case.k,
             hit,
+            absent_hit: absent_found,
             ndcg: round4(ndcg),
         });
     }
@@ -316,17 +320,83 @@ fn evaluate(bench: &Bench) -> Baseline {
     }
 }
 
+fn load_baseline() -> Baseline {
+    let bytes = fs::read(baseline_path()).expect(
+        "tests/fixtures/search-quality/baseline.json is missing — \
+         run: cargo test --locked --test search_quality -- --ignored regenerate_baseline",
+    );
+    serde_json::from_slice(&bytes).expect("parse baseline.json")
+}
+
+/// Pure comparison behind [`no_regression_gate`]: regressions only, no
+/// equality requirement (strict reproducibility lives in
+/// [`metrics_match_baseline`]).
+fn regression_failures(current: &Baseline, baseline: &Baseline) -> Vec<String> {
+    let mut failures = Vec::new();
+
+    for (class, expected) in &baseline.classes {
+        let Some(report) = current.classes.get(class) else {
+            failures.push(format!("[{class}] class missing in the current run"));
+            continue;
+        };
+        if report.hit_rate + 1e-9 < expected.hit_rate {
+            failures.push(format!(
+                "[{class}] hit_rate {:.4} fell below baseline {:.4}",
+                report.hit_rate, expected.hit_rate
+            ));
+        }
+        if report.ndcg + baseline.tolerance.ndcg < expected.ndcg {
+            failures.push(format!(
+                "[{class}] ndcg {:.4} fell below baseline {:.4} (tol {:.2})",
+                report.ndcg, expected.ndcg, baseline.tolerance.ndcg
+            ));
+        }
+    }
+
+    let current_by_key: BTreeMap<(&str, &str), &CaseReport> = current
+        .cases
+        .iter()
+        .map(|case| ((case.query.as_str(), case.class.as_str()), case))
+        .collect();
+    for base_case in &baseline.cases {
+        let Some(cur) = current_by_key.get(&(base_case.query.as_str(), base_case.class.as_str()))
+        else {
+            failures.push(format!(
+                "[{}] {:?}: case missing in the current run",
+                base_case.class, base_case.query
+            ));
+            continue;
+        };
+        if base_case.hit && !cur.hit {
+            failures.push(format!(
+                "[{}] {:?}: relevant document dropped from top-{}",
+                base_case.class, base_case.query, base_case.k
+            ));
+        }
+        if !base_case.absent_hit && cur.absent_hit {
+            failures.push(format!(
+                "[{}] {:?}: forbidden document appeared in top-{}",
+                base_case.class, base_case.query, base_case.k
+            ));
+        }
+        if cur.ndcg + baseline.tolerance.ndcg < base_case.ndcg {
+            failures.push(format!(
+                "[{}] {:?}: ndcg {:.4} fell below baseline {:.4}",
+                base_case.class, base_case.query, cur.ndcg, base_case.ndcg
+            ));
+        }
+    }
+
+    failures
+}
+
 /// SC-1: metrics are reproducible — current run matches the checked-in
 /// baseline within tolerance.
 #[test]
 fn metrics_match_baseline() {
     let bench = Bench::new();
     let current = evaluate(&bench);
-    let baseline_bytes = fs::read(baseline_path()).expect(
-        "tests/fixtures/search-quality/baseline.json is missing — \
-         run: cargo test --locked --test search_quality -- --ignored regenerate_baseline",
-    );
-    let baseline: Baseline = serde_json::from_slice(&baseline_bytes).expect("parse baseline.json");
+    let baseline = load_baseline();
 
     assert_eq!(
         current.cases.len(),
@@ -358,6 +428,15 @@ fn metrics_match_baseline() {
             failures.push(format!(
                 "[{}] {:?}: hit {} != baseline {}",
                 current_case.class, current_case.query, current_case.hit, baseline_case.hit
+            ));
+        }
+        if current_case.absent_hit != baseline_case.absent_hit {
+            failures.push(format!(
+                "[{}] {:?}: absent_hit {} != baseline {}",
+                current_case.class,
+                current_case.query,
+                current_case.absent_hit,
+                baseline_case.absent_hit
             ));
         }
         if (current_case.ndcg - baseline_case.ndcg).abs() > baseline.tolerance.ndcg {
@@ -402,6 +481,78 @@ fn metrics_match_baseline() {
         failures.is_empty(),
         "baseline drift:\n{}",
         failures.join("\n")
+    );
+}
+
+/// FR-3/SC-4: acceptance gate — no relevant document may drop out of top-k and
+/// no class metric may fall below the checked-in baseline (nDCG within
+/// tolerance). Improvements are allowed; citation snapshots update only as
+/// deliberate deltas (S2), ranks are guarded by hit@k here.
+#[test]
+fn no_regression_gate() {
+    let bench = Bench::new();
+    let current = evaluate(&bench);
+    let baseline = load_baseline();
+    let failures = regression_failures(&current, &baseline);
+    assert!(
+        failures.is_empty(),
+        "search-quality regressions:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// The gate itself rejects synthetic regressions — a lost hit and a newly
+/// appearing forbidden document (negative half of SC-3) — and accepts a
+/// synthetic improvement.
+#[test]
+fn gate_rejects_regression() {
+    let make = |hit: bool, absent_hit: bool, ndcg: f64, class_ndcg: f64| Baseline {
+        tolerance: Tolerance {
+            ndcg: NDCG_TOLERANCE,
+        },
+        cases: vec![CaseReport {
+            query: "замены".to_owned(),
+            class: "ru".to_owned(),
+            k: 3,
+            hit,
+            absent_hit,
+            ndcg,
+        }],
+        classes: BTreeMap::from([(
+            "ru".to_owned(),
+            ClassReport {
+                hit_rate: f64::from(u8::from(hit)),
+                ndcg: class_ndcg,
+            },
+        )]),
+    };
+
+    // Baseline keeps the hit but with zero nDCG so only the drop branch fires.
+    let baseline = make(true, false, 0.0, 0.0);
+    let lost_hit = make(false, false, 0.0, 0.0);
+    let failures = regression_failures(&lost_hit, &baseline);
+    assert!(
+        failures
+            .iter()
+            .any(|line| line.contains("dropped from top-")),
+        "lost hit must be reported: {failures:?}"
+    );
+
+    // Negative half: a forbidden document appears where the baseline had none.
+    let clean = make(false, false, 0.0, 0.0);
+    let forbidden = make(false, true, 0.0, 0.0);
+    let failures = regression_failures(&forbidden, &clean);
+    assert!(
+        failures
+            .iter()
+            .any(|line| line.contains("forbidden document appeared")),
+        "appearing forbidden document must be reported: {failures:?}"
+    );
+
+    let improved_current = make(true, false, 1.0, 1.0);
+    assert!(
+        regression_failures(&improved_current, &clean).is_empty(),
+        "improvements must pass the gate"
     );
 }
 
