@@ -13,7 +13,7 @@ jobs; frontend'ы ходят через local socket (platform transport, ADR-9;
 **Global constraints (verbatim из design/constitution):**
 - Rust edition 2024, MSRV 1.88; `cargo fmt`; `cargo clippy --all-targets -- -D warnings`.
 - Linux/WSL2 x86_64; ОС-зависимый код — только в `src/platform/` (ADR-9); один
-  статический бинарь; офлайн, ноль сетевых крейтов.
+  статический бинарь; офлайн по умолчанию, ноль сетевых крейтов в дефолтной сборке.
 - `unwrap`/`expect` запрещены в библиотечном коде; `thiserror` в libs, `anyhow` на границе.
 - Крейты — только из design.md; в шапке задачи указывать `New crates:` с обоснованием.
 - Runtime layout: `$CACHE=~/.cache/docsbase-memory-mcp` (0700), socket 0600; один writer;

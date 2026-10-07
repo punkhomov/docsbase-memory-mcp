@@ -21,7 +21,8 @@ local socket (platform transport, ADR-9) и пробрасывают MCP tool-ca
 - v1 — Linux/WSL2 (x86_64); первая рабочая версия также Windows x64 (ADR-10).
   Весь ОС-зависимый код изолирован в `src/platform/` (`pub`-фасад, внутренний контракт;
   `#[cfg]`-выбор backend'а — только там), остальные модули к ОС не обращаются (ADR-9).
-- Один статический бинарь; ноль сетевых вызовов и внешних сервисов в рантайме.
+- Один статический бинарь; ноль сетевых вызовов и внешних сервисов в рантайме
+  по умолчанию (hybrid-стадии за флагами per-project/per-request, конституция 1.2.0).
 - `unwrap`/`expect` запрещены в библиотечном коде; `thiserror` в libs, `anyhow` на границе.
 - Один canonical cache root; версия схемы; один writer.
 - Крейты — только из таблицы §7; крейт вне списка — через ADR; каждый новый крейт
@@ -250,6 +251,8 @@ pub struct Project {
 | (без крейта) файловый лог `logs/daemon.log` 0600 + `logs/conflicts.ndjson` | диагностика и admission-конфликты | NFR-8 |
 | `interprocess` (`cfg(windows)`, feature `tokio`) | local sockets: daemon-транспорт на Windows | FR-33, ADR-10 |
 | `windows-sys` (`cfg(windows)`, `Win32_System_Threading`, `Win32_Foundation`) | `process_alive` (OpenProcess/GetExitCodeProcess) и флаги `detach` (std не экспортирует `CREATE_*`) | ADR-10 |
+| (фаза 2, за флагом, ADR-13) HTTP-клиент, кандидат `reqwest` (rustls) | embedding через OpenRouter; вне дефолтной сборки | FR-27, ADR-13 |
+| (фаза 2, за флагом, ADR-13) `fastembed` + ONNX-runtime, `usearch` | локальные эмбеддинги и ANN-индекс; опция, не дефолт | FR-27, ADR-12, ADR-13 |
 | dev: `tempfile`, `assert_cmd`, `insta`, `criterion` | интеграционные, golden и perf-тесты (T27, T30) | NFR-1, NFR-7 |
 
 **Точечные альтернативы:** вместо `serde_yaml` — минимальный flat-парсер frontmatter
@@ -258,9 +261,12 @@ pub struct Project {
 ## 8. Required / Forbidden stack
 
 - **Required:** `rmcp`, `tantivy`, `pulldown-cmark`, `rusqlite`, `tokio`, `clap`.
-- **Forbidden:** любые сетевые клиенты (`reqwest`, `hyper`-клиенты), embedding/LLM SDK,
-  Docker/внешние БД, Python/Node в рантайме, `unsafe` без `SAFETY`.
-- Фаза 2 (за флагом): `fastembed`, `usearch`, RRF — добавляются только после бенчмарка.
+- **Forbidden по умолчанию:** сетевые клиенты, embedding/LLM SDK, Docker/внешние БД,
+  Python/Node в рантайме, `unsafe` без `SAFETY`. Исключение (конституция 1.2.0):
+  embedding/LLM API-клиенты — только как провайдеры hybrid-стадий за флагами
+  per-project/per-request, каждый крейт — через ADR и таблицу §7.
+- Фаза 2 (за флагами, ADR-13): `fastembed`/ONNX-runtime, `usearch`, RRF, HTTP-клиент
+  для OpenRouter — добавляются только после бенчмарка; дефолтная сборка остаётся офлайн.
 
 ## 9. Error handling
 
@@ -291,7 +297,9 @@ pub struct Project {
 - **Golden (SC-1…SC-4):** фиксированный корпус + 4 типа запросов; снапшоты top-3.
 - **Perf (NFR-1/2):** criterion для search/index; 50k чанков.
 - **Soak (SC-5):** 3 агента + watcher 1 час (CI nightly).
-- **Offline (SC-8):** тест в network namespace, проверка отсутствия connect().
+- **Offline (SC-8):** тест в network namespace, проверка отсутствия connect() в
+  дефолтной конфигурации; для hybrid-стадий с сетью — отдельный гейт на
+  allowlist-эндпоинты.
 
 ## 11. Risks & trade-offs
 
@@ -418,6 +426,19 @@ path-ключ, `(doc_id, seq)`, per-project/per-worktree кэш (дублиро�
 тесты на fake-embedder и bench. Известное ограничение: partial-failure эмбеддера не должен
 оставлять «полу-поколение» — батч валидируется целиком до записи.
 
+**ADR-13. Embedding-провайдеры: OpenRouter + локальные модели за флагами (конституция 1.2.0).**
+Выбрано: hybrid-ступени (embedding, reranker) включаются per-project (конфиг) и
+per-request; embedding-провайдер абстрагирован: старт — OpenRouter API (без локального
+веса), опция — локальная модель (докачка с HF в кэш моделей, `fastembed`/ONNX). Дефолт —
+выключено (полный офлайн; SC-8 проверяет дефолтную конфигурацию). Сеть — только при явно
+включённых ступенях, молчаливый сетевой доступ запрещён; API-ключи — в конфиге, обзор
+security — до реализации (утечка документов, креденшелы, allowlist). Кэш векторов
+(ADR-12) не зависит от источника: `model_id` обязан включать провайдера и ревизию
+модели, чтобы remote-апдейты не смешивали векторы. 40 MiB (NFR-2) — бюджет самого ПО;
+кэши моделей/индексы вне бюджета; сетевые/локальные hybrid-крейты — за feature-флагом,
+чтобы дефолтный статический артефакт не рос. Отклонено: обязательный локальный вес в v1,
+безусловная сеть, сеть без флага.
+
 ## 13. Directory structure
 
 ```
@@ -498,5 +519,5 @@ tests/
 | FR-34 | `mcp/tools.rs` (read-only набор) |
 | NFR-2, NFR-3, NFR-6 | `store`, `index/`, сборка, `platform/` (seam, ADR-9) |
 | NFR-6 (Windows x64) | `platform/windows.rs`, CI-матрица (ADR-10, T38–T43) |
-| NFR-5, NFR-8 | `logs/daemon.log` + conflict-log, отсутствие сетевых крейтов |
+| NFR-5, NFR-8 | `logs/daemon.log` + conflict-log, отсутствие сетевых крейтов в дефолтной сборке |
 | NFR-7 | `store/migrations.rs` |

@@ -7,9 +7,12 @@
 | `0.1.0-alpha.3` (prerelease) | Best-effort fixes; breaking changes expected before `0.1.0` |
 | `main` branch | Security fixes land here first |
 
-This is a local-first tool: no network calls at runtime, no accounts, no
-telemetry. The attack surface that matters is local: daemon socket/pipe,
-file containment, install manifest handling.
+This is a local-first tool by default: no network calls at runtime, no
+accounts, no telemetry. The attack surface that matters is local: daemon
+socket/pipe, file containment, install manifest handling. Optional hybrid
+search stages (phase 2, per-project/per-request opt-in) send document
+chunks/queries to the configured embedding provider and require API-key
+handling; they are covered by a dedicated security review before shipping.
 
 ## Reporting a vulnerability
 
