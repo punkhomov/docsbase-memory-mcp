@@ -17,3 +17,9 @@ Task SQ3: Ruling: `CHUNK_OVERLAP` (=150) определён в SQ3 (chunk.rs), �
 Task SQ3: minor (deferred): `LONG_CHUNK_PENALTY` doc не упоминает `+CHUNK_OVERLAP` (src/index/tantivy_index.rs:21).
 Task SQ3: minor (deferred): `CHUNK_OVERLAP` doc не упоминает SQ3-потребителя (penalty) (src/index/chunk.rs:23).
 Task SQ3: minor (deferred): тестовые границы 1590/1690 дублируют 1500+150 вместо вывода из констант (tests/tantivy_index.rs:330).
+Task SQ4: complete (commits 525931a..a777e85, tests: `cargo test --locked` → 324 passed / 0 failed / 7 ignored; chunker 24 tests)
+Task SQ4: Ruling: рекурсивная сегментация — только для секций > cap (иначе ломаются golden-ранги продукта); fence/table атомарны; heading-caption merge; overlap = min(CHUNK_OVERLAP, cap/10), пропускается для merged/atomic — иначе bound cap+overlap не держится.
+Task SQ4: Ruling: chunker-тесты, фиксировавшие v1-семантику (oversized paragraph intact, fence одним чанком, trailing-prose prose-kind, kind cap 12), обновлены под FR-4; fence/table-целостность сохранена и покрыта.
+Task SQ4: minor (deferred): merge_preceding_heading требует точной смежности — дропнутый whitespace-only piece может оставить голый заголовок; `heading_merged: true` у atomic-кусков противоречит док-комментарию поля.
+Task SQ4: minor (deferred): границы только ASCII-пунктуация (Unicode punct → char fallback); merge_preceding_heading не проверяет бюджет merged-размера в байтах-не-символах.
+Task SQ4: minor (deferred): тест-гигиена — line coverage по первому токену, размер overlap не ограничен тестом.
