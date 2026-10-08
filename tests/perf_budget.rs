@@ -33,13 +33,18 @@ const SYNC_NOOP_BUDGET: Duration = Duration::from_secs(3);
 const SYNC_INCREMENTAL_BUDGET: Duration = Duration::from_secs(5);
 /// B4: no-op sync over a 10k-doc project (T52; deferred tail from Task 32).
 const SYNC_NOOP_10K_BUDGET: Duration = Duration::from_secs(15);
-/// B4: RSS delta of the indexing process for a 10k-doc project (T52;
-/// local release measurement: ~32 MiB).
+/// B4: RSS delta of the indexing process for a 10k-doc project (T52; SQ12
+/// local release measurement: ~64 MiB with stems/bigrams).
 const RSS_10K_BUDGET_KB: u64 = 128 * 1024;
 const CHUNKS: usize = 50_000;
 const FILES: usize = 1_000;
 const FILES_10K: usize = 10_000;
 const SAMPLES: usize = 60;
+/// NFR-1: the CJK corpus is measured separately (bigrams ≈ ×2 tokens).
+const CJK_CHUNKS: usize = 50_000;
+/// NFR-1 sanity ceiling: the CJK index stays within 4× the corpus text bytes
+/// (SQ12 measurement: 0.77×).
+const CJK_INDEX_SIZE_MULTIPLE: u64 = 4;
 
 fn chunk(doc_id: i64, seq: u32, text: String) -> Chunk {
     Chunk {
@@ -91,6 +96,68 @@ fn build_index(dir: &Path) -> IndexHandle {
     index
 }
 
+/// Deterministic CJK-heavy chunk: a fixed searchable phrase (every chunk
+/// carries it, so queries always hit), a unique document number and a Latin
+/// identifier for the mixed-script path.
+fn synthetic_cjk_text(index: usize) -> String {
+    const POOL: &[char] = &[
+        '東', '京', '国', '際', '空', '港', '検', '索', '文', '書', '実', '行', '速', '度', '計',
+        '測',
+    ];
+    let mut text = format!("ドキュメント{index} 検索性能のベンチマーク。");
+    for step in 0..24 {
+        text.push(POOL[(index.wrapping_mul(7).wrapping_add(step * 5)) % POOL.len()]);
+    }
+    let _ = write!(text, " identifier doc_{index} indexing throughput.");
+    text
+}
+
+/// Builds the CJK corpus and returns it with the total source text bytes for
+/// the size-ratio measurement.
+fn build_cjk_index(dir: &Path) -> (IndexHandle, u64) {
+    let mut index = IndexHandle::open_or_create(dir).expect("index");
+    index.mark_rebuilt().expect("mark rebuilt");
+    let mut text_bytes = 0_u64;
+    let mut batch = Vec::with_capacity(5_000);
+    for i in 0..CJK_CHUNKS {
+        let text = synthetic_cjk_text(i);
+        text_bytes += u64::try_from(text.len()).unwrap_or(u64::MAX);
+        batch.push(chunk(
+            i64::try_from(i).unwrap_or(i64::MAX),
+            u32::try_from(i % 64).unwrap_or(0),
+            text,
+        ));
+        if batch.len() == 5_000 {
+            index.add_chunks(&batch).expect("add");
+            index.commit().expect("commit");
+            batch.clear();
+        }
+    }
+    if !batch.is_empty() {
+        index.add_chunks(&batch).expect("add");
+        index.commit().expect("commit");
+    }
+    (index, text_bytes)
+}
+
+fn dir_size(path: &Path) -> u64 {
+    let mut total = 0_u64;
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_dir() {
+            total += dir_size(&entry.path());
+        } else {
+            total += metadata.len();
+        }
+    }
+    total
+}
+
 fn percentile(samples: &mut [Duration], percent: usize) -> Duration {
     samples.sort();
     let last = samples.len().saturating_sub(1);
@@ -134,6 +201,49 @@ fn search_budget() {
     assert!(
         p95 <= SEARCH_BUDGET,
         "search p95 {p95:?} over {CHUNKS} chunks exceeds {SEARCH_BUDGET:?}"
+    );
+}
+
+/// NFR-1: CJK latency and index size after bigram tokenization (SQ12).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "perf budget requires --release")]
+fn cjk_search_budget_and_size() {
+    let dir = TempDir::new().expect("tempdir");
+    let (index, text_bytes) = build_cjk_index(dir.path());
+    let queries = ["検索性能", "ベンチマーク", "ドキュメント42", "doc_123"];
+
+    for _ in 0..5 {
+        let hits = index.search(queries[0], 10).expect("warmup");
+        assert!(!hits.is_empty(), "cjk corpus must be searchable");
+    }
+
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for i in 0..SAMPLES {
+        let query = queries[i % queries.len()];
+        let started = Instant::now();
+        let hits = index.search(query, 10).expect("search");
+        samples.push(started.elapsed());
+        assert!(!hits.is_empty(), "query {query:?} must match");
+    }
+    let p95 = percentile(&mut samples, 95);
+    eprintln!("cjk search p95 over {CJK_CHUNKS} chunks: {p95:?}");
+    assert!(
+        p95 <= SEARCH_BUDGET,
+        "cjk search p95 {p95:?} over {CJK_CHUNKS} chunks exceeds {SEARCH_BUDGET:?}"
+    );
+
+    let index_bytes = dir_size(dir.path());
+    assert!(index_bytes > 0, "index directory must not be empty");
+    let text_bytes = text_bytes.max(1);
+    eprintln!(
+        "cjk index size: {index_bytes} bytes for {text_bytes} text bytes \
+         ({}%)",
+        index_bytes.saturating_mul(100) / text_bytes
+    );
+    assert!(
+        index_bytes <= text_bytes.saturating_mul(CJK_INDEX_SIZE_MULTIPLE),
+        "cjk index {index_bytes} bytes exceeds {CJK_INDEX_SIZE_MULTIPLE}× \
+         text {text_bytes} bytes"
     );
 }
 
