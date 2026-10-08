@@ -79,9 +79,9 @@
       "query": "\"plan id\"",
       "class": "phrases",
       "k": 3,
-      "hit": false,
-      "absent_hit": true,
-      "ndcg": 0.0
+      "hit": true,
+      "absent_hit": false,
+      "ndcg": 1.0
     },
     {
       "query": "東京",
@@ -118,8 +118,8 @@
       "ndcg": 1.0
     },
     "phrases": {
-      "hit_rate": 0.0,
-      "ndcg": 0.0
+      "hit_rate": 1.0,
+      "ndcg": 1.0
     },
     "ru": {
       "hit_rate": 0.4,

@@ -323,6 +323,28 @@ fn long_chunk_ranks_below_compact_match() {
 }
 
 #[test]
+fn phrase_does_not_match_inside_identifier() {
+    // FR-7: variants of `assessment_plan_id` share one position, so the
+    // phrase "plan id" must not match it; a real two-word phrase does.
+    let (_dir, mut index) = handle();
+    index
+        .add_chunks(&[
+            chunk(1, 0, "A", "assessment_plan_id is configured here"),
+            chunk(2, 0, "B", "plan id appears as separate words"),
+        ])
+        .expect("add");
+    index.commit().expect("commit");
+
+    let hits = index.search("\"plan id\"", 10).expect("search");
+    assert_eq!(
+        hits.len(),
+        1,
+        "phrase must match exactly one chunk: {hits:?}"
+    );
+    assert_eq!(hits[0].doc_id, 2, "false match inside identifier: {hits:?}");
+}
+
+#[test]
 fn empty_query_is_query_error() {
     let (_dir, index) = handle();
     for query in ["", "   "] {

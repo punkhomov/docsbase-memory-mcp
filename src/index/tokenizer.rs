@@ -12,11 +12,16 @@ use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 /// Tokenizer name registered in the [`TokenizerManager`].
 pub const NAME: &str = "identifier";
 
+/// Maximum emitted token length in Unicode chars (FR-16): longer tokens (hash
+/// blobs, giant base64 pieces) are dropped instead of bloating the dictionary.
+pub const MAX_TOKEN_CHARS: usize = 40;
+
 /// Version of the tokenizer pipeline (FR-8). Bump on any change of
 /// normalization, emitted variants or stemming: indexes record this value and
 /// are rebuilt from `SQLite` when it differs. 1 = legacy (indexes without a
-/// version file are considered stale); 2 = first versioned pipeline.
-pub const TOKENIZER_VERSION: u32 = 2;
+/// version file are considered stale); 2 = first versioned pipeline;
+/// 3 = one position per segment + token length limit.
+pub const TOKENIZER_VERSION: u32 = 3;
 
 /// Tokenizer producing identifier sub-tokens.
 #[derive(Clone, Default)]
@@ -92,7 +97,7 @@ fn tokenize(text: &str) -> Vec<Token> {
             &lower,
             offset,
             offset + raw.len(),
-            &mut position,
+            position,
         );
 
         // Emit the identifier with surrounding punctuation stripped so that
@@ -109,7 +114,7 @@ fn tokenize(text: &str) -> Vec<Token> {
                 &trimmed_lower,
                 offset + from,
                 offset + to,
-                &mut position,
+                position,
             );
         }
 
@@ -122,7 +127,7 @@ fn tokenize(text: &str) -> Vec<Token> {
                 &part_lower,
                 offset + part_from,
                 offset + part_to,
-                &mut position,
+                position,
             );
             for (sub, sub_from, sub_to) in camel_split(part) {
                 emit(
@@ -131,10 +136,13 @@ fn tokenize(text: &str) -> Vec<Token> {
                     &sub,
                     offset + part_from + sub_from,
                     offset + part_from + sub_to,
-                    &mut position,
+                    position,
                 );
             }
         }
+
+        // FR-7: one position per raw segment, shared by every variant.
+        position += 1;
     }
     tokens
 }
@@ -145,19 +153,19 @@ fn emit(
     text: &str,
     from: usize,
     to: usize,
-    position: &mut usize,
+    position: usize,
 ) {
-    if text.is_empty() || !emitted.insert(text.to_owned()) {
+    if text.is_empty() || text.chars().count() > MAX_TOKEN_CHARS || !emitted.insert(text.to_owned())
+    {
         return;
     }
     tokens.push(Token {
         offset_from: from,
         offset_to: to,
-        position: *position,
+        position,
         text: text.to_owned(),
         position_length: 1,
     });
-    *position += 1;
 }
 
 fn raw_segments(text: &str) -> Vec<(usize, &str)> {

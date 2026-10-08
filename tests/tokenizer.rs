@@ -132,10 +132,37 @@ fn punctuation_wrapped_identifier_keeps_clean_token() {
 }
 
 #[test]
-fn positions_are_contiguous() {
-    let text = "defineStore assessment_plan_id";
-    let positions: Vec<usize> = token_list(text).into_iter().map(|t| t.position).collect();
-    assert_eq!(positions, (0..positions.len()).collect::<Vec<_>>());
+fn positions_are_one_per_segment() {
+    // FR-7: every variant of one whitespace segment shares a position;
+    // the next segment advances the position by one.
+    let list = token_list("defineStore assessment_plan_id");
+    let pairs: Vec<(&str, usize)> = list
+        .iter()
+        .map(|token| (token.text.as_str(), token.position))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            ("definestore", 0),
+            ("define", 0),
+            ("store", 0),
+            ("assessment_plan_id", 1),
+            ("assessment", 1),
+            ("plan", 1),
+            ("id", 1),
+        ]
+    );
+}
+
+#[test]
+fn tokens_over_max_length_are_dropped() {
+    // FR-16: tokens longer than 40 chars are not emitted; 40 is kept.
+    let ok = "b".repeat(40);
+    assert_eq!(tokens(&ok), expected(&[ok.as_str()]));
+    let too_long = "c".repeat(41);
+    assert_eq!(tokens(&too_long), Vec::<String>::new());
+    let blob = "a".repeat(64);
+    assert_eq!(tokens(&blob), Vec::<String>::new());
 }
 
 #[test]
