@@ -28,3 +28,7 @@ Task SQ5: Ruling: файл версии пишется в create_fresh и в в�
 Task SQ5: minor (deferred): ReadIndex::open при отсутствующем meta.json теперь падает на version-check с сообщением «pipeline unknown» вместо ошибки отсутствия индекса; мусорный контент файла не покрыт тестом.
 Task SQ5: minor (deferred): write_tokenizer_version не имеет rollback'а remove_dir_all как write_rebuild_marker — безопасно только за счёт порядка (маркер всегда первым); закрепить комментарием/guard.
 Task SQ5: minor (deferred): вариант с удалённым файлом версии проверяет только was_recreated, не полный reindex (покрыто родственным тестом index_job).
+Task SQ6: complete (commits fb65d1e..b2d2443, tests: `cargo test --locked` → 330 passed / 0 failed / 7 ignored)
+Task SQ6: Ruling: baseline.json регенерирован (санкционированный improvement): фраза "plan id" больше не матчит assessment_plan_id и находит prose-док — hit false→true, absent_hit true→false, ndcg 0.0→1.0; класс phrases 0.0→1.0. Механизм SQ2-gate допускает улучшения.
+Task SQ6: Ruling: chunker-тест позиций positions_are_contiguous заменён на positions_are_one_per_segment (FR-7 меняет семантику позиций).
+Task SQ6: minor (deferred): док-комментарий «positions are contiguous from zero» устарел; лимит длины тестируется только на raw-пути (camel/alnum части >40 — только через централизацию emit); 64-символьный blob-кейс дублирует 41; gap от дропнутого сегмента (blob) и пунктуационные сегменты без advance позиции не покрыты тестом.
