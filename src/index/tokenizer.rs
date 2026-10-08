@@ -14,6 +14,8 @@ use tantivy::tokenizer::{
     Language, LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer, Token, TokenStream, Tokenizer,
 };
 
+use super::textnorm::{self, Script};
+
 /// Tokenizer name registered in the [`TokenizerManager`].
 pub const NAME: &str = "identifier";
 
@@ -25,8 +27,9 @@ pub const MAX_TOKEN_CHARS: usize = 40;
 /// normalization, emitted variants or stemming: indexes record this value and
 /// are rebuilt from `SQLite` when it differs. 1 = legacy (indexes without a
 /// version file are considered stale); 2 = first versioned pipeline;
-/// 3 = one position per segment + token length limit; 4 = ru/en stemming.
-pub const TOKENIZER_VERSION: u32 = 4;
+/// 3 = one position per segment + token length limit; 4 = ru/en stemming;
+/// 5 = `ё`/width/Turkish-`İ` folding.
+pub const TOKENIZER_VERSION: u32 = 5;
 
 /// Tokenizer producing identifier sub-tokens and prose stems.
 #[derive(Clone)]
@@ -55,7 +58,8 @@ impl Tokenizer for IdentifierTokenizer {
     type TokenStream<'a> = IdentifierTokenStream;
 
     fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
-        IdentifierTokenStream::new(text, &mut self.ru, &mut self.en)
+        let normalized = textnorm::normalize(text);
+        IdentifierTokenStream::new(&normalized, &mut self.ru, &mut self.en)
     }
 }
 
@@ -204,17 +208,11 @@ fn stem_language(part: &str) -> Option<Language> {
     {
         return None;
     }
-    if part.chars().all(|ch| ch.is_ascii_alphabetic()) {
-        return Some(Language::English);
+    match textnorm::script_of(part) {
+        Script::Latin => Some(Language::English),
+        Script::Cyrillic => Some(Language::Russian),
+        _ => None,
     }
-    if part.chars().any(is_cyrillic) {
-        return Some(Language::Russian);
-    }
-    None
-}
-
-fn is_cyrillic(ch: char) -> bool {
-    matches!(ch, '\u{0400}'..='\u{04FF}' | '\u{0500}'..='\u{052F}')
 }
 
 fn analyzer_for<'a>(

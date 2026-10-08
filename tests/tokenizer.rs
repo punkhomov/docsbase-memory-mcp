@@ -1,3 +1,4 @@
+use docsbase_memory::index::textnorm::{Script, normalize, script_of, split_script_runs};
 use docsbase_memory::index::tokenizer::{IdentifierTokenizer, NAME};
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer, TokenizerManager};
 
@@ -221,6 +222,60 @@ fn identifiers_are_not_stemmed() {
 fn stemming_guards_short_caps_and_digits() {
     assert_eq!(tokens("МОСКВА"), expected(&["москва"]));
     assert_eq!(tokens("ветка2"), expected(&["ветка2"]));
+}
+
+#[test]
+fn yo_folds_to_ye() {
+    // FR-14/SC-8: `ёлка` must be found by the query `елка`.
+    assert_eq!(tokens("ёлка"), tokens("елка"));
+    // The fold preserves case, so ALL-CAPS words keep the FR-10 guard and are
+    // indexed as the (lowercased) surface only, without a stem.
+    assert_eq!(tokens("ЁЛКА"), expected(&["елка"]));
+}
+
+#[test]
+fn fullwidth_folds_to_ascii() {
+    assert_eq!(tokens("ＡＢＣ"), expected(&["abc"]));
+}
+
+#[test]
+fn turkish_dotted_i_folds() {
+    assert_eq!(tokens("İstanbul"), expected(&["istanbul"]));
+}
+
+#[test]
+fn normalization_is_idempotent() {
+    for raw in [
+        "ёлка",
+        "ЁЛКА",
+        "ＡＢＣ",
+        "İstanbul",
+        "plain ascii",
+        "привет",
+    ] {
+        let once = normalize(raw);
+        let twice = normalize(&once);
+        assert_eq!(once, twice, "not idempotent for {raw:?}");
+    }
+}
+
+#[test]
+fn script_detection() {
+    assert_eq!(script_of("hello"), Script::Latin);
+    assert_eq!(script_of("привет"), Script::Cyrillic);
+    assert_eq!(script_of("東京"), Script::Cjk);
+    assert_eq!(script_of("مطار"), Script::Arabic);
+    assert_eq!(script_of("123 !?"), Script::Other);
+}
+
+#[test]
+fn script_runs_split_mixed_segment() {
+    // `OpenSearchを検索` — the SQ11 case: Latin run + CJK run.
+    let runs = split_script_runs("OpenSearchを検索");
+    let texts: Vec<&str> = runs.iter().map(|(_, text)| *text).collect();
+    assert_eq!(texts, vec!["OpenSearch", "を検索"]);
+    assert_eq!(runs[0].0, 0);
+    assert_eq!(runs[1].0, "OpenSearch".len());
 }
 
 #[test]
