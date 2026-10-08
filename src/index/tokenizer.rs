@@ -12,6 +12,12 @@ use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 /// Tokenizer name registered in the [`TokenizerManager`].
 pub const NAME: &str = "identifier";
 
+/// Version of the tokenizer pipeline (FR-8). Bump on any change of
+/// normalization, emitted variants or stemming: indexes record this value and
+/// are rebuilt from `SQLite` when it differs. 1 = legacy (indexes without a
+/// version file are considered stale); 2 = first versioned pipeline.
+pub const TOKENIZER_VERSION: u32 = 2;
+
 /// Tokenizer producing identifier sub-tokens.
 #[derive(Clone, Default)]
 pub struct IdentifierTokenizer;

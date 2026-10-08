@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use docsbase_memory::index::chunk::{Chunk, ChunkKind};
-use docsbase_memory::index::tantivy_index::{IndexHandle, ReadIndex, chunk_id, chunk_id_parts};
+use docsbase_memory::index::tantivy_index::{
+    IndexHandle, ReadIndex, TOKENIZER_VERSION_FILE, chunk_id, chunk_id_parts,
+};
+use docsbase_memory::index::tokenizer::TOKENIZER_VERSION;
 use tempfile::TempDir;
 
 fn chunk(doc_id: i64, seq: u32, heading: &str, text: &str) -> Chunk {
@@ -109,6 +112,86 @@ fn legacy_schema_is_rejected_for_reads() {
 
     let Err(err) = ReadIndex::open(&path) else {
         panic!("read-only open must refuse a legacy schema");
+    };
+    let text = err.to_string();
+    assert!(
+        text.contains("docsbase index"),
+        "instruction missing: {text}"
+    );
+}
+
+fn versioned_index(path: &Path) -> IndexHandle {
+    let mut index = IndexHandle::open_or_create(path).expect("open");
+    index.mark_rebuilt().expect("mark rebuilt");
+    index
+        .add_chunks(&[chunk(1, 0, "T", "versioned prose")])
+        .expect("add");
+    index.commit().expect("commit");
+    assert_eq!(
+        std::fs::read_to_string(path.join(TOKENIZER_VERSION_FILE)).expect("version file"),
+        format!("{TOKENIZER_VERSION}\n"),
+        "fresh index must record the pipeline version"
+    );
+    index
+}
+
+#[test]
+fn tokenizer_version_mismatch_is_recreated_for_writes() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("tantivy");
+    let index = versioned_index(&path);
+    assert!(
+        !index.search("versioned", 5).expect("search").is_empty(),
+        "initial index"
+    );
+
+    std::fs::write(path.join(TOKENIZER_VERSION_FILE), b"1\n").expect("downgrade version");
+    // Release the writer lock before the reopen: `create_fresh` removes the
+    // directory, which Windows refuses while the lockfile is open.
+    drop(index);
+
+    let mut index = IndexHandle::open_or_create(&path).expect("reopen");
+    assert!(
+        index.was_recreated(),
+        "version mismatch must force a rebuild from SQLite"
+    );
+    assert!(
+        index.search("versioned", 5).expect("search").is_empty(),
+        "stale chunks must not survive the rebuild"
+    );
+    index.mark_rebuilt().expect("mark rebuilt");
+    let reopened = ReadIndex::open(&path).expect("read-only open after rebuild");
+    assert!(
+        reopened.search("versioned", 5).expect("search").is_empty(),
+        "rebuilt index must be readable"
+    );
+}
+
+#[test]
+fn legacy_index_without_version_file_is_recreated() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("tantivy");
+    let index = versioned_index(&path);
+    drop(index);
+    std::fs::remove_file(path.join(TOKENIZER_VERSION_FILE)).expect("remove version file");
+
+    let index = IndexHandle::open_or_create(&path).expect("reopen legacy");
+    assert!(
+        index.was_recreated(),
+        "an index without a version file is legacy and must be rebuilt"
+    );
+}
+
+#[test]
+fn tokenizer_version_mismatch_is_rejected_for_reads() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("tantivy");
+    let index = versioned_index(&path);
+    drop(index);
+    std::fs::write(path.join(TOKENIZER_VERSION_FILE), b"1\n").expect("downgrade version");
+
+    let Err(err) = ReadIndex::open(&path) else {
+        panic!("read-only open must refuse a version mismatch");
     };
     let text = err.to_string();
     assert!(

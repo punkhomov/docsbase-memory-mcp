@@ -4,7 +4,9 @@ use std::path::Path;
 use docsbase_memory::config::Config;
 use docsbase_memory::index::chunk::{Chunk, ChunkKind};
 use docsbase_memory::index::job::{JobStats, run_full};
-use docsbase_memory::index::tantivy_index::{Hit, IndexHandle, REBUILD_MARKER};
+use docsbase_memory::index::tantivy_index::{
+    Hit, IndexHandle, REBUILD_MARKER, TOKENIZER_VERSION_FILE,
+};
 use docsbase_memory::store::models::{Project, ProjectStatus};
 use docsbase_memory::store::{DB_FILE, Db};
 use rusqlite::Connection;
@@ -148,6 +150,35 @@ fn legacy_schema_rebuild_repopulates_docs() {
         "upgraded index must be repopulated"
     );
     assert!(!env.search("betawidget").is_empty(), "second doc rebuilt");
+}
+
+#[test]
+fn tokenizer_version_bump_reindexes_from_sqlite() {
+    let mut env = Env::new(&[("a.md", "# A\n\nalphawidget prose\n")]);
+    env.run();
+    assert!(!env.search("alphawidget").is_empty(), "initial index");
+
+    // Simulate an index written by a pipeline version before the current one.
+    let path = env.cache.path().join("projects/1/tantivy");
+    std::fs::write(path.join(TOKENIZER_VERSION_FILE), b"1\n").expect("downgrade version");
+    drop(env.index);
+
+    let mut index = IndexHandle::open_or_create(&path).expect("reopen");
+    assert!(
+        index.was_recreated(),
+        "version bump must force a rebuild from SQLite"
+    );
+    let stats = run_full(&mut env.db, &mut index, &env.project, &Config::default())
+        .expect("run_full after version bump");
+    assert!(stats.docs >= 1, "reindex from SQLite: {stats:?}");
+    assert!(
+        !path.join(REBUILD_MARKER).exists(),
+        "marker cleared after a successful rebuild"
+    );
+    assert!(
+        !index.search("alphawidget", 10).expect("search").is_empty(),
+        "full reindex must repopulate the searchable chunk"
+    );
 }
 
 #[test]
