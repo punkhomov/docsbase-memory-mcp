@@ -29,8 +29,9 @@ pub const MAX_TOKEN_CHARS: usize = 40;
 /// are rebuilt from `SQLite` when it differs. 1 = legacy (indexes without a
 /// version file are considered stale); 2 = first versioned pipeline;
 /// 3 = one position per segment + token length limit; 4 = ru/en stemming;
-/// 5 = `ё`/width/Turkish-`İ` folding; 6 = Arabic folding + stemming.
-pub const TOKENIZER_VERSION: u32 = 6;
+/// 5 = `ё`/width/Turkish-`İ` folding; 6 = Arabic folding + stemming;
+/// 7 = CJK bigrams.
+pub const TOKENIZER_VERSION: u32 = 7;
 
 /// Tokenizer producing identifier sub-tokens and prose stems.
 #[derive(Clone)]
@@ -138,7 +139,10 @@ fn tokenize(
         // that only a document with the same surface form can satisfy.
         let stem_only =
             runs.len() == 1 && !protected && stem_language(&raw[runs[0].0..runs[0].1]).is_some();
-        if !stem_only {
+        // A CJK-dominant segment is represented by its bigrams only (FR-12);
+        // the whole-segment token would be dictionary noise.
+        let cjk_segment = textnorm::script_of(raw) == Script::Cjk;
+        if !stem_only && !cjk_segment {
             let lower = raw.to_lowercase();
             emit(
                 &mut tokens,
@@ -168,48 +172,87 @@ fn tokenize(
             }
         }
 
+        // Mixed segments are processed per single-script run (FR-12): CJK runs
+        // become sequential bigrams, everything else keeps the word path.
+        // Non-CJK variants all share the segment position (FR-7/SQ6): runs of
+        // `assessment_plan_id` must not become phrase-adjacent.
+        let base = position;
         for (part_from, part_to) in runs {
             let part = &raw[part_from..part_to];
-            if !protected
-                && let Some(language) = stem_language(part)
-                && let Some(stemmed) =
-                    stem(analyzer_for(language, ru, en, ar), &part.to_lowercase())
-            {
+            for (run_from, run) in textnorm::split_script_runs(part) {
+                let start = part_from + run_from;
+                if textnorm::script_of(run) == Script::Cjk {
+                    emit_cjk(&mut tokens, run, offset + start, &mut position);
+                    continue;
+                }
+                if !protected
+                    && let Some(language) = stem_language(run)
+                    && let Some(stemmed) =
+                        stem(analyzer_for(language, ru, en, ar), &run.to_lowercase())
+                {
+                    emit(
+                        &mut tokens,
+                        &mut emitted,
+                        &stemmed,
+                        offset + start,
+                        offset + start + run.len(),
+                        base,
+                    );
+                    continue;
+                }
+                let run_lower = run.to_lowercase();
                 emit(
                     &mut tokens,
                     &mut emitted,
-                    &stemmed,
-                    offset + part_from,
-                    offset + part_to,
-                    position,
+                    &run_lower,
+                    offset + start,
+                    offset + start + run.len(),
+                    base,
                 );
-                continue;
-            }
-            let part_lower = part.to_lowercase();
-            emit(
-                &mut tokens,
-                &mut emitted,
-                &part_lower,
-                offset + part_from,
-                offset + part_to,
-                position,
-            );
-            for (sub, sub_from, sub_to) in camel_split(part) {
-                emit(
-                    &mut tokens,
-                    &mut emitted,
-                    &sub,
-                    offset + part_from + sub_from,
-                    offset + part_from + sub_to,
-                    position,
-                );
+                for (sub, sub_from, sub_to) in camel_split(run) {
+                    emit(
+                        &mut tokens,
+                        &mut emitted,
+                        &sub,
+                        offset + start + sub_from,
+                        offset + start + sub_to,
+                        base,
+                    );
+                }
             }
         }
-
-        // FR-7: one position per raw segment, shared by every variant.
-        position += 1;
+        // FR-7: one position per segment (CJK bigrams add their own on top).
+        position = position.max(base + 1);
     }
     tokens
+}
+
+/// Emits overlapping bigrams over every character of a CJK run with
+/// sequential positions (FR-12); a single-character run emits that unigram.
+/// Bigrams bypass the variant dedupe: repeated bigrams must keep their
+/// positions for phrase matching.
+fn emit_cjk(tokens: &mut Vec<Token>, run: &str, offset: usize, position: &mut usize) {
+    let chars: Vec<(usize, char)> = run.char_indices().collect();
+    if chars.len() == 1 {
+        let (from, ch) = chars[0];
+        emit_token(
+            tokens,
+            &ch.to_string(),
+            offset + from,
+            offset + from + ch.len_utf8(),
+            *position,
+        );
+        *position += 1;
+        return;
+    }
+    for pair in chars.windows(2) {
+        let (from, first) = pair[0];
+        let (_, second) = pair[1];
+        let bigram = format!("{first}{second}");
+        let to = from + first.len_utf8() + second.len_utf8();
+        emit_token(tokens, &bigram, offset + from, offset + to, *position);
+        *position += 1;
+    }
 }
 
 /// Stemmer for a standalone word: pure alphabet, longer than 3 chars, not
@@ -261,8 +304,16 @@ fn emit(
     to: usize,
     position: usize,
 ) {
-    if text.is_empty() || text.chars().count() > MAX_TOKEN_CHARS || !emitted.insert(text.to_owned())
-    {
+    if text.is_empty() || !emitted.insert(text.to_owned()) {
+        return;
+    }
+    emit_token(tokens, text, from, to, position);
+}
+
+/// Pushes one token unconditionally (length-guarded); callers own dedupe and
+/// position decisions.
+fn emit_token(tokens: &mut Vec<Token>, text: &str, from: usize, to: usize, position: usize) {
+    if text.is_empty() || text.chars().count() > MAX_TOKEN_CHARS {
         return;
     }
     tokens.push(Token {

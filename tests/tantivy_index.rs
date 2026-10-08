@@ -345,6 +345,33 @@ fn phrase_does_not_match_inside_identifier() {
 }
 
 #[test]
+fn cjk_phrase_matches_bigrams() {
+    // FR-12: a phrase of bigrams finds the CJK text; reversed bigrams do not.
+    let (_dir, mut index) = handle();
+    index
+        .add_chunks(&[
+            chunk(1, 0, "A", "東京国際空港"),
+            chunk(2, 0, "B", "哈哈哈哈京"),
+            chunk(3, 0, "C", "哈哈"),
+        ])
+        .expect("add");
+    index.commit().expect("commit");
+
+    let hits = index.search("\"国際空港\"", 5).expect("search");
+    assert!(!hits.is_empty(), "bigram phrase must match: {hits:?}");
+    let hits = index.search("\"空港国際\"", 5).expect("search");
+    assert!(hits.is_empty(), "reversed bigrams must not match: {hits:?}");
+
+    // Repeated bigrams keep their positions, so the phrase needs two of them.
+    let hits = index.search("\"哈哈京\"", 5).expect("search");
+    assert_eq!(hits.len(), 1, "repeated-bigram phrase: {hits:?}");
+    assert_eq!(hits[0].doc_id, 2);
+    let hits = index.search("\"哈哈哈\"", 5).expect("search");
+    assert_eq!(hits.len(), 1, "two bigrams must not match one: {hits:?}");
+    assert_eq!(hits[0].doc_id, 2);
+}
+
+#[test]
 fn empty_query_is_query_error() {
     let (_dir, index) = handle();
     for query in ["", "   "] {

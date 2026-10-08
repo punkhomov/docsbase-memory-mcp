@@ -87,9 +87,9 @@
       "query": "東京",
       "class": "cjk",
       "k": 3,
-      "hit": false,
+      "hit": true,
       "absent_hit": false,
-      "ndcg": 0.0
+      "ndcg": 1.0
     },
     {
       "query": "مطار",
@@ -106,8 +106,8 @@
       "ndcg": 1.0
     },
     "cjk": {
-      "hit_rate": 0.0,
-      "ndcg": 0.0
+      "hit_rate": 1.0,
+      "ndcg": 1.0
     },
     "en": {
       "hit_rate": 1.0,

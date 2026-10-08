@@ -313,6 +313,59 @@ fn arabic_stems_share_segment_positions() {
 }
 
 #[test]
+fn cjk_bigrams_are_sequential() {
+    // FR-12: overlapping bigrams with sequential positions.
+    let list = token_list("東京国際空港");
+    let pairs: Vec<(&str, usize)> = list
+        .iter()
+        .map(|token| (token.text.as_str(), token.position))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            ("東京", 0),
+            ("京国", 1),
+            ("国際", 2),
+            ("際空", 3),
+            ("空港", 4),
+        ]
+    );
+}
+
+#[test]
+fn cjk_single_char_is_unigram() {
+    let list = token_list("東");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].text, "東");
+    assert_eq!(list[0].position, 0);
+}
+
+#[test]
+fn mixed_script_segment_splits_runs() {
+    let indexed = tokens("OpenSearchを検索");
+    assert!(indexed.contains(&"opensearch".to_owned()), "{indexed:?}");
+    assert!(indexed.contains(&"を検".to_owned()), "{indexed:?}");
+    assert!(indexed.contains(&"検索".to_owned()), "{indexed:?}");
+}
+
+#[test]
+fn cjk_digits_do_not_merge_segments() {
+    // Bigrams run over every char of the CJK run, so digits keep the
+    // discrimination between `第1四半期` and `第2四半期` and no char is lost.
+    let q1 = tokens("第1四半期");
+    let q2 = tokens("第2四半期");
+    assert!(q1.contains(&"第1".to_owned()), "{q1:?}");
+    assert!(q2.contains(&"第2".to_owned()), "{q2:?}");
+    assert_ne!(q1, q2);
+}
+
+#[test]
+fn repeated_cjk_bigrams_keep_positions() {
+    // Dedupe must not gate bigrams: `哈哈哈` is two overlapping `哈哈`s.
+    assert_eq!(tokens("哈哈哈"), expected(&["哈哈", "哈哈"]));
+}
+
+#[test]
 fn registration_works() {
     let manager = TokenizerManager::default();
     docsbase_memory::index::tokenizer::register(&manager);
