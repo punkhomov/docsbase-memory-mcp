@@ -54,3 +54,8 @@ Task SQ11: complete (commits cb80055..6d6c250, tests: `cargo test --locked` → 
 Task SQ11: Ruling: биграммы — по всем символам CJK-рана (включая приклеенные цифры: 第1四半期 ≠ 第2四半期), без variant-dedupe (повторы несут позиции для фраз), одиночный символ → униграмма; не-CJK раны сохраняют одну позицию сегмента (SQ6-инвариант).
 Task SQ11: Ruling: baseline регенерирован — только cjk-кейс (0.0→1.0) = целевой флип FR-12/SC-8; прочие классы без изменений; golden-снапшоты без дрейфа.
 Task SQ11: minor (fixed in-task): комментарий cjk_segment уточнён (CJK-dominant, не pure); script_char возвращён в private (нужен только внутри textnorm).
+Task SQ12: complete (commits ae1e95c..fb5a866, release: `cargo test --locked --release --test perf_budget` → 6 passed; debug: 349 passed / 0 failed / 8 ignored)
+Task SQ12: Ruling: бюджеты не менялись; новые замеры: latin p95 564µs, cjk p95 4.88ms (50k чанков), cjk index 6.7MB/8.7MB (77%, sanity-ceiling 4×), full index 1000 файлов 154ms, 10k no-op 83ms, RSS delta 64MiB (бюджет 128), idle daemon 10MB; RSS-комментарий обновлён с ~32MiB на ~64MiB.
+Task SQ12: Ruling: SC-7 — offline-гейт зелёный (Linux, 1 passed), `cargo tree -e normal` без сетевых крейтов (reqwest/ureq/curl/hyper/isahc/surf — пусто); debug-прогон игнорирует все перф-тесты.
+Task SQ12: minor (fixed in-task): целочисленный ratio вместо float (clippy cast_precision_loss), assert index_bytes > 0, let-else в dir_size.
+Task SQ12: minor (deferred): cjk p95-бюджет с запасом ~40× (не ловит регресс ×20, стиль существующих тестов); sanity-ceiling 4× не имеет spec-анкора; headroom намеренно большой.
