@@ -4,9 +4,10 @@
 //! technical identifiers (`defineStore`, `assessment_plan_id`,
 //! `__bt_tt_getProp`, `X-Request-ID`) rank high on exact matches while prose
 //! words match regardless of adjacent punctuation. Standalone prose words are
-//! reduced to a `ru`/`en` stem (FR-9) instead of the surface form: tantivy's
-//! phrase query requires every same-position term, so emitting the stem *and*
-//! the surface would stop word forms from finding each other (SQ7 ruling).
+//! reduced to a `ru`/`en`/`ar` stem (FR-9/FR-13) instead of the surface form:
+//! tantivy's phrase query requires every same-position term, so emitting the
+//! stem *and* the surface would stop word forms from finding each other
+//! (SQ7 ruling).
 
 use std::collections::HashSet;
 
@@ -28,14 +29,15 @@ pub const MAX_TOKEN_CHARS: usize = 40;
 /// are rebuilt from `SQLite` when it differs. 1 = legacy (indexes without a
 /// version file are considered stale); 2 = first versioned pipeline;
 /// 3 = one position per segment + token length limit; 4 = ru/en stemming;
-/// 5 = `ё`/width/Turkish-`İ` folding.
-pub const TOKENIZER_VERSION: u32 = 5;
+/// 5 = `ё`/width/Turkish-`İ` folding; 6 = Arabic folding + stemming.
+pub const TOKENIZER_VERSION: u32 = 6;
 
 /// Tokenizer producing identifier sub-tokens and prose stems.
 #[derive(Clone)]
 pub struct IdentifierTokenizer {
     ru: TextAnalyzer,
     en: TextAnalyzer,
+    ar: TextAnalyzer,
 }
 
 impl Default for IdentifierTokenizer {
@@ -43,6 +45,7 @@ impl Default for IdentifierTokenizer {
         Self {
             ru: stemmer(Language::Russian),
             en: stemmer(Language::English),
+            ar: stemmer(Language::Arabic),
         }
     }
 }
@@ -59,7 +62,7 @@ impl Tokenizer for IdentifierTokenizer {
 
     fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
         let normalized = textnorm::normalize(text);
-        IdentifierTokenStream::new(&normalized, &mut self.ru, &mut self.en)
+        IdentifierTokenStream::new(&normalized, &mut self.ru, &mut self.en, &mut self.ar)
     }
 }
 
@@ -76,9 +79,14 @@ pub struct IdentifierTokenStream {
 }
 
 impl IdentifierTokenStream {
-    fn new(text: &str, ru: &mut TextAnalyzer, en: &mut TextAnalyzer) -> Self {
+    fn new(
+        text: &str,
+        ru: &mut TextAnalyzer,
+        en: &mut TextAnalyzer,
+        ar: &mut TextAnalyzer,
+    ) -> Self {
         Self {
-            tokens: tokenize(text, ru, en),
+            tokens: tokenize(text, ru, en, ar),
             index: 0,
             fallback: Token::default(),
         }
@@ -109,7 +117,12 @@ impl TokenStream for IdentifierTokenStream {
     }
 }
 
-fn tokenize(text: &str, ru: &mut TextAnalyzer, en: &mut TextAnalyzer) -> Vec<Token> {
+fn tokenize(
+    text: &str,
+    ru: &mut TextAnalyzer,
+    en: &mut TextAnalyzer,
+    ar: &mut TextAnalyzer,
+) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut position = 0_usize;
 
@@ -159,7 +172,8 @@ fn tokenize(text: &str, ru: &mut TextAnalyzer, en: &mut TextAnalyzer) -> Vec<Tok
             let part = &raw[part_from..part_to];
             if !protected
                 && let Some(language) = stem_language(part)
-                && let Some(stemmed) = stem(analyzer_for(language, ru, en), &part.to_lowercase())
+                && let Some(stemmed) =
+                    stem(analyzer_for(language, ru, en, ar), &part.to_lowercase())
             {
                 emit(
                     &mut tokens,
@@ -211,6 +225,7 @@ fn stem_language(part: &str) -> Option<Language> {
     match textnorm::script_of(part) {
         Script::Latin => Some(Language::English),
         Script::Cyrillic => Some(Language::Russian),
+        Script::Arabic => Some(Language::Arabic),
         _ => None,
     }
 }
@@ -219,9 +234,11 @@ fn analyzer_for<'a>(
     language: Language,
     ru: &'a mut TextAnalyzer,
     en: &'a mut TextAnalyzer,
+    ar: &'a mut TextAnalyzer,
 ) -> &'a mut TextAnalyzer {
     match language {
         Language::Russian => ru,
+        Language::Arabic => ar,
         _ => en,
     }
 }

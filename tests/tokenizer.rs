@@ -252,6 +252,11 @@ fn normalization_is_idempotent() {
         "İstanbul",
         "plain ascii",
         "привет",
+        "مَطَار",
+        "مطـار",
+        "أحمد",
+        "مدرسة",
+        "مصطفى",
     ] {
         let once = normalize(raw);
         let twice = normalize(&once);
@@ -276,6 +281,35 @@ fn script_runs_split_mixed_segment() {
     assert_eq!(texts, vec!["OpenSearch", "を検索"]);
     assert_eq!(runs[0].0, 0);
     assert_eq!(runs[1].0, "OpenSearch".len());
+}
+
+#[test]
+fn arabic_harakat_and_tatweel_fold() {
+    // FR-13/SC-8: the vocalized document must match a plain query.
+    assert_eq!(tokens("مَطَار"), tokens("مطار"));
+    assert_eq!(tokens("مطـار"), tokens("مطار"));
+    // Hamza forms, ta marbuta and alef maksura unify (FR-13).
+    assert_eq!(tokens("أحمد"), tokens("احمد"));
+    assert_eq!(tokens("إبراهيم"), tokens("ابراهيم"));
+    assert_eq!(tokens("آلة"), tokens("الة"));
+    assert_eq!(tokens("مدرسة"), tokens("مدرسه"));
+    assert_eq!(tokens("مصطفى"), tokens("مصطفي"));
+}
+
+#[test]
+fn arabic_words_are_stemmed() {
+    // Snowball Arabic: the definite article and feminine endings fold away.
+    assert_eq!(tokens("المطار"), expected(&["مطار"]));
+    assert_eq!(tokens("طائرة"), expected(&["طاير"]));
+}
+
+#[test]
+fn arabic_stems_share_segment_positions() {
+    let positions: Vec<usize> = token_list("مطار طائرة")
+        .into_iter()
+        .map(|token| token.position)
+        .collect();
+    assert_eq!(positions, vec![0, 1], "one stem per segment");
 }
 
 #[test]

@@ -1,13 +1,15 @@
-//! Minimal, dependency-free Unicode folding and script detection (FR-14).
+//! Minimal, dependency-free Unicode folding and script detection (FR-13,
+//! FR-14).
 //!
 //! Folds what the multilingual pipeline needs, preserving case so the FR-10
 //! ALL-CAPS stem guard still sees it: `ё`/`Ё` → `е`/`Е`, fullwidth ASCII →
 //! ASCII, Turkish dotted `İ` → `I` (the tokenizer lowercases token text).
-//! Arabic normalization lands with SQ10.
+//! Arabic (FR-13): harakat `U+064B..=U+0652` and tatweel `U+0640` are removed,
+//! `أ`/`إ`/`آ` → `ا`, `ة` → `ه`, `ى` → `ي`.
 //!
-//! All folds are one-to-one character replacements, so token offsets stay
-//! aligned with the source text except for byte lengths of width-folded
-//! characters (fullwidth → ASCII shrinks three bytes to one).
+//! Folds are mostly one-to-one character replacements, but harakat/tatweel
+//! removal shifts byte offsets, and width folding shrinks three bytes to one:
+//! token offsets are relative to the normalized text.
 
 use std::borrow::Cow;
 
@@ -29,27 +31,41 @@ pub fn normalize(raw: &str) -> Cow<'_, str> {
     }
     let mut out = String::with_capacity(raw.len());
     for ch in raw.chars() {
-        out.push(fold(ch));
+        if let Some(folded) = fold(ch) {
+            out.push(folded);
+        }
     }
     Cow::Owned(out)
 }
 
 fn needs_fold(ch: char) -> bool {
-    matches!(ch, 'ё' | 'Ё' | 'İ' | '\u{FF01}'..='\u{FF5E}')
+    matches!(
+        ch,
+        'ё' | 'Ё'
+            | 'İ'
+            | '\u{FF01}'..='\u{FF5E}'
+            | '\u{064B}'..='\u{0652}'
+            | '\u{0640}'
+            | 'أ'
+            | 'إ'
+            | 'آ'
+            | 'ة'
+            | 'ى'
+    )
 }
 
-fn fold(ch: char) -> char {
+/// Folds one char; `None` removes it (harakat, tatweel).
+fn fold(ch: char) -> Option<char> {
     match ch {
-        'ё' | 'Ё' => {
-            if ch == 'ё' {
-                'е'
-            } else {
-                'Е'
-            }
-        }
-        'İ' => 'I',
-        '\u{FF01}'..='\u{FF5E}' => char::from_u32(ch as u32 - 0xFEE0).unwrap_or(ch),
-        _ => ch,
+        'ё' => Some('е'),
+        'Ё' => Some('Е'),
+        'İ' => Some('I'),
+        '\u{FF01}'..='\u{FF5E}' => Some(char::from_u32(ch as u32 - 0xFEE0).unwrap_or(ch)),
+        '\u{064B}'..='\u{0652}' | '\u{0640}' => None,
+        'أ' | 'إ' | 'آ' => Some('ا'),
+        'ة' => Some('ه'),
+        'ى' => Some('ي'),
+        _ => Some(ch),
     }
 }
 

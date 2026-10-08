@@ -95,15 +95,15 @@
       "query": "مطار",
       "class": "arabic",
       "k": 3,
-      "hit": false,
+      "hit": true,
       "absent_hit": false,
-      "ndcg": 0.0
+      "ndcg": 1.0
     }
   ],
   "classes": {
     "arabic": {
-      "hit_rate": 0.0,
-      "ndcg": 0.0
+      "hit_rate": 1.0,
+      "ndcg": 1.0
     },
     "cjk": {
       "hit_rate": 0.0,
