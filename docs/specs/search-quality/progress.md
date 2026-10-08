@@ -23,3 +23,8 @@ Task SQ4: Ruling: chunker-тесты, фиксировавшие v1-семант
 Task SQ4: minor (deferred): merge_preceding_heading требует точной смежности — дропнутый whitespace-only piece может оставить голый заголовок; `heading_merged: true` у atomic-кусков противоречит док-комментарию поля.
 Task SQ4: minor (deferred): границы только ASCII-пунктуация (Unicode punct → char fallback); merge_preceding_heading не проверяет бюджет merged-размера в байтах-не-символах.
 Task SQ4: minor (deferred): тест-гигиена — line coverage по первому токену, размер overlap не ограничен тестом.
+Task SQ5: complete (commits 0868702..b222712, tests: `cargo test --locked` → 328 passed / 0 failed / 7 ignored)
+Task SQ5: Ruling: файл версии пишется в create_fresh и в ветке нового каталога до создания индекса (рядом с REBUILD_MARKER); отсутствие/несоответствие = legacy → рекреэйт + полный reindex; ReadIndex → Error::Project с инструкцией.
+Task SQ5: minor (deferred): ReadIndex::open при отсутствующем meta.json теперь падает на version-check с сообщением «pipeline unknown» вместо ошибки отсутствия индекса; мусорный контент файла не покрыт тестом.
+Task SQ5: minor (deferred): write_tokenizer_version не имеет rollback'а remove_dir_all как write_rebuild_marker — безопасно только за счёт порядка (маркер всегда первым); закрепить комментарием/guard.
+Task SQ5: minor (deferred): вариант с удалённым файлом версии проверяет только was_recreated, не полный reindex (покрыто родственным тестом index_job).
