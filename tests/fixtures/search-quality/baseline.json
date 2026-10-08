@@ -15,17 +15,17 @@
       "query": "замены",
       "class": "ru",
       "k": 3,
-      "hit": false,
+      "hit": true,
       "absent_hit": false,
-      "ndcg": 0.0
+      "ndcg": 1.0
     },
     {
       "query": "заменой",
       "class": "ru",
       "k": 3,
-      "hit": false,
+      "hit": true,
       "absent_hit": false,
-      "ndcg": 0.0
+      "ndcg": 1.0
     },
     {
       "query": "каталоги",
@@ -39,9 +39,9 @@
       "query": "каталогов",
       "class": "ru",
       "k": 3,
-      "hit": false,
+      "hit": true,
       "absent_hit": false,
-      "ndcg": 0.0
+      "ndcg": 1.0
     },
     {
       "query": "atomic replace",
@@ -122,8 +122,8 @@
       "ndcg": 1.0
     },
     "ru": {
-      "hit_rate": 0.4,
-      "ndcg": 0.4
+      "hit_rate": 1.0,
+      "ndcg": 1.0
     }
   }
 }

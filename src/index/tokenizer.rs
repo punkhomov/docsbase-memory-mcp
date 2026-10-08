@@ -3,11 +3,16 @@
 //! Emits the lowercased raw token plus `camelCase` / `snake_case` sub-tokens so
 //! technical identifiers (`defineStore`, `assessment_plan_id`,
 //! `__bt_tt_getProp`, `X-Request-ID`) rank high on exact matches while prose
-//! words match regardless of adjacent punctuation.
+//! words match regardless of adjacent punctuation. Standalone prose words are
+//! reduced to a `ru`/`en` stem (FR-9) instead of the surface form: tantivy's
+//! phrase query requires every same-position term, so emitting the stem *and*
+//! the surface would stop word forms from finding each other (SQ7 ruling).
 
 use std::collections::HashSet;
 
-use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
+use tantivy::tokenizer::{
+    Language, LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer, Token, TokenStream, Tokenizer,
+};
 
 /// Tokenizer name registered in the [`TokenizerManager`].
 pub const NAME: &str = "identifier";
@@ -20,27 +25,46 @@ pub const MAX_TOKEN_CHARS: usize = 40;
 /// normalization, emitted variants or stemming: indexes record this value and
 /// are rebuilt from `SQLite` when it differs. 1 = legacy (indexes without a
 /// version file are considered stale); 2 = first versioned pipeline;
-/// 3 = one position per segment + token length limit.
-pub const TOKENIZER_VERSION: u32 = 3;
+/// 3 = one position per segment + token length limit; 4 = ru/en stemming.
+pub const TOKENIZER_VERSION: u32 = 4;
 
-/// Tokenizer producing identifier sub-tokens.
-#[derive(Clone, Default)]
-pub struct IdentifierTokenizer;
+/// Tokenizer producing identifier sub-tokens and prose stems.
+#[derive(Clone)]
+pub struct IdentifierTokenizer {
+    ru: TextAnalyzer,
+    en: TextAnalyzer,
+}
+
+impl Default for IdentifierTokenizer {
+    fn default() -> Self {
+        Self {
+            ru: stemmer(Language::Russian),
+            en: stemmer(Language::English),
+        }
+    }
+}
+
+fn stemmer(language: Language) -> TextAnalyzer {
+    TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter(LowerCaser)
+        .filter(Stemmer::new(language))
+        .build()
+}
 
 impl Tokenizer for IdentifierTokenizer {
     type TokenStream<'a> = IdentifierTokenStream;
 
     fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
-        IdentifierTokenStream::new(text)
+        IdentifierTokenStream::new(text, &mut self.ru, &mut self.en)
     }
 }
 
 /// Registers this tokenizer in a tantivy manager under [`NAME`].
 pub fn register(manager: &tantivy::tokenizer::TokenizerManager) {
-    manager.register(NAME, IdentifierTokenizer);
+    manager.register(NAME, IdentifierTokenizer::default());
 }
 
-/// Vec-backed token stream; positions are contiguous from zero.
+/// Vec-backed token stream; positions advance once per whitespace segment.
 pub struct IdentifierTokenStream {
     tokens: Vec<Token>,
     index: usize,
@@ -48,9 +72,9 @@ pub struct IdentifierTokenStream {
 }
 
 impl IdentifierTokenStream {
-    fn new(text: &str) -> Self {
+    fn new(text: &str, ru: &mut TextAnalyzer, en: &mut TextAnalyzer) -> Self {
         Self {
-            tokens: tokenize(text),
+            tokens: tokenize(text, ru, en),
             index: 0,
             fallback: Token::default(),
         }
@@ -81,7 +105,7 @@ impl TokenStream for IdentifierTokenStream {
     }
 }
 
-fn tokenize(text: &str) -> Vec<Token> {
+fn tokenize(text: &str, ru: &mut TextAnalyzer, en: &mut TextAnalyzer) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut position = 0_usize;
 
@@ -90,36 +114,59 @@ fn tokenize(text: &str) -> Vec<Token> {
             continue;
         }
         let mut emitted: HashSet<String> = HashSet::new();
-        let lower = raw.to_lowercase();
-        emit(
-            &mut tokens,
-            &mut emitted,
-            &lower,
-            offset,
-            offset + raw.len(),
-            position,
-        );
-
-        // Emit the identifier with surrounding punctuation stripped so that
-        // `` `assessment_plan_id`, `` still carries the exact identifier token
-        // (FR-21); only spans made purely of alphanumerics/underscores count.
-        if let Some((from, to)) = identifier_span(raw)
-            && (from > 0 || to < raw.len())
-        {
-            let trimmed = &raw[from..to];
-            let trimmed_lower = trimmed.to_lowercase();
+        let runs = alnum_runs(raw);
+        let protected = raw.contains('_');
+        // A single-word segment whose only run stems is emitted as the stem
+        // alone (SQ7 ruling): surface variants would make the query a phrase
+        // that only a document with the same surface form can satisfy.
+        let stem_only =
+            runs.len() == 1 && !protected && stem_language(&raw[runs[0].0..runs[0].1]).is_some();
+        if !stem_only {
+            let lower = raw.to_lowercase();
             emit(
                 &mut tokens,
                 &mut emitted,
-                &trimmed_lower,
-                offset + from,
-                offset + to,
+                &lower,
+                offset,
+                offset + raw.len(),
                 position,
             );
+
+            // Emit the identifier with surrounding punctuation stripped so that
+            // `` `assessment_plan_id`, `` still carries the exact identifier token
+            // (FR-21); only spans made purely of alphanumerics/underscores count.
+            if let Some((from, to)) = identifier_span(raw)
+                && (from > 0 || to < raw.len())
+            {
+                let trimmed = &raw[from..to];
+                let trimmed_lower = trimmed.to_lowercase();
+                emit(
+                    &mut tokens,
+                    &mut emitted,
+                    &trimmed_lower,
+                    offset + from,
+                    offset + to,
+                    position,
+                );
+            }
         }
 
-        for (part_from, part_to) in alnum_runs(raw) {
+        for (part_from, part_to) in runs {
             let part = &raw[part_from..part_to];
+            if !protected
+                && let Some(language) = stem_language(part)
+                && let Some(stemmed) = stem(analyzer_for(language, ru, en), &part.to_lowercase())
+            {
+                emit(
+                    &mut tokens,
+                    &mut emitted,
+                    &stemmed,
+                    offset + part_from,
+                    offset + part_to,
+                    position,
+                );
+                continue;
+            }
             let part_lower = part.to_lowercase();
             emit(
                 &mut tokens,
@@ -145,6 +192,50 @@ fn tokenize(text: &str) -> Vec<Token> {
         position += 1;
     }
     tokens
+}
+
+/// Stemmer for a standalone word: pure alphabet, longer than 3 chars, not
+/// ALL-CAPS, not a camel part (FR-10 guards). `None` = keep the surface form.
+fn stem_language(part: &str) -> Option<Language> {
+    if part.chars().count() <= 3
+        || !part.chars().all(char::is_alphabetic)
+        || part.chars().all(char::is_uppercase)
+        || camel_split(part).len() > 1
+    {
+        return None;
+    }
+    if part.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return Some(Language::English);
+    }
+    if part.chars().any(is_cyrillic) {
+        return Some(Language::Russian);
+    }
+    None
+}
+
+fn is_cyrillic(ch: char) -> bool {
+    matches!(ch, '\u{0400}'..='\u{04FF}' | '\u{0500}'..='\u{052F}')
+}
+
+fn analyzer_for<'a>(
+    language: Language,
+    ru: &'a mut TextAnalyzer,
+    en: &'a mut TextAnalyzer,
+) -> &'a mut TextAnalyzer {
+    match language {
+        Language::Russian => ru,
+        _ => en,
+    }
+}
+
+/// Runs the word through its stemmer and returns the single output token.
+fn stem(analyzer: &mut TextAnalyzer, word: &str) -> Option<String> {
+    let mut stream = analyzer.token_stream(word);
+    let mut result = None;
+    while stream.advance() {
+        result = Some(stream.token().text.clone());
+    }
+    result
 }
 
 fn emit(

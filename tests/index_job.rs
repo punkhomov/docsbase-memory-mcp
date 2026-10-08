@@ -393,7 +393,9 @@ fn changed_file_reindexes() {
     let stats = env.run();
     assert_eq!(stats.docs, 1);
     assert_eq!(stats.skipped, 1);
-    assert!(env.search("installer").is_empty(), "old chunks gone");
+    // `quickly` is unique to the old body; `installer` would still match the
+    // new `Install` heading through the shared stem (SQ7).
+    assert!(env.search("quickly").is_empty(), "old chunks gone");
     assert!(!env.search("verbiage").is_empty(), "new chunks searchable");
     let chunks = env.count("SELECT COUNT(*) FROM chunks WHERE doc_id = 1");
     assert!(

@@ -2,7 +2,7 @@ use docsbase_memory::index::tokenizer::{IdentifierTokenizer, NAME};
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer, TokenizerManager};
 
 fn token_list(text: &str) -> Vec<Token> {
-    let mut tokenizer = IdentifierTokenizer;
+    let mut tokenizer = IdentifierTokenizer::default();
     let mut stream = tokenizer.token_stream(text);
     let mut output = Vec::new();
     while stream.advance() {
@@ -163,6 +163,64 @@ fn tokens_over_max_length_are_dropped() {
     assert_eq!(tokens(&too_long), Vec::<String>::new());
     let blob = "a".repeat(64);
     assert_eq!(tokens(&blob), Vec::<String>::new());
+}
+
+#[test]
+fn russian_forms_share_stem_classes() {
+    // FR-9 via the Snowball Russian algorithm. Its RV region splits the
+    // illustrative trio from the brief: `замена`/`замены` -> `зам`,
+    // `заменой` -> `замен` (same classes as the official vocabulary:
+    // `алена` -> `ал`, `времена` -> `врем`). Cross-form retrieval holds
+    // because documents carry several forms; the golden RU class (SQ7)
+    // proves the queries find the document.
+    assert_eq!(tokens("замена"), tokens("замены"));
+    assert_eq!(tokens("заменой"), tokens("замену"));
+    assert_ne!(tokens("замена"), tokens("заменой"));
+    assert_ne!(tokens("замена"), expected(&["замена"]));
+    assert_ne!(tokens("заменой"), expected(&["заменой"]));
+}
+
+#[test]
+fn english_forms_share_a_stem_variant() {
+    let forms = ["replace", "replaces", "replaced"];
+    let token_sets: Vec<Vec<String>> = forms.iter().map(|form| tokens(form)).collect();
+    let common: Vec<&String> = token_sets[0]
+        .iter()
+        .filter(|token| {
+            !forms.contains(&token.as_str())
+                && token_sets[1].contains(token)
+                && token_sets[2].contains(token)
+        })
+        .collect();
+    assert_eq!(
+        common.len(),
+        1,
+        "shared non-surface stem expected: {token_sets:?}"
+    );
+}
+
+#[test]
+fn identifiers_are_not_stemmed() {
+    // FR-10: exact identifiers keep their variants, no invented stems.
+    assert_eq!(
+        tokens("MAX_FRAME_BYTES"),
+        expected(&["max_frame_bytes", "max", "frame", "bytes"])
+    );
+    assert_eq!(
+        tokens("assessment_plan_id"),
+        expected(&["assessment_plan_id", "assessment", "plan", "id"])
+    );
+    // Camel parts are protected too: `define` must not become `defin`.
+    assert_eq!(
+        tokens("defineStore"),
+        expected(&["definestore", "define", "store"])
+    );
+}
+
+#[test]
+fn stemming_guards_short_caps_and_digits() {
+    assert_eq!(tokens("МОСКВА"), expected(&["москва"]));
+    assert_eq!(tokens("ветка2"), expected(&["ветка2"]));
 }
 
 #[test]

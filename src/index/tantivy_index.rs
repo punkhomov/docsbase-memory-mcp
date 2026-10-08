@@ -440,7 +440,7 @@ fn open_index(dir: &Path) -> Result<Index> {
 fn register_tokenizer(index: &Index) {
     index
         .tokenizers()
-        .register(tokenizer::NAME, IdentifierTokenizer);
+        .register(tokenizer::NAME, IdentifierTokenizer::default());
 }
 
 fn build_parser(index: &Index, fields: &Fields) -> QueryParser {

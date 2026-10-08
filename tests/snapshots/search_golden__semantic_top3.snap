@@ -22,12 +22,12 @@ expression: citations(&hits)
     "path": "auth/token-refresh.md"
   },
   {
-    "chunk_id": 8589934594,
-    "heading_path": "Authentication > Revocation",
+    "chunk_id": 4294967299,
+    "heading_path": "Session Management > Token refresh policy",
     "lines": [
-      12,
-      14
+      5,
+      5
     ],
-    "path": "auth/token-refresh.md"
+    "path": "auth/session-management.md"
   }
 ]

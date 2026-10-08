@@ -408,7 +408,8 @@ fn stored_text_len_counts_unicode_chars() {
     let text_field = schema.get_field("text").expect("text field");
     let len_field = schema.get_field("text_len").expect("text_len field");
     let query = TermQuery::new(
-        Term::from_field_text(text_field, "refreshed"),
+        // SQ7: prose words are indexed by stem, so `refreshed` is `refresh`.
+        Term::from_field_text(text_field, "refresh"),
         IndexRecordOption::WithFreqsAndPositions,
     );
     let top = searcher
