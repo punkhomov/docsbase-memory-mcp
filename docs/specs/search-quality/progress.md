@@ -37,3 +37,7 @@ Task SQ7: Ruling: стем-вариант заменяет поверхност�
 Task SQ7: Ruling: Snowball RV делит иллюстративное трио: замена/замены→зам, заменой→замен (офиц. vocab: алена→ал, времена→врем); unit-тест проверяет реальные классы; golden RU 5/5, класс ru 0.4→1.0; baseline регенерирован.
 Task SQ7: Ruling: снапшоты цитат — delta (semantic_top3 3-я цитата → session-management.md, другой релевантный док; SC-1..SC-4 ассерты неизменны); тесты index_job (маркер quickly) и stored_text_len (терм refresh) обновлены под стемы.
 Task SQ7: minor (deferred): offset стема указывает на поверхностный спан (потребителей нет, но инвариант не зафиксирован); длинные alnum-раны стеммятся до лимита MAX_TOKEN_CHARS; wildcard `_ => en` в analyzer_for — SQ10 обязан добавить явную ветку Arabic; нет теста «стем на позиции сегмента»/фразовой механики.
+Task SQ8: complete (commits 4161240..2619d5f, tests: `cargo test --locked` → 334 passed / 0 failed / 7 ignored)
+Task SQ8: Ruling: golden-классы сатурированы (ru/en/identifiers/phrases 1.0/1.0; cjk/arabic ждут SQ10/11), sweep C1–C4 идентичен → константы не менялись (наименьшее структурное смещение); LONG_CHUNK_PENALTY на golden не упражняется (корпус < cap+overlap) — задокументировано в коде.
+Task SQ8: Ruling: guard FR-11 — переиспользован SQ2 no_regression_gate (per-class hit_rate/ndcg + per-case hit/absent/ndcg); дубль не добавлялся (YAGNI).
+Task SQ8: minor (fixed in-task): уточнены комментарии — penalty не упражняется golden; гейт сравнивает метрики, а не константы; regenerate_baseline не ограничивается гейтом.
