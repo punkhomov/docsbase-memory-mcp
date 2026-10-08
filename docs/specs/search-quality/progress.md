@@ -50,3 +50,7 @@ Task SQ10: Ruling: baseline регенерирован — только arabic-�
 Task SQ10: Ruling: analyzer_for получил явную ветку Arabic (закрыт SQ7-minor про `_ => en` wildcard); фолды Arabic — no-op для FR-10-гардов (регистр не трогается).
 Task SQ10: minor (fixed in-task): прямые ассерты أإآ→ا/ة→ه/ى→ي и removal-путей; Arabic-входы в тесте идемпотентности; доки модулей дополнены FR-13.
 Task SQ10: fixed bug: needs_fold range U+0640..=U+0652 захватывал арабские буквы U+0641–U+064A (clippy: unreachable 'ى') — сужен до harakat U+064B..=U+0652 + tatweel U+0640.
+Task SQ11: complete (commits cb80055..6d6c250, tests: `cargo test --locked` → 349 passed / 0 failed / 7 ignored; все 6 классов 1.0/1.0)
+Task SQ11: Ruling: биграммы — по всем символам CJK-рана (включая приклеенные цифры: 第1四半期 ≠ 第2四半期), без variant-dedupe (повторы несут позиции для фраз), одиночный символ → униграмма; не-CJK раны сохраняют одну позицию сегмента (SQ6-инвариант).
+Task SQ11: Ruling: baseline регенерирован — только cjk-кейс (0.0→1.0) = целевой флип FR-12/SC-8; прочие классы без изменений; golden-снапшоты без дрейфа.
+Task SQ11: minor (fixed in-task): комментарий cjk_segment уточнён (CJK-dominant, не pure); script_char возвращён в private (нужен только внутри textnorm).
