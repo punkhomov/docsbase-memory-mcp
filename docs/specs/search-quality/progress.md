@@ -45,3 +45,8 @@ Task SQ9: complete (commits 132bb6a..d8a2ed5, tests: `cargo test --locked` → 3
 Task SQ9: Ruling: normalize применяется к тексту до токенизации; фолды 1:1 и case-preserving (Ё→Е, İ→I) — иначе фолд снимал ALL-CAPS-защиту FR-10 (fix in-task по minor ревью); token-оффсеты для width-folded текста относительны нормализованного текста (потребителей оффсетов нет).
 Task SQ9: Ruling: split_script_runs реализован уже в SQ9 (потребитель — SQ11); stem_language маршрутизируется через script_of (Latin→EN, Cyrillic→RU; café теперь стеммится).
 Task SQ9: minor (deferred): edge-семантика split_script_runs (пунктуация/цифры/без букв → пустой Vec) не покрыта тестом; пробелы диапазонов скриптов (Latin Ext-C/D/E, CJK Ext B+, Bopomofo, Arabic 08A0/FB50/FE70) → Other; halfwidth katakana не фолдится во fullwidth; dotless ı не фолдится (турецкая пара асимметрична); мёртвый guard `if index > start`.
+Task SQ10: complete (commits bddc357..80e914a, tests: `cargo test --locked` → 343 passed / 0 failed / 7 ignored)
+Task SQ10: Ruling: baseline регенерирован — только arabic-кейс (hit false→true, ndcg 0→1; класс arabic 0.0→1.0) = целевой флип FR-13/SC-8; прочие классы без изменений.
+Task SQ10: Ruling: analyzer_for получил явную ветку Arabic (закрыт SQ7-minor про `_ => en` wildcard); фолды Arabic — no-op для FR-10-гардов (регистр не трогается).
+Task SQ10: minor (fixed in-task): прямые ассерты أإآ→ا/ة→ه/ى→ي и removal-путей; Arabic-входы в тесте идемпотентности; доки модулей дополнены FR-13.
+Task SQ10: fixed bug: needs_fold range U+0640..=U+0652 захватывал арабские буквы U+0641–U+064A (clippy: unreachable 'ى') — сужен до harakat U+064B..=U+0652 + tatweel U+0640.
