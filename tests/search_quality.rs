@@ -488,6 +488,8 @@ fn metrics_match_baseline() {
 /// no class metric may fall below the checked-in baseline (nDCG within
 /// tolerance). Improvements are allowed; citation snapshots update only as
 /// deliberate deltas (S2), ranks are guarded by hit@k here.
+/// FR-11 guard: the tuned boost/penalty values must keep every class metric
+/// at or above the checked-in baseline (SQ8 step 3; SQ2's gate reused).
 #[test]
 fn no_regression_gate() {
     let bench = Bench::new();

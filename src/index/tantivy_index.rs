@@ -21,6 +21,11 @@ const WRITER_HEAP_BYTES: usize = 20_000_000;
 /// Score multiplier for chunks above [`MAX_CHUNK_CHARS`]: oversized
 /// sections (giant tables or fences) must not outrank compact answers
 /// (FR-20, T27).
+///
+/// SQ8 sweep (FR-11): the golden corpus cannot exercise the penalty (its
+/// largest document is far below `MAX_CHUNK_CHARS + CHUNK_OVERLAP`), so
+/// `0.25` vs `0.5` are indistinguishable there; `0.5` is kept as the less
+/// aggressive value.
 const LONG_CHUNK_PENALTY: f32 = 0.5;
 
 /// Upper bound for a single search's `limit`. Tantivy's top-k collector
@@ -443,6 +448,11 @@ fn register_tokenizer(index: &Index) {
         .register(tokenizer::NAME, IdentifierTokenizer::default());
 }
 
+/// Field boosts (FR-11). SQ8 sweep: `title 3.0 / heading 2.5` and
+/// `identifiers 3.5` variants produce identical per-class golden metrics
+/// (all achievable classes saturated at `hit_rate`/`ndcg` 1.0; `cjk`/`arabic`
+/// pending SQ10/SQ11), so the least-biased values are kept and guarded by
+/// `tests/search_quality.rs::no_regression_gate`.
 fn build_parser(index: &Index, fields: &Fields) -> QueryParser {
     let mut parser = QueryParser::for_index(
         index,
