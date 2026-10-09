@@ -90,3 +90,8 @@ Task SQ16: Ruling: перф до/после (release): full index 1000 159.0→1
 Task SQ16: Review: spec PASS, quality CHANGES (1 Important: первый тест не достигал merge-пути) → fix round (oversize-тест + non-vacuity доказательство) → re-review ADDRESSED.
 Task SQ16: minor (accepted): Emitter::runs ~70 строк — плоский цикл с ранним continue; дробление CJK/word-веток отклонено ревьюером как вкусовщина.
 Plan extended (scoring evidence): SQ17–SQ18 — penalty fetch-window correctness (баг подтверждён пробой: limit=1 при 17 oversized + 1 compact отдаёт oversized 0.01390 вместо compact 0.01573) + boost-order/чувствительность pins (FR-11, дискриминирующий корпус NFR-6).
+Task SQ17: complete (commits 1e06664..fb5b12d, tests: tantivy_index 21 passed; full suite 357 passed / 0 failed / 8 ignored; release perf_budget 6/6)
+Task SQ17: Ruling: penalty учитывается при выборе top-k, а не после отсечения raw top-N: окно растёт ×4 (cap — num_docs), пока final_k < min_raw_fetched и выборка не исчерпана; звуковость — unseen raw ≤ min_raw_fetched и LONG_CHUNK_PENALTY ≤ 1; обычный путь (без oversized в окне) — одна итерация.
+Task SQ17: Ruling: баг подтверждён пробой (limit=1, 17 oversized + 1 compact: 0.01390 vs 0.01573) и RED-тестом penalty_respects_compact_winner_beyond_fetch_window; golden/baseline не менялись.
+Task SQ17: minor (fixed in-task): premise-ассерты и комментарий (блоб >40 симв. не индексируется — oversized «короткие» в токенах), допущение penalty ≤ 1 в soundness-комментарии, убран redundant hits.len() < limit.
+Task SQ17: minor (deferred): next==fetch guard недостижим при !settled (defensive, оставлен); top-k при точных f32-ничьих может отличаться идентичностью доков между limit — свойство top-k, не дефект.
