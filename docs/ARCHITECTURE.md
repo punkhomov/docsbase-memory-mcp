@@ -71,4 +71,5 @@ major version; wire/DB mismatches fail with an actionable `Admission` error
 
 `Cargo.lock` committed, `--locked` everywhere, crates.io
 `min-publish-age = 14 days` (nightly-only feature, no `[unstable]` needed),
-no network at runtime, releases with sha256 + SBOM + SLSA provenance.
+no network at runtime by default (hybrid stages are opt-in per project/request,
+constitution 1.2.0), releases with sha256 + SBOM + SLSA provenance.

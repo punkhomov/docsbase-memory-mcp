@@ -10,7 +10,7 @@ use tantivy::schema::{
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 
 use crate::error::{Error, Result};
-use crate::index::chunk::Chunk;
+use crate::index::chunk::{CHUNK_OVERLAP, Chunk};
 use crate::index::job::MAX_CHUNK_CHARS;
 use crate::index::tokenizer::{self, IdentifierTokenizer};
 
@@ -21,7 +21,14 @@ const WRITER_HEAP_BYTES: usize = 20_000_000;
 /// Score multiplier for chunks above [`MAX_CHUNK_CHARS`]: oversized
 /// sections (giant tables or fences) must not outrank compact answers
 /// (FR-20, T27).
+///
+/// SQ8 sweep (FR-11): the golden corpus cannot exercise the penalty (its
+/// largest document is far below `MAX_CHUNK_CHARS + CHUNK_OVERLAP`), so
+/// `0.25` vs `0.5` are indistinguishable there; `0.5` is kept as the less
+/// aggressive value.
 const LONG_CHUNK_PENALTY: f32 = 0.5;
+// SQ17 widening is sound only if the penalty never raises a score.
+const _: () = assert!(LONG_CHUNK_PENALTY <= 1.0);
 
 /// Upper bound for a single search's `limit`. Tantivy's top-k collector
 /// allocates proportional to the requested limit, so an unbounded
@@ -32,6 +39,10 @@ pub const MAX_HITS: usize = 1_000;
 /// It survives crashes: the wipe and reindex happen in the next job, and
 /// reads refuse an index that still carries it.
 pub const REBUILD_MARKER: &str = "docsbase.rebuild";
+
+/// File recording the tokenizer pipeline version of the on-disk index
+/// (FR-8): a missing (legacy) or mismatched file forces a rebuild.
+pub const TOKENIZER_VERSION_FILE: &str = "docsbase.tokenizer_version";
 
 /// A search hit: composite chunk id, owning document, BM25 score.
 #[derive(Debug, Clone, PartialEq)]
@@ -97,7 +108,11 @@ impl IndexHandle {
         let mut recreated = false;
         let index = if dir.join("meta.json").exists() {
             match open_index(dir) {
-                Ok(existing) if fields_from(&existing.schema()).is_ok() && !marker.exists() => {
+                Ok(existing)
+                    if fields_from(&existing.schema()).is_ok()
+                        && !marker.exists()
+                        && tokenizer_version_matches(dir) =>
+                {
                     existing
                 }
                 Ok(existing) => {
@@ -129,6 +144,7 @@ impl IndexHandle {
             // The marker is written *before* the index exists so even a hard
             // crash mid-creation leaves a durable rebuild requirement (T27).
             write_rebuild_marker(dir, &marker)?;
+            write_tokenizer_version(dir)?;
             let index = Index::create_in_dir(dir, build_schema()).map_err(tantivy_error)?;
             register_tokenizer(&index);
             recreated = true;
@@ -209,7 +225,7 @@ impl IndexHandle {
             document.add_text(self.fields.identifiers, extract_identifiers(&chunk.text));
             document.add_u64(
                 self.fields.text_len,
-                u64::try_from(chunk.text.len()).unwrap_or(u64::MAX),
+                u64::try_from(chunk.text.chars().count()).unwrap_or(u64::MAX),
             );
             self.writer.add_document(document).map_err(tantivy_error)?;
         }
@@ -258,6 +274,17 @@ impl ReadIndex {
         if dir.join(REBUILD_MARKER).exists() {
             return Err(Error::Project {
                 message: format!("index {} needs to be rebuilt", dir.display()),
+                instruction: Some("run `docsbase index` to rebuild".to_owned()),
+            });
+        }
+        if !tokenizer_version_matches(dir) {
+            let found = tokenizer_version(dir).unwrap_or_else(|| "unknown".to_owned());
+            return Err(Error::Project {
+                message: format!(
+                    "index {} was built by tokenizer pipeline {found}, current is {}",
+                    dir.display(),
+                    tokenizer::TOKENIZER_VERSION
+                ),
                 instruction: Some("run `docsbase index` to rebuild".to_owned()),
             });
         }
@@ -315,44 +342,65 @@ fn search_reader(
         message: format!("parse query {query:?}: {err}"),
     })?;
     let searcher = reader.searcher();
-    // Over-fetch so the long-chunk penalty can reorder before truncation.
-    let fetch = limit.saturating_mul(4).max(limit.saturating_add(16));
-    let top = searcher
-        .search(&parsed, &TopDocs::with_limit(fetch).order_by_score())
-        .map_err(tantivy_error)?;
-
-    let mut hits = Vec::with_capacity(top.len());
-    for (score, address) in top {
-        let document: TantivyDocument = searcher.doc(address).map_err(tantivy_error)?;
-        let chunk = document
-            .get_first(fields.chunk_id)
-            .and_then(|value| value.as_u64())
-            .ok_or_else(|| Error::internal(format!("index doc {address:?}: missing chunk_id")))?;
-        let doc = document
-            .get_first(fields.doc_id)
-            .and_then(|value| value.as_i64())
-            .ok_or_else(|| Error::internal(format!("index doc {address:?}: missing doc_id")))?;
-        let text_len = document
-            .get_first(fields.text_len)
-            .and_then(|value| value.as_u64())
-            .ok_or_else(|| Error::internal(format!("index doc {address:?}: missing text_len")))?;
-        let score = if text_len > MAX_CHUNK_CHARS as u64 {
-            score * LONG_CHUNK_PENALTY
-        } else {
-            score
-        };
-        hits.push(Hit {
-            chunk_id: chunk,
-            doc_id: doc,
-            score,
+    // Over-fetch so the long-chunk penalty can reorder before truncation, and
+    // widen while an unseen document could still beat the k-th final score
+    // (SQ17): an unseen raw score is at most `min_raw_fetched`, and the
+    // penalty never raises a score (`LONG_CHUNK_PENALTY <= 1`), so once the
+    // k-th final score is >= it, the top-k is settled.
+    let total = usize::try_from(searcher.num_docs()).unwrap_or(usize::MAX);
+    let mut fetch = limit.saturating_mul(4).max(limit.saturating_add(16));
+    let mut hits = loop {
+        let top = searcher
+            .search(&parsed, &TopDocs::with_limit(fetch).order_by_score())
+            .map_err(tantivy_error)?;
+        let exhausted = top.len() < fetch || fetch >= total;
+        let min_raw = top.last().map_or(0.0, |(score, _)| *score);
+        let mut hits = Vec::with_capacity(top.len());
+        for (score, address) in top {
+            let document: TantivyDocument = searcher.doc(address).map_err(tantivy_error)?;
+            let chunk = document
+                .get_first(fields.chunk_id)
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| {
+                    Error::internal(format!("index doc {address:?}: missing chunk_id"))
+                })?;
+            let doc = document
+                .get_first(fields.doc_id)
+                .and_then(|value| value.as_i64())
+                .ok_or_else(|| Error::internal(format!("index doc {address:?}: missing doc_id")))?;
+            let text_len = document
+                .get_first(fields.text_len)
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| {
+                    Error::internal(format!("index doc {address:?}: missing text_len"))
+                })?;
+            let score = if text_len > (MAX_CHUNK_CHARS + CHUNK_OVERLAP) as u64 {
+                score * LONG_CHUNK_PENALTY
+            } else {
+                score
+            };
+            hits.push(Hit {
+                chunk_id: chunk,
+                doc_id: doc,
+                score,
+            });
+        }
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
-    }
-    hits.sort_by(|left, right| {
-        right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+        let settled = exhausted || hits.get(limit - 1).is_none_or(|hit| hit.score >= min_raw);
+        if settled {
+            break hits;
+        }
+        let next = fetch.saturating_mul(4).min(total);
+        if next == fetch {
+            break hits;
+        }
+        fetch = next;
+    };
     hits.truncate(limit);
     Ok(hits)
 }
@@ -366,13 +414,37 @@ fn create_fresh(dir: &Path, marker: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).map_err(|err| {
         Error::internal_with_source(format!("recreate index dir {}: {err}", dir.display()), err)
     })?;
-    // Marker first: a crash before `meta.json` exists must still be seen as
-    // "needs rebuild" by the next open (T27).
+    // Marker and version first: a crash before `meta.json` exists must still
+    // be seen as "needs rebuild" by the next open (T27, FR-8).
     write_rebuild_marker(dir, marker)?;
+    write_tokenizer_version(dir)?;
     let index = Index::create_in_dir(dir, build_schema()).map_err(tantivy_error)?;
     register_tokenizer(&index);
     drop(index);
     Ok(())
+}
+
+/// Records the current tokenizer pipeline version in the index directory.
+fn write_tokenizer_version(dir: &Path) -> Result<()> {
+    let path = dir.join(TOKENIZER_VERSION_FILE);
+    std::fs::write(&path, format!("{}\n", tokenizer::TOKENIZER_VERSION))
+        .map_err(|err| Error::internal_with_source(format!("write {}: {err}", path.display()), err))
+}
+
+fn tokenizer_version(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dir.join(TOKENIZER_VERSION_FILE))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// True when the on-disk index was written by the current pipeline; a missing
+/// (legacy) or unparsable file counts as a mismatch (FR-8).
+#[must_use]
+fn tokenizer_version_matches(dir: &Path) -> bool {
+    tokenizer_version(dir)
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_some_and(|version| version == tokenizer::TOKENIZER_VERSION)
 }
 
 fn write_rebuild_marker(dir: &Path, marker: &Path) -> Result<()> {
@@ -397,9 +469,14 @@ fn open_index(dir: &Path) -> Result<Index> {
 fn register_tokenizer(index: &Index) {
     index
         .tokenizers()
-        .register(tokenizer::NAME, IdentifierTokenizer);
+        .register(tokenizer::NAME, IdentifierTokenizer::default());
 }
 
+/// Field boosts (FR-11). SQ8 sweep: `title 3.0 / heading 2.5` and
+/// `identifiers 3.5` variants produce identical per-class golden metrics
+/// (all achievable classes saturated at `hit_rate`/`ndcg` 1.0; `cjk`/`arabic`
+/// pending SQ10/SQ11), so the least-biased values are kept and guarded by
+/// `tests/search_quality.rs::no_regression_gate`.
 fn build_parser(index: &Index, fields: &Fields) -> QueryParser {
     let mut parser = QueryParser::for_index(
         index,

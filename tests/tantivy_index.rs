@@ -1,7 +1,11 @@
 use std::path::Path;
 
-use docsbase_memory::index::chunk::{Chunk, ChunkKind};
-use docsbase_memory::index::tantivy_index::{IndexHandle, ReadIndex, chunk_id, chunk_id_parts};
+use docsbase_memory::index::chunk::{CHUNK_OVERLAP, Chunk, ChunkKind, chunk_markdown};
+use docsbase_memory::index::job::MAX_CHUNK_CHARS;
+use docsbase_memory::index::tantivy_index::{
+    IndexHandle, ReadIndex, TOKENIZER_VERSION_FILE, chunk_id, chunk_id_parts,
+};
+use docsbase_memory::index::tokenizer::TOKENIZER_VERSION;
 use tempfile::TempDir;
 
 fn chunk(doc_id: i64, seq: u32, heading: &str, text: &str) -> Chunk {
@@ -9,6 +13,20 @@ fn chunk(doc_id: i64, seq: u32, heading: &str, text: &str) -> Chunk {
         doc_id,
         seq,
         heading_path: vec![heading.to_owned()],
+        kind: ChunkKind::Prose,
+        line_start: 1,
+        line_end: 1,
+        text: text.to_owned(),
+    }
+}
+
+/// Chunk with an explicit breadcrumb (SQ18 boost-order docs need controlled
+/// title/heading field contents).
+fn doc_with_path(doc_id: i64, heading_path: &[&str], text: &str) -> Chunk {
+    Chunk {
+        doc_id,
+        seq: 0,
+        heading_path: heading_path.iter().map(|part| (*part).to_owned()).collect(),
         kind: ChunkKind::Prose,
         line_start: 1,
         line_end: 1,
@@ -109,6 +127,86 @@ fn legacy_schema_is_rejected_for_reads() {
 
     let Err(err) = ReadIndex::open(&path) else {
         panic!("read-only open must refuse a legacy schema");
+    };
+    let text = err.to_string();
+    assert!(
+        text.contains("docsbase index"),
+        "instruction missing: {text}"
+    );
+}
+
+fn versioned_index(path: &Path) -> IndexHandle {
+    let mut index = IndexHandle::open_or_create(path).expect("open");
+    index.mark_rebuilt().expect("mark rebuilt");
+    index
+        .add_chunks(&[chunk(1, 0, "T", "versioned prose")])
+        .expect("add");
+    index.commit().expect("commit");
+    assert_eq!(
+        std::fs::read_to_string(path.join(TOKENIZER_VERSION_FILE)).expect("version file"),
+        format!("{TOKENIZER_VERSION}\n"),
+        "fresh index must record the pipeline version"
+    );
+    index
+}
+
+#[test]
+fn tokenizer_version_mismatch_is_recreated_for_writes() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("tantivy");
+    let index = versioned_index(&path);
+    assert!(
+        !index.search("versioned", 5).expect("search").is_empty(),
+        "initial index"
+    );
+
+    std::fs::write(path.join(TOKENIZER_VERSION_FILE), b"1\n").expect("downgrade version");
+    // Release the writer lock before the reopen: `create_fresh` removes the
+    // directory, which Windows refuses while the lockfile is open.
+    drop(index);
+
+    let mut index = IndexHandle::open_or_create(&path).expect("reopen");
+    assert!(
+        index.was_recreated(),
+        "version mismatch must force a rebuild from SQLite"
+    );
+    assert!(
+        index.search("versioned", 5).expect("search").is_empty(),
+        "stale chunks must not survive the rebuild"
+    );
+    index.mark_rebuilt().expect("mark rebuilt");
+    let reopened = ReadIndex::open(&path).expect("read-only open after rebuild");
+    assert!(
+        reopened.search("versioned", 5).expect("search").is_empty(),
+        "rebuilt index must be readable"
+    );
+}
+
+#[test]
+fn legacy_index_without_version_file_is_recreated() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("tantivy");
+    let index = versioned_index(&path);
+    drop(index);
+    std::fs::remove_file(path.join(TOKENIZER_VERSION_FILE)).expect("remove version file");
+
+    let index = IndexHandle::open_or_create(&path).expect("reopen legacy");
+    assert!(
+        index.was_recreated(),
+        "an index without a version file is legacy and must be rebuilt"
+    );
+}
+
+#[test]
+fn tokenizer_version_mismatch_is_rejected_for_reads() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("tantivy");
+    let index = versioned_index(&path);
+    drop(index);
+    std::fs::write(path.join(TOKENIZER_VERSION_FILE), b"1\n").expect("downgrade version");
+
+    let Err(err) = ReadIndex::open(&path) else {
+        panic!("read-only open must refuse a version mismatch");
     };
     let text = err.to_string();
     assert!(
@@ -240,6 +338,55 @@ fn long_chunk_ranks_below_compact_match() {
 }
 
 #[test]
+fn phrase_does_not_match_inside_identifier() {
+    // FR-7: variants of `assessment_plan_id` share one position, so the
+    // phrase "plan id" must not match it; a real two-word phrase does.
+    let (_dir, mut index) = handle();
+    index
+        .add_chunks(&[
+            chunk(1, 0, "A", "assessment_plan_id is configured here"),
+            chunk(2, 0, "B", "plan id appears as separate words"),
+        ])
+        .expect("add");
+    index.commit().expect("commit");
+
+    let hits = index.search("\"plan id\"", 10).expect("search");
+    assert_eq!(
+        hits.len(),
+        1,
+        "phrase must match exactly one chunk: {hits:?}"
+    );
+    assert_eq!(hits[0].doc_id, 2, "false match inside identifier: {hits:?}");
+}
+
+#[test]
+fn cjk_phrase_matches_bigrams() {
+    // FR-12: a phrase of bigrams finds the CJK text; reversed bigrams do not.
+    let (_dir, mut index) = handle();
+    index
+        .add_chunks(&[
+            chunk(1, 0, "A", "東京国際空港"),
+            chunk(2, 0, "B", "哈哈哈哈京"),
+            chunk(3, 0, "C", "哈哈"),
+        ])
+        .expect("add");
+    index.commit().expect("commit");
+
+    let hits = index.search("\"国際空港\"", 5).expect("search");
+    assert!(!hits.is_empty(), "bigram phrase must match: {hits:?}");
+    let hits = index.search("\"空港国際\"", 5).expect("search");
+    assert!(hits.is_empty(), "reversed bigrams must not match: {hits:?}");
+
+    // Repeated bigrams keep their positions, so the phrase needs two of them.
+    let hits = index.search("\"哈哈京\"", 5).expect("search");
+    assert_eq!(hits.len(), 1, "repeated-bigram phrase: {hits:?}");
+    assert_eq!(hits[0].doc_id, 2);
+    let hits = index.search("\"哈哈哈\"", 5).expect("search");
+    assert_eq!(hits.len(), 1, "two bigrams must not match one: {hits:?}");
+    assert_eq!(hits[0].doc_id, 2);
+}
+
+#[test]
 fn empty_query_is_query_error() {
     let (_dir, index) = handle();
     for query in ["", "   "] {
@@ -278,4 +425,195 @@ fn bad_query_is_query_error() {
 fn chunk_id_parts_inverse() {
     assert_eq!(chunk_id_parts(chunk_id(7, 42)), (7, 42));
     assert_eq!(chunk_id_parts(chunk_id(0, 0)), (0, 0));
+}
+
+/// FR-5: the stored `text_len` is a Unicode-char count, not a byte count.
+#[test]
+fn stored_text_len_counts_unicode_chars() {
+    use tantivy::collector::TopDocs;
+    use tantivy::query::TermQuery;
+    use tantivy::schema::{IndexRecordOption, Value};
+    use tantivy::{TantivyDocument, Term};
+
+    let (_dir, mut index) = handle();
+    let text = format!("{} refreshed", "а".repeat(999));
+    assert_eq!(text.chars().count(), 1009);
+    index
+        .add_chunks(&[chunk(1, 0, "T", &text)])
+        .expect("add chunks");
+    index.commit().expect("commit");
+
+    let reader = index.reader();
+    reader.reload().expect("reload");
+    let searcher = reader.searcher();
+    let schema = searcher.schema();
+    let text_field = schema.get_field("text").expect("text field");
+    let len_field = schema.get_field("text_len").expect("text_len field");
+    let query = TermQuery::new(
+        // SQ7: prose words are indexed by stem, so `refreshed` is `refresh`.
+        Term::from_field_text(text_field, "refresh"),
+        IndexRecordOption::WithFreqsAndPositions,
+    );
+    let top = searcher
+        .search(&query, &TopDocs::with_limit(1).order_by_score())
+        .expect("term search");
+    let (_, address) = top[0];
+    let document: TantivyDocument = searcher.doc(address).expect("stored doc");
+    let stored = document
+        .get_first(len_field)
+        .and_then(|value| value.as_u64())
+        .expect("stored text_len");
+    assert_eq!(
+        stored,
+        1009,
+        "text_len must count Unicode chars, not {} bytes",
+        text.len()
+    );
+}
+
+/// FR-5: the long-chunk penalty uses the char cap plus the overlap allowance,
+/// so a chunk sized within `MAX_CHUNK_CHARS + CHUNK_OVERLAP` is not punished
+/// while an oversized one is.
+#[test]
+fn penalty_uses_char_threshold_and_overlap() {
+    let (_dir, mut index) = handle();
+    let legal = format!("{} refreshed", "а".repeat(1590));
+    let oversized = format!("{} refreshed", "а".repeat(1690));
+    assert_eq!(legal.chars().count(), 1600);
+    assert_eq!(oversized.chars().count(), 1700);
+    index
+        .add_chunks(&[chunk(1, 0, "T", &legal), chunk(2, 0, "T", &oversized)])
+        .expect("add chunks");
+    index.commit().expect("commit");
+
+    let hits = index.search("refreshed", 5).expect("search");
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    assert_eq!(hits[0].doc_id, 1, "legal chunk must rank first: {hits:?}");
+    assert!(
+        hits[0].score > hits[1].score * 1.1,
+        "oversized chunk must be penalized: {hits:?}"
+    );
+}
+
+/// FR-11/SQ13: the penalty is reachable end-to-end — the production chunker
+/// emits an oversized chunk for an atomic fence above cap+overlap, and the
+/// search path penalizes it against a compact competitor.
+#[test]
+fn penalty_applies_to_chunker_oversized_fence() {
+    let (_dir, mut index) = handle();
+    let compact_body = "# T\n\n```rust\nfn refreshed() { let value = 1; }\n```\n";
+    let giant_body = format!(
+        "# T\n\n```rust\nfn refreshed() {{ let value = 1; {} }}\n```\n",
+        "x".repeat(5000)
+    );
+    let compact = chunk_markdown(compact_body, MAX_CHUNK_CHARS);
+    let giant = chunk_markdown(&giant_body, MAX_CHUNK_CHARS);
+    let code = |chunks: &[Chunk]| {
+        chunks
+            .iter()
+            .find(|chunk| {
+                chunk.kind
+                    == ChunkKind::Code {
+                        lang: Some("rust".to_owned()),
+                    }
+            })
+            .expect("fence chunk")
+            .text
+            .clone()
+    };
+    let compact = code(&compact);
+    let giant = code(&giant);
+    assert!(
+        giant.chars().count() > MAX_CHUNK_CHARS + CHUNK_OVERLAP,
+        "premise: chunker output exceeds the penalty threshold"
+    );
+
+    // The giant fence is short in *tokens* (its blob exceeds the 40-char
+    // token limit, so BM25 length normalization alone would not demote it) —
+    // the long-chunk penalty is the only brake, which is exactly what this
+    // end-to-end test pins.
+    index
+        .add_chunks(&[chunk(1, 0, "T", &compact), chunk(2, 0, "T", &giant)])
+        .expect("add chunks");
+    index.commit().expect("commit");
+
+    let hits = index.search("refreshed", 5).expect("search");
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    assert_eq!(hits[0].doc_id, 1, "compact chunk must rank first: {hits:?}");
+    assert!(
+        hits[0].score > hits[1].score * 1.1,
+        "chunker-produced oversized chunk must be penalized: {hits:?}"
+    );
+}
+
+/// FR-11/SQ17: the top-k is chosen by the final score (raw × penalty), not
+/// after truncating the raw window. Seventeen oversized chunks fill the
+/// default fetch window (limit*4+16 = 17) with higher raw scores; the compact
+/// chunk just below them must still win once the penalty is applied.
+#[test]
+fn penalty_respects_compact_winner_beyond_fetch_window() {
+    let (_dir, mut index) = handle();
+    let oversized = format!("target {}", "x".repeat(3000));
+    let mut chunks: Vec<Chunk> = (1..=17).map(|i| chunk(i, 0, "T", &oversized)).collect();
+    chunks.push(chunk(100, 0, "T", "target filler1 filler2"));
+    // Premise: the giant blobs exceed the 40-char token limit, so the
+    // oversized chunks stay short *in tokens* and outrank the compact chunk
+    // on raw score; 17 is exactly the default fetch window for limit=1.
+    assert!(
+        oversized.chars().count() > MAX_CHUNK_CHARS + CHUNK_OVERLAP,
+        "oversized chunks must exceed the penalty threshold"
+    );
+    index.add_chunks(&chunks).expect("add chunks");
+    index.commit().expect("commit");
+
+    let hits = index.search("target", 1).expect("search");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(
+        hits[0].doc_id, 100,
+        "compact chunk must win by final score: {hits:?}"
+    );
+}
+
+/// FR-11/SQ18: field boosts order as configured and the ratio windows are
+/// tight enough that degrading a single boost fails — the discriminating
+/// corpus NFR-6 asks for. Field lengths are equalized per field so the
+/// ratios are boost-driven (title 2.0 / heading 1.5 / text 1.0 /
+/// identifiers 2.5; per-field idf cancels inside each ratio).
+#[test]
+fn field_boosts_order_and_sensitivity() {
+    let (_dir, mut index) = handle();
+    index
+        .add_chunks(&[
+            doc_with_path(1, &["target", "pad"], "filler"), // title + heading
+            doc_with_path(2, &["zed", "pad"], "target"),    // text
+            doc_with_path(3, &["zed", "target"], "filler"), // heading
+            doc_with_path(4, &["zed", "pad"], "target."),   // identifiers + text
+        ])
+        .expect("add chunks");
+    index.commit().expect("commit");
+
+    let hits = index.search("target", 4).expect("search");
+    let order: Vec<i64> = hits.iter().map(|hit| hit.doc_id).collect();
+    assert_eq!(order, vec![1, 4, 3, 2], "boost order: {hits:?}");
+    let by = |id: i64| {
+        hits.iter()
+            .find(|hit| hit.doc_id == id)
+            .expect("doc in hits")
+            .score
+    };
+    let title_heading = by(1) / by(3);
+    assert!(
+        (3.0..=3.6).contains(&title_heading),
+        "title+heading/heading = {title_heading:.3} (title 2.0 + heading 1.5)"
+    );
+    let heading_text = by(3) / by(2);
+    assert!(
+        (1.35..=1.65).contains(&heading_text),
+        "heading/text = {heading_text:.3} (heading 1.5)"
+    );
+    let identifiers_text = by(4) / by(2);
+    assert!(
+        (2.7..=3.2).contains(&identifiers_text),
+        "identifiers/text = {identifiers_text:.3} (identifiers 2.5)"
+    );
 }

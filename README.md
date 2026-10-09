@@ -15,7 +15,9 @@ One `docsbase` binary, three roles: **CLI**, **stdio MCP server**, and a
 **per-account daemon**. The daemon owns the project registry, per-project
 full-text indexes, file watchers and sync jobs. The `.md` files on disk are
 the only source of truth; the MCP surface is read-only over the index.
-No network calls at runtime — no telemetry, no cloud, no Docker.
+No network calls at runtime by default — no telemetry, no cloud, no Docker.
+Optional hybrid search stages (phase 2) are opt-in per project/request and may
+use an embedding API (OpenRouter) or a locally cached model.
 
 Supported platforms: **Linux x86_64** (static binary) and **Windows x64**
 (`.exe`). macOS is out of scope for v1.
