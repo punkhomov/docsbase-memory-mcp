@@ -364,3 +364,65 @@ fn identifier_line_and_blob_splitting() {
         assert!(chunk.text.chars().count() <= 100);
     }
 }
+
+/// FR-4/SC-5 delta (SQ15): an oversized fence stays atomic — code blocks are
+/// never split (probe: 5018 chars at max=1500), the content is intact and the
+/// line span still points at real source lines. This is the deliberate
+/// exception pinned by the SC-5 delta marker.
+#[test]
+fn oversized_fence_stays_atomic() {
+    let code = "x".repeat(5000);
+    let body = format!("# T\n\n```rust\n{code}\n```\n\nafter\n");
+    let chunks = chunk_markdown(&body, 1500);
+    let fence = chunks
+        .iter()
+        .find(|chunk| chunk.text.contains("xxxx"))
+        .expect("fence chunk");
+    assert!(
+        fence.text.chars().count() > 1500 + CHUNK_OVERLAP,
+        "probe premise: fence chunk exceeds cap+overlap: {} chars",
+        fence.text.chars().count()
+    );
+    assert_eq!(
+        fence.kind,
+        ChunkKind::Code {
+            lang: Some("rust".to_owned())
+        }
+    );
+    assert!(fence.text.contains(&code), "fence content must be intact");
+    assert_eq!(chunks.len(), 2, "fence + trailing prose: {chunks:?}");
+    assert_eq!(
+        (fence.line_start, fence.line_end),
+        (1, 5),
+        "citation lines pin the merged heading + fence span"
+    );
+}
+
+/// Same pin for tables: a table over cap+overlap stays one atomic chunk.
+#[test]
+fn oversized_table_stays_atomic() {
+    let row = "| a | b |\n";
+    let body = format!("# T\n\n{}", row.repeat(400));
+    let chunks = chunk_markdown(&body, 1500);
+    let table = chunks
+        .iter()
+        .find(|chunk| chunk.kind == ChunkKind::Table)
+        .expect("table chunk");
+    assert!(
+        table.text.chars().count() > 1500 + CHUNK_OVERLAP,
+        "probe premise: table chunk exceeds cap+overlap: {} chars",
+        table.text.chars().count()
+    );
+    assert!(table.text.contains("| a | b |"));
+    assert_eq!(chunks.len(), 1, "only the table block: {chunks:?}");
+    assert_eq!(
+        (table.line_start, table.line_end),
+        (1, 402),
+        "citation lines pin the merged heading + table span"
+    );
+    assert_eq!(
+        table.text.matches("| a | b |").count(),
+        400,
+        "all rows intact"
+    );
+}

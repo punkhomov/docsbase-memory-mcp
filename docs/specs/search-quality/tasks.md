@@ -322,8 +322,8 @@ SQ16 — code-hygiene (m15/m10). Порядок: тесты/код → доки 
    oversized реально штрафуется (паттерн `score > legal × 1.1`).
 3. `bound_prose`: `debug_assert!` + fallback вместо `return` (на валидных входах
    поведение не меняется).
-4. Tie `script_of` 2:2 Latin/CJK → Latin (enum-порядок осознан), whole-токен
-   эмитится — тест-комментарий.
+4. Tie `script_of` 2:2 Latin/CJK → Latin (enum-порядок осознан); whole-токен
+   не эмитится (stem-only путь), биграммы эмитятся — тест-комментарий.
 5. Тесты зелёные; коммит.
 **Acceptance:** FR-4/FR-11; SC-5 (поведение зафиксировано тестами).
 **Verify:** `cargo test --locked --test chunker --test tantivy_index --test tokenizer`

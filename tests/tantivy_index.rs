@@ -1,6 +1,7 @@
 use std::path::Path;
 
-use docsbase_memory::index::chunk::{Chunk, ChunkKind};
+use docsbase_memory::index::chunk::{CHUNK_OVERLAP, Chunk, ChunkKind, chunk_markdown};
+use docsbase_memory::index::job::MAX_CHUNK_CHARS;
 use docsbase_memory::index::tantivy_index::{
     IndexHandle, ReadIndex, TOKENIZER_VERSION_FILE, chunk_id, chunk_id_parts,
 };
@@ -477,5 +478,56 @@ fn penalty_uses_char_threshold_and_overlap() {
     assert!(
         hits[0].score > hits[1].score * 1.1,
         "oversized chunk must be penalized: {hits:?}"
+    );
+}
+
+/// FR-11/SQ13: the penalty is reachable end-to-end — the production chunker
+/// emits an oversized chunk for an atomic fence above cap+overlap, and the
+/// search path penalizes it against a compact competitor.
+#[test]
+fn penalty_applies_to_chunker_oversized_fence() {
+    let (_dir, mut index) = handle();
+    let compact_body = "# T\n\n```rust\nfn refreshed() { let value = 1; }\n```\n";
+    let giant_body = format!(
+        "# T\n\n```rust\nfn refreshed() {{ let value = 1; {} }}\n```\n",
+        "x".repeat(5000)
+    );
+    let compact = chunk_markdown(compact_body, MAX_CHUNK_CHARS);
+    let giant = chunk_markdown(&giant_body, MAX_CHUNK_CHARS);
+    let code = |chunks: &[Chunk]| {
+        chunks
+            .iter()
+            .find(|chunk| {
+                chunk.kind
+                    == ChunkKind::Code {
+                        lang: Some("rust".to_owned()),
+                    }
+            })
+            .expect("fence chunk")
+            .text
+            .clone()
+    };
+    let compact = code(&compact);
+    let giant = code(&giant);
+    assert!(
+        giant.chars().count() > MAX_CHUNK_CHARS + CHUNK_OVERLAP,
+        "premise: chunker output exceeds the penalty threshold"
+    );
+
+    // The giant fence is short in *tokens* (its blob exceeds the 40-char
+    // token limit, so BM25 length normalization alone would not demote it) —
+    // the long-chunk penalty is the only brake, which is exactly what this
+    // end-to-end test pins.
+    index
+        .add_chunks(&[chunk(1, 0, "T", &compact), chunk(2, 0, "T", &giant)])
+        .expect("add chunks");
+    index.commit().expect("commit");
+
+    let hits = index.search("refreshed", 5).expect("search");
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    assert_eq!(hits[0].doc_id, 1, "compact chunk must rank first: {hits:?}");
+    assert!(
+        hits[0].score > hits[1].score * 1.1,
+        "chunker-produced oversized chunk must be penalized: {hits:?}"
     );
 }

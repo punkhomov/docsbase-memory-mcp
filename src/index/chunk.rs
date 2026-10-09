@@ -338,8 +338,17 @@ fn bound_prose(pieces: &mut Vec<Piece>, text: &str, start: usize, end: usize, ma
         }
         if chars == 0 && line_chars > max {
             let mut pieces_of_line = split_oversized_line(line, max);
+            debug_assert!(
+                !pieces_of_line.is_empty(),
+                "a non-empty oversized line must yield at least one piece"
+            );
             let Some(last) = pieces_of_line.pop() else {
-                return;
+                // Invariant broken: keep the line instead of silently dropping
+                // the rest of the run (SQ13).
+                push_piece(pieces, text, line_start, line_start + line.len());
+                piece_start = line_start + line.len();
+                chars = 0;
+                continue;
             };
             for (from, to) in pieces_of_line {
                 push_piece(pieces, text, line_start + from, line_start + to);

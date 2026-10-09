@@ -273,6 +273,22 @@ fn script_detection() {
     assert_eq!(script_of("123 !?"), Script::Other);
 }
 
+/// SQ13: a Latin/CJK tie keeps enum order (Latin) — an intentional choice
+/// (see `script_of` docs); CJK runs still emit bigrams in the run loop.
+#[test]
+fn script_of_tie_keeps_enum_order() {
+    assert_eq!(script_of("ab日本"), Script::Latin);
+    assert_eq!(script_of("日本ab"), Script::Latin);
+}
+
+/// SQ13 tie pin at the tokenizer level: the mixed whole token is not emitted
+/// (a single-run alphabetic segment takes the stem-only path), while `ab` and
+/// the `日本` bigram are — no dictionary noise either way.
+#[test]
+fn tie_segment_emits_runs_not_whole_token() {
+    assert_eq!(tokens("ab日本"), expected(&["ab", "日本"]));
+}
+
 #[test]
 fn script_runs_split_mixed_segment() {
     // `OpenSearchを検索` — the SQ11 case: Latin run + CJK run.
