@@ -81,3 +81,5 @@ Post-review SQ15: учёт SQ8-sweep (2619d5f), per-class hit_rate/ndcg (все 
 | C4 | 1.0 | 2.0 | 1.5 | 2.5 | 0.25 | 1.0/1.0 каждый |
 Варианты неразличимы на golden (cjk/arabic тогда ждали SQ10/11) → оставлены консервативные значения C1; LONG_CHUNK_PENALTY теперь достижим e2e (SQ13 pin).
 Post-review SQ15: fixed/deferred: SQ13 minors — fixed (конкретные span-ассерты, формулировка брифа), deferred (fallback defense-in-depth); SQ14 minors — fixed (док recall_at_k, изоляция per-case nDCG-бранча, док-комментарий, non-vacuity); untracked docs/specs/hybrid-providers/ — вне задачи.
+Task SQ15: complete (commits 359a64d..a47c805 + fix round, docs-only: FR-3/assumption #3/SC-5/NFR-6 delta-маркеры, design §9 + §5, ledger)
+Task SQ15: Review: spec PASS, quality CHANGES (1 Important: §5/S2 безусловная cap-гарантия) → fix round (проза-квалификатор в §5/S2/SQ4-интерфейсе) → re-review ADDRESSED; остальные unqualified-упоминания закрыты в том же проходе.
