@@ -27,6 +27,8 @@ const WRITER_HEAP_BYTES: usize = 20_000_000;
 /// `0.25` vs `0.5` are indistinguishable there; `0.5` is kept as the less
 /// aggressive value.
 const LONG_CHUNK_PENALTY: f32 = 0.5;
+// SQ17 widening is sound only if the penalty never raises a score.
+const _: () = assert!(LONG_CHUNK_PENALTY <= 1.0);
 
 /// Upper bound for a single search's `limit`. Tantivy's top-k collector
 /// allocates proportional to the requested limit, so an unbounded
