@@ -60,3 +60,9 @@ Task SQ12: Ruling: SC-7 — offline-гейт зелёный (Linux, 1 passed), `
 Task SQ12: minor (fixed in-task): целочисленный ratio вместо float (clippy cast_precision_loss), assert index_bytes > 0, let-else в dir_size.
 Task SQ12: minor (deferred): cjk p95-бюджет с запасом ~40× (не ловит регресс ×20, стиль существующих тестов); sanity-ceiling 4× не имеет spec-анкора; headroom намеренно большой.
 Plan extended (post-review convergence): SQ13–SQ16 (tasks.md) — закрытие находок кросс-ревью SQ1–SQ12 (delta-протокол) и code-ревью (m15/m10); порядок: SQ13 (pin/penalty/инвариант) → SQ14 (контракт SQ1) → SQ15 (доки) → SQ16 (hygiene).
+Task SQ13: complete (commits 84528e1..285240b, tests: chunker 26 / tantivy_index 20 / tokenizer 35; full suite 354 passed / 0 failed / 8 ignored)
+Task SQ13: Ruling: oversized fence/table атомарны, > cap+overlap, без падений (проба 5018/4005 при 1650); SC-5-исключение фиксируется pin-тестами, delta-маркер — SQ15.
+Task SQ13: Ruling: penalty достижим e2e — BM25-длина в токенах, блоб >40 симв. не индексируется, поэтому giant fence «короткий» в токенах и LONG_CHUNK_PENALTY — единственный тормоз (тест с симметричными fence-доками из реального chunker).
+Task SQ13: Ruling: tie script_of 2:2 Latin/CJK → Latin (enum-порядок осознан); whole-токен не эмитится (stem-only путь), биграммы эмитятся — поведение запинено.
+Task SQ13: minor (fixed in-task): конкретные line-span ассерты и целостность 400 строк таблицы; формулировка брифа про tie.
+Task SQ13: minor (deferred): fallback в bound_prose — defense-in-depth, недостижим при контракте split_oversized_line (тестом не покрыт); untracked docs/specs/hybrid-providers/ — не относится к задаче.
