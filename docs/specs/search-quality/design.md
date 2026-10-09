@@ -167,8 +167,9 @@ FR-5/FR-8/FR-11, SC-6.
 - `IdentifierTokenizer::token_stream` — без `Result`, не паникует; инвариант
   «позиции строго возрастают по сегментам, варианты внутри — равны».
 - `chunk_markdown(body, max_chars) -> Vec<Chunk>` — сигнатура сохраняется
-  (константа меняет смысл единиц); гарантия: `text.chars().count() <= max_chars +
-  CHUNK_OVERLAP`.
+  (константа меняет смысл единиц); гарантия для прозы: `text.chars().count() <=
+  max_chars + CHUNK_OVERLAP`; атомарные fence/table — исключение (SC-5 delta,
+  SQ15).
 - `TOKENIZER_VERSION: u32` — публичная константа; читается `tantivy_index`.
 
 ## 6. Data flow

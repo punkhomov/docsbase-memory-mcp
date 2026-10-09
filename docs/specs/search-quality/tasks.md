@@ -107,7 +107,8 @@ baseline-отчёт создан; повторный прогон в преде�
 - Test: `tests/search_golden.rs`
 **Interfaces:**
 - Produces: `CHUNK_OVERLAP` (≈10%), гарантия
-  `text.chars().count() <= MAX_CHUNK_CHARS + CHUNK_OVERLAP`, срез по границе
+  `text.chars().count() <= MAX_CHUNK_CHARS + CHUNK_OVERLAP` для прозы
+  (атомарные fence/table — исключение, SC-5 delta/SQ15), срез по границе
   токена (аварийный посимвольный — только для безпробельного блоба).
 **Steps:**
 1. Тест: секция 3000 слов без подзаголовков → все чанки ≤ cap+overlap; у каждого
