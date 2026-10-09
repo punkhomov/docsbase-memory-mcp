@@ -66,3 +66,7 @@ Task SQ13: Ruling: penalty достижим e2e — BM25-длина в токе�
 Task SQ13: Ruling: tie script_of 2:2 Latin/CJK → Latin (enum-порядок осознан); whole-токен не эмитится (stem-only путь), биграммы эмитятся — поведение запинено.
 Task SQ13: minor (fixed in-task): конкретные line-span ассерты и целостность 400 строк таблицы; формулировка брифа про tie.
 Task SQ13: minor (deferred): fallback в bound_prose — defense-in-depth, недостижим при контракте split_oversized_line (тестом не покрыт); untracked docs/specs/hybrid-providers/ — не относится к задаче.
+Task SQ14: complete (commits 79024e0..e07dc0a, tests: search_quality 4 passed / 1 ignored; full suite 355 passed / 0 failed / 8 ignored)
+Task SQ14: Ruling: контракт SQ1 выполнен буквально — recall_at_k (found-половина hit) и ndcg_at_10 (реальный truncate ≤10) используются в evaluate; кейсы k=3 < 10, поэтому baseline не регенерировался и метрики идентичны.
+Task SQ14: Ruling: детерминизм доказан дважды — evaluate_is_deterministic (два независимых Bench) сравнивает полный сериализованный отчёт; непустота отчёта и наличие hit проверяются (не вакуумный).
+Task SQ14: minor (fixed in-task): уточнён док recall_at_k (absent-случай), gate-кейс изолирует per-case nDCG-бранч (class_ndcg равны), обновлён док-комментарий теста, добавлена non-vacuity проверка.
