@@ -59,3 +59,4 @@ Task SQ12: Ruling: бюджеты не менялись; новые замеры
 Task SQ12: Ruling: SC-7 — offline-гейт зелёный (Linux, 1 passed), `cargo tree -e normal` без сетевых крейтов (reqwest/ureq/curl/hyper/isahc/surf — пусто); debug-прогон игнорирует все перф-тесты.
 Task SQ12: minor (fixed in-task): целочисленный ratio вместо float (clippy cast_precision_loss), assert index_bytes > 0, let-else в dir_size.
 Task SQ12: minor (deferred): cjk p95-бюджет с запасом ~40× (не ловит регресс ×20, стиль существующих тестов); sanity-ceiling 4× не имеет spec-анкора; headroom намеренно большой.
+Plan extended (post-review convergence): SQ13–SQ16 (tasks.md) — закрытие находок кросс-ревью SQ1–SQ12 (delta-протокол) и code-ревью (m15/m10); порядок: SQ13 (pin/penalty/инвариант) → SQ14 (контракт SQ1) → SQ15 (доки) → SQ16 (hygiene).

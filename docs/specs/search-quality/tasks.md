@@ -291,11 +291,129 @@ SC-2).
 
 ---
 
+## Post-review convergence: SQ13–SQ16
+
+Внешний аудит (кросс-ревью SQ1–SQ12 + code-ревью) подтвердил 4 контрактно-учётных
+пробела и 1 рассинхрон спеки; багов не найдено. SQ13–SQ15 закрывают delta-протокол,
+SQ16 — code-hygiene (m15/m10). Порядок: тесты/код → доки (по рекомендации аудита:
+поведение fence проверяется до правок спеки — проба сделана: oversized fence/table
+не падают, 5018/4005 chars при cap+overlap=1650).
+
+## SQ13 — Fence/table pin + penalty e2e + инвариант `bound_prose`
+
+**Goal:** зафиксировать oversized fence/table тестами (атомарность, валидные lines,
+без падений), доказать достижимость `LONG_CHUNK_PENALTY` на реальном пайплайне,
+убрать тихую потерю данных в `bound_prose`, запинить tie-брейк `script_of`
+(FR-4/FR-11, SC-5).
+**Files:**
+- Modify: `tests/chunker.rs` (pin-тесты oversized fence/table)
+- Modify: `tests/tantivy_index.rs` (penalty e2e через `chunk_markdown`)
+- Modify: `src/index/chunk.rs` (`bound_prose` `:339-343`: `debug_assert!` + fallback)
+- Modify: `tests/tokenizer.rs` (tie pin `script_of`)
+**Interfaces:**
+- Consumes: `chunk_markdown`, `CHUNK_OVERLAP`, `LONG_CHUNK_PENALTY`.
+- Produces: зафиксированный инвариант «oversized fence/table — атомарный чанк
+  > cap+overlap (осознанное исключение SC-5; delta-маркер — SQ15)»;
+  `bound_prose` без silent drop (fallback `push_piece` целой строки).
+**Steps:**
+1. Pin: fence >5000 chars → 1 Code-чанк, текст цел, `line_start/line_end` валидны;
+   аналогично table (1 Table-чанк).
+2. Penalty e2e: markdown с giant fence → `chunk_markdown` → `add_chunks` → search:
+   oversized реально штрафуется (паттерн `score > legal × 1.1`).
+3. `bound_prose`: `debug_assert!` + fallback вместо `return` (на валидных входах
+   поведение не меняется).
+4. Tie `script_of` 2:2 Latin/CJK → Latin (enum-порядок осознан), whole-токен
+   эмитится — тест-комментарий.
+5. Тесты зелёные; коммит.
+**Acceptance:** FR-4/FR-11; SC-5 (поведение зафиксировано тестами).
+**Verify:** `cargo test --locked --test chunker --test tantivy_index --test tokenizer`
+→ ok.
+
+## SQ14 — SQ1-контракт: `recall_at_k`/`ndcg_at_10` + детерминизм + gate-бранч
+
+**Goal:** буквально выполнить контракт SQ1 (`tasks.md` Interfaces) и шаг 3 брифа
+(два прогона), доказать nDCG-only бранч гейта (FR-1/FR-2/FR-3, SC-1).
+**Files:**
+- Modify: `tests/search_quality.rs` (`evaluate`, `gate_rejects_regression`)
+**Interfaces:**
+- Consumes: `hit`/`hit_rate`, `ndcg_at_k`, `regression_failures`.
+- Produces: `fn recall_at_k(paths, expected, k) -> f64`;
+  `fn ndcg_at_10(paths, expected) -> f64` (truncate ≤10 поверх `ndcg_at_k`);
+  `evaluate_is_deterministic`; gate-кейс «hit сохранён, nDCG упал».
+**Steps:**
+1. `recall_at_k`: заменить inline `found` в `evaluate` (идентично: `paths` уже top-k).
+2. `ndcg_at_10`: использовать в `evaluate` (все кейсы k=3 < 10 → метрики не
+   меняются; baseline не регенерируется).
+3. Тест: два `evaluate(&Bench::new())` подряд → равенство.
+4. Gate: baseline `hit=true, ndcg=1.0` → current `hit=true, ndcg=0.0` → fail
+   с ndcg-сообщением.
+5. Тесты зелёные; коммит.
+**Acceptance:** FR-1/FR-2; SC-1; контракт SQ1 выполнен буквально.
+**Verify:** `cargo test --locked --test search_quality` → ok.
+
+## SQ15 — Delta-маркеры и ledger
+
+**Goal:** устранить рассинхрон спеки (SC-5 ⇔ design §9) и учесть все delta:
+FR-3/assumption #3, SC-5, NFR-6, ledger SQ4/SQ8.
+**Files:**
+- Modify: `requirements.md` (FR-3 `:157-161`, assumption #3 `:264`,
+  SC-5 `:248-251`, NFR-6 `:213-214`)
+- Modify: `design.md` (§9 `:208-209`)
+- Modify: `progress.md`
+**Interfaces:**
+- Consumes: SQ13-тесты (ссылки в маркерах), коммиты `a777e85`/`2619d5f`.
+- Produces: delta-маркеры в SC-5 **и** §9 (синхронные формулировки); ledger-строки
+  `Post-review:`; sweep-таблица SQ8.
+**Steps:**
+1. FR-3 + assumption #3: «хвостовые позиции citation-снапшотов могут дрейфовать
+   (не только координаты); критерий — hit@k per-case».
+2. SC-5 + design §9: одинаковый маркер «атомарные fence/table — исключение ради
+   целостности блока (SQ13 pin-тесты)»; §9 не ссылается на «одиночный абзац».
+3. NFR-6: «sweep валиден только на дискриминирующем корпусе; на сатурированном
+   golden фиксируется „варианты неразличимы“ (SQ8)».
+4. Ledger: SQ4-delta (`error_message` rank-3, `a777e85`); SQ8-таблица (C1–C4 из
+   `2619d5f` → все классы 1.0/1.0); `Post-review:` fixed/deferred.
+5. Коммит.
+**Acceptance:** спека внутренне согласована; каждая delta учтена.
+**Verify:** `git diff docs/specs/search-quality/` — SC-5 и §9 совпадают по смыслу.
+
+## SQ16 — Code hygiene: `tokenize`, `camel_split`, `merge_heading_only`, `#[must_use]`
+
+**Goal:** закрыть code-ревью без изменения поведения: `tokenize` ≤50 строк (m15),
+один `camel_split` на ран, O(n) `merge_heading_only`, `#[must_use]`; замеры до/после
+(m10).
+**Files:**
+- Modify: `src/index/tokenizer.rs` (`emit_whole`/`emit_runs`, единый `camel_split`,
+  `#[must_use]` на чистых хелперах)
+- Modify: `src/index/chunk.rs` (`merge_heading_only` без `remove` в цикле)
+- Test: существующие сьюты + chunker-тест цепочки заголовков
+**Interfaces:**
+- Consumes: текущие тесты как контракт поведения.
+- Produces: `tokenize` ≤50 строк; `merge_heading_only` O(n); замеры full index
+  1000/10000 до/после в ledger.
+**Steps:**
+1. Baseline-замер (`perf_budget` release): full index 1000/10000, cjk.
+2. Вынос `emit_whole`/`emit_runs` (чистый move); единый `camel_split` (флаг из
+   `stem_language`/предвычисленный сплит); `#[must_use]` на `stem_language`,
+   `identifier_span`, `alnum_runs`, `camel_split`, `overlap_start`,
+   `tokenizer_version_matches`; проверить `TextAnalyzer: Default` (derive или ledger).
+3. `merge_heading_only`: push/pop-перепись (back-step сохраняется) + тест цепочки
+   заголовков.
+4. Полный сьют зелёный; замер после; разница — в ledger; коммит.
+**Acceptance:** m15/m10; golden/baseline не регенерируются; перф не хуже.
+**Verify:** `cargo test --locked` → ok; `cargo test --locked --release --test
+perf_budget` → ok.
+
+---
+
 ## Self-review плана
 
 - **Spec coverage:** FR-1→SQ1, FR-2/3→SQ2, FR-4→SQ4, FR-5→SQ3, FR-6→SQ4,
   FR-7→SQ6, FR-8→SQ5, FR-9/10→SQ7, FR-11→SQ8, FR-12→SQ11, FR-13→SQ10,
   FR-14→SQ9, FR-15→констрейнт (SC-7 в SQ12), FR-16→SQ6. Пробелов нет.
+  Post-review convergence: SQ13→FR-4/FR-11/SC-5 (pin/penalty/инвариант),
+  SQ14→FR-1/2/3/SC-1 (контракт SQ1), SQ15→доки (FR-3/SC-5/NFR-6 delta),
+  SQ16→m15/m10 hygiene.
 - **Type consistency:** `MAX_CHUNK_CHARS`/`CHUNK_OVERLAP`/`TOKENIZER_VERSION`/
   `normalize`/`script_of` определены в ранних задачах и используются в поздних.
 - **Review focus:** все 5 failure modes привязаны к тестам задач SQ7/SQ5/SQ6/SQ4/SQ12.
