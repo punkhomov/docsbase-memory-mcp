@@ -407,6 +407,60 @@ perf_budget` → ok.
 
 ---
 
+## Scoring evidence: SQ17–SQ18
+
+Аудит BM25-покрытия (после SQ16) нашёл: (а) реальный баг окна penalty —
+проба: 17 oversized (fence-like) + 1 compact, `limit=1` возвращает oversized
+(0.01390) вместо compact (0.01573), потому что penalty применяется после
+отсечения raw top-N; (б) бусты полей (FR-11) не покрыты прямыми тестами —
+смена буста не роняет ни один тест (корень недоказуемости SQ8; NFR-6 требует
+дискриминирующий корпус).
+
+## SQ17 — Penalty за пределами fetch-окна
+
+**Goal:** top-k считается по финальному скору (raw × penalty), а не после
+отсечения raw top-N: результат не должен зависеть от `limit` (FR-11).
+**Files:**
+- Modify: `src/index/tantivy_index.rs` (`search_reader` `:342-347`)
+- Test: `tests/tantivy_index.rs`
+**Interfaces:**
+- Consumes: `LONG_CHUNK_PENALTY`, `MAX_CHUNK_CHARS + CHUNK_OVERLAP`, `TopDocs`.
+- Produces: гарантия «top-k по финальному скору»; окно растёт, пока
+  `final_k < min_raw_fetched` и выборка не исчерпана (звуковость: unseen raw ≤
+  `min_raw_fetched` ⇒ unseen final ≤ raw ≤ `min_raw_fetched`).
+**Steps:**
+1. RED: 17 oversized + 1 compact, `limit=1` → compact first (проба подтвердила
+   падение на текущем коде).
+2. Итеративное расширение окна: после penalty, если окно полное и
+   `final_k < min_raw_fetched` → widen (×4, cap — число доков), повтор.
+3. GREEN; существующие penalty/golden/perf без изменений; коммит.
+**Acceptance:** FR-11; корректный top-k при любом числе oversized-чанков.
+**Verify:** `cargo test --locked --test tantivy_index` → ok; полный сьют → ok.
+
+## SQ18 — Boost-порядок и чувствительность
+
+**Goal:** прямые пин-тесты бустов полей — порядок
+`identifiers > title(+heading) > heading > text` и окна отношений,
+откалиброванные так, чтобы деградация любого буста (≥~30%) роняла тест
+(FR-11; дискриминирующий мини-корпус для NFR-6).
+**Files:**
+- Modify: `tests/tantivy_index.rs` (синтетические доки: термин в одном поле)
+**Interfaces:**
+- Consumes: текущие бусты (text 1.0, title 2.0, heading 1.5, identifiers 2.5).
+- Produces: дискриминирующий мини-корпус; окна отношений зафиксированы в ledger.
+**Steps:**
+1. Синтетика: text-only; heading-only (`["Zed","target"]` — title без матча);
+   title (`["target"]` — title+heading матч); identifier (`target_id`).
+2. Probe: снять фактические отношения скоров (BM25-длины полей различаются);
+   задать окна с запасом.
+3. Ассерты порядка + окон; чувствительность: временно ослабить буст → тест
+   падает; вернуть.
+4. Коммит.
+**Acceptance:** FR-11; NFR-6 (дискриминирующий корпус).
+**Verify:** `cargo test --locked --test tantivy_index` → ok.
+
+---
+
 ## Self-review плана
 
 - **Spec coverage:** FR-1→SQ1, FR-2/3→SQ2, FR-4→SQ4, FR-5→SQ3, FR-6→SQ4,
@@ -415,6 +469,7 @@ perf_budget` → ok.
   Post-review convergence: SQ13→FR-4/FR-11/SC-5 (pin/penalty/инвариант),
   SQ14→FR-1/2/3/SC-1 (контракт SQ1), SQ15→доки (FR-3/SC-5/NFR-6 delta),
   SQ16→m15/m10 hygiene.
+  Scoring evidence: SQ17→FR-11 (penalty window), SQ18→FR-11/NFR-6 (boost pins).
 - **Type consistency:** `MAX_CHUNK_CHARS`/`CHUNK_OVERLAP`/`TOKENIZER_VERSION`/
   `normalize`/`script_of` определены в ранних задачах и используются в поздних.
 - **Review focus:** все 5 failure modes привязаны к тестам задач SQ7/SQ5/SQ6/SQ4/SQ12.

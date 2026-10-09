@@ -89,3 +89,4 @@ Task SQ16: Ruling: merge_heading_only — push/pop без remove(index) в ци�
 Task SQ16: Ruling: перф до/после (release): full index 1000 159.0→159.9ms, 10000 307.5→306.1ms, sync no-op 10k 83.3→88.6ms (шум), search p95 573→590µs, cjk p95 7.9→4.9ms (вариативность) — регресса нет; golden/baseline не регенерировались.
 Task SQ16: Review: spec PASS, quality CHANGES (1 Important: первый тест не достигал merge-пути) → fix round (oversize-тест + non-vacuity доказательство) → re-review ADDRESSED.
 Task SQ16: minor (accepted): Emitter::runs ~70 строк — плоский цикл с ранним continue; дробление CJK/word-веток отклонено ревьюером как вкусовщина.
+Plan extended (scoring evidence): SQ17–SQ18 — penalty fetch-window correctness (баг подтверждён пробой: limit=1 при 17 oversized + 1 compact отдаёт oversized 0.01390 вместо compact 0.01573) + boost-order/чувствительность pins (FR-11, дискриминирующий корпус NFR-6).
