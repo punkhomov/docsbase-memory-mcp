@@ -41,6 +41,9 @@ pub struct IdentifierTokenizer {
     ar: TextAnalyzer,
 }
 
+/// Manual on purpose: `TextAnalyzer::default()` is an `EmptyTokenizer`
+/// (tantivy 0.26), so `#[derive(Default)]` would compile and silently disable
+/// stemming.
 impl Default for IdentifierTokenizer {
     fn default() -> Self {
         Self {
