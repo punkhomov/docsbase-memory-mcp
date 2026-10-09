@@ -245,6 +245,18 @@ impl Bench {
     }
 }
 
+/// Recall@k for single-relevant golden cases: 1.0 when any expected document
+/// is inside the fetched top-`k`, else 0.0. This is the `found` half of the
+/// per-case hit (`hit = found && !absent_hit`).
+fn recall_at_k(paths: &[String], expected: &[&str], k: usize) -> f64 {
+    f64::from(u8::from(
+        paths
+            .iter()
+            .take(k)
+            .any(|path| expected.contains(&path.as_str())),
+    ))
+}
+
 /// Discounted gain of the first relevant document within the fetched top-`k`
 /// (IDCG = 1 for a single expected document); 0.0 when it is missing.
 fn ndcg_at_k(paths: &[String], expected: &[&str]) -> f64 {
@@ -254,6 +266,13 @@ fn ndcg_at_k(paths: &[String], expected: &[&str]) -> f64 {
         }
     }
     0.0
+}
+
+/// Brief-named nDCG@10 contract helper (SQ1/SQ14): truncates the fetched
+/// results to ten before scoring. Golden cases fetch k=3 < 10, so this is the
+/// metric in use and per-case values stay identical to [`ndcg_at_k`].
+fn ndcg_at_10(paths: &[String], expected: &[&str]) -> f64 {
+    ndcg_at_k(&paths[..paths.len().min(10)], expected)
 }
 
 /// Lossless count → f64 (test counters fit u32 by construction).
@@ -272,16 +291,13 @@ fn evaluate(bench: &Bench) -> Baseline {
 
     for case in CASES {
         let paths = bench.paths(case.query, case.k);
-        let found = case
-            .expected
-            .iter()
-            .any(|p| paths.contains(&(*p).to_owned()));
+        let found = recall_at_k(&paths, case.expected, case.k) > 0.0;
         let absent_found = case.absent.iter().any(|p| paths.contains(&(*p).to_owned()));
         let hit = found && !absent_found;
         let ndcg = if absent_found {
             0.0
         } else {
-            ndcg_at_k(&paths, case.expected)
+            ndcg_at_10(&paths, case.expected)
         };
         let entry = class_hits.entry(case.class).or_insert((0, 0));
         entry.0 += usize::from(hit);
@@ -484,6 +500,23 @@ fn metrics_match_baseline() {
     );
 }
 
+/// SC-1 (SQ1 step 3): two independent evaluations agree — the baseline is
+/// reproducible, not merely single-run stable.
+#[test]
+fn evaluate_is_deterministic() {
+    let first = evaluate(&Bench::new());
+    let second = evaluate(&Bench::new());
+    assert!(
+        !first.cases.is_empty() && first.classes.values().any(|class| class.hit_rate > 0.0),
+        "the report must be non-empty with at least one hit: {first:?}"
+    );
+    assert_eq!(
+        serde_json::to_value(&first).expect("serialize first"),
+        serde_json::to_value(&second).expect("serialize second"),
+        "two evaluations must produce identical reports"
+    );
+}
+
 /// FR-3/SC-4: acceptance gate — no relevant document may drop out of top-k and
 /// no class metric may fall below the checked-in baseline (nDCG within
 /// tolerance). Improvements are allowed; citation snapshots update only as
@@ -503,9 +536,9 @@ fn no_regression_gate() {
     );
 }
 
-/// The gate itself rejects synthetic regressions — a lost hit and a newly
-/// appearing forbidden document (negative half of SC-3) — and accepts a
-/// synthetic improvement.
+/// The gate itself rejects synthetic regressions — a lost hit, a newly
+/// appearing forbidden document (negative half of SC-3), and a pure nDCG drop
+/// with the hit retained — and accepts a synthetic improvement.
 #[test]
 fn gate_rejects_regression() {
     let make = |hit: bool, absent_hit: bool, ndcg: f64, class_ndcg: f64| Baseline {
@@ -549,6 +582,15 @@ fn gate_rejects_regression() {
             .iter()
             .any(|line| line.contains("forbidden document appeared")),
         "appearing forbidden document must be reported: {failures:?}"
+    );
+
+    // Pure nDCG drop with the hit retained: the per-case metric branch must
+    // fire on its own (class nDCG is kept equal to isolate it).
+    let degraded = make(true, false, 0.0, 0.0);
+    let failures = regression_failures(&degraded, &make(true, false, 1.0, 0.0));
+    assert!(
+        failures.iter().any(|line| line.contains("ndcg")),
+        "nDCG-only regression must be reported: {failures:?}"
     );
 
     let improved_current = make(true, false, 1.0, 1.0);
