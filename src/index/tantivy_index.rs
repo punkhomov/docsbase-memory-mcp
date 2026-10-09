@@ -340,44 +340,65 @@ fn search_reader(
         message: format!("parse query {query:?}: {err}"),
     })?;
     let searcher = reader.searcher();
-    // Over-fetch so the long-chunk penalty can reorder before truncation.
-    let fetch = limit.saturating_mul(4).max(limit.saturating_add(16));
-    let top = searcher
-        .search(&parsed, &TopDocs::with_limit(fetch).order_by_score())
-        .map_err(tantivy_error)?;
-
-    let mut hits = Vec::with_capacity(top.len());
-    for (score, address) in top {
-        let document: TantivyDocument = searcher.doc(address).map_err(tantivy_error)?;
-        let chunk = document
-            .get_first(fields.chunk_id)
-            .and_then(|value| value.as_u64())
-            .ok_or_else(|| Error::internal(format!("index doc {address:?}: missing chunk_id")))?;
-        let doc = document
-            .get_first(fields.doc_id)
-            .and_then(|value| value.as_i64())
-            .ok_or_else(|| Error::internal(format!("index doc {address:?}: missing doc_id")))?;
-        let text_len = document
-            .get_first(fields.text_len)
-            .and_then(|value| value.as_u64())
-            .ok_or_else(|| Error::internal(format!("index doc {address:?}: missing text_len")))?;
-        let score = if text_len > (MAX_CHUNK_CHARS + CHUNK_OVERLAP) as u64 {
-            score * LONG_CHUNK_PENALTY
-        } else {
-            score
-        };
-        hits.push(Hit {
-            chunk_id: chunk,
-            doc_id: doc,
-            score,
+    // Over-fetch so the long-chunk penalty can reorder before truncation, and
+    // widen while an unseen document could still beat the k-th final score
+    // (SQ17): an unseen raw score is at most `min_raw_fetched`, and the
+    // penalty never raises a score (`LONG_CHUNK_PENALTY <= 1`), so once the
+    // k-th final score is >= it, the top-k is settled.
+    let total = usize::try_from(searcher.num_docs()).unwrap_or(usize::MAX);
+    let mut fetch = limit.saturating_mul(4).max(limit.saturating_add(16));
+    let mut hits = loop {
+        let top = searcher
+            .search(&parsed, &TopDocs::with_limit(fetch).order_by_score())
+            .map_err(tantivy_error)?;
+        let exhausted = top.len() < fetch || fetch >= total;
+        let min_raw = top.last().map_or(0.0, |(score, _)| *score);
+        let mut hits = Vec::with_capacity(top.len());
+        for (score, address) in top {
+            let document: TantivyDocument = searcher.doc(address).map_err(tantivy_error)?;
+            let chunk = document
+                .get_first(fields.chunk_id)
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| {
+                    Error::internal(format!("index doc {address:?}: missing chunk_id"))
+                })?;
+            let doc = document
+                .get_first(fields.doc_id)
+                .and_then(|value| value.as_i64())
+                .ok_or_else(|| Error::internal(format!("index doc {address:?}: missing doc_id")))?;
+            let text_len = document
+                .get_first(fields.text_len)
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| {
+                    Error::internal(format!("index doc {address:?}: missing text_len"))
+                })?;
+            let score = if text_len > (MAX_CHUNK_CHARS + CHUNK_OVERLAP) as u64 {
+                score * LONG_CHUNK_PENALTY
+            } else {
+                score
+            };
+            hits.push(Hit {
+                chunk_id: chunk,
+                doc_id: doc,
+                score,
+            });
+        }
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
-    }
-    hits.sort_by(|left, right| {
-        right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+        let settled = exhausted || hits.get(limit - 1).is_none_or(|hit| hit.score >= min_raw);
+        if settled {
+            break hits;
+        }
+        let next = fetch.saturating_mul(4).min(total);
+        if next == fetch {
+            break hits;
+        }
+        fetch = next;
+    };
     hits.truncate(limit);
     Ok(hits)
 }

@@ -531,3 +531,31 @@ fn penalty_applies_to_chunker_oversized_fence() {
         "chunker-produced oversized chunk must be penalized: {hits:?}"
     );
 }
+
+/// FR-11/SQ17: the top-k is chosen by the final score (raw × penalty), not
+/// after truncating the raw window. Seventeen oversized chunks fill the
+/// default fetch window (limit*4+16 = 17) with higher raw scores; the compact
+/// chunk just below them must still win once the penalty is applied.
+#[test]
+fn penalty_respects_compact_winner_beyond_fetch_window() {
+    let (_dir, mut index) = handle();
+    let oversized = format!("target {}", "x".repeat(3000));
+    let mut chunks: Vec<Chunk> = (1..=17).map(|i| chunk(i, 0, "T", &oversized)).collect();
+    chunks.push(chunk(100, 0, "T", "target filler1 filler2"));
+    // Premise: the giant blobs exceed the 40-char token limit, so the
+    // oversized chunks stay short *in tokens* and outrank the compact chunk
+    // on raw score; 17 is exactly the default fetch window for limit=1.
+    assert!(
+        oversized.chars().count() > MAX_CHUNK_CHARS + CHUNK_OVERLAP,
+        "oversized chunks must exceed the penalty threshold"
+    );
+    index.add_chunks(&chunks).expect("add chunks");
+    index.commit().expect("commit");
+
+    let hits = index.search("target", 1).expect("search");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(
+        hits[0].doc_id, 100,
+        "compact chunk must win by final score: {hits:?}"
+    );
+}
