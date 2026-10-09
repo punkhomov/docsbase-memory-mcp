@@ -118,81 +118,95 @@ impl TokenStream for IdentifierTokenStream {
     }
 }
 
-fn tokenize(
-    text: &str,
-    ru: &mut TextAnalyzer,
-    en: &mut TextAnalyzer,
-    ar: &mut TextAnalyzer,
-) -> Vec<Token> {
-    let mut tokens = Vec::new();
-    let mut position = 0_usize;
+/// Emitter state shared by the whole-segment and per-run paths: token buffer,
+/// per-segment variant dedupe, running position, and the stem analyzers.
+struct Emitter<'a> {
+    tokens: Vec<Token>,
+    emitted: HashSet<String>,
+    position: usize,
+    ru: &'a mut TextAnalyzer,
+    en: &'a mut TextAnalyzer,
+    ar: &'a mut TextAnalyzer,
+}
 
-    for (offset, raw) in raw_segments(text) {
-        if !raw.chars().any(char::is_alphanumeric) {
-            continue;
-        }
-        let mut emitted: HashSet<String> = HashSet::new();
-        let runs = alnum_runs(raw);
-        let protected = raw.contains('_');
-        // A single-word segment whose only run stems is emitted as the stem
-        // alone (SQ7 ruling): surface variants would make the query a phrase
-        // that only a document with the same surface form can satisfy.
-        let stem_only =
-            runs.len() == 1 && !protected && stem_language(&raw[runs[0].0..runs[0].1]).is_some();
-        // A CJK-dominant segment is represented by its bigrams only (FR-12);
-        // the whole-segment token would be dictionary noise.
-        let cjk_segment = textnorm::script_of(raw) == Script::Cjk;
-        if !stem_only && !cjk_segment {
-            let lower = raw.to_lowercase();
+impl Emitter<'_> {
+    /// Emits the whole segment (lowercased) plus the punctuation-stripped
+    /// identifier span when one exists (FR-21), all at the segment position.
+    fn whole(&mut self, raw: &str, offset: usize, position: usize) {
+        let lower = raw.to_lowercase();
+        emit(
+            &mut self.tokens,
+            &mut self.emitted,
+            &lower,
+            offset,
+            offset + raw.len(),
+            position,
+        );
+
+        // The identifier with surrounding punctuation stripped so that
+        // `` `assessment_plan_id`, `` still carries the exact identifier token
+        // (FR-21); only spans made purely of alphanumerics/underscores count.
+        if let Some((from, to)) = identifier_span(raw)
+            && (from > 0 || to < raw.len())
+        {
+            let trimmed = &raw[from..to];
+            let trimmed_lower = trimmed.to_lowercase();
             emit(
-                &mut tokens,
-                &mut emitted,
-                &lower,
-                offset,
-                offset + raw.len(),
+                &mut self.tokens,
+                &mut self.emitted,
+                &trimmed_lower,
+                offset + from,
+                offset + to,
                 position,
             );
-
-            // Emit the identifier with surrounding punctuation stripped so that
-            // `` `assessment_plan_id`, `` still carries the exact identifier token
-            // (FR-21); only spans made purely of alphanumerics/underscores count.
-            if let Some((from, to)) = identifier_span(raw)
-                && (from > 0 || to < raw.len())
-            {
-                let trimmed = &raw[from..to];
-                let trimmed_lower = trimmed.to_lowercase();
-                emit(
-                    &mut tokens,
-                    &mut emitted,
-                    &trimmed_lower,
-                    offset + from,
-                    offset + to,
-                    position,
-                );
-            }
         }
+    }
 
-        // Mixed segments are processed per single-script run (FR-12): CJK runs
-        // become sequential bigrams, everything else keeps the word path.
-        // Non-CJK variants all share the segment position (FR-7/SQ6): runs of
-        // `assessment_plan_id` must not become phrase-adjacent.
-        let base = position;
+    /// Processes the alphanumeric runs of a mixed segment (FR-12): CJK runs
+    /// become sequential bigrams, everything else keeps the word path.
+    /// Non-CJK variants all share the segment position (FR-7/SQ6): runs of
+    /// `assessment_plan_id` must not become phrase-adjacent. `single_camel` is
+    /// the precomputed split of a lone run, reused instead of recomputing it.
+    fn runs(
+        &mut self,
+        raw: &str,
+        runs: &[(usize, usize)],
+        single_camel: Option<&[(String, usize, usize)]>,
+        protected: bool,
+        offset: usize,
+        base: usize,
+    ) {
         for (part_from, part_to) in runs {
-            let part = &raw[part_from..part_to];
-            for (run_from, run) in textnorm::split_script_runs(part) {
+            let part = &raw[*part_from..*part_to];
+            let script_runs = textnorm::split_script_runs(part);
+            let reusable = if runs.len() == 1 && script_runs.len() == 1 {
+                single_camel
+            } else {
+                None
+            };
+            for (run_from, run) in script_runs {
                 let start = part_from + run_from;
                 if textnorm::script_of(run) == Script::Cjk {
-                    emit_cjk(&mut tokens, run, offset + start, &mut position);
+                    emit_cjk(&mut self.tokens, run, offset + start, &mut self.position);
                     continue;
                 }
+                let owned;
+                let camel: &[(String, usize, usize)] = if let Some(parts) = reusable {
+                    parts
+                } else {
+                    owned = camel_split(run);
+                    &owned
+                };
                 if !protected
-                    && let Some(language) = stem_language(run)
-                    && let Some(stemmed) =
-                        stem(analyzer_for(language, ru, en, ar), &run.to_lowercase())
+                    && let Some(language) = stem_language(run, camel.len() > 1)
+                    && let Some(stemmed) = stem(
+                        analyzer_for(language, self.ru, self.en, self.ar),
+                        &run.to_lowercase(),
+                    )
                 {
                     emit(
-                        &mut tokens,
-                        &mut emitted,
+                        &mut self.tokens,
+                        &mut self.emitted,
                         &stemmed,
                         offset + start,
                         offset + start + run.len(),
@@ -202,18 +216,18 @@ fn tokenize(
                 }
                 let run_lower = run.to_lowercase();
                 emit(
-                    &mut tokens,
-                    &mut emitted,
+                    &mut self.tokens,
+                    &mut self.emitted,
                     &run_lower,
                     offset + start,
                     offset + start + run.len(),
                     base,
                 );
-                for (sub, sub_from, sub_to) in camel_split(run) {
+                for (sub, sub_from, sub_to) in camel {
                     emit(
-                        &mut tokens,
-                        &mut emitted,
-                        &sub,
+                        &mut self.tokens,
+                        &mut self.emitted,
+                        sub,
                         offset + start + sub_from,
                         offset + start + sub_to,
                         base,
@@ -222,9 +236,50 @@ fn tokenize(
             }
         }
         // FR-7: one position per segment (CJK bigrams add their own on top).
-        position = position.max(base + 1);
+        self.position = self.position.max(base + 1);
     }
-    tokens
+}
+
+fn tokenize(
+    text: &str,
+    ru: &mut TextAnalyzer,
+    en: &mut TextAnalyzer,
+    ar: &mut TextAnalyzer,
+) -> Vec<Token> {
+    let mut emitter = Emitter {
+        tokens: Vec::new(),
+        emitted: HashSet::new(),
+        position: 0,
+        ru,
+        en,
+        ar,
+    };
+
+    for (offset, raw) in raw_segments(text) {
+        if !raw.chars().any(char::is_alphanumeric) {
+            continue;
+        }
+        let runs = alnum_runs(raw);
+        let protected = raw.contains('_');
+        // A single-word segment whose only run stems is emitted as the stem
+        // alone (SQ7 ruling): surface variants would make the query a phrase
+        // that only a document with the same surface form can satisfy.
+        let single_camel = (runs.len() == 1).then(|| camel_split(&raw[runs[0].0..runs[0].1]));
+        let stem_only = !protected
+            && single_camel.as_ref().is_some_and(|camel| {
+                stem_language(&raw[runs[0].0..runs[0].1], camel.len() > 1).is_some()
+            });
+        // A CJK-dominant segment is represented by its bigrams only (FR-12);
+        // the whole-segment token would be dictionary noise.
+        let cjk_segment = textnorm::script_of(raw) == Script::Cjk;
+        emitter.emitted.clear();
+        let base = emitter.position;
+        if !stem_only && !cjk_segment {
+            emitter.whole(raw, offset, base);
+        }
+        emitter.runs(raw, &runs, single_camel.as_deref(), protected, offset, base);
+    }
+    emitter.tokens
 }
 
 /// Emits overlapping bigrams over every character of a CJK run with
@@ -256,12 +311,15 @@ fn emit_cjk(tokens: &mut Vec<Token>, run: &str, offset: usize, position: &mut us
 }
 
 /// Stemmer for a standalone word: pure alphabet, longer than 3 chars, not
-/// ALL-CAPS, not a camel part (FR-10 guards). `None` = keep the surface form.
-fn stem_language(part: &str) -> Option<Language> {
+/// ALL-CAPS, not a camel part (FR-10 guards). The camel decision is passed in
+/// so callers compute [`camel_split`] once per run (SQ16). `None` = keep the
+/// surface form.
+#[must_use]
+fn stem_language(part: &str, is_camel: bool) -> Option<Language> {
     if part.chars().count() <= 3
         || !part.chars().all(char::is_alphabetic)
         || part.chars().all(char::is_uppercase)
-        || camel_split(part).len() > 1
+        || is_camel
     {
         return None;
     }
@@ -346,6 +404,7 @@ fn raw_segments(text: &str) -> Vec<(usize, &str)> {
 /// Byte span of `raw` once leading/trailing punctuation is stripped, when
 /// every character inside the span is alphanumeric or `_`; `None` when the
 /// segment is empty or contains punctuation in the middle (`PA.data`).
+#[must_use]
 fn identifier_span(raw: &str) -> Option<(usize, usize)> {
     let is_ident = |ch: char| ch.is_alphanumeric() || ch == '_';
     let mut first: Option<usize> = None;
@@ -362,6 +421,7 @@ fn identifier_span(raw: &str) -> Option<(usize, usize)> {
     raw[from..to].chars().all(is_ident).then_some((from, to))
 }
 
+#[must_use]
 fn alnum_runs(raw: &str) -> Vec<(usize, usize)> {
     let mut runs = Vec::new();
     let mut start: Option<usize> = None;
@@ -380,6 +440,7 @@ fn alnum_runs(raw: &str) -> Vec<(usize, usize)> {
     runs
 }
 
+#[must_use]
 fn camel_split(part: &str) -> Vec<(String, usize, usize)> {
     let mut words = Vec::new();
     let mut current = String::new();

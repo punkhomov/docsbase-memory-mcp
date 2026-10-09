@@ -398,6 +398,29 @@ fn oversized_fence_stays_atomic() {
     );
 }
 
+/// SQ16: `merge_heading_only` is only reachable in an oversized section — the
+/// leading heading-only piece (heading + blank line before a giant single
+/// line) merges into the first split piece; under-cap sections never call it.
+#[test]
+fn oversized_section_keeps_heading_in_first_piece() {
+    let words: Vec<String> = (0..40).map(|i| format!("word{i:02}")).collect();
+    let body = format!("# H\n\n{}\n", words.join(" "));
+    let chunks = chunk_markdown(&body, 60);
+    assert!(chunks.len() > 1, "{chunks:?}");
+    let first = &chunks[0];
+    assert_eq!(first.heading_path, vec!["H"]);
+    assert!(
+        first.text.starts_with("# H"),
+        "heading merged into the first piece: {:?}",
+        first.text
+    );
+    assert!(
+        first.text.contains("word00"),
+        "first words merged with the heading: {:?}",
+        first.text
+    );
+}
+
 /// Same pin for tables: a table over cap+overlap stays one atomic chunk.
 #[test]
 fn oversized_table_stays_atomic() {

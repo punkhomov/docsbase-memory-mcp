@@ -214,31 +214,37 @@ fn split_ranges(text: &str, max: usize) -> Vec<(usize, usize)> {
 
 /// A heading-only piece directly before the next piece is a caption: merge it
 /// back so chunks never consist of a bare heading. The merge budget is
-/// cap + overlap and the merged piece skips overlap, keeping SC-5.
-fn merge_heading_only(mut pieces: Vec<Piece>, text: &str, max: usize) -> Vec<Piece> {
-    let mut index = 0_usize;
-    while index + 1 < pieces.len() {
-        let current = pieces[index];
-        let next = pieces[index + 1];
-        let current_chars = text[current.start..current.end].chars().count();
-        let next_chars = text[next.start..next.end].chars().count();
-        let heading_only = !current.atomic
-            && !next.atomic
-            && current.end == next.start
-            && current_chars + next_chars <= max + CHUNK_OVERLAP
-            && text[current.start..current.end]
-                .lines()
-                .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'));
-        if heading_only {
-            pieces[index + 1].start = current.start;
-            pieces[index + 1].heading_merged = true;
-            pieces.remove(index);
-            index = index.saturating_sub(1);
-        } else {
-            index += 1;
+/// cap + overlap and the merged piece skips overlap, keeping SC-5. A push/pop
+/// pass keeps the backward re-check without O(n) removal inside the scan
+/// (SQ16).
+fn merge_heading_only(pieces: Vec<Piece>, text: &str, max: usize) -> Vec<Piece> {
+    let mut merged: Vec<Piece> = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        merged.push(piece);
+        while merged.len() >= 2 {
+            let current = merged[merged.len() - 2];
+            let next = merged[merged.len() - 1];
+            let current_chars = text[current.start..current.end].chars().count();
+            let next_chars = text[next.start..next.end].chars().count();
+            let heading_only = !current.atomic
+                && !next.atomic
+                && current.end == next.start
+                && current_chars + next_chars <= max + CHUNK_OVERLAP
+                && text[current.start..current.end]
+                    .lines()
+                    .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'));
+            if !heading_only {
+                break;
+            }
+            // Merge `current` into `next`: keep the newer piece, drop the
+            // older one (remove at len-2 shifts only the last element).
+            let last = merged.len() - 1;
+            merged[last].start = current.start;
+            merged[last].heading_merged = true;
+            merged.remove(last - 1);
         }
     }
-    pieces
+    merged
 }
 
 /// Splits `text` into pieces ≤ `max` chars: prose runs are cut at line
@@ -434,6 +440,7 @@ fn apply_overlap(text: &str, pieces: &[Piece], max: usize) -> Vec<(usize, usize)
 
 /// Longest suffix of `[prev_start..prev_end)` (≤ `take` chars) that starts at
 /// a token boundary; `None` when the tail has no boundary (blob).
+#[must_use]
 fn overlap_start(text: &str, prev_start: usize, prev_end: usize, take: usize) -> Option<usize> {
     let prev = &text[prev_start..prev_end];
     let total = prev.chars().count();

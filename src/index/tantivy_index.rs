@@ -417,6 +417,7 @@ fn tokenizer_version(dir: &Path) -> Option<String> {
 
 /// True when the on-disk index was written by the current pipeline; a missing
 /// (legacy) or unparsable file counts as a mismatch (FR-8).
+#[must_use]
 fn tokenizer_version_matches(dir: &Path) -> bool {
     tokenizer_version(dir)
         .and_then(|value| value.parse::<u32>().ok())
