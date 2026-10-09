@@ -95,3 +95,7 @@ Task SQ17: Ruling: penalty учитывается при выборе top-k, а 
 Task SQ17: Ruling: баг подтверждён пробой (limit=1, 17 oversized + 1 compact: 0.01390 vs 0.01573) и RED-тестом penalty_respects_compact_winner_beyond_fetch_window; golden/baseline не менялись.
 Task SQ17: minor (fixed in-task): premise-ассерты и комментарий (блоб >40 симв. не индексируется — oversized «короткие» в токенах), допущение penalty ≤ 1 в soundness-комментарии, убран redundant hits.len() < limit.
 Task SQ17: minor (deferred): next==fetch guard недостижим при !settled (defensive, оставлен); top-k при точных f32-ничьих может отличаться идентичностью доков между limit — свойство top-k, не дефект.
+Task SQ18: complete (commits 65e31ab..403aea5, tests: tantivy_index 22 passed; full suite 358 passed / 0 failed / 8 ignored)
+Task SQ18: Ruling: дискриминирующий мини-корпус — 4 синтетических дока с выровненными длинами полей (title 1 токен, heading 2, text 1); окна отношений (замер probe): title+heading/heading 3.316 → (3.0..=3.6), heading/text 1.500 → (1.35..=1.65), identifiers/text 2.950 → (2.7..=3.2); порядок [1,4,3,2].
+Task SQ18: Ruling: чувствительность доказана — деградация title 2.0→1.0, heading 1.5→1.0, identifiers 2.5→1.5 роняет тест; compound-мисконфиг (title 2.3 + identifiers 2.1) роняет после ужатия окон; per-field idf сокращается внутри отношений.
+Task SQ18: Review: spec PASS, quality APPROVED; 3 minors — 2 fixed in-task (окна ужаты, формулировка брифа target_id→target.), ledger-строки добавлены этим коммитом.
