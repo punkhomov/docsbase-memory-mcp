@@ -450,7 +450,8 @@ perf_budget` → ok.
 - Produces: дискриминирующий мини-корпус; окна отношений зафиксированы в ledger.
 **Steps:**
 1. Синтетика: text-only; heading-only (`["Zed","target"]` — title без матча);
-   title (`["target"]` — title+heading матч); identifier (`target_id`).
+   title (`["target"]` — title+heading матч); identifier (`target.` — терм
+   попадает в identifiers через production `extract_identifiers`).
 2. Probe: снять фактические отношения скоров (BM25-длины полей различаются);
    задать окна с запасом.
 3. Ассерты порядка + окон; чувствительность: временно ослабить буст → тест

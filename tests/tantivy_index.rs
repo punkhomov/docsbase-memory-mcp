@@ -20,6 +20,20 @@ fn chunk(doc_id: i64, seq: u32, heading: &str, text: &str) -> Chunk {
     }
 }
 
+/// Chunk with an explicit breadcrumb (SQ18 boost-order docs need controlled
+/// title/heading field contents).
+fn doc_with_path(doc_id: i64, heading_path: &[&str], text: &str) -> Chunk {
+    Chunk {
+        doc_id,
+        seq: 0,
+        heading_path: heading_path.iter().map(|part| (*part).to_owned()).collect(),
+        kind: ChunkKind::Prose,
+        line_start: 1,
+        line_end: 1,
+        text: text.to_owned(),
+    }
+}
+
 fn handle() -> (TempDir, IndexHandle) {
     let dir = TempDir::new().expect("tempdir");
     let mut index = IndexHandle::open_or_create(dir.path()).expect("open");
@@ -557,5 +571,49 @@ fn penalty_respects_compact_winner_beyond_fetch_window() {
     assert_eq!(
         hits[0].doc_id, 100,
         "compact chunk must win by final score: {hits:?}"
+    );
+}
+
+/// FR-11/SQ18: field boosts order as configured and the ratio windows are
+/// tight enough that degrading a single boost fails — the discriminating
+/// corpus NFR-6 asks for. Field lengths are equalized per field so the
+/// ratios are boost-driven (title 2.0 / heading 1.5 / text 1.0 /
+/// identifiers 2.5; per-field idf cancels inside each ratio).
+#[test]
+fn field_boosts_order_and_sensitivity() {
+    let (_dir, mut index) = handle();
+    index
+        .add_chunks(&[
+            doc_with_path(1, &["target", "pad"], "filler"), // title + heading
+            doc_with_path(2, &["zed", "pad"], "target"),    // text
+            doc_with_path(3, &["zed", "target"], "filler"), // heading
+            doc_with_path(4, &["zed", "pad"], "target."),   // identifiers + text
+        ])
+        .expect("add chunks");
+    index.commit().expect("commit");
+
+    let hits = index.search("target", 4).expect("search");
+    let order: Vec<i64> = hits.iter().map(|hit| hit.doc_id).collect();
+    assert_eq!(order, vec![1, 4, 3, 2], "boost order: {hits:?}");
+    let by = |id: i64| {
+        hits.iter()
+            .find(|hit| hit.doc_id == id)
+            .expect("doc in hits")
+            .score
+    };
+    let title_heading = by(1) / by(3);
+    assert!(
+        (3.0..=3.6).contains(&title_heading),
+        "title+heading/heading = {title_heading:.3} (title 2.0 + heading 1.5)"
+    );
+    let heading_text = by(3) / by(2);
+    assert!(
+        (1.35..=1.65).contains(&heading_text),
+        "heading/text = {heading_text:.3} (heading 1.5)"
+    );
+    let identifiers_text = by(4) / by(2);
+    assert!(
+        (2.7..=3.2).contains(&identifiers_text),
+        "identifiers/text = {identifiers_text:.3} (identifiers 2.5)"
     );
 }
