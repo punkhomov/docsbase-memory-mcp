@@ -70,3 +70,14 @@ Task SQ14: complete (commits 79024e0..e07dc0a, tests: search_quality 4 passed / 
 Task SQ14: Ruling: контракт SQ1 выполнен буквально — recall_at_k (found-половина hit) и ndcg_at_10 (реальный truncate ≤10) используются в evaluate; кейсы k=3 < 10, поэтому baseline не регенерировался и метрики идентичны.
 Task SQ14: Ruling: детерминизм доказан дважды — evaluate_is_deterministic (два независимых Bench) сравнивает полный сериализованный отчёт; непустота отчёта и наличие hit проверяются (не вакуумный).
 Task SQ14: minor (fixed in-task): уточнён док recall_at_k (absent-случай), gate-кейс изолирует per-case nDCG-бранч (class_ndcg равны), обновлён док-комментарий теста, добавлена non-vacuity проверка.
+Post-review SQ15: delta-маркеры: FR-3 + assumption #3 — дрейф хвостовых позиций citation-снапшотов (не только координаты chunk_id/lines), критерий hit@k per-case; SC-5 + design §9 — атомарные fence/table как единственное исключение, формулировки синхронизированы, устаревшая ссылка на «одиночный абзац» убрана; NFR-6 — sweep валиден только на дискриминирующем корпусе.
+Post-review SQ15: учёт SQ4-delta (a777e85): снапшот error_message_top1 — хвостовая rank-3 замена cad/sheet-metal-rules.md (Diagnostics) → cad/thickness-glossary.md; per-case top-1 ассерт SC-2 держится; замена — следствие нового сплита (S2), покрыта delta-формулировкой FR-3.
+Post-review SQ15: учёт SQ8-sweep (2619d5f), per-class hit_rate/ndcg (все достижимые классы сатурированы):
+| Вариант | text | title | heading | identifiers | penalty | ru/en/identifiers/phrases |
+|---|---|---|---|---|---|---|
+| C1 current | 1.0 | 2.0 | 1.5 | 2.5 | 0.5 | 1.0/1.0 каждый |
+| C2 | 1.0 | 3.0 | 2.5 | 2.5 | 0.5 | 1.0/1.0 каждый |
+| C3 | 1.0 | 2.0 | 1.5 | 3.5 | 0.5 | 1.0/1.0 каждый |
+| C4 | 1.0 | 2.0 | 1.5 | 2.5 | 0.25 | 1.0/1.0 каждый |
+Варианты неразличимы на golden (cjk/arabic тогда ждали SQ10/11) → оставлены консервативные значения C1; LONG_CHUNK_PENALTY теперь достижим e2e (SQ13 pin).
+Post-review SQ15: fixed/deferred: SQ13 minors — fixed (конкретные span-ассерты, формулировка брифа), deferred (fallback defense-in-depth); SQ14 minors — fixed (док recall_at_k, изоляция per-case nDCG-бранча, док-комментарий, non-vacuity); untracked docs/specs/hybrid-providers/ — вне задачи.
