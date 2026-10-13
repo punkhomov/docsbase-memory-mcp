@@ -28,9 +28,22 @@ pub fn is_under(candidate: &Path, base: &Path) -> bool {
     key_under(&windows_key(candidate), &windows_key(base))
 }
 
+/// macOS containment: compare case-folded keys — the default APFS spelling is
+/// case-insensitive, so a differently-cased candidate still belongs to the
+/// base (FR-5; same trade-off as Windows, documented caveat for
+/// case-sensitive APFS volumes).
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn is_under(candidate: &Path, base: &Path) -> bool {
+    key_under(
+        &candidate.to_string_lossy().to_lowercase(),
+        &base.to_string_lossy().to_lowercase(),
+    )
+}
+
 /// Shared-root test on an already-normalized key: equal, or a prefix at a
 /// separator boundary (`/docs` is not under `/doc`).
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 #[must_use]
 fn key_under(candidate: &str, base: &str) -> bool {
     let base = base.strip_suffix('/').unwrap_or(base);
@@ -226,6 +239,24 @@ mod tests {
         let sibling = windows_key(Path::new(r"C:\Users\X\Docs2\a.md"));
         assert!(!key_under(&sibling, &base), "component boundary");
         assert!(key_under("c:/users/x", "c:/"), "trailing separator in base");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_comparison_key_and_containment_fold_case() {
+        assert_eq!(
+            normalize_for_compare(Path::new("/Users/User/Project")),
+            normalize_for_compare(Path::new("/users/user/project")),
+            "comparison key folds case"
+        );
+        assert!(
+            is_under(Path::new("/users/x/docs/a.md"), Path::new("/Users/X/Docs")),
+            "containment folds case"
+        );
+        assert!(
+            !is_under(Path::new("/Users/X/Docs2/a.md"), Path::new("/Users/X/Docs")),
+            "component boundary is preserved"
+        );
     }
 
     #[test]

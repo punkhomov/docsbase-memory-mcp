@@ -8,6 +8,8 @@ use docsbase_memory::platform::{self, fs as platform_fs, process};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 fn mode(path: &std::path::Path) -> u32 {
@@ -33,6 +35,28 @@ fn alive_rejects_dead_pid() {
     child.kill().expect("kill");
     child.wait().expect("reap");
     assert!(!process::process_alive(pid), "reaped pid must be dead");
+}
+
+/// FR-2 (macOS support): a killed-but-unreaped child is a zombie and must
+/// count as dead — Linux reads state `Z`, macOS reads `SZOMB`.
+#[cfg(unix)]
+#[test]
+fn alive_rejects_zombie_without_reap() {
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn sleep");
+    let pid = child.id();
+    child.kill().expect("kill");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process::process_alive(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "a zombie must count as dead (pid {pid})"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.wait();
 }
 
 #[cfg(windows)]

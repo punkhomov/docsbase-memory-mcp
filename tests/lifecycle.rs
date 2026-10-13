@@ -237,18 +237,25 @@ fn connection_flood_is_refused_and_daemon_survives() {
     }
 
     // Freeing one slot restores service; the daemon may take a moment to
-    // notice the EOF and release the permit on slow runners.
+    // notice the EOF and release the permit on slow runners. Retry the full
+    // admission (connect plus registry handshake), not just connect: on
+    // Linux a shed connection still connects and only the handshake fails.
     drop(held.pop());
-    let mut client = None;
+    let mut admitted = None;
     assert!(
         wait_until(Duration::from_secs(5), || {
-            client = Client::connect(env.cache());
-            client.is_some()
+            let Some(mut client) = Client::connect(env.cache()) else {
+                return false;
+            };
+            if client.handshake_registry().is_err() {
+                return false;
+            }
+            admitted = Some(client);
+            true
         }),
         "client under cap"
     );
-    let mut client = client.expect("client under cap");
-    client.handshake_registry().expect("hello under cap");
+    let mut client = admitted.expect("client under cap");
     let status = client
         .call_tool("status", serde_json::json!({}))
         .expect("status");
