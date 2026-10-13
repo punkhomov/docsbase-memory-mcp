@@ -381,8 +381,58 @@ fn injected_watch_fault(root: &Path) -> Option<Error> {
     ))
 }
 
+/// Diagnostics for batch failures: a compact listing of the index directory
+/// (entry count and the newest files) so CI logs carry the state the tantivy
+/// error alone hides (flake #28 follow-up).
+fn log_index_state(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        eprintln!("watch: index dir {} is unreadable", dir.display());
+        return;
+    };
+    let mut files: Vec<(String, u64, u64)> = Vec::new();
+    let mut total = 0_usize;
+    for entry in entries.flatten() {
+        total += 1;
+        if files.len() >= 200 {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |delta| delta.as_secs());
+        files.push((
+            entry.file_name().to_string_lossy().into_owned(),
+            meta.len(),
+            modified,
+        ));
+    }
+    files.sort_by_key(|(_, _, modified)| std::cmp::Reverse(*modified));
+    let newest: Vec<String> = files
+        .iter()
+        .take(5)
+        .map(|(name, size, modified)| format!("{name} ({size}B, mtime {modified})"))
+        .collect();
+    eprintln!(
+        "watch: index dir {}: {total} entries; newest: {}",
+        dir.display(),
+        newest.join(", ")
+    );
+}
+
 /// Logs one batch event (kept out of the consumer loop for readability).
-fn report_batch_event(project_id: i64, policy: &BatchRetryPolicy, event: BatchEvent) {
+fn report_batch_event(
+    project_id: i64,
+    policy: &BatchRetryPolicy,
+    index_dir: &Path,
+    event: BatchEvent,
+) {
     match event {
         BatchEvent::LeaseRetry { attempt } => {
             if watch_debug() {
@@ -396,14 +446,17 @@ fn report_batch_event(project_id: i64, policy: &BatchRetryPolicy, event: BatchEv
                 "warning: watcher batch for project {project_id}: {error}; retrying ({attempt}/{})",
                 policy.max_transient_attempts
             );
+            log_index_state(index_dir);
         }
         BatchEvent::DroppedTransient { attempts, error } => {
             eprintln!(
                 "warning: watcher batch for project {project_id} dropped after {attempts} transient retries: {error}"
             );
+            log_index_state(index_dir);
         }
         BatchEvent::DroppedPermanent { error } => {
             eprintln!("warning: watcher batch for project {project_id}: {error}");
+            log_index_state(index_dir);
         }
         BatchEvent::RootMissing => {
             eprintln!("watch: project {project_id} root is missing; stopping watcher");
@@ -705,7 +758,9 @@ fn spawn_consumer(
                     pending.push(path);
                 }
                 let policy = BatchRetryPolicy::default();
-                let mut report = |event: BatchEvent| report_batch_event(project_id, &policy, event);
+                let index_dir = lifecycle::index_dir(&cache, project_id);
+                let mut report =
+                    |event: BatchEvent| report_batch_event(project_id, &policy, &index_dir, event);
                 let outcome = run_pending_batch(
                     &mut pending,
                     &policy,
