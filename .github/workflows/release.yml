@@ -128,6 +128,62 @@ jobs:
             dist/windows/docsbase-*.zip.sha256
           if-no-files-found: error
 
+  macos:
+    needs: version-check
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (macOS aarch64)
+        run: cargo build --release --locked
+      - name: Platform seam invariant (ADR-9)
+        run: cargo test --locked --test platform_boundary
+      - name: Ad-hoc sign (Apple Silicon requires a valid signature)
+        run: |
+          codesign -s - --force target/release/docsbase
+          codesign -v target/release/docsbase
+      - name: Smoke (install + index + search)
+        run: |
+          work="$(mktemp -d)"
+          printf '# Guide\n\ninstaller prose about gizmos.\n' > "$work/README.md"
+          export DOCSBASE_CACHE_DIR="$work/cache"
+          export DOCSBASE_CONFIG_DIR="$work/config"
+          export DOCSBASE_DATA_DIR="$work/data"
+          ./target/release/docsbase --version
+          ./target/release/docsbase install
+          ./target/release/docsbase index "$work"
+          ./target/release/docsbase search "gizmos" --limit 3 > "$work/search.json"
+          grep -q "README.md" "$work/search.json"
+      - name: Package + checksum
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          stage="dist/macos"
+          mkdir -p "$stage"
+          cp target/release/docsbase "$stage/docsbase"
+          asset="docsbase-$version-macos-aarch64.tar.gz"
+          tar -czf "$stage/$asset" -C "$stage" docsbase
+          (cd "$stage" && shasum -a 256 "$asset" > "$asset.sha256")
+          ls -l "$stage"
+      - name: Attest macos artifact (SLSA provenance, Sigstore)
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: "dist/macos/docsbase-*.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docsbase-macos-aarch64
+          path: |
+            dist/macos/docsbase-*.tar.gz
+            dist/macos/docsbase-*.tar.gz.sha256
+          if-no-files-found: error
+
   sbom:
     needs: version-check
     runs-on: ubuntu-latest
@@ -171,7 +227,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [linux, windows, sbom]
+    needs: [linux, windows, macos, sbom]
     # Publish only on tag pushes; manual runs stop at artifacts.
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     runs-on: ubuntu-latest

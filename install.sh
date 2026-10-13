@@ -1,5 +1,5 @@
 #!/bin/sh
-# docsbase installer — Linux x86_64.
+# docsbase installer — Linux x86_64 and macOS (Apple Silicon).
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | sh
 #   DOCSBASE_CHANNEL=prerelease sh install.sh
@@ -24,10 +24,24 @@ command -v tar >/dev/null 2>&1 || fail "tar is required"
 
 OS="$(uname -s 2>/dev/null || echo unknown)"
 ARCH="$(uname -m 2>/dev/null || echo unknown)"
-[ "$OS" = "Linux" ] || fail "this script is for Linux; on Windows use install.ps1 (or WSL2 + this script). Got: $OS"
-case "$ARCH" in
-  x86_64|amd64) ARCH="x86_64" ;;
-  *) fail "only x86_64 is supported in v1. Got: $ARCH" ;;
+case "$OS" in
+  Linux)
+    OS_SLUG="linux"
+    case "$ARCH" in
+      x86_64|amd64) ARCH="x86_64" ;;
+      *) fail "only x86_64 is supported on Linux in v1. Got: $ARCH" ;;
+    esac
+    ;;
+  Darwin)
+    OS_SLUG="macos"
+    case "$ARCH" in
+      arm64|aarch64) ARCH="aarch64" ;;
+      *) fail "only Apple Silicon (arm64) is supported on macOS in v1. Got: $ARCH" ;;
+    esac
+    ;;
+  *)
+    fail "unsupported OS '$OS': on Windows use install.ps1 (or WSL2 + this script), otherwise build from source"
+    ;;
 esac
 
 if [ "$VERSION" = "latest" ]; then
@@ -57,7 +71,7 @@ case "$VERSION" in
 esac
 VER="${TAG#v}"
 
-ASSET="docsbase-$VER-linux-x86_64.tar.gz"
+ASSET="docsbase-$VER-$OS_SLUG-$ARCH.tar.gz"
 BASE_URL="https://github.com/$REPO/releases/download/$TAG"
 
 TMP="$(mktemp -d)"

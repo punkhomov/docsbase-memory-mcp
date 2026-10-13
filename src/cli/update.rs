@@ -300,6 +300,11 @@ fn sha256_file(path: &Path) -> anyhow::Result<String> {
         );
         let output = run_tool(&powershell(&script))?;
         String::from_utf8_lossy(&output.stdout).into_owned()
+    } else if cfg!(target_os = "macos") {
+        // Stock macOS ships `shasum`, not GNU `sha256sum`.
+        let path_str = path.to_string_lossy();
+        let output = run_tool(&["shasum", "-a", "256", path_str.as_ref()])?;
+        String::from_utf8_lossy(&output.stdout).into_owned()
     } else {
         let path_str = path.to_string_lossy();
         let output = run_tool(&["sha256sum", path_str.as_ref()])?;
