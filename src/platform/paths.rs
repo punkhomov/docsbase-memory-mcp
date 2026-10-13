@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn system_dirs_are_refused_and_workdirs_allowed() {
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         {
             for dir in [
                 "/etc",
@@ -268,6 +268,36 @@ mod tests {
                 "/var/www2",
                 "/home2/x",
                 "/etcetera/x",
+            ] {
+                assert!(!is_system_dir(Path::new(dir)), "{dir} must stay allowed");
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // Canonical spellings: /etc and /var resolve below /private.
+            for dir in [
+                "/System",
+                "/System/Library/CoreServices",
+                "/Library",
+                "/Applications",
+                "/private/etc",
+                "/private/etc/nginx",
+                "/dev",
+                "/Users",
+                "/Volumes",
+                "/private/var",
+                "/private/tmp",
+            ] {
+                assert!(is_system_dir(Path::new(dir)), "{dir} must be refused");
+            }
+            for dir in [
+                "/Users/user/project",
+                "/private/var/folders/xx/project",
+                "/private/tmp/work",
+                "/opt/app",
+                "/Systematic/x",
+                "/Library2/x",
+                "/Applications2/x",
             ] {
                 assert!(!is_system_dir(Path::new(dir)), "{dir} must stay allowed");
             }
