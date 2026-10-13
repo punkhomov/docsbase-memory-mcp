@@ -85,12 +85,19 @@ CI периодически падает на Linux/Windows; перезапус�
   filepath: "...fieldnorm" }`.
 - **Наблюдения:** run `38404323321` (13.10 13:25, job `115319812833`) — первый
   зафиксированный случай; воспроизводимость не подтверждена.
-- **Root cause (подтверждён):** tantivy issue #2847 — внутренний merge-поток
-  `IndexWriter` гоняется с commit за `.managed.json` (`MoveFileExW`), а ошибка
-  обёрнута именем сегментного файла (`managed_directory.rs:287`) — отсюда
-  `.fieldnorm` в логе. На Linux `rename(2)` атомарный, поэтому сбой не виден
-  (там возможна тихая потеря регистраций файлов — тоже опасно). Upstream-фикса
-  нет, issue открыт.
+- **Root cause (наиболее вероятный; механизм upstream оспаривается):** сигнатура
+  точно совпадает с tantivy issue #2847: merge-поток `IndexWriter` гоняется с
+  commit за `.managed.json` (`MoveFileExW`), а ошибка обёрнута именем сегментного
+  файла (`managed_directory.rs:287`) — отсюда `.fieldnorm` в логе. Однако в issue
+  есть содержательный контраргумент (STiFLeR7, 2026-07-28,
+  https://github.com/quickwit-oss/tantivy/issues/2847#issuecomment-5100620847):
+  официальное репро 14× (280 коммитов) — 0 падений; `meta_wlock` уже держится
+  через `save_managed_paths`, клоны делят один `RwLock` через `Arc`. Возможные
+  альтернативы: AV-софт раннера, окружение, более узкое окно гонки. Доказано у
+  нас: дроп батча теряет правки, а ретрай/видимость чинят симптом
+  детерминированно; сериализация мержей (drop-wait) полезна независимо от
+  исхода спора (на Linux там же — тихая потеря регистраций `.managed.json`).
+  Upstream-фикса нет, issue открыт и трекается.
 - **Фикс (наш слой):** 1) `IndexHandle` при drop вызывает
   `wait_merging_threads()` — merge-потоки завершаются до следующего commit,
   записи `.managed.json` сериализуются; 2) bounded retry батчей (3 попытки,
@@ -99,7 +106,10 @@ CI периодически падает на Linux/Windows; перезапус�
 - **Acceptance:** Linux fault-injection тесты (retry и drop-видимость) —
   детерминированный гейт; Windows 50× — статистический сигнал; upstream #2847
   остаётся открытым и отслеживается.
-- **Статус:** исправлено на нашем слое; upstream баг открыт.
+- **Статус:** исправлено на нашем слое (defense-in-depth: drop-wait + bounded
+  retry + видимость дропа); механизм upstream не подтверждён — трекаем #2847.
+  Стресс: workflow `flake-stress` (workflow_dispatch, по умолчанию 50 прогонов;
+  Windows — `watcher_refreshes_search`, Linux — flood-тест).
 
 ## Что дальше
 

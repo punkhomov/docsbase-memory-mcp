@@ -1,0 +1,47 @@
+name: flake-stress
+
+# Manual stress runs for the known flakes (see docs/daemon-test-flakes.md).
+# Dispatch-only: never part of PR checks.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Iterations per target"
+        required: false
+        default: "50"
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    name: ${{ matrix.os }} / ${{ matrix.suite }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            suite: mcp_registry
+            filter: watcher_refreshes_search
+          - os: ubuntu-latest
+            suite: lifecycle
+            filter: connection_flood_is_refused_and_daemon_survives
+    env:
+      RUSTUP_TOOLCHAIN: "1.88.0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build test target
+        run: cargo test --locked --test ${{ matrix.suite }} --no-run
+      - name: Stress (${{ inputs.runs }} iterations)
+        shell: bash
+        run: |
+          runs="${{ inputs.runs }}"
+          for i in $(seq 1 "$runs"); do
+            cargo test --locked --test ${{ matrix.suite }} ${{ matrix.filter }} -- --test-threads 1
+            echo "iteration $i/$runs green"
+          done
