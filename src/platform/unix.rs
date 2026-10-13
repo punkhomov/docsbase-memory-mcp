@@ -304,6 +304,7 @@ pub fn process_alive(pid: u32) -> bool {
 
 /// macOS liveness via `proc_pidinfo(PROC_PIDTBSDINFO)` (ADR-M1).
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)] // libproc FFI: SAFETY comments on each block
 fn macos_process_alive(pid: u32) -> bool {
     /// Darwin `SZOMB` (`sys/proc.h`); libc does not export it for Apple.
     const SZOMB: u32 = 5;
@@ -353,6 +354,7 @@ pub fn fd_count() -> u64 {
 /// macOS descriptor count via `PROC_PIDLISTFDS` (buffer doubles until it
 /// fits, bounded) (ADR-M1).
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)] // libproc FFI: SAFETY comments on each block
 fn macos_fd_count() -> u64 {
     let entry = std::mem::size_of::<libc::proc_fdinfo>();
     let Ok(pid) = libc::c_int::try_from(std::process::id()) else {
