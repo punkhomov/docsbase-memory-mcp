@@ -14,7 +14,7 @@ pub fn home_dir() -> Option<PathBuf> {
 
 /// Component-wise containment (`candidate` equals `base` or lives under it).
 /// Callers canonicalize symlinked ancestors first (FR-32, I4).
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[must_use]
 pub fn is_under(candidate: &Path, base: &Path) -> bool {
     candidate.starts_with(base)
