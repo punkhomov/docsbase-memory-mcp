@@ -134,6 +134,10 @@ fn serve_fake_connection(
 ) {
     use std::sync::atomic::Ordering;
 
+    // BSD/macOS accepted sockets inherit the listener's non-blocking flag;
+    // clear it so blocking reads with a timeout work (Linux does not inherit).
+    #[cfg(unix)]
+    stream.set_nonblocking(false).expect("blocking stream");
     stream
         .set_read_timeout(Some(Duration::from_millis(50)))
         .expect("read timeout");

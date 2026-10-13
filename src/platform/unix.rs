@@ -93,6 +93,18 @@ impl BlockingStream {
     pub fn try_clone(&self) -> io::Result<Self> {
         self.0.try_clone().map(Self)
     }
+
+    /// Switches the stream between blocking and polling IO.
+    ///
+    /// Accepted sockets inherit the listener's non-blocking flag on BSD/macOS
+    /// (but not on Linux), so callers that need blocking reads with a timeout
+    /// must clear it explicitly (macOS support, M2).
+    ///
+    /// # Errors
+    /// Returns the raw IO error when the socket refuses the option.
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.0.set_nonblocking(nonblocking)
+    }
 }
 
 impl Read for BlockingStream {
