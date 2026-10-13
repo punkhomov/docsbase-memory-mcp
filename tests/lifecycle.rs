@@ -182,7 +182,18 @@ fn grace_shutdown_after_last_session() {
 #[test]
 fn connection_flood_is_refused_and_daemon_survives() {
     let env = Env::new();
-    env.start();
+    // Long grace: the flood sequence (64 connects plus saturation probing)
+    // outlives the 5 s default on slow runners (macOS CI), and the daemon
+    // must stay up for the whole test.
+    let mut child = env
+        .cli()
+        .args(["serve", "--detached", "--grace-ms", "60000"])
+        .spawn()
+        .expect("spawn serve");
+    assert!(
+        wait_until(Duration::from_secs(10), || env.endpoint_up()),
+        "socket must appear"
+    );
 
     let mut held = Vec::new();
     for _ in 0..MAX_CONNECTIONS {
@@ -225,17 +236,26 @@ fn connection_flood_is_refused_and_daemon_survives() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // Freeing one slot restores service.
+    // Freeing one slot restores service; the daemon may take a moment to
+    // notice the EOF and release the permit on slow runners.
     drop(held.pop());
-    std::thread::sleep(Duration::from_millis(100));
-    let mut client = Client::connect(env.cache()).expect("client under cap");
+    let mut client = None;
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            client = Client::connect(env.cache());
+            client.is_some()
+        }),
+        "client under cap"
+    );
+    let mut client = client.expect("client under cap");
     client.handshake_registry().expect("hello under cap");
     let status = client
         .call_tool("status", serde_json::json!({}))
         .expect("status");
     assert!(status["projects"].is_array());
     drop(held);
-    env.stop();
+    stop_daemon(env.cache()).expect("stop daemon");
+    let _ = child.wait();
 }
 
 #[test]
