@@ -143,3 +143,27 @@ fn pipe_name_is_cache_unique() {
     assert!(name.starts_with("docsbase-"), "{name}");
     assert!(name.len() <= 64, "pipe name stays short: {name}");
 }
+
+/// FR-6 (macOS support): an endpoint path that cannot fit into
+/// `sockaddr_un` is rejected with a clear `InvalidInput` error instead of a
+/// raw OS failure (EINVAL/ENAMETOOLONG).
+#[cfg(unix)]
+#[test]
+fn oversized_socket_path_is_rejected() {
+    let dir = TempDir::new().expect("cache");
+    let long = dir.path().join("x".repeat(200));
+    std::fs::create_dir_all(&long).expect("mkdir long");
+    let endpoint = Endpoint::Unix(long.join("daemon.sock"));
+    let err = match platform::bind_blocking(&endpoint) {
+        Ok(_) => panic!("bind must reject an over-long path"),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
+    assert!(err.to_string().contains("socket path"), "{err}");
+    let err = match platform::connect_blocking(&endpoint) {
+        Ok(_) => panic!("connect must reject an over-long path"),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
+    assert!(!platform::connect_probe(&endpoint), "probe must be false");
+}

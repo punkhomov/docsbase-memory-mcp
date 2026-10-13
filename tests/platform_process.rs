@@ -105,7 +105,11 @@ fn secure_helpers_are_best_effort_on_windows() {
 #[test]
 fn counts_are_positive() {
     assert!(process::fd_count() > 0, "fd count");
+    // macOS degrades the thread counter to 0 (task_threads is out of scope).
+    #[cfg(target_os = "linux")]
     assert!(process::thread_count() > 0, "thread count");
+    #[cfg(target_os = "macos")]
+    assert_eq!(process::thread_count(), 0, "thread counter degrades to 0");
 }
 
 #[cfg(windows)]
@@ -115,7 +119,7 @@ fn counts_are_zero_on_windows() {
     assert_eq!(process::thread_count(), 0, "thread counter degrades to 0");
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn detach_sets_own_process_group() {
     let mut command = std::process::Command::new("sleep");

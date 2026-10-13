@@ -166,37 +166,64 @@ impl Iterator for Incoming<'_> {
     }
 }
 
+/// Longest `sun_path` for this platform, including the trailing NUL byte
+/// (macOS 104, Linux 108; FR-6).
+#[cfg(target_os = "macos")]
+const SUN_PATH_MAX: usize = 104;
+#[cfg(not(target_os = "macos"))]
+const SUN_PATH_MAX: usize = 108;
+
+/// Rejects endpoint paths that cannot fit into `sockaddr_un` with a clear
+/// error instead of a raw EINVAL/ENAMETOOLONG (FR-6).
+fn checked_path(endpoint: &Endpoint) -> io::Result<&Path> {
+    let path = endpoint.as_path();
+    let len = path.as_os_str().len();
+    if len >= SUN_PATH_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "socket path is {len} bytes; the limit is {} — shorten the cache directory (e.g. DOCSBASE_CACHE_DIR)",
+                SUN_PATH_MAX - 1
+            ),
+        ));
+    }
+    Ok(path)
+}
+
 /// Binds the async listener for `endpoint`.
 ///
 /// Must be called from within an IO-enabled Tokio runtime (production binds
 /// inside `run_daemon`'s runtime).
 ///
 /// # Errors
-/// Returns the raw bind error (caller adds path context).
+/// Returns [`io::ErrorKind::InvalidInput`] for over-long paths and the raw
+/// bind error otherwise (caller adds path context).
 pub fn bind(endpoint: &Endpoint) -> io::Result<Listener> {
-    tokio::net::UnixListener::bind(endpoint.as_path()).map(Listener)
+    tokio::net::UnixListener::bind(checked_path(endpoint)?).map(Listener)
 }
 
 /// Binds the blocking listener for fakes and tests.
 ///
 /// # Errors
-/// Returns the raw bind error.
+/// Returns [`io::ErrorKind::InvalidInput`] for over-long paths and the raw
+/// bind error otherwise.
 pub fn bind_blocking(endpoint: &Endpoint) -> io::Result<BlockingListener> {
-    UnixListener::bind(endpoint.as_path()).map(BlockingListener)
+    UnixListener::bind(checked_path(endpoint)?).map(BlockingListener)
 }
 
 /// Connects a blocking client stream to `endpoint`.
 ///
 /// # Errors
-/// Returns the raw connect error.
+/// Returns [`io::ErrorKind::InvalidInput`] for over-long paths and the raw
+/// connect error otherwise.
 pub fn connect_blocking(endpoint: &Endpoint) -> io::Result<BlockingStream> {
-    UnixStream::connect(endpoint.as_path()).map(BlockingStream)
+    UnixStream::connect(checked_path(endpoint)?).map(BlockingStream)
 }
 
 /// Liveness probe: `true` when something accepts on `endpoint`.
 #[must_use]
 pub fn connect_probe(endpoint: &Endpoint) -> bool {
-    UnixStream::connect(endpoint.as_path()).is_ok()
+    checked_path(endpoint).and_then(UnixStream::connect).is_ok()
 }
 
 /// Endpoint of the daemon serving `cache` (design §3).
@@ -250,34 +277,131 @@ impl ShutdownSignal {
     }
 }
 
-/// True while `pid` exists and is not a zombie (Linux `/proc`; without
-/// `/proc` the process is assumed alive and other liveness checks decide).
+/// True while `pid` exists and is not a zombie.
+///
+/// Linux reads `/proc` (without `/proc` the process is assumed alive and
+/// other liveness checks decide). macOS uses `proc_pidinfo` BSD info; a
+/// zombie (killed but not reaped) counts as dead, matching the Linux
+/// `state != "Z"` semantics (FR-2).
 #[must_use]
 pub fn process_alive(pid: u32) -> bool {
-    if !Path::new("/proc").is_dir() {
-        return true;
+    #[cfg(target_os = "macos")]
+    {
+        macos_process_alive(pid)
     }
-    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().next())
-            .is_some_and(|state| state != "Z")
-    })
+    #[cfg(not(target_os = "macos"))]
+    {
+        if !Path::new("/proc").is_dir() {
+            return true;
+        }
+        fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .is_some_and(|state| state != "Z")
+        })
+    }
 }
 
-/// Open file descriptors of this process (Linux `/proc`; 0 elsewhere).
+/// macOS liveness via `proc_pidinfo(PROC_PIDTBSDINFO)` (ADR-M1).
+#[cfg(target_os = "macos")]
+fn macos_process_alive(pid: u32) -> bool {
+    /// Darwin `SZOMB` (`sys/proc.h`); libc does not export it for Apple.
+    const SZOMB: u32 = 5;
+    let Ok(pid) = libc::c_int::try_from(pid) else {
+        return false;
+    };
+    let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).unwrap_or(i32::MAX);
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    // SAFETY: `proc_pidinfo` writes at most `size` bytes into `info`, which is
+    // exactly the struct's size; `pid`/flavor are plain values. A zero or
+    // short result means the pid is gone.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written != size {
+        return false;
+    }
+    // SAFETY: the call reported a full struct written into `info`.
+    let info = unsafe { info.assume_init() };
+    info.pbi_status != SZOMB
+}
+
+/// Open file descriptors of this process.
+///
+/// Linux reads `/proc/self/fd`; macOS uses `proc_pidinfo(PROC_PIDLISTFDS)`;
+/// 0 elsewhere (FR-3).
 #[must_use]
 pub fn fd_count() -> u64 {
-    fs::read_dir("/proc/self/fd").map_or(0, |entries| {
-        u64::try_from(entries.count()).unwrap_or(u64::MAX)
-    })
+    #[cfg(target_os = "macos")]
+    {
+        macos_fd_count()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        fs::read_dir("/proc/self/fd").map_or(0, |entries| {
+            u64::try_from(entries.count()).unwrap_or(u64::MAX)
+        })
+    }
 }
 
-/// OS threads of this process (Linux `/proc`; 0 elsewhere).
+/// macOS descriptor count via `PROC_PIDLISTFDS` (buffer doubles until it
+/// fits, bounded) (ADR-M1).
+#[cfg(target_os = "macos")]
+fn macos_fd_count() -> u64 {
+    let entry = std::mem::size_of::<libc::proc_fdinfo>();
+    let Ok(pid) = libc::c_int::try_from(std::process::id()) else {
+        return 0;
+    };
+    let mut capacity = 64_usize;
+    loop {
+        let bytes = capacity.saturating_mul(entry);
+        let Ok(size) = i32::try_from(bytes) else {
+            return 0;
+        };
+        let mut buffer = vec![0_u8; bytes];
+        // SAFETY: the buffer is `bytes` long and `proc_pidinfo` writes at
+        // most `size` bytes into it.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                buffer.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if written <= 0 {
+            return 0;
+        }
+        let count = usize::try_from(written).unwrap_or(0) / entry;
+        if written < size || capacity >= 65_536 {
+            // Fits, or the bounded cap is reached (count may under-report).
+            return u64::try_from(count).unwrap_or(u64::MAX);
+        }
+        capacity = capacity.saturating_mul(2);
+    }
+}
+
+/// OS threads of this process (Linux `/proc/self/task`; 0 elsewhere — macOS
+/// degrades like Windows, `task_threads` is out of scope) (FR-3).
 #[must_use]
 pub fn thread_count() -> u64 {
-    fs::read_dir("/proc/self/task").map_or(0, |entries| {
-        u64::try_from(entries.count()).unwrap_or(u64::MAX)
-    })
+    #[cfg(target_os = "macos")]
+    {
+        0
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        fs::read_dir("/proc/self/task").map_or(0, |entries| {
+            u64::try_from(entries.count()).unwrap_or(u64::MAX)
+        })
+    }
 }
 
 /// Puts the child in its own process group so signals to the daemon's group

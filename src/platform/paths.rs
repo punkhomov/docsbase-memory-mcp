@@ -51,7 +51,7 @@ pub fn is_filesystem_root(path: &Path) -> bool {
 /// and parents of user homes. `path` is expected canonicalized.
 #[must_use]
 pub fn is_system_dir(path: &Path) -> bool {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         const EQUALS: &[&str] = &["/home", "/root", "/var", "/mnt", "/media", "/run"];
         const SUBTREES: &[&str] = &[
@@ -76,6 +76,20 @@ pub fn is_system_dir(path: &Path) -> bool {
         if path.starts_with("/run/media") {
             return false;
         }
+        EQUALS.iter().any(|dir| path == Path::new(dir))
+            || SUBTREES.iter().any(|dir| path.starts_with(Path::new(dir)))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Canonical spellings (`/etc` and `/var` resolve below `/private`).
+        const EQUALS: &[&str] = &["/Users", "/Volumes", "/private/var", "/private/tmp"];
+        const SUBTREES: &[&str] = &[
+            "/System",
+            "/Library",
+            "/Applications",
+            "/private/etc",
+            "/dev",
+        ];
         EQUALS.iter().any(|dir| path == Path::new(dir))
             || SUBTREES.iter().any(|dir| path.starts_with(Path::new(dir)))
     }
@@ -144,15 +158,20 @@ fn is_system_key(candidate: &str, subtrees: &[String], equals: &[String]) -> boo
         || subtrees.iter().any(|dir| key_under(candidate, dir))
 }
 
-/// Comparison key for root paths: identity on Unix; separator and case
-/// folded on Windows, where the filesystem is case-insensitive.
+/// Comparison key for root paths: identity on Unix; case folded on Windows
+/// and macOS, whose default filesystems are case-insensitive (a case-sensitive
+/// APFS volume may fold two distinct roots together — documented FR-5 caveat).
 #[must_use]
 pub fn normalize_for_compare(path: &Path) -> String {
     #[cfg(windows)]
     {
         windows_key(path)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        path.to_string_lossy().to_lowercase()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         path.to_string_lossy().into_owned()
     }

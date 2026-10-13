@@ -553,6 +553,7 @@ dependencies = [
  "ignore",
  "insta",
  "interprocess",
+ "libc",
  "notify",
  "pulldown-cmark",
  "rmcp",

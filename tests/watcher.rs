@@ -136,9 +136,12 @@ fn recv_none(rx: &Receiver<Vec<PathBuf>>, timeout: Duration) {
 const PLAIN: &str = "# Plain\n\nSome prose about widgets and gadgets.\n";
 
 /// Product freshness budget (FR-15); Windows CI runners under parallel test
-/// load get more headroom (ledger residual).
-#[cfg(unix)]
+/// load get more headroom, and `FSEvents` delivery plus the 1.5 s debounce
+/// needs a little more than inotify on macOS (ledger residual).
+#[cfg(all(unix, not(target_os = "macos")))]
 const FRESHNESS_BUDGET: Duration = Duration::from_millis(2_000);
+#[cfg(target_os = "macos")]
+const FRESHNESS_BUDGET: Duration = Duration::from_secs(5);
 #[cfg(windows)]
 const FRESHNESS_BUDGET: Duration = Duration::from_secs(15);
 
