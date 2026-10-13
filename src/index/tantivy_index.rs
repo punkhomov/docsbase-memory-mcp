@@ -87,12 +87,28 @@ struct Fields {
 
 /// Open tantivy index plus writer/reader; single writer per project (I5).
 pub struct IndexHandle {
-    writer: IndexWriter,
+    /// Taken (set to `None`) when [`Drop`] settles background merges.
+    writer: Option<IndexWriter>,
     reader: IndexReader,
     parser: QueryParser,
     fields: Fields,
     dir: PathBuf,
     recreated: bool,
+}
+
+impl Drop for IndexHandle {
+    /// Waits for background merges before releasing the writer: tantivy's
+    /// merge thread races with the next commit on `.managed.json`, which
+    /// fails with `PermissionDenied` on Windows and can lose file
+    /// registrations elsewhere (tantivy issue #2847). Waiting serializes
+    /// every `.managed.json` update within the process.
+    fn drop(&mut self) {
+        if let Some(writer) = self.writer.take()
+            && let Err(err) = writer.wait_merging_threads()
+        {
+            eprintln!("warning: waiting for index merges failed: {err}");
+        }
+    }
 }
 
 impl IndexHandle {
@@ -160,7 +176,7 @@ impl IndexHandle {
         let parser = build_parser(&index, &fields);
 
         Ok(Self {
-            writer,
+            writer: Some(writer),
             reader,
             parser,
             fields,
@@ -227,15 +243,26 @@ impl IndexHandle {
                 self.fields.text_len,
                 u64::try_from(chunk.text.chars().count()).unwrap_or(u64::MAX),
             );
-            self.writer.add_document(document).map_err(tantivy_error)?;
+            self.writer_mut()?
+                .add_document(document)
+                .map_err(tantivy_error)?;
         }
         Ok(())
     }
 
+    /// Writer access after construction; `None` only after [`Drop`] settled
+    /// the handle, which no caller can observe.
+    fn writer_mut(&mut self) -> Result<&mut IndexWriter> {
+        self.writer
+            .as_mut()
+            .ok_or_else(|| Error::internal("index writer already settled"))
+    }
+
     /// Deletes every chunk of `doc_id` (visible after [`Self::commit`]).
     pub fn delete_doc(&self, doc_id: i64) {
-        self.writer
-            .delete_term(Term::from_field_i64(self.fields.doc_id, doc_id));
+        if let Some(writer) = &self.writer {
+            writer.delete_term(Term::from_field_i64(self.fields.doc_id, doc_id));
+        }
     }
 
     /// Commits pending operations and reloads the reader.
@@ -243,7 +270,7 @@ impl IndexHandle {
     /// # Errors
     /// Returns [`Error::Internal`] when commit or reload fails.
     pub fn commit(&mut self) -> Result<()> {
-        self.writer.commit().map_err(tantivy_error)?;
+        self.writer_mut()?.commit().map_err(tantivy_error)?;
         self.reader.reload().map_err(tantivy_error)?;
         Ok(())
     }
