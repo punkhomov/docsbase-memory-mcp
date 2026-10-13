@@ -1,0 +1,80 @@
+# AGENTS.md — working guide for coding agents
+
+One page of hard rules, verification commands, process and pointers.
+Authoritative sources: `docs/constitution.md`, `docs/specs/`, the product docs
+linked below. This file only indexes them — do not duplicate spec content here.
+
+## Repo map
+
+- `src/` — Rust (edition 2024, MSRV 1.88): CLI (`src/cli`), daemon
+  (`src/daemon`), MCP frontend (`src/mcp`), index/tokenizer/chunker
+  (`src/index`), store (`src/store`), OS seam (`src/platform`).
+- `tests/` — functional suites per area; `tests/fixtures/search-quality/`
+  holds the golden corpus and `baseline.json`.
+- `docs/` — product docs and `docs/specs/<name>/{requirements,design,tasks,progress}.md`.
+- `.opencode/` — commands and the project-design skill (machine-mode protocol).
+
+## Commands (verification)
+
+Sandboxed agents: point `CARGO_HOME`/`RUSTUP_HOME` at a writable directory
+first. CI pins the MSRV toolchain explicitly (the repo file pins nightly for
+local development), so validate with `RUSTUP_TOOLCHAIN=1.88.0`.
+
+```sh
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked
+RUSTUP_TOOLCHAIN=1.88.0 cargo clippy --locked --all-targets -- -D warnings
+cargo fmt --check
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --release --test perf_budget
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test offline            # Linux only
+INSTA_UPDATE=always RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_golden
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_quality -- --ignored regenerate_baseline
+```
+
+Accept snapshots/baseline only as a deliberate, reviewed delta (see below).
+
+## Hard rules
+
+- No `unwrap`/`expect`/`panic!` in `src/**` (tests may use them).
+- No new crates without an ADR; the default build stays offline (no network
+  crates).
+- `main` is protected: changes land via PR only. Required checks: `docs`,
+  `linux`, `windows`.
+- Commit messages and PR titles: English prose. Literal examples in other
+  scripts are fine (`ё/Ё→е/Е`, `замена/замены`). Conventional commits.
+- Refactors must not change behavior. If the tokenizer/normalization pipeline
+  changes, bump `TOKENIZER_VERSION` — the index rebuilds from SQLite.
+- The golden baseline is a no-regression gate: improvements are allowed,
+  silent regressions are not. Never regenerate it as a side effect.
+
+## Process (machine mode)
+
+- Spec-driven work lives in `docs/specs/<name>/` (requirements, design, tasks,
+  progress ledger). Amend specs with dated delta markers instead of silently
+  editing requirements.
+- One task at a time, TDD where possible (RED -> GREEN). Fresh reviewer per
+  task; prompt pattern: `.opencode/skills/project-design/references/reviewer.md`.
+  Fix rounds for Critical/Important; minors are fixed in-task or recorded as
+  `minor (deferred)` in the ledger.
+- Ledger: append `Task <ID>: complete (...)` plus `Ruling:` / `minor` lines to
+  `progress.md` with each task commit.
+- Exemplar to copy: `docs/specs/search-quality/` (SQ1–SQ18).
+
+## Gotchas (paid for in review cycles)
+
+- Windows: drop the tantivy `IndexHandle` before `open_or_create` — its
+  recreate wipes the index dir and an open lockfile blocks it.
+- tantivy `PhraseQuery` same-offset terms are a conjunction: for standalone
+  words the stem must *replace* the surface form, not be added next to it.
+- Snowball Russian (RV region) splits illustrative trios (`замена`/`замены`
+  -> one stem, `заменой` -> another); pin measured behavior, not assumptions.
+- BM25 length is counted in tokens: an oversized chunk whose long blob is
+  dropped stays "short", so `LONG_CHUNK_PENALTY` is the only brake (its
+  soundness requires penalty <= 1; enforced by a const assert).
+- The long-chunk penalty is applied while widening the raw fetch window: the
+  top-k must be settled by final score, not by the initial window.
+- `textnorm` offsets are relative to the normalized text (width folding and
+  Arabic removals shift bytes).
+- Chunker: fences/tables are atomic and may exceed cap+overlap (documented
+  SC-5 exception); prose is capped and split at token boundaries.
+- Boost values are pinned by `field_boosts_order_and_sensitivity` and the
+  penalty end-to-end; do not tune them without golden evidence (NFR-6).

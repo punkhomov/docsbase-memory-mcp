@@ -26,44 +26,82 @@ per-project/per-request и могут использовать embedding API (Op
 ## Быстрый старт (5 минут)
 
 ```sh
-# 1. Установка из ассета GitHub Releases (варианты — в docs/INSTALL.md).
-# Альфа-период: все релизы — пререлизы, включаем канал явно; после 0.1.0
-# по умолчанию стабильный канал.
+# 1. Установка бинаря. Скрипт проверяет релиз и сам регистрирует бинарь
+#    в docsbase. Альфа-период: все релизы — пререлизы, включаем канал
+#    явно; после 0.1.0 по умолчанию стабильный канал.
 curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | DOCSBASE_CHANNEL=prerelease sh
-# Windows (PowerShell):
-# $env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1 | iex
 
-# 2. Регистрация бинаря + манифеста
-docsbase install
-
-# 3. Индексация репозитория с доками (по умолчанию — текущий каталог)
+# 2. Индексация репозитория с доками (по умолчанию — текущий каталог)
 cd /path/to/your/docs
 docsbase index
 
-# 4. Поиск
+# 3. Поиск
 docsbase search "admission lease" --limit 10
 
-# 5. Переиндексация по требованию
+# 4. Переиндексация по требованию
 docsbase sync
 docsbase status
 ```
+
+Windows (PowerShell):
+
+```powershell
+$env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1 | iex
+```
+
+Сборка из исходников или ручная установка? Выполните `docsbase install` один
+раз, чтобы зарегистрировать бинарь — скрипты выше делают это сами.
 
 Полное прохождение: [`docs/QUICKSTART.md`](docs/QUICKSTART.md) (EN).
 
 ## Установка
 
-| Способ | Команда | Примечание |
-|---|---|---|
-| Linux-скрипт | `curl -fsSL …/install.sh \| sh` | Качает ассет релиза, проверяет sha256, вызывает `docsbase install` |
-| Windows-скрипт | `irm …/install.ps1 \| iex` | То же для `.exe`-ассета |
-| Cargo | `cargo install --locked docsbase --version 0.1.0-alpha.3` | Сборка из исходников, MSRV 1.88 |
-| Вручную | Скачать ассет из [Releases](https://github.com/punkhomov/docsbase-memory-mcp/releases), `sha256sum -c`, затем `docsbase install` | Проверяйте SLSA-provenance, см. [`docs/INSTALL.md`](docs/INSTALL.md) |
+Поддерживаются: **Linux x86_64** и **Windows x64**. macOS **не поддерживается
+в v1** — на технике Apple используйте WSL2 или Linux-контейнер (Linux-скрипт
+там работает). Подробности: [`docs/INSTALL.md`](docs/INSTALL.md) (EN).
 
-Обновление: `docsbase update` (проверяет последний релиз, верифицирует и
-заменяет бинарь). Зафиксировать версию: `docsbase update --version v0.1.0-alpha.3`.
+### Linux x86_64
 
-Каждый релиз содержит: файлы `sha256sum`, SBOM и SLSA-provenance сборки
-(Sigstore). Проверка: `gh attestation verify`.
+```sh
+curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | DOCSBASE_CHANNEL=prerelease sh
+```
+
+Ставит бинарь в `~/.local/bin` (переопределяется `DOCSBASE_BIN_DIR`),
+проверяет `sha256` и регистрирует бинарь (`docsbase install`). Зафиксировать
+версию: `DOCSBASE_VERSION=v0.1.0-alpha.3`.
+
+### Windows x64 (PowerShell)
+
+```powershell
+$env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1 | iex
+```
+
+Ставит в `%USERPROFILE%\.local\bin` (добавляется в пользовательский `PATH`),
+проверяет `sha256` и регистрирует бинарь. Тот же `DOCSBASE_VERSION`.
+
+### Сборка из исходников (любая поддерживаемая платформа)
+
+```sh
+cargo install --locked docsbase --version 0.1.0-alpha.3
+docsbase install   # зарегистрировать бинарь в демоне
+```
+
+Требуется Rust 1.88+ (MSRV). Для локальной разработки в `rust-toolchain.toml`
+зафиксирован nightly; CI проверяет MSRV-тулчейн.
+
+### Вручную
+
+Скачайте ассет и его `.sha256` из
+[Releases](https://github.com/punkhomov/docsbase-memory-mcp/releases),
+проверьте (`sha256sum -c` на Linux, `Get-FileHash` на Windows), при желании
+проверьте SLSA-provenance через `gh attestation verify`, положите бинарь в
+`PATH` и выполните `docsbase install`.
+
+### Обновление и проверка
+
+`docsbase update` проверяет последний релиз, верифицирует и заменяет бинарь
+(зафиксировать версию: `docsbase update --version v0.1.0-alpha.3`). Каждый
+релиз содержит файлы `sha256sum`, SBOM и SLSA-provenance сборки (Sigstore).
 
 ## CLI кратко
 
@@ -111,6 +149,31 @@ daemon -> registry.db (SQLite WAL) + projects/<id>/tantivy + вотчер на �
 named pipe). Публичные контракты (MCP-инструменты, CLI, формат конфига,
 сокет-протокол) версионируются; ломающие изменения — только мажорная версия.
 Подробнее: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (EN).
+
+## Мультиязычный поиск
+
+Поиск офлайн и без словарей: никаких новых крейтов и сети. Токенайзер
+учитывает скрипт и версионируется — смена пайплайна бампает
+`TOKENIZER_VERSION`, и индекс пересобирается из SQLite автоматически.
+
+| Скрипт | Нормализация | Анализатор | Пример |
+|---|---|---|---|
+| Кириллица | — | Snowball Russian (standalone-слова) | `замены` находит `замена` |
+| Латиница | fullwidth → ASCII, `İ` → `I` | Snowball English | `storing` находит `store` |
+| Арабский | harakat/tatweel удаляются, `أإآ`→`ا`, `ة`→`ه`, `ى`→`ي` | Snowball Arabic | `مَطَار` находит `مطار` |
+| CJK | — | биграммы по всем символам, последовательные позиции | `東京` внутри `東京国際空港` |
+| Все | `ё`→`е` (с сохранением регистра), width folding | — | `ёлка` находит `елка` |
+| Идентификаторы | не стеммятся (`_`, CamelCase, ALL_CAPS, цифры) | точные мульти-токены | `assessment_plan_id`, `MAX_FRAME_BYTES` |
+
+Замеры на SQ18 (directional; источник истины:
+[`tests/fixtures/search-quality/baseline.json`](tests/fixtures/search-quality/baseline.json)):
+все шесть golden-классов hit_rate/ndcg 1.0; p95 поиска ≈ 0.6 мс (латиница) и
+≈ 5 мс (CJK) на 50k чанков; CJK-индекс ≈ 0.8× размера текста корпуса.
+
+Примечания: BM25-скоры — внутренние для движка и намеренно не снапшотятся
+(дрейфуют между версиями tantivy); fence/table-блоки атомарны (могут
+превышать cap); фразовый матч никогда не срабатывает внутри идентификаторов
+(`"plan id"` ≠ `assessment_plan_id`).
 
 ## Конфигурация
 
