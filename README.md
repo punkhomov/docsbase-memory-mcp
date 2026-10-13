@@ -25,44 +25,83 @@ Supported platforms: **Linux x86_64** (static binary) and **Windows x64**
 ## Quickstart (5 minutes)
 
 ```sh
-# 1. Install from a GitHub Release asset (see docs/INSTALL.md for options).
-# Alpha period: every release is a prerelease, so opt in to that channel;
-# stable is the default once 0.1.0 ships.
+# 1. Install the binary. The script verifies the release and registers the
+#    binary with docsbase for you. Alpha period: every release is a
+#    prerelease, so opt in to that channel; stable is the default once
+#    0.1.0 ships.
 curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | DOCSBASE_CHANNEL=prerelease sh
-# Windows (PowerShell):
-# $env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1 | iex
 
-# 2. Register the owned binary + manifest
-docsbase install
-
-# 3. Index your docs repo (defaults to the current directory)
+# 2. Index your docs repo (defaults to the current directory)
 cd /path/to/your/docs
 docsbase index
 
-# 4. Search
+# 3. Search
 docsbase search "admission lease" --limit 10
 
-# 5. Re-index on demand
+# 4. Re-index on demand
 docsbase sync
 docsbase status
 ```
+
+Windows (PowerShell):
+
+```powershell
+$env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1 | iex
+```
+
+Building from source or installing manually? Run `docsbase install` once to
+register the binary — the scripts above already do it for you.
 
 Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 
 ## Install
 
-| Method | Command | Notes |
-|---|---|---|
-| Linux script | `curl -fsSL …/install.sh \| sh` | Downloads the release asset, verifies sha256, runs `docsbase install` |
-| Windows script | `irm …/install.ps1 \| iex` | Same for the `.exe` asset |
-| Cargo | `cargo install --locked docsbase --version 0.1.0-alpha.3` | Builds from source, MSRV 1.88 |
-| Manual | Download asset from [Releases](https://github.com/punkhomov/docsbase-memory-mcp/releases), `sha256sum -c`, then `docsbase install` | Verify SLSA provenance, see [`docs/INSTALL.md`](docs/INSTALL.md) |
+Supported: **Linux x86_64** and **Windows x64**. macOS is **not supported in
+v1** — on Apple hardware use WSL2 or a Linux container (the Linux script works
+there). Details: [`docs/INSTALL.md`](docs/INSTALL.md).
 
-Updates: `docsbase update` (checks the latest release, verifies it, replaces
-the binary). Pin a version with `docsbase update --version v0.1.0-alpha.3`.
+### Linux x86_64
 
-Every release ships: `sha256sum` files, SBOM, and SLSA build provenance
-(Sigstore). Verify with `gh attestation verify`.
+```sh
+curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | DOCSBASE_CHANNEL=prerelease sh
+```
+
+Installs to `~/.local/bin` (override with `DOCSBASE_BIN_DIR`), verifies
+`sha256`, and registers the binary (`docsbase install`). Pin a version with
+`DOCSBASE_VERSION=v0.1.0-alpha.3`.
+
+### Windows x64 (PowerShell)
+
+```powershell
+$env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1 | iex
+```
+
+Installs to `%USERPROFILE%\.local\bin` (added to the user `PATH`), verifies
+`sha256`, and registers the binary. Same `DOCSBASE_VERSION` pinning.
+
+### Build from source (any supported platform)
+
+```sh
+cargo install --locked docsbase --version 0.1.0-alpha.3
+docsbase install   # register the binary with the daemon
+```
+
+Requires Rust 1.88+ (MSRV). Local development pins nightly in
+`rust-toolchain.toml`; CI validates the MSRV toolchain.
+
+### Manual
+
+Download the asset and its `.sha256` from
+[Releases](https://github.com/punkhomov/docsbase-memory-mcp/releases), verify
+(`sha256sum -c` on Linux, `Get-FileHash` on Windows), optionally verify SLSA
+provenance with `gh attestation verify`, put the binary on `PATH`, then run
+`docsbase install`.
+
+### Updates and verification
+
+`docsbase update` checks the latest release, verifies it, and replaces the
+binary (pin with `docsbase update --version v0.1.0-alpha.3`). Every release
+ships `sha256sum` files, an SBOM, and SLSA build provenance (Sigstore).
 
 ## CLI reference (short)
 
@@ -110,6 +149,31 @@ All OS-dependent code lives behind `src/platform/` (Unix socket vs Windows
 named pipe). Public contracts (MCP tools, CLI, config format, socket
 protocol) are versioned; breaking changes bump the major version.
 More: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Multilingual search
+
+Search is offline and dictionary-free: no extra crates, no network. The
+tokenizer is script-aware and versioned — changing the pipeline bumps
+`TOKENIZER_VERSION` and the index rebuilds from SQLite automatically.
+
+| Script | Normalization | Analyzer | Example |
+|---|---|---|---|
+| Cyrillic | — | Snowball Russian (standalone words) | `замены` finds `замена` |
+| Latin | fullwidth → ASCII, `İ` → `I` | Snowball English | `storing` finds `store` |
+| Arabic | harakat/tatweel removed, `أإآ`→`ا`, `ة`→`ه`, `ى`→`ي` | Snowball Arabic | `مَطَار` finds `مطار` |
+| CJK | — | bigrams over every character, sequential positions | `東京` matches inside `東京国際空港` |
+| All | `ё`→`е` (case-preserving), width folding | — | `ёлка` finds `елка` |
+| Identifiers | not stemmed (`_`, CamelCase, ALL_CAPS, digits) | exact multi-token | `assessment_plan_id`, `MAX_FRAME_BYTES` |
+
+Measured at SQ18 (directional; source of truth:
+[`tests/fixtures/search-quality/baseline.json`](tests/fixtures/search-quality/baseline.json)):
+all six golden classes at hit_rate/ndcg 1.0; search p95 ≈ 0.6 ms (Latin) and
+≈ 5 ms (CJK) over 50k chunks; a CJK index stays ≈ 0.8× the corpus text size.
+
+Notes: BM25 scores are engine-internal and intentionally not snapshotted
+(they drift across tantivy upgrades); fenced code blocks and tables stay
+atomic (they may exceed the chunk cap); phrase matching never matches inside
+identifiers (`"plan id"` ≠ `assessment_plan_id`).
 
 ## Configuration
 
