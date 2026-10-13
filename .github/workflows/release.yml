@@ -157,10 +157,12 @@ jobs:
           export DOCSBASE_CACHE_DIR="$work/cache"
           export DOCSBASE_CONFIG_DIR="$work/config"
           export DOCSBASE_DATA_DIR="$work/data"
-          ./target/release/docsbase --version
-          ./target/release/docsbase install
-          ./target/release/docsbase index "$work"
-          ./target/release/docsbase search "gizmos" --limit 3 > "$work/search.json"
+          bin="$PWD/target/release/docsbase"
+          "$bin" --version
+          "$bin" install
+          cd "$work"
+          "$bin" index "$work"
+          "$bin" search "gizmos" --limit 3 > "$work/search.json"
           grep -q "README.md" "$work/search.json"
       - name: Package + checksum
         run: |
