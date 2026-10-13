@@ -4,7 +4,7 @@
 search-quality. Фиксы — отдельной веткой/PR, не смешивать с #24.
 
 CI периодически падает на Linux/Windows; перезапуск failed jobs — зелёный.
-Ниже три подтверждённых флейка с логами CI, root cause и вариантами фикса.
+Ниже четыре подтверждённых флейка с логами CI, root cause и вариантами фикса.
 
 ## 1. `mcp_registry::second_sync_start_returns_current`
 
@@ -12,7 +12,8 @@ CI периодически падает на Linux/Windows; перезапус�
   хелпер на `:94`).
 - **Симптом:** `Transport { message: "Resource temporarily unavailable (os error 11)" }`.
 - **Наблюдения:** runs `37818545405` (08.10 17:45), `37899633839` (09.10 07:36),
-  `37900243501` (09.10 07:42); jobs `113453330685`, `113718981126`, `113720846683`.
+  `37900243501` (09.10 07:42), `38404323321` (13.10 13:25, job `115319812507`);
+  jobs `113453330685`, `113718981126`, `113720846683`.
 - **Root cause:** `Client::connect` ставит `IO_TIMEOUT = 2s`
   (`src/ipc/client.rs:13`, `:34`); на Linux истечение `SO_RCVTIMEO` возвращает
   `EAGAIN`/`WouldBlock` (os error 11), а `io_error` (`src/ipc/client.rs:203`)
@@ -67,9 +68,34 @@ CI периодически падает на Linux/Windows; перезапус�
 - **Acceptance:** конкурентный `index` при живом демоне на Windows не падает по
   lock.
 
+## 4. `mcp_registry::watcher_refreshes_search` (Windows)
+
+- **Где:** `tests/mcp_registry.rs:617` («watcher did not refresh search»), тест
+  пишет файл и до 6 с поллит `search_docs`.
+- **Симптом:** refresh не наступает; в логе демона:
+  `warning: watcher batch for project 1: internal error: tantivy: Failed to open
+  file for write: IoError { io_error: Os { code: 5, kind: PermissionDenied },
+  filepath: "...fieldnorm" }`.
+- **Наблюдения:** run `38404323321` (13.10 13:25, job `115319812833`) — первый
+  зафиксированный случай; воспроизводимость не подтверждена.
+- **Root cause (гипотеза, не подтверждено):** семантика разделения файлов на
+  Windows — инкрементальная запись/мердж tantivy пытается открыть/пересоздать
+  `.fieldnorm` сегмента, который держит открытым читатель (searcher) без
+  `FILE_SHARE_DELETE`/`FILE_SHARE_WRITE`; на Linux это не проявляется. Возможен
+  вклад антивируса/индексатора раннера.
+- **Варианты фикса:** воспроизвести локально на Windows (стресс: watcher-правка
+  при активном поиске); проверить жизненный цикл reader/writer в watcher-пути
+  (reload/commit порядок), при необходимости — retry с backoff на
+  `PermissionDenied` при открытии файлов сегмента или managed-directory с
+  корректным sharing.
+- **Acceptance:** watcher-правка при параллельном поиске на Windows стабильно
+  становится видимой в пределах дедлайна теста.
+
 ## Что дальше
 
 - Фиксы 1–2 локальны и детерминированы (тест-сайд, без изменения поведения
   продукта, кроме 1.2 — сообщение о таймауте).
-- Фикс 3 требует воспроизведения на Windows (раннер или локальный Windows).
-- Оформить отдельной веткой от main после merge #24.
+- Фиксы 3–4 требуют воспроизведения на Windows (раннер или локальный Windows).
+- Оформить отдельной веткой от main.
+- 2026-10-13: флейки 1 и 4 воспроизвелись одновременно на docs-only PR #26
+  (linux job `115319812507`, windows job `115319812833`) — rerun обычно зелёный.
