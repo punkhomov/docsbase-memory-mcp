@@ -21,11 +21,12 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use crate::config::Config;
 use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
-use crate::index::job::run_incremental_with;
+use crate::index::job::{JobStats, run_incremental_with};
 use crate::index::tantivy_index::IndexHandle;
 use crate::index::walk;
 use crate::store::Db;
 use crate::store::models::{Project, ProjectStatus};
+use serde_json::json;
 
 /// Quiet window after the last event; extends while events keep coming, so a
 /// git-checkout-like burst becomes one incremental job (FR-15, NFR-4).
@@ -188,24 +189,250 @@ pub fn spawn_watcher(
 
 /// Deduplicated batch under construction.
 #[derive(Default)]
-struct Batch {
+pub struct Batch {
     paths: Vec<PathBuf>,
     seen: HashSet<PathBuf>,
 }
 
 impl Batch {
-    fn new() -> Self {
+    /// Empty batch.
+    #[must_use]
+    pub fn new() -> Self {
         Self::default()
     }
 
-    fn push(&mut self, path: PathBuf) {
+    /// Adds `path` once, keeping arrival order.
+    pub fn push(&mut self, path: PathBuf) {
         if self.seen.insert(path.clone()) {
             self.paths.push(path);
         }
     }
 
+    /// Paths in arrival order.
+    #[must_use]
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+
     fn into_vec(self) -> Vec<PathBuf> {
         self.paths
+    }
+}
+
+/// Bounded transient retries per batch (flake #28: tantivy merge thread races
+/// the next commit on `.managed.json`; see tantivy issue #2847).
+const BATCH_MAX_TRANSIENT_ATTEMPTS: u32 = 3;
+
+/// First transient backoff; multiplied by 3 per attempt (100/300/900 ms).
+const BATCH_TRANSIENT_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Retry policy for one pending watcher batch.
+pub struct BatchRetryPolicy {
+    /// Bounded retries for transient (internal) batch failures.
+    pub max_transient_attempts: u32,
+    /// Wait between lease-conflict retries. A full index job holds the lease;
+    /// those retries are unbounded and never consume the transient budget
+    /// (FR-16).
+    pub lease_retry: Duration,
+    /// Base delay between transient retries; multiplied by 3 per attempt.
+    pub transient_backoff: Duration,
+}
+
+impl Default for BatchRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_transient_attempts: BATCH_MAX_TRANSIENT_ATTEMPTS,
+            lease_retry: LEASE_RETRY,
+            transient_backoff: BATCH_TRANSIENT_BACKOFF,
+        }
+    }
+}
+
+/// Events reported while a batch is retried (tests assert them).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchEvent {
+    /// A full index job holds the writer lease; retried without counting.
+    LeaseRetry { attempt: u32 },
+    /// Transient failure; retried after a backoff.
+    TransientRetry { attempt: u32, error: String },
+    /// Transient retries exhausted; the batch is dropped and surfaced.
+    DroppedTransient { attempts: u32, error: String },
+    /// Permanent failure; the batch is dropped.
+    DroppedPermanent { error: String },
+    /// The project root vanished; the watcher must stop.
+    RootMissing,
+}
+
+/// Terminal outcome of one pending batch.
+#[derive(Debug)]
+pub enum BatchOutcome {
+    /// The batch was indexed.
+    Done(JobStats),
+    /// The batch was dropped after `attempts` transient retries.
+    Dropped { attempts: u32, error: String },
+    /// The project root disappeared; stop the watcher.
+    RootMissing,
+}
+
+fn transient_batch_error(err: &Error) -> bool {
+    matches!(err, Error::Internal { .. })
+}
+
+fn transient_delay(policy: &BatchRetryPolicy, attempt: u32) -> Duration {
+    let factor = 3_u32.saturating_pow(attempt.saturating_sub(1));
+    policy.transient_backoff.saturating_mul(factor)
+}
+
+/// Runs `pending` to a terminal state. Newly arrived paths are drained into
+/// `pending` before every attempt, so retries coalesce instead of queueing
+/// extra runs (events still in the channel are never lost: they are picked up
+/// by the next outer receive). Lease conflicts retry unbounded (FR-16) and
+/// outside the transient budget; transient failures retry within it; anything
+/// else is dropped. Every step is reported through `report`.
+pub fn run_pending_batch<R, D, S, M>(
+    pending: &mut Batch,
+    policy: &BatchRetryPolicy,
+    mut run: R,
+    mut drain: D,
+    mut sleep: S,
+    mut root_missing: M,
+    report: &mut dyn FnMut(BatchEvent),
+) -> BatchOutcome
+where
+    R: FnMut(&[PathBuf]) -> Result<JobStats>,
+    D: FnMut(&mut Batch),
+    S: FnMut(Duration),
+    M: FnMut() -> bool,
+{
+    let mut transient_attempts = 0_u32;
+    let mut lease_attempts = 0_u32;
+    loop {
+        drain(pending);
+        if root_missing() {
+            report(BatchEvent::RootMissing);
+            return BatchOutcome::RootMissing;
+        }
+        match run(pending.paths()) {
+            Ok(stats) => return BatchOutcome::Done(stats),
+            Err(err) if lifecycle::is_lease_conflict(&err) => {
+                lease_attempts += 1;
+                report(BatchEvent::LeaseRetry {
+                    attempt: lease_attempts,
+                });
+                sleep(policy.lease_retry);
+            }
+            Err(err) if transient_batch_error(&err) => {
+                if transient_attempts >= policy.max_transient_attempts {
+                    let error = err.to_string();
+                    report(BatchEvent::DroppedTransient {
+                        attempts: transient_attempts,
+                        error: error.clone(),
+                    });
+                    return BatchOutcome::Dropped {
+                        attempts: transient_attempts,
+                        error,
+                    };
+                }
+                transient_attempts += 1;
+                report(BatchEvent::TransientRetry {
+                    attempt: transient_attempts,
+                    error: err.to_string(),
+                });
+                sleep(transient_delay(policy, transient_attempts));
+            }
+            Err(err) => {
+                let error = err.to_string();
+                report(BatchEvent::DroppedPermanent {
+                    error: error.clone(),
+                });
+                return BatchOutcome::Dropped { attempts: 0, error };
+            }
+        }
+    }
+}
+
+/// Remaining injected faults for the current fault-test root (test seam).
+static INJECTED_FAULT_REMAINING: Mutex<Option<(String, usize)>> = Mutex::new(None);
+
+/// Test seam (see `tests/watcher.rs`): with `DOCSBASE_WATCH_FAULT=internal:N`
+/// and `DOCSBASE_WATCH_FAULT_ROOT=<prefix>` set, the first `N` batch runs of
+/// a project whose root starts with the prefix fail with a synthetic
+/// transient error. Inert unless both variables are set.
+fn injected_watch_fault(root: &Path) -> Option<Error> {
+    let spec = std::env::var("DOCSBASE_WATCH_FAULT").ok()?;
+    let prefix = std::env::var("DOCSBASE_WATCH_FAULT_ROOT").ok()?;
+    let budget = spec.strip_prefix("internal:")?.parse::<usize>().ok()?;
+    if !root.starts_with(&prefix) {
+        return None;
+    }
+    let mut guard = INJECTED_FAULT_REMAINING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let entry = guard.get_or_insert_with(|| (prefix.clone(), budget));
+    if entry.0 != prefix {
+        *entry = (prefix.clone(), budget);
+    }
+    if entry.1 == 0 {
+        return None;
+    }
+    entry.1 -= 1;
+    Some(Error::internal(
+        "injected watcher batch fault (DOCSBASE_WATCH_FAULT)",
+    ))
+}
+
+/// Logs one batch event (kept out of the consumer loop for readability).
+fn report_batch_event(project_id: i64, policy: &BatchRetryPolicy, event: BatchEvent) {
+    match event {
+        BatchEvent::LeaseRetry { attempt } => {
+            if watch_debug() {
+                eprintln!(
+                    "watch: project {project_id} batch waits for the writer lease (attempt {attempt})"
+                );
+            }
+        }
+        BatchEvent::TransientRetry { attempt, error } => {
+            eprintln!(
+                "warning: watcher batch for project {project_id}: {error}; retrying ({attempt}/{})",
+                policy.max_transient_attempts
+            );
+        }
+        BatchEvent::DroppedTransient { attempts, error } => {
+            eprintln!(
+                "warning: watcher batch for project {project_id} dropped after {attempts} transient retries: {error}"
+            );
+        }
+        BatchEvent::DroppedPermanent { error } => {
+            eprintln!("warning: watcher batch for project {project_id}: {error}");
+        }
+        BatchEvent::RootMissing => {
+            eprintln!("watch: project {project_id} root is missing; stopping watcher");
+        }
+    }
+}
+
+/// Records a dropped batch as a terminal `error` job row so `status` surfaces
+/// the lost edits next to per-file warnings (FR-19 pattern).
+fn record_dropped_batch(db: &mut Db, project_id: i64, pending: &Batch, attempts: u32, error: &str) {
+    let warnings: Vec<serde_json::Value> = pending
+        .paths()
+        .iter()
+        .map(|path| {
+            json!({
+                "path": path.display().to_string(),
+                "message": format!(
+                    "watcher batch dropped after {attempts} transient retries: {error}"
+                ),
+            })
+        })
+        .collect();
+    let stats = json!({ "error": error, "warnings": warnings }).to_string();
+    if let Err(record) =
+        crate::store::repo::record_failed_batch(db.connection(), project_id, &stats)
+    {
+        eprintln!(
+            "warning: cannot record dropped watcher batch for project {project_id}: {record}"
+        );
     }
 }
 
@@ -474,63 +701,57 @@ fn spawn_consumer(
             };
             let mut pending = Batch::new();
             while let Ok(batch) = rx.recv() {
-                // A vanished root must stop the watcher before any batch runs:
-                // the deletion events themselves would otherwise look like a
-                // successful purge and leave a zombie `watched=true` (T50).
-                if crate::daemon::registry::root_state(&project.canonical_root)
-                    == crate::daemon::registry::RootState::Missing
-                {
-                    eprintln!(
-                        "watch: project {project_id} root is missing; stopping watcher"
-                    );
-                    if let Some(watchers) = watchers.upgrade() {
-                        watchers.remove(project_id);
-                    }
-                    return;
-                }
                 for path in batch {
                     pending.push(path);
                 }
-                loop {
-                    // Clone and release the slot: a reopen must not stall
-                    // behind a long incremental batch.
-                    let config = config
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .clone();
-                    match run_batch(&mut db, &cache, &project, &config, &pending.paths) {
-                        Ok(stats) => {
-                            eprintln!(
-                                "watcher: project {project_id} refreshed {} doc(s), {} chunk(s), {} error(s)",
-                                stats.docs, stats.chunks, stats.errors
-                            );
-                            pending = Batch::new();
-                            break;
+                let policy = BatchRetryPolicy::default();
+                let mut report = |event: BatchEvent| report_batch_event(project_id, &policy, event);
+                let outcome = run_pending_batch(
+                    &mut pending,
+                    &policy,
+                    |paths| {
+                        if let Some(err) = injected_watch_fault(&project.canonical_root) {
+                            return Err(err);
                         }
-                        // A full index job holds the lease: keep the batch and
-                        // retry instead of dropping fresh edits (FR-16).
-                        Err(err) if lifecycle::is_lease_conflict(&err) => {
-                            std::thread::sleep(LEASE_RETRY);
-                        }
-                        Err(err) => {
-                            if crate::daemon::registry::root_state(
-                                &project.canonical_root,
-                            ) == crate::daemon::registry::RootState::Missing
-                            {
-                                eprintln!(
-                                    "watch: project {project_id} root is missing; stopping watcher"
-                                );
-                                if let Some(watchers) = watchers.upgrade() {
-                                    watchers.remove(project_id);
-                                }
-                                return;
+                        // Clone and release the slot: a reopen must not stall
+                        // behind a long incremental batch.
+                        let config = config
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .clone();
+                        run_batch(&mut db, &cache, &project, &config, paths)
+                    },
+                    |pending| {
+                        while let Ok(extra) = rx.try_recv() {
+                            for path in extra {
+                                pending.push(path);
                             }
-                            eprintln!(
-                                "warning: watcher batch for project {project_id}: {err}"
-                            );
-                            pending = Batch::new();
-                            break;
                         }
+                    },
+                    std::thread::sleep,
+                    || {
+                        crate::daemon::registry::root_state(&project.canonical_root)
+                            == crate::daemon::registry::RootState::Missing
+                    },
+                    &mut report,
+                );
+                match outcome {
+                    BatchOutcome::Done(stats) => {
+                        eprintln!(
+                            "watcher: project {project_id} refreshed {} doc(s), {} chunk(s), {} error(s)",
+                            stats.docs, stats.chunks, stats.errors
+                        );
+                        pending = Batch::new();
+                    }
+                    BatchOutcome::Dropped { attempts, error } => {
+                        record_dropped_batch(&mut db, project.id, &pending, attempts, &error);
+                        pending = Batch::new();
+                    }
+                    BatchOutcome::RootMissing => {
+                        if let Some(watchers) = watchers.upgrade() {
+                            watchers.remove(project_id);
+                        }
+                        return;
                     }
                 }
             }

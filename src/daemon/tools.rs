@@ -336,14 +336,22 @@ fn project_entry(
     with_git: bool,
 ) -> Result<Value> {
     let counts = repo::project_counts(db.connection(), project.id)?;
-    // Warnings come from the newest job only when it succeeded: a newer
-    // failed job must not leave an older job's warnings looking current.
-    let warnings = match repo::latest_job(db.connection(), project.id)? {
-        Some((state, Some(raw))) if state == "done" => serde_json::from_str::<Value>(&raw)
-            .ok()
-            .and_then(|stats| stats.get("warnings").cloned())
-            .unwrap_or_else(|| Value::Array(Vec::new())),
-        _ => Value::Array(Vec::new()),
+    // The newest job's own warnings and error are surfaced whatever its state:
+    // a dropped watcher batch records its lost paths here (FR-19), while a
+    // failed full job carries `error` and no warnings. An older job's warnings
+    // never leak through a newer row (FR-26).
+    let (warnings, last_error) = match repo::latest_job(db.connection(), project.id)? {
+        Some((_state, Some(raw))) => {
+            let stats = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null);
+            (
+                stats
+                    .get("warnings")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(Vec::new())),
+                stats.get("error").cloned(),
+            )
+        }
+        _ => (Value::Array(Vec::new()), None),
     };
     let mut entry = json!({
         "id": project.id,
@@ -355,6 +363,9 @@ fn project_entry(
         "last_indexed_at": project.last_indexed_at,
         "warnings": warnings,
     });
+    if let Some(error) = last_error {
+        entry["last_error"] = error;
+    }
     if let Some(watched) = watched {
         entry["watched"] = json!(watched);
     }

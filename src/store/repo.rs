@@ -370,6 +370,27 @@ pub fn latest_job(conn: &Connection, project_id: i64) -> Result<Option<(String, 
     .map_err(db_error)
 }
 
+/// Records a watcher batch dropped after bounded transient retries as a
+/// terminal `error` job row, so `status` surfaces the lost edits next to
+/// per-file warnings (FR-19 pattern).
+///
+/// # Errors
+/// Returns [`Error::Internal`] on `SQLite` failures.
+pub fn record_failed_batch(conn: &Connection, project_id: i64, stats_json: &str) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO sync_jobs (project_id, state, started_at, finished_at, stats_json)
+         VALUES (?1, ?2, ?3, ?3, ?4)",
+        params![
+            project_id,
+            SyncState::Error.as_str(),
+            unix_now(),
+            stats_json
+        ],
+    )
+    .map_err(db_error)?;
+    Ok(conn.last_insert_rowid())
+}
+
 /// Aggregate document/chunk counts for one project (FR-26).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectCounts {

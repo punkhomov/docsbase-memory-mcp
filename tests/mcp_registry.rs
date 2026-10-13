@@ -59,8 +59,17 @@ impl Env {
     /// Starts the daemon with an explicit working directory (the project
     /// root may be deleted already in missing-root tests).
     fn start_daemon_in(&mut self, cwd: &Path) {
-        let child = self
-            .cmd()
+        self.start_daemon_with_env(cwd, &[]);
+    }
+
+    /// Starts the daemon with extra environment variables (watcher fault
+    /// injection for the retry tests).
+    fn start_daemon_with_env(&mut self, cwd: &Path, extra: &[(&str, &str)]) {
+        let mut command = self.cmd();
+        for (key, value) in extra {
+            command.env(key, value);
+        }
+        let child = command
             .current_dir(cwd)
             .args(["serve", "--detached", "--grace-ms", "3000"])
             .spawn()
@@ -627,6 +636,116 @@ fn watcher_refreshes_search() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Flake #28: a transient watcher-batch failure (injected into the daemon)
+/// must be retried instead of dropping the edit.
+#[test]
+fn watcher_retries_transient_batch_failure() {
+    let mut env = Env::new(&[("README.md", "# Guide\n\ninstaller prose about gizmos.\n")]);
+    let root = env.root().canonicalize().expect("canonical root");
+    let root_path = env.root().to_path_buf();
+    env.start_daemon_with_env(
+        &root_path,
+        &[
+            ("DOCSBASE_WATCH_FAULT", "internal:1"),
+            (
+                "DOCSBASE_WATCH_FAULT_ROOT",
+                root.to_str().expect("utf8 root"),
+            ),
+        ],
+    );
+    let mut client = env.client();
+    client.handshake_registry().expect("hello");
+    Env::index_project(&mut client, env.root());
+
+    let mut bound = env.client();
+    bound.handshake(env.root()).expect("bind session");
+    write_file(
+        env.root(),
+        "README.md",
+        b"# Guide\n\ninstaller prose about sprockets.\n",
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let hits = bound
+            .call_tool("search_docs", json!({ "query": "sprockets" }))
+            .expect("search_docs");
+        if !hits.as_array().expect("hits").is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "edit must land despite one injected batch failure: {hits}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let status = bound.call_tool("status", json!({})).expect("status");
+    assert!(
+        status["projects"][0]["last_error"].is_null(),
+        "a recovered batch must not surface an error: {status}"
+    );
+}
+
+/// Flake #28: a batch dropped after the bounded retries is surfaced in
+/// `status` (`last_error` plus the lost paths as warnings), not silently lost.
+#[test]
+fn dropped_watcher_batch_is_visible_in_status() {
+    let mut env = Env::new(&[("README.md", "# Guide\n\ninstaller prose about gizmos.\n")]);
+    let root = env.root().canonicalize().expect("canonical root");
+    let root_path = env.root().to_path_buf();
+    env.start_daemon_with_env(
+        &root_path,
+        &[
+            ("DOCSBASE_WATCH_FAULT", "internal:99"),
+            (
+                "DOCSBASE_WATCH_FAULT_ROOT",
+                root.to_str().expect("utf8 root"),
+            ),
+        ],
+    );
+    let mut client = env.client();
+    client.handshake_registry().expect("hello");
+    Env::index_project(&mut client, env.root());
+
+    let mut bound = env.client();
+    bound.handshake(env.root()).expect("bind session");
+    write_file(
+        env.root(),
+        "README.md",
+        b"# Guide\n\ninstaller prose about sprockets.\n",
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let status = bound.call_tool("status", json!({})).expect("status");
+        let entry = &status["projects"][0];
+        if entry["last_error"].is_string() {
+            let error = entry["last_error"].as_str().expect("error");
+            assert!(error.contains("injected"), "last_error: {entry}");
+            let warnings = entry["warnings"].as_array().expect("warnings");
+            let paths: Vec<&str> = warnings
+                .iter()
+                .map(|warning| warning["path"].as_str().expect("path"))
+                .collect();
+            assert!(
+                paths.iter().any(|path| path.ends_with("README.md")),
+                "dropped path must be listed: {warnings:?}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "dropped batch must surface in status: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let hits = bound
+        .call_tool("search_docs", json!({ "query": "sprockets" }))
+        .expect("search_docs");
+    assert!(
+        hits.as_array().expect("hits").is_empty(),
+        "the dropped edit is not indexed: {hits}"
+    );
 }
 
 #[test]
