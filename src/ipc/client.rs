@@ -201,7 +201,14 @@ impl Client {
 }
 
 fn io_error(err: std::io::Error) -> Error {
-    Error::transport_with_source(err.to_string(), err)
+    match err.kind() {
+        // SO_RCVTIMEO expiry surfaces as WouldBlock on Linux and TimedOut on
+        // Windows; name it so slow-runner flakes are self-diagnosing.
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+            Error::transport_with_source(format!("timed out waiting for the daemon: {err}"), err)
+        }
+        _ => Error::transport_with_source(err.to_string(), err),
+    }
 }
 
 /// True when the error came from the socket/framing rather than the daemon

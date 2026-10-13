@@ -11,6 +11,7 @@ use tempfile::TempDir;
 use docsbase_memory::daemon::lifecycle::stop_daemon;
 use docsbase_memory::ipc::client::Client;
 use docsbase_memory::ipc::protocol::{PROTOCOL_VERSION, build_id};
+use docsbase_memory::mcp::tools::LONG_TIMEOUT;
 use docsbase_memory::platform;
 
 struct Env {
@@ -91,6 +92,12 @@ impl Env {
     }
 
     fn index_project(client: &mut Client, path: &Path) -> Value {
+        // Indexing 40 docs is a long tool: use the production long-tool
+        // timeout instead of the 2s client default, which expires on loaded
+        // runners (EAGAIN/WouldBlock) and made this test flaky.
+        client
+            .set_read_timeout(Some(LONG_TIMEOUT))
+            .expect("set long read timeout");
         client
             .call_tool(
                 "index_project",

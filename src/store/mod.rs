@@ -35,7 +35,10 @@ impl Db {
         ensure_private_dir(cache_dir)?;
         let path = cache_dir.join(DB_FILE);
         let conn = Connection::open(&path).map_err(|err| sql_error(&path, err))?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))
+        // Concurrent CLI index + daemon can hold the registry lock past the
+        // old 5s budget on loaded Windows CI runners; wait it out instead of
+        // failing with "database is locked".
+        conn.busy_timeout(std::time::Duration::from_secs(30))
             .map_err(|err| sql_error(&path, err))?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|err| sql_error(&path, err))?;
