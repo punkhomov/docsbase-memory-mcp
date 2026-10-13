@@ -191,26 +191,38 @@ fn connection_flood_is_refused_and_daemon_survives() {
                 .expect("connect within cap"),
         );
     }
-    // Give the accept loop time to consume every slot before the extra one.
-    std::thread::sleep(Duration::from_millis(500));
-
-    let extra = platform::connect_blocking(&platform::daemon_endpoint(env.cache()))
-        .expect("connect handshake");
-    extra
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .expect("timeout");
-    let mut extra = extra;
-    let hello = encode(&Request::Hello {
-        protocol_version: PROTOCOL_VERSION,
-        build_id: "flood".to_owned(),
-        client: "flood".to_owned(),
-    })
-    .expect("encode");
-    let _ = extra.write_all(&hello);
-    let mut line = String::new();
-    match BufReader::new(extra).read_line(&mut line) {
-        Ok(0) | Err(_) => {}
-        Ok(_) => panic!("over-cap connection must be shed, got: {line}"),
+    // The accept loop consumes the held connections asynchronously: probe
+    // until the daemon is actually at capacity instead of trusting a fixed
+    // sleep (CI timing flake). Each accepted probe is dropped before the next
+    // iteration, so a probe cannot hold a slot itself.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let extra = platform::connect_blocking(&platform::daemon_endpoint(env.cache()))
+            .expect("connect handshake");
+        extra
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let mut extra = extra;
+        let hello = encode(&Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            build_id: "flood".to_owned(),
+            client: "flood".to_owned(),
+        })
+        .expect("encode");
+        let _ = extra.write_all(&hello);
+        let mut line = String::new();
+        let shed = match BufReader::new(extra).read_line(&mut line) {
+            Ok(0) | Err(_) => true,
+            Ok(_) => false,
+        };
+        if shed {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon never reached capacity; probe reply: {line}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     // Freeing one slot restores service.
