@@ -72,10 +72,18 @@ CI периодически падает на Linux/Windows; перезапус�
   registry; при необходимости увеличить таймаут; стресс-тест CLI+daemon на Windows.
 - **Acceptance:** конкурентный `index` при живом демоне на Windows не падает по
   lock.
-- **Статус:** смягчено и проверено стрессом — registry `busy_timeout` 5 с → 30 с
-  (`src/store/mod.rs`); цель `error_surface::mcp_error_codes_stable` добавлена в
-  `flake-stress`, прогон 50/50 на Windows зелёный (run `38590476555`,
-  2026-10-14). При повторе — воспроизводить на Windows.
+- **Root cause (2026-10-14, доказан):** `SQLITE_BUSY_SNAPSHOT` (extended 517) —
+  deferred-транзакция, которая сначала читает, а потом пишет, падает мгновенно
+  («database is locked») как только другое соединение закоммитило между этими
+  шагами; **busy_timeout его не покрывает** (busy-handler не вызывается для
+  deferred-upgrade). Repro: `read_then_write_tx_survives_concurrent_writer`
+  (красный на deferred с `extended_code: 517`, зелёный на IMMEDIATE). Повторный
+  CI-инцидент: PR #41, run `38608476841` (`docsbase index` в error_surface).
+- **Статус:** исправлено по корню — все пишущие транзакции через
+  `Db::begin_write` (`BEGIN IMMEDIATE`, `src/store/mod.rs`): write-lock берётся
+  на `BEGIN`, сценарий upgrade невозможен; плюс защитный ретрай
+  `PRAGMA journal_mode=WAL` при параллельном первичном открытии. Ранее:
+  `busy_timeout` 5→30 с и стресс 50/50 (run `38590476555`) — оставлены.
 
 ## 4. `mcp_registry::watcher_refreshes_search` (Windows)
 

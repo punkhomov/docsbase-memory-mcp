@@ -29,10 +29,7 @@ pub fn ensure_project(db: &mut Db, path: &Path) -> Result<Project> {
         || canonical_root.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     );
-    let tx = db
-        .connection_mut()
-        .transaction()
-        .map_err(|err| Error::internal_with_source(format!("begin sqlite: {err}"), err))?;
+    let tx = db.begin_write()?;
     tx.execute(
         "INSERT INTO projects (canonical_root, name, status, schema_version, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)
