@@ -18,3 +18,4 @@ Task M3: Review: spec PASS/quality APPROVED; minors закрыты (round-trip s
 Task M4: complete (commit 3c76932 + review round; docs CI gate зелёный)
 Task M4: Ruling: платформенные заявления — macOS 12+ Apple Silicon (Intel/universal out, ADR-M2); install-путь macOS ad-hoc + curl без карантина; конституция — delta-маркер «артефакты Linux + Windows + macOS aarch64»; AGENTS — macOS-грабли (exclusive cfg, SZOMB, O_NONBLOCK/XNU EINVAL, codesign) и advisory-статус macos-джобы.
 Task M4: Review: spec PASS/quality APPROVED; minors закрыты (ARM64 Windows в out-of-scope, macOS-верификация sha, macOS-пути data/config).
+Task M4: follow-up: MACOSX_DEPLOYMENT_TARGET=12.0 зафиксирован в macos-джобах ci.yml/release.yml (док-заявление «macOS 12+» стало enforced; rustc-дефолт arm64 — 11.0).
