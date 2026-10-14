@@ -1,7 +1,7 @@
 name: release
 
 # Serious-project release pipeline (constitution §Supply-chain):
-# tag v* -> version check -> linux + windows builds -> SBOM ->
+# tag v* -> version check -> linux + windows + macos builds -> SBOM ->
 # GitHub Release (prerelease for alpha/beta/rc) -> SLSA provenance.
 on:
   push:
@@ -143,27 +143,15 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Build (macOS aarch64)
-        run: cargo build --release --locked
+        run: |
+          test "$(uname -m)" = "arm64"
+          cargo build --release --locked
       - name: Platform seam invariant (ADR-9)
         run: cargo test --locked --test platform_boundary
       - name: Ad-hoc sign (Apple Silicon requires a valid signature)
         run: |
           codesign -s - --force target/release/docsbase
           codesign -v target/release/docsbase
-      - name: Smoke (install + index + search)
-        run: |
-          work="$(mktemp -d)"
-          printf '# Guide\n\ninstaller prose about gizmos.\n' > "$work/README.md"
-          export DOCSBASE_CACHE_DIR="$work/cache"
-          export DOCSBASE_CONFIG_DIR="$work/config"
-          export DOCSBASE_DATA_DIR="$work/data"
-          bin="$PWD/target/release/docsbase"
-          "$bin" --version
-          "$bin" install
-          cd "$work"
-          "$bin" index "$work"
-          "$bin" search "gizmos" --limit 3 > "$work/search.json"
-          grep -q "README.md" "$work/search.json"
       - name: Package + checksum
         run: |
           version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
@@ -174,6 +162,21 @@ jobs:
           tar -czf "$stage/$asset" -C "$stage" docsbase
           (cd "$stage" && shasum -a 256 "$asset" > "$asset.sha256")
           ls -l "$stage"
+      - name: Smoke the packaged artifact (install + index + search)
+        run: |
+          work="$(mktemp -d)"
+          tar -xzf dist/macos/docsbase-*.tar.gz -C "$work"
+          printf '# Guide\n\ninstaller prose about gizmos.\n' > "$work/README.md"
+          export DOCSBASE_CACHE_DIR="$work/cache"
+          export DOCSBASE_CONFIG_DIR="$work/config"
+          export DOCSBASE_DATA_DIR="$work/data"
+          bin="$work/docsbase"
+          "$bin" --version
+          "$bin" install
+          cd "$work"
+          "$bin" index "$work"
+          "$bin" search "gizmos" --limit 3 > "$work/search.json"
+          grep -q "README.md" "$work/search.json"
       - name: Attest macos artifact (SLSA provenance, Sigstore)
         uses: actions/attest-build-provenance@v4
         with:

@@ -2,7 +2,8 @@
 //!
 //! This is the only network-touching code path in the binary; like the install
 //! scripts it shells out to the platform tooling they already require
-//! (`curl`, `sha256sum`, `tar` on Linux; `PowerShell` on Windows), so the crate
+//! (`curl`, `sha256sum`, `tar` on Linux; `shasum` on macOS; `PowerShell` on
+//! Windows), so the crate
 //! gains no HTTP stack and the daemon stays strictly local. The daemon
 //! coordination (stop, admission lease, owned manifest) is shared with
 //! `cli::install`. The `.sha256` from the release is checked so a truncated
