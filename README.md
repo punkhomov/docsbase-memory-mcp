@@ -104,7 +104,8 @@ Requires Rust 1.88+ (MSRV). Local development pins nightly in
 
 Download the asset and its `.sha256` from
 [Releases](https://github.com/punkhomov/docsbase-memory-mcp/releases), verify
-(`sha256sum -c` on Linux, `Get-FileHash` on Windows), optionally verify SLSA
+( `sha256sum -c` on Linux, `shasum -a 256 -c` on macOS, `Get-FileHash` on
+Windows), optionally verify SLSA
 provenance with `gh attestation verify`, put the binary on `PATH`, then run
 `docsbase install`.
 
@@ -191,6 +192,7 @@ identifiers (`"plan id"` ≠ `assessment_plan_id`).
 Precedence: **CLI > project > global > defaults**.
 
 - Global: `~/.config/docsbase-memory-mcp/config.toml`
+  (`~/Library/Application Support/docsbase-memory-mcp/config.toml` on macOS)
 - Project: `.docsbase.toml` + `.docsbaseignore` in the project root
 - Overrides: `DOCSBASE_CACHE_DIR`, `DOCSBASE_DATA_DIR`, `DOCSBASE_CONFIG_DIR`
 - Defaults: `max_file_size = 1 MiB`, `max_docs_per_project = 20000`,

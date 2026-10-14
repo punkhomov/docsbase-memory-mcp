@@ -27,8 +27,9 @@ within 14 days for confirmed High/Critical issues.
 ## Scope notes
 
 - Out of scope for v1: macOS x86_64 (Intel) and universal binaries, ARM64
-  Linux, distro packages, SDDL-ACL hardening on Windows (tracked as backlog
-  after ADR-10), DoS via pathological local inputs beyond documented limits.
+  Linux and ARM64 Windows, distro packages, SDDL-ACL hardening on Windows
+  (tracked as backlog after ADR-10), DoS via pathological local inputs beyond
+  documented limits.
 - Supply chain: releases carry sha256 + SBOM + SLSA provenance — verify with
   `gh attestation verify` before installing from an asset. Full policy
   (threat model, quarantine layers, Dependabot scope, deferred items):

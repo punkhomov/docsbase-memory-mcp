@@ -105,7 +105,8 @@ docsbase install   # зарегистрировать бинарь в демон
 
 Скачайте ассет и его `.sha256` из
 [Releases](https://github.com/punkhomov/docsbase-memory-mcp/releases),
-проверьте (`sha256sum -c` на Linux, `Get-FileHash` на Windows), при желании
+проверьте (`sha256sum -c` на Linux, `shasum -a 256 -c` на macOS,
+`Get-FileHash` на Windows), при желании
 проверьте SLSA-provenance через `gh attestation verify`, положите бинарь в
 `PATH` и выполните `docsbase install`.
 
@@ -192,6 +193,7 @@ Linux/macOS vs Windows named pipe). Публичные контракты (MCP-�
 Приоритет: **CLI > проект > глобал > defaults**.
 
 - Глобально: `~/.config/docsbase-memory-mcp/config.toml`
+  (`~/Library/Application Support/docsbase-memory-mcp/config.toml` на macOS)
 - Проект: `.docsbase.toml` + `.docsbaseignore` в корне проекта
 - Переменные: `DOCSBASE_CACHE_DIR`, `DOCSBASE_DATA_DIR`, `DOCSBASE_CONFIG_DIR`
 - Дефолты: `max_file_size = 1 MiB`, `max_docs_per_project = 20000`,

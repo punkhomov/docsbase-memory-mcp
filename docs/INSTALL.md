@@ -76,8 +76,9 @@ Requires Rust 1.88+. Local dev uses the nightly pinned in
 
 1. Download the asset + `.sha256` from
    [Releases](https://github.com/punkhomov/docsbase-memory-mcp/releases).
-2. Verify: `sha256sum -c docsbase-*.sha256` (Linux) or
-   `Get-FileHash` against the `.sha256` content (Windows).
+2. Verify: `sha256sum -c docsbase-*.sha256` (Linux),
+   `shasum -a 256 -c docsbase-*.sha256` (macOS), or `Get-FileHash` against
+   the `.sha256` content (Windows).
 3. Verify provenance (recommended):
    `gh attestation verify <asset> --repo punkhomov/docsbase-memory-mcp`.
 4. Put the binary on `PATH` and run `docsbase install`.
@@ -87,6 +88,7 @@ Requires Rust 1.88+. Local dev uses the nightly pinned in
 - Stops the daemon, waits for the admission lease, clears stale state.
 - Atomically copies the current executable to the data dir
   (`~/.local/share/docsbase-memory-mcp/bin/docsbase` on Linux,
+  `~/Library/Application Support/docsbase-memory-mcp/bin/docsbase` on macOS,
   `%LOCALAPPDATA%\docsbase-memory-mcp\bin\docsbase.exe` on Windows).
 - Writes the owned manifest `install.json` (binary, socket/pipe, cache root,
   `build_id`, protocol/schema versions).
