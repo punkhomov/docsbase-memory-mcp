@@ -146,7 +146,7 @@ const FRESHNESS_BUDGET: Duration = Duration::from_secs(5);
 const FRESHNESS_BUDGET: Duration = Duration::from_secs(15);
 
 #[test]
-fn edit_becomes_searchable_within_2s() {
+fn edit_becomes_searchable_within_budget() {
     let mut env = Env::new(&[("a.md", PLAIN)]);
     env.full();
     let (_guard, rx) = env.watch();

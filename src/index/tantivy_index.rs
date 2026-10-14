@@ -18,9 +18,9 @@ use crate::index::tokenizer::{self, IdentifierTokenizer};
 /// thread without growing the RSS of short-lived CLI runs much.
 const WRITER_HEAP_BYTES: usize = 20_000_000;
 
-/// Score multiplier for chunks above [`MAX_CHUNK_CHARS`]: oversized
-/// sections (giant tables or fences) must not outrank compact answers
-/// (FR-20, T27).
+/// Score multiplier for chunks above [`MAX_CHUNK_CHARS`] + [`CHUNK_OVERLAP`]
+/// (the penalty threshold): oversized sections (giant tables or fences) must
+/// not outrank compact answers (FR-20, T27).
 ///
 /// SQ8 sweep (FR-11): the golden corpus cannot exercise the penalty (its
 /// largest document is far below `MAX_CHUNK_CHARS + CHUNK_OVERLAP`), so
@@ -304,6 +304,14 @@ impl ReadIndex {
                 instruction: Some("run `docsbase index` to rebuild".to_owned()),
             });
         }
+        if !dir.join("meta.json").exists() {
+            // SQ19 (SQ5 burn-down): report the absence instead of a
+            // confusing "pipeline unknown" mismatch.
+            return Err(Error::Project {
+                message: format!("index {} is missing", dir.display()),
+                instruction: Some("run `docsbase index` to rebuild".to_owned()),
+            });
+        }
         if !tokenizer_version_matches(dir) {
             let found = tokenizer_version(dir).unwrap_or_else(|| "unknown".to_owned());
             return Err(Error::Project {
@@ -452,6 +460,9 @@ fn create_fresh(dir: &Path, marker: &Path) -> Result<()> {
 }
 
 /// Records the current tokenizer pipeline version in the index directory.
+/// Writes the pipeline version file. Callers write the rebuild marker first,
+/// so a failure here still forces a full recreate on the next open (no
+/// rollback of the fresh directory is needed; SQ19 note).
 fn write_tokenizer_version(dir: &Path) -> Result<()> {
     let path = dir.join(TOKENIZER_VERSION_FILE);
     std::fs::write(&path, format!("{}\n", tokenizer::TOKENIZER_VERSION))

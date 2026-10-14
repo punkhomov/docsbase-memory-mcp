@@ -131,9 +131,10 @@ pub fn split_script_runs(s: &str) -> Vec<(usize, &str)> {
         match current {
             None => current = Some(script),
             Some(active) if active != script => {
-                if index > start {
-                    runs.push((start, &s[start..index]));
-                }
+                // `start` always trails `index` here: a script change can
+                // only happen after at least one earlier character of the
+                // current run, so the slice is never empty.
+                runs.push((start, &s[start..index]));
                 start = index;
                 current = Some(script);
             }

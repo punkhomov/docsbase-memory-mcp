@@ -200,6 +200,10 @@ impl Emitter<'_> {
                     owned = camel_split(run);
                     &owned
                 };
+                // The stem keeps the surface span (`offset_from/offset_to`
+                // cover `run`, not the stem text): consumers have none today,
+                // but the invariant is pinned by
+                // `stem_occupies_the_segment_position` (SQ19).
                 if !protected
                     && let Some(language) = stem_language(run, camel.len() > 1)
                     && let Some(stemmed) = stem(

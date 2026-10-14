@@ -22,7 +22,8 @@ pub enum ChunkKind {
 }
 
 /// Tail of the previous chunk carried into the next one at paragraph splits
-/// (≈10% of the char cap); consumed by the recursive splitter (SQ4).
+/// (≈10% of the char cap); consumed by the recursive splitter (SQ4) and by
+/// the long-chunk penalty threshold (`tantivy_index`).
 pub const CHUNK_OVERLAP: usize = 150;
 
 /// One indexed chunk with citation metadata.
@@ -196,8 +197,11 @@ struct Piece {
     end: usize,
     /// Fence or table block: never subdivided and never overlapped.
     atomic: bool,
-    /// A heading caption was merged into this piece: no overlap is added, so
-    /// the cap + overlap bound still holds.
+    /// Set when the piece absorbed a preceding heading caption: `true` for
+    /// every atomic fence/table block (they always absorb an adjacent
+    /// caption) and for prose pieces that merged a heading-only piece.
+    /// Overlap is not added afterwards (for prose this keeps the cap +
+    /// overlap bound; atomic blocks are exempt by the SC-5 delta).
     heading_merged: bool,
 }
 
