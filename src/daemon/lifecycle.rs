@@ -152,44 +152,42 @@ pub fn stop_daemon(cache: &Path) -> Result<()> {
         return Ok(());
     }
     let endpoint = platform::daemon_endpoint(cache);
-    let sent = if let Ok(mut stream) = platform::connect_blocking(&endpoint) {
-        let bytes = protocol::encode(&Request::StopDaemon)?;
-        stream
-            .write_all(&bytes)
-            .map_err(|err| Error::internal_with_source("send stop request", err))?;
-        stream
-            .flush()
-            .map_err(|err| Error::internal_with_source("flush stop request", err))?;
-        true
-    } else {
-        false
-    };
-
-    if !sent && !platform::exists(&endpoint) {
-        let deadline = Instant::now() + NO_LISTENER_TIMEOUT;
-        while Instant::now() < deadline {
-            if !pid_alive(state.pid) {
-                cleanup_stale(cache)?;
-                return Ok(());
-            }
-            std::thread::sleep(POLL_INTERVAL);
-        }
-        // Unix: the socket file is unlinked only once shutdown is committed,
-        // so the stop is under way even if the process needs longer to
-        // release the admission lease (FR-5/FR-6). Windows pipes have no
-        // file to observe, so fall through and verify the pid really exits.
-        #[cfg(unix)]
-        return Ok(());
-    }
-
-    // Wait for the process itself, not just the socket: `serve` unlinks its
-    // state and socket before the process (and its admission lease) is gone
-    // (FR-5).
+    let bytes = protocol::encode(&Request::StopDaemon)?;
+    // Send the stop request while waiting for the process itself, not just
+    // the socket: `serve` unlinks its state and socket before the process
+    // (and its admission lease) is gone (FR-5). A daemon at connection
+    // capacity sheds new connections before reading, so a single attempt can
+    // be dropped silently — retry until the deadline.
+    let mut no_listener_since: Option<Instant> = None;
     let deadline = Instant::now() + STOP_TIMEOUT;
     while Instant::now() < deadline {
         if !pid_alive(state.pid) {
             cleanup_stale(cache)?;
             return Ok(());
+        }
+        match platform::connect_blocking(&endpoint) {
+            Ok(mut stream) => {
+                no_listener_since = None;
+                stream
+                    .write_all(&bytes)
+                    .map_err(|err| Error::internal_with_source("send stop request", err))?;
+                stream
+                    .flush()
+                    .map_err(|err| Error::internal_with_source("flush stop request", err))?;
+            }
+            Err(_) if !platform::exists(&endpoint) => {
+                let since = *no_listener_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= NO_LISTENER_TIMEOUT {
+                    // Unix: the socket file is unlinked only once shutdown is
+                    // committed, so the stop is under way even if the process
+                    // needs longer to release the admission lease
+                    // (FR-5/FR-6). Windows pipes have no file to observe, so
+                    // fall through and verify the pid really exits.
+                    #[cfg(unix)]
+                    return Ok(());
+                }
+            }
+            Err(_) => {}
         }
         std::thread::sleep(POLL_INTERVAL);
     }
