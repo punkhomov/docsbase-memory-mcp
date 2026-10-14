@@ -132,6 +132,9 @@ jobs:
     needs: version-check
     runs-on: macos-latest
     timeout-minutes: 60
+    env:
+      # Documented floor (docs/specs/macos-support/requirements.md).
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
     permissions:
       contents: read
       id-token: write
