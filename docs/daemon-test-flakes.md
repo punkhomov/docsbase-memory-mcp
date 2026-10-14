@@ -72,8 +72,10 @@ CI периодически падает на Linux/Windows; перезапус�
   registry; при необходимости увеличить таймаут; стресс-тест CLI+daemon на Windows.
 - **Acceptance:** конкурентный `index` при живом демоне на Windows не падает по
   lock.
-- **Статус:** смягчено — registry `busy_timeout` 5 с → 30 с (`src/store/mod.rs`);
-  Windows-репро не было, стабильность подтвердит CI.
+- **Статус:** смягчено и проверено стрессом — registry `busy_timeout` 5 с → 30 с
+  (`src/store/mod.rs`); цель `error_surface::mcp_error_codes_stable` добавлена в
+  `flake-stress`, прогон 50/50 на Windows зелёный (run `38590476555`,
+  2026-10-14). При повторе — воспроизводить на Windows.
 
 ## 4. `mcp_registry::watcher_refreshes_search` (Windows)
 

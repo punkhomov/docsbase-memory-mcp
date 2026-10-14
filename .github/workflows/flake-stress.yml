@@ -29,6 +29,9 @@ jobs:
           - os: ubuntu-latest
             suite: lifecycle
             filter: connection_flood_is_refused_and_daemon_survives
+          - os: windows-latest
+            suite: error_surface
+            filter: mcp_error_codes_stable
     env:
       RUSTUP_TOOLCHAIN: "1.88.0"
     steps:

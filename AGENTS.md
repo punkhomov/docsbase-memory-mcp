@@ -38,7 +38,7 @@ Accept snapshots/baseline only as a deliberate, reviewed delta (see below).
 - No new crates without an ADR; the default build stays offline (no network
   crates).
 - `main` is protected: changes land via PR only. Required checks: `docs`,
-  `linux`, `windows`; `macos` runs advisory until the required-check flip.
+  `linux`, `macos`, `windows`.
 - Commit messages and PR titles: English prose. Literal examples in other
   scripts are fine (`ё/Ё→е/Е`, `замена/замены`). Conventional commits.
 - Refactors must not change behavior. If the tokenizer/normalization pipeline
