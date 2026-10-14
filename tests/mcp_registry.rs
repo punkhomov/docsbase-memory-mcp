@@ -465,15 +465,24 @@ fn second_sync_start_returns_current() {
     let second = bound
         .call_tool("sync_start", json!({}))
         .expect("second sync_start");
-    assert_eq!(
-        first["job_id"], second["job_id"],
-        "second sync_start must return the active job: {first} vs {second}"
-    );
-    assert!(
-        matches!(second["state"].as_str(), Some("queued" | "running")),
-        "second call returns the active job: {second}"
-    );
-    wait_job_done(&mut bound, first["job_id"].as_i64().expect("job id"));
+    if first["job_id"] == second["job_id"] {
+        assert!(
+            matches!(second["state"].as_str(), Some("queued" | "running")),
+            "second call returns the active job: {second}"
+        );
+    } else {
+        // The first job can finish between the two calls (a no-op sync is
+        // fast): the second call then correctly starts a new one. FR-17
+        // still holds: the first job must be terminal and the jobs must not
+        // overlap (timestamps are Unix seconds).
+        let finished = wait_job_done(&mut bound, first["job_id"].as_i64().expect("job id"));
+        assert!(
+            finished["finished_at"].as_i64().expect("finished_at")
+                <= second["started_at"].as_i64().expect("started_at"),
+            "jobs must not overlap: {finished} vs {second}"
+        );
+    }
+    wait_job_done(&mut bound, second["job_id"].as_i64().expect("job id"));
 }
 
 #[test]
