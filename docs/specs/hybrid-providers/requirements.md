@@ -39,7 +39,7 @@ BM25-поиск (`index/tantivy_index.rs`) не ловит парафразы и
 
 Goals (итерация 1):
 - G1. Embedding чанков через OpenRouter (`POST {base}/embeddings`), дефолт
-  `qwen/qwen3-embedding-0.6b` @1024d, с записью в существующий `VectorCache`
+  `qwen/qwen3-embedding-8b` @1024d (`DELTA-T1`), с записью в существующий `VectorCache`
   (контракт `(model_id, chunk_hash)` не меняется — меняется композиция строки
   `model_id`, см. FR-5).
 - G2. Rerank BM25 top-k через OpenRouter (`POST {base}/rerank`), дефолт

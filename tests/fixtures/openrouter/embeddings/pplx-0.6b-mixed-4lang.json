@@ -2,8 +2,14 @@
  "request": {
   "model": "perplexity/pplx-embed-v1-0.6b",
   "input_type": "search_document",
-  "input_kind": "4 mixed texts"
+  "input": [
+   "Настройка демона: путь к сокету, разрешения и состояние сессии.",
+   "Banana bread recipe with walnuts.",
+   "关于索引与搜索的配置",
+   "إعداد الفهرسة والبحث في المستندات"
+  ]
  },
+ "status": 200,
  "response": {
   "object": "list",
   "data": [

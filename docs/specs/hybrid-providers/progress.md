@@ -47,3 +47,5 @@
   наш срез до `limit` остаётся единственным местом лимита; пустые `documents`
   не отправляем (провайдер отвечает 400). minor: 429/5xx не провоцировались
   (политика по докам, пересмотр при первом инциденте).
+  Review (fresh): PASS/APPROVED, minors fixed in a follow-up commit (G1 default
+  model line; rerank/embedding fixtures normalized to {request,status,response}).

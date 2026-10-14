@@ -1,6 +1,15 @@
 {
+ "request": {
+  "model": "cohere/rerank-v3.5",
+  "query": "как настроить сокет демона",
+  "documents": [
+   "Настройка демона: путь к сокету, разрешения и состояние сессии.",
+   "Banana bread recipe with walnuts."
+  ],
+  "top_n": 10
+ },
  "status": 200,
- "body": {
+ "response": {
   "id": "gen-rerank-1791999336-0Z0GmDHun20YE3NlngQ1",
   "model": "rerank-v3.5",
   "results": [

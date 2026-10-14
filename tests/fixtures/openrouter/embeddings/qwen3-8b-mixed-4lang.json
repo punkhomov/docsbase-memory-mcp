@@ -3,8 +3,14 @@
   "model": "qwen/qwen3-embedding-8b",
   "dimensions": 1024,
   "input_type": "search_document",
-  "input_kind": "4 mixed texts"
+  "input": [
+   "Настройка демона: путь к сокету, разрешения и состояние сессии.",
+   "Banana bread recipe with walnuts.",
+   "关于索引与搜索的配置",
+   "إعداد الفهرسة والبحث في المستندات"
+  ]
  },
+ "status": 200,
  "response": {
   "id": "gen-emb-1791999198-Zz52sqRrDpPgsaU3KcIg",
   "object": "list",
