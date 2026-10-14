@@ -57,6 +57,9 @@ Accept snapshots/baseline only as a deliberate, reviewed delta (see below).
   `minor (deferred)` in the ledger.
 - Ledger: append `Task <ID>: complete (...)` plus `Ruling:` / `minor` lines to
   `progress.md` with each task commit.
+- **Merging is a human action.** Agents prepare a PR (ready for review, green
+  checks, reviewed) and stop; never run `gh pr merge` or any other merge
+  mechanism, even when the work looks finished. The human merges explicitly.
 - Exemplar to copy: `docs/specs/search-quality/` (SQ1–SQ18).
 
 ## Gotchas (paid for in review cycles)
