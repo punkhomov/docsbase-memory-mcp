@@ -8,6 +8,15 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ## [Unreleased]
 
+### Added
+
+- macOS (Apple Silicon) support: platform seam (zombie-aware liveness via
+  `proc_pidinfo`, descriptor counters, macOS system-dir guards, socket-path
+  validation, case-insensitive path comparison), an advisory `macos` CI job,
+  release artifact `docsbase-<ver>-macos-aarch64.tar.gz` with ad-hoc signing
+  and a `codesign -v` gate, `install.sh` (Darwin/arm64) and `docsbase update`
+  (asset name + `shasum` fallback).
+
 ### Fixed
 
 - `install.sh`: no more `curl: (23)` EPIPE noise while resolving the release

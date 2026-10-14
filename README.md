@@ -19,8 +19,9 @@ No network calls at runtime by default — no telemetry, no cloud, no Docker.
 Optional hybrid search stages (phase 2) are opt-in per project/request and may
 use an embedding API (OpenRouter) or a locally cached model.
 
-Supported platforms: **Linux x86_64** (static binary) and **Windows x64**
-(`.exe`). macOS is out of scope for v1.
+Supported platforms: **Linux x86_64** (static binary), **Windows x64**
+(`.exe`) and **macOS 12+ on Apple Silicon**. Intel Macs are out of scope
+(`x86_64-apple-darwin` is Tier 2 upstream and Intel hardware is EOL).
 
 ## Quickstart (5 minutes)
 
@@ -56,9 +57,8 @@ Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 
 ## Install
 
-Supported: **Linux x86_64** and **Windows x64**. macOS is **not supported in
-v1** — on Apple hardware use WSL2 or a Linux container (the Linux script works
-there). Details: [`docs/INSTALL.md`](docs/INSTALL.md).
+Supported: **Linux x86_64**, **Windows x64** and **macOS (Apple Silicon)**.
+Details, verification and manual options: [`docs/INSTALL.md`](docs/INSTALL.md).
 
 ### Linux x86_64
 
@@ -79,6 +79,17 @@ $env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punk
 Installs to `%USERPROFILE%\.local\bin` (added to the user `PATH`), verifies
 `sha256`, and registers the binary. Same `DOCSBASE_VERSION` pinning.
 
+### macOS (Apple Silicon)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | DOCSBASE_CHANNEL=prerelease sh
+```
+
+Installs to `~/.local/bin`, verifies `sha256` (via stock `shasum`), and
+registers the binary. The binary is ad-hoc signed; `curl` does not set the
+quarantine attribute, so the terminal install runs without Gatekeeper
+prompts (notarization is not needed for this path).
+
 ### Build from source (any supported platform)
 
 ```sh
@@ -93,7 +104,8 @@ Requires Rust 1.88+ (MSRV). Local development pins nightly in
 
 Download the asset and its `.sha256` from
 [Releases](https://github.com/punkhomov/docsbase-memory-mcp/releases), verify
-(`sha256sum -c` on Linux, `Get-FileHash` on Windows), optionally verify SLSA
+( `sha256sum -c` on Linux, `shasum -a 256 -c` on macOS, `Get-FileHash` on
+Windows), optionally verify SLSA
 provenance with `gh attestation verify`, put the binary on `PATH`, then run
 `docsbase install`.
 
@@ -145,8 +157,8 @@ CLI -------------------------------------------------------------> daemon / snap
 daemon -> registry.db (SQLite WAL) + projects/<id>/tantivy + per-project watcher
 ```
 
-All OS-dependent code lives behind `src/platform/` (Unix socket vs Windows
-named pipe). Public contracts (MCP tools, CLI, config format, socket
+All OS-dependent code lives behind `src/platform/` (Unix socket on
+Linux/macOS vs Windows named pipe). Public contracts (MCP tools, CLI, config format, socket
 protocol) are versioned; breaking changes bump the major version.
 More: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -180,6 +192,7 @@ identifiers (`"plan id"` ≠ `assessment_plan_id`).
 Precedence: **CLI > project > global > defaults**.
 
 - Global: `~/.config/docsbase-memory-mcp/config.toml`
+  (`~/Library/Application Support/docsbase-memory-mcp/config.toml` on macOS)
 - Project: `.docsbase.toml` + `.docsbaseignore` in the project root
 - Overrides: `DOCSBASE_CACHE_DIR`, `DOCSBASE_DATA_DIR`, `DOCSBASE_CONFIG_DIR`
 - Defaults: `max_file_size = 1 MiB`, `max_docs_per_project = 20000`,

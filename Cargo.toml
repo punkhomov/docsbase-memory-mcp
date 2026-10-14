@@ -66,3 +66,8 @@ harness = false
 [target."cfg(windows)".dependencies]
 interprocess = { version = "2.4.4", features = ["tokio"] }
 windows-sys = { version = "0.61.2", features = ["Win32_System_Threading", "Win32_Foundation"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# ADR-M1: macOS liveness/counters via proc_pidinfo. Already in the dependency
+# graph transitively (notify -> fsevent-sys), so this adds no new crate.
+libc = "0.2"

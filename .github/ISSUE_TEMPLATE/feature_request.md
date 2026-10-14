@@ -20,5 +20,6 @@ What was considered and why it is worse.
 
 - [ ] Linux x86_64
 - [ ] Windows x64
+- [ ] macOS (Apple Silicon)
 - [ ] Docs update needed
 - [ ] CHANGELOG entry needed

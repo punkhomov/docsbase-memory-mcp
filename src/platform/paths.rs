@@ -14,7 +14,7 @@ pub fn home_dir() -> Option<PathBuf> {
 
 /// Component-wise containment (`candidate` equals `base` or lives under it).
 /// Callers canonicalize symlinked ancestors first (FR-32, I4).
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[must_use]
 pub fn is_under(candidate: &Path, base: &Path) -> bool {
     candidate.starts_with(base)
@@ -28,9 +28,22 @@ pub fn is_under(candidate: &Path, base: &Path) -> bool {
     key_under(&windows_key(candidate), &windows_key(base))
 }
 
+/// macOS containment: compare case-folded keys — the default APFS spelling is
+/// case-insensitive, so a differently-cased candidate still belongs to the
+/// base (FR-5; same trade-off as Windows, documented caveat for
+/// case-sensitive APFS volumes).
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn is_under(candidate: &Path, base: &Path) -> bool {
+    key_under(
+        &candidate.to_string_lossy().to_lowercase(),
+        &base.to_string_lossy().to_lowercase(),
+    )
+}
+
 /// Shared-root test on an already-normalized key: equal, or a prefix at a
 /// separator boundary (`/docs` is not under `/doc`).
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 #[must_use]
 fn key_under(candidate: &str, base: &str) -> bool {
     let base = base.strip_suffix('/').unwrap_or(base);
@@ -51,7 +64,7 @@ pub fn is_filesystem_root(path: &Path) -> bool {
 /// and parents of user homes. `path` is expected canonicalized.
 #[must_use]
 pub fn is_system_dir(path: &Path) -> bool {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         const EQUALS: &[&str] = &["/home", "/root", "/var", "/mnt", "/media", "/run"];
         const SUBTREES: &[&str] = &[
@@ -76,6 +89,20 @@ pub fn is_system_dir(path: &Path) -> bool {
         if path.starts_with("/run/media") {
             return false;
         }
+        EQUALS.iter().any(|dir| path == Path::new(dir))
+            || SUBTREES.iter().any(|dir| path.starts_with(Path::new(dir)))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Canonical spellings (`/etc` and `/var` resolve below `/private`).
+        const EQUALS: &[&str] = &["/Users", "/Volumes", "/private/var", "/private/tmp"];
+        const SUBTREES: &[&str] = &[
+            "/System",
+            "/Library",
+            "/Applications",
+            "/private/etc",
+            "/dev",
+        ];
         EQUALS.iter().any(|dir| path == Path::new(dir))
             || SUBTREES.iter().any(|dir| path.starts_with(Path::new(dir)))
     }
@@ -144,15 +171,20 @@ fn is_system_key(candidate: &str, subtrees: &[String], equals: &[String]) -> boo
         || subtrees.iter().any(|dir| key_under(candidate, dir))
 }
 
-/// Comparison key for root paths: identity on Unix; separator and case
-/// folded on Windows, where the filesystem is case-insensitive.
+/// Comparison key for root paths: identity on Unix; case folded on Windows
+/// and macOS, whose default filesystems are case-insensitive (a case-sensitive
+/// APFS volume may fold two distinct roots together — documented FR-5 caveat).
 #[must_use]
 pub fn normalize_for_compare(path: &Path) -> String {
     #[cfg(windows)]
     {
         windows_key(path)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        path.to_string_lossy().to_lowercase()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         path.to_string_lossy().into_owned()
     }
@@ -209,9 +241,27 @@ mod tests {
         assert!(key_under("c:/users/x", "c:/"), "trailing separator in base");
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_comparison_key_and_containment_fold_case() {
+        assert_eq!(
+            normalize_for_compare(Path::new("/Users/User/Project")),
+            normalize_for_compare(Path::new("/users/user/project")),
+            "comparison key folds case"
+        );
+        assert!(
+            is_under(Path::new("/users/x/docs/a.md"), Path::new("/Users/X/Docs")),
+            "containment folds case"
+        );
+        assert!(
+            !is_under(Path::new("/Users/X/Docs2/a.md"), Path::new("/Users/X/Docs")),
+            "component boundary is preserved"
+        );
+    }
+
     #[test]
     fn system_dirs_are_refused_and_workdirs_allowed() {
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         {
             for dir in [
                 "/etc",
@@ -249,6 +299,36 @@ mod tests {
                 "/var/www2",
                 "/home2/x",
                 "/etcetera/x",
+            ] {
+                assert!(!is_system_dir(Path::new(dir)), "{dir} must stay allowed");
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // Canonical spellings: /etc and /var resolve below /private.
+            for dir in [
+                "/System",
+                "/System/Library/CoreServices",
+                "/Library",
+                "/Applications",
+                "/private/etc",
+                "/private/etc/nginx",
+                "/dev",
+                "/Users",
+                "/Volumes",
+                "/private/var",
+                "/private/tmp",
+            ] {
+                assert!(is_system_dir(Path::new(dir)), "{dir} must be refused");
+            }
+            for dir in [
+                "/Users/user/project",
+                "/private/var/folders/xx/project",
+                "/private/tmp/work",
+                "/opt/app",
+                "/Systematic/x",
+                "/Library2/x",
+                "/Applications2/x",
             ] {
                 assert!(!is_system_dir(Path::new(dir)), "{dir} must stay allowed");
             }

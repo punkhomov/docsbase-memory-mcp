@@ -6,7 +6,7 @@ Precedence (highest first): **CLI > project > global > defaults**.
 
 | Level | Path | Format |
 |---|---|---|
-| Global | `~/.config/docsbase-memory-mcp/config.toml` (`%APPDATA%\docsbase-memory-mcp\config.toml` on Windows) | TOML, all keys optional |
+| Global | `~/.config/docsbase-memory-mcp/config.toml` (`~/Library/Application Support/docsbase-memory-mcp/config.toml` on macOS, `%APPDATA%\docsbase-memory-mcp\config.toml` on Windows) | TOML, all keys optional |
 | Project | `<project>/.docsbase.toml` | TOML, all keys optional |
 | Ignores | `<project>/.docsbaseignore` | gitignore-style patterns |
 

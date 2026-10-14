@@ -2,7 +2,8 @@
 //!
 //! This is the only network-touching code path in the binary; like the install
 //! scripts it shells out to the platform tooling they already require
-//! (`curl`, `sha256sum`, `tar` on Linux; `PowerShell` on Windows), so the crate
+//! (`curl`, `sha256sum`, `tar` on Linux; `shasum` on macOS; `PowerShell` on
+//! Windows), so the crate
 //! gains no HTTP stack and the daemon stays strictly local. The daemon
 //! coordination (stop, admission lease, owned manifest) is shared with
 //! `cli::install`. The `.sha256` from the release is checked so a truncated
@@ -219,10 +220,20 @@ fn asset_name(version: &str) -> anyhow::Result<String> {
         "windows"
     } else if cfg!(target_os = "linux") {
         "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
     } else {
-        anyhow::bail!("unsupported OS: prebuilt releases cover Linux and Windows only");
+        anyhow::bail!("unsupported OS: prebuilt releases cover Linux, Windows and macOS");
     };
-    let arch = if cfg!(target_arch = "x86_64") {
+    let arch = if cfg!(target_os = "macos") {
+        if !cfg!(target_arch = "aarch64") {
+            anyhow::bail!(
+                "unsupported macOS architecture {}: prebuilt releases cover aarch64 only",
+                std::env::consts::ARCH
+            );
+        }
+        "aarch64"
+    } else if cfg!(target_arch = "x86_64") {
         "x86_64"
     } else {
         anyhow::bail!(
@@ -289,6 +300,11 @@ fn sha256_file(path: &Path) -> anyhow::Result<String> {
             ps_literal(&path.to_string_lossy())
         );
         let output = run_tool(&powershell(&script))?;
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    } else if cfg!(target_os = "macos") {
+        // Stock macOS ships `shasum`, not GNU `sha256sum`.
+        let path_str = path.to_string_lossy();
+        let output = run_tool(&["shasum", "-a", "256", path_str.as_ref()])?;
         String::from_utf8_lossy(&output.stdout).into_owned()
     } else {
         let path_str = path.to_string_lossy();
@@ -395,6 +411,8 @@ mod tests {
         let name = asset_name("0.1.0-alpha.1").expect("asset name");
         if cfg!(windows) {
             assert_eq!(name, "docsbase-0.1.0-alpha.1-windows-x86_64.zip");
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(name, "docsbase-0.1.0-alpha.1-macos-aarch64.tar.gz");
         } else {
             assert_eq!(name, "docsbase-0.1.0-alpha.1-linux-x86_64.tar.gz");
         }

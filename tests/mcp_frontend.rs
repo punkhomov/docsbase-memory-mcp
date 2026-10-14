@@ -134,9 +134,19 @@ fn serve_fake_connection(
 ) {
     use std::sync::atomic::Ordering;
 
-    stream
+    // BSD/macOS accepted sockets inherit the listener's non-blocking flag;
+    // clear it so blocking reads with a timeout work (Linux does not
+    // inherit). A connection whose peer already shut it down is dead: macOS
+    // rejects further socket options on shut-down sockets (XNU sosetoptlock
+    // returns EINVAL), so drop it instead of failing the whole fake.
+    #[cfg(unix)]
+    let _ = stream.set_nonblocking(false);
+    if stream
         .set_read_timeout(Some(Duration::from_millis(50)))
-        .expect("read timeout");
+        .is_err()
+    {
+        return;
+    }
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     let mut writer = stream;
     loop {

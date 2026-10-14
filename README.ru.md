@@ -20,8 +20,9 @@ Docker. Опциональные hybrid-стадии поиска (фаза 2) �
 per-project/per-request и могут использовать embedding API (OpenRouter) или
 локально закэшированную модель.
 
-Поддерживаемые платформы: **Linux x86_64** (статический бинарь) и
-**Windows x64** (`.exe`). macOS вне scope v1.
+Поддерживаемые платформы: **Linux x86_64** (статический бинарь),
+**Windows x64** (`.exe`) и **macOS 12+ на Apple Silicon**. Intel-маки вне
+scope (`x86_64-apple-darwin` — Tier 2 у upstream, Intel-железо EOL).
 
 ## Быстрый старт (5 минут)
 
@@ -56,9 +57,9 @@ $env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punk
 
 ## Установка
 
-Поддерживаются: **Linux x86_64** и **Windows x64**. macOS **не поддерживается
-в v1** — на технике Apple используйте WSL2 или Linux-контейнер (Linux-скрипт
-там работает). Подробности: [`docs/INSTALL.md`](docs/INSTALL.md) (EN).
+Поддерживаются: **Linux x86_64**, **Windows x64** и **macOS (Apple
+Silicon)**. Подробности, проверка и ручные варианты:
+[`docs/INSTALL.md`](docs/INSTALL.md) (EN).
 
 ### Linux x86_64
 
@@ -79,6 +80,17 @@ $env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punk
 Ставит в `%USERPROFILE%\.local\bin` (добавляется в пользовательский `PATH`),
 проверяет `sha256` и регистрирует бинарь. Тот же `DOCSBASE_VERSION`.
 
+### macOS (Apple Silicon)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | DOCSBASE_CHANNEL=prerelease sh
+```
+
+Ставит в `~/.local/bin`, проверяет `sha256` (через стоковый `shasum`) и
+регистрирует бинарь. Бинарь ad-hoc подписан; `curl` не ставит карантин, так
+что установка из терминала работает без запросов Gatekeeper (нотаризация для
+этого пути не нужна).
+
 ### Сборка из исходников (любая поддерживаемая платформа)
 
 ```sh
@@ -93,7 +105,8 @@ docsbase install   # зарегистрировать бинарь в демон
 
 Скачайте ассет и его `.sha256` из
 [Releases](https://github.com/punkhomov/docsbase-memory-mcp/releases),
-проверьте (`sha256sum -c` на Linux, `Get-FileHash` на Windows), при желании
+проверьте (`sha256sum -c` на Linux, `shasum -a 256 -c` на macOS,
+`Get-FileHash` на Windows), при желании
 проверьте SLSA-provenance через `gh attestation verify`, положите бинарь в
 `PATH` и выполните `docsbase install`.
 
@@ -145,8 +158,8 @@ CLI ----------------------------------------------------------> daemon / snapsho
 daemon -> registry.db (SQLite WAL) + projects/<id>/tantivy + вотчер на проект
 ```
 
-Весь ОС-зависимый код изолирован за `src/platform/` (Unix-сокет vs Windows
-named pipe). Публичные контракты (MCP-инструменты, CLI, формат конфига,
+Весь ОС-зависимый код изолирован за `src/platform/` (Unix-сокет на
+Linux/macOS vs Windows named pipe). Публичные контракты (MCP-инструменты, CLI, формат конфига,
 сокет-протокол) версионируются; ломающие изменения — только мажорная версия.
 Подробнее: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (EN).
 
@@ -180,6 +193,7 @@ named pipe). Публичные контракты (MCP-инструменты, 
 Приоритет: **CLI > проект > глобал > defaults**.
 
 - Глобально: `~/.config/docsbase-memory-mcp/config.toml`
+  (`~/Library/Application Support/docsbase-memory-mcp/config.toml` на macOS)
 - Проект: `.docsbase.toml` + `.docsbaseignore` в корне проекта
 - Переменные: `DOCSBASE_CACHE_DIR`, `DOCSBASE_DATA_DIR`, `DOCSBASE_CONFIG_DIR`
 - Дефолты: `max_file_size = 1 MiB`, `max_docs_per_project = 20000`,

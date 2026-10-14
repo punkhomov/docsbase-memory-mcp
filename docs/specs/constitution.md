@@ -28,7 +28,7 @@
   `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update <crate> --precise <ver>`
   с обоснованием в задаче; молчаливый обход запрещён.
 - Релизы — только через GitHub Releases по тегу `v*` (GitHub Flow):
-  артефакты Linux + Windows, `sha256sum`, SBOM и SLSA-provenance
+  артефакты Linux + Windows + macOS aarch64, `sha256sum`, SBOM и SLSA-provenance
   (Sigstore, `actions/attest-build-provenance`). Только checksums без
   provenance — недостаточно для релиза.
 - Enforcement `min-publish-age` сегодня — только локально под nightly
@@ -38,7 +38,9 @@
   (~cargo 1.100).
 - `Cargo.lock` коммитится; CI собирает с `--locked`.
 - v1 — Linux x86_64 и Windows x64 (ADR-10 реализован: daemon + CLI + MCP,
-  зелёные тесты в CI на обеих ОС). macOS out of scope до отдельного решения.
+  зелёные тесты в CI на обеих ОС). *(2026-10: macOS aarch64 добавлен —
+  ADR-M2 спеки `docs/specs/macos-support`: зелёный функциональный сьют в CI,
+  ad-hoc подпись релиза; Intel/universal — out of scope.)*
 - Версионирование — SemVer. До стабилизации — пререлизы `0.1.0-alpha.N`;
   Git-тег `v<version>` обязан совпадать с `version` в `Cargo.toml` (проверяется в CI).
   Ломающее изменение публичных контрактов — только мажорная версия.

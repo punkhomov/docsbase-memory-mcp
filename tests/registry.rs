@@ -140,10 +140,14 @@ fn status_round_trip() {
 #[test]
 fn system_dirs_are_refused() {
     let cache = tempfile::TempDir::new().expect("cache");
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     let dirs = ["/etc", "/usr", "/boot", "/proc"];
+    #[cfg(target_os = "macos")]
+    let dirs = ["/System", "/Library", "/etc"];
     #[cfg(windows)]
     let dirs = ["C:\\Windows", "C:\\Program Files"];
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+    let dirs: [&str; 0] = [];
     for dir in dirs {
         let err = docsbase_memory::daemon::registry::project_root_for(
             std::path::Path::new(dir),

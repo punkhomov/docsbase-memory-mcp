@@ -4,7 +4,8 @@ End-to-end in five minutes: install → index → search → sync.
 
 ## 0. Prerequisites
 
-- Linux x86_64 or Windows x64, `docsbase` on `PATH` (see `INSTALL.md`).
+- Linux x86_64, Windows x64 or macOS (Apple Silicon), `docsbase` on `PATH`
+  (see `INSTALL.md`).
 - A directory with Markdown docs (any repo works).
 
 ## 1. Install
