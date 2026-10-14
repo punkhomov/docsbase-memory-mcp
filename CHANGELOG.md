@@ -6,19 +6,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [Semantic Versioning](https://semver.org/).
 Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
-## [Unreleased]
+## [0.1.0-alpha.4] — 2026-10-14
 
 ### Added
 
+- Search-quality cycle (spec `docs/specs/search-quality`): golden fixture and
+  metrics harness with a no-regression gate (all six golden classes at
+  hit rate / nDCG 1.0), Unicode-aware chunk cap with recursive token-boundary
+  split and overlap, `TOKENIZER_VERSION` plus version file with automatic
+  index rebuild, single position per segment with a 40-token limit,
+  Russian/English Snowball stemming (the stem replaces the surface form),
+  Arabic normalization and stemming (harakat, tatweel, form folding), CJK
+  bigrams, tuned boosts and long-chunk penalty. Perf evidence: Latin search
+  p95 564 µs, CJK 4.9 ms (budget 200 ms), CJK index 77% of source text,
+  RSS delta 64 MiB at 10k chunks (budget 128 MiB).
 - macOS (Apple Silicon) support: platform seam (zombie-aware liveness via
   `proc_pidinfo`, descriptor counters, macOS system-dir guards, socket-path
-  validation, case-insensitive path comparison), an advisory `macos` CI job,
-  release artifact `docsbase-<ver>-macos-aarch64.tar.gz` with ad-hoc signing
-  and a `codesign -v` gate, `install.sh` (Darwin/arm64) and `docsbase update`
+  validation, case-insensitive path comparison), a `macos` CI job, release
+  artifact `docsbase-<ver>-macos-aarch64.tar.gz` with ad-hoc signing and a
+  `codesign -v` gate, `install.sh` (Darwin/arm64) and `docsbase update`
   (asset name + `shasum` fallback).
+- `status` surfaces the last watcher drop: `last_error` plus the lost paths
+  in `warnings`.
+- README install and multilingual sections (EN/RU) and `AGENTS.md` guidance
+  for contributors.
+
+### Changed
+
+- Watcher batches retry transient failures (three attempts with backoff;
+  lease conflicts stay unbounded) and tantivy background merges are
+  serialized via `wait_merging_threads()`, fixing a race on `.managed.json`
+  (upstream tantivy#2847); indexing 1000 files 160 to 170 ms.
 
 ### Fixed
 
+- `daemon stop` retries the stop request until the deadline: a daemon at
+  connection capacity could shed the single request, making stop time out
+  on a healthy daemon.
+- `index` reports an actionable `index <path> is missing` message when a
+  project's index directory was removed.
 - `install.sh`: no more `curl: (23)` EPIPE noise while resolving the release
   tag (`grep -m1` closes the pipe early); network failures still surface via
   the actionable empty-tag message.
@@ -83,7 +109,8 @@ First public alpha. Expect breaking changes before `0.1.0`.
   `min-publish-age = 14 days`, GitHub Releases with sha256, SBOM
   and SLSA build provenance.
 
-[Unreleased]: https://github.com/punkhomov/docsbase-memory-mcp/compare/v0.1.0-alpha.3...HEAD
+[Unreleased]: https://github.com/punkhomov/docsbase-memory-mcp/compare/v0.1.0-alpha.4...HEAD
+[0.1.0-alpha.4]: https://github.com/punkhomov/docsbase-memory-mcp/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/punkhomov/docsbase-memory-mcp/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/punkhomov/docsbase-memory-mcp/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/punkhomov/docsbase-memory-mcp/releases/tag/v0.1.0-alpha.1

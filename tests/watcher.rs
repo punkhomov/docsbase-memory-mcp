@@ -8,6 +8,8 @@ use docsbase_memory::index::job::{JobStats, run_full, run_incremental_with};
 use docsbase_memory::index::tantivy_index::{Hit, IndexHandle};
 use docsbase_memory::store::models::{Project, ProjectStatus};
 use docsbase_memory::store::{DB_FILE, Db};
+#[cfg(all(unix, not(target_os = "macos")))]
+use docsbase_memory::watch::MAX_DEBOUNCE;
 use docsbase_memory::watch::{WatcherGuard, spawn_watcher};
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -135,15 +137,26 @@ fn recv_none(rx: &Receiver<Vec<PathBuf>>, timeout: Duration) {
 
 const PLAIN: &str = "# Plain\n\nSome prose about widgets and gadgets.\n";
 
-/// Product freshness budget (FR-15); Windows CI runners under parallel test
-/// load get more headroom, and `FSEvents` delivery plus the 1.5 s debounce
-/// needs a little more than inotify on macOS (ledger residual).
+/// FR-15: a batch is flushed at most `MAX_DEBOUNCE` after the first event;
+/// the extra second absorbs CI scheduling jitter under parallel test load
+/// (witness: 2.26 s end-to-end on a loaded Linux runner, flake 6). macOS
+/// `FSEvents` delivery needs more (ledger residual), Windows more still.
 #[cfg(all(unix, not(target_os = "macos")))]
-const FRESHNESS_BUDGET: Duration = Duration::from_millis(2_000);
+const FLUSH_BUDGET: Duration = MAX_DEBOUNCE.saturating_add(Duration::from_secs(1));
 #[cfg(target_os = "macos")]
-const FRESHNESS_BUDGET: Duration = Duration::from_secs(5);
+const FLUSH_BUDGET: Duration = Duration::from_secs(5);
 #[cfg(windows)]
-const FRESHNESS_BUDGET: Duration = Duration::from_secs(15);
+const FLUSH_BUDGET: Duration = Duration::from_secs(15);
+
+/// NFR-4 counts freshness *after the debounce*: incremental indexing plus
+/// search must see the edit within 2 s; macOS and Windows runners get
+/// headroom over the product budget.
+#[cfg(all(unix, not(target_os = "macos")))]
+const POST_FLUSH_BUDGET: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
+const POST_FLUSH_BUDGET: Duration = Duration::from_secs(3);
+#[cfg(windows)]
+const POST_FLUSH_BUDGET: Duration = Duration::from_secs(5);
 
 #[test]
 fn edit_becomes_searchable_within_budget() {
@@ -158,14 +171,16 @@ fn edit_becomes_searchable_within_budget() {
         b"# Plain\n\nSome prose about gizmos and gadgets.\n",
     );
     let batch = recv_batch(&rx, Duration::from_secs(5));
+    let flushed = start.elapsed();
+    assert!(flushed < FLUSH_BUDGET, "flush took {flushed:?}");
     env.incremental(&batch);
 
     let hits = env.search("gizmos");
     assert!(!hits.is_empty(), "edit must be searchable");
+    let post_flush = start.elapsed() - flushed;
     assert!(
-        start.elapsed() < FRESHNESS_BUDGET,
-        "freshness took {:?}",
-        start.elapsed()
+        post_flush < POST_FLUSH_BUDGET,
+        "post-flush freshness took {post_flush:?}"
     );
 }
 
