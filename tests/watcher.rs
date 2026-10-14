@@ -8,7 +8,9 @@ use docsbase_memory::index::job::{JobStats, run_full, run_incremental_with};
 use docsbase_memory::index::tantivy_index::{Hit, IndexHandle};
 use docsbase_memory::store::models::{Project, ProjectStatus};
 use docsbase_memory::store::{DB_FILE, Db};
-use docsbase_memory::watch::{MAX_DEBOUNCE, WatcherGuard, spawn_watcher};
+use docsbase_memory::watch::{WatcherGuard, spawn_watcher};
+#[cfg(all(unix, not(target_os = "macos")))]
+use docsbase_memory::watch::MAX_DEBOUNCE;
 use rusqlite::Connection;
 use tempfile::TempDir;
 
