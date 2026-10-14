@@ -575,13 +575,13 @@ mod tests {
     use crate::store::{DB_FILE, Db};
     use rusqlite::Connection;
 
-    /// Flake 3 root cause (2026-10-14): a deferred transaction that reads
-    /// before writing fails with `SQLITE_BUSY_SNAPSHOT` ("database is locked"
-    /// immediately; the busy handler does not cover deferred upgrades) once
-    /// another connection commits in between. Write transactions go through
+    /// Deferred read-then-write upgrades fail with `SQLITE_BUSY_SNAPSHOT`
+    /// (extended 517; the busy handler does not cover them) once another
+    /// connection commits in between - the Windows CI incident also showed an
+    /// immediate `database is locked`. Write transactions go through
     /// [`Db::begin_write`] (`BEGIN IMMEDIATE`), so the interleaving cannot
-    /// happen; under the old deferred code the "write a after b attempted"
-    /// step below panics.
+    /// happen; with a deferred tx the "write a after b attempted" step below
+    /// panics once the writer thread committed within the sleep window.
     #[test]
     fn read_then_write_tx_survives_concurrent_writer() {
         use std::time::Duration;

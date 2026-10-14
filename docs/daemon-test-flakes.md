@@ -72,18 +72,26 @@ CI периодически падает на Linux/Windows; перезапус�
   registry; при необходимости увеличить таймаут; стресс-тест CLI+daemon на Windows.
 - **Acceptance:** конкурентный `index` при живом демоне на Windows не падает по
   lock.
-- **Root cause (2026-10-14, доказан):** `SQLITE_BUSY_SNAPSHOT` (extended 517) —
-  deferred-транзакция, которая сначала читает, а потом пишет, падает мгновенно
-  («database is locked») как только другое соединение закоммитило между этими
-  шагами; **busy_timeout его не покрывает** (busy-handler не вызывается для
-  deferred-upgrade). Repro: `read_then_write_tx_survives_concurrent_writer`
-  (красный на deferred с `extended_code: 517`, зелёный на IMMEDIATE). Повторный
-  CI-инцидент: PR #41, run `38608476841` (`docsbase index` в error_surface).
-- **Статус:** исправлено по корню — все пишущие транзакции через
-  `Db::begin_write` (`BEGIN IMMEDIATE`, `src/store/mod.rs`): write-lock берётся
-  на `BEGIN`, сценарий upgrade невозможен; плюс защитный ретрай
-  `PRAGMA journal_mode=WAL` при параллельном первичном открытии. Ранее:
-  `busy_timeout` 5→30 с и стресс 50/50 (run `38590476555`) — оставлены.
+- **Механизм A — наблюдался в CI (run `38608476841` и ранние):**
+  `PRAGMA journal_mode=WAL` в `Db::open` возвращает мгновенный
+  `database is locked` при параллельном первичном открытии (смена journal-mode
+  не покрывается busy-handler'ом). Доказательство: в логе ошибка несёт
+  префикс пути `sqlite {path}: ...` — так оборачивает только `sql_error`
+  (`Db::open`), тогда как ошибки транзакций идут через `db_error` без пути;
+  при extended-коде 517 в логе было бы «517», а не 5 (libsqlite3-sys печатает
+  extended). **Исправлено:** bounded-ретрай (3×100 мс) только для
+  `DatabaseBusy` вокруг `PRAGMA journal_mode=WAL`.
+- **Механизм B — класс, доказан тестом:** deferred-транзакция с
+  read→write-upgrade падает `SQLITE_BUSY_SNAPSHOT` (extended 517) мгновенно,
+  как только другое соединение закоммитило между read и write;
+  `busy_timeout` его не покрывает. Repro:
+  `read_then_write_tx_survives_concurrent_writer` (красный на Deferred с
+  `extended_code: 517`, зелёный на Immediate). Продакшен-транзакции были
+  write-first (класс в CI не наблюдался), но фикс закрывает его по
+  конструкции: все пишущие транзакции — через `Db::begin_write`
+  (`BEGIN IMMEDIATE`, `src/store/mod.rs`).
+- **Статус:** исправлено (A + B); ранее: `busy_timeout` 5→30 с и стресс 50/50
+  (run `38590476555`) — оставлены.
 
 ## 4. `mcp_registry::watcher_refreshes_search` (Windows)
 

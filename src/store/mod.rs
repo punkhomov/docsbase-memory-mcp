@@ -44,14 +44,20 @@ impl Db {
             .map_err(|err| sql_error(&path, err))?;
         // A concurrent first open may hold the transition lock: journal-mode
         // changes can fail with an immediate SQLITE_BUSY that the busy handler
-        // does not cover (flake 3, 2026-10-14), so retry briefly.
+        // does not cover (flake 3: the path-prefixed error came from this
+        // `Db::open` statement), so retry briefly - and only for BUSY.
         let mut attempts = 0;
         loop {
             match conn.pragma_update(None, "journal_mode", "WAL") {
                 Ok(()) => break,
                 Err(err) => {
+                    let busy = matches!(
+                        &err,
+                        rusqlite::Error::SqliteFailure(code, _)
+                            if code.code == rusqlite::ErrorCode::DatabaseBusy
+                    );
                     attempts += 1;
-                    if attempts >= 3 {
+                    if !busy || attempts >= 3 {
                         return Err(sql_error(&path, err));
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
