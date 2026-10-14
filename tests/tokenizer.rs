@@ -162,8 +162,9 @@ fn tokens_over_max_length_are_dropped() {
     assert_eq!(tokens(&ok), expected(&[ok.as_str()]));
     let too_long = "c".repeat(41);
     assert_eq!(tokens(&too_long), Vec::<String>::new());
-    let blob = "a".repeat(64);
-    assert_eq!(tokens(&blob), Vec::<String>::new());
+    // SQ19: a dropped blob in context — surrounding tokens still emit.
+    let in_context = format!("keep {} tail", "a".repeat(45));
+    assert_eq!(tokens(&in_context), expected(&["keep", "tail"]));
 }
 
 #[test]
@@ -392,4 +393,89 @@ fn registration_works() {
         count += 1;
     }
     assert!(count >= 3);
+}
+
+/// SQ19 (SQ6 burn-down): the 40-char limit also applies to camel parts — the
+/// oversized whole run is dropped, short parts survive, an over-40 part is
+/// dropped by the centralized emit.
+#[test]
+fn camel_parts_are_length_limited() {
+    let head = "x".repeat(30);
+    let long_tail = "z".repeat(45);
+    let run = format!("{head}Y{long_tail}");
+    let texts = tokens(&run);
+    assert!(
+        !texts.contains(&run),
+        "oversized whole run is dropped: {texts:?}"
+    );
+    assert!(
+        texts.contains(&head),
+        "short camel parts survive: {texts:?}"
+    );
+    let tail = format!("y{long_tail}");
+    assert!(
+        !texts.contains(&tail),
+        "an over-40 camel part is dropped: {texts:?}"
+    );
+}
+
+/// SQ19 (SQ6 burn-down): a dropped oversized segment still advances the
+/// position, leaving a gap that phrase queries cannot bridge.
+#[test]
+fn dropped_blob_leaves_position_gap() {
+    let blob = "1".repeat(50);
+    let list = token_list(&format!("word {blob} tail"));
+    let positions: Vec<usize> = list.iter().map(|token| token.position).collect();
+    assert_eq!(list.len(), 2, "{list:?}");
+    assert_eq!((list[0].text.as_str(), list[0].position), ("word", 0));
+    assert_eq!(
+        (list[1].text.as_str(), list[1].position),
+        ("tail", 2),
+        "{positions:?}"
+    );
+}
+
+/// SQ19 (SQ6 burn-down): punctuation-only segments do not advance the
+/// position.
+#[test]
+fn punctuation_only_segments_do_not_advance() {
+    let list = token_list("word --- tail");
+    let positions: Vec<usize> = list.iter().map(|token| token.position).collect();
+    assert_eq!(positions, vec![0, 1], "{list:?}");
+}
+
+/// SQ19 (SQ7 burn-down): the stem occupies the segment position and its span
+/// covers the surface form (documented invariant).
+#[test]
+fn stem_occupies_the_segment_position() {
+    let text = "слово замена";
+    let list = token_list(text);
+    assert_eq!(list.len(), 2, "{list:?}");
+    assert_eq!(list[0].position, 0);
+    let stem = &list[1];
+    assert_eq!(stem.position, 1, "stem shares the segment position");
+    assert_ne!(stem.text, "замена", "surface form is replaced by the stem");
+    assert_eq!(
+        &text[stem.offset_from..stem.offset_to],
+        "замена",
+        "span covers the surface form"
+    );
+}
+
+/// SQ19 (SQ9 burn-down): `split_script_runs` edge semantics — empty input
+/// yields no runs; letter-less input stays one run (digits and punctuation
+/// attach to it, which is what lets numeric tokens emit); digits inside a run
+/// never split it.
+#[test]
+fn script_runs_edge_cases() {
+    assert!(split_script_runs("").is_empty());
+    let runs = split_script_runs("123 !?");
+    assert_eq!(runs.len(), 1, "letter-less input stays one run: {runs:?}");
+    assert_eq!(runs[0], (0, "123 !?"), "digits and punctuation attach");
+    let runs = split_script_runs("12ab");
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0], (0, "12ab"), "leading digits attach to the run");
+    let runs = split_script_runs("ab12日34");
+    let texts: Vec<&str> = runs.iter().map(|(_, text)| *text).collect();
+    assert_eq!(texts, vec!["ab12", "日34"], "digits stay attached");
 }

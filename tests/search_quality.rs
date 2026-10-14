@@ -606,7 +606,8 @@ fn gate_rejects_regression() {
 fn regenerate_baseline() {
     let bench = Bench::new();
     let baseline = evaluate(&bench);
-    let bytes = serde_json::to_vec_pretty(&baseline).expect("serialize baseline");
+    let mut bytes = serde_json::to_vec_pretty(&baseline).expect("serialize baseline");
+    bytes.push(b'\n');
     fs::write(baseline_path(), bytes).expect("write baseline.json");
     println!("baseline written to {}", baseline_path().display());
 }

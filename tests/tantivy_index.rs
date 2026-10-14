@@ -195,6 +195,41 @@ fn legacy_index_without_version_file_is_recreated() {
         index.was_recreated(),
         "an index without a version file is legacy and must be rebuilt"
     );
+    assert!(
+        index.search("versioned", 5).expect("search").is_empty(),
+        "stale chunks must not survive the rebuild"
+    );
+}
+
+/// SQ19 (SQ5 burn-down): a missing index reports the absence, not a
+/// confusing "pipeline unknown" mismatch.
+#[test]
+fn read_open_missing_index_reports_absence() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("tantivy");
+    let Err(err) = ReadIndex::open(&path) else {
+        panic!("missing index must be refused");
+    };
+    let text = err.to_string();
+    assert!(text.contains("is missing"), "{text}");
+    assert!(text.contains("docsbase index"), "instruction: {text}");
+}
+
+/// SQ19 (SQ5 burn-down): a garbage version file is a mismatch (rebuild), not
+/// a panic or a silent read.
+#[test]
+fn garbage_tokenizer_version_file_is_recreated() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("tantivy");
+    let index = versioned_index(&path);
+    drop(index);
+    std::fs::write(path.join(TOKENIZER_VERSION_FILE), b"not-a-version\n").expect("write garbage");
+
+    let index = IndexHandle::open_or_create(&path).expect("reopen with garbage version");
+    assert!(
+        index.was_recreated(),
+        "a garbage version file must force a rebuild"
+    );
 }
 
 #[test]
@@ -477,10 +512,19 @@ fn stored_text_len_counts_unicode_chars() {
 #[test]
 fn penalty_uses_char_threshold_and_overlap() {
     let (_dir, mut index) = handle();
-    let legal = format!("{} refreshed", "а".repeat(1590));
-    let oversized = format!("{} refreshed", "а".repeat(1690));
-    assert_eq!(legal.chars().count(), 1600);
-    assert_eq!(oversized.chars().count(), 1700);
+    let legal = format!(
+        "{} refreshed",
+        "а".repeat(MAX_CHUNK_CHARS + CHUNK_OVERLAP - 60)
+    );
+    let oversized = format!(
+        "{} refreshed",
+        "а".repeat(MAX_CHUNK_CHARS + CHUNK_OVERLAP + 40)
+    );
+    assert_eq!(legal.chars().count(), MAX_CHUNK_CHARS + CHUNK_OVERLAP - 50);
+    assert_eq!(
+        oversized.chars().count(),
+        MAX_CHUNK_CHARS + CHUNK_OVERLAP + 50
+    );
     index
         .add_chunks(&[chunk(1, 0, "T", &legal), chunk(2, 0, "T", &oversized)])
         .expect("add chunks");

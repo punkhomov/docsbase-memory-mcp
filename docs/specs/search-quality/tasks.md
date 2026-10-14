@@ -460,6 +460,40 @@ perf_budget` → ok.
 **Acceptance:** FR-11; NFR-6 (дискриминирующий корпус).
 **Verify:** `cargo test --locked --test tantivy_index` → ok.
 
+## SQ19 — Deferred burn-down (post-review cleanup)
+
+**Goal:** закрыть отложенные миноры SQ1–SQ17, не обоснованные необходимостью;
+остальные — с явным ruling'ом.
+**Files:** `tests/search_quality.rs`, `src/index/tantivy_index.rs`,
+`src/index/chunk.rs`, `src/index/textnorm.rs`, `tests/tantivy_index.rs`,
+`tests/tokenizer.rs`, `tests/watcher.rs`, `requirements.md` (NFR-1 anchor),
+`docs/specs/docsbase-memory-mcp/tasks.md` (ссылка на переименованный тест),
+`progress.md`.
+**Steps (fixed):**
+1. baseline.json: trailing newline (генератор + регенерация; дельта — только newline).
+2. SQ3: доки `LONG_CHUNK_PENALTY` (порог `MAX_CHUNK_CHARS + CHUNK_OVERLAP`) и
+   `CHUNK_OVERLAP` (потребители); границы penalty-теста выводятся из констант.
+3. SQ4: док `heading_merged` (atomic-исключение SC-5).
+4. SQ5: тест мусорного version-файла; удалённый файл — плюс проверка отсутствия
+   stale-чанков; missing-meta сообщение `index ... is missing` (+тест) и
+   rollback-комментарий `write_tokenizer_version`.
+5. SQ6: доки позиций; тесты — лимит на camel-частях, gap от дропнутого блоба,
+   пунктуация без advance, blob-в-контексте (вместо дубля 64/41).
+6. SQ7: инвариант спана стема (док) + тест позиции стема.
+7. SQ9: edge-тесты `split_script_runs` (letter-less вход — один прикреплённый ран,
+   цифры не разбивают ран) + удалён мёртвый guard.
+8. SQ12: spec-анкор sanity-ceiling 4× в NFR-1.
+9. Переименован stale watcher-тест (`edit_becomes_searchable_within_budget`).
+**Kept (ruling):** naming/tolerance SQ1–SQ2 (осознанный дрейф M3);
+Unicode-границы SQ4; SQ4-gap недостижим (проба: 3 сценария — heading всегда
+сливается `merge_heading_only`); SQ4 test hygiene (покрытие по всем токенам уже
+есть, cap-ассерты в chunker-тестах); скрипт-пробелы/halfwidth katakana/dotless ı
+SQ9 (документированные ограничения); SQ7 длинные alnum-раны стеммятся до лимита
+emit (безвредно); headroom бюджетов SQ12; defensive-ветки SQ13/SQ17; flake-3
+(нужен Windows-репро).
+**Acceptance:** полный сьют зелёный; baseline — только newline-дельта.
+**Verify:** `cargo test --locked` → ok.
+
 ---
 
 ## Self-review плана

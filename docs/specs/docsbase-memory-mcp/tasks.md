@@ -313,7 +313,7 @@ second_sync_start_returns_current, sync_job_persists_across_restart)` — пад
 **Files:** Create `src/watch/mod.rs`, `tests/watcher.rs`; Modify `src/daemon/lifecycle.rs`
 **Interfaces:** Produces `spawn_watcher(project, tx) -> WatcherGuard`; debounce 1.5 с;
 коалесценция burst; игнор `projects/<id>/` и cache
-**RED:** `watcher::(edit_becomes_searchable_within_2s, burst_one_job, delete_purges,
+**RED:** `watcher::(edit_becomes_searchable_within_budget, burst_one_job, delete_purges,
 rename_delete_plus_add, index_dir_ignored)` — падают.
 **GREEN:** notify + debouncer; батч изменённых путей → `run_incremental`.
 **Verify:** `cargo test --test watcher` → OK
