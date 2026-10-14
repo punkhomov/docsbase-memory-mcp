@@ -4,7 +4,7 @@
 
 | Version | Support |
 |---|---|
-| `0.1.0-alpha.3` (prerelease) | Best-effort fixes; breaking changes expected before `0.1.0` |
+| `0.1.0-alpha.4` (prerelease) | Best-effort fixes; breaking changes expected before `0.1.0` |
 | `main` branch | Security fixes land here first |
 
 This is a local-first tool by default: no network calls at runtime, no
