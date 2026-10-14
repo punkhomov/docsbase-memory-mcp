@@ -1,6 +1,7 @@
 # Install
 
-Supported: **Linux x86_64** and **Windows x64**. macOS is out of scope for v1.
+Supported: **Linux x86_64**, **Windows x64** and **macOS 12+ (Apple
+Silicon)**. Intel Macs and universal binaries are out of scope for v1.
 Alpha version: `0.1.0-alpha.3` (`v0.1.0-alpha.3` tag).
 
 ## Option A — script (recommended)
@@ -17,11 +18,18 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.ps1 | iex
 ```
 
+macOS (Apple Silicon; same `install.sh`, stock `curl`/`tar`/`shasum`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/install.sh | sh
+```
+
 What the script does:
 
 1. Resolves the version (`DOCSBASE_VERSION` env or latest GitHub Release).
 2. Downloads the asset for your OS/arch
-   (`docsbase-linux-x86_64.tar.gz` / `docsbase-windows-x86_64.zip`).
+   (`docsbase-linux-x86_64.tar.gz` / `docsbase-windows-x86_64.zip` /
+   `docsbase-macos-aarch64.tar.gz`).
 3. Verifies `sha256sum` against the published `.sha256` file. This is an
    integrity check (truncated/corrupt download); the checksum ships in the
    same release as the asset, so it is not a security boundary. For
@@ -108,7 +116,8 @@ binary that invoked the command. It reuses the same daemon coordination as
 `docsbase install`: the daemon is stopped, the admission lease is taken, and
 the binary is swapped atomically; the daemon restarts on next use.
 
-Requirements: `curl`, `sha256sum` and `tar` on Linux; PowerShell on Windows.
+Requirements: `curl`, `sha256sum` and `tar` on Linux; `curl`, `tar` and
+`shasum` on macOS (all stock); PowerShell on Windows.
 `--from <PATH>` installs a local binary instead, skipping download and
 verification (used by tests and air-gapped setups).
 
@@ -134,3 +143,7 @@ are ever deleted. Config files are kept.
   or copied from another machine — reinstall from the real binary.
 - Windows: if `docsbase` is not found after install, reopen the terminal
   (installer updates the user `PATH`).
+- macOS: the binary is ad-hoc signed (Apple Silicon requires a valid
+  signature) and `curl` installs are not quarantined, so no Gatekeeper prompt
+  is expected; a browser-downloaded archive may be quarantined — prefer
+  `install.sh` or run `xattr -d com.apple.quarantine docsbase`.

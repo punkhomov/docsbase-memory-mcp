@@ -38,7 +38,7 @@ Accept snapshots/baseline only as a deliberate, reviewed delta (see below).
 - No new crates without an ADR; the default build stays offline (no network
   crates).
 - `main` is protected: changes land via PR only. Required checks: `docs`,
-  `linux`, `windows`.
+  `linux`, `windows`; `macos` runs advisory until the required-check flip.
 - Commit messages and PR titles: English prose. Literal examples in other
   scripts are fine (`ё/Ё→е/Е`, `замена/замены`). Conventional commits.
 - Refactors must not change behavior. If the tokenizer/normalization pipeline
@@ -78,3 +78,14 @@ Accept snapshots/baseline only as a deliberate, reviewed delta (see below).
   SC-5 exception); prose is capped and split at token boundaries.
 - Boost values are pinned by `field_boosts_order_and_sensitivity` and the
   penalty end-to-end; do not tune them without golden evidence (NFR-6).
+- macOS is `cfg(unix)`: keep platform branches exclusive
+  (`cfg(all(unix, not(target_os = "macos")))` for the generic Unix variant)
+  or the crate fails to compile on macOS only.
+- macOS liveness must treat zombies as dead (`proc_pidinfo` + `SZOMB`):
+  `kill(pid, 0)` alone reports a killed-but-unreaped child as alive.
+- BSD/macOS `accept()` inherits `O_NONBLOCK` from the listener (Linux does
+  not), and XNU rejects `setsockopt` with EINVAL on shut-down sockets: clear
+  non-blocking before setting timeouts and tolerate dead connections.
+- macOS releases: ad-hoc `codesign -s - --force` after build plus a
+  `codesign -v` gate (Apple Silicon kills unsigned binaries); sign after any
+  `lipo` merge.

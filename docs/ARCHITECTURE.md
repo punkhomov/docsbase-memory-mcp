@@ -55,7 +55,8 @@ Indexes are derived data: they can always be rebuilt from the `.md` sources.
 
 All OS-dependent code lives in `src/platform/` behind a small facade:
 transport (`Endpoint`: Unix path vs `\\.\pipe\docsbase-<blake3>`),
-signals, process liveness (`/proc` vs `OpenProcess`), permissions
+signals, process liveness (`/proc` on Linux, `proc_pidinfo` on macOS,
+`OpenProcess` on Windows), permissions
 (`0600`/`0700` vs best-effort ACLs), path semantics (case, separators,
 verbatim `\\?\`, system roots). Everything else is platform-agnostic and
 selected by `#[cfg]` only inside the seam. `platform_boundary` tests pin it.
