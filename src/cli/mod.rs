@@ -187,15 +187,39 @@ fn sync(path: Option<&std::path::Path>) -> anyhow::Result<()> {
 fn show_config() -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let config = Config::load(Some(&cwd))?;
-    let payload = serde_json::json!({
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&config_payload(&config))?
+    );
+    Ok(())
+}
+
+/// Effective configuration as JSON, including the resolved hybrid stages
+/// (T3 acceptance; `docsbase config` and tests share this shape).
+#[must_use]
+pub fn config_payload(config: &Config) -> serde_json::Value {
+    let hybrid_cfg = &config.hybrid_cfg;
+    serde_json::json!({
         "ignores": config.ignores,
         "max_file_size": config.max_file_size,
         "max_docs_per_project": config.max_docs_per_project,
         "auto_index": config.auto_index,
         "hybrid": config.hybrid,
-    });
-    println!("{}", serde_json::to_string_pretty(&payload)?);
-    Ok(())
+        "hybrid_config": {
+            "enabled": hybrid_cfg.enabled,
+            "embedding": hybrid_cfg.embedding.as_ref().map(|embedding| serde_json::json!({
+                "provider": embedding.provider,
+                "model": embedding.model,
+                "dimensions": embedding.dimensions,
+                "normalize": embedding.normalize,
+            })),
+            "reranker": hybrid_cfg.reranker.as_ref().map(|reranker| serde_json::json!({
+                "provider": reranker.provider,
+                "model": reranker.model,
+                "window": reranker.window,
+            })),
+        },
+    })
 }
 
 fn daemon_stop() -> anyhow::Result<()> {

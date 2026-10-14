@@ -6,6 +6,11 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
+use crate::hybrid::config::{
+    DEFAULT_DIMENSIONS, DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANK_MODEL, DEFAULT_RERANK_WINDOW,
+    EmbeddingCfg, HybridCfg, MAX_RERANK_WINDOW, MIN_RERANK_WINDOW, PROVIDER_OPENROUTER,
+    RerankerCfg,
+};
 
 pub mod paths;
 
@@ -22,6 +27,8 @@ pub struct Config {
     pub auto_index: bool,
     /// Hybrid retrieval feature flag (phase 2; off in v1).
     pub hybrid: bool,
+    /// Hybrid stages resolved from the file forms (bool shorthand or table).
+    pub hybrid_cfg: HybridCfg,
 }
 
 impl Default for Config {
@@ -32,6 +39,7 @@ impl Default for Config {
             max_docs_per_project: 20_000,
             auto_index: false,
             hybrid: false,
+            hybrid_cfg: HybridCfg::default(),
         }
     }
 }
@@ -59,7 +67,98 @@ struct FileConfig {
     max_file_size: Option<u64>,
     max_docs_per_project: Option<usize>,
     auto_index: Option<bool>,
-    hybrid: Option<bool>,
+    hybrid: Option<HybridToggle>,
+}
+
+/// File-level `hybrid` accepts both the legacy boolean shorthand and the
+/// full table form (FR-13); the table replaces the value wholesale.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum HybridToggle {
+    Bool(bool),
+    Table(HybridTable),
+}
+
+impl HybridToggle {
+    fn into_cfg(self) -> HybridCfg {
+        match self {
+            Self::Bool(true) => HybridCfg::enabled_with_defaults(),
+            Self::Bool(false) => HybridCfg::default(),
+            Self::Table(table) => HybridCfg {
+                enabled: table.enabled,
+                embedding: table.embedding.map(|embedding| EmbeddingCfg {
+                    provider: embedding.provider,
+                    model: embedding.model,
+                    dimensions: embedding.dimensions,
+                    normalize: embedding.normalize,
+                }),
+                reranker: table.reranker.map(|reranker| RerankerCfg {
+                    provider: reranker.provider,
+                    model: reranker.model,
+                    window: reranker.window,
+                }),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HybridTable {
+    #[serde(default = "def_true")]
+    enabled: bool,
+    #[serde(default)]
+    embedding: Option<HybridEmbedding>,
+    #[serde(default)]
+    reranker: Option<HybridReranker>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HybridEmbedding {
+    #[serde(default = "def_provider")]
+    provider: String,
+    #[serde(default = "def_embedding_model")]
+    model: String,
+    #[serde(default = "def_dimensions")]
+    dimensions: u32,
+    #[serde(default = "def_true")]
+    normalize: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HybridReranker {
+    #[serde(default = "def_provider")]
+    provider: String,
+    #[serde(default = "def_rerank_model")]
+    model: String,
+    #[serde(default = "def_window")]
+    window: u32,
+}
+
+fn def_true() -> bool {
+    true
+}
+
+fn def_provider() -> String {
+    PROVIDER_OPENROUTER.to_owned()
+}
+
+fn def_embedding_model() -> String {
+    DEFAULT_EMBEDDING_MODEL.to_owned()
+}
+
+fn def_dimensions() -> u32 {
+    DEFAULT_DIMENSIONS
+}
+
+fn def_rerank_model() -> String {
+    DEFAULT_RERANK_MODEL.to_owned()
+}
+
+fn def_window() -> u32 {
+    DEFAULT_RERANK_WINDOW
 }
 
 impl Config {
@@ -150,6 +249,7 @@ impl Config {
         }
         if let Some(v) = overrides.hybrid {
             self.hybrid = v;
+            self.hybrid_cfg.enabled = v;
         }
         self
     }
@@ -181,6 +281,46 @@ impl Config {
                 ),
             });
         }
+        self.validate_hybrid()?;
+        Ok(())
+    }
+
+    /// Hybrid-specific admission checks: provider allowlist (iteration 1)
+    /// and bounded, sane stage values (FR-3, FR-13).
+    fn validate_hybrid(&self) -> Result<()> {
+        if let Some(embedding) = &self.hybrid_cfg.embedding {
+            if embedding.provider != PROVIDER_OPENROUTER {
+                return Err(Error::Admission {
+                    message: format!(
+                        "hybrid.embedding.provider \"{}\" is not supported in iteration 1 (only \"{PROVIDER_OPENROUTER}\")",
+                        embedding.provider
+                    ),
+                });
+            }
+            if embedding.dimensions == 0 {
+                return Err(Error::Admission {
+                    message: "hybrid.embedding.dimensions must be > 0".to_owned(),
+                });
+            }
+        }
+        if let Some(reranker) = &self.hybrid_cfg.reranker {
+            if reranker.provider != PROVIDER_OPENROUTER {
+                return Err(Error::Admission {
+                    message: format!(
+                        "hybrid.reranker.provider \"{}\" is not supported in iteration 1 (only \"{PROVIDER_OPENROUTER}\")",
+                        reranker.provider
+                    ),
+                });
+            }
+            if !(MIN_RERANK_WINDOW..=MAX_RERANK_WINDOW).contains(&reranker.window) {
+                return Err(Error::Admission {
+                    message: format!(
+                        "hybrid.reranker.window must be between {MIN_RERANK_WINDOW} and {MAX_RERANK_WINDOW}, got {}",
+                        reranker.window
+                    ),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -197,8 +337,9 @@ impl Config {
         if let Some(v) = file.auto_index {
             self.auto_index = v;
         }
-        if let Some(v) = file.hybrid {
-            self.hybrid = v;
+        if let Some(toggle) = file.hybrid {
+            self.hybrid_cfg = toggle.into_cfg();
+            self.hybrid = self.hybrid_cfg.enabled;
         }
     }
 }
