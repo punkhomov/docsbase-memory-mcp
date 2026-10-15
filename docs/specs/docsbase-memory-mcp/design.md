@@ -13,6 +13,14 @@ per-account daemon. Daemon владеет реестром проектов, per
 local socket (platform transport, ADR-9) и пробрасывают MCP tool-calls. Индексация явная (`index_project`), опционально
 автоматическая (`auto_index`, default false). Реализует FR-1…FR-34, NFR-1…NFR-9.
 
+**Библиотечное встраивание (направление, конституция 1.3.0).** Ядро живёт в
+crate `docsbase_memory` (`src/lib.rs`) и не требует daemon'а: `index`, `store`,
+`vector_cache`, `hybrid` вызываются напрямую (так уже делают интеграционные
+тесты). CLI, daemon и MCP-frontend — потребители этого же API, а не его хозяева:
+новые возможности по умолчанию реализуются в ядре, бинарные слои остаются
+тонкими. Целевой сценарий — cargo-зависимость и встраивание в приложения и
+пайплайны; стабильность API и публикация — отдельным решением (ADR) после 1.0.
+
 ## 2. Global constraints
 
 Скопировано из constitution:
