@@ -1,0 +1,9 @@
+{
+ "status": 400,
+ "body": {
+  "error": {
+   "message": "Input is empty",
+   "code": 400
+  }
+ }
+}

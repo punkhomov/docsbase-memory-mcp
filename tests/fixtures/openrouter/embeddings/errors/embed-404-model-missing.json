@@ -1,0 +1,10 @@
+{
+ "status": 404,
+ "body": {
+  "error": {
+   "message": "No endpoints found for qwen/qwen3-embedding-0.6b.",
+   "code": 404
+  },
+  "user_id": "user_TEST"
+ }
+}
