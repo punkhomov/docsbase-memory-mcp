@@ -228,6 +228,39 @@ pub struct Citation {
 ///
 /// # Errors
 /// Returns [`Error::Internal`] on `SQLite` failures.
+/// Every chunk text of `project_id` in `(doc_id, seq)` order (backfill pass,
+/// FR-15); empty projects return an empty vector.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on `SQLite` failures.
+pub fn chunk_texts(conn: &Connection, project_id: i64) -> Result<Vec<String>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT c.text FROM chunks c JOIN docs d ON d.id = c.doc_id
+             WHERE d.project_id = ?1 ORDER BY c.doc_id, c.seq",
+        )
+        .map_err(db_error)?;
+    let rows = statement
+        .query_map([project_id], |row| row.get::<_, String>(0))
+        .map_err(db_error)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(db_error)
+}
+
+/// Text of one chunk (rerank documents, FR-11).
+///
+/// # Errors
+/// Returns [`Error::Internal`] on `SQLite` failures.
+pub fn chunk_text(conn: &Connection, doc_id: i64, seq: u32) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT text FROM chunks WHERE doc_id = ?1 AND seq = ?2",
+        params![doc_id, seq],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(db_error)
+}
+
 pub fn citation_for(conn: &Connection, doc_id: i64, seq: u32) -> Result<Option<Citation>> {
     conn.query_row(
         "SELECT d.rel_path, c.heading_path, c.line_start, c.line_end

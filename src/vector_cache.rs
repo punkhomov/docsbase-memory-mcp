@@ -241,6 +241,32 @@ impl VectorCache {
             .collect()
     }
 
+    /// How many of `hashes` are present for `model_id` (coverage diagnostics,
+    /// FR-15). Batches the lookups so large projects stay linear-ish.
+    ///
+    /// # Errors
+    /// Returns [`Error::Internal`] on cache failures.
+    pub fn count_present(&self, model_id: &str, hashes: &[String]) -> Result<u64> {
+        let mut present = 0u64;
+        for window in hashes.chunks(500) {
+            let placeholders = vec!["?"; window.len()].join(", ");
+            let sql = format!(
+                "SELECT COUNT(*) FROM vector_cache WHERE model_id = ?1 AND chunk_hash IN ({placeholders})"
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(window.len() + 1);
+            params.push(&model_id);
+            for hash in window {
+                params.push(hash);
+            }
+            let count: i64 = self
+                .conn
+                .query_row(&sql, params.as_slice(), |row| row.get(0))
+                .map_err(|err| Error::internal_with_source("count cached vectors", err))?;
+            present += u64::try_from(count).unwrap_or(0);
+        }
+        Ok(present)
+    }
+
     /// Number of cached vectors (diagnostics, tests).
     ///
     /// # Errors
