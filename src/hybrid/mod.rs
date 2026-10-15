@@ -14,6 +14,7 @@
 pub mod config;
 pub mod dense;
 pub mod jobs;
+pub mod rrf;
 
 #[cfg(feature = "hybrid-remote")]
 pub mod openrouter;
