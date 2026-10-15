@@ -126,6 +126,60 @@ fn hybrid_bool_shorthand_enables_stage_defaults() {
 }
 
 #[test]
+fn hybrid_ranking_parses_rrf_and_defaults_to_lexical() {
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[hybrid]\nranking = \"rrf\"\n\n[hybrid.embedding]\ndimensions = 512\n",
+    );
+    let config = Config::load_from(config_dir.path(), None).expect("load");
+    assert_eq!(
+        config.hybrid_cfg.ranking,
+        docsbase_memory::hybrid::Ranking::Rrf
+    );
+
+    let config_dir = TempDir::new().expect("tempdir");
+    write(config_dir.path(), "config.toml", "hybrid = true\n");
+    let config = Config::load_from(config_dir.path(), None).expect("load");
+    assert_eq!(
+        config.hybrid_cfg.ranking,
+        docsbase_memory::hybrid::Ranking::Lexical,
+        "the bool shorthand keeps the default ordering"
+    );
+}
+
+#[test]
+fn hybrid_ranking_unknown_value_is_a_config_error() {
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[hybrid]\nranking = \"dense\"\n",
+    );
+    let err = Config::load_from(config_dir.path(), None).expect_err("unknown ranking");
+    assert!(
+        err.to_string().contains("parse") && err.to_string().contains("did not match"),
+        "unknown ranking must fail parsing (serde untagged collapses the field name): {err}"
+    );
+}
+
+#[test]
+fn hybrid_ranking_rrf_requires_the_embedding_stage() {
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[hybrid]\nranking = \"rrf\"\n\n[hybrid.reranker]\n",
+    );
+    let err = Config::load_from(config_dir.path(), None).expect_err("rrf without embedding");
+    assert!(
+        matches!(err, docsbase_memory::error::Error::Admission { ref message } if message.contains("rrf")),
+        "{err}"
+    );
+}
+
+#[test]
 fn hybrid_table_parses_stages_with_defaults() {
     let config_dir = TempDir::new().expect("tempdir");
     write(

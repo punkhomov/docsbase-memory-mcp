@@ -124,3 +124,16 @@
   `migrations::SCHEMA_VERSION` (admission/store/cli_read/mcp_registry/mcp_frontend/
   install). minor (deferred): status-выход не показывает `index_generation`
   (внутренний маркер).
+- Task T10: complete (2026-10-15). `Ranking {lexical, rrf}` в HybridCfg/
+  HybridStages; `[hybrid] ranking` (неизвестное значение — ошибка парсинга);
+  «rrf требует embedding» — Admission в validate и from_config (до feature-проверки,
+  конфиг-ошибка важнее сборки). `search_docs_with(stages, dense, ...)`: RRF-путь
+  (dense-кандидаты через DenseCache или стриминг поверх VectorCache при cap,
+  `rrf_merge`, fetch=max(limit,window)), rerank поверх fused-списка,
+  score=RRF-скор без rerank (FR-18). `Shared.dense`; CLI direct и `docsbase config`
+  (`hybrid_config.ranking`) обновлены. Публичная библиотечная поверхность:
+  `store::repo`, `Db::{connection,begin_write}` (конституция 1.3.0; понадобилось
+  интеграционным тестам). Тесты: +7 `tests/hybrid_ranking.rs` (lexical без dense,
+  RRF-порядок/скоры, RRF+rerank, rerank=false, окно при limit=1, нулевое покрытие,
+  частичное), +3 `tests/config.rs` (парсинг/дефолт/ошибка), +2 `tests/hybrid_config.rs`
+  (rrf без embedding в обоих режимах сборки). clipy/fmt — оба билда чисто.

@@ -20,6 +20,7 @@ use crate::daemon::session::SessionRegistry;
 use crate::daemon::tools;
 use crate::error::{Error, Result};
 use crate::hybrid::HybridStages;
+use crate::hybrid::dense::DenseCache;
 use crate::hybrid::jobs as hybrid_jobs;
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 use crate::platform::Stream;
@@ -49,6 +50,8 @@ pub struct Shared {
     /// Hybrid stages as of the last project open (FR-14: built and validated
     /// there, reused by search/index paths).
     stages: Mutex<HashMap<i64, Arc<HybridStages>>>,
+    /// Dense candidate cache keyed by project and index generation (FR-16).
+    pub dense: DenseCache,
 }
 
 impl Shared {
@@ -84,6 +87,7 @@ impl Shared {
             global_config_stamp: stamp,
             project_configs: Mutex::new(HashMap::new()),
             stages: Mutex::new(HashMap::new()),
+            dense: DenseCache::new(),
         });
         match shared.start_watchers() {
             Ok(started) if started > 0 => eprintln!("watching {started} indexed project(s)"),
@@ -677,6 +681,34 @@ async fn call_tool(
         .map_err(|err| Error::internal_with_source("tool task join", err))?
 }
 
+/// `search_docs` with the project's hybrid stages, dense cache and window.
+fn route_search(
+    shared: &Arc<Shared>,
+    db: &crate::store::Db,
+    session_id: Option<u64>,
+    args: &Value,
+) -> Result<Value> {
+    let project = bound_project(shared, db, session_id)?;
+    let config = shared.project_config(&project)?;
+    let stages = shared.project_stages(&project)?;
+    let window = config
+        .hybrid_cfg
+        .reranker
+        .as_ref()
+        .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |reranker| {
+            reranker.window
+        });
+    tools::search_docs_with(
+        &stages,
+        &shared.dense,
+        db,
+        &shared.cache,
+        &project,
+        args,
+        window,
+    )
+}
+
 fn route_tool(
     shared: &Arc<Shared>,
     session_id: Option<u64>,
@@ -705,19 +737,7 @@ fn route_tool(
             )
         }
         "list_projects" => tools::list_projects(&db),
-        "search_docs" => {
-            let project = bound_project(shared, &db, session_id)?;
-            let config = shared.project_config(&project)?;
-            let stages = shared.project_stages(&project)?;
-            let window = config
-                .hybrid_cfg
-                .reranker
-                .as_ref()
-                .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |reranker| {
-                    reranker.window
-                });
-            tools::search_docs_with(&stages, &db, &shared.cache, &project, args, window)
-        }
+        "search_docs" => route_search(shared, &db, session_id, args),
         "list_docs" => {
             let project = bound_project(shared, &db, session_id)?;
             tools::list_docs(&db, &project, args)

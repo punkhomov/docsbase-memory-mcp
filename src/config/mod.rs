@@ -8,7 +8,7 @@ use serde::Deserialize;
 use crate::error::{Error, Result};
 use crate::hybrid::config::{
     DEFAULT_DIMENSIONS, DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANK_MODEL, DEFAULT_RERANK_WINDOW,
-    EmbeddingCfg, HybridCfg, MAX_RERANK_WINDOW, MIN_RERANK_WINDOW, PROVIDER_OPENROUTER,
+    EmbeddingCfg, HybridCfg, MAX_RERANK_WINDOW, MIN_RERANK_WINDOW, PROVIDER_OPENROUTER, Ranking,
     RerankerCfg,
 };
 
@@ -97,6 +97,12 @@ impl HybridToggle {
                     model: reranker.model,
                     window: reranker.window,
                 }),
+                ranking: table
+                    .ranking
+                    .map_or(Ranking::Lexical, |ranking| match ranking {
+                        RankingFile::Lexical => Ranking::Lexical,
+                        RankingFile::Rrf => Ranking::Rrf,
+                    }),
             },
         }
     }
@@ -111,6 +117,16 @@ struct HybridTable {
     embedding: Option<HybridEmbedding>,
     #[serde(default)]
     reranker: Option<HybridReranker>,
+    #[serde(default)]
+    ranking: Option<RankingFile>,
+}
+
+/// File spelling of the fusion mode (FR-17); unknown values fail parsing.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RankingFile {
+    Lexical,
+    Rrf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -294,6 +310,14 @@ impl Config {
     /// Hybrid-specific admission checks: provider allowlist (iteration 1)
     /// and bounded, sane stage values (FR-3, FR-13).
     fn validate_hybrid(&self) -> Result<()> {
+        if self.hybrid_cfg.enabled
+            && self.hybrid_cfg.ranking == Ranking::Rrf
+            && self.hybrid_cfg.embedding.is_none()
+        {
+            return Err(Error::Admission {
+                message: "hybrid.ranking = \"rrf\" requires the embedding stage (FR-17)".to_owned(),
+            });
+        }
         if let Some(embedding) = &self.hybrid_cfg.embedding {
             if embedding.provider != PROVIDER_OPENROUTER {
                 return Err(Error::Admission {

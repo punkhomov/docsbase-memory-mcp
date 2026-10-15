@@ -2,7 +2,8 @@
 
 pub mod migrations;
 pub mod models;
-pub(crate) mod repo;
+/// Document and chunk repository helpers (part of the public core surface).
+pub mod repo;
 
 pub use repo::MAX_SYNC_JOBS;
 
@@ -154,7 +155,8 @@ impl Db {
         migrations::read_version(&self.conn)
     }
 
-    pub(crate) fn connection(&self) -> &Connection {
+    #[must_use]
+    pub fn connection(&self) -> &Connection {
         &self.conn
     }
 
@@ -170,7 +172,7 @@ impl Db {
     ///
     /// # Errors
     /// Returns [`Error::Internal`] when `BEGIN IMMEDIATE` fails.
-    pub(crate) fn begin_write(&mut self) -> Result<Transaction<'_>> {
+    pub fn begin_write(&mut self) -> Result<Transaction<'_>> {
         self.conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|err| Error::internal_with_source(format!("begin sqlite: {err}"), err))

@@ -36,8 +36,10 @@ pub fn run(query: &str, limit: usize) -> anyhow::Result<()> {
         .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |reranker| {
             reranker.window
         });
+    let dense = crate::hybrid::dense::DenseCache::new();
     let value = tools::search_docs_with(
         &stages,
+        &dense,
         &db,
         &cache,
         &project,

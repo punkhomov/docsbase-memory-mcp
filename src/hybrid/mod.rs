@@ -25,7 +25,7 @@ use std::cell::Cell;
 
 use crate::error::Result;
 
-pub use config::{EmbeddingCfg, HybridCfg, HybridStages, RerankerCfg, from_config};
+pub use config::{EmbeddingCfg, HybridCfg, HybridStages, Ranking, RerankerCfg, from_config};
 
 /// Cross-encoder style reranking stage (FR-2, FR-11).
 ///

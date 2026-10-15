@@ -135,6 +135,7 @@ fn live_golden_rerank_measurement() {
         let args = serde_json::json!({ "query": query, "limit": 3 });
         let bm25 = docsbase_memory::daemon::tools::search_docs_with(
             &HybridStages::default(),
+            &docsbase_memory::hybrid::dense::DenseCache::new(),
             &db,
             cache.path(),
             &project,
@@ -144,6 +145,7 @@ fn live_golden_rerank_measurement() {
         .expect("bm25 search");
         let reranked = docsbase_memory::daemon::tools::search_docs_with(
             &stages,
+            &docsbase_memory::hybrid::dense::DenseCache::new(),
             &db,
             cache.path(),
             &project,

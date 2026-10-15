@@ -207,6 +207,10 @@ pub fn config_payload(config: &Config) -> serde_json::Value {
         "hybrid": config.hybrid,
         "hybrid_config": {
             "enabled": hybrid_cfg.enabled,
+            "ranking": match hybrid_cfg.ranking {
+                crate::hybrid::Ranking::Lexical => "lexical",
+                crate::hybrid::Ranking::Rrf => "rrf",
+            },
             "embedding": hybrid_cfg.embedding.as_ref().map(|embedding| serde_json::json!({
                 "provider": embedding.provider,
                 "model": embedding.model,

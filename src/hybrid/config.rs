@@ -35,6 +35,16 @@ pub const MAX_RERANK_WINDOW: u32 = 100;
 /// Default rerank window (FR-11).
 pub const DEFAULT_RERANK_WINDOW: u32 = 50;
 
+/// Candidate-list ordering mode (FR-17).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Ranking {
+    /// Lexical BM25 order; the default so a ranking change is opt-in (NFR-6).
+    #[default]
+    Lexical,
+    /// Reciprocal Rank Fusion of the BM25 and dense lists (FR-16).
+    Rrf,
+}
+
 /// Resolved hybrid configuration; the file-level forms (bool shorthand or
 /// table) are parsed in `crate::config`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -45,6 +55,8 @@ pub struct HybridCfg {
     pub embedding: Option<EmbeddingCfg>,
     /// Rerank stage; `None` = stage disabled.
     pub reranker: Option<RerankerCfg>,
+    /// Candidate ordering (FR-17); `Rrf` requires the embedding stage.
+    pub ranking: Ranking,
 }
 
 impl HybridCfg {
@@ -55,6 +67,7 @@ impl HybridCfg {
             enabled: true,
             embedding: Some(EmbeddingCfg::default()),
             reranker: Some(RerankerCfg::default()),
+            ranking: Ranking::Lexical,
         }
     }
 }
@@ -124,6 +137,8 @@ pub struct HybridStages {
     pub embedder: Option<Arc<dyn Embedder>>,
     /// Rerank stage, when enabled and resolvable.
     pub reranker: Option<Arc<dyn Reranker>>,
+    /// Resolved candidate ordering (FR-17).
+    pub ranking: Ranking,
 }
 
 impl std::fmt::Debug for HybridStages {
@@ -131,6 +146,7 @@ impl std::fmt::Debug for HybridStages {
         f.debug_struct("HybridStages")
             .field("embedder", &self.embedder.as_ref().map(|_| "<embedder>"))
             .field("reranker", &self.reranker.as_ref().map(|_| "<reranker>"))
+            .field("ranking", &self.ranking)
             .finish()
     }
 }
@@ -149,11 +165,21 @@ pub fn from_config(cfg: &HybridCfg, feature_on: bool) -> Result<HybridStages> {
     if !cfg.enabled {
         return Ok(HybridStages::default());
     }
+    // A configuration error outranks build capability: rrf without the
+    // embedding stage can never resolve, feature or not (FR-17).
+    if cfg.ranking == Ranking::Rrf && cfg.embedding.is_none() {
+        return Err(Error::Admission {
+            message: "hybrid.ranking = \"rrf\" requires the embedding stage (FR-17)".to_owned(),
+        });
+    }
     if !feature_on || !cfg!(feature = "hybrid-remote") {
         return Err(feature_missing());
     }
     #[cfg_attr(not(feature = "hybrid-remote"), allow(unused_mut))]
-    let mut stages = HybridStages::default();
+    let mut stages = HybridStages {
+        ranking: cfg.ranking,
+        ..HybridStages::default()
+    };
     if let Some(embedding) = &cfg.embedding {
         ensure_openrouter(&embedding.provider)?;
         if embedding.dimensions == 0 {

@@ -3,6 +3,7 @@
 //! offline build and in `--features hybrid-remote` (SC-3, SC-4).
 
 use docsbase_memory::error::Error;
+use docsbase_memory::hybrid::Ranking;
 use docsbase_memory::hybrid::blocking;
 #[cfg(feature = "hybrid-remote")]
 use docsbase_memory::hybrid::config::RerankerCfg;
@@ -69,6 +70,7 @@ fn unknown_provider_is_rejected_before_any_network_setup() {
             ..EmbeddingCfg::default()
         }),
         reranker: None,
+        ranking: Ranking::Lexical,
     };
     let error = from_config(&cfg, true).expect_err("provider must be validated");
     let Error::Admission { message } = error else {
@@ -83,6 +85,7 @@ fn unknown_provider_is_rejected_before_any_network_setup() {
             provider: "voyage".to_owned(),
             ..RerankerCfg::default()
         }),
+        ranking: Ranking::Lexical,
     };
     assert!(matches!(
         from_config(&cfg, true),
@@ -101,6 +104,7 @@ fn rerank_window_bounds_are_enforced() {
                 window,
                 ..RerankerCfg::default()
             }),
+            ranking: Ranking::Lexical,
         };
         let error = from_config(&cfg, true).expect_err("window must be bounded");
         let Error::Admission { message } = error else {
@@ -145,4 +149,36 @@ fn blocking_context_contract() {
         .expect_err("enter propagates errors");
     assert!(format!("{error}").contains("boom"));
     assert!(!blocking::in_context());
+}
+
+#[test]
+fn rrf_without_the_embedding_stage_is_an_admission_error() {
+    let cfg = HybridCfg {
+        enabled: true,
+        embedding: None,
+        reranker: None,
+        ranking: Ranking::Rrf,
+    };
+    let err = from_config(&cfg, true).expect_err("rrf without embedding");
+    assert!(
+        matches!(&err, Error::Admission { message } if message.contains("rrf")),
+        "{err}"
+    );
+}
+
+#[test]
+fn rrf_keeps_the_configuration_error_across_feature_modes() {
+    let cfg = HybridCfg {
+        enabled: true,
+        embedding: None,
+        reranker: None,
+        ranking: Ranking::Rrf,
+    };
+    for feature_on in [false, true] {
+        let err = from_config(&cfg, feature_on).expect_err("rrf without embedding");
+        assert!(
+            matches!(&err, Error::Admission { message } if message.contains("rrf")),
+            "feature_on={feature_on}: {err}"
+        );
+    }
 }

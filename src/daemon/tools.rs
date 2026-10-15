@@ -10,9 +10,12 @@ use crate::daemon::session::Stats;
 use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
 use crate::hybrid::HybridStages;
+use crate::hybrid::Ranking;
 use crate::hybrid::blocking;
 use crate::hybrid::config::DEFAULT_RERANK_WINDOW;
+use crate::hybrid::dense::{self, DenseCache, DenseRows};
 use crate::hybrid::jobs::{self as hybrid_jobs, Coverage};
+use crate::hybrid::rrf::rrf_merge;
 use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
 use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
@@ -28,6 +31,7 @@ use crate::store::{Db, repo};
 pub fn search_docs(db: &Db, cache: &Path, project: &Project, args: &Value) -> Result<Value> {
     search_docs_with(
         &HybridStages::default(),
+        &DenseCache::new(),
         db,
         cache,
         project,
@@ -36,9 +40,49 @@ pub fn search_docs(db: &Db, cache: &Path, project: &Project, args: &Value) -> Re
     )
 }
 
-/// [`search_docs`] with resolved hybrid stages and the project's rerank
-/// window; the shared seam for the daemon route, the direct CLI mode and the
-/// integration tests (FR-11, FR-12, SC-2).
+/// Dense candidate list for the RRF stage (FR-15): the query embedding plus
+/// cached per-chunk vectors. `Ready` scans the in-memory rows; `TooLarge`
+/// streams the cache with a bounded heap, so memory stays flat above the cap.
+fn dense_candidates(
+    stages: &HybridStages,
+    dense: &DenseCache,
+    db: &Db,
+    project: &Project,
+    query: &str,
+    fetch: usize,
+) -> Result<Vec<(u64, f32)>> {
+    let Some(embedder) = stages.embedder.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let mut vectors = blocking::enter(|| embedder.embed(&[query.to_owned()]))?;
+    if vectors.len() != 1 {
+        return Err(Error::internal(format!(
+            "dense query embedding returned {} vectors for one input",
+            vectors.len()
+        )));
+    }
+    let vector = vectors.pop().unwrap_or_default();
+    let model_id = embedder.model_id();
+    match dense.get(db, project.id, model_id)? {
+        DenseRows::Ready(index) => dense::top_k(&vector, index.rows(), fetch),
+        DenseRows::TooLarge => {
+            let chunks = repo::chunk_hashes(db.connection(), project.id)?;
+            let mut cache = crate::vector_cache::VectorCache::open(db.cache_root())?;
+            let rows = chunks.into_iter().filter_map(move |(chunk_id, hash)| {
+                match cache.get(model_id, &hash) {
+                    Ok(Some(vector)) => Some(Ok((chunk_id, vector))),
+                    Ok(None) => None,
+                    Err(err) => Some(Err(err)),
+                }
+            });
+            dense::top_k_iter(&vector, rows, fetch)
+        }
+    }
+}
+
+/// [`search_docs`] with resolved hybrid stages, the dense cache and the
+/// project's rerank window; the shared seam for the daemon route, the direct
+/// CLI mode and the integration tests (FR-11, FR-12, FR-16, SC-2).
 ///
 /// # Errors
 /// Returns [`Error::Query`] for invalid queries, [`Error::Project`] when the
@@ -46,6 +90,7 @@ pub fn search_docs(db: &Db, cache: &Path, project: &Project, args: &Value) -> Re
 /// (including `rerank=true` when the project has no rerank stage).
 pub fn search_docs_with(
     stages: &HybridStages,
+    dense: &DenseCache,
     db: &Db,
     cache: &Path,
     project: &Project,
@@ -96,9 +141,10 @@ pub fn search_docs_with(
         });
     }
 
-    // Rerank needs a wider candidate window than the requested limit (FR-11);
-    // plain BM25 fetches exactly the limit.
-    let fetch = if rerank_active {
+    // The rerank and RRF stages need a wider candidate window than the
+    // requested limit (FR-11, FR-16); plain BM25 fetches exactly the limit.
+    let rrf_active = stages.ranking == Ranking::Rrf && stages.embedder.is_some();
+    let fetch = if rerank_active || rrf_active {
         limit.max(window as usize).min(MAX_HITS)
     } else {
         limit
@@ -106,7 +152,13 @@ pub fn search_docs_with(
     let index = ReadIndex::open(&lifecycle::index_dir(cache, project.id))?;
     let hits = index.search(query, fetch)?;
 
-    let mut ordered: Vec<(u64, f32)> = hits.iter().map(|hit| (hit.chunk_id, hit.score)).collect();
+    let bm25: Vec<(u64, f32)> = hits.iter().map(|hit| (hit.chunk_id, hit.score)).collect();
+    let mut ordered: Vec<(u64, f32)> = if rrf_active {
+        let dense_hits = dense_candidates(stages, dense, db, project, query, fetch)?;
+        rrf_merge(&bm25, &dense_hits)
+    } else {
+        bm25
+    };
     if rerank_active
         && !ordered.is_empty()
         && let Some(reranker) = stages.reranker.as_deref()
@@ -756,6 +808,7 @@ mod tests {
 
         let bm25 = search_docs_with(
             &HybridStages::default(),
+            &DenseCache::new(),
             &db,
             cache.path(),
             &project,
@@ -770,9 +823,18 @@ mod tests {
         let stages = HybridStages {
             embedder: None,
             reranker: Some(reranker.clone()),
+            ranking: Ranking::Lexical,
         };
-        let result = search_docs_with(&stages, &db, cache.path(), &project, &args, 50)
-            .expect("reranked search");
+        let result = search_docs_with(
+            &stages,
+            &DenseCache::new(),
+            &db,
+            cache.path(),
+            &project,
+            &args,
+            50,
+        )
+        .expect("reranked search");
         let result_ids = chunk_ids(&result);
         let mut expected = bm25_ids.clone();
         expected.reverse();
@@ -801,6 +863,7 @@ mod tests {
         let (cache, db, project) = env();
         let bm25 = search_docs_with(
             &HybridStages::default(),
+            &DenseCache::new(),
             &db,
             cache.path(),
             &project,
@@ -813,9 +876,11 @@ mod tests {
         let stages = HybridStages {
             embedder: None,
             reranker: Some(reranker.clone()),
+            ranking: Ranking::Lexical,
         };
         let value = search_docs_with(
             &stages,
+            &DenseCache::new(),
             &db,
             cache.path(),
             &project,
@@ -832,6 +897,7 @@ mod tests {
         let (cache, db, project) = env();
         let error = search_docs_with(
             &HybridStages::default(),
+            &DenseCache::new(),
             &db,
             cache.path(),
             &project,
