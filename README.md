@@ -11,8 +11,11 @@
 >
 > Read this in another language: [Русский](README.ru.md) · **English**
 
-One `docsbase` binary, three roles: **CLI**, **stdio MCP server**, and a
-**per-account daemon**. The daemon owns the project registry, per-project
+The core is a plain Rust library (`docsbase_memory`); the `docsbase` binary is
+its first consumer with three roles: **CLI**, **stdio MCP server**, and a
+**per-account daemon**. Embedding the library into applications and pipelines
+(as a cargo dependency) is an explicit long-term direction - API stability is
+not promised before 1.0. The daemon owns the project registry, per-project
 full-text indexes, file watchers and sync jobs. The `.md` files on disk are
 the only source of truth; the MCP surface is read-only over the index.
 No network calls at runtime by default — no telemetry, no cloud, no Docker.
