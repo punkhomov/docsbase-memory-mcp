@@ -374,10 +374,7 @@ fn mark_pending(
     plan: &mut [Pending],
     removed: &[&DocState],
 ) -> Result<()> {
-    let tx = db
-        .connection_mut()
-        .transaction()
-        .map_err(|err| Error::internal_with_source(format!("begin sqlite: {err}"), err))?;
+    let tx = db.begin_write()?;
     for pending in plan.iter_mut() {
         if let Some(id) = pending.id {
             repo::invalidate_doc(&tx, id)?;
@@ -467,10 +464,7 @@ fn prepare_doc(
 }
 
 fn apply_plan(db: &mut Db, project_id: i64, plan: &[Pending], removed: &[&DocState]) -> Result<()> {
-    let tx = db
-        .connection_mut()
-        .transaction()
-        .map_err(|err| Error::internal_with_source(format!("begin sqlite: {err}"), err))?;
+    let tx = db.begin_write()?;
     let now = unix_now();
 
     for pending in plan {
@@ -581,6 +575,58 @@ mod tests {
     use crate::store::{DB_FILE, Db};
     use rusqlite::Connection;
 
+    /// Deferred read-then-write upgrades fail with `SQLITE_BUSY_SNAPSHOT`
+    /// (extended 517; the busy handler does not cover them) once another
+    /// connection commits in between - the Windows CI incident also showed an
+    /// immediate `database is locked`. Write transactions go through
+    /// [`Db::begin_write`] (`BEGIN IMMEDIATE`), so the interleaving cannot
+    /// happen; with a deferred tx the "write a after b attempted" step below
+    /// panics once the writer thread committed within the sleep window.
+    #[test]
+    fn read_then_write_tx_survives_concurrent_writer() {
+        use std::time::Duration;
+
+        let cache = tempfile::tempdir().expect("cache");
+        let mut db_a = Db::open(cache.path()).expect("db a");
+        let mut db_b = Db::open(cache.path()).expect("db b");
+        let conn = Connection::open(cache.path().join(DB_FILE)).expect("raw db");
+        conn.execute(
+            "INSERT INTO projects (id, canonical_root, name, status, schema_version, created_at)
+             VALUES (1, '/p', 'p', 'indexed', 1, 0)",
+            [],
+        )
+        .expect("project");
+        drop(conn);
+
+        let tx_a = db_a.begin_write().expect("tx a");
+        let name: String = tx_a
+            .query_row("SELECT name FROM projects WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("read inside tx a");
+        assert_eq!(name, "p");
+
+        let handle = std::thread::spawn(move || {
+            let tx_b = db_b.begin_write().expect("tx b waits for a");
+            tx_b.execute("UPDATE projects SET name = 'b' WHERE id = 1", [])
+                .expect("write b");
+            tx_b.commit().expect("commit b");
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        tx_a.execute("UPDATE projects SET name = 'a' WHERE id = 1", [])
+            .expect("write a after b attempted");
+        tx_a.commit().expect("commit a");
+        handle.join().expect("join b");
+
+        let name: String = db_a
+            .connection()
+            .query_row("SELECT name FROM projects WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("final read");
+        assert_eq!(name, "b", "b committed after a released the lock");
+    }
+
     #[test]
     fn concurrent_marker_tx_allocates_distinct_ids() {
         use std::time::Duration;
@@ -597,17 +643,11 @@ mod tests {
         .expect("project");
         drop(conn);
 
-        let tx = db_a
-            .connection_mut()
-            .transaction()
-            .expect("tx a holds the write lock");
+        let tx = db_a.begin_write().expect("tx a holds the write lock");
         let id_a = repo::insert_pending_doc(&tx, 1, "a.md", "/p/a.md").expect("alloc a");
 
         let handle = std::thread::spawn(move || {
-            let tx = db_b
-                .connection_mut()
-                .transaction()
-                .expect("tx b blocks until a commits");
+            let tx = db_b.begin_write().expect("tx b blocks until a commits");
             let id = repo::insert_pending_doc(&tx, 1, "b.md", "/p/b.md").expect("alloc b");
             tx.commit().expect("commit b");
             id

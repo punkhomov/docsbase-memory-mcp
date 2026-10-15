@@ -64,18 +64,38 @@ CI периодически падает на Linux/Windows; перезапус�
   database is locked: Error code 5`.
 - **Наблюдения:** run `37819989463` (08.10 17:53, job `113458241238`), rerun —
   зелёный.
-- **Root cause:** конкуренция SQLite (CLI-индекс и демон) на Windows.
-  `busy_timeout(5s)` установлен (`src/store/mod.rs:38`,
-  `src/store/migrations.rs:102`), но либо лок держится дольше, либо конкретный путь
-  открытия registry идёт в другом режиме (не подтверждено).
-- **Варианты фикса:** подтвердить WAL + `busy_timeout` на всех путях открытия
-  registry; при необходимости увеличить таймаут; стресс-тест CLI+daemon на Windows.
+- **Root cause (раскрыт 2026-10-14, два механизма):**
+  - **A — наблюдался в CI (run `38608476841` и ранние):**
+    `PRAGMA journal_mode=WAL` в `Db::open` возвращает мгновенный
+    `database is locked` при параллельном первичном открытии (смена
+    journal-mode не покрывается busy-handler'ом). Доказательство: в логе
+    ошибка несёт префикс пути `sqlite {path}: ...` — так оборачивает только
+    `sql_error` (`Db::open`), тогда как ошибки транзакций идут через
+    `db_error` без пути; при extended-коде 517 в логе было бы «517», а не 5
+    (libsqlite3-sys печатает extended). **Исправлено:** bounded-ретрай
+    (до 3 попыток, пауза 100 мс) только для `DatabaseBusy` вокруг
+    `PRAGMA journal_mode=WAL`.
+  - **B — класс, доказан тестом:** deferred-транзакция с read→write-upgrade
+    падает `SQLITE_BUSY_SNAPSHOT` (extended 517) мгновенно, как только
+    другое соединение закоммитило между read и write; `busy_timeout` его не
+    покрывает. Repro: `read_then_write_tx_survives_concurrent_writer`
+    (красный на Deferred с `extended_code: 517`, зелёный на Immediate).
+    Продакшен-транзакции были write-first (класс в CI не наблюдался), но
+    фикс закрывает его по конструкции: все пишущие транзакции — через
+    `Db::begin_write` (`BEGIN IMMEDIATE`, `src/store/mod.rs`).
 - **Acceptance:** конкурентный `index` при живом демоне на Windows не падает по
-  lock.
-- **Статус:** смягчено и проверено стрессом — registry `busy_timeout` 5 с → 30 с
-  (`src/store/mod.rs`); цель `error_surface::mcp_error_codes_stable` добавлена в
-  `flake-stress`, прогон 50/50 на Windows зелёный (run `38590476555`,
-  2026-10-14). При повторе — воспроизводить на Windows.
+  lock; стресс 50/50 (run `38590476555`) и полный сьют — зелёные.
+- **Механизм B — класс, доказан тестом:** deferred-транзакция с
+  read→write-upgrade падает `SQLITE_BUSY_SNAPSHOT` (extended 517) мгновенно,
+  как только другое соединение закоммитило между read и write;
+  `busy_timeout` его не покрывает. Repro:
+  `read_then_write_tx_survives_concurrent_writer` (красный на Deferred с
+  `extended_code: 517`, зелёный на Immediate). Продакшен-транзакции были
+  write-first (класс в CI не наблюдался), но фикс закрывает его по
+  конструкции: все пишущие транзакции — через `Db::begin_write`
+  (`BEGIN IMMEDIATE`, `src/store/mod.rs`).
+- **Статус:** исправлено (A + B); ранее: `busy_timeout` 5→30 с и стресс 50/50
+  (run `38590476555`) — оставлены.
 
 ## 4. `mcp_registry::watcher_refreshes_search` (Windows)
 

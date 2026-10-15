@@ -8,7 +8,7 @@ pub use repo::MAX_SYNC_JOBS;
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use crate::error::{Error, Result};
 
@@ -42,8 +42,28 @@ impl Db {
             .map_err(|err| sql_error(&path, err))?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|err| sql_error(&path, err))?;
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|err| sql_error(&path, err))?;
+        // A concurrent first open may hold the transition lock: journal-mode
+        // changes can fail with an immediate SQLITE_BUSY that the busy handler
+        // does not cover (flake 3: the path-prefixed error came from this
+        // `Db::open` statement), so retry briefly - and only for BUSY.
+        let mut attempts = 0;
+        loop {
+            match conn.pragma_update(None, "journal_mode", "WAL") {
+                Ok(()) => break,
+                Err(err) => {
+                    let busy = matches!(
+                        &err,
+                        rusqlite::Error::SqliteFailure(code, _)
+                            if code.code == rusqlite::ErrorCode::DatabaseBusy
+                    );
+                    attempts += 1;
+                    if !busy || attempts >= 3 {
+                        return Err(sql_error(&path, err));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
         if let Err(err) = migrations::migrate(&conn) {
             if matches!(err, Error::Admission { .. }) {
                 let version = migrations::read_version(&conn).ok();
@@ -138,12 +158,22 @@ impl Db {
         &self.conn
     }
 
-    pub(crate) fn connection_mut(&mut self) -> &mut Connection {
-        &mut self.conn
-    }
-
     pub(crate) fn cache_root(&self) -> &Path {
         &self.cache_root
+    }
+
+    /// Begins an IMMEDIATE write transaction: the write lock is taken at
+    /// `BEGIN`, so a read-then-write sequence cannot fail with
+    /// `SQLITE_BUSY_SNAPSHOT` — the busy handler does not cover deferred
+    /// upgrades once another connection commits (flake 3 root cause,
+    /// 2026-10-14; regression test in `index::job`).
+    ///
+    /// # Errors
+    /// Returns [`Error::Internal`] when `BEGIN IMMEDIATE` fails.
+    pub(crate) fn begin_write(&mut self) -> Result<Transaction<'_>> {
+        self.conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|err| Error::internal_with_source(format!("begin sqlite: {err}"), err))
     }
 }
 
