@@ -49,3 +49,20 @@
   (политика по докам, пересмотр при первом инциденте).
   Review (fresh): PASS/APPROVED, minors fixed in a follow-up commit (G1 default
   model line; rerank/embedding fixtures normalized to {request,status,response}).
+- 2026-10-15: ревью PR #41 (punkhomov): NEEDS CHANGES — исправлено:
+  error-фикстуры нормализованы в {request,status,response} (единый парсер для T2);
+  FR-1/FR-2 уточнены (порядок по advisory-`index`, `dimensions` из конфига,
+  `model` в ответе не сверять — провайдер регистро/префикс-нормализует);
+  `top_n=999` подкреплён живой пробой: 200, возвращаются все 4 дока
+  (`tests/fixtures/openrouter/rerank/topn999-clamp.json`).
+  Решения за человеком (вне репо): 8b-дефолт с ценой $0.01/M принят в T1-спайке;
+  правки внешнего agreement (`rerank-3.5`→`v3.5`, `@d<dim>`→`@d<dim>@{l2,raw}`) —
+  за оператором.
+- 2026-10-15: ревью PR #40 (punkhomov): PASS в стеке 40+41 (по отдельности не
+  мержить); FR-7 переформулирован как предварительный бюджет (калибровка при
+  первом инциденте); согласие по цене 8b — за оператором; `rerank-3.5` в
+  agreement — за оператором.
+- 2026-10-15: ревью PR #42 (punkhomov): PASS, действий не требуется.
+- 2026-10-15: ревью PR #43 (punkhomov): PASS with notes — сквош fixup-дубликата,
+  doc-ниты `l2_normalize`/`citation_for` (исправлено); опциональный `index`
+  у embeddings сделан advisory и в коде.

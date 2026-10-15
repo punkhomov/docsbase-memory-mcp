@@ -92,12 +92,20 @@ Non-goals (явно позже, отдельными задачами): dense re
   `Vec<Vec<f32>>` по порядку входа. `base = https://openrouter.ai/api/v1`
   (без хвостового `/`); пути — `/embeddings`, `/rerank` (без второго `/v1`).
   Спайк: `dimensions` — MRL-truncation (200 на 256…4096), дефолт модели 4096;
-  qwen3-8b возвращает уже нормированные вектора (L2=1.000); эффект `input_type`
-  минимален (cos 0.9976) — поле остаётся в контракте. `DELTA-2`, `DELTA-T1`.
+  отправляется из конфига (модели без MRL — без параметра; фикстура pplx
+  записана без него); qwen3-8b возвращает уже нормированные вектора (L2=1.000);
+  эффект `input_type` минимален (cos 0.9976) — поле остаётся в контракте.
+  Порядок сборки — по `index`, **когда провайдер его вернул** (поле advisory:
+  документация OpenRouter его опциональна, отсутствие = порядок входа).
+  Строку `model` в ответе не сверять с запрошенной: провайдер нормализует
+  регистр/вендорный префикс (`qwen/qwen3-embedding-8b` → `Qwen/Qwen3-Embedding-8B`).
+  `DELTA-2`, `DELTA-T1`.
 - **FR-2.** `OpenRouterReranker: Reranker` — `POST {base}/rerank`
   `{model, query, documents, top_n}` → `Vec<(original_index, relevance_score)>`,
   desc по score. Ответ разбирается из `results[].{index, relevance_score}`;
-  `usage.search_units` логируется. `DELTA-2`.
+  `usage.search_units` логируется. Строку `model` в ответе не сверять с
+  запрошенной (`cohere/rerank-v3.5` → `rerank-v3.5`; у 4-pro — `rerank-v4.0-pro`).
+  `DELTA-2`, `DELTA-T1`.
 - **FR-3.** `provider = "openrouter"` — единственное допустимое значение в
   итерации 1; иное → `Admission`-ошибка («итерация 1: только openrouter»).
 - **FR-4.** API-ключ — только из env (`OPENROUTER_API_KEY`); в toml-интерфейсе

@@ -1,0 +1,53 @@
+{
+ "request": {
+  "model": "cohere/rerank-v3.5",
+  "query": "как настроить сокет демона",
+  "documents": [
+   "Настройка демона: путь к сокету, разрешения и состояние сессии.",
+   "Banana bread recipe with walnuts.",
+   "Индекс и поиск: tantivy, чанки и golden-наборы.",
+   "关于索引与搜索的配置"
+  ],
+  "top_n": 999
+ },
+ "status": 200,
+ "response": {
+  "id": "gen-rerank-1792067565-6B4gv4ox1GAwtgCbBz5Z",
+  "model": "rerank-v3.5",
+  "results": [
+   {
+    "index": 0,
+    "relevance_score": 0.44521654,
+    "document": {
+     "text": "Настройка демона: путь к сокету, разрешения и состояние сессии."
+    }
+   },
+   {
+    "index": 3,
+    "relevance_score": 0.05200422,
+    "document": {
+     "text": "关于索引与搜索的配置"
+    }
+   },
+   {
+    "index": 2,
+    "relevance_score": 0.021667069,
+    "document": {
+     "text": "Индекс и поиск: tantivy, чанки и golden-наборы."
+    }
+   },
+   {
+    "index": 1,
+    "relevance_score": 0.0117336195,
+    "document": {
+     "text": "Banana bread recipe with walnuts."
+    }
+   }
+  ],
+  "usage": {
+   "search_units": 1,
+   "cost": 0.001
+  },
+  "provider": "Cohere"
+ }
+}
