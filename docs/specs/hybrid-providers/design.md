@@ -80,37 +80,66 @@ pub struct EmbeddingCfg { pub provider: String, pub model: String, pub dimension
 pub struct RerankerCfg { pub provider: String, pub model: String, pub window: u32 }
 pub struct HybridStages { pub embedder: Option<Arc<dyn Embedder>>, pub reranker: Option<Arc<dyn Reranker>> }
 pub fn from_config(cfg: &HybridCfg, feature_on: bool) -> Result<HybridStages>;
+pub fn cache_model_id(cfg: &EmbeddingCfg) -> String;   // FR-5, ungated → тестируем в дефолте
 
 // src/hybrid/mod.rs — UNGATED
 pub trait Reranker: Send + Sync {   // model_id нет: rerank не кэшируется (YAGNI)
     fn rerank(&self, query: &str, docs: &[String], top_n: usize) -> Result<Vec<(usize, f32)>>;
 }
 pub mod blocking {
-    // Единственный санкционированный sync-вход (I3): ставит thread-local маркер.
-    // run_async — для daemon (spawn_blocking + await); run_sync — для CLI/тестов
-    // (assert: вне runtime). Прямой вызов embed/rerank без маркера → Internal.
-    pub async fn run_async<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T>;
-    pub fn run_sync<T>(f: impl FnOnce() -> Result<T>) -> Result<T>;
+    // Единственный санкционированный sync-вход (I3): ставит thread-local
+    // маркер и восстанавливает его после выхода. Daemon уже гоняет все
+    // tool-вызовы через spawn_blocking (daemon::server::route), watcher —
+    // собственный поток, direct CLI — главный поток: отдельные
+    // run_async/run_sync не нужны (архитектурная сверка, DELTA-T2).
+    pub fn enter<T>(f: impl FnOnce() -> Result<T>) -> Result<T>;
+    pub fn in_context() -> bool;
 }
 
 // src/hybrid/wire.rs — feature-gated: DTO + transport
+pub struct TransportResponse { pub status: u16, pub body: String, pub retry_after: Option<Duration> }
 pub trait Transport: Send + Sync {
-    fn post_json(&self, url: &str, headers: &[(String, String)], body: &str) -> Result<String>;
+    fn post_json(&self, url: &str, headers: &[(String, String)], body: &str) -> Result<TransportResponse>;
 }
+pub fn post_with_retry(transport: &dyn Transport, url: &str,
+                       headers: &[(String, String)], body: &str) -> Result<TransportResponse>;
+pub fn embed_batches(texts: &[String]) -> Vec<Range<usize>>;  // ≤128 текстов / 512 KiB
 // src/hybrid/openrouter.rs — feature-gated
-pub struct OpenRouterClient { /* base_url, api_key (redacted Debug), t: Box<dyn Transport> */ }
+pub struct OpenRouterClient { /* base_url, api_key (redacted Debug), transport: Box<dyn Transport> */ }
 impl OpenRouterClient {
-    pub fn embed_texts(&self, model: &str, dim: u32, post: Postprocess, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    pub fn new(base_url: &str, api_key: &str, transport: Box<dyn Transport>) -> Result<Self>; // allowlist
+    pub fn from_env() -> Result<Self>;                                                         // OPENROUTER_API_KEY
+    pub fn embed_texts(&self, model: &str, dimensions: u32, normalize: bool, texts: &[String]) -> Result<Vec<Vec<f32>>>;
     pub fn rerank(&self, model: &str, query: &str, docs: &[String], top_n: usize) -> Result<Vec<(usize, f32)>>;
 }
+pub struct OpenRouterEmbedder { /* client, cfg, model_id */ }   // impl Embedder; with_client/new
+pub struct OpenRouterReranker { /* client, cfg */ }             // impl Reranker;  with_client/new
+pub struct ReqwestTransport { /* reqwest::Client + fallback runtime */ } // impl Transport
 // DTO: обязательные поля required, deny_unknown_fields не ставим (дрейф провайдера —
-// явная ошибка парсинга только на несовместимости обязательных полей).
+// явная ошибка парсинга только на несовместимости обязательных полей); ответы
+// валидируются (count/dim/index-range), сортируются повторно.
 // model_id (FR-5): format!("openrouter/{model}@d{dim}@{post}"), post ∈ {"l2","raw"}
 
-// src/daemon/tools.rs — seam для интеграционных тестов (SC-2)
-pub fn search_docs_with(stages: &HybridStages, index: &ReadIndex, db: &Db,
-                        query: &str, limit: usize, rerank: bool) -> Result<SearchPayload>;
+// src/daemon/tools.rs — seam для интеграционных тестов (SC-2, T4)
+pub fn search_docs_with(stages: &HybridStages, db: &Db, cache: &Path, project: &Project,
+                        args: &Value, window: u32) -> Result<Value>;
+// args: query/limit/scope + опциональный "rerank": bool (FR-12)
 ```
+
+**DELTA-T2.1 (2026-10-14, фикс-раунд финального ревью):** `TransportResponse`
+несёт `retry_after` (429 уважает `Retry-After`, кап 30 с — FR-7); эмбеддинг-ответ
+валидируется по индексам (каждый ровно раз, в диапазоне); пустой `results` у
+non-empty rerank — явная ошибка; пер-попыточный таймаут 30 с; coverage считает
+уникальные `chunk_hash` (дубликаты текстов не занижают покрытие навсегда) и
+вычисляется по ключу кэша без построения клиента; plan-эмбеддинг выполняется до
+любых изменений состояния (ретрай watcher'а пере-планирует файлы, а не теряет
+векторы); CLI `index` резолвит стадии fail-fast.
+
+**DELTA-T2 (2026-10-14, реализовано):** `blocking::enter` заменяет пару
+`run_async`/`run_sync` (см. выше); `Transport` возвращает `{status, body}`
+(нужны коды для FR-7); ретрай — 4 попытки, 250 мс ×2 (кап 4 с) + джиттер ≤50 мс;
+`ReqwestTransport` переиспользует ambient runtime на blocking-потоках демона и
+владеет current-thread runtime в CLI/тестах; ключ закрыт `ApiKey(***)` в `Debug`.
 
 Инварианты: I1 — ответ короче/длиннее запроса или с разным dim → `Internal`,
 в кэш ничего не пишется (батч целиком). I2 — ключ никогда в `Debug`/логах

@@ -49,6 +49,46 @@
   (политика по докам, пересмотр при первом инциденте).
   Review (fresh): PASS/APPROVED, minors fixed in a follow-up commit (G1 default
   model line; rerank/embedding fixtures normalized to {request,status,response}).
+- Task T2: complete (2026-10-14). `src/hybrid/{mod,config}.rs` (ungated),
+  `{wire,openrouter}.rs` за feature `hybrid-remote` (reqwest/rustls-webpki-roots);
+  `blocking::enter` вместо run_async/run_sync (design DELTA-T2: daemon уже роутит
+  tool-вызовы через spawn_blocking); retry 4×250ms+джиттер; allowlist base_url;
+  ключ redacted. Тесты: hybrid_config (4, дефолтная сборка) + hybrid_openrouter
+  (12, фикстуры T1 через mock-транспорт, без сети).
+- Task T3: complete (2026-10-14). Untagged `hybrid` (bool | таблица) с
+  deny_unknown_fields и per-field дефолтами; `Config.hybrid_cfg`; validate:
+  provider/window/dimensions → Admission; `docsbase config` JSON с ступенями
+  через вынесенный `config_payload`. Тесты: +8 в tests/config.rs.
+- Task T4: complete (2026-10-14). Plan-эмбеддинг в index-джобе; полный sweep в
+  sync-джобе; авто-backfill при открытии проекта (`Shared::schedule_backfill`,
+  `embed_coverage` в `status`); `search_docs_with` seam с окном
+  max(limit, window), score = relevance, rerank=false → strict BM25, explicit
+  Protocol на rerank=true без ступени; `rerank`-параметр в MCP-схеме; direct
+  CLI через тот же seam. Тесты: unit-реранкер через seam (3) + hybrid_jobs (3).
+- Task T5: complete (2026-10-14). CI-джоба `linux-hybrid` (feature clippy+сьют,
+  SC-4 гейт без reqwest в дефолтном tree); `tests/hybrid_live.rs` (#[ignore]):
+  live smoke и golden-замер — прогон 14.10: BM25 10/10 (nDCG 1.000) →
+  rerank 10/10 (nDCG 1.000), паритет на golden-наборе (отчёт, не гейт, NFR-1).
+- Task T6: complete (2026-10-14). Product design §7/§8 (reqwest-строка, feature,
+  фаза-2 раздел), ADR-13 delta (dim/normalize в ключе, env-ключ, пины ревизий —
+  принятое ограничение A3/R2), ADR-14 (итерация 1 целиком), CONFIG.md
+  (hybrid-секции, семантика, пример), README EN/RU.
+- 2026-10-14: итоговое ревью ветки (final review) — PENDING (свежий ревьюер,
+  whole-branch diff).
+- 2026-10-14: итоговое ревью ветки: CHANGES REQUIRED — 3 Important (Retry-After
+  не внедрён; coverage считала вхождения, а не уникальные хэши → вечный backfill
+  при дубликатах; невалидировались индексы embeddings-ответа) + 13 Minor.
+- 2026-10-14: фикс-раунд (DELTA-T2.1): Retry-After с капом 30 с; coverage по
+  уникальным chunk_hash и без построения клиента (только ключ кэша); валидация
+  индексов (каждый ровно раз, в диапазоне) и явная ошибка на пустой `results`;
+  plan-эмбеддинг до любых изменений состояния (ретраи watcher'а пере-планируют);
+  fail-fast стадий в CLI index; явная ошибка на отсутствующий chunk text;
+  truncation JSON-сообщений; таймаут 30 с; overrides материализуют дефолты;
+  доки (OQ-2 закрыт, sketch §5, DELTA-T2.1). Новые тесты: Retry-After,
+  исчерпание ретраев, 401/402/413, транспортные ошибки, валидация индексов,
+  пустой rerank, границы embed_batches, дубликаты текстов в coverage.
+  minor (deferred): p95-числа NFR-1 в отчёт (live-замер даёт порядок величины,
+  формального p95 нет — вне гейта).
 - 2026-10-15: ревью PR #41 (punkhomov): NEEDS CHANGES — исправлено:
   error-фикстуры нормализованы в {request,status,response} (единый парсер для T2);
   FR-1/FR-2 уточнены (порядок по advisory-`index`, `dimensions` из конфига,

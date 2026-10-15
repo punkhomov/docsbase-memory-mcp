@@ -60,6 +60,7 @@ pub fn status() -> anyhow::Result<()> {
         0,
         None,
         &|_| false,
+        &|_| None,
     )?;
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())

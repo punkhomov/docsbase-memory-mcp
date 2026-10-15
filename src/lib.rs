@@ -5,6 +5,7 @@ pub mod config;
 pub mod conflict;
 pub mod daemon;
 pub mod error;
+pub mod hybrid;
 pub mod index;
 pub mod ipc;
 pub mod limits;
