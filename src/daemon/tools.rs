@@ -114,7 +114,10 @@ pub fn search_docs_with(
         let mut documents = Vec::with_capacity(ordered.len());
         for (chunk_id, _) in &ordered {
             let (doc_id, seq) = chunk_id_parts(*chunk_id);
-            documents.push(repo::chunk_text(db.connection(), doc_id, seq)?.unwrap_or_default());
+            let text = repo::chunk_text(db.connection(), doc_id, seq)?.ok_or_else(|| {
+                Error::internal(format!("chunk text missing for rerank (chunk {chunk_id})"))
+            })?;
+            documents.push(text);
         }
         let ranked = blocking::enter(|| reranker.rerank(query, &documents, documents.len()))?;
         let mut reranked: Vec<(u64, f32)> = Vec::with_capacity(ordered.len());

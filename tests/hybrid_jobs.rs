@@ -42,6 +42,9 @@ fn indexed_project() -> (TempDir, Db, i64) {
         ("a.md", "# A\n\nwidgets and sprockets.\n"),
         ("b.md", "# B\n\ncogs and gears.\n"),
         ("c.md", "# C\n\nmore widgets here.\n"),
+        // Two byte-identical documents: their chunks share one content hash.
+        ("dup-1.md", "identical duplicate body text.\n"),
+        ("dup-2.md", "identical duplicate body text.\n"),
     ] {
         fs::write(root.path().join(name), body).expect("write doc");
     }
@@ -64,7 +67,7 @@ fn coverage_and_backfill_with_a_fake_embedder() {
     assert_eq!(before.cached, 0, "nothing is embedded before the backfill");
 
     let backfilled = embed_project_chunks_with(&db, &embedder, project_id).expect("backfill");
-    assert_eq!(backfilled, before.total);
+    assert!(backfilled >= before.total, "every chunk text is processed");
     assert_eq!(embedder.calls.load(Ordering::SeqCst), 1);
 
     let after = coverage_with(&db, &embedder, project_id).expect("coverage");
@@ -75,7 +78,7 @@ fn coverage_and_backfill_with_a_fake_embedder() {
     );
 
     let again = embed_project_chunks_with(&db, &embedder, project_id).expect("second pass");
-    assert_eq!(again, before.total);
+    assert!(again >= before.total);
     assert_eq!(
         embedder.calls.load(Ordering::SeqCst),
         1,
@@ -114,5 +117,35 @@ fn enabled_hybrid_in_the_offline_build_is_an_admission_error() {
     assert!(
         matches!(error, docsbase_memory::error::Error::Admission { .. }),
         "{error}"
+    );
+}
+
+#[test]
+fn duplicate_chunk_texts_do_not_block_full_coverage() {
+    let (_cache, db, project_id) = indexed_project();
+    let embedder = FakeEmbedder {
+        calls: AtomicUsize::new(0),
+    };
+
+    let before = coverage_with(&db, &embedder, project_id).expect("coverage");
+    assert!(before.total > 0);
+
+    let backfilled = embed_project_chunks_with(&db, &embedder, project_id).expect("backfill");
+    assert!(backfilled >= before.total);
+
+    let after = coverage_with(&db, &embedder, project_id).expect("coverage");
+    assert_eq!(
+        (after.cached, after.total),
+        (before.total, before.total),
+        "content-addressed coverage counts distinct chunk hashes and converges (FR-15)"
+    );
+
+    let calls = embedder.calls.load(Ordering::SeqCst);
+    let again = embed_project_chunks_with(&db, &embedder, project_id).expect("second pass");
+    assert!(again >= before.total);
+    assert_eq!(
+        embedder.calls.load(Ordering::SeqCst),
+        calls,
+        "converged coverage stays a no-op"
     );
 }

@@ -261,6 +261,10 @@ pub fn chunk_text(conn: &Connection, doc_id: i64, seq: u32) -> Result<Option<Str
     .map_err(db_error)
 }
 
+/// Citation fields of one chunk for `search_docs` (FR-20).
+///
+/// # Errors
+/// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn citation_for(conn: &Connection, doc_id: i64, seq: u32) -> Result<Option<Citation>> {
     conn.query_row(
         "SELECT d.rel_path, c.heading_path, c.line_start, c.line_end

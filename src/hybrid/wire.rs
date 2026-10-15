@@ -16,6 +16,8 @@ pub struct TransportResponse {
     pub status: u16,
     /// Response body verbatim.
     pub body: String,
+    /// `Retry-After` in seconds when the provider sent one (FR-7).
+    pub retry_after: Option<Duration>,
 }
 
 /// Minimal synchronous HTTP seam; the real implementation owns the runtime.
@@ -41,6 +43,10 @@ pub const EMBED_BATCH_BYTES: usize = 512 * 1024;
 
 /// Total attempts (first try plus retries) for retryable failures (FR-7).
 pub const RETRY_ATTEMPTS: u32 = 4;
+
+/// Upper bound for a provider-requested `Retry-After` (a rogue value must not
+/// stall an interactive search forever).
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// Statuses that get an exponential-backoff retry (FR-7, spike table).
 #[must_use]
@@ -80,7 +86,7 @@ pub fn error_message(body: &str) -> String {
                 .get("error")?
                 .get("message")?
                 .as_str()
-                .map(str::to_owned)
+                .map(|message| truncate(message, 300))
         });
     parsed.unwrap_or_else(|| truncate(body, 300))
 }
@@ -110,11 +116,16 @@ pub fn post_with_retry(
     let mut delay = Duration::from_millis(250);
     let mut last: Option<Error> = None;
     for attempt in 1..=RETRY_ATTEMPTS {
+        let mut wait = None;
         match transport.post_json(url, headers, body) {
             Ok(response) if (200..300).contains(&response.status) => return Ok(response),
             Ok(response) if is_retryable(response.status) => {
                 if attempt == RETRY_ATTEMPTS {
                     return Err(error_for_status(response.status, &response.body));
+                }
+                if response.status == 429 {
+                    // Honor Retry-After (capped), falling back to our backoff.
+                    wait = response.retry_after;
                 }
                 last = Some(error_for_status(response.status, &response.body));
             }
@@ -126,7 +137,8 @@ pub fn post_with_retry(
                 last = Some(err);
             }
         }
-        std::thread::sleep(delay.saturating_add(jitter()));
+        let pause = wait.map_or(delay, |after| after.min(MAX_RETRY_AFTER));
+        std::thread::sleep(pause.saturating_add(jitter()));
         delay = delay.saturating_mul(2).min(Duration::from_secs(4));
     }
     Err(last.unwrap_or_else(|| Error::internal("OpenRouter retry loop exhausted")))
@@ -162,4 +174,57 @@ pub fn embed_batches(texts: &[String]) -> Vec<Range<usize>> {
         batches.push(start..texts.len());
     }
     batches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(count: usize, bytes: usize) -> Vec<String> {
+        (0..count).map(|_| "x".repeat(bytes)).collect()
+    }
+
+    #[test]
+    fn batches_split_on_count_boundary() {
+        let texts = texts(EMBED_BATCH_TEXTS + 5, 1);
+        let batches = embed_batches(&texts);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0], 0..EMBED_BATCH_TEXTS);
+        assert_eq!(batches[1], EMBED_BATCH_TEXTS..texts.len());
+    }
+
+    #[test]
+    fn batches_split_on_byte_budget() {
+        // Two chunks fit; the third crosses the byte budget.
+        let half = EMBED_BATCH_BYTES / 2;
+        let texts = texts(3, half);
+        let batches = embed_batches(&texts);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0], 0..2);
+        assert_eq!(batches[1], 2..3);
+    }
+
+    #[test]
+    fn an_oversized_single_text_goes_alone() {
+        let texts = vec!["a".repeat(EMBED_BATCH_BYTES + 1), "small".to_owned()];
+        let batches = embed_batches(&texts);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0], 0..1);
+        assert_eq!(batches[1], 1..2);
+    }
+
+    #[test]
+    fn empty_input_produces_no_batches() {
+        assert!(embed_batches(&[]).is_empty());
+    }
+
+    #[test]
+    fn error_message_prefers_the_provider_envelope_and_truncates() {
+        let envelope = r#"{"error":{"message":"Input is empty"}}"#;
+        assert_eq!(error_message(envelope), "Input is empty");
+        let raw = "x".repeat(1000);
+        let message = error_message(&raw);
+        assert!(message.ends_with('…'), "raw bodies are truncated");
+        assert!(message.len() < 400);
+    }
 }

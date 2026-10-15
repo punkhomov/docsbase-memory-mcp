@@ -97,7 +97,7 @@ pub mod blocking {
 }
 
 // src/hybrid/wire.rs — feature-gated: DTO + transport
-pub struct TransportResponse { pub status: u16, pub body: String }
+pub struct TransportResponse { pub status: u16, pub body: String, pub retry_after: Option<Duration> }
 pub trait Transport: Send + Sync {
     fn post_json(&self, url: &str, headers: &[(String, String)], body: &str) -> Result<TransportResponse>;
 }
@@ -121,9 +121,19 @@ pub struct ReqwestTransport { /* reqwest::Client + fallback runtime */ } // impl
 // model_id (FR-5): format!("openrouter/{model}@d{dim}@{post}"), post ∈ {"l2","raw"}
 
 // src/daemon/tools.rs — seam для интеграционных тестов (SC-2, T4)
-pub fn search_docs_with(stages: &HybridStages, index: &ReadIndex, db: &Db,
-                        query: &str, limit: usize, rerank: bool) -> Result<SearchPayload>;
+pub fn search_docs_with(stages: &HybridStages, db: &Db, cache: &Path, project: &Project,
+                        args: &Value, window: u32) -> Result<Value>;
+// args: query/limit/scope + опциональный "rerank": bool (FR-12)
 ```
+
+**DELTA-T2.1 (2026-10-14, фикс-раунд финального ревью):** `TransportResponse`
+несёт `retry_after` (429 уважает `Retry-After`, кап 30 с — FR-7); эмбеддинг-ответ
+валидируется по индексам (каждый ровно раз, в диапазоне); пустой `results` у
+non-empty rerank — явная ошибка; пер-попыточный таймаут 30 с; coverage считает
+уникальные `chunk_hash` (дубликаты текстов не занижают покрытие навсегда) и
+вычисляется по ключу кэша без построения клиента; plan-эмбеддинг выполняется до
+любых изменений состояния (ретрай watcher'а пере-планирует файлы, а не теряет
+векторы); CLI `index` резолвит стадии fail-fast.
 
 **DELTA-T2 (2026-10-14, реализовано):** `blocking::enter` заменяет пару
 `run_async`/`run_sync` (см. выше); `Transport` возвращает `{status, body}`

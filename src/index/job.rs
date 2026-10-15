@@ -368,19 +368,20 @@ fn finish_plan(
     }
     stats.removed = removed.len();
 
-    // Tantivy first, then a short SQLite write transaction (R2): the marker
-    // rows make a crash in between reprocess on the next run.
-    index.commit()?;
-    apply_plan(db, project_id, plan, removed)?;
-    // Embed the freshly written chunks when the hybrid stage is enabled: new
-    // content becomes semantically available immediately; failures stay
-    // explicit and fail the job (NFR-2, FR-1). Unchanged chunks are untouched
-    // (the full pass lives in the sync job and the open-time backfill).
+    // Embed BEFORE any state change: a provider failure (explicit error,
+    // NFR-2) then leaves the batch unapplied, so a watcher retry re-plans the
+    // same files instead of skipping them as unchanged and silently losing
+    // the vectors. Unchanged chunks are untouched (the full pass lives in the
+    // sync job and the open-time backfill).
     let texts: Vec<String> = plan
         .iter()
         .flat_map(|pending| pending.chunks.iter().map(|chunk| chunk.text.clone()))
         .collect();
     crate::hybrid::jobs::embed_texts(db.cache_root(), &config.hybrid_cfg, &texts)?;
+    // Tantivy first, then a short SQLite write transaction (R2): the marker
+    // rows make a crash in between reprocess on the next run.
+    index.commit()?;
+    apply_plan(db, project_id, plan, removed)?;
     Ok(())
 }
 

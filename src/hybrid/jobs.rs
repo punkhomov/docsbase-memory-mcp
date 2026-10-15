@@ -87,14 +87,15 @@ pub fn embed_project_chunks_with(db: &Db, embedder: &dyn Embedder, project_id: i
 /// # Errors
 /// Registry/cache failures; feature errors when enabled in an offline build.
 pub fn coverage(db: &Db, cfg: &HybridCfg, project_id: i64) -> Result<Option<Coverage>> {
-    if !cfg.enabled || cfg.embedding.is_none() {
+    if !cfg.enabled {
         return Ok(None);
     }
-    let stages = from_config(cfg, cfg!(feature = "hybrid-remote"))?;
-    let Some(embedder) = stages.embedder else {
+    let Some(embedding) = &cfg.embedding else {
         return Ok(None);
     };
-    coverage_with(db, embedder.as_ref(), project_id).map(Some)
+    // Coverage needs only the cache key, not a provider client: reporting
+    // stays cheap and never builds runtimes per status call (NFR-1).
+    coverage_for_key(db, &super::config::cache_model_id(embedding), project_id).map(Some)
 }
 
 /// [`coverage`] with an explicit embedder (tests).
@@ -102,8 +103,18 @@ pub fn coverage(db: &Db, cfg: &HybridCfg, project_id: i64) -> Result<Option<Cove
 /// # Errors
 /// Registry and cache failures.
 pub fn coverage_with(db: &Db, embedder: &dyn Embedder, project_id: i64) -> Result<Coverage> {
+    coverage_for_key(db, embedder.model_id(), project_id)
+}
+
+/// Coverage for one cache key. The cache is content-addressed, so coverage
+/// counts *distinct* chunk hashes: duplicated chunk texts share one vector
+/// and must not keep coverage below 100% forever (FR-15).
+///
+/// # Errors
+/// Registry and cache failures.
+pub fn coverage_for_key(db: &Db, model_id: &str, project_id: i64) -> Result<Coverage> {
     let texts = repo::chunk_texts(db.connection(), project_id)?;
-    let hashes: Vec<String> = texts
+    let hashes: std::collections::HashSet<String> = texts
         .iter()
         .map(|text| crate::vector_cache::chunk_hash(text))
         .collect();
@@ -114,7 +125,8 @@ pub fn coverage_with(db: &Db, embedder: &dyn Embedder, project_id: i64) -> Resul
             total: 0,
         });
     }
+    let unique: Vec<String> = hashes.into_iter().collect();
     let cache = VectorCache::open(db.cache_root())?;
-    let cached = cache.count_present(embedder.model_id(), &hashes)?;
+    let cached = cache.count_present(model_id, &unique)?;
     Ok(Coverage { cached, total })
 }

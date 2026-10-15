@@ -288,9 +288,9 @@ pub trait Reranker: Send + Sync {
   (zod-envelope), пустые `documents` → 400; rerank `top_n` клампится; фикстуры —
   `tests/fixtures/openrouter/`. Лимиты docs/call по-прежнему берём из батч-конфига
   (≤128 текстов / byte-budget), 429/5xx не провоцировались — политика по докам.
-- **OQ-2:** значение `HTTP-Referer`/`X-Title` (предложение: URL репо +
-  `docsbase-memory-mcp`; `X-OpenRouter-Categories` не задаём). Закрывается в T2
-  (константы в `openrouter.rs`, подтверждаются в PR).
+- **OQ-2 (ЗАКРЫТ в T2):** `HTTP-Referer = https://github.com/punkhomov/docsbase-memory-mcp`,
+  `X-Title = docsbase-memory-mcp`; `X-OpenRouter-Categories` не задаём (константы
+  в `src/hybrid/openrouter.rs`).
 
 ## References (ресёрч 2026-10-14)
 

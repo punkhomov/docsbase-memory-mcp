@@ -248,8 +248,14 @@ impl Config {
             self.auto_index = v;
         }
         if let Some(v) = overrides.hybrid {
+            // Boolean override replaces the whole hybrid value, mirroring the
+            // `hybrid = true` file shorthand (FR-13): enabled means defaults.
             self.hybrid = v;
-            self.hybrid_cfg.enabled = v;
+            self.hybrid_cfg = if v {
+                HybridCfg::enabled_with_defaults()
+            } else {
+                HybridCfg::default()
+            };
         }
         self
     }

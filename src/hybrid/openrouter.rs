@@ -141,22 +141,43 @@ impl OpenRouterClient {
                     batch.len()
                 )));
             }
-            let mut ordered = parsed.data;
-            ordered.sort_by_key(|datum| datum.index);
-            for datum in ordered {
-                if datum.embedding.is_empty() {
+            // The provider must return each index exactly once (design §5:
+            // count + dim + index-range validation) - duplicated, missing or
+            // out-of-range indices mean schema drift and must never persist a
+            // vector under the wrong content hash (I1/A1).
+            let mut slots: Vec<Option<Vec<f32>>> = (0..batch.len()).map(|_| None).collect();
+            for datum in parsed.data {
+                if datum.index >= batch.len() {
+                    return Err(Error::internal(format!(
+                        "OpenRouter returned index {} for {} inputs",
+                        datum.index,
+                        batch.len()
+                    )));
+                }
+                if slots[datum.index].is_some() {
+                    return Err(Error::internal(format!(
+                        "OpenRouter returned index {} twice",
+                        datum.index
+                    )));
+                }
+                slots[datum.index] = Some(datum.embedding);
+            }
+            for slot in slots {
+                let embedding =
+                    slot.ok_or_else(|| Error::internal("OpenRouter skipped an input index"))?;
+                if embedding.is_empty() {
                     return Err(Error::internal("OpenRouter returned an empty vector"));
                 }
-                if datum.embedding.len() != dimensions as usize {
+                if embedding.len() != dimensions as usize {
                     return Err(Error::internal(format!(
                         "OpenRouter returned a {}-dimensional vector, expected {dimensions}",
-                        datum.embedding.len()
+                        embedding.len()
                     )));
                 }
                 let vector = if normalize {
-                    l2_normalize(datum.embedding)
+                    l2_normalize(embedding)
                 } else {
-                    datum.embedding
+                    embedding
                 };
                 vectors.push(vector);
             }
@@ -197,6 +218,13 @@ impl OpenRouterClient {
                 err,
             )
         })?;
+        if parsed.results.is_empty() {
+            // Empty results for non-empty documents are schema drift, not an
+            // implicit fallback to BM25 order (A1, FR-11).
+            return Err(Error::internal(
+                "OpenRouter rerank returned no results for non-empty documents",
+            ));
+        }
         let mut ranked: Vec<(usize, f32)> = Vec::with_capacity(parsed.results.len());
         for result in parsed.results {
             if result.index >= docs.len() {
@@ -366,8 +394,10 @@ impl ReqwestTransport {
     /// # Errors
     /// [`Error::Internal`] when the HTTP client or runtime cannot be built.
     pub fn new() -> Result<Self> {
+        // 30 s per attempt keeps the worst retry chain (~2 min) bounded for
+        // interactive search (NFR-1; a rerank/embed call takes ~100-500 ms).
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(Duration::from_secs(30))
             .build()
             .map_err(|err| Error::internal_with_source("build OpenRouter http client", err))?;
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -402,11 +432,21 @@ impl Transport for ReqwestTransport {
                 .await
                 .map_err(|err| Error::internal_with_source("OpenRouter request failed", err))?;
             let status = response.status().as_u16();
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .map(Duration::from_secs);
             let body = response
                 .text()
                 .await
                 .map_err(|err| Error::internal_with_source("read OpenRouter response", err))?;
-            Ok(TransportResponse { status, body })
+            Ok(TransportResponse {
+                status,
+                body,
+                retry_after,
+            })
         };
         self.block_on(future)
     }

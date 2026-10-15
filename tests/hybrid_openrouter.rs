@@ -5,6 +5,7 @@
 //! SC-5; I1, I2, I3). No network: everything runs through a mock transport.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use docsbase_memory::error::{Error, Result};
@@ -59,10 +60,13 @@ fn strings(value: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-/// Mock transport: a FIFO of recorded responses, plus a call log.
+type ScriptedResponse = (u16, String, Option<u64>);
+type ResponseQueue = Arc<Mutex<VecDeque<ScriptedResponse>>>;
+
+/// Mock transport: a FIFO of scripted responses, plus a call log.
 #[derive(Clone, Default)]
 struct MockTransport {
-    responses: Arc<Mutex<VecDeque<(u16, String)>>>,
+    responses: ResponseQueue,
     calls: Arc<Mutex<Vec<(String, String)>>>,
 }
 
@@ -72,10 +76,18 @@ impl MockTransport {
         {
             let mut queue = mock.responses.lock().expect("queue");
             for fixture in responses {
-                queue.push_back((fixture.status, fixture.response.to_string()));
+                queue.push_back((fixture.status, fixture.response.to_string(), None));
             }
         }
         mock
+    }
+
+    fn push(&self, status: u16, body: &str, retry_after_secs: Option<u64>) {
+        self.responses.lock().expect("queue").push_back((
+            status,
+            body.to_owned(),
+            retry_after_secs,
+        ));
     }
 
     fn calls(&self) -> Vec<(String, String)> {
@@ -94,13 +106,17 @@ impl Transport for MockTransport {
             .lock()
             .expect("calls")
             .push((url.to_owned(), body.to_owned()));
-        let (status, body) = self
+        let (status, body, retry_after) = self
             .responses
             .lock()
             .expect("queue")
             .pop_front()
             .expect("mock transport received more calls than scripted");
-        Ok(TransportResponse { status, body })
+        Ok(TransportResponse {
+            status,
+            body,
+            retry_after: retry_after.map(std::time::Duration::from_secs),
+        })
     }
 }
 
@@ -320,4 +336,146 @@ fn embedder_adapter_reports_the_cache_key() {
         embedder.model_id(),
         "openrouter/qwen/qwen3-embedding-8b@d1024@l2"
     );
+}
+
+#[test]
+fn retry_after_is_honored_on_429() {
+    let fx = fixture(EMBED_QWEN);
+    let mock = MockTransport::default();
+    mock.push(429, r#"{"error":{"message":"Rate limited"}}"#, Some(0));
+    mock.push(fx.status, &fx.response.to_string(), None);
+    let client = make_client(&mock);
+    let input = texts(&fx.request);
+
+    let vectors =
+        blocking::enter(|| client.embed_texts("qwen/qwen3-embedding-8b", 1024, true, &input))
+            .expect("retry after 429 must succeed");
+    assert_eq!(vectors.len(), input.len());
+    assert_eq!(mock.calls().len(), 2);
+}
+
+#[test]
+fn retryable_errors_after_all_attempts_are_explicit() {
+    let fx = fixture(EMBED_QWEN);
+    let mock = MockTransport::default();
+    for _ in 0..4 {
+        mock.push(503, r#"{"error":{"message":"Service Unavailable"}}"#, None);
+    }
+    let client = make_client(&mock);
+    let input = texts(&fx.request);
+    let error =
+        blocking::enter(|| client.embed_texts("qwen/qwen3-embedding-8b", 1024, true, &input))
+            .expect_err("exhausted retries must fail");
+    assert!(
+        format!("{error}").contains("Service Unavailable"),
+        "{error}"
+    );
+    assert_eq!(mock.calls().len(), 4, "first try plus three retries");
+}
+
+#[test]
+fn non_retryable_error_branches_carry_their_messages() {
+    for (status, body, fragment) in [
+        (
+            401,
+            r#"{"error":{"message":"Invalid key"}}"#,
+            "authentication failed",
+        ),
+        (
+            402,
+            r#"{"error":{"message":"No credits"}}"#,
+            "payment required",
+        ),
+        (
+            413,
+            r#"{"error":{"message":"Too large"}}"#,
+            "payload too large",
+        ),
+    ] {
+        let mock = MockTransport::default();
+        mock.push(status, body, None);
+        let client = make_client(&mock);
+        let error = blocking::enter(|| {
+            client.embed_texts("qwen/qwen3-embedding-8b", 1024, true, &["x".to_owned()])
+        })
+        .expect_err("non-retryable status must fail");
+        let message = format!("{error}");
+        assert!(message.contains(fragment), "{status}: {message}");
+        assert_eq!(mock.calls().len(), 1, "{status} must not be retried");
+    }
+}
+
+/// Transport that always fails at the transport layer (retried, FR-7).
+struct FailingTransport {
+    calls: AtomicUsize,
+}
+
+impl Transport for FailingTransport {
+    fn post_json(
+        &self,
+        _url: &str,
+        _headers: &[(String, String)],
+        _body: &str,
+    ) -> Result<TransportResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(Error::internal("connection reset"))
+    }
+}
+
+#[test]
+fn transport_failures_are_retried_then_surface() {
+    let transport = FailingTransport {
+        calls: AtomicUsize::new(0),
+    };
+    let client = OpenRouterClient::new(BASE_URL, "test-key", Box::new(transport)).expect("client");
+    let error = blocking::enter(|| {
+        client.embed_texts("qwen/qwen3-embedding-8b", 1024, true, &["x".to_owned()])
+    })
+    .expect_err("transport failure must surface");
+    assert!(format!("{error}").contains("connection reset"), "{error}");
+}
+
+#[test]
+fn embedding_response_indices_are_validated() {
+    let input = vec!["a".to_owned(), "b".to_owned()];
+    let vector = vec![0.1f32; 1024];
+    let duplicated = serde_json::json!({
+        "data": [
+            { "index": 0, "embedding": vector },
+            { "index": 0, "embedding": vector },
+        ]
+    })
+    .to_string();
+    let mock = MockTransport::default();
+    mock.push(200, &duplicated, None);
+    let client = make_client(&mock);
+    let error = blocking::enter(|| client.embed_texts("m", 1024, true, &input))
+        .expect_err("duplicate index must fail");
+    assert!(format!("{error}").contains("twice"), "{error}");
+
+    let out_of_range = serde_json::json!({
+        "data": [
+            { "index": 0, "embedding": vector },
+            { "index": 7, "embedding": vector },
+        ]
+    })
+    .to_string();
+    let mock = MockTransport::default();
+    mock.push(200, &out_of_range, None);
+    let client = make_client(&mock);
+    let error = blocking::enter(|| client.embed_texts("m", 1024, true, &input))
+        .expect_err("out-of-range index must fail");
+    assert!(format!("{error}").contains("index 7"), "{error}");
+}
+
+#[test]
+fn empty_rerank_results_for_non_empty_documents_are_schema_drift() {
+    let fx = fixture(RERANK_V35);
+    let docs = documents(&fx.request);
+    let mock = MockTransport::default();
+    mock.push(200, r#"{"results":[]}"#, None);
+    let client = make_client(&mock);
+    let error = blocking::enter(|| client.rerank("cohere/rerank-v3.5", "q", &docs, docs.len()))
+        .expect_err("empty results must fail");
+    assert!(format!("{error}").contains("no results"), "{error}");
 }
