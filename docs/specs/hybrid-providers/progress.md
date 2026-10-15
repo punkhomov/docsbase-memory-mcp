@@ -110,3 +110,17 @@
 - 2026-10-15: план итерации 2 (dense + RRF) зафиксирован: DELTA-3 (FR-15…FR-18),
   design DELTA-7, задачи T7–T12; ветка `feat/hybrid-iteration-2` от свежего main
   (в неё влит #43 из `feat/hybrid-t1-spike` — base #43 не перецелился на main).
+- Task T9: complete (2026-10-15). Схема v2: `projects.index_generation`
+  (аддитивная миграция; re-read версии под BEGIN IMMEDIATE чинит гонки и потерянный
+  version-write, ALTER идемпотентен через пробу колонки). `repo::{chunk_hashes,
+  index_generation,bump_index_generation}`; инкремент поколения — в R2-транзакции
+  `apply_plan` и только при непустом плане/удалениях (no-op sync не инвалидирует).
+  Dense-кэш `hybrid::dense::{DenseCache,DenseIndex,DenseRows}`: ленивое построение,
+  инвалидация по поколению, cap-деградация (`DENSE_CACHE_MAX_VECTORS=1_000_000`,
+  стриминговый `top_k_iter` с bounded-хипом). Тесты: миграции v1→v2 + lost-version
+  repair + конкурентность, `chunk_hashes` согласован с `chunk_texts`, поколение
+  растёт только при применении плана, провал hybrid-плана (offline) не трогает
+  поколение, кэш hit/rebuild/cap. Тестовые хардкоды schema=1 переведены на
+  `migrations::SCHEMA_VERSION` (admission/store/cli_read/mcp_registry/mcp_frontend/
+  install). minor (deferred): status-выход не показывает `index_generation`
+  (внутренний маркер).

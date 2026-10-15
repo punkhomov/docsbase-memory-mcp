@@ -341,7 +341,10 @@ fn status_reports_sessions_watcher_versions() {
     let status = bound.call_tool("status", json!({})).expect("status");
     assert_eq!(status["build_id"], build_id());
     assert_eq!(status["protocol_version"], PROTOCOL_VERSION);
-    assert_eq!(status["schema_version"], 1);
+    assert_eq!(
+        status["schema_version"],
+        docsbase_memory::store::migrations::SCHEMA_VERSION
+    );
     assert!(
         status["sessions"].as_u64().unwrap_or(0) >= 1,
         "status: {status}"

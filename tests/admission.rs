@@ -78,9 +78,10 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
 #[test]
 fn build_mismatch_refuses_and_logs() {
     let env = Env::new();
-    env.write_state("docsbase 0.0.0-old", 1);
+    let schema = docsbase_memory::store::migrations::SCHEMA_VERSION;
+    env.write_state("docsbase 0.0.0-old", schema);
 
-    let err = Lease::acquire(env.cache(), &build_id(), 1).expect_err("must refuse");
+    let err = Lease::acquire(env.cache(), &build_id(), schema).expect_err("must refuse");
     assert!(matches!(err, Error::Admission { .. }), "{err:?}");
     assert_eq!(err.mcp_code(), -32010);
 
@@ -105,7 +106,12 @@ fn schema_mismatch_refuses() {
     let env = Env::new();
     env.write_state(&build_id(), 99);
 
-    let err = Lease::acquire(env.cache(), &build_id(), 1).expect_err("must refuse");
+    let err = Lease::acquire(
+        env.cache(),
+        &build_id(),
+        docsbase_memory::store::migrations::SCHEMA_VERSION,
+    )
+    .expect_err("must refuse");
     assert!(matches!(err, Error::Admission { .. }), "{err:?}");
     assert!(
         env.conflicts().contains("schema_mismatch"),
@@ -153,7 +159,12 @@ fn second_daemon_refused() {
     let env = Env::new();
     ensure_daemon_with(env.cache(), Some(&daemon_bin())).expect("start");
 
-    let err = Lease::acquire(env.cache(), &build_id(), 1).expect_err("must refuse");
+    let err = Lease::acquire(
+        env.cache(),
+        &build_id(),
+        docsbase_memory::store::migrations::SCHEMA_VERSION,
+    )
+    .expect_err("must refuse");
     assert!(matches!(err, Error::Admission { .. }), "{err:?}");
     assert!(env.conflicts().contains("lock_busy"), "{}", env.conflicts());
 
@@ -178,7 +189,12 @@ fn lock_recovered_after_kill() {
     child.kill().expect("kill -9");
     child.wait().expect("reap");
 
-    let lease = Lease::acquire(env.cache(), &build_id(), 1).expect("recover lock");
+    let lease = Lease::acquire(
+        env.cache(),
+        &build_id(),
+        docsbase_memory::store::migrations::SCHEMA_VERSION,
+    )
+    .expect("recover lock");
     drop(lease);
 
     ensure_daemon_with(env.cache(), Some(&daemon_bin())).expect("fresh daemon starts");

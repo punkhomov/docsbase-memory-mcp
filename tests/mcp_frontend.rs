@@ -86,7 +86,7 @@ impl FakeDaemon {
             "pid": std::process::id(),
             "socket": endpoint,
             "build_id": docsbase_memory::ipc::protocol::build_id(),
-            "schema_version": 1,
+            "schema_version": docsbase_memory::store::migrations::SCHEMA_VERSION,
             "cache_root": cache,
         });
         fs::write(

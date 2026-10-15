@@ -6,7 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Error, Result};
+use crate::index::tantivy_index::chunk_id;
 use crate::store::models::{SyncJob, SyncState};
+use crate::vector_cache::chunk_hash;
 
 /// Identity and hash of an already indexed document.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +257,67 @@ pub fn chunk_text(conn: &Connection, doc_id: i64, seq: u32) -> Result<Option<Str
     )
     .optional()
     .map_err(db_error)
+}
+
+/// Current chunk set of `project_id` as `(chunk_id, content_hash)` rows in
+/// `(doc_id, seq)` order; `chunk_id` matches the ids the lexical index
+/// produces, so the dense stage can fuse both ranked lists (FR-16).
+///
+/// # Errors
+/// Returns [`Error::Internal`] on `SQLite` failures or a chunk row whose
+/// sequence does not fit the composite-id layout.
+pub fn chunk_hashes(conn: &Connection, project_id: i64) -> Result<Vec<(u64, String)>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT c.doc_id, c.seq, c.text FROM chunks c JOIN docs d ON d.id = c.doc_id
+             WHERE d.project_id = ?1 ORDER BY c.doc_id, c.seq",
+        )
+        .map_err(db_error)?;
+    let rows = statement
+        .query_map([project_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(db_error)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (doc_id, seq, text) = row.map_err(db_error)?;
+        let seq = u32::try_from(seq)
+            .map_err(|_| Error::internal(format!("chunk seq {seq} does not fit 32 bits")))?;
+        out.push((chunk_id(doc_id, seq), chunk_hash(&text)));
+    }
+    Ok(out)
+}
+
+/// Monotonic index generation of `project_id` (dense-cache invalidation,
+/// DELTA-7); bumped by every applied plan.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on `SQLite` failure or a missing project.
+pub fn index_generation(conn: &Connection, project_id: i64) -> Result<i64> {
+    conn.query_row(
+        "SELECT index_generation FROM projects WHERE id = ?1",
+        [project_id],
+        |row| row.get(0),
+    )
+    .map_err(db_error)
+}
+
+/// Bumps the index generation inside the caller's transaction (the R2 apply
+/// transaction, DELTA-7).
+///
+/// # Errors
+/// Returns [`Error::Internal`] on `SQLite` failures.
+pub fn bump_index_generation(conn: &Connection, project_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE projects SET index_generation = index_generation + 1 WHERE id = ?1",
+        [project_id],
+    )
+    .map_err(db_error)?;
+    Ok(())
 }
 
 /// Citation fields of one chunk for `search_docs` (FR-20).

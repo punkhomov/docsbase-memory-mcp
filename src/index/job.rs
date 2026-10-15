@@ -528,6 +528,11 @@ fn apply_plan(db: &mut Db, project_id: i64, plan: &[Pending], removed: &[&DocSta
     for state in removed {
         repo::delete_doc(&tx, state.id)?;
     }
+    // The generation changes only when the chunk set does: dense caches key
+    // on it (DELTA-7), and a no-op sync must not invalidate them.
+    if !plan.is_empty() || !removed.is_empty() {
+        repo::bump_index_generation(&tx, project_id)?;
+    }
 
     tx.commit()
         .map_err(|err| Error::internal_with_source(format!("commit sqlite: {err}"), err))

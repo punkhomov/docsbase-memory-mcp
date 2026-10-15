@@ -222,7 +222,10 @@ fn install_owned_artifacts() {
         manifest["cache_root"],
         serde_json::json!(canon(env.cache()))
     );
-    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(
+        manifest["schema_version"],
+        docsbase_memory::store::migrations::SCHEMA_VERSION
+    );
     assert!(
         manifest["build_id"]
             .as_str()

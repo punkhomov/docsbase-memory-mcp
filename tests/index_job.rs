@@ -76,6 +76,47 @@ impl Env {
     }
 }
 
+fn index_generation(env: &Env) -> i64 {
+    env.count("SELECT index_generation FROM projects WHERE id = 1")
+}
+
+#[test]
+fn index_generation_tracks_applied_plans_only() {
+    let mut env = Env::new(&[("a.md", "# A\n\nalpha\n")]);
+    env.run();
+    assert_eq!(index_generation(&env), 1, "the first run applies a plan");
+    env.run();
+    assert_eq!(index_generation(&env), 1, "a no-op run leaves it alone");
+    write_file(env.root.path(), "a.md", b"# A\n\nalpha changed\n");
+    env.run();
+    assert_eq!(index_generation(&env), 2, "a changed document bumps it");
+}
+
+#[cfg(not(feature = "hybrid-remote"))]
+#[test]
+fn failed_hybrid_plan_leaves_generation_unchanged() {
+    let mut env = Env::new(&[("a.md", "# A\n\nalpha\n")]);
+    env.run();
+    let before = index_generation(&env);
+    write_file(env.root.path(), "a.md", b"# A\n\nalpha changed again\n");
+    let config = Config {
+        hybrid: true,
+        hybrid_cfg: docsbase_memory::hybrid::HybridCfg::enabled_with_defaults(),
+        ..Config::default()
+    };
+    let err = run_full(&mut env.db, &mut env.index, &env.project, &config)
+        .expect_err("the offline build cannot embed");
+    let message = err.to_string();
+    assert!(
+        message.contains("hybrid-remote") || message.contains("feature"),
+        "feature-off error expected, got: {message}"
+    );
+    assert_eq!(
+        index_generation(&env),
+        before,
+        "a failed plan bumps nothing"
+    );
+}
 fn write_file(root: &Path, rel: &str, bytes: &[u8]) {
     let path = root.join(rel);
     if let Some(parent) = path.parent() {

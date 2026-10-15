@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version understood by this build.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 const SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS projects (
@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
 );
 ";
 
+const SCHEMA_V2: &str = "
+ALTER TABLE projects ADD COLUMN index_generation INTEGER NOT NULL DEFAULT 0;
+";
+
 /// Migrates the database to [`SCHEMA_VERSION`].
 ///
 /// # Errors
@@ -70,14 +74,59 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         return Ok(());
     }
     // `BEGIN IMMEDIATE` serializes concurrent first opens (daemon and CLI can
-    // race on a fresh cache); `IF NOT EXISTS` keeps a lost version write from
-    // turning the loser into a hard error.
-    conn.execute_batch(&format!(
-        "BEGIN IMMEDIATE;{SCHEMA_V1}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
-    ))
-    .map_err(|err| {
-        Error::internal_with_source(format!("migrate schema to v{SCHEMA_VERSION}: {err}"), err)
-    })
+    // race on a fresh cache). The version is re-read inside the lock: the
+    // fast path above may be stale, and the re-read keeps the loser of a race
+    // from replaying an `ALTER TABLE` (`ADD COLUMN` has no `IF NOT EXISTS`).
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(migrate_error)?;
+    let version = match read_version(conn) {
+        Ok(version) => version,
+        Err(err) => {
+            drop(conn.execute_batch("ROLLBACK;"));
+            return Err(err);
+        }
+    };
+    if version == SCHEMA_VERSION {
+        conn.execute_batch("COMMIT;").map_err(migrate_error)?;
+        return Ok(());
+    }
+    let mut script = String::new();
+    if version < 1 {
+        script += SCHEMA_V1;
+    }
+    // `IF NOT EXISTS` keeps a lost version write idempotent for the tables;
+    // a column probe does the same for the `ALTER TABLE` steps.
+    if version < SCHEMA_VERSION && !has_column(conn, "projects", "index_generation")? {
+        script += SCHEMA_V2;
+    }
+    script.push_str("PRAGMA user_version = ");
+    script.push_str(&SCHEMA_VERSION.to_string());
+    script.push(';');
+    if let Err(err) = conn.execute_batch(&format!("{script}COMMIT;")) {
+        drop(conn.execute_batch("ROLLBACK;"));
+        return Err(migrate_error(err));
+    }
+    Ok(())
+}
+
+fn migrate_error(err: rusqlite::Error) -> Error {
+    Error::internal_with_source(format!("migrate schema to v{SCHEMA_VERSION}: {err}"), err)
+}
+
+/// Whether `table` has the named column (idempotent migrations).
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(migrate_error)?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(migrate_error)?;
+    for name in names {
+        if name.map_err(migrate_error)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Reads `PRAGMA user_version`.
@@ -123,6 +172,31 @@ mod tests {
         assert_eq!(read_version(&conn).expect("version"), 0);
         migrate(&conn).expect("repair");
         assert_eq!(read_version(&conn).expect("version"), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_upgrades_v1_and_is_idempotent() {
+        let dir = TempDir::new().expect("dir");
+        let conn = open(&dir.path().join("db.sqlite"));
+        conn.execute_batch(SCHEMA_V1).expect("v1 tables");
+        conn.execute_batch("PRAGMA user_version = 1;")
+            .expect("v1 version");
+        migrate(&conn).expect("v1 -> v2");
+        assert_eq!(read_version(&conn).expect("version"), SCHEMA_VERSION);
+        assert!(has_column(&conn, "projects", "index_generation").expect("column"));
+        migrate(&conn).expect("idempotent");
+    }
+
+    #[test]
+    fn migrate_repairs_a_lost_v2_version_write() {
+        let dir = TempDir::new().expect("dir");
+        let conn = open(&dir.path().join("db.sqlite"));
+        conn.execute_batch(SCHEMA_V1).expect("tables");
+        conn.execute_batch(SCHEMA_V2).expect("crashed v2 column");
+        assert_eq!(read_version(&conn).expect("version"), 0);
+        migrate(&conn).expect("repair");
+        assert_eq!(read_version(&conn).expect("version"), SCHEMA_VERSION);
+        assert!(has_column(&conn, "projects", "index_generation").expect("column"));
     }
 
     #[test]

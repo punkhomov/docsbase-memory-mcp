@@ -22,7 +22,10 @@ fn table_names(cache: &std::path::Path) -> Vec<String> {
 fn migrate_fresh() {
     let cache = TempDir::new().expect("tempdir");
     let db = Db::open(cache.path()).expect("open");
-    assert_eq!(db.schema_version().expect("version"), 1);
+    assert_eq!(
+        db.schema_version().expect("version"),
+        docsbase_memory::store::migrations::SCHEMA_VERSION
+    );
 
     let tables = table_names(cache.path());
     for expected in ["projects", "docs", "chunks", "sync_jobs"] {
@@ -80,7 +83,10 @@ fn readonly_open() {
 
     Db::open(cache.path()).expect("create");
     let db = Db::open_readonly(cache.path()).expect("readonly open");
-    assert_eq!(db.schema_version().expect("version"), 1);
+    assert_eq!(
+        db.schema_version().expect("version"),
+        docsbase_memory::store::migrations::SCHEMA_VERSION
+    );
 }
 
 #[test]
