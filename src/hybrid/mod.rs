@@ -12,6 +12,7 @@
 //! async worker (ADR-7, I3).
 
 pub mod config;
+pub mod dense;
 pub mod jobs;
 
 #[cfg(feature = "hybrid-remote")]
