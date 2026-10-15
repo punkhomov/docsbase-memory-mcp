@@ -37,3 +37,32 @@
   NOT ADDRESSED — Minor (остаточный `model_id` в блоке Interfaces requirements) →
   исправлено сразу, штампы ревизии обновлены на 2.1. New breakage: none.
 - 2026-10-14: ревизия 2.1 готова к коммиту (PR: спека целиком, docs-only).
+- Task T1: complete (2026-10-14). P0-spike против живого OpenRouter (тестовый
+  ключ, ~$0.002): OQ-1 закрыт фактами (`DELTA-T1` в requirements); дефолт-модель
+  сменена на `qwen/qwen3-embedding-8b`@1024 (0.6b отсутствует в каталоге);
+  нормированность/`input_type`/MRL/коды ошибок зафиксированы; фикстуры —
+  `tests/fixtures/openrouter/` (embeddings: qwen3-8b 4-язычный, pplx raw,
+  каталог, 2 ошибки; rerank: v3.5 top_n=2, 4-pro, top_n-клампинг, 2 ошибки).
+  Ruling: rerank `top_n = window` у провайдера клампится к числу документов —
+  наш срез до `limit` остаётся единственным местом лимита; пустые `documents`
+  не отправляем (провайдер отвечает 400). minor: 429/5xx не провоцировались
+  (политика по докам, пересмотр при первом инциденте).
+  Review (fresh): PASS/APPROVED, minors fixed in a follow-up commit (G1 default
+  model line; rerank/embedding fixtures normalized to {request,status,response}).
+- 2026-10-15: ревью PR #41 (punkhomov): NEEDS CHANGES — исправлено:
+  error-фикстуры нормализованы в {request,status,response} (единый парсер для T2);
+  FR-1/FR-2 уточнены (порядок по advisory-`index`, `dimensions` из конфига,
+  `model` в ответе не сверять — провайдер регистро/префикс-нормализует);
+  `top_n=999` подкреплён живой пробой: 200, возвращаются все 4 дока
+  (`tests/fixtures/openrouter/rerank/topn999-clamp.json`).
+  Решения за человеком (вне репо): 8b-дефолт с ценой $0.01/M принят в T1-спайке;
+  правки внешнего agreement (`rerank-3.5`→`v3.5`, `@d<dim>`→`@d<dim>@{l2,raw}`) —
+  за оператором.
+- 2026-10-15: ревью PR #40 (punkhomov): PASS в стеке 40+41 (по отдельности не
+  мержить); FR-7 переформулирован как предварительный бюджет (калибровка при
+  первом инциденте); согласие по цене 8b — за оператором; `rerank-3.5` в
+  agreement — за оператором.
+- 2026-10-15: ревью PR #42 (punkhomov): PASS, действий не требуется.
+- 2026-10-15: ревью PR #43 (punkhomov): PASS with notes — сквош fixup-дубликата,
+  doc-ниты `l2_normalize`/`citation_for` (исправлено); опциональный `index`
+  у embeddings сделан advisory и в коде.

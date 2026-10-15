@@ -1,0 +1,10 @@
+{
+ "request": null,
+ "status": 400,
+ "response": {
+  "error": {
+   "message": "Input is empty",
+   "code": 400
+  }
+ }
+}

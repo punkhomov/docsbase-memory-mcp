@@ -1,0 +1,37 @@
+{
+ "request": {
+  "model": "cohere/rerank-v3.5",
+  "query": "как настроить сокет демона",
+  "documents": [
+   "Настройка демона: путь к сокету, разрешения и состояние сессии.",
+   "Banana bread recipe with walnuts."
+  ],
+  "top_n": 10
+ },
+ "status": 200,
+ "response": {
+  "id": "gen-rerank-1791999336-0Z0GmDHun20YE3NlngQ1",
+  "model": "rerank-v3.5",
+  "results": [
+   {
+    "index": 0,
+    "relevance_score": 0.4450718,
+    "document": {
+     "text": "Настройка демона: путь к сокету, разрешения и состояние сессии."
+    }
+   },
+   {
+    "index": 1,
+    "relevance_score": 0.0117336195,
+    "document": {
+     "text": "Banana bread recipe with walnuts."
+    }
+   }
+  ],
+  "usage": {
+   "search_units": 1,
+   "cost": 0.001
+  },
+  "provider": "Cohere"
+ }
+}

@@ -4,6 +4,15 @@
 **Constitution:** `docs/specs/constitution.md` (1.2.0)
 **Связано:** ADR-12 (кэш `(model_id, chunk_hash)`), ADR-13 (OpenRouter-старт, флаги, 40 MiB — вес ПО)
 
+**Delta T1-спайка (2026-10-14, живые вызовы):** дефолтная embedding-модель —
+`qwen/qwen3-embedding-8b` @ `dimensions=1024` (MRL): `qwen/qwen3-embedding-0.6b`
+в каталоге OpenRouter ОТСУТСТВУЕТ (404). Факты: qwen3-8b нормирует вектора
+(L2=1.000), `dimensions` resizable (256…4096, дефолт 4096), `input_type` даёт
+минимальный эффект (cos 0.9976); rerank-ответ `results[].{index, relevance_score,
+document.text}`, `top_n` клампится к числу документов, пустые `documents` → 400
+(вызов пропускаем), `usage.{search_units,cost}`. Фикстуры — `tests/fixtures/openrouter/`.
+Провайдерский дефолт кода при моделях с `@d1024@l2` — см. FR-5/P1/FR-13.
+
 **Delta ревизии 2.1 (2026-10-14):** закрыты 6 Important + 16 Minor свежего
 ревью (ungated `hybrid::config` для feature-off-проверки, хук backfill в
 `daemon::server`, `hybrid::blocking` с thread-local маркером вместо
@@ -30,7 +39,7 @@ BM25-поиск (`index/tantivy_index.rs`) не ловит парафразы и
 
 Goals (итерация 1):
 - G1. Embedding чанков через OpenRouter (`POST {base}/embeddings`), дефолт
-  `qwen/qwen3-embedding-0.6b` @1024d, с записью в существующий `VectorCache`
+  `qwen/qwen3-embedding-8b` @1024d (`DELTA-T1`), с записью в существующий `VectorCache`
   (контракт `(model_id, chunk_hash)` не меняется — меняется композиция строки
   `model_id`, см. FR-5).
 - G2. Rerank BM25 top-k через OpenRouter (`POST {base}/rerank`), дефолт
@@ -58,7 +67,7 @@ Non-goals (явно позже, отдельными задачами): dense re
 - **P1.** Index с эмбеддингами. *Given* hybrid включён, валидный `OPENROUTER_API_KEY`,
   проект с N чанками; *When* выполняется `index_project`/sync; *Then* все чанки
   получают вектора в `vectors.db` под ключом
-  `openrouter/qwen/qwen3-embedding-0.6b@d1024@l2`, повторный прогон сети не
+  `openrouter/qwen/qwen3-embedding-8b@d1024@l2`, повторный прогон сети не
   касается (cache hit 100%).
 - **P2.** Поиск с rerank. *Given* hybrid включён и reranker активен; *When*
   `search_docs(query)`; *Then* BM25 top-k (окно ≥ `top_n`) переупорядочены
@@ -82,11 +91,21 @@ Non-goals (явно позже, отдельными задачами): dense re
   `{model, input[], dimensions, input_type: "search_document"}` →
   `Vec<Vec<f32>>` по порядку входа. `base = https://openrouter.ai/api/v1`
   (без хвостового `/`); пути — `/embeddings`, `/rerank` (без второго `/v1`).
-  `DELTA-2`.
+  Спайк: `dimensions` — MRL-truncation (200 на 256…4096), дефолт модели 4096;
+  отправляется из конфига (модели без MRL — без параметра; фикстура pplx
+  записана без него); qwen3-8b возвращает уже нормированные вектора (L2=1.000);
+  эффект `input_type` минимален (cos 0.9976) — поле остаётся в контракте.
+  Порядок сборки — по `index`, **когда провайдер его вернул** (поле advisory:
+  документация OpenRouter его опциональна, отсутствие = порядок входа).
+  Строку `model` в ответе не сверять с запрошенной: провайдер нормализует
+  регистр/вендорный префикс (`qwen/qwen3-embedding-8b` → `Qwen/Qwen3-Embedding-8B`).
+  `DELTA-2`, `DELTA-T1`.
 - **FR-2.** `OpenRouterReranker: Reranker` — `POST {base}/rerank`
   `{model, query, documents, top_n}` → `Vec<(original_index, relevance_score)>`,
   desc по score. Ответ разбирается из `results[].{index, relevance_score}`;
-  `usage.search_units` логируется. `DELTA-2`.
+  `usage.search_units` логируется. Строку `model` в ответе не сверять с
+  запрошенной (`cohere/rerank-v3.5` → `rerank-v3.5`; у 4-pro — `rerank-v4.0-pro`).
+  `DELTA-2`, `DELTA-T1`.
 - **FR-3.** `provider = "openrouter"` — единственное допустимое значение в
   итерации 1; иное → `Admission`-ошибка («итерация 1: только openrouter»).
 - **FR-4.** API-ключ — только из env (`OPENROUTER_API_KEY`); в toml-интерфейсе
@@ -102,10 +121,13 @@ Non-goals (явно позже, отдельными задачами): dense re
   backoff с капом и джиттером (учёт `Retry-After` при 429); 400/401/402/403/404/413
   — сразу ошибка без ретраев. `DELTA-2`. Бюджет попыток и коды 524/529 —
   предварительно, по докам OpenRouter (спайк их не провоцировал); калибровка —
-  при первом инциденте.
+  при первом инциденте. Спайк подтвердил: 404 «No endpoints found for {model}»
+  (недоступная модель), 400 «Input is empty» (пустой батч), 400 zod-envelope на
+  `top_n < 1`; конверт ошибки — `{"error":{"message","code"}}`. `DELTA-T1`.
 - **FR-8.** Client-side L2-нормализация — конфиг-флаг `normalize` (презумпция
-  `true`; P0-spike подтверждает или флипает дефолт `DELTA`-маркером; флаг входит
-  в ключ кэша, FR-5).
+  `true`; флаг входит в ключ кэша, FR-5). Спайк: qwen3-8b уже нормирует
+  (L2=1.000) → `true` идемпотентен; pplx-0.6b возвращает raw (4.83) — флаг
+  сохраняется как защита при смене модели. `DELTA-T1`.
 - **FR-9.** Заголовки OpenRouter: `HTTP-Referer`, `X-Title` (значения —
   константы, финализируются в T2; OQ-2 закрывается там же).
   `X-OpenRouter-Categories` не задаём.
@@ -119,7 +141,10 @@ Non-goals (явно позже, отдельными задачами): dense re
   heading-path). Один rerank-запрос с `top_n = window` (провайдер возвращает
   ≤ window ранжированных; фактический лимит `limit` обеспечивается срезом у нас);
   порядок — строго по `relevance_score` (listwise), срез до `limit`. Ноль
-  кандидатов → rerank не вызывается, пустой ответ как у BM25. `score` в MCP-ответе
+  кандидатов → rerank не вызывается, пустой ответ как у BM25 (спайк: пустые
+  `documents` — 400 у провайдера, т.е. пропуск обязателен; `top_n` клампится к
+  числу документов, `top_n=999` → 200; у нас всегда `top_n = window ≥ 10`).
+  `score` в MCP-ответе
   для переупорядоченных хитов = `relevance_score`; формат и остальные поля
   неизменны. Ошибка ступени — явная ошибка запроса (NFR-2). Качество rerank
   измеряется на golden (recall@k/nDCG, rerank on/off; live-замер в T5 — конституция:
@@ -139,7 +164,7 @@ Non-goals (явно позже, отдельными задачами): dense re
   enabled = true
   [hybrid.embedding]
   provider = "openrouter"
-  model = "qwen/qwen3-embedding-0.6b"
+  model = "qwen/qwen3-embedding-8b"
   dimensions = 1024
   normalize = true
   [hybrid.reranker]
@@ -233,10 +258,12 @@ pub trait Reranker: Send + Sync {
 
 - **A1.** Схемы OpenRouter стабильны на итерацию (спайк; дрейф — явная ошибка
   парсинга, не молчание).
-- **A2.** `qwen/qwen3-embedding-0.6b` и `cohere/rerank-v3.5` доступны в роутере
-  (спайк; fallback — соседние ID тем же PR: из каталога OR 2026-09 — `qwen3-embedding-8b`
-  $0.01/M, `pplx-embed-v1-0.6b` $0.004/M, `voyage-4-lite` $0.02/M;
-  rerank — `cohere/rerank-4-pro`, 32k ctx).
+- **A2 (закрыто спайком).** `qwen/qwen3-embedding-0.6b` в роутере НЕТ (404) →
+  дефолт — `qwen/qwen3-embedding-8b` @1024 (32k ctx, $0.01/M, нормированные вектора,
+  MRL 256…4096). Fallback из каталога (33 модели): `perplexity/pplx-embed-v1-0.6b`
+  (1024d, $0.004/M, raw-вектора), `baai/bge-m3` (1024d, $0.01/M), `voyageai/voyage-4-lite`
+  (1024d, $0.02/M). Rerank: `cohere/rerank-v3.5` (дефолт, $0.001/search) проверен
+  живьём; доступны `cohere/rerank-4-pro` (другие скоры, 32k ctx) и `cohere/rerank-4-fast`.
 - **A3.** OpenRouter не версионирует веса провайдеров → тихий апдейт веса не
   инвалидирует кэш. Принято как известное ограничение итерации 1 (дешёвый риск;
   дорогой контроль — пин провайдера/ревизии — отложен).
@@ -252,9 +279,15 @@ pub trait Reranker: Send + Sync {
 
 ## Open questions
 
-- **OQ-1 (закрывает P0-spike):** точные лимиты docs/call и tokens/call,
-  наличие `qwen/qwen3-embedding-0.6b`, resizable `dimensions`, нормированность
-  векторов, фактическая таблица кодов ошибок. Без ответов — блокируется T2.
+- **OQ-1 (ЗАКРЫТ спайком 2026-10-14, `DELTA-T1`):** `qwen3-embedding-0.6b`
+  отсутствует → дефолт `qwen3-embedding-8b`@1024; `dimensions` resizable
+  (256/512/1024/2048/4096 — 200, dim точный; дефолт 4096); qwen3-8b нормирует
+  (1.000), pplx-0.6b raw (4.83), bge-m3 нормирует (1.000); мультиязычный probe
+  (RU-запрос): qwen3-8b 0.837 против 0.37–0.41 нерелевантных (bge-m3 0.769/0.295–0.532;
+  pplx 0.691/0.105–0.225); коды: 404 модель, 400 пустой input, 400 `top_n<1`
+  (zod-envelope), пустые `documents` → 400; rerank `top_n` клампится; фикстуры —
+  `tests/fixtures/openrouter/`. Лимиты docs/call по-прежнему берём из батч-конфига
+  (≤128 текстов / byte-budget), 429/5xx не провоцировались — политика по докам.
 - **OQ-2:** значение `HTTP-Referer`/`X-Title` (предложение: URL репо +
   `docsbase-memory-mcp`; `X-OpenRouter-Categories` не задаём). Закрывается в T2
   (константы в `openrouter.rs`, подтверждаются в PR).
