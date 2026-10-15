@@ -1,6 +1,7 @@
 {
+ "request": null,
  "status": 404,
- "body": {
+ "response": {
   "error": {
    "message": "No endpoints found for qwen/qwen3-embedding-0.6b.",
    "code": 404
