@@ -18,7 +18,7 @@ use docsbase_memory::config::Config;
 use docsbase_memory::daemon::registry;
 use docsbase_memory::daemon::tools::run_project_index;
 use docsbase_memory::hybrid::config::DEFAULT_RERANK_WINDOW;
-use docsbase_memory::hybrid::{HybridCfg, HybridStages, Reranker, blocking, from_config};
+use docsbase_memory::hybrid::{HybridCfg, HybridStages, Ranking, Reranker, blocking, from_config};
 use docsbase_memory::store::Db;
 use docsbase_memory::store::models::ProjectStatus;
 use docsbase_memory::vector_cache::Embedder;
@@ -194,5 +194,101 @@ fn live_golden_rerank_measurement() {
         bm25_hits + 2 >= CASES.len(),
         "live BM25 sanity: {bm25_hits}/{} hits",
         CASES.len()
+    );
+}
+
+#[test]
+#[ignore = "live: needs OPENROUTER_API_KEY and network (embedding pass + rerank calls)"]
+fn live_golden_dense_rrf_measurement() {
+    let _key = api_key();
+
+    let cache = TempDir::new().expect("cache");
+    let root = TempDir::new().expect("root");
+    let fixtures = Path::new("tests/fixtures/search-quality");
+    for class in ["ru", "en", "api", "cjk", "ar", "plans", "docs"] {
+        copy_tree(&fixtures.join(class), &root.path().join(class));
+    }
+
+    let config = Config {
+        hybrid: true,
+        hybrid_cfg: HybridCfg {
+            ranking: Ranking::Rrf,
+            ..HybridCfg::enabled_with_defaults()
+        },
+        ..Config::default()
+    };
+
+    let mut db = Db::open(cache.path()).expect("db");
+    let project = registry::ensure_project(&mut db, &root.path().canonicalize().expect("canon"))
+        .expect("project");
+    run_project_index(&mut db, cache.path(), &project, &config).expect("live index + embed");
+    let mut project = project;
+    project.status = ProjectStatus::Indexed;
+
+    let stages_all = from_config(&config.hybrid_cfg, true).expect("stages");
+    assert!(stages_all.embedder.is_some() && stages_all.reranker.is_some());
+    let stages_rrf = HybridStages {
+        embedder: stages_all.embedder.clone(),
+        reranker: None,
+        ranking: Ranking::Rrf,
+    };
+
+    let mut hits = [0usize; 3];
+    let mut ndcg = [0.0f64; 3];
+    for (query, expected) in CASES {
+        let args = serde_json::json!({ "query": query, "limit": 3 });
+        let variants: [(Option<&HybridStages>, &str); 3] = [
+            (None, "bm25"),
+            (Some(&stages_rrf), "rrf"),
+            (Some(&stages_all), "rrf+rerank"),
+        ];
+        let mut row = String::new();
+        for (index, (stages, label)) in variants.into_iter().enumerate() {
+            let value = docsbase_memory::daemon::tools::search_docs_with(
+                stages.unwrap_or(&HybridStages::default()),
+                &docsbase_memory::hybrid::dense::DenseCache::new(),
+                &db,
+                cache.path(),
+                &project,
+                &args,
+                DEFAULT_RERANK_WINDOW,
+            )
+            .expect("live search");
+            let rank = value
+                .as_array()
+                .expect("array")
+                .iter()
+                .position(|row| row["path"].as_str() == Some(*expected))
+                .map(|position| position + 1);
+            if rank.is_some() {
+                hits[index] += 1;
+            }
+            ndcg[index] += rank.map_or(0.0, |rank| {
+                #[allow(clippy::cast_precision_loss)]
+                let rank = rank as f64;
+                1.0 / (rank + 1.0).log2()
+            });
+            {
+                use std::fmt::Write as _;
+                let _ = write!(row, "  {label}={rank:?}");
+            }
+        }
+        println!("{query:>22}{row}  ({expected})");
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let n = CASES.len() as f64;
+    println!(
+        "hit@3: bm25 {}/{n} -> rrf {}/{n} -> rrf+rerank {}/{n}; nDCG@3: bm25 {:.3} -> rrf {:.3} -> rrf+rerank {:.3}",
+        hits[0],
+        hits[1],
+        hits[2],
+        ndcg[0] / n,
+        ndcg[1] / n,
+        ndcg[2] / n
+    );
+    assert!(
+        hits[0] + 2 >= CASES.len(),
+        "live BM25 sanity: {}/{n} hits",
+        hits[0]
     );
 }

@@ -42,6 +42,7 @@ hybrid = true          # shorthand: both stages with defaults
 # or the full form; a missing stage section disables that stage
 [hybrid]
 enabled = true
+ranking = "lexical"                # "lexical" | "rrf" (see below)
 
 [hybrid.embedding]
 provider = "openrouter"            # iteration 1 allows only openrouter
@@ -60,6 +61,17 @@ Semantics: chunk vectors are cached content-addressed
 coverage enqueues a background sync job (`embed_coverage` in `status`);
 searches rerank the BM25 window, `rerank=false` per request keeps strict BM25
 order (the MCP `search_docs` tool accepts the same boolean).
+
+`ranking = "rrf"` (opt-in) fuses the BM25 window with a dense candidate list
+(cosine over the cached vectors of the current revision, Reciprocal Rank
+Fusion `k = 60`) before the rerank stage runs on top of the fused order. It
+requires the embedding stage and stays `"lexical"` by default: switching the
+ranking is a measured, deliberate change (NFR-6). Without an active rerank
+stage the exposed `score` is the RRF score (rank-based scale, not comparable
+to BM25 values); chunks without vectors are simply absent from the dense list
+until the backfill completes. `rerank = false` disables only the rerank
+stage - the order is then whatever `ranking` selects (`"lexical"` = strict
+BM25).
 
 ## Example
 

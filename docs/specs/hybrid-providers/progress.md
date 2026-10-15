@@ -137,3 +137,11 @@
   RRF-порядок/скоры, RRF+rerank, rerank=false, окно при limit=1, нулевое покрытие,
   частичное), +3 `tests/config.rs` (парсинг/дефолт/ошибка), +2 `tests/hybrid_config.rs`
   (rrf без embedding в обоих режимах сборки). clipy/fmt — оба билда чисто.
+- Task T11: complete (2026-10-15). Доки: `docs/CONFIG.md` (`ranking`, семантика
+  `score` без rerank = RRF-скор, частичное покрытие, cap), README EN/RU,
+  ADR-14 delta в product design (dense+RRF, поколение, cap, публичная
+  библиотечная поверхность). Live-замер инструментирован:
+  `tests/hybrid_live.rs::live_golden_dense_rrf_measurement` (BM25 vs RRF vs
+  RRF+rerank на golden, hit@3/nDCG@3, отчёт). minor (deferred): прогон замера
+  не выполнен — `OPENROUTER_API_KEY` в окружении агента недоступен (обрезан до
+  `proxy-managed`); команда прогона в шапке `tests/hybrid_live.rs`.
