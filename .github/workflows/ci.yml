@@ -61,6 +61,27 @@ jobs:
       - name: Functional suite (Linux)
         run: cargo test --locked
 
+  linux-hybrid:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Feature lints (hybrid-remote)
+        run: cargo clippy --locked --features hybrid-remote --all-targets -- -D warnings
+      - name: Feature suite (fixtures only, no network)
+        run: cargo test --locked --features hybrid-remote
+      - name: Default build stays offline (SC-4)
+        run: |
+          if cargo tree --locked -e normal | grep -q reqwest; then
+            echo "::error::reqwest leaked into the default build"
+            exit 1
+          fi
+          echo "default build has no reqwest"
+
   windows:
     runs-on: windows-latest
     timeout-minutes: 60

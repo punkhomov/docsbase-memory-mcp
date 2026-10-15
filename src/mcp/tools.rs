@@ -30,7 +30,8 @@ pub fn catalogue() -> Vec<Tool> {
                 "properties": {
                     "query": { "type": "string", "description": "Search query." },
                     "limit": { "type": "integer", "minimum": 1, "description": "Max hits (default 10)." },
-                    "scope": { "type": "string", "enum": ["project"], "description": "Reserved; v1 supports only the current project." }
+                    "scope": { "type": "string", "enum": ["project"], "description": "Reserved; v1 supports only the current project." },
+                    "rerank": { "type": "boolean", "description": "Per-request hybrid rerank override; default follows the project configuration. true requires hybrid rerank to be enabled." }
                 },
                 "required": ["query"]
             }),

@@ -19,6 +19,8 @@ use crate::daemon::registry;
 use crate::daemon::session::SessionRegistry;
 use crate::daemon::tools;
 use crate::error::{Error, Result};
+use crate::hybrid::HybridStages;
+use crate::hybrid::jobs as hybrid_jobs;
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 use crate::platform::Stream;
 use crate::store::Db;
@@ -44,6 +46,9 @@ pub struct Shared {
     global_config_stamp: Option<u64>,
     /// Project configs as of project-open time (OQ-6).
     project_configs: Mutex<HashMap<i64, Arc<Config>>>,
+    /// Hybrid stages as of the last project open (FR-14: built and validated
+    /// there, reused by search/index paths).
+    stages: Mutex<HashMap<i64, Arc<HybridStages>>>,
 }
 
 impl Shared {
@@ -78,6 +83,7 @@ impl Shared {
             global_config_error,
             global_config_stamp: stamp,
             project_configs: Mutex::new(HashMap::new()),
+            stages: Mutex::new(HashMap::new()),
         });
         match shared.start_watchers() {
             Ok(started) if started > 0 => eprintln!("watching {started} indexed project(s)"),
@@ -89,6 +95,63 @@ impl Shared {
 
     fn db(&self) -> MutexGuard<'_, Db> {
         self.db.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn stages_map(&self) -> MutexGuard<'_, HashMap<i64, Arc<HybridStages>>> {
+        self.stages.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Resolved hybrid stages of `project`; built on first use and refreshed
+    /// when the project is reopened. Feature-off + enabled hybrid is an
+    /// explicit [`Error::Admission`] (FR-14) - no silent BM25-only fallback.
+    ///
+    /// # Errors
+    /// Admission (feature/provider/key/window) and config read errors.
+    pub fn project_stages(
+        &self,
+        project: &crate::store::models::Project,
+    ) -> Result<Arc<HybridStages>> {
+        if let Some(stages) = self.stages_map().get(&project.id) {
+            return Ok(Arc::clone(stages));
+        }
+        let config = self.project_config(project)?;
+        let stages = Arc::new(crate::hybrid::from_config(
+            &config.hybrid_cfg,
+            cfg!(feature = "hybrid-remote"),
+        )?);
+        self.stages_map().insert(project.id, Arc::clone(&stages));
+        Ok(stages)
+    }
+
+    /// Enqueues the open-time backfill sync job when the embedding stage is
+    /// on and the project is not fully covered (FR-15); cached chunks make a
+    /// fully covered project a cheap no-op.
+    ///
+    /// # Errors
+    /// Stage admission errors (propagated to the open) and registry failures.
+    fn schedule_backfill(self: &Arc<Self>, project: &crate::store::models::Project) -> Result<()> {
+        let stages = self.project_stages(project)?;
+        if stages.embedder.is_none()
+            || project.status != crate::store::models::ProjectStatus::Indexed
+        {
+            return Ok(());
+        }
+        let db = self.db();
+        let config = self.project_config(project)?;
+        let Some(coverage) = hybrid_jobs::coverage(&db, &config.hybrid_cfg, project.id)? else {
+            return Ok(());
+        };
+        if coverage.cached >= coverage.total {
+            return Ok(());
+        }
+        if crate::store::repo::active_sync_job(db.connection(), project.id)?.is_some() {
+            return Ok(());
+        }
+        let (job_id, created) = crate::daemon::tools::enqueue_sync(&db, project)?;
+        if created {
+            spawn_sync_job(Arc::clone(self), job_id, project.id, config);
+        }
+        Ok(())
     }
 
     fn configs(&self) -> MutexGuard<'_, HashMap<i64, Arc<Config>>> {
@@ -153,6 +216,10 @@ impl Shared {
     ) -> Result<Arc<Config>> {
         let previous = self.configs().get(&project.id).map(Arc::clone);
         let config = self.load_project_config(project)?;
+        // Rebuild and validate stages so a broken hybrid config fails the
+        // open (FR-14) instead of the first search.
+        self.stages_map().remove(&project.id);
+        self.project_stages(project)?;
         // The watcher must filter with the config the project was reopened
         // with, otherwise incremental updates keep applying stale ignores
         // (OQ-6). An existing watcher only swaps its config slot: restarting
@@ -529,6 +596,7 @@ async fn register_session(
         let project_err = match registry::resolve_by_cwd(&db, &cwd_for_task) {
             Ok(project) => {
                 shared_for_task.open_project_config(&project)?;
+                shared_for_task.schedule_backfill(&project)?;
                 return Ok(project);
             }
             Err(err) => err,
@@ -626,12 +694,29 @@ fn route_tool(
                 shared.watchers.count(),
                 notice.as_deref(),
                 &|id| shared.watchers.watching(id),
+                &|project| {
+                    let Ok(config) = shared.project_config(project) else {
+                        return None;
+                    };
+                    hybrid_jobs::coverage(&db, &config.hybrid_cfg, project.id)
+                        .ok()
+                        .flatten()
+                },
             )
         }
         "list_projects" => tools::list_projects(&db),
         "search_docs" => {
             let project = bound_project(shared, &db, session_id)?;
-            tools::search_docs(&db, &shared.cache, &project, args)
+            let config = shared.project_config(&project)?;
+            let stages = shared.project_stages(&project)?;
+            let window = config
+                .hybrid_cfg
+                .reranker
+                .as_ref()
+                .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |reranker| {
+                    reranker.window
+                });
+            tools::search_docs_with(&stages, &db, &shared.cache, &project, args, window)
         }
         "list_docs" => {
             let project = bound_project(shared, &db, session_id)?;

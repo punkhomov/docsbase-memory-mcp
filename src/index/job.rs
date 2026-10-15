@@ -181,7 +181,9 @@ pub fn run_full(
         }
     }
 
-    finish_plan(db, index, project.id, &mut plan, &removed, &mut stats)?;
+    finish_plan(
+        db, index, project.id, &mut plan, &removed, &mut stats, config,
+    )?;
     if index.was_recreated() {
         index.mark_rebuilt()?;
     }
@@ -328,13 +330,16 @@ pub fn run_incremental_with(
     let planned_ids: HashSet<i64> = plan.iter().filter_map(|pending| pending.id).collect();
     removed.retain(|state| !planned_ids.contains(&state.id) && !still_present.contains(&state.id));
 
-    finish_plan(db, index, project.id, &mut plan, &removed, &mut stats)?;
+    finish_plan(
+        db, index, project.id, &mut plan, &removed, &mut stats, config,
+    )?;
     if index.was_recreated() {
         index.mark_rebuilt()?;
     }
     Ok(stats)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_plan(
     db: &mut Db,
     index: &mut IndexHandle,
@@ -342,6 +347,7 @@ fn finish_plan(
     plan: &mut [Pending],
     removed: &[&DocState],
     stats: &mut JobStats,
+    config: &Config,
 ) -> Result<()> {
     mark_pending(db, project_id, plan, removed)?;
 
@@ -362,10 +368,22 @@ fn finish_plan(
     }
     stats.removed = removed.len();
 
+    // Embed before the tantivy commit and the plan apply: a provider failure
+    // (explicit error, NFR-2) then leaves the documents unindexed, and the
+    // marker rows written by `mark_pending` force the next (retry) run to
+    // re-plan the same files instead of skipping them as unchanged - vectors
+    // are never silently lost. Unchanged chunks are untouched (the full pass
+    // lives in the sync job and the open-time backfill).
+    let texts: Vec<String> = plan
+        .iter()
+        .flat_map(|pending| pending.chunks.iter().map(|chunk| chunk.text.clone()))
+        .collect();
+    crate::hybrid::jobs::embed_texts(db.cache_root(), &config.hybrid_cfg, &texts)?;
     // Tantivy first, then a short SQLite write transaction (R2): the marker
     // rows make a crash in between reprocess on the next run.
     index.commit()?;
-    apply_plan(db, project_id, plan, removed)
+    apply_plan(db, project_id, plan, removed)?;
+    Ok(())
 }
 
 fn mark_pending(

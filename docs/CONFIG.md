@@ -24,9 +24,42 @@ Environment overrides (highest-priority directory resolution, used by tests):
 | `max_file_size` | `1048576` (1 MiB) | Files larger than this are skipped |
 | `max_docs_per_project` | `20000` | Admission limit per project |
 | `auto_index` | `false` | Register + index unknown projects on first connection (ADR-6: off) |
-| `hybrid` | `false` | Hybrid retrieval feature flag (phase 2; off in v1) |
+| `hybrid` | `false` | Hybrid stages (embeddings + rerank) master switch; boolean shorthand or a table, see below |
 
 Unknown keys are rejected (`deny_unknown_fields`) — typos fail loudly.
+
+## Hybrid stages (opt-in, spec `docs/specs/hybrid-providers`)
+
+Hybrid search needs a build with the `hybrid-remote` feature
+(`cargo build --features hybrid-remote`) and `OPENROUTER_API_KEY` in the
+environment; the default build stays fully offline and any enabled hybrid
+configuration fails with an explicit admission error instead of silently
+falling back to BM25.
+
+```toml
+hybrid = true          # shorthand: both stages with defaults
+
+# or the full form; a missing stage section disables that stage
+[hybrid]
+enabled = true
+
+[hybrid.embedding]
+provider = "openrouter"            # iteration 1 allows only openrouter
+model = "qwen/qwen3-embedding-8b"  # default; MRL-truncated
+dimensions = 1024                  # part of the vector cache key
+normalize = true                   # L2; part of the cache key
+
+[hybrid.reranker]
+provider = "openrouter"
+model = "cohere/rerank-v3.5"
+window = 50                        # BM25 candidates sent per search (10..=100)
+```
+
+Semantics: chunk vectors are cached content-addressed
+(`openrouter/<model>@d<dim>@<l2|raw>`); opening a project with incomplete
+coverage enqueues a background sync job (`embed_coverage` in `status`);
+searches rerank the BM25 window, `rerank=false` per request keeps strict BM25
+order (the MCP `search_docs` tool accepts the same boolean).
 
 ## Example
 
@@ -36,7 +69,7 @@ Global `config.toml`:
 max_file_size = 2097152
 max_docs_per_project = 20000
 auto_index = false
-hybrid = false
+hybrid = false   # true = hybrid stages (needs --features hybrid-remote build)
 ignores = ["drafts/**", "*.tmp.md"]
 ```
 

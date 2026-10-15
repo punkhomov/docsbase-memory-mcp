@@ -179,8 +179,8 @@ fn status_marks_missing_root() {
         fd_count: 0,
         threads: 0,
     };
-    let value =
-        docsbase_memory::daemon::tools::status(&db, &stats, 0, None, &|_| false).expect("status");
+    let value = docsbase_memory::daemon::tools::status(&db, &stats, 0, None, &|_| false, &|_| None)
+        .expect("status");
     assert_eq!(value["projects"][0]["root_state"], "missing");
     assert_eq!(
         list_projects(&db).expect("registry").len(),
