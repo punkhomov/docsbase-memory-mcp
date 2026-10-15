@@ -133,3 +133,56 @@ offline-дефолт; сеть только за `hybrid-remote` + hybrid enable
   раздел opt-in + `OPENROUTER_API_KEY`)
 **Acceptance:** traceability: §7 → FR; триггер async-пересмотра записан.
 **Verify:** ревью диффа. **Depends:** T5.
+
+## T7 — Dense-скан: `hybrid/dense.rs` (TDD)
+
+**Goal:** косинусный top-`fetch` по переданному набору `(chunk_id, вектор)`.
+**Files:** Create `src/hybrid/dense.rs`; Modify `src/hybrid/mod.rs`.
+**Acceptance:** unit: порядок и скор на детерминированных векторах; `normalize=false`
+(косинус без нормировки), пустой набор, меньше кандидатов чем fetch, стабильный
+тай-брейк при равенстве (chunk_id возр.).
+**Verify:** `cargo test` (unit). **Depends:** —.
+
+## T8 — RRF: `hybrid/rrf.rs` (TDD)
+
+**Goal:** `rrf_merge` по FR-16 (k=60, равные веса, тай-брейки).
+**Files:** Create `src/hybrid/rrf.rs`; Modify `src/hybrid/mod.rs`.
+**Acceptance:** unit: ручной пример математики k=60; вхождение в оба списка >
+одного; тай-брейки (вхождения, ранг, BM25-скор, id); пустые списки.
+**Verify:** unit. **Depends:** —.
+
+## T9 — Поколение индекса + `repo::chunk_hashes` + dense-кэш
+
+**Goal:** маркер ревизии и ленивый кэш (DELTA-7).
+**Files:** Modify `src/store/mod.rs` (схема+миграция), `src/store/repo.rs`,
+`src/index/job.rs` (инкремент в R2-транзакции), `src/daemon/server.rs`/`Shared`,
+`src/hybrid/dense.rs`.
+**Acceptance:** тест: поколение растёт ровно с успешным применением плана (сбой
+провайдера/коммита не инкрементит); `chunk_hashes` согласован с покрытием; кэш:
+hit / rebuild при новом поколении / cap-деградация.
+**Verify:** `cargo test`. **Depends:** T7.
+
+## T10 — Конфиг `ranking` + wiring поиска (FR-17/FR-18)
+
+**Goal:** сквозной путь lexical/rrf через `search_docs_with` и MCP.
+**Files:** Modify `src/hybrid/config.rs`, `src/config/mod.rs`, `src/daemon/tools.rs`,
+`src/daemon/server.rs` (seam), `src/mcp/tools.rs` (docs), `src/cli/search.rs`.
+**Acceptance:** `tests/hybrid_ranking.rs`: lexical не меняется; rrf; rrf+rerank
+(relevance, top_n=window); rerank=false при rrf → RRF-порядок; rrf без embedding →
+Admission; неизвестное значение → ошибка конфига; частичное/нулевое покрытие;
+fetch=окно. MCP-схема без изменений.
+**Verify:** `cargo test --test hybrid_ranking`. **Depends:** T7–T9.
+
+## T11 — Доки + live-замер (BM25 vs RRF vs RRF+rerank)
+
+**Goal:** ADR-дельта, CONFIG.md (ranking, семантика score), README; live-замер
+на golden — отчёт в ledger.
+**Files:** Modify `docs/specs/docsbase-memory-mcp/design.md` (ADR-14 delta),
+`docs/CONFIG.md`, `README.md`/`README.ru.md`, `tests/hybrid_live.rs`.
+**Acceptance:** замер прогнан; выводы и цифры в `progress.md`; доки консистентны.
+**Verify:** live `#[ignore]` прогон. **Depends:** T10.
+
+## T12 — Итоговое ревью ветки + фикс-раунд
+
+**Goal:** свежий ревьюер (whole-branch), фиксы Critical/Important, scoped re-review.
+**Depends:** T11.

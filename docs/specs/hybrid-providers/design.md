@@ -281,3 +281,35 @@ precedence). Существующие конфиги с `hybrid = true` оста
   `webpki-roots`; `native-roots` — фоллбэк-вариант, не дефолт.
 - **`encoding_format=base64`:** отложено (меньше payload, но decode-код и тесты);
   итерация 1 — `float`.
+
+## DELTA-7 (2026-10-15): механика итерации 2 (dense + RRF, T7–T12)
+
+- **Модули.** `src/hybrid/dense.rs` — косинусный скан (`dot/(|q||v|)`; для
+  L2-нормированных = dot) и top-`fetch` по переданному набору; `src/hybrid/rrf.rs`
+  — `rrf_merge` (k=60, тай-брейки FR-16).
+- **Поколение индекса.** Колонка `projects.index_generation INTEGER NOT NULL
+  DEFAULT 0`; инкремент — в той же SQLite-транзакции, что применяет план после
+  tantivy-commit (R2-порядок `index::job`): (project_id, index_generation) ⇔
+  актуальный набор чанков. Новое чтение `repo::chunk_hashes(conn, project_id)
+  -> Vec<(chunk_id, hash)>` — текущая ревизия, детерминированный порядок.
+- **Кэш dense-векторов.** `Shared::dense` — `Mutex<HashMap<i64, DenseEntry>>`,
+  `DenseEntry { generation, rows: Vec<(u64, Arc<[f32]>)> }`; ленивое построение
+  при первом dense-поиске и при смене поколения (старая запись замещается).
+  RAM ≈ chunks×dim×4 B (50k×1024 ≈ 200 MB). Константа `DENSE_CACHE_MAX_VECTORS`
+  (1_000_000): при превышении кэш не строится, скан идёт потоково поверх
+  `VectorCache::get` (корректность та же, медленнее). Тест границы.
+- **Путь запроса.** `search_docs_with`: BM25 top-`fetch` → (rrf) query-эмбеддинг
+  через `blocking::enter`, dense top-`fetch` → `rrf_merge` → rerank-ступень
+  (тексты fused-окна, FR-11) → `truncate(limit)`;
+  `fetch = max(limit, window).min(MAX_HITS)` при активных rerank и/или rrf.
+- **Ступени/конфиг.** `HybridCfg.ranking: Ranking { Lexical, Rrf }` (default
+  Lexical); валидация FR-17 в `validate`/`from_config`; `docsbase config` печатает
+  `ranking`.
+- **Стоимость.** Dense-скан N×1024 dot ≈ единицы мс на 10k чанков (одно ядро),
+  +1 сетевой вызов на запрос (query-эмбеддинг) против rerank'ового 1 вызова.
+- **Тесты.** Unit: `rrf_merge` (математика/тай-брейки), top-k косинуса (частичное
+  покрытие, normalize=false). Integration `tests/hybrid_ranking.rs`: mock-embedder
+  (детерминированные 2-d векторы), сквозной lexical/rrf с/без rerank, окно/fetch,
+  пустой dense, чанки без векторов, смена поколения → перестройка, cap-деградация.
+  Live (`#[ignore]`): BM25 vs RRF vs RRF+rerank на golden — отчёт, не гейт
+  (NFR-1, NFR-6).

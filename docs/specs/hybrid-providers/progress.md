@@ -106,3 +106,7 @@
 - 2026-10-15: ревью PR #43 (punkhomov): PASS with notes — сквош fixup-дубликата,
   doc-ниты `l2_normalize`/`citation_for` (исправлено); опциональный `index`
   у embeddings сделан advisory и в коде.
+
+- 2026-10-15: план итерации 2 (dense + RRF) зафиксирован: DELTA-3 (FR-15…FR-18),
+  design DELTA-7, задачи T7–T12; ветка `feat/hybrid-iteration-2` от свежего main
+  (в неё влит #43 из `feat/hybrid-t1-spike` — base #43 не перецелился на main).
