@@ -224,10 +224,6 @@ pub struct Citation {
     pub line_end: u32,
 }
 
-/// Looks up citation metadata for `(doc_id, seq)`.
-///
-/// # Errors
-/// Returns [`Error::Internal`] on `SQLite` failures.
 /// Every chunk text of `project_id` in `(doc_id, seq)` order (backfill pass,
 /// FR-15); empty projects return an empty vector.
 ///

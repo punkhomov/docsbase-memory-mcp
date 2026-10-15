@@ -141,26 +141,36 @@ impl OpenRouterClient {
                     batch.len()
                 )));
             }
-            // The provider must return each index exactly once (design §5:
-            // count + dim + index-range validation) - duplicated, missing or
-            // out-of-range indices mean schema drift and must never persist a
-            // vector under the wrong content hash (I1/A1).
+            // The provider must place each input exactly once when it sends
+            // indices (design §5: count + dim + index-range validation) -
+            // duplicated, missing or out-of-range indices mean schema drift
+            // and must never persist a vector under the wrong content hash
+            // (I1/A1). The index field is advisory (FR-1): a response without
+            // indices is read as input order; mixing both forms is drift.
+            let any_index = parsed.data.iter().any(|datum| datum.index.is_some());
             let mut slots: Vec<Option<Vec<f32>>> = (0..batch.len()).map(|_| None).collect();
-            for datum in parsed.data {
-                if datum.index >= batch.len() {
+            for (position, datum) in parsed.data.into_iter().enumerate() {
+                let index = match datum.index {
+                    Some(index) => index,
+                    None if !any_index => position,
+                    None => {
+                        return Err(Error::internal(
+                            "OpenRouter mixed indexed and unindexed embeddings",
+                        ));
+                    }
+                };
+                if index >= batch.len() {
                     return Err(Error::internal(format!(
-                        "OpenRouter returned index {} for {} inputs",
-                        datum.index,
+                        "OpenRouter returned index {index} for {} inputs",
                         batch.len()
                     )));
                 }
-                if slots[datum.index].is_some() {
+                if slots[index].is_some() {
                     return Err(Error::internal(format!(
-                        "OpenRouter returned index {} twice",
-                        datum.index
+                        "OpenRouter returned index {index} twice"
                     )));
                 }
-                slots[datum.index] = Some(datum.embedding);
+                slots[index] = Some(datum.embedding);
             }
             for slot in slots {
                 let embedding =
@@ -254,7 +264,8 @@ fn ensure_context() -> Result<()> {
     ))
 }
 
-/// `true` when the vector needs no normalization (already unit length).
+/// L2-normalizes `vector` to unit length; an all-zero vector is returned
+/// unchanged.
 fn l2_normalize(mut vector: Vec<f32>) -> Vec<f32> {
     let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
     if norm > 0.0 {
@@ -280,7 +291,9 @@ struct EmbeddingsResponse {
 
 #[derive(Deserialize)]
 struct EmbeddingDatum {
-    index: usize,
+    /// Advisory per the provider docs: absent means "input order" (FR-1).
+    #[serde(default)]
+    index: Option<usize>,
     embedding: Vec<f32>,
 }
 

@@ -407,7 +407,7 @@ fn non_retryable_error_branches_carry_their_messages() {
 
 /// Transport that always fails at the transport layer (retried, FR-7).
 struct FailingTransport {
-    calls: AtomicUsize,
+    calls: Arc<AtomicUsize>,
 }
 
 impl Transport for FailingTransport {
@@ -424,8 +424,9 @@ impl Transport for FailingTransport {
 
 #[test]
 fn transport_failures_are_retried_then_surface() {
+    let calls = Arc::new(AtomicUsize::new(0));
     let transport = FailingTransport {
-        calls: AtomicUsize::new(0),
+        calls: Arc::clone(&calls),
     };
     let client = OpenRouterClient::new(BASE_URL, "test-key", Box::new(transport)).expect("client");
     let error = blocking::enter(|| {
@@ -433,6 +434,11 @@ fn transport_failures_are_retried_then_surface() {
     })
     .expect_err("transport failure must surface");
     assert!(format!("{error}").contains("connection reset"), "{error}");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        4,
+        "transport failures get the first-try-plus-three-retries budget"
+    );
 }
 
 #[test]
@@ -478,4 +484,38 @@ fn empty_rerank_results_for_non_empty_documents_are_schema_drift() {
     let error = blocking::enter(|| client.rerank("cohere/rerank-v3.5", "q", &docs, docs.len()))
         .expect_err("empty results must fail");
     assert!(format!("{error}").contains("no results"), "{error}");
+}
+
+#[test]
+fn embeddings_without_indices_are_read_in_input_order() {
+    let input = vec!["a".to_owned(), "b".to_owned()];
+    let body = serde_json::json!({
+        "data": [
+            { "embedding": vec![0.1f32; 1024] },
+            { "embedding": vec![0.2f32; 1024] },
+        ]
+    })
+    .to_string();
+    let mock = MockTransport::default();
+    mock.push(200, &body, None);
+    let client = make_client(&mock);
+    let vectors = blocking::enter(|| client.embed_texts("m", 1024, false, &input))
+        .expect("positional fallback");
+    assert_eq!(vectors.len(), 2);
+    assert!((vectors[0][0] - 0.1).abs() < 1e-6);
+    assert!((vectors[1][0] - 0.2).abs() < 1e-6);
+
+    let mixed = serde_json::json!({
+        "data": [
+            { "index": 0, "embedding": vec![0.1f32; 1024] },
+            { "embedding": vec![0.2f32; 1024] },
+        ]
+    })
+    .to_string();
+    let mock = MockTransport::default();
+    mock.push(200, &mixed, None);
+    let client = make_client(&mock);
+    let error = blocking::enter(|| client.embed_texts("m", 1024, false, &input))
+        .expect_err("mixed index forms are drift");
+    assert!(format!("{error}").contains("mixed"), "{error}");
 }

@@ -368,11 +368,12 @@ fn finish_plan(
     }
     stats.removed = removed.len();
 
-    // Embed BEFORE any state change: a provider failure (explicit error,
-    // NFR-2) then leaves the batch unapplied, so a watcher retry re-plans the
-    // same files instead of skipping them as unchanged and silently losing
-    // the vectors. Unchanged chunks are untouched (the full pass lives in the
-    // sync job and the open-time backfill).
+    // Embed before the tantivy commit and the plan apply: a provider failure
+    // (explicit error, NFR-2) then leaves the documents unindexed, and the
+    // marker rows written by `mark_pending` force the next (retry) run to
+    // re-plan the same files instead of skipping them as unchanged - vectors
+    // are never silently lost. Unchanged chunks are untouched (the full pass
+    // lives in the sync job and the open-time backfill).
     let texts: Vec<String> = plan
         .iter()
         .flat_map(|pending| pending.chunks.iter().map(|chunk| chunk.text.clone()))
