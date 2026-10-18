@@ -259,7 +259,7 @@ pub struct Project {
 | (без крейта) файловый лог `logs/daemon.log` 0600 + `logs/conflicts.ndjson` | диагностика и admission-конфликты | NFR-8 |
 | `interprocess` (`cfg(windows)`, feature `tokio`) | local sockets: daemon-транспорт на Windows | FR-33, ADR-10 |
 | `windows-sys` (`cfg(windows)`, `Win32_System_Threading`, `Win32_Foundation`) | `process_alive` (OpenProcess/GetExitCodeProcess) и флаги `detach` (std не экспортирует `CREATE_*`) | ADR-10 |
-| (фаза 2, за флагом, ADR-13) HTTP-клиент, кандидат `reqwest` (rustls) | embedding через OpenRouter; вне дефолтной сборки | FR-27, ADR-13 |
+| `reqwest` (`default-features = false`, `rustls-tls-webpki-roots`, `json`; feature `hybrid-remote`) | HTTP-клиент hybrid-ступеней (embeddings + rerank через OpenRouter); вне дефолтной сборки — SC-4-гейт «без reqwest в `cargo tree`» | hybrid-providers FR-1/2/7, ADR-14 |
 | (фаза 2, за флагом, ADR-13) `fastembed` + ONNX-runtime, `usearch` | локальные эмбеддинги и ANN-индекс; опция, не дефолт | FR-27, ADR-12, ADR-13 |
 | dev: `tempfile`, `assert_cmd`, `insta`, `criterion` | интеграционные, golden и perf-тесты (T27, T30) | NFR-1, NFR-7 |
 
@@ -273,8 +273,11 @@ pub struct Project {
   Python/Node в рантайме, `unsafe` без `SAFETY`. Исключение (конституция 1.2.0):
   embedding/LLM API-клиенты — только как провайдеры hybrid-стадий за флагами
   per-project/per-request, каждый крейт — через ADR и таблицу §7.
-- Фаза 2 (за флагами, ADR-13): `fastembed`/ONNX-runtime, `usearch`, RRF, HTTP-клиент
-  для OpenRouter — добавляются только после бенчмарка; дефолтная сборка остаётся офлайн.
+- Реализовано (spec `docs/specs/hybrid-providers`, ADR-14): HTTP-клиент OpenRouter —
+  `reqwest` + rustls (`webpki-roots`) за feature `hybrid-remote`; дефолтная сборка
+  остаётся офлайн (SC-4: `cargo tree` без `reqwest`, CI-джоба `linux-hybrid`).
+- Позже (ADR-13): `fastembed`/ONNX-runtime, `usearch`, dense-поиск + RRF — после
+  бенчмарка; не входят в итерацию 1.
 
 ## 9. Error handling
 
@@ -429,10 +432,15 @@ entries/bytes), а live-индекс проекта содержит тольк�
 бесплатен; worktrees с общим контентом не дублируют инференс; смена `model_id` инвалидирует
 по ключу (старые векторы эвиктятся по LRU); эмбеддинг — фоновая стадия, перепроверяющая
 `chunk_hash` перед публикацией (branch switch в момент инференса безопасен). Отклонено:
-path-ключ, `(doc_id, seq)`, per-project/per-worktree кэш (дублирование, как у CBM). В v1
-ничего не подключено (`Config::hybrid` off, wire/поиск не меняются): T53 фиксирует контракт,
-тесты на fake-embedder и bench. Известное ограничение: partial-failure эмбеддера не должен
-оставлять «полу-поколение» — батч валидируется целиком до записи.
+path-ключ, `(doc_id, seq)`, per-project/per-worktree кэш (дублирование, как у CBM).
+Известное ограничение: partial-failure эмбеддера не должен оставлять «полу-поколение» —
+батч валидируется целиком до записи.
+
+**Delta 2026-10-14 (spec `hybrid-providers`, ADR-14):** контракт подключён в итерации 1.
+Ключ `model_id` уточнён до `openrouter/<model>@d<dim>@<l2|raw>` (dim и нормализация обязаны
+входить в ключ; FR-5 спеки); `count_present` добавлен для покрытия (`embed_coverage`).
+Подключены: plan-эмбеддинг в index-джобе, полный sweep в sync-джобе (backfill) и
+открытие проекта (авто-enqueue при покрытии < 100%).
 
 **ADR-13. Embedding-провайдеры: OpenRouter + локальные модели за флагами (конституция 1.2.0).**
 Выбрано: hybrid-ступени (embedding, reranker) включаются per-project (конфиг) и
@@ -446,6 +454,40 @@ security — до реализации (утечка документов, кр�
 кэши моделей/индексы вне бюджета; сетевые/локальные hybrid-крейты — за feature-флагом,
 чтобы дефолтный статический артефакт не рос. Отклонено: обязательный локальный вес в v1,
 безусловная сеть, сеть без флага.
+
+**Delta 2026-10-14 (spec `hybrid-providers`, ADR-14):** «ревизия модели» из `model_id`
+реализована как `@d<dim>@<l2|raw>` (пин ревизии весов провайдера — принятое ограничение
+итерации 1, риск A3/R2 спеки); ключ — только env (`OPENROUTER_API_KEY`), не в конфиге
+(FR-4 уточнил пункт «API-ключи — в конфиге»: обзор security закрыт env-only).
+
+**ADR-14. Hybrid iteration 1: OpenRouter-only за feature `hybrid-remote` (spec `docs/specs/hybrid-providers`).**
+Выбрано: единственный провайдер итерации — OpenRouter (embeddings — `qwen/qwen3-embedding-8b`
+@ `dimensions=1024` MRL: спайк 2026-10-14 показал отсутствие `qwen3-embedding-0.6b` в каталоге,
+8B — нормированные вектора, $0.01/M; rerank — `cohere/rerank-v3.5`, $0.001/search). Sync-трейты
+(`Embedder` существующий, `Reranker` новый) с единственным санкционированным входом
+`hybrid::blocking::enter` (thread-local маркер; daemon роутит tool-вызовы через `spawn_blocking`).
+Поиск: BM25-окно `max(limit, window)` (10..=100, дефолт 50) → провайдерский порядок listwise,
+`score = relevance_score`, `rerank=false` — строгий BM25-порядок; `rerank=true` без ступени —
+явная ошибка. Backfill: авто-enqueue sync-джобы при открытии проекта с покрытием < 100%
+(`embed_coverage` в `status`); sync-джоба делает полный sweep чанков (content-addressed кэш —
+бесплатно при покрытии). TOML: `hybrid = true` шорткат или untagged-таблица с per-stage
+секциями; feature-off / чужой провайдер / нет ключа / window вне границ — явный `Admission`
+без молчаливого fallback. Дефолтная сборка — офлайн (SC-4 гейт в CI-джобе `linux-hybrid`).
+Отклонено: `reqwest::blocking` (паника внутри runtime, issue #1017), `rustls-tls-manual-roots`
+(не верифицирует без рутов), прямой Cohere (второй ключ/биллинг — итерация 2+), async-трейты
+(триггер пересмотра — веерные per-request запросы с дедлайном).
+
+**Delta 2026-10-15 (итерация 2, spec `hybrid-providers` DELTA-3/DELTA-7):**
+добавлен dense-канал и RRF-fusion. `hybrid.ranking = "lexical" | "rrf"`
+(дефолт lexical — смена порядка выдачи только с замером, NFR-6; `rrf` требует
+embedding-ступень — `Admission`). Списки BM25 и dense (косинус по кэшу векторов
+текущей ревизии, `k = 60`, детерминированные тай-брейки) сливаются; rerank
+остаётся верхней ступенью, без rerank `score` = RRF-скор (rank-based).
+`projects.index_generation` (схема v2; инкремент в R2-транзакции применения
+плана) инвалидирует in-memory dense-кэш (`DENSE_CACHE_MAX_VECTORS = 1M`,
+выше — стриминговый скан с bounded-хипом). Публичная библиотечная поверхность
+расширена: `store::repo`, `Db::{connection,begin_write}` (конституция 1.3.0).
+ANN, локальные модели и тюнинг `k`/весов — отдельные итерации.
 
 ## 13. Directory structure
 

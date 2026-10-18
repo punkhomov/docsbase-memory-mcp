@@ -217,7 +217,12 @@ fn status_lists_projects() {
         .get_output()
         .clone();
     let json = stdout_json(&output);
-    assert_eq!(json["schema_version"], 1);
+    assert_eq!(
+        json["schema_version"].as_u64(),
+        Some(u64::from(
+            docsbase_memory::store::migrations::SCHEMA_VERSION
+        ))
+    );
     let projects = json["projects"].as_array().expect("projects");
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0]["status"], "indexed");

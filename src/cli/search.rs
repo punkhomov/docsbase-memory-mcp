@@ -1,6 +1,7 @@
 //! `docsbase search` — read-only snapshot search (FR-20, FR-30).
 
 use crate::cli::status::read_project;
+use crate::config::Config;
 use crate::config::paths;
 use crate::daemon::tools;
 
@@ -23,11 +24,27 @@ pub fn run(query: &str, limit: usize) -> anyhow::Result<()> {
 
     let (db, project) = read_project()?;
     let cache = paths::cache_dir()?;
-    let value = tools::search_docs(
+    // Direct mode honors the project's hybrid configuration exactly like the
+    // daemon route: stages resolved up front (explicit admission on failure,
+    // FR-14) and the same `search_docs_with` seam (FR-11/12).
+    let config = Config::load(Some(&project.canonical_root))?;
+    let stages = crate::hybrid::from_config(&config.hybrid_cfg, cfg!(feature = "hybrid-remote"))?;
+    let window = config
+        .hybrid_cfg
+        .reranker
+        .as_ref()
+        .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |reranker| {
+            reranker.window
+        });
+    let dense = crate::hybrid::dense::DenseCache::new();
+    let value = tools::search_docs_with(
+        &stages,
+        &dense,
         &db,
         &cache,
         &project,
         &serde_json::json!({ "query": query, "limit": limit }),
+        window,
     )?;
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())

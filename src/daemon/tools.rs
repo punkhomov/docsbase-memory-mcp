@@ -9,6 +9,13 @@ use crate::config::Config;
 use crate::daemon::session::Stats;
 use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
+use crate::hybrid::HybridStages;
+use crate::hybrid::Ranking;
+use crate::hybrid::blocking;
+use crate::hybrid::config::DEFAULT_RERANK_WINDOW;
+use crate::hybrid::dense::{self, DenseCache, DenseRows};
+use crate::hybrid::jobs::{self as hybrid_jobs, Coverage};
+use crate::hybrid::rrf::rrf_merge;
 use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
 use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
@@ -22,6 +29,125 @@ use crate::store::{Db, repo};
 /// Returns [`Error::Query`] for invalid queries and [`Error::Project`] when
 /// the project is not indexed.
 pub fn search_docs(db: &Db, cache: &Path, project: &Project, args: &Value) -> Result<Value> {
+    search_docs_with(
+        &HybridStages::default(),
+        &DenseCache::new(),
+        db,
+        cache,
+        project,
+        args,
+        DEFAULT_RERANK_WINDOW,
+    )
+}
+
+/// Applies the rerank stage to `ordered` in place (FR-11): the provider
+/// receives exactly the candidate window and ranks all of it (`top_n` =
+/// `documents.len()`); candidates it did not rank keep their order after
+/// the ranked ones.
+fn apply_rerank(
+    stages: &HybridStages,
+    db: &Db,
+    query: &str,
+    ordered: &mut Vec<(u64, f32)>,
+) -> Result<()> {
+    if ordered.is_empty() {
+        return Ok(());
+    }
+    let Some(reranker) = stages.reranker.as_deref() else {
+        return Ok(());
+    };
+    let mut documents = Vec::with_capacity(ordered.len());
+    for (chunk_id, _) in ordered.iter() {
+        let (doc_id, seq) = chunk_id_parts(*chunk_id);
+        let text = repo::chunk_text(db.connection(), doc_id, seq)?.ok_or_else(|| {
+            Error::internal(format!("chunk text missing for rerank (chunk {chunk_id})"))
+        })?;
+        documents.push(text);
+    }
+    // `documents` is already bounded by the fetch window (`max(limit,
+    // window)`, truncated after fusion): the provider ranks exactly the
+    // candidates it received (FR-11); every ranked score is a
+    // `relevance_score`, so the tail can never mix score scales.
+    let ranked = blocking::enter(|| reranker.rerank(query, &documents, documents.len()))?;
+    let mut reordered: Vec<(u64, f32)> = Vec::with_capacity(ordered.len());
+    let mut ranked_flags = vec![false; ordered.len()];
+    for (index, score) in ranked {
+        if let Some(entry) = ordered.get(index)
+            && !ranked_flags[index]
+        {
+            ranked_flags[index] = true;
+            reordered.push((entry.0, score));
+        }
+    }
+    // Defensive: candidates the provider did not rank keep the incoming
+    // order after the ranked ones (the provider clamps top_n to the
+    // candidate count, so this is unreachable with a conforming response).
+    for (index, entry) in ordered.iter().enumerate() {
+        if !ranked_flags[index] {
+            reordered.push(*entry);
+        }
+    }
+    *ordered = reordered;
+    Ok(())
+}
+
+/// Dense candidate list for the RRF stage (FR-15): the query embedding plus
+/// cached per-chunk vectors. `Ready` scans the in-memory rows; `TooLarge`
+/// streams the cache with a bounded heap, so memory stays flat above the cap.
+fn dense_candidates(
+    stages: &HybridStages,
+    dense: &DenseCache,
+    db: &Db,
+    project: &Project,
+    query: &str,
+    fetch: usize,
+) -> Result<Vec<(u64, f32)>> {
+    let Some(embedder) = stages.embedder.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let mut vectors = blocking::enter(|| embedder.embed(&[query.to_owned()]))?;
+    if vectors.len() != 1 {
+        return Err(Error::internal(format!(
+            "dense query embedding returned {} vectors for one input",
+            vectors.len()
+        )));
+    }
+    let vector = vectors.pop().unwrap_or_default();
+    let model_id = embedder.model_id();
+    match dense.get(db, project.id, model_id)? {
+        DenseRows::Ready(index) => dense::top_k(&vector, index.rows(), fetch),
+        DenseRows::TooLarge => {
+            let chunks = repo::chunk_hashes(db.connection(), project.id)?;
+            let mut cache = crate::vector_cache::VectorCache::open(db.cache_root())?;
+            let rows = chunks.into_iter().filter_map(move |(chunk_id, hash)| {
+                match cache.get(model_id, &hash) {
+                    Ok(Some(vector)) => Some(Ok((chunk_id, vector))),
+                    Ok(None) => None,
+                    Err(err) => Some(Err(err)),
+                }
+            });
+            dense::top_k_iter(&vector, rows, fetch)
+        }
+    }
+}
+
+/// [`search_docs`] with resolved hybrid stages, the dense cache and the
+/// project's rerank window; the shared seam for the daemon route, the direct
+/// CLI mode and the integration tests (FR-11, FR-12, FR-16, SC-2).
+///
+/// # Errors
+/// Returns [`Error::Query`] for invalid queries, [`Error::Project`] when the
+/// project is not indexed, and [`Error::Protocol`] for malformed arguments
+/// (including `rerank=true` when the project has no rerank stage).
+pub fn search_docs_with(
+    stages: &HybridStages,
+    dense: &DenseCache,
+    db: &Db,
+    cache: &Path,
+    project: &Project,
+    args: &Value,
+    window: u32,
+) -> Result<Value> {
     ensure_indexed(project)?;
     let query = args
         .get("query")
@@ -52,18 +178,65 @@ pub fn search_docs(db: &Db, cache: &Path, project: &Project, args: &Value) -> Re
         });
     }
 
+    let requested = match args.get("rerank") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_bool().ok_or_else(|| Error::Protocol {
+            message: format!("search_docs: rerank must be a boolean, got {value}"),
+        })?),
+    };
+    let rerank_active = requested.unwrap_or(stages.reranker.is_some());
+    if requested == Some(true) && stages.reranker.is_none() {
+        return Err(Error::Protocol {
+            message: "search_docs: rerank=true but hybrid rerank is not enabled for this project"
+                .to_owned(),
+        });
+    }
+
+    // The rerank and RRF stages need a wider candidate window than the
+    // requested limit (FR-11, FR-16); plain BM25 fetches exactly the limit.
+    // `HybridStages` is a public type: rrf with no embedder is an invariant
+    // violation, not a silent BM25 fallback (NFR-2).
+    let rrf_active = stages.ranking == Ranking::Rrf;
+    if rrf_active && stages.embedder.is_none() {
+        return Err(Error::internal(
+            "search_docs: rrf ranking requires the embedding stage (FR-17)",
+        ));
+    }
+    let fetch = if rerank_active || rrf_active {
+        limit.max(window as usize).min(MAX_HITS)
+    } else {
+        limit
+    };
     let index = ReadIndex::open(&lifecycle::index_dir(cache, project.id))?;
-    let hits = index.search(query, limit)?;
-    let mut rows = Vec::with_capacity(hits.len());
-    for hit in hits {
-        let (doc_id, seq) = chunk_id_parts(hit.chunk_id);
+    let hits = index.search(query, fetch)?;
+
+    let bm25: Vec<(u64, f32)> = hits.iter().map(|hit| (hit.chunk_id, hit.score)).collect();
+    let mut ordered: Vec<(u64, f32)> = if rrf_active {
+        let dense_hits = dense_candidates(stages, dense, db, project, query, fetch)?;
+        let mut fused = rrf_merge(&bm25, &dense_hits);
+        // The union of two fetch-sized lists can reach 2x fetch; the rerank
+        // stage must not see more candidates than the configured window
+        // (FR-11, FR-16).
+        fused.truncate(fetch);
+        fused
+    } else {
+        bm25
+    };
+    if rerank_active {
+        apply_rerank(stages, db, query, &mut ordered)?;
+    }
+    ordered.truncate(limit);
+
+    let mut rows = Vec::with_capacity(ordered.len());
+    for (chunk_id, score) in ordered {
+        let (doc_id, seq) = chunk_id_parts(chunk_id);
         if let Some(citation) = repo::citation_for(db.connection(), doc_id, seq)? {
             rows.push(json!({
-                "chunk_id": hit.chunk_id,
+                "chunk_id": chunk_id,
                 "path": citation.path,
                 "heading_path": citation.heading_path,
                 "lines": [citation.line_start, citation.line_end],
-                "score": hit.score,
+                "score": score,
             }));
         }
     }
@@ -304,11 +477,16 @@ pub fn status(
     watchers: u64,
     restart_notice: Option<&str>,
     watching: &dyn Fn(i64) -> bool,
+    coverage: &dyn Fn(&Project) -> Option<Coverage>,
 ) -> Result<Value> {
     let mut projects = Vec::new();
     for project in registry::list_projects(db)? {
         let mut entry = project_entry(db, &project, Some(watching(project.id)), true)?;
         entry["root_state"] = json!(registry::root_state(&project.canonical_root).as_str());
+        entry["embed_coverage"] = match coverage(&project) {
+            Some(cov) => json!({ "cached": cov.cached, "total": cov.total }),
+            None => Value::Null,
+        };
         projects.push(entry);
     }
     let hint = projects
@@ -462,7 +640,13 @@ pub fn run_sync_job_in(
     config: &Config,
 ) -> Result<JobStats> {
     repo::mark_sync_running(db.connection(), job_id)?;
-    let outcome = run_project_index(db, cache, project, config);
+    // After the index pass, a full embedding sweep over every project chunk
+    // completes the coverage a previous offline period left behind (FR-15);
+    // cached chunks cost nothing, so this is a no-op once covered.
+    let outcome = run_project_index(db, cache, project, config).and_then(|stats| {
+        hybrid_jobs::embed_project_chunks(db, &config.hybrid_cfg, project.id)?;
+        Ok(stats)
+    });
     let (state, stats_json) = match &outcome {
         Ok(stats) => (SyncState::Done, serde_json::to_string(stats).ok()),
         Err(err) => (
@@ -578,4 +762,214 @@ fn ensure_indexed(project: &Project) -> Result<()> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tempfile::TempDir;
+
+    use crate::hybrid::Reranker;
+    use crate::index::job::run_full;
+    use crate::index::tantivy_index::IndexHandle;
+    use crate::store::models::ProjectStatus;
+
+    /// Reranker that reverses the candidates, scores by rank and records the
+    /// documents it saw (FR-11 contract; SC-2).
+    #[derive(Default)]
+    struct ReverseReranker {
+        calls: AtomicUsize,
+        top_ns: std::sync::Mutex<Vec<usize>>,
+        documents: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Reranker for ReverseReranker {
+        #[allow(clippy::cast_precision_loss)]
+        fn rerank(&self, _query: &str, docs: &[String], top_n: usize) -> Result<Vec<(usize, f32)>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.top_ns.lock().expect("top_ns").push(top_n);
+            self.documents
+                .lock()
+                .expect("documents")
+                .extend(docs.iter().cloned());
+            let n = docs.len().min(top_n);
+            Ok((0..n)
+                .map(|rank| (docs.len() - 1 - rank, (n - rank) as f32))
+                .collect())
+        }
+    }
+
+    const DOCS: &[(&str, &str)] = &[
+        ("a.md", "# A\n\nwidgets alpha text about gizmos.\n"),
+        ("b.md", "# B\n\nwidgets beta text about sprockets.\n"),
+        ("c.md", "# C\n\nwidgets gamma text about cogs.\n"),
+    ];
+
+    fn env() -> (TempDir, Db, crate::store::models::Project) {
+        let cache = TempDir::new().expect("cache");
+        let root = TempDir::new().expect("root");
+        for (rel, body) in DOCS {
+            fs::write(root.path().join(rel), body).expect("write doc");
+        }
+        let mut db = Db::open(cache.path()).expect("db");
+        let canonical_root = root.path().canonicalize().expect("canonical root");
+        let mut project = registry::ensure_project(&mut db, &canonical_root).expect("project");
+        let mut index =
+            IndexHandle::open_or_create(&lifecycle::index_dir(cache.path(), project.id))
+                .expect("index");
+        run_full(&mut db, &mut index, &project, &Config::default()).expect("index run");
+        // search only needs the status; avoid the full mark_indexed bookkeeping.
+        project.status = ProjectStatus::Indexed;
+        (cache, db, project)
+    }
+
+    fn chunk_ids(value: &Value) -> Vec<u64> {
+        value
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|row| row["chunk_id"].as_u64().expect("chunk_id"))
+            .collect()
+    }
+
+    #[test]
+    fn rerank_reorders_hits_and_replaces_scores() {
+        let (cache, db, project) = env();
+        let args = json!({ "query": "widgets", "limit": 3 });
+
+        let bm25 = search_docs_with(
+            &HybridStages::default(),
+            &DenseCache::new(),
+            &db,
+            cache.path(),
+            &project,
+            &args,
+            DEFAULT_RERANK_WINDOW,
+        )
+        .expect("bm25 search");
+        let bm25_ids = chunk_ids(&bm25);
+        assert_eq!(bm25_ids.len(), 3);
+
+        let reranker = Arc::new(ReverseReranker::default());
+        let stages = HybridStages {
+            embedder: None,
+            reranker: Some(reranker.clone()),
+            ranking: Ranking::Lexical,
+        };
+        let result = search_docs_with(
+            &stages,
+            &DenseCache::new(),
+            &db,
+            cache.path(),
+            &project,
+            &args,
+            50,
+        )
+        .expect("reranked search");
+        let result_ids = chunk_ids(&result);
+        let mut expected = bm25_ids.clone();
+        expected.reverse();
+        assert_eq!(result_ids, expected, "provider order replaces BM25 order");
+        assert_eq!(reranker.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            reranker.documents.lock().expect("documents").len(),
+            3,
+            "every candidate is sent once; window clamps to the hit count"
+        );
+
+        let scores: Vec<f64> = result
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|row| row["score"].as_f64().expect("score"))
+            .collect();
+        assert_eq!(scores, vec![3.0, 2.0, 1.0], "score = relevance_score");
+        for row in result.as_array().expect("array") {
+            assert!(row["path"].is_string(), "citations survive the rerank");
+        }
+    }
+
+    #[test]
+    fn rerank_false_keeps_bm25_order_and_skips_the_provider() {
+        let (cache, db, project) = env();
+        let bm25 = search_docs_with(
+            &HybridStages::default(),
+            &DenseCache::new(),
+            &db,
+            cache.path(),
+            &project,
+            &json!({ "query": "widgets", "limit": 3 }),
+            DEFAULT_RERANK_WINDOW,
+        )
+        .expect("bm25 search");
+
+        let reranker = Arc::new(ReverseReranker::default());
+        let stages = HybridStages {
+            embedder: None,
+            reranker: Some(reranker.clone()),
+            ranking: Ranking::Lexical,
+        };
+        let value = search_docs_with(
+            &stages,
+            &DenseCache::new(),
+            &db,
+            cache.path(),
+            &project,
+            &json!({ "query": "widgets", "limit": 3, "rerank": false }),
+            50,
+        )
+        .expect("strict bm25");
+        assert_eq!(chunk_ids(&value), chunk_ids(&bm25));
+        assert_eq!(reranker.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn rerank_ranks_the_whole_fetch_window_even_above_the_config_window() {
+        let (cache, db, project) = env();
+        let reranker = Arc::new(ReverseReranker::default());
+        let stages = HybridStages {
+            embedder: None,
+            reranker: Some(reranker.clone()),
+            ranking: Ranking::Lexical,
+        };
+        let value = search_docs_with(
+            &stages,
+            &DenseCache::new(),
+            &db,
+            cache.path(),
+            &project,
+            &json!({ "query": "widgets", "limit": 3 }),
+            2,
+        )
+        .expect("limit above the config window");
+        assert_eq!(value.as_array().expect("array").len(), 3);
+        assert_eq!(
+            *reranker.top_ns.lock().expect("top_ns"),
+            vec![3],
+            "top_n = fetch = max(limit, window)"
+        );
+    }
+
+    #[test]
+    fn rerank_true_without_a_stage_is_a_protocol_error() {
+        let (cache, db, project) = env();
+        let error = search_docs_with(
+            &HybridStages::default(),
+            &DenseCache::new(),
+            &db,
+            cache.path(),
+            &project,
+            &json!({ "query": "widgets", "rerank": true }),
+            DEFAULT_RERANK_WINDOW,
+        )
+        .expect_err("explicit rerank without a stage must fail");
+        assert!(
+            matches!(&error, Error::Protocol { message } if message.contains("rerank")),
+            "{error}"
+        );
+    }
 }

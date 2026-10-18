@@ -277,6 +277,38 @@ pub trait Reranker: Send + Sync {
 См. Non-goals. Дополнительно: смена формата MCP-ответа (кроме `score`-семантики
 по FR-11), мультимодальные входы OpenRouter-rerank, локальные провайдеры.
 
+## DELTA-3 (2026-10-15): итерация 2 — dense-канал и RRF-fusion
+
+Заменяет плейсхолдер в FR-11 («RRF/dense — итерация 2… контракт fusion не был
+определён»): контракт фиксируется ниже до кода.
+
+- **FR-15. Dense-канал (косинус по кэшу векторов).** При `hybrid.ranking = "rrf"`
+  поиск строит второй список: query-эмбеддинг тем же `Embedder`/`cache_model_id`,
+  косинусная близость (для L2-нормированных = скалярное произведение) против
+  векторов **текущей ревизии** проекта; кандидаты — чанки, у которых есть вектор;
+  чанки без вектора пропускаются (частичное покрытие допустимо: backfill сходится
+  в фоне, покрытие видно в `status.embed_coverage`); top-`fetch`,
+  `fetch = max(limit, window)`. Пустой dense-список не ошибка — выдача равна
+  BM25-части RRF (деградация при нулевом покрытии).
+- **FR-16. RRF-fusion.** Списки BM25 и dense объединяются Reciprocal Rank Fusion:
+  `score = Σ 1/(60 + rank)` (rank с 1), `k = 60` — константа `RRF_K`, веса равные.
+  Детерминированный тай-брейк при равенстве: (1) больше вхождений в списки,
+  (2) лучший ранг, (3) BM25-скор убыв., (4) `chunk_id` возр. После fusion
+  rerank-ступень (если активна) работает как в FR-11: тексты fused-окна,
+  `top_n = window`, порядок и `score` = `relevance_score`; финальный срез — `limit`.
+- **FR-17. Конфиг `hybrid.ranking`.** Значения `"lexical" | "rrf"`, дефолт
+  `"lexical"` (смена порядка выдачи — только опти-ин, NFR-6). `"rrf"` требует
+  включённой embedding-ступени; иначе ошибка валидации (`Admission`). Неизвестное
+  значение — ошибка конфига. Per-request параметр — итерация 3 (как и веса/`k`).
+- **FR-18. Семантика `score`.** С активным rerank — как в 2.1 (`relevance_score`).
+  Без rerank: `ranking = "lexical"` — BM25-скор (не меняется); `ranking = "rrf"` —
+  RRF-скор (rank-based, не сопоставим с BM25 — документируется в CONFIG.md).
+  Уточнение FR-12 из 2.1: `rerank=false` отключает только rerank-ступень, порядок
+  определяет `ranking`; формулировка «строгий BM25» относится к `ranking = "lexical"`.
+
+**Non-goals итерации 2:** ANN-индекс, локальные модели, тюнинг `k`/весов,
+per-request `ranking`, квантование/сжатие векторов, параллельный скан.
+
 ## Open questions
 
 - **OQ-1 (ЗАКРЫТ спайком 2026-10-14, `DELTA-T1`):** `qwen3-embedding-0.6b`
@@ -288,9 +320,9 @@ pub trait Reranker: Send + Sync {
   (zod-envelope), пустые `documents` → 400; rerank `top_n` клампится; фикстуры —
   `tests/fixtures/openrouter/`. Лимиты docs/call по-прежнему берём из батч-конфига
   (≤128 текстов / byte-budget), 429/5xx не провоцировались — политика по докам.
-- **OQ-2:** значение `HTTP-Referer`/`X-Title` (предложение: URL репо +
-  `docsbase-memory-mcp`; `X-OpenRouter-Categories` не задаём). Закрывается в T2
-  (константы в `openrouter.rs`, подтверждаются в PR).
+- **OQ-2 (ЗАКРЫТ в T2):** `HTTP-Referer = https://github.com/punkhomov/docsbase-memory-mcp`,
+  `X-Title = docsbase-memory-mcp`; `X-OpenRouter-Categories` не задаём (константы
+  в `src/hybrid/openrouter.rs`).
 
 ## References (ресёрч 2026-10-14)
 

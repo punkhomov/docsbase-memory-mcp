@@ -1,6 +1,8 @@
 //! Tantivy schema and per-project index handle (FR-19, FR-21; NFR-1).
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
@@ -17,6 +19,60 @@ use crate::index::tokenizer::{self, IdentifierTokenizer};
 /// Writer heap: tantivy's minimum is 15 MB; 20 MB keeps a single indexing
 /// thread without growing the RSS of short-lived CLI runs much.
 const WRITER_HEAP_BYTES: usize = 20_000_000;
+
+/// In-process commit-fault budget, scoped by index-dir prefix (test seam:
+/// the watcher arms it to model a commit that died mid-way; see
+/// `tests/mcp_registry.rs::watcher_recovers_from_a_commit_failure`).
+static INJECTED_COMMIT_FAULTS: Mutex<Option<(PathBuf, usize)>> = Mutex::new(None);
+
+/// Arms `budget` injected commit failures for index dirs under `prefix`.
+pub(crate) fn inject_commit_faults(prefix: &Path, budget: usize) {
+    *INJECTED_COMMIT_FAULTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some((prefix.to_path_buf(), budget));
+}
+
+/// Env commit-fault budget (`DOCSBASE_INDEX_FAULT=commit:N` with
+/// `DOCSBASE_INDEX_FAULT_ROOT=<prefix>`), remembering the consumed budget
+/// across one-shot calls; inert unless both variables are set.
+static INJECTED_ENV_COMMITS: Mutex<Option<(String, usize)>> = Mutex::new(None);
+
+fn injected_commit_fault(dir: &Path) -> Option<Error> {
+    {
+        let mut guard = INJECTED_COMMIT_FAULTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some((prefix, budget)) = guard.as_mut()
+            && *budget > 0
+            && dir.starts_with(prefix.as_path())
+        {
+            *budget -= 1;
+            return Some(Error::internal(
+                "injected index commit fault (DOCSBASE_INDEX_FAULT=commit)",
+            ));
+        }
+    }
+    let spec = std::env::var("DOCSBASE_INDEX_FAULT").ok()?;
+    let prefix = std::env::var("DOCSBASE_INDEX_FAULT_ROOT").ok()?;
+    let budget = spec.strip_prefix("commit:")?.parse::<usize>().ok()?;
+    if !dir.starts_with(&prefix) {
+        return None;
+    }
+    let mut guard = INJECTED_ENV_COMMITS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let entry = guard.get_or_insert_with(|| (prefix.clone(), budget));
+    if entry.0 != prefix {
+        *entry = (prefix, budget);
+    }
+    if entry.1 == 0 {
+        return None;
+    }
+    entry.1 -= 1;
+    Some(Error::internal(
+        "injected index commit fault (DOCSBASE_INDEX_FAULT=commit)",
+    ))
+}
 
 /// Score multiplier for chunks above [`MAX_CHUNK_CHARS`] + [`CHUNK_OVERLAP`]
 /// (the penalty threshold): oversized sections (giant tables or fences) must
@@ -267,12 +323,46 @@ impl IndexHandle {
 
     /// Commits pending operations and reloads the reader.
     ///
+    /// A failed commit is not retried in place: tantivy opens every file with
+    /// `create_new`, so files left by a half-applied commit make the next
+    /// attempt fail with `FileAlreadyExists` forever (CI flake family,
+    /// tantivy #2847). The index is marked for recreation instead and the
+    /// caller's next open rebuilds it from `SQLite` (T27).
+    ///
     /// # Errors
     /// Returns [`Error::Internal`] when commit or reload fails.
     pub fn commit(&mut self) -> Result<()> {
-        self.writer_mut()?.commit().map_err(tantivy_error)?;
-        self.reader.reload().map_err(tantivy_error)?;
-        Ok(())
+        if let Some(error) = injected_commit_fault(&self.dir) {
+            self.mark_needs_rebuild("an injected commit fault");
+            return Err(error);
+        }
+        let outcome = match self.writer_mut() {
+            Ok(writer) => writer.commit().map_err(tantivy_error),
+            Err(err) => Err(err),
+        };
+        match outcome {
+            Ok(_) => {
+                self.reader.reload().map_err(tantivy_error)?;
+                Ok(())
+            }
+            Err(err) => {
+                self.mark_needs_rebuild(&err.to_string());
+                Err(err)
+            }
+        }
+    }
+
+    /// Writes [`REBUILD_MARKER`] so the next open recreates the directory and
+    /// the caller rebuilds from `SQLite` (best effort: a failure to write the
+    /// marker still surfaces the original commit error).
+    fn mark_needs_rebuild(&mut self, reason: &str) {
+        let marker = self.dir.join(REBUILD_MARKER);
+        if let Err(err) = write_rebuild_marker(&self.dir, &marker) {
+            eprintln!(
+                "warning: cannot mark index {} for rebuild after {reason}: {err}",
+                self.dir.display()
+            );
+        }
     }
 
     /// Runs a BM25 search over all fields with identifier boosts.
@@ -440,11 +530,53 @@ fn search_reader(
     Ok(hits)
 }
 
+/// Retries directory removal for readers that briefly hold locks (Windows
+/// mmaps): success returns immediately, only exhaustion returns the last
+/// error. Early return (not a `last_error` accumulator checked after the
+/// loop) so a transient failure followed by success cannot surface a stale
+/// error — regression: the first version of this loop `break`ed on success
+/// but still reported the earlier failure.
+fn remove_dir_all_retry(
+    dir: &Path,
+    attempts: u32,
+    pause: Duration,
+    remove: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match remove(dir) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                attempt += 1;
+                if attempt >= attempts {
+                    return Err(err);
+                }
+                std::thread::sleep(pause);
+            }
+        }
+    }
+}
+
 /// Removes a stale index directory and creates a current-schema one with the
 /// rebuild marker already in place.
 fn create_fresh(dir: &Path, marker: &Path) -> Result<()> {
-    std::fs::remove_dir_all(dir).map_err(|err| {
-        Error::internal_with_source(format!("remove stale index {}: {err}", dir.display()), err)
+    // Windows: a concurrent reader may still hold mmaps, so `remove_dir_all`
+    // fails with `AccessDenied` until it drops (searches are short). Bounded
+    // retries give readers time instead of failing the batch outright.
+    const REMOVE_ATTEMPTS: u32 = 20;
+    const REMOVE_PAUSE: Duration = Duration::from_millis(100);
+    remove_dir_all_retry(dir, REMOVE_ATTEMPTS, REMOVE_PAUSE, &|dir| {
+        std::fs::remove_dir_all(dir)
+    })
+    .map_err(|err| {
+        Error::internal_with_source(
+            format!(
+                "remove stale index {} after {REMOVE_ATTEMPTS} attempts: {err}",
+                dir.display()
+            ),
+            err,
+        )
     })?;
     std::fs::create_dir_all(dir).map_err(|err| {
         Error::internal_with_source(format!("recreate index dir {}: {err}", dir.display()), err)
@@ -579,4 +711,84 @@ fn extract_identifiers(text: &str) -> String {
 
 fn tantivy_error(err: tantivy::TantivyError) -> Error {
     Error::internal_with_source(format!("tantivy: {err}"), err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+
+    /// Scripted removal backend: replays queued outcomes, counts calls.
+    struct Script {
+        outcomes: RefCell<VecDeque<std::io::Result<()>>>,
+        calls: Cell<usize>,
+    }
+
+    impl Script {
+        fn remove(&self, _dir: &Path) -> std::io::Result<()> {
+            self.calls.set(self.calls.get() + 1);
+            self.outcomes
+                .borrow_mut()
+                .pop_front()
+                .expect("removal script exhausted")
+        }
+    }
+
+    fn denied() -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "reader holds a mmap",
+        ))
+    }
+
+    #[test]
+    fn retry_succeeds_after_a_transient_failure() {
+        // Regression: the first version reported the earlier failure even
+        // when a later attempt succeeded (stale `last_error` accumulator).
+        let script = Script {
+            outcomes: RefCell::new(VecDeque::from([denied(), Ok(())])),
+            calls: Cell::new(0),
+        };
+        let dir = Path::new("index");
+        assert!(remove_dir_all_retry(dir, 20, Duration::ZERO, &|dir| script.remove(dir)).is_ok());
+        assert_eq!(script.calls.get(), 2);
+    }
+
+    #[test]
+    fn retry_treats_missing_dir_as_success() {
+        // A concurrent deleter winning the race is the desired end state.
+        let missing = |_dir: &Path| -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "already gone",
+            ))
+        };
+        let dir = Path::new("index");
+        assert!(remove_dir_all_retry(dir, 20, Duration::ZERO, &missing).is_ok());
+    }
+
+    #[test]
+    fn retry_returns_the_last_error_on_exhaustion() {
+        let script = Script {
+            outcomes: RefCell::new(VecDeque::from([denied(), denied(), denied()])),
+            calls: Cell::new(0),
+        };
+        let dir = Path::new("index");
+        let err = remove_dir_all_retry(dir, 3, Duration::ZERO, &|dir| script.remove(dir))
+            .expect_err("three failures against a budget of three must surface the error");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(script.calls.get(), 3);
+    }
+
+    #[test]
+    fn retry_succeeds_on_the_first_attempt() {
+        let script = Script {
+            outcomes: RefCell::new(VecDeque::from([Ok(())])),
+            calls: Cell::new(0),
+        };
+        let dir = Path::new("index");
+        assert!(remove_dir_all_retry(dir, 20, Duration::ZERO, &|dir| script.remove(dir)).is_ok());
+        assert_eq!(script.calls.get(), 1);
+    }
 }

@@ -19,9 +19,12 @@
 полнотекстовыми индексами, вотчерами и sync-джобами. Единственный источник
 истины — `.md`-файлы на диске; MCP-поверхность — read-only поверх индекса.
 В рантайме по умолчанию ноль сетевых вызовов: ни телеметрии, ни облака, ни
-Docker. Опциональные hybrid-стадии поиска (фаза 2) включаются явно
-per-project/per-request и могут использовать embedding API (OpenRouter) или
-локально закэшированную модель.
+Docker. Опциональные hybrid-стадии поиска (embeddings + rerank через
+OpenRouter, плюс opt-in RRF-fusion по кэшу векторов — `ranking = "rrf"`)
+включаются явно per-project/per-request, поставляются за feature-флагом
+`hybrid-remote` и требуют `OPENROUTER_API_KEY`; дефолтная сборка остаётся
+полностью офлайн и не делает молчаливого fallback
+(см. [`docs/CONFIG.md`](docs/CONFIG.md)).
 
 Поддерживаемые платформы: **Linux x86_64** (статический бинарь),
 **Windows x64** (`.exe`) и **macOS 12+ на Apple Silicon**. Intel-маки вне

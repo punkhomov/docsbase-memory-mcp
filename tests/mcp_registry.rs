@@ -341,7 +341,10 @@ fn status_reports_sessions_watcher_versions() {
     let status = bound.call_tool("status", json!({})).expect("status");
     assert_eq!(status["build_id"], build_id());
     assert_eq!(status["protocol_version"], PROTOCOL_VERSION);
-    assert_eq!(status["schema_version"], 1);
+    assert_eq!(
+        status["schema_version"],
+        docsbase_memory::store::migrations::SCHEMA_VERSION
+    );
     assert!(
         status["sessions"].as_u64().unwrap_or(0) >= 1,
         "status: {status}"
@@ -633,16 +636,18 @@ fn watcher_refreshes_search() {
     );
     let deadline = Instant::now() + Duration::from_secs(6);
     loop {
-        let hits = bound
-            .call_tool("search_docs", json!({ "query": "gizmos" }))
-            .expect("search_docs");
-        if !hits.as_array().expect("hits").is_empty() {
-            break;
+        // A batch that dies mid-commit takes the index offline for reads
+        // until the retried batch rebuilds it ("needs to be rebuilt", T27);
+        // the window is expected to close quickly.
+        match bound.call_tool("search_docs", json!({ "query": "gizmos" })) {
+            Ok(hits) if !hits.as_array().expect("hits").is_empty() => break,
+            Ok(_) => {}
+            Err(err) => assert!(
+                err.to_string().contains("needs to be rebuilt"),
+                "only the rebuild marker may interrupt the refresh window: {err}"
+            ),
         }
-        assert!(
-            Instant::now() < deadline,
-            "watcher did not refresh search: {hits}"
-        );
+        assert!(Instant::now() < deadline, "watcher did not refresh search");
         std::thread::sleep(Duration::from_millis(50));
     }
 }
@@ -677,15 +682,20 @@ fn watcher_retries_transient_batch_failure() {
     );
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let hits = bound
-            .call_tool("search_docs", json!({ "query": "sprockets" }))
-            .expect("search_docs");
-        if !hits.as_array().expect("hits").is_empty() {
-            break;
+        // The retry after the injected fault may hit the Windows file race
+        // and take the index offline until the next retried batch rebuilds
+        // it (T27); the poll tolerates exactly that window.
+        match bound.call_tool("search_docs", json!({ "query": "sprockets" })) {
+            Ok(hits) if !hits.as_array().expect("hits").is_empty() => break,
+            Ok(_) => {}
+            Err(err) => assert!(
+                err.to_string().contains("needs to be rebuilt"),
+                "only the rebuild marker may interrupt the healing window: {err}"
+            ),
         }
         assert!(
             Instant::now() < deadline,
-            "edit must land despite one injected batch failure: {hits}"
+            "edit must land despite one injected batch failure"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -694,6 +704,63 @@ fn watcher_retries_transient_batch_failure() {
         status["projects"][0]["last_error"].is_null(),
         "a recovered batch must not surface an error: {status}"
     );
+}
+
+/// The CI flake family (tantivy #2847): a commit that dies mid-way leaves
+/// files that poison every later retry with `FileAlreadyExists`. The batch
+/// retry must heal through the rebuild marker: recreate the index and
+/// rebuild it from `SQLite` instead of failing forever.
+#[test]
+fn watcher_recovers_from_a_commit_failure() {
+    let mut env = Env::new(&[("README.md", "# Guide\n\ninstaller prose about gizmos.\n")]);
+    let root = env.root().canonicalize().expect("canonical root");
+    let root_path = env.root().to_path_buf();
+    env.start_daemon_with_env(
+        &root_path,
+        &[
+            ("DOCSBASE_WATCH_FAULT", "commit:1"),
+            (
+                "DOCSBASE_WATCH_FAULT_ROOT",
+                root.to_str().expect("utf8 root"),
+            ),
+        ],
+    );
+    let mut client = env.client();
+    client.handshake_registry().expect("hello");
+    Env::index_project(&mut client, env.root());
+
+    let mut bound = env.client();
+    bound.handshake(env.root()).expect("bind session");
+    write_file(
+        env.root(),
+        "README.md",
+        b"# Guide\n\ninstaller prose about sprockets.\n",
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        // Until the retried batch finishes its rebuild the read side refuses
+        // the marked index with an explicit "needs to be rebuilt" error
+        // (T27); the recovery window is expected to close quickly.
+        match bound.call_tool("search_docs", json!({ "query": "sprockets" })) {
+            Ok(hits) if !hits.as_array().expect("hits").is_empty() => break,
+            Ok(_) => {}
+            Err(err) => assert!(
+                err.to_string().contains("needs to be rebuilt"),
+                "only the rebuild marker may interrupt the healing window: {err}"
+            ),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the batch must heal after a failed commit"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let status = bound.call_tool("status", json!({})).expect("status");
+    assert!(
+        status["projects"][0]["last_error"].is_null(),
+        "the healed batch must not surface an error: {status}"
+    );
+    assert_eq!(status["projects"][0]["docs"], 1, "{status}");
 }
 
 /// Flake #28: a batch dropped after the bounded retries is surfaced in

@@ -26,6 +26,9 @@ jobs:
           - os: windows-latest
             suite: mcp_registry
             filter: watcher_refreshes_search
+          - os: windows-latest
+            suite: mcp_registry
+            filter: watcher_retries_transient_batch_failure
           - os: ubuntu-latest
             suite: lifecycle
             filter: connection_flood_is_refused_and_daemon_survives
