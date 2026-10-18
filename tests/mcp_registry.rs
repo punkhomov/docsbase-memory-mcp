@@ -699,6 +699,63 @@ fn watcher_retries_transient_batch_failure() {
     );
 }
 
+/// The CI flake family (tantivy #2847): a commit that dies mid-way leaves
+/// files that poison every later retry with `FileAlreadyExists`. The batch
+/// retry must heal through the rebuild marker: recreate the index and
+/// rebuild it from `SQLite` instead of failing forever.
+#[test]
+fn watcher_recovers_from_a_commit_failure() {
+    let mut env = Env::new(&[("README.md", "# Guide\n\ninstaller prose about gizmos.\n")]);
+    let root = env.root().canonicalize().expect("canonical root");
+    let root_path = env.root().to_path_buf();
+    env.start_daemon_with_env(
+        &root_path,
+        &[
+            ("DOCSBASE_WATCH_FAULT", "commit:1"),
+            (
+                "DOCSBASE_WATCH_FAULT_ROOT",
+                root.to_str().expect("utf8 root"),
+            ),
+        ],
+    );
+    let mut client = env.client();
+    client.handshake_registry().expect("hello");
+    Env::index_project(&mut client, env.root());
+
+    let mut bound = env.client();
+    bound.handshake(env.root()).expect("bind session");
+    write_file(
+        env.root(),
+        "README.md",
+        b"# Guide\n\ninstaller prose about sprockets.\n",
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        // Until the retried batch finishes its rebuild the read side refuses
+        // the marked index with an explicit "needs to be rebuilt" error
+        // (T27); the recovery window is expected to close quickly.
+        match bound.call_tool("search_docs", json!({ "query": "sprockets" })) {
+            Ok(hits) if !hits.as_array().expect("hits").is_empty() => break,
+            Ok(_) => {}
+            Err(err) => assert!(
+                err.to_string().contains("needs to be rebuilt"),
+                "only the rebuild marker may interrupt the healing window: {err}"
+            ),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the batch must heal after a failed commit"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let status = bound.call_tool("status", json!({})).expect("status");
+    assert!(
+        status["projects"][0]["last_error"].is_null(),
+        "the healed batch must not surface an error: {status}"
+    );
+    assert_eq!(status["projects"][0]["docs"], 1, "{status}");
+}
+
 /// Flake #28: a batch dropped after the bounded retries is surfaced in
 /// `status` (`last_error` plus the lost paths as warnings), not silently lost.
 #[test]

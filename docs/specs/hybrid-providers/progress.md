@@ -193,3 +193,18 @@
   ("*.del")` на всех 3 ретраях инжектированного watchdog-батча
   (`watcher_retries_transient_batch_failure`). Наблюдение добавлено в
   `docs/daemon-test-flakes.md` (раздел 4); rerun/новая ревизия — зелёные.
+- 2026-10-18: флейк 4 разобран до конца (по требованию: последний раз). Полный
+  механизм: os error 5 приходит ПОСРЕДИ коммита; tantivy пишет файлы через
+  `create_new(true)`, а имя `.del` = `segment.{delete_opstamp}` — после падения
+  opstamp не сдвигается, ретраи переигрывают те же удаления и вечно получают
+  `FileAlreadyExists`. Т.е. транзиент превращался в детерминированную порчу
+  нашим ретраем. Фикс: `IndexHandle::commit()` при любой ошибке пишет
+  `REBUILD_MARKER` → следующий open пересоздаёт каталог и перестраивает из
+  SQLite (`was_recreated` → run_full, T27); `create_fresh` — bounded retry
+  `remove_dir_all` (Windows: mmap ридеры); в окне перестройки чтение отвергает
+  индекс явной ошибкой (как раньше). Детерминированные тесты:
+  `tests/index_recovery.rs` (env-инжект commit:1) и
+  `mcp_registry::watcher_recovers_from_a_commit_failure`
+  (`DOCSBASE_WATCH_FAULT=commit:1` — новый вид инжекта). flake-stress: windows
+  таргет `watcher_retries_transient_batch_failure` добавлен. Upstream #2847
+  открыт (0.27.0 вышел 17.10 — заблокирован min-publish-age 14д, не путь).

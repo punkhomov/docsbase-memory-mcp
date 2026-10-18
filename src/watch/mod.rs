@@ -354,17 +354,41 @@ where
 /// Remaining injected faults for the current fault-test root (test seam).
 static INJECTED_FAULT_REMAINING: Mutex<Option<(String, usize)>> = Mutex::new(None);
 
+/// Prefix that already armed its one-shot commit fault (see
+/// [`injected_watch_fault`]).
+static INJECTED_COMMIT_ARMED: Mutex<Option<String>> = Mutex::new(None);
+
 /// Test seam (see `tests/watcher.rs`): with `DOCSBASE_WATCH_FAULT=internal:N`
 /// and `DOCSBASE_WATCH_FAULT_ROOT=<prefix>` set, the first `N` batch runs of
 /// a project whose root starts with the prefix fail with a synthetic
 /// transient error. Inert unless both variables are set.
-fn injected_watch_fault(root: &Path) -> Option<Error> {
+///
+/// `DOCSBASE_WATCH_FAULT=commit:N` arms N injected *commit* failures for the
+/// batch that follows (one-shot): the batch runs for real, but its commit
+/// dies mid-way - the recovery path (`tests/mcp_registry.rs::
+/// watcher_recovers_from_a_commit_failure`) needs the index marked for a
+/// rebuild and rebuilt by the retried batch.
+fn injected_watch_fault(root: &Path, cache: &Path) -> Option<Error> {
     let spec = std::env::var("DOCSBASE_WATCH_FAULT").ok()?;
     let prefix = std::env::var("DOCSBASE_WATCH_FAULT_ROOT").ok()?;
-    let budget = spec.strip_prefix("internal:")?.parse::<usize>().ok()?;
     if !root.starts_with(&prefix) {
         return None;
     }
+    if let Some(budget) = spec
+        .strip_prefix("commit:")
+        .and_then(|raw| raw.parse::<usize>().ok())
+    {
+        let mut armed = INJECTED_COMMIT_ARMED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if armed.as_deref() == Some(prefix.as_str()) {
+            return None;
+        }
+        *armed = Some(prefix);
+        crate::index::tantivy_index::inject_commit_faults(cache, budget);
+        return None;
+    }
+    let budget = spec.strip_prefix("internal:")?.parse::<usize>().ok()?;
     let mut guard = INJECTED_FAULT_REMAINING
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
@@ -765,7 +789,7 @@ fn spawn_consumer(
                     &mut pending,
                     &policy,
                     |paths| {
-                        if let Some(err) = injected_watch_fault(&project.canonical_root) {
+                        if let Some(err) = injected_watch_fault(&project.canonical_root, &cache) {
                             return Err(err);
                         }
                         // Clone and release the slot: a reopen must not stall

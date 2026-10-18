@@ -1,6 +1,8 @@
 //! Tantivy schema and per-project index handle (FR-19, FR-21; NFR-1).
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
@@ -17,6 +19,60 @@ use crate::index::tokenizer::{self, IdentifierTokenizer};
 /// Writer heap: tantivy's minimum is 15 MB; 20 MB keeps a single indexing
 /// thread without growing the RSS of short-lived CLI runs much.
 const WRITER_HEAP_BYTES: usize = 20_000_000;
+
+/// In-process commit-fault budget, scoped by index-dir prefix (test seam:
+/// the watcher arms it to model a commit that died mid-way; see
+/// `tests/mcp_registry.rs::watcher_recovers_from_a_commit_failure`).
+static INJECTED_COMMIT_FAULTS: Mutex<Option<(PathBuf, usize)>> = Mutex::new(None);
+
+/// Arms `budget` injected commit failures for index dirs under `prefix`.
+pub(crate) fn inject_commit_faults(prefix: &Path, budget: usize) {
+    *INJECTED_COMMIT_FAULTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some((prefix.to_path_buf(), budget));
+}
+
+/// Env commit-fault budget (`DOCSBASE_INDEX_FAULT=commit:N` with
+/// `DOCSBASE_INDEX_FAULT_ROOT=<prefix>`), remembering the consumed budget
+/// across one-shot calls; inert unless both variables are set.
+static INJECTED_ENV_COMMITS: Mutex<Option<(String, usize)>> = Mutex::new(None);
+
+fn injected_commit_fault(dir: &Path) -> Option<Error> {
+    {
+        let mut guard = INJECTED_COMMIT_FAULTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some((prefix, budget)) = guard.as_mut()
+            && *budget > 0
+            && dir.starts_with(prefix.as_path())
+        {
+            *budget -= 1;
+            return Some(Error::internal(
+                "injected index commit fault (DOCSBASE_INDEX_FAULT=commit)",
+            ));
+        }
+    }
+    let spec = std::env::var("DOCSBASE_INDEX_FAULT").ok()?;
+    let prefix = std::env::var("DOCSBASE_INDEX_FAULT_ROOT").ok()?;
+    let budget = spec.strip_prefix("commit:")?.parse::<usize>().ok()?;
+    if !dir.starts_with(&prefix) {
+        return None;
+    }
+    let mut guard = INJECTED_ENV_COMMITS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let entry = guard.get_or_insert_with(|| (prefix.clone(), budget));
+    if entry.0 != prefix {
+        *entry = (prefix, budget);
+    }
+    if entry.1 == 0 {
+        return None;
+    }
+    entry.1 -= 1;
+    Some(Error::internal(
+        "injected index commit fault (DOCSBASE_INDEX_FAULT=commit)",
+    ))
+}
 
 /// Score multiplier for chunks above [`MAX_CHUNK_CHARS`] + [`CHUNK_OVERLAP`]
 /// (the penalty threshold): oversized sections (giant tables or fences) must
@@ -267,12 +323,46 @@ impl IndexHandle {
 
     /// Commits pending operations and reloads the reader.
     ///
+    /// A failed commit is not retried in place: tantivy opens every file with
+    /// `create_new`, so files left by a half-applied commit make the next
+    /// attempt fail with `FileAlreadyExists` forever (CI flake family,
+    /// tantivy #2847). The index is marked for recreation instead and the
+    /// caller's next open rebuilds it from `SQLite` (T27).
+    ///
     /// # Errors
     /// Returns [`Error::Internal`] when commit or reload fails.
     pub fn commit(&mut self) -> Result<()> {
-        self.writer_mut()?.commit().map_err(tantivy_error)?;
-        self.reader.reload().map_err(tantivy_error)?;
-        Ok(())
+        if let Some(error) = injected_commit_fault(&self.dir) {
+            self.mark_needs_rebuild("an injected commit fault");
+            return Err(error);
+        }
+        let outcome = match self.writer_mut() {
+            Ok(writer) => writer.commit().map_err(tantivy_error),
+            Err(err) => Err(err),
+        };
+        match outcome {
+            Ok(_) => {
+                self.reader.reload().map_err(tantivy_error)?;
+                Ok(())
+            }
+            Err(err) => {
+                self.mark_needs_rebuild(&err.to_string());
+                Err(err)
+            }
+        }
+    }
+
+    /// Writes [`REBUILD_MARKER`] so the next open recreates the directory and
+    /// the caller rebuilds from `SQLite` (best effort: a failure to write the
+    /// marker still surfaces the original commit error).
+    fn mark_needs_rebuild(&mut self, reason: &str) {
+        let marker = self.dir.join(REBUILD_MARKER);
+        if let Err(err) = write_rebuild_marker(&self.dir, &marker) {
+            eprintln!(
+                "warning: cannot mark index {} for rebuild after {reason}: {err}",
+                self.dir.display()
+            );
+        }
     }
 
     /// Runs a BM25 search over all fields with identifier boosts.
@@ -443,9 +533,31 @@ fn search_reader(
 /// Removes a stale index directory and creates a current-schema one with the
 /// rebuild marker already in place.
 fn create_fresh(dir: &Path, marker: &Path) -> Result<()> {
-    std::fs::remove_dir_all(dir).map_err(|err| {
-        Error::internal_with_source(format!("remove stale index {}: {err}", dir.display()), err)
-    })?;
+    // Windows: a concurrent reader may still hold mmaps, so `remove_dir_all`
+    // fails with `AccessDenied` until it drops (searches are short). Bounded
+    // retries give readers time instead of failing the batch outright.
+    const REMOVE_ATTEMPTS: u32 = 20;
+    const REMOVE_PAUSE: Duration = Duration::from_millis(100);
+    let mut last_error = None;
+    for _ in 0..REMOVE_ATTEMPTS {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+            Err(err) => {
+                last_error = Some(err);
+                std::thread::sleep(REMOVE_PAUSE);
+            }
+        }
+    }
+    if let Some(err) = last_error {
+        return Err(Error::internal_with_source(
+            format!(
+                "remove stale index {} after {REMOVE_ATTEMPTS} attempts: {err}",
+                dir.display()
+            ),
+            err,
+        ));
+    }
     std::fs::create_dir_all(dir).map_err(|err| {
         Error::internal_with_source(format!("recreate index dir {}: {err}", dir.display()), err)
     })?;

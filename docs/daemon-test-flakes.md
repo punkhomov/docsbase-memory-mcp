@@ -97,7 +97,7 @@ CI периодически падает на Linux/Windows; перезапус�
 - **Статус:** исправлено (A + B); ранее: `busy_timeout` 5→30 с и стресс 50/50
   (run `38590476555`) — оставлены.
 
-## 4. `mcp_registry::watcher_refreshes_search` (Windows)
+## 4. `mcp_registry::watcher_refreshes_search` / `watcher_retries_transient_batch_failure` (Windows)
 
 - **Где:** `tests/mcp_registry.rs:617` («watcher did not refresh search»), тест
   пишет файл и до 6 с поллит `search_docs`.
@@ -125,18 +125,42 @@ CI периодически падает на Linux/Windows; перезапус�
   детерминированно; сериализация мержей (drop-wait) полезна независимо от
   исхода спора (на Linux там же — тихая потеря регистраций `.managed.json`).
   Upstream-фикса нет, issue открыт и трекается.
-- **Фикс (наш слой):** 1) `IndexHandle` при drop вызывает
-  `wait_merging_threads()` — merge-потоки завершаются до следующего commit,
-  записи `.managed.json` сериализуются; 2) bounded retry батчей (3 попытки,
-  100/300/900 мс) как страховка на прочие транзиенты; 3) финальный дроп виден
-  в `status` (`last_error` + потерянные пути в `warnings`).
+- **Полный механизм (разбор 2026-10-18, run `39133552920`, windows job
+  `117693411488`).** Двухстадийная воронка:
+  1. *Триггер:* `Access is denied (os error 5)` приходит **посреди коммита**
+     (та же гонка merge-потока и commit за файлы каталога, #2847); часть
+     файлов коммита уже создана, `meta.json` ещё нет.
+  2. *Усилитель (наш):* tantivy открывает файлы через `create_new(true)`
+     (`mmap_directory/mod.rs`), а имя `.del` = `segment.{delete_opstamp}`.
+     После падения opstamp не сдвинулся, ретрай переигрывает те же удаления и
+     упирается в `FileAlreadyExists` **навсегда** — все 3 попытки падают
+     детерминированно, батч дропается. Именно поэтому «перезапусти и пройдёт»
+     работало не всегда.
+- **Фикс (наш слой, 2026-10-18):**
+  1) `IndexHandle::commit()` при любой ошибке коммита пишет `REBUILD_MARKER`:
+     следующий `open_or_create` пересоздаёт каталог (`create_fresh`) и джоба
+     перестраивает индекс из `SQLite` (`was_recreated` → полный ребак,
+     T27) — отравленный `.del`/`.managed.json` больше не может залипнуть;
+  2) `create_fresh` делает bounded-retry `remove_dir_all` (20×100 мс) —
+     на Windows ридеры с mmap успевают отпустить файлы;
+  3) в окне перестройки чтение отвергает помеченный индекс явной ошибкой
+     «needs to be rebuilt» (как и раньше, T27) — окно короткое;
+  4) drop-wait merge-потоков и bounded retry батчей (3 попытки, 100/300/900 мс)
+     остаются как было.
+- **Детерминированные тесты фикса:** `tests/index_recovery.rs` (lib-уровень:
+  инжект `DOCSBASE_INDEX_FAULT=commit:1` → маркер → следующий запуск лечит и
+  ищет документ) и `mcp_registry::watcher_recovers_from_a_commit_failure`
+  (демон: `DOCSBASE_WATCH_FAULT=commit:1` → батч-ретрай лечит через
+  пересоздание). Оба — в обычном CI.
 - **Acceptance:** Linux fault-injection тесты (retry и drop-видимость) —
   детерминированный гейт; Windows 50× — статистический сигнал; upstream #2847
   остаётся открытым и отслеживается.
 - **Статус:** исправлено на нашем слое (defense-in-depth: drop-wait + bounded
-  retry + видимость дропа); механизм upstream не подтверждён — трекаем #2847.
-  Стресс: workflow `flake-stress` (workflow_dispatch, по умолчанию 50 прогонов;
-  Windows — `watcher_refreshes_search`, Linux — flood-тест).
+  retry + видимость дропа + **self-heal через маркер при сбое коммита**);
+  механизм upstream не подтверждён — трекаем #2847. Стресс: workflow
+  `flake-stress` (workflow_dispatch, по умолчанию 50 прогонов; Windows —
+  `watcher_refreshes_search` и `watcher_retries_transient_batch_failure`,
+  Linux — flood-тест).
 
 ## 5. `mcp_registry::second_sync_start_returns_current` (assertion race, Linux)
 
