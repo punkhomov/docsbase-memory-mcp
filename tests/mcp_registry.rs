@@ -636,15 +636,20 @@ fn watcher_refreshes_search() {
     );
     let deadline = Instant::now() + Duration::from_secs(6);
     loop {
-        let hits = bound
-            .call_tool("search_docs", json!({ "query": "gizmos" }))
-            .expect("search_docs");
-        if !hits.as_array().expect("hits").is_empty() {
-            break;
+        // A batch that dies mid-commit takes the index offline for reads
+        // until the retried batch rebuilds it ("needs to be rebuilt", T27);
+        // the window is expected to close quickly.
+        match bound.call_tool("search_docs", json!({ "query": "gizmos" })) {
+            Ok(hits) if !hits.as_array().expect("hits").is_empty() => break,
+            Ok(_) => {}
+            Err(err) => assert!(
+                err.to_string().contains("needs to be rebuilt"),
+                "only the rebuild marker may interrupt the refresh window: {err}"
+            ),
         }
         assert!(
             Instant::now() < deadline,
-            "watcher did not refresh search: {hits}"
+            "watcher did not refresh search"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -680,15 +685,20 @@ fn watcher_retries_transient_batch_failure() {
     );
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let hits = bound
-            .call_tool("search_docs", json!({ "query": "sprockets" }))
-            .expect("search_docs");
-        if !hits.as_array().expect("hits").is_empty() {
-            break;
+        // The retry after the injected fault may hit the Windows file race
+        // and take the index offline until the next retried batch rebuilds
+        // it (T27); the poll tolerates exactly that window.
+        match bound.call_tool("search_docs", json!({ "query": "sprockets" })) {
+            Ok(hits) if !hits.as_array().expect("hits").is_empty() => break,
+            Ok(_) => {}
+            Err(err) => assert!(
+                err.to_string().contains("needs to be rebuilt"),
+                "only the rebuild marker may interrupt the healing window: {err}"
+            ),
         }
         assert!(
             Instant::now() < deadline,
-            "edit must land despite one injected batch failure: {hits}"
+            "edit must land despite one injected batch failure"
         );
         std::thread::sleep(Duration::from_millis(50));
     }

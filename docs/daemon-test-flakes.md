@@ -144,7 +144,10 @@ CI периодически падает на Linux/Windows; перезапус�
   2) `create_fresh` делает bounded-retry `remove_dir_all` (20×100 мс) —
      на Windows ридеры с mmap успевают отпустить файлы;
   3) в окне перестройки чтение отвергает помеченный индекс явной ошибкой
-     «needs to be rebuilt» (как и раньше, T27) — окно короткое;
+     «needs to be rebuilt» (как и раньше, T27) — окно короткое; демон-тесты
+     поллят поиск через это окно (tolerant poll), а не падают на первом
+     отвергнутом чтении; `watcher_refreshes_search` / `watcher_retries_…` /
+     `watcher_recovers_…` обновлены соответственно;
   4) drop-wait merge-потоков и bounded retry батчей (3 попытки, 100/300/900 мс)
      остаются как было.
 - **Детерминированные тесты фикса:** `tests/index_recovery.rs` (lib-уровень:
