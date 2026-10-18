@@ -647,10 +647,7 @@ fn watcher_refreshes_search() {
                 "only the rebuild marker may interrupt the refresh window: {err}"
             ),
         }
-        assert!(
-            Instant::now() < deadline,
-            "watcher did not refresh search"
-        );
+        assert!(Instant::now() < deadline, "watcher did not refresh search");
         std::thread::sleep(Duration::from_millis(50));
     }
 }
