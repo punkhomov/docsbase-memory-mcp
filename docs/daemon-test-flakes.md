@@ -163,7 +163,8 @@ CI периодически падает на Linux/Windows; перезапус�
   механизм upstream не подтверждён — трекаем #2847. Стресс: workflow
   `flake-stress` (workflow_dispatch, по умолчанию 50 прогонов; Windows —
   `watcher_refreshes_search` и `watcher_retries_transient_batch_failure`,
-  Linux — flood-тест).
+  Linux — flood-тест). Стресс-прогон 2026-10-18 (run `39137190895`): все 4
+  таргета ×50 зелёные.
 
 ## 5. `mcp_registry::second_sync_start_returns_current` (assertion race, Linux)
 

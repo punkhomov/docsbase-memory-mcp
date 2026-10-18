@@ -214,3 +214,8 @@
   демон-тесты падали на `.expect("search_docs")` в этом окне (итерации 6 и 25
   на двух таргетах). Тесты переведены на tolerant-poll (ошибка маркера —
   ожидаемая); стресс перезапущен.
+- 2026-10-18: стресс фикса зелёный: flake-stress run 39137190895 — все 4
+  таргета ×50 (windows watcher_refreshes_search, windows
+  watcher_retries_transient_batch_failure — новый таргет, windows
+  error_surface, linux lifecycle flood). Флейк 4 закрыт: детерминированные
+  тесты + статистика.
