@@ -219,3 +219,11 @@
   watcher_retries_transient_batch_failure — новый таргет, windows
   error_surface, linux lifecycle flood). Флейк 4 закрыт: детерминированные
   тесты + статистика.
+- 2026-10-18: ревью-фикс `create_fresh` retry (найден в ревью PR #45):
+  `last_error`-аккумулятор не сбрасывался на успехе — связка (fail, success)
+  возвращала stale-ошибку «after 20 attempts» при уже удалённой директории.
+  Цикл вынесен в `remove_dir_all_retry` с injectable операцией и early-return
+  семантикой + 4 unit-теста (transient→success, NotFound, exhaustion,
+  first-try-success). Ruling: баг родился вместе с циклом в `dde6a1f` —
+  гейтов на ретрай не было; паттерн проверен по всему `src/` — единственный
+  экземпляр класса.

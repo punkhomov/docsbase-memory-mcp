@@ -530,6 +530,34 @@ fn search_reader(
     Ok(hits)
 }
 
+/// Retries directory removal for readers that briefly hold locks (Windows
+/// mmaps): success returns immediately, only exhaustion returns the last
+/// error. Early return (not a `last_error` accumulator checked after the
+/// loop) so a transient failure followed by success cannot surface a stale
+/// error — regression: the first version of this loop `break`ed on success
+/// but still reported the earlier failure.
+fn remove_dir_all_retry(
+    dir: &Path,
+    attempts: u32,
+    pause: Duration,
+    remove: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match remove(dir) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                attempt += 1;
+                if attempt >= attempts {
+                    return Err(err);
+                }
+                std::thread::sleep(pause);
+            }
+        }
+    }
+}
+
 /// Removes a stale index directory and creates a current-schema one with the
 /// rebuild marker already in place.
 fn create_fresh(dir: &Path, marker: &Path) -> Result<()> {
@@ -538,26 +566,18 @@ fn create_fresh(dir: &Path, marker: &Path) -> Result<()> {
     // retries give readers time instead of failing the batch outright.
     const REMOVE_ATTEMPTS: u32 = 20;
     const REMOVE_PAUSE: Duration = Duration::from_millis(100);
-    let mut last_error = None;
-    for _ in 0..REMOVE_ATTEMPTS {
-        match std::fs::remove_dir_all(dir) {
-            Ok(()) => break,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
-            Err(err) => {
-                last_error = Some(err);
-                std::thread::sleep(REMOVE_PAUSE);
-            }
-        }
-    }
-    if let Some(err) = last_error {
-        return Err(Error::internal_with_source(
+    remove_dir_all_retry(dir, REMOVE_ATTEMPTS, REMOVE_PAUSE, &|dir| {
+        std::fs::remove_dir_all(dir)
+    })
+    .map_err(|err| {
+        Error::internal_with_source(
             format!(
                 "remove stale index {} after {REMOVE_ATTEMPTS} attempts: {err}",
                 dir.display()
             ),
             err,
-        ));
-    }
+        )
+    })?;
     std::fs::create_dir_all(dir).map_err(|err| {
         Error::internal_with_source(format!("recreate index dir {}: {err}", dir.display()), err)
     })?;
@@ -691,4 +711,84 @@ fn extract_identifiers(text: &str) -> String {
 
 fn tantivy_error(err: tantivy::TantivyError) -> Error {
     Error::internal_with_source(format!("tantivy: {err}"), err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+
+    /// Scripted removal backend: replays queued outcomes, counts calls.
+    struct Script {
+        outcomes: RefCell<VecDeque<std::io::Result<()>>>,
+        calls: Cell<usize>,
+    }
+
+    impl Script {
+        fn remove(&self, _dir: &Path) -> std::io::Result<()> {
+            self.calls.set(self.calls.get() + 1);
+            self.outcomes
+                .borrow_mut()
+                .pop_front()
+                .expect("removal script exhausted")
+        }
+    }
+
+    fn denied() -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "reader holds a mmap",
+        ))
+    }
+
+    #[test]
+    fn retry_succeeds_after_a_transient_failure() {
+        // Regression: the first version reported the earlier failure even
+        // when a later attempt succeeded (stale `last_error` accumulator).
+        let script = Script {
+            outcomes: RefCell::new(VecDeque::from([denied(), Ok(())])),
+            calls: Cell::new(0),
+        };
+        let dir = Path::new("index");
+        assert!(remove_dir_all_retry(dir, 20, Duration::ZERO, &|dir| script.remove(dir)).is_ok());
+        assert_eq!(script.calls.get(), 2);
+    }
+
+    #[test]
+    fn retry_treats_missing_dir_as_success() {
+        // A concurrent deleter winning the race is the desired end state.
+        let missing = |_dir: &Path| -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "already gone",
+            ))
+        };
+        let dir = Path::new("index");
+        assert!(remove_dir_all_retry(dir, 20, Duration::ZERO, &missing).is_ok());
+    }
+
+    #[test]
+    fn retry_returns_the_last_error_on_exhaustion() {
+        let script = Script {
+            outcomes: RefCell::new(VecDeque::from([denied(), denied(), denied()])),
+            calls: Cell::new(0),
+        };
+        let dir = Path::new("index");
+        let err = remove_dir_all_retry(dir, 3, Duration::ZERO, &|dir| script.remove(dir))
+            .expect_err("three failures against a budget of three must surface the error");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(script.calls.get(), 3);
+    }
+
+    #[test]
+    fn retry_succeeds_on_the_first_attempt() {
+        let script = Script {
+            outcomes: RefCell::new(VecDeque::from([Ok(())])),
+            calls: Cell::new(0),
+        };
+        let dir = Path::new("index");
+        assert!(remove_dir_all_retry(dir, 20, Duration::ZERO, &|dir| script.remove(dir)).is_ok());
+        assert_eq!(script.calls.get(), 1);
+    }
 }
