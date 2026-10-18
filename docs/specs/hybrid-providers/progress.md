@@ -165,9 +165,14 @@
   seam-тест cap-деградации `cached == streamed`; CONFIG.md уточнён. DELTA-7.1
   в design. minor (deferred): byte-aware cap (счётные 1M векторов ≈ 4 ГиБ при
   d1024) — спец-уровень, отдельная итерация.
-- 2026-10-15: live-замер T11 — прогон ожидает `OPENROUTER_API_KEY` (в окружении
-  агента недоступен; обычная ревью-дельта зафиксирована); команда — в шапке
-  `tests/hybrid_live.rs`.
+- 2026-10-18: live-замер T11 прогнан (ключ восстановлен, сохранён локально вне
+  репо). `live_golden_rerank_measurement`: hit@3 bm25 10/10 -> rerank 10/10;
+  nDCG@3 1.000 -> 1.000 (без регрессий). `live_golden_dense_rrf_measurement`:
+  hit@3 bm25 10/10 -> rrf 10/10 -> rrf+rerank 10/10; nDCG@3 1.000 -> 1.000 ->
+  0.926. Наблюдение (отчёт, не гейт; набор насыщен — BM25 уже ставит все ответы
+  на rank 1): чистое RRF не ухудшает nDCG, rerank поверх fused-списка ухудшил
+  два кейса до rank 2 («заменой» ru, «مطار» ar) — кандидат на замер
+  rerank-window/fusion на расширенном наборе в след. итерации.
 - 2026-10-15: scoped-переревью T12 (тот же ревьюер): findings 1, 3–7 ADDRESSED;
   finding 2 PARTIAL + новое A (Important): `top_n = min(len, window)` —
   over-correction (top_n — кэп результата, а не стоимости; кандидаты уже
