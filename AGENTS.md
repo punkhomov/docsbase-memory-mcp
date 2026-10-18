@@ -20,6 +20,12 @@ Sandboxed agents: point `CARGO_HOME`/`RUSTUP_HOME` at a writable directory
 first. CI pins the MSRV toolchain explicitly (the repo file pins nightly for
 local development), so validate with `RUSTUP_TOOLCHAIN=1.88.0`.
 
+Memory: 32-core hosts run 32 parallel `rustc` by default — full builds
+(`test --all-targets`, `clippy --all-targets`, release) spike to ~20 GB RSS
+plus page cache (`target/` grows to ~19 GB). On constrained hosts cap it:
+`CARGO_BUILD_JOBS=8`; prefer `cargo test --lib` / `--test <name>` for
+iteration.
+
 ```sh
 RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked
 RUSTUP_TOOLCHAIN=1.88.0 cargo clippy --locked --all-targets -- -D warnings
