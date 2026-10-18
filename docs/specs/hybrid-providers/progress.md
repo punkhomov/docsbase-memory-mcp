@@ -177,3 +177,9 @@
   `rerank_ranks_the_whole_fetch_window_even_above_the_config_window`
   (fetch=max(limit,window)); DELTA-7.1, CONFIG.md и док DenseCache выровнены.
   Статус: все findings закрыты, ветка approvable.
+- 2026-10-18: ревью PR #45 (punkhomov): PASS with notes — фикс докстринга
+  `apply_rerank` (описывал отменённый `top_n = min(len, window)`). minor
+  (deferred): DenseCache хранит одну запись на проект без eviction — живое
+  переключение моделей перестраивает кэш каждый раз (перф, ledger-кандидат);
+  `TooLarge`-путь пересчитывает `chunk_hashes` + стриминг на каждый запрос —
+  мемоизировать маркер для проектов 75k+ чанков (ledger-кандидат).

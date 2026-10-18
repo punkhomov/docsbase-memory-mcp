@@ -40,9 +40,10 @@ pub fn search_docs(db: &Db, cache: &Path, project: &Project, args: &Value) -> Re
     )
 }
 
-/// Applies the rerank stage to `ordered` in place (FR-11): exactly the
-/// candidate window goes to the provider with `top_n = min(len, window)`;
-/// candidates it did not rank keep their order after the ranked ones.
+/// Applies the rerank stage to `ordered` in place (FR-11): the provider
+/// receives exactly the candidate window and ranks all of it (`top_n` =
+/// `documents.len()`); candidates it did not rank keep their order after
+/// the ranked ones.
 fn apply_rerank(
     stages: &HybridStages,
     db: &Db,
