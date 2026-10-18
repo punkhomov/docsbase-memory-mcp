@@ -106,7 +106,12 @@ CI периодически падает на Linux/Windows; перезапус�
   file for write: IoError { io_error: Os { code: 5, kind: PermissionDenied },
   filepath: "...fieldnorm" }`.
 - **Наблюдения:** run `38404323321` (13.10 13:25, job `115319812833`) — первый
-  зафиксированный случай; воспроизводимость не подтверждена.
+  зафиксированный случай; повтор run `39133552920` (18.10, windows job
+  `117693411488`, тест `watcher_retries_transient_batch_failure`): все три
+  ретрая попали в гонку создания файла удалённого сегмента
+  (`FileAlreadyExists("*.del")`), батч дропнут, тест не увидел правку;
+  тот же upstream-механизм (#2847), другое расширение окна (`.del`). Рerun —
+  зелёный.
 - **Root cause (наиболее вероятный; механизм upstream оспаривается):** сигнатура
   точно совпадает с tantivy issue #2847: merge-поток `IndexWriter` гоняется с
   commit за `.managed.json` (`MoveFileExW`), а ошибка обёрнута именем сегментного
