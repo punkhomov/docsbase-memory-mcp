@@ -172,6 +172,14 @@ pub fn from_config(cfg: &HybridCfg, feature_on: bool) -> Result<HybridStages> {
             message: "hybrid.ranking = \"rrf\" requires the embedding stage (FR-17)".to_owned(),
         });
     }
+    // An enabled table with no stage sections has nothing to resolve: it
+    // must not demand the network feature or an API key (review T12).
+    if cfg.embedding.is_none() && cfg.reranker.is_none() {
+        return Ok(HybridStages {
+            ranking: cfg.ranking,
+            ..HybridStages::default()
+        });
+    }
     if !feature_on || !cfg!(feature = "hybrid-remote") {
         return Err(feature_missing());
     }

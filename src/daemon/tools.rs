@@ -40,6 +40,54 @@ pub fn search_docs(db: &Db, cache: &Path, project: &Project, args: &Value) -> Re
     )
 }
 
+/// Applies the rerank stage to `ordered` in place (FR-11): exactly the
+/// candidate window goes to the provider with `top_n = min(len, window)`;
+/// candidates it did not rank keep their order after the ranked ones.
+fn apply_rerank(
+    stages: &HybridStages,
+    db: &Db,
+    query: &str,
+    ordered: &mut Vec<(u64, f32)>,
+    window: u32,
+) -> Result<()> {
+    if ordered.is_empty() {
+        return Ok(());
+    }
+    let Some(reranker) = stages.reranker.as_deref() else {
+        return Ok(());
+    };
+    let mut documents = Vec::with_capacity(ordered.len());
+    for (chunk_id, _) in ordered.iter() {
+        let (doc_id, seq) = chunk_id_parts(*chunk_id);
+        let text = repo::chunk_text(db.connection(), doc_id, seq)?.ok_or_else(|| {
+            Error::internal(format!("chunk text missing for rerank (chunk {chunk_id})"))
+        })?;
+        documents.push(text);
+    }
+    let top_n = documents.len().min(window as usize);
+    let ranked = blocking::enter(|| reranker.rerank(query, &documents, top_n))?;
+    let mut reordered: Vec<(u64, f32)> = Vec::with_capacity(ordered.len());
+    let mut ranked_flags = vec![false; ordered.len()];
+    for (index, score) in ranked {
+        if let Some(entry) = ordered.get(index)
+            && !ranked_flags[index]
+        {
+            ranked_flags[index] = true;
+            reordered.push((entry.0, score));
+        }
+    }
+    // Defensive: candidates the provider did not rank keep the incoming
+    // order after the ranked ones (the provider clamps top_n to the
+    // candidate count, so this is unreachable with a conforming response).
+    for (index, entry) in ordered.iter().enumerate() {
+        if !ranked_flags[index] {
+            reordered.push(*entry);
+        }
+    }
+    *ordered = reordered;
+    Ok(())
+}
+
 /// Dense candidate list for the RRF stage (FR-15): the query embedding plus
 /// cached per-chunk vectors. `Ready` scans the in-memory rows; `TooLarge`
 /// streams the cache with a bounded heap, so memory stays flat above the cap.
@@ -143,7 +191,14 @@ pub fn search_docs_with(
 
     // The rerank and RRF stages need a wider candidate window than the
     // requested limit (FR-11, FR-16); plain BM25 fetches exactly the limit.
-    let rrf_active = stages.ranking == Ranking::Rrf && stages.embedder.is_some();
+    // `HybridStages` is a public type: rrf with no embedder is an invariant
+    // violation, not a silent BM25 fallback (NFR-2).
+    let rrf_active = stages.ranking == Ranking::Rrf;
+    if rrf_active && stages.embedder.is_none() {
+        return Err(Error::internal(
+            "search_docs: rrf ranking requires the embedding stage (FR-17)",
+        ));
+    }
     let fetch = if rerank_active || rrf_active {
         limit.max(window as usize).min(MAX_HITS)
     } else {
@@ -155,42 +210,17 @@ pub fn search_docs_with(
     let bm25: Vec<(u64, f32)> = hits.iter().map(|hit| (hit.chunk_id, hit.score)).collect();
     let mut ordered: Vec<(u64, f32)> = if rrf_active {
         let dense_hits = dense_candidates(stages, dense, db, project, query, fetch)?;
-        rrf_merge(&bm25, &dense_hits)
+        let mut fused = rrf_merge(&bm25, &dense_hits);
+        // The union of two fetch-sized lists can reach 2x fetch; the rerank
+        // stage must not see more candidates than the configured window
+        // (FR-11, FR-16).
+        fused.truncate(fetch);
+        fused
     } else {
         bm25
     };
-    if rerank_active
-        && !ordered.is_empty()
-        && let Some(reranker) = stages.reranker.as_deref()
-    {
-        let mut documents = Vec::with_capacity(ordered.len());
-        for (chunk_id, _) in &ordered {
-            let (doc_id, seq) = chunk_id_parts(*chunk_id);
-            let text = repo::chunk_text(db.connection(), doc_id, seq)?.ok_or_else(|| {
-                Error::internal(format!("chunk text missing for rerank (chunk {chunk_id})"))
-            })?;
-            documents.push(text);
-        }
-        let ranked = blocking::enter(|| reranker.rerank(query, &documents, documents.len()))?;
-        let mut reranked: Vec<(u64, f32)> = Vec::with_capacity(ordered.len());
-        let mut ranked_flags = vec![false; ordered.len()];
-        for (index, score) in ranked {
-            if let Some(entry) = ordered.get(index)
-                && !ranked_flags[index]
-            {
-                ranked_flags[index] = true;
-                reranked.push((entry.0, score));
-            }
-        }
-        // Defensive: candidates the provider did not rank stay in BM25 order
-        // after the ranked ones (the provider clamps top_n to the candidate
-        // count, so this is unreachable with a conforming response).
-        for (index, entry) in ordered.iter().enumerate() {
-            if !ranked_flags[index] {
-                reranked.push(*entry);
-            }
-        }
-        ordered = reranked;
+    if rerank_active {
+        apply_rerank(stages, db, query, &mut ordered, window)?;
     }
     ordered.truncate(limit);
 
@@ -750,6 +780,7 @@ mod tests {
     #[derive(Default)]
     struct ReverseReranker {
         calls: AtomicUsize,
+        top_ns: std::sync::Mutex<Vec<usize>>,
         documents: std::sync::Mutex<Vec<String>>,
     }
 
@@ -757,6 +788,7 @@ mod tests {
         #[allow(clippy::cast_precision_loss)]
         fn rerank(&self, _query: &str, docs: &[String], top_n: usize) -> Result<Vec<(usize, f32)>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.top_ns.lock().expect("top_ns").push(top_n);
             self.documents
                 .lock()
                 .expect("documents")
@@ -890,6 +922,37 @@ mod tests {
         .expect("strict bm25");
         assert_eq!(chunk_ids(&value), chunk_ids(&bm25));
         assert_eq!(reranker.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn rerank_top_n_is_the_window_not_the_fetch() {
+        let (cache, db, project) = env();
+        let reranker = Arc::new(ReverseReranker::default());
+        let stages = HybridStages {
+            embedder: None,
+            reranker: Some(reranker.clone()),
+            ranking: Ranking::Lexical,
+        };
+        let value = search_docs_with(
+            &stages,
+            &DenseCache::new(),
+            &db,
+            cache.path(),
+            &project,
+            &json!({ "query": "widgets", "limit": 3 }),
+            2,
+        )
+        .expect("limit above the window");
+        assert_eq!(
+            value.as_array().expect("array").len(),
+            3,
+            "unranked candidates keep the requested limit"
+        );
+        assert_eq!(
+            *reranker.top_ns.lock().expect("top_ns"),
+            vec![2],
+            "top_n = min(fetch, window)"
+        );
     }
 
     #[test]

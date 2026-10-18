@@ -110,6 +110,12 @@
 - 2026-10-15: план итерации 2 (dense + RRF) зафиксирован: DELTA-3 (FR-15…FR-18),
   design DELTA-7, задачи T7–T12; ветка `feat/hybrid-iteration-2` от свежего main
   (в неё влит #43 из `feat/hybrid-t1-spike` — base #43 не перецелился на main).
+- Task T7: complete (2026-10-15). `src/hybrid/dense.rs`: косинусный top-`fetch`
+  (истинный косинус — scale-invariant, `normalize=false` безопасен; zero/NaN →
+  0.0; dim-mismatch/пустой query → internal; тай-брейк по chunk_id). 11 unit-тестов
+  (RED-first).
+- Task T8: complete (2026-10-15). `src/hybrid/rrf.rs`: `rrf_merge` (k=60, равные
+  веса, дедуп по лучшему рангу внутри списка, тай-брейки FR-16). 7 unit-тестов.
 - Task T9: complete (2026-10-15). Схема v2: `projects.index_generation`
   (аддитивная миграция; re-read версии под BEGIN IMMEDIATE чинит гонки и потерянный
   version-write, ALTER идемпотентен через пробу колонки). `repo::{chunk_hashes,
@@ -145,3 +151,20 @@
   RRF+rerank на golden, hit@3/nDCG@3, отчёт). minor (deferred): прогон замера
   не выполнен — `OPENROUTER_API_KEY` в окружении агента недоступен (обрезан до
   `proxy-managed`); команда прогона в шапке `tests/hybrid_live.rs`.
+- 2026-10-15: итоговое ревью ветки T12 (свежий ревьюер, whole-branch): CHANGES
+  REQUIRED — 1 Critical (dense-кэш не скоупился по `model_id`: смена модели/размерности
+  при живом конфиге отдавала бы стухшие вектора; recovery через поколение не
+  срабатывал, т.к. backfill не бампает его), 1 Important (в RRF-режиме rerank получал
+  до 2×fetch кандидатов и `top_n = len` вместо window — нарушение FR-11/16 и двойная
+  цена), 3 Minor приняты к фиксу (enabled-без-ступеней требовал feature/ключ;
+  cap-degrade без сквозного теста; rrf-без-embedder молча деградировал в BM25).
+- 2026-10-15: фикс-раунд T12. Кэш скоупится `(generation, model_id)` (+тест смены
+  модели при том же поколении); `fused.truncate(fetch)` и `top_n = min(len, window)`
+  (+тесты: union 13→10 кандидатов, lexical limit>window); `enabled` без ступеней →
+  пустые ступени без feature/ключа (+тест); rrf без embedder → internal (+тест);
+  seam-тест cap-деградации `cached == streamed`; CONFIG.md уточнён. DELTA-7.1
+  в design. minor (deferred): byte-aware cap (счётные 1M векторов ≈ 4 ГиБ при
+  d1024) — спец-уровень, отдельная итерация.
+- 2026-10-15: live-замер T11 — прогон ожидает `OPENROUTER_API_KEY` (в окружении
+  агента недоступен; обычная ревью-дельта зафиксирована); команда — в шапке
+  `tests/hybrid_live.rs`.

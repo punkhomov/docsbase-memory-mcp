@@ -182,3 +182,15 @@ fn rrf_keeps_the_configuration_error_across_feature_modes() {
         );
     }
 }
+
+#[test]
+fn enabled_without_stages_resolves_to_empty_stages_offline() {
+    let cfg = HybridCfg {
+        enabled: true,
+        embedding: None,
+        reranker: None,
+        ranking: Ranking::Lexical,
+    };
+    let stages = from_config(&cfg, false).expect("no stages, nothing to resolve");
+    assert!(stages.embedder.is_none() && stages.reranker.is_none());
+}

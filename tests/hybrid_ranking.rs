@@ -55,6 +55,7 @@ impl Embedder for FakeEmbedder {
 #[derive(Default)]
 struct ReverseReranker {
     calls: AtomicUsize,
+    top_ns: std::sync::Mutex<Vec<usize>>,
     documents: std::sync::Mutex<Vec<String>>,
 }
 
@@ -62,6 +63,7 @@ impl Reranker for ReverseReranker {
     #[allow(clippy::cast_precision_loss)]
     fn rerank(&self, _query: &str, docs: &[String], top_n: usize) -> Result<Vec<(usize, f32)>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.top_ns.lock().expect("top_ns").push(top_n);
         self.documents
             .lock()
             .expect("documents")
@@ -302,4 +304,111 @@ fn partial_coverage_skips_chunks_without_vectors() {
         vec!["a.md", "c.md"],
         "the uncovered chunk has no dense candidate and no lexical match"
     );
+}
+
+fn project_with_many_docs() -> (TempDir, Db, Project) {
+    let cache = TempDir::new().expect("cache");
+    let root = TempDir::new().expect("root");
+    for index in 0..15u32 {
+        let body = if index % 2 == 0 {
+            format!("# Doc {index}\n\nalpha alpha topic {index}\n")
+        } else {
+            format!("# Doc {index}\n\nsynonym topic {index}\n")
+        };
+        fs::write(root.path().join(format!("doc-{index:02}.md")), body).expect("write doc");
+    }
+    let mut db = Db::open(cache.path()).expect("db");
+    let canonical = root.path().canonicalize().expect("canonical");
+    let mut project = registry::ensure_project(&mut db, &canonical).expect("project");
+    docsbase_memory::daemon::tools::run_project_index(
+        &mut db,
+        cache.path(),
+        &project,
+        &Config::default(),
+    )
+    .expect("index");
+    project.status = ProjectStatus::Indexed;
+    (cache, db, project)
+}
+
+#[test]
+fn rerank_sees_at_most_fetch_candidates_and_ranks_the_window() {
+    let (cache, db, project) = project_with_many_docs();
+    embed_all(&db, project.id);
+    let reranker = Arc::new(ReverseReranker::default());
+    let dense = DenseCache::new();
+    let value = search_docs_with(
+        &rrf_stages(Some(Arc::clone(&reranker))),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 3 }),
+        10,
+    )
+    .expect("rrf + rerank, window 10");
+    assert_eq!(value.as_array().expect("array").len(), 3);
+    let documents = reranker.documents.lock().expect("documents");
+    assert_eq!(
+        documents.len(),
+        10,
+        "the fused union is truncated to fetch before rerank"
+    );
+    assert_eq!(
+        *reranker.top_ns.lock().expect("top_ns"),
+        vec![10],
+        "top_n = min(fetch, window)"
+    );
+}
+
+#[test]
+fn cap_degradation_streams_the_same_fused_results() {
+    let (cache, db, project) = project_with_docs();
+    embed_all(&db, project.id);
+    let args = json!({ "query": "alpha", "limit": 3 });
+    let cached = search_docs_with(
+        &rrf_stages(None),
+        &DenseCache::new(),
+        &db,
+        cache.path(),
+        &project,
+        &args,
+        50,
+    )
+    .expect("cached scan");
+    let streamed = search_docs_with(
+        &rrf_stages(None),
+        &DenseCache::with_cap(1),
+        &db,
+        cache.path(),
+        &project,
+        &args,
+        50,
+    )
+    .expect("streamed scan");
+    assert_eq!(
+        cached, streamed,
+        "cap degradation changes memory, not results"
+    );
+}
+
+#[test]
+fn rrf_without_a_stage_is_an_internal_error() {
+    let (cache, db, project) = project_with_docs();
+    let stages = HybridStages {
+        embedder: None,
+        reranker: None,
+        ranking: Ranking::Rrf,
+    };
+    let err = search_docs_with(
+        &stages,
+        &DenseCache::new(),
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha" }),
+        50,
+    )
+    .expect_err("invariant violation");
+    assert!(err.to_string().contains("rrf"), "{err}");
 }

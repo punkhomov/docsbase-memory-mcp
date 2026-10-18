@@ -156,10 +156,11 @@ impl PartialOrd for Worst {
     }
 }
 
-/// Per-project dense rows for a fixed index generation.
+/// Per-project dense rows for a fixed `(index generation, model)` pair.
 #[derive(Debug)]
 pub struct DenseIndex {
     generation: i64,
+    model_id: String,
     rows: Vec<(u64, Arc<[f32]>)>,
 }
 
@@ -168,6 +169,12 @@ impl DenseIndex {
     #[must_use]
     pub fn generation(&self) -> i64 {
         self.generation
+    }
+
+    /// Cache key of the embedding stage the rows were built with (FR-5).
+    #[must_use]
+    pub fn model_id(&self) -> &str {
+        &self.model_id
     }
 
     /// `(chunk_id, vector)` rows with vectors only, deterministic order.
@@ -226,6 +233,7 @@ impl DenseCache {
             let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(entry) = entries.get(&project_id)
                 && entry.generation == generation
+                && entry.model_id == model_id
             {
                 return Ok(DenseRows::Ready(Arc::clone(entry)));
             }
@@ -241,7 +249,11 @@ impl DenseCache {
                 rows.push((chunk_id, Arc::from(vector)));
             }
         }
-        let entry = Arc::new(DenseIndex { generation, rows });
+        let entry = Arc::new(DenseIndex {
+            generation,
+            model_id: model_id.to_owned(),
+            rows,
+        });
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         entries.insert(project_id, Arc::clone(&entry));
         Ok(DenseRows::Ready(entry))
@@ -557,6 +569,43 @@ mod tests {
         );
         assert_eq!(rebuilt.generation(), first.generation() + 1);
         assert_eq!(rebuilt.rows().len(), first.rows().len());
+    }
+
+    #[test]
+    fn dense_cache_rebuilds_when_the_model_changes() {
+        let (_cache, db, project_id) = indexed_project();
+        let embedder = FakeEmbedder {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        crate::hybrid::jobs::embed_project_chunks_with(&db, &embedder, project_id).expect("embed");
+        let dense = DenseCache::new();
+        let first = ready(
+            dense
+                .get(&db, project_id, embedder.model_id())
+                .expect("get"),
+        );
+        assert!(!first.rows().is_empty());
+
+        let other = ready(
+            dense
+                .get(&db, project_id, "fake/model@d99@l2")
+                .expect("get"),
+        );
+        assert!(!Arc::ptr_eq(&first, &other), "a model change invalidates");
+        assert_eq!(other.generation(), first.generation());
+        assert_eq!(other.model_id(), "fake/model@d99@l2");
+        assert!(other.rows().is_empty(), "no vectors under the other key");
+
+        let again = ready(
+            dense
+                .get(&db, project_id, embedder.model_id())
+                .expect("get"),
+        );
+        assert_eq!(again.model_id(), embedder.model_id());
+        assert!(
+            !again.rows().is_empty(),
+            "the first model's vectors survive"
+        );
     }
 
     #[test]
