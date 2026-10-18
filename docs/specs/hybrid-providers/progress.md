@@ -168,3 +168,12 @@
 - 2026-10-15: live-замер T11 — прогон ожидает `OPENROUTER_API_KEY` (в окружении
   агента недоступен; обычная ревью-дельта зафиксирована); команда — в шапке
   `tests/hybrid_live.rs`.
+- 2026-10-15: scoped-переревью T12 (тот же ревьюер): findings 1, 3–7 ADDRESSED;
+  finding 2 PARTIAL + новое A (Important): `top_n = min(len, window)` —
+  over-correction (top_n — кэп результата, а не стоимости; кандидаты уже
+  усечены до `fetch = max(limit, window)`; меняло бы лексическую семантику при
+  limit > window и смешивало шкалы score в хвосте). Фикс: `top_n =
+  documents.len()` (провайдер ранжирует ровно полученный fetch-набор), тест
+  `rerank_ranks_the_whole_fetch_window_even_above_the_config_window`
+  (fetch=max(limit,window)); DELTA-7.1, CONFIG.md и док DenseCache выровнены.
+  Статус: все findings закрыты, ветка approvable.

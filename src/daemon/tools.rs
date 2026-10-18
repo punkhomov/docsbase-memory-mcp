@@ -48,7 +48,6 @@ fn apply_rerank(
     db: &Db,
     query: &str,
     ordered: &mut Vec<(u64, f32)>,
-    window: u32,
 ) -> Result<()> {
     if ordered.is_empty() {
         return Ok(());
@@ -64,8 +63,11 @@ fn apply_rerank(
         })?;
         documents.push(text);
     }
-    let top_n = documents.len().min(window as usize);
-    let ranked = blocking::enter(|| reranker.rerank(query, &documents, top_n))?;
+    // `documents` is already bounded by the fetch window (`max(limit,
+    // window)`, truncated after fusion): the provider ranks exactly the
+    // candidates it received (FR-11); every ranked score is a
+    // `relevance_score`, so the tail can never mix score scales.
+    let ranked = blocking::enter(|| reranker.rerank(query, &documents, documents.len()))?;
     let mut reordered: Vec<(u64, f32)> = Vec::with_capacity(ordered.len());
     let mut ranked_flags = vec![false; ordered.len()];
     for (index, score) in ranked {
@@ -220,7 +222,7 @@ pub fn search_docs_with(
         bm25
     };
     if rerank_active {
-        apply_rerank(stages, db, query, &mut ordered, window)?;
+        apply_rerank(stages, db, query, &mut ordered)?;
     }
     ordered.truncate(limit);
 
@@ -925,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn rerank_top_n_is_the_window_not_the_fetch() {
+    fn rerank_ranks_the_whole_fetch_window_even_above_the_config_window() {
         let (cache, db, project) = env();
         let reranker = Arc::new(ReverseReranker::default());
         let stages = HybridStages {
@@ -942,16 +944,12 @@ mod tests {
             &json!({ "query": "widgets", "limit": 3 }),
             2,
         )
-        .expect("limit above the window");
-        assert_eq!(
-            value.as_array().expect("array").len(),
-            3,
-            "unranked candidates keep the requested limit"
-        );
+        .expect("limit above the config window");
+        assert_eq!(value.as_array().expect("array").len(), 3);
         assert_eq!(
             *reranker.top_ns.lock().expect("top_ns"),
-            vec![2],
-            "top_n = min(fetch, window)"
+            vec![3],
+            "top_n = fetch = max(limit, window)"
         );
     }
 

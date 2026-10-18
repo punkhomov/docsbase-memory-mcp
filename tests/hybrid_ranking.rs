@@ -357,7 +357,7 @@ fn rerank_sees_at_most_fetch_candidates_and_ranks_the_window() {
     assert_eq!(
         *reranker.top_ns.lock().expect("top_ns"),
         vec![10],
-        "top_n = min(fetch, window)"
+        "top_n = the fetched candidate window"
     );
 }
 

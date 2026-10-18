@@ -53,16 +53,16 @@ normalize = true                   # L2; part of the cache key
 [hybrid.reranker]
 provider = "openrouter"
 model = "cohere/rerank-v3.5"
-window = 50                        # BM25 candidates sent per search (10..=100)
+window = 50                        # candidate window per search (10..=100)
 ```
 
 Semantics: chunk vectors are cached content-addressed
 (`openrouter/<model>@d<dim>@<l2|raw>`); opening a project with incomplete
 coverage enqueues a background sync job (`embed_coverage` in `status`);
-searches rerank the candidate window (the BM25 window, or the fused
-BM25 + dense window under `ranking = "rrf"`, truncated to the same size);
-`rerank=false` per request skips the rerank stage (the MCP `search_docs`
-tool accepts the same boolean).
+searches rerank the candidate window (`max(limit, window)` candidates: plain
+BM25, or under `ranking = "rrf"` the fused BM25 + dense list truncated to the
+same size); `rerank=false` per request skips the rerank stage (the MCP
+`search_docs` tool accepts the same boolean).
 
 `ranking = "rrf"` (opt-in) fuses the BM25 window with a dense candidate list
 (cosine over the cached vectors of the current revision, Reciprocal Rank

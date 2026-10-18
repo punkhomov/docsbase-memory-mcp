@@ -193,8 +193,9 @@ pub enum DenseRows {
     TooLarge,
 }
 
-/// Per-project dense cache keyed by the index generation (DELTA-7): a new
-/// generation replaces the entry, a no-op sync keeps it.
+/// Per-project dense cache keyed by `(index generation, model_id)`
+/// (DELTA-7, DELTA-7.1): a new generation or embedding model replaces the
+/// entry, a no-op sync keeps it.
 #[derive(Debug)]
 pub struct DenseCache {
     cap: usize,
