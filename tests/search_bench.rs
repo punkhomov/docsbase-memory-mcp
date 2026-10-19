@@ -1016,3 +1016,320 @@ fn run_config_returns_citations_for_four_configs() {
     // The recorded (reversed) order proves the rerank stage ran through replay.
     assert_ne!(tops[0], tops[1], "rerank must reorder Bm25 hits");
 }
+
+use support::bench::{Citation, QueryCase, evaluate_case};
+
+fn citation(id: u64, path: &str, start: u32, end: u32) -> Citation {
+    Citation {
+        chunk_id: id,
+        path: path.to_owned(),
+        heading_path: "H".to_owned(),
+        lines: (start, end),
+    }
+}
+
+type ExpectedSpec<'a> = Vec<(&'a str, Option<(u32, u32)>, u8)>;
+
+fn t8_case(id: &str, expected: ExpectedSpec) -> QueryCase {
+    QueryCase {
+        id: id.to_owned(),
+        query: "q".to_owned(),
+        class: "probe".to_owned(),
+        k: 10,
+        expected: expected
+            .into_iter()
+            .map(|(path, lines, grade)| support::bench::ExpectedHit {
+                path: path.to_owned(),
+                lines: lines.map(|(start, end)| support::bench::LineRange { start, end }),
+                grade,
+            })
+            .collect(),
+        absent: vec![],
+        source: "test".to_owned(),
+        notes: "t8".to_owned(),
+        reviewed_by: vec![],
+    }
+}
+
+/// Hand-computed constants stay separator-free to match machine output.
+#[allow(clippy::unreadable_literal)]
+#[test]
+fn ndcg_matches_hand_computed_example() {
+    // Ranks: X(1) miss, A(2, grade 2), B(3, grade 1).
+    // DCG = 3/log2(3) + 1/log2(4); IDCG = 3/log2(2) + 1/log2(3).
+    let case = t8_case("ndcg-01", vec![("a.md", None, 2), ("b.md", None, 1)]);
+    let hits = vec![
+        citation(1, "x.md", 1, 1),
+        citation(2, "a.md", 1, 1),
+        citation(3, "b.md", 1, 1),
+    ];
+    let metrics = evaluate_case(&hits, &case);
+    assert!(metrics.hit);
+    let expected = 0.6590018048024133;
+    assert!(
+        (metrics.ndcg - expected).abs() < 1e-9,
+        "ndcg={} expected={}",
+        metrics.ndcg,
+        expected
+    );
+}
+
+#[test]
+fn ndcg_suppresses_duplicate_gain() {
+    // The second chunk matching the same expected doc adds no gain.
+    let case = t8_case("ndcg-02", vec![("a.md", None, 2)]);
+    let hits = vec![
+        citation(1, "a.md", 1, 1),
+        citation(2, "a.md", 2, 2),
+        citation(3, "x.md", 1, 1),
+    ];
+    let metrics = evaluate_case(&hits, &case);
+    assert!((metrics.ndcg - 1.0).abs() < 1e-12, "ndcg={}", metrics.ndcg);
+}
+
+/// Hand-computed constants mirror the design literals verbatim (spec §5.1);
+/// readability lints are off for the same reason as on the table itself.
+#[allow(clippy::unreadable_literal, clippy::excessive_precision)]
+#[test]
+fn ndcg_discount_table_is_checked_in() {
+    use support::bench::NDCG_DISCOUNT;
+    // Exact fractions (powers of two): rank 1, 3, 7, 15.
+    assert!((NDCG_DISCOUNT[0] - 1.0).abs() < 1e-12);
+    assert!((NDCG_DISCOUNT[2] - 0.5).abs() < 1e-12);
+    assert!((NDCG_DISCOUNT[6] - 1.0 / 3.0).abs() < 1e-12);
+    assert!((NDCG_DISCOUNT[14] - 0.25).abs() < 1e-12);
+    // Irrational spots, verbatim design literals (spot-checked by hand).
+    assert!((NDCG_DISCOUNT[1] - 0.63092975357145753).abs() < 1e-15);
+    assert!((NDCG_DISCOUNT[9] - 0.28906482631788788).abs() < 1e-15);
+    assert!((NDCG_DISCOUNT[19] - 0.22767024869695299).abs() < 1e-15);
+}
+
+#[test]
+fn recall_and_mrr_multi_relevant() {
+    let case = t8_case(
+        "rm-01",
+        vec![("a.md", None, 2), ("b.md", None, 1), ("c.md", None, 1)],
+    );
+    let hits = vec![
+        citation(1, "x.md", 1, 1),
+        citation(2, "b.md", 1, 1),
+        citation(3, "a.md", 1, 1),
+    ];
+    let metrics = evaluate_case(&hits, &case);
+    assert!(metrics.hit);
+    assert!(
+        (metrics.recall - 2.0 / 3.0).abs() < 1e-12,
+        "recall={}",
+        metrics.recall
+    );
+    assert!((metrics.mrr - 0.5).abs() < 1e-12, "mrr={}", metrics.mrr);
+}
+
+#[test]
+fn citation_overlap_uses_lines() {
+    let case = t8_case("co-01", vec![("a.md", Some((5, 8)), 2)]);
+    let hits = vec![
+        citation(1, "a.md", 5, 6),
+        citation(2, "a.md", 20, 30),
+        citation(3, "b.md", 1, 2),
+    ];
+    let metrics = evaluate_case(&hits, &case);
+    assert!(
+        (metrics.citation_overlap - 1.0 / 3.0).abs() < 1e-12,
+        "overlap={}",
+        metrics.citation_overlap
+    );
+}
+
+#[test]
+fn forbidden_hit_is_sticky() {
+    use support::bench::AbsentHit;
+    let mut no_lines = t8_case("fh-01", vec![("a.md", None, 2)]);
+    no_lines.absent = vec![AbsentHit {
+        path: "d.md".to_owned(),
+        lines: None,
+        reason: "trap".to_owned(),
+    }];
+    // Forbidden doc without lines: any hit on the path counts.
+    let hits = vec![citation(1, "a.md", 1, 1), citation(2, "d.md", 1, 1)];
+    let metrics = evaluate_case(&hits, &no_lines);
+    assert!(metrics.hit);
+    assert!(metrics.forbidden_hit);
+    let clean = evaluate_case(&[citation(1, "a.md", 1, 1)], &no_lines);
+    assert!(!clean.forbidden_hit);
+    // Forbidden doc WITH lines: only an intersecting range counts.
+    let mut ranged = t8_case("fh-02", vec![("a.md", None, 2)]);
+    ranged.absent = vec![AbsentHit {
+        path: "d.md".to_owned(),
+        lines: Some(support::bench::LineRange { start: 10, end: 20 }),
+        reason: "trap".to_owned(),
+    }];
+    let overlapping = vec![citation(1, "a.md", 1, 1), citation(2, "d.md", 15, 25)];
+    assert!(evaluate_case(&overlapping, &ranged).forbidden_hit);
+    let disjoint = vec![citation(1, "a.md", 1, 1), citation(2, "d.md", 21, 30)];
+    assert!(!evaluate_case(&disjoint, &ranged).forbidden_hit);
+}
+
+#[test]
+fn duplicate_path_ratio_counts_repeats() {
+    let case = t8_case("dup-01", vec![("a.md", None, 2), ("b.md", None, 1)]);
+    let hits = vec![
+        citation(1, "a.md", 1, 1),
+        citation(2, "a.md", 2, 2),
+        citation(3, "b.md", 1, 1),
+        citation(4, "a.md", 3, 3),
+    ];
+    let metrics = evaluate_case(&hits, &case);
+    assert!(
+        (metrics.duplicate_path_ratio - 0.5).abs() < 1e-12,
+        "dup={}",
+        metrics.duplicate_path_ratio
+    );
+}
+
+/// Hand-computed constants stay separator-free to match machine output.
+#[allow(clippy::unreadable_literal)]
+#[test]
+fn early_metrics_match_hand_computed() {
+    use support::bench::early_metrics;
+    // X(1), Y(2) miss; A(3, grade 2), B(4, grade 1); k=10.
+    let case = t8_case("em-01", vec![("a.md", None, 2), ("b.md", None, 1)]);
+    let hits = vec![
+        citation(1, "x.md", 1, 1),
+        citation(2, "y.md", 1, 1),
+        citation(3, "a.md", 1, 1),
+        citation(4, "b.md", 1, 1),
+    ];
+    let early = early_metrics(&hits, &case);
+    assert!(early.hit_at_3);
+    assert!((early.recall_at_3 - 0.5).abs() < 1e-12);
+    assert!(
+        (early.ndcg_at_3 - 0.41311732856427996).abs() < 1e-9,
+        "{}",
+        early.ndcg_at_3
+    );
+}
+
+#[test]
+fn outcome_matrix_counts_per_slice() {
+    use support::bench::{OutcomeCounts, classify_case, outcome_matrix};
+    assert_eq!(
+        classify_case(&[true, true]),
+        support::bench::CasePattern::AllHit
+    );
+    assert_eq!(
+        classify_case(&[false, false]),
+        support::bench::CasePattern::AllMiss
+    );
+    assert_eq!(
+        classify_case(&[true, false]),
+        support::bench::CasePattern::Mixed
+    );
+    let matrix = outcome_matrix(&[
+        ("ru", support::bench::CasePattern::AllHit),
+        ("ru", support::bench::CasePattern::Mixed),
+        ("en", support::bench::CasePattern::AllMiss),
+    ]);
+    assert_eq!(
+        matrix.by_slice["ru"],
+        OutcomeCounts {
+            all_hit: 1,
+            all_miss: 0,
+            mixed: 1
+        }
+    );
+    assert_eq!(
+        matrix.by_slice["en"],
+        OutcomeCounts {
+            all_hit: 0,
+            all_miss: 1,
+            mixed: 0
+        }
+    );
+}
+
+#[test]
+fn bootstrap_is_deterministic() {
+    use support::bench::bootstrap_ci;
+    let deltas = vec![0.1, 0.2, 0.3];
+    let first = bootstrap_ci(&deltas);
+    let second = bootstrap_ci(&deltas);
+    assert_eq!(first, second, "seeded bootstrap must be identical");
+    assert!(first.0 <= first.1, "CI lower <= upper");
+    // Constant deltas collapse the interval.
+    let flat = bootstrap_ci(&[0.5, 0.5, 0.5]);
+    assert!((flat.0 - 0.5).abs() < 1e-12 && (flat.1 - 0.5).abs() < 1e-12);
+}
+
+#[test]
+fn aggregate_slices_matches_hand_computed() {
+    use support::bench::aggregate_slices;
+    // Case 1: hit, full recall, nDCG 1.0. Case 2: total miss.
+    let one = t8_case("agg-01", vec![("a.md", None, 2)]);
+    let two = t8_case("agg-02", vec![("b.md", None, 1)]);
+    let m1 = evaluate_case(&[citation(1, "a.md", 1, 1)], &one);
+    let m2 = evaluate_case(&[citation(1, "x.md", 1, 1)], &two);
+    let slices = aggregate_slices([("probe", &m1), ("probe", &m2)]);
+    let report = &slices["probe"];
+    assert_eq!(report.cases, 2);
+    for (actual, expected) in [
+        (report.hit_rate, 0.5),
+        (report.recall, 0.5),
+        (report.mrr, 0.5),
+        (report.ndcg, 0.5),
+        (report.citation_overlap, 0.5),
+        (report.duplicate_path_ratio, 0.0),
+    ] {
+        assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
+    }
+    assert!((report.forbidden_rate - 0.0).abs() < 1e-12);
+}
+
+#[test]
+fn delta_report_counts_wins_losses() {
+    use support::bench::delta_report;
+    // Two cases: one improved past tolerance, one tied.
+    let delta = delta_report(&[0.5, 0.5], &[0.5, 0.8], 0.9, 0.9, 0.1).expect("delta");
+    assert_eq!((delta.wins, delta.losses, delta.ties), (1, 0, 1));
+    assert!(
+        (delta.ndcg_delta - 0.15).abs() < 1e-9,
+        "{}",
+        delta.ndcg_delta
+    );
+    assert!((delta.hit_rate_delta - 0.0).abs() < 1e-12);
+    assert!(delta.ndcg_ci95.0 <= delta.ndcg_ci95.1);
+}
+
+#[test]
+#[allow(clippy::unreadable_literal, clippy::excessive_precision)]
+fn gain_requires_line_overlap_when_expected_has_lines() {
+    use support::bench::AbsentHit;
+    // Same doc, disjoint chunk: no gain, no hit — the citation is wrong
+    // even though the path matches (design §5.6, FR-9).
+    let mut case = t8_case("ln-01", vec![("a.md", Some((5, 8)), 2)]);
+    case.absent = vec![AbsentHit {
+        path: "d.md".to_owned(),
+        lines: None,
+        reason: "trap".to_owned(),
+    }];
+    let wrong_chunk = vec![citation(1, "a.md", 20, 30), citation(2, "d.md", 1, 1)];
+    let miss = evaluate_case(&wrong_chunk, &case);
+    assert!(!miss.hit);
+    assert!(miss.ndcg.abs() < 1e-12, "ndcg={}", miss.ndcg);
+    assert!(
+        miss.citation_overlap.abs() < 1e-12,
+        "overlap={}",
+        miss.citation_overlap
+    );
+    assert!(miss.forbidden_hit);
+    // Intersecting chunk: full gain at its rank.
+    let right_chunk = vec![citation(1, "x.md", 1, 1), citation(2, "a.md", 5, 6)];
+    let hit = evaluate_case(&right_chunk, &case);
+    assert!(hit.hit);
+    assert!(
+        (hit.ndcg - 0.63092975357145753).abs() < 1e-12,
+        "ndcg={}",
+        hit.ndcg
+    );
+    assert!(!hit.forbidden_hit);
+}

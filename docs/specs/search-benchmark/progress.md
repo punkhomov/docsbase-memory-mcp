@@ -66,7 +66,22 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   по текстам ловушек, включая невыявленные тем же классом ошибки
   в hard-07/12). Второй круг ревью: reasons сверены дословно с текстами
   (подстрока ≠ токен: `config` в `configurable` не считается; `trace`
-  отсутствует в debug-доке). Minor: notes sem-03/05 уточнены.
+  отсутствует в debug-доке).   Minor: notes sem-03/05 уточнены.
+- Task T8: complete (2026-10-19). Метрики и агрегаты: checked-in
+  `NDCG_DISCOUNT[20]` (литералы спеки дословно, Decimal-аудит: в пределах
+  1 ulp от истинных; `LOG10_2` бит-в-бит), `evaluate_case`/`evaluate_at`,
+  `EarlyMetrics` (= spec: только @3), `OutcomeMatrix` by-slice,
+  `aggregate_slices`, `bootstrap_ci` (nearest-rank 24/974, канонический
+  xorshift64*), `delta_report`, `classify_case`. Verify: 10 unit-тестов
+  с ручными примерами + aggregate/delta тесты, сьют 40 passed;
+  fmt/clippy clean; `cargo tree` без reqwest. Ruling: единый предикат
+  `matches_hit` (path + lines-if-given) для gain/recall/MRR/overlap/
+  forbidden — подтверждён focused-ревью как буква спеки (§5.6 generic
+  sentence + `grade` clause + ADR-B2); path-only gain отвергнут.
+  Review: PASS/APPROVED → fix round (9 minor: таблица→20 по спеке,
+  canonical PRNG, имена/структуры по спеке, nearest-rank, untested
+  forbidden-ветка покрыта, лишние allows убраны) → re-review: всё
+  addressed, новой поломки нет. Minor: T6 RED-игнор остаётся до DELTA-2.
 - Task T7: complete (2026-10-19). Replay fixtures + config runner:
   `VectorFixture` (manifest + `.bin` raw LE f32, atomic write, offset/len/
   finite/dim checks), `RerankFixture` (exact-set pools, top_n/index/usage

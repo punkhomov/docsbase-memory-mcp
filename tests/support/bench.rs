@@ -1297,3 +1297,384 @@ pub fn preload_vectors(env: &BenchEnv, fixture: &VectorFixture) -> anyhow::Resul
     }
     Ok(())
 }
+
+/// Checked-in nDCG discounts `1 / log2(rank + 1)` for ranks 1..=20
+/// (design §5.1: k is capped at 20, so the table suffices). Literals match
+/// the spec verbatim for bit-identical output on every OS; no `log2` call
+/// exists anywhere near this path. `LOG10_2` is bit-identical to the
+/// design's literal at that position. The 17-digit form is intentional
+/// (spec-verbatim), hence the second allow.
+#[allow(clippy::unreadable_literal, clippy::excessive_precision)]
+pub const NDCG_DISCOUNT: [f64; 20] = [
+    1.0,
+    0.63092975357145753,
+    0.5,
+    0.43067655807339306,
+    0.38685280723454163,
+    0.35620718710802218,
+    0.33333333333333331,
+    0.31546487678572877,
+    std::f64::consts::LOG10_2,
+    0.28906482631788788,
+    0.27894294565112987,
+    0.27023815442731974,
+    0.26264953503719357,
+    0.2559580248098155,
+    0.25,
+    0.24465054211822604,
+    0.23981246656813146,
+    0.23540891336663824,
+    0.23137821315975915,
+    0.22767024869695299,
+];
+
+fn discount(rank_1based: usize) -> f64 {
+    NDCG_DISCOUNT
+        .get(rank_1based.saturating_sub(1))
+        .copied()
+        .unwrap_or(0.0)
+}
+
+/// Per-case metrics (design §5.6, FR-8).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseMetrics {
+    pub hit: bool,
+    pub recall: f64,
+    pub mrr: f64,
+    pub ndcg: f64,
+    pub citation_overlap: f64,
+    pub forbidden_hit: bool,
+    pub duplicate_path_ratio: f64,
+}
+
+/// Early cutoff at 3 from the same ranked list (design §5.7: the @10 view
+/// is the full [`CaseMetrics`], so it is not duplicated here). Field names
+/// mirror the spec verbatim.
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct EarlyMetrics {
+    pub hit_at_3: bool,
+    pub recall_at_3: f64,
+    pub ndcg_at_3: f64,
+}
+
+/// One slice aggregate: macro-average over its cases (design §5.7).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SliceReport {
+    pub cases: usize,
+    pub hit_rate: f64,
+    pub recall: f64,
+    pub mrr: f64,
+    pub ndcg: f64,
+    pub citation_overlap: f64,
+    pub forbidden_rate: f64,
+    pub duplicate_path_ratio: f64,
+}
+
+/// Baseline-vs-current delta (design §5.7; computed in the gate, T10).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeltaReport {
+    pub ndcg_delta: f64,
+    pub hit_rate_delta: f64,
+    pub wins: usize,
+    pub losses: usize,
+    pub ties: usize,
+    pub ndcg_ci95: (f64, f64),
+}
+
+/// Hit pattern of one case across configurations (design §5.7, FR-31).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CasePattern {
+    AllHit,
+    AllMiss,
+    Mixed,
+}
+
+/// Per-slice outcome counts (design §5.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OutcomeCounts {
+    pub all_hit: usize,
+    pub all_miss: usize,
+    pub mixed: usize,
+}
+
+/// Outcome matrix by slice (design §5.7, FR-31).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OutcomeMatrix {
+    pub by_slice: BTreeMap<String, OutcomeCounts>,
+}
+
+/// Classifies one case's hit pattern. Empty patterns carry no signal and
+/// count as misses.
+#[must_use]
+pub fn classify_case(hits: &[bool]) -> CasePattern {
+    if hits.iter().all(|&hit| hit) && !hits.is_empty() {
+        CasePattern::AllHit
+    } else if hits.iter().any(|&hit| hit) {
+        CasePattern::Mixed
+    } else {
+        CasePattern::AllMiss
+    }
+}
+
+/// Tallies per-case patterns by slice (FR-31).
+#[must_use]
+pub fn outcome_matrix(patterns: &[(&str, CasePattern)]) -> OutcomeMatrix {
+    let mut matrix = OutcomeMatrix::default();
+    for (slice, pattern) in patterns {
+        let counts = matrix.by_slice.entry((*slice).to_owned()).or_default();
+        match pattern {
+            CasePattern::AllHit => counts.all_hit += 1,
+            CasePattern::AllMiss => counts.all_miss += 1,
+            CasePattern::Mixed => counts.mixed += 1,
+        }
+    }
+    matrix
+}
+
+/// Paired bootstrap CI of per-case deltas with a fixed seed
+/// (design §5.7): deterministic across runs and platforms. Percentiles use
+/// nearest-rank on 1000 resamples: index 24 ≈ p2.5, index 974 ≈ p97.5.
+/// Counts are tiny (< 10^6 test cases), so `usize as f64` is exact here.
+#[allow(clippy::cast_precision_loss)]
+pub fn bootstrap_ci(deltas: &[f64]) -> (f64, f64) {
+    const RESAMPLES: usize = 1000;
+    const SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+    if deltas.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut rng = XorShift64(SEED);
+    let n = deltas.len();
+    let mut means = Vec::with_capacity(RESAMPLES);
+    for _ in 0..RESAMPLES {
+        let mut sum = 0.0;
+        for _ in 0..n {
+            #[allow(clippy::cast_possible_truncation)]
+            let draw = (rng.next() % n as u64) as usize;
+            sum += deltas[draw];
+        }
+        means.push(sum / n as f64);
+    }
+    means.sort_by(f64::total_cmp);
+    let low = means[RESAMPLES * 25 / 1000 - 1];
+    let high = means[(RESAMPLES * 975 / 1000 - 1).min(RESAMPLES - 1)];
+    (low, high)
+}
+
+struct XorShift64(u64);
+
+impl XorShift64 {
+    /// Canonical xorshift64* (Vigna): 12/25/27 shifts plus the multiplier.
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+}
+
+/// Delta between two paired per-case metric lists (T10 gate input).
+/// `tolerance` is the DELTA-1 win/loss band (FR-14).
+pub fn delta_report(
+    baseline_ndcg: &[f64],
+    current_ndcg: &[f64],
+    baseline_hit_rate: f64,
+    current_hit_rate: f64,
+    tolerance: f64,
+) -> anyhow::Result<DeltaReport> {
+    if baseline_ndcg.len() != current_ndcg.len() {
+        anyhow::bail!(
+            "delta needs paired nDCG lists, got {} vs {}",
+            baseline_ndcg.len(),
+            current_ndcg.len()
+        );
+    }
+    let mut wins = 0;
+    let mut losses = 0;
+    let mut ties = 0;
+    let mut deltas = Vec::with_capacity(baseline_ndcg.len());
+    for (base, current) in baseline_ndcg.iter().zip(current_ndcg.iter()) {
+        let delta = current - base;
+        deltas.push(delta);
+        if delta > tolerance {
+            wins += 1;
+        } else if delta < -tolerance {
+            losses += 1;
+        } else {
+            ties += 1;
+        }
+    }
+    let current_mean = mean(current_ndcg);
+    let base_mean = mean(baseline_ndcg);
+    Ok(DeltaReport {
+        ndcg_delta: current_mean - base_mean,
+        hit_rate_delta: current_hit_rate - baseline_hit_rate,
+        wins,
+        losses,
+        ties,
+        ndcg_ci95: bootstrap_ci(&deltas),
+    })
+}
+
+/// Mean of a slice; empty input yields 0.0. Counts are tiny, so the
+/// `usize as f64` conversion below is exact.
+#[allow(clippy::cast_precision_loss)]
+fn mean(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.iter().sum::<f64>() / values.len() as f64
+}
+
+/// Macro-average of case metrics, grouped by slice (design §5.7).
+/// Counts are tiny (< 10^6 cases), so `usize as f64` is exact here.
+#[allow(clippy::cast_precision_loss)]
+pub fn aggregate_slices<'a>(
+    cases: impl IntoIterator<Item = (&'a str, &'a CaseMetrics)>,
+) -> BTreeMap<String, SliceReport> {
+    let mut by_class: BTreeMap<&str, Vec<&CaseMetrics>> = BTreeMap::new();
+    for (class, metrics) in cases {
+        by_class.entry(class).or_default().push(metrics);
+    }
+    by_class
+        .into_iter()
+        .map(|(class, metrics)| {
+            let n = metrics.len() as f64;
+            let sum =
+                |field: fn(&CaseMetrics) -> f64| metrics.iter().map(|m| field(m)).sum::<f64>() / n;
+            let forbidden = metrics.iter().filter(|m| m.forbidden_hit).count() as f64 / n;
+            let hits = metrics.iter().filter(|m| m.hit).count() as f64 / n;
+            (
+                class.to_owned(),
+                SliceReport {
+                    cases: metrics.len(),
+                    hit_rate: hits,
+                    recall: sum(|m| m.recall),
+                    mrr: sum(|m| m.mrr),
+                    ndcg: sum(|m| m.ndcg),
+                    citation_overlap: sum(|m| m.citation_overlap),
+                    forbidden_rate: forbidden,
+                    duplicate_path_ratio: sum(|m| m.duplicate_path_ratio),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Evaluates one case over its top-k citations (design §5.6, FR-8…FR-10).
+/// Every expected element counts at most once: a second chunk matching an
+/// already-found expected doc adds no gain (duplicate-trap protection).
+pub fn evaluate_case(hits: &[Citation], case: &QueryCase) -> CaseMetrics {
+    evaluate_at(hits, case, case.k)
+}
+
+/// A citation matches an expected/absent hit when paths are equal and, if
+/// the hit names lines, the intervals intersect (design §5.6). This single
+/// predicate drives gain, recall, MRR, citation overlap and forbidden
+/// detection alike: ranking metrics and citation precision share one notion
+/// of "found", so a right-doc/wrong-chunk hit earns no gain but also never
+/// counts as citation overlap.
+fn matches_hit(path: &str, lines: Option<LineRange>, hit: &Citation) -> bool {
+    hit.path == path && line_ranges_overlap(lines, hit.lines)
+}
+
+fn line_ranges_overlap(expected: Option<LineRange>, actual: (u32, u32)) -> bool {
+    match expected {
+        // No range recorded: path equality is the whole contract.
+        None => true,
+        // Inclusive on both ends: touching at one line counts.
+        Some(range) => range.start.max(actual.0) <= range.end.min(actual.1),
+    }
+}
+
+/// Internal worker: `evaluate_case` is `evaluate_at` with the case's own
+/// `k`. Counts are tiny, so `usize as f64` conversions below are exact.
+#[allow(clippy::cast_precision_loss)]
+fn evaluate_at(hits: &[Citation], case: &QueryCase, k: usize) -> CaseMetrics {
+    let hits: Vec<&Citation> = hits.iter().take(k).collect();
+    let n = hits.len();
+    let mut matched = vec![false; case.expected.len()];
+    let mut dcg = 0.0;
+    let mut first_rank: Option<usize> = None;
+    let mut overlap = 0usize;
+    let mut seen_paths = BTreeSet::new();
+    let mut dupes = 0usize;
+    for (position, hit) in hits.iter().enumerate() {
+        let rank = position + 1;
+        if !seen_paths.insert(hit.path.as_str()) {
+            dupes += 1;
+        }
+        for (idx, expected) in case.expected.iter().enumerate() {
+            if matched[idx] {
+                continue;
+            }
+            if matches_hit(&expected.path, expected.lines, hit) {
+                matched[idx] = true;
+                let gain = 2f64.powi(i32::from(expected.grade)) - 1.0;
+                dcg += gain * discount(rank);
+                if expected.grade >= 1 && first_rank.is_none() {
+                    first_rank = Some(rank);
+                }
+                break;
+            }
+        }
+        if case
+            .expected
+            .iter()
+            .any(|expected| matches_hit(&expected.path, expected.lines, hit))
+        {
+            overlap += 1;
+        }
+    }
+    let found_relevant = matched
+        .iter()
+        .zip(case.expected.iter())
+        .any(|(found, expected)| *found && expected.grade >= 1);
+    let mut grades: Vec<u8> = case
+        .expected
+        .iter()
+        .map(|expected| expected.grade)
+        .collect();
+    grades.sort_unstable_by(|a, b| b.cmp(a));
+    let idcg: f64 = grades
+        .iter()
+        .enumerate()
+        .map(|(position, grade)| (2f64.powi(i32::from(*grade)) - 1.0) * discount(position + 1))
+        .sum();
+    let forbidden_hit = hits.iter().any(|hit| {
+        case.absent
+            .iter()
+            .any(|trap| matches_hit(&trap.path, trap.lines, hit))
+    });
+    let recall = if case.expected.is_empty() {
+        1.0
+    } else {
+        matched.iter().filter(|found| **found).count() as f64 / case.expected.len() as f64
+    };
+    CaseMetrics {
+        hit: found_relevant,
+        recall,
+        mrr: first_rank.map_or(0.0, |rank| 1.0 / rank as f64),
+        ndcg: if idcg == 0.0 { 1.0 } else { dcg / idcg },
+        citation_overlap: if n == 0 {
+            0.0
+        } else {
+            overlap as f64 / n as f64
+        },
+        forbidden_hit,
+        duplicate_path_ratio: if n == 0 { 0.0 } else { dupes as f64 / n as f64 },
+    }
+}
+
+/// Early cutoff at 3 from the same ranked list (design §5.7: the @10 view
+/// is the full [`CaseMetrics`], so it is not duplicated here).
+pub fn early_metrics(hits: &[Citation], case: &QueryCase) -> EarlyMetrics {
+    let at_3 = evaluate_at(hits, case, 3);
+    EarlyMetrics {
+        hit_at_3: at_3.hit,
+        recall_at_3: at_3.recall,
+        ndcg_at_3: at_3.ndcg,
+    }
+}
