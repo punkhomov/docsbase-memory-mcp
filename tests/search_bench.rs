@@ -621,8 +621,8 @@ use std::sync::{Arc, Mutex};
 use docsbase_memory::hybrid::Reranker;
 use docsbase_memory::vector_cache::Embedder;
 use support::bench::{
-    ConfigId, RerankFixture, RerankPool, Usage, VectorFixture, preload_vectors, run_config,
-    stages_for,
+    ConfigId, RerankFixture, RerankPool, Usage, VectorFixture, preload_vectors,
+    record_fixtures_with, run_config, stages_for,
 };
 
 fn tiny_corpus(root: &std::path::Path) {
@@ -1332,4 +1332,281 @@ fn gain_requires_line_overlap_when_expected_has_lines() {
         hit.ndcg
     );
     assert!(!hit.forbidden_hit);
+}
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+/// Deterministic fake embedder with an optional one-shot failure and an
+/// additive bias (lets two pins share texts without sharing vectors).
+struct FailingEmbedder {
+    dim: usize,
+    bias: f32,
+    fail_after_calls: AtomicUsize,
+}
+
+impl FailingEmbedder {
+    fn working(dim: usize, bias: f32) -> Self {
+        Self {
+            dim,
+            bias,
+            fail_after_calls: AtomicUsize::new(usize::MAX),
+        }
+    }
+
+    fn failing(dim: usize) -> Self {
+        Self {
+            dim,
+            bias: 0.0,
+            fail_after_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Embedder for FailingEmbedder {
+    fn model_id(&self) -> &'static str {
+        "test/fake@d4@l2"
+    }
+
+    fn embed(&self, texts: &[String]) -> docsbase_memory::error::Result<Vec<Vec<f32>>> {
+        let remaining = self.fail_after_calls.fetch_sub(1, Ordering::SeqCst);
+        if remaining == 0 {
+            return Err(docsbase_memory::error::Error::internal(
+                "injected embed failure",
+            ));
+        }
+        Ok(texts
+            .iter()
+            .map(|text| {
+                fake_vector(text, self.dim)
+                    .iter()
+                    .map(|v| v + self.bias)
+                    .collect()
+            })
+            .collect())
+    }
+}
+
+struct FailingReranker {
+    fail: AtomicBool,
+}
+
+impl docsbase_memory::hybrid::Reranker for FailingReranker {
+    fn rerank(
+        &self,
+        _query: &str,
+        docs: &[String],
+        _top_n: usize,
+    ) -> docsbase_memory::error::Result<Vec<(usize, f32)>> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(docsbase_memory::error::Error::internal(
+                "injected rerank failure",
+            ));
+        }
+        Ok((0..docs.len()).map(|i| (i, 1.0)).collect())
+    }
+}
+
+fn record_case() -> support::bench::QueryCase {
+    probe_case("rec-01", "alpha beta", 10)
+}
+
+#[test]
+fn record_mode_writes_replayable_fixtures() {
+    use support::bench::{RerankFixture, VectorFixture};
+    let tmp = TempDir::new().expect("tmp");
+    tiny_corpus(tmp.path());
+    let env = support::bench::build_env(&tmp.path().join("corpus"), "record", 3..=3)
+        .expect("index corpus");
+    let case = record_case();
+    // Direct run with fake stages.
+    let fake_embedder: Arc<dyn Embedder> = Arc::new(FailingEmbedder::working(4, 0.0));
+    let fake_reranker = Arc::new(FailingReranker {
+        fail: AtomicBool::new(false),
+    });
+    let direct_bm25 = run_config(
+        &env,
+        &[case.clone()],
+        ConfigId::Bm25Rerank,
+        &stages_for(
+            ConfigId::Bm25Rerank,
+            Some(fake_embedder.clone()),
+            Some(fake_reranker.clone() as Arc<dyn docsbase_memory::hybrid::Reranker>),
+        ),
+    )
+    .expect("direct run");
+    // Record, then replay from disk.
+    let vectors_dir = tmp.path().join("vectors");
+    let rerank_path = tmp.path().join("rerank.json");
+    record_fixtures_with(
+        &env,
+        &[case.clone()],
+        &fake_embedder,
+        fake_reranker.as_ref(),
+        "test/rerank",
+        &vectors_dir,
+        &rerank_path,
+    )
+    .expect("record");
+    let loaded_vectors = VectorFixture::load(&vectors_dir).expect("load vectors");
+    let loaded_rerank = RerankFixture::load(&rerank_path).expect("load rerank");
+    let replay = run_config(
+        &env,
+        &[case.clone()],
+        ConfigId::Bm25Rerank,
+        &stages_for(
+            ConfigId::Bm25Rerank,
+            Some(Arc::new(support::bench::ReplayEmbedder {
+                pin: "test/fake@d4@l2".to_owned(),
+                fixture: Arc::new(loaded_vectors),
+            }) as Arc<dyn Embedder>),
+            Some(Arc::new(support::bench::ReplayReranker {
+                fixture: Arc::new(loaded_rerank),
+            }) as Arc<dyn docsbase_memory::hybrid::Reranker>),
+        ),
+    )
+    .expect("replay run");
+    assert_eq!(
+        direct_bm25.cases[0].citations, replay.cases[0].citations,
+        "replay must reproduce the recorded run"
+    );
+    assert!(!replay.cases[0].citations.is_empty());
+}
+
+#[test]
+fn record_mode_is_atomic_on_failure() {
+    use support::bench::{RerankFixture, VectorFixture};
+    let tmp = TempDir::new().expect("tmp");
+    tiny_corpus(tmp.path());
+    let env = support::bench::build_env(&tmp.path().join("corpus"), "atomic", 3..=3)
+        .expect("index corpus");
+    let case = record_case();
+    let vectors_dir = tmp.path().join("vectors");
+    let rerank_path = tmp.path().join("rerank.json");
+    // Phase 1: a complete record (baseline state).
+    let emb: Arc<dyn Embedder> = Arc::new(FailingEmbedder::working(4, 0.0));
+    record_fixtures_with(
+        &env,
+        &[case.clone()],
+        &emb,
+        Arc::new(FailingReranker {
+            fail: AtomicBool::new(false),
+        })
+        .as_ref(),
+        "test/rerank",
+        &vectors_dir,
+        &rerank_path,
+    )
+    .expect("baseline record");
+    let manifest_before = fs::read(vectors_dir.join("manifest.json")).expect("manifest");
+    let rerank_before = fs::read(&rerank_path).expect("rerank json");
+    // Phase 2a: embedder fails before any write — files must be untouched.
+    let emb_fail: Arc<dyn Embedder> = Arc::new(FailingEmbedder::failing(4));
+    let err = record_fixtures_with(
+        &env,
+        &[case.clone()],
+        &emb_fail,
+        Arc::new(FailingReranker {
+            fail: AtomicBool::new(false),
+        })
+        .as_ref(),
+        "test/rerank",
+        &vectors_dir,
+        &rerank_path,
+    )
+    .expect_err("failing embedder must fail the record");
+    assert!(err.to_string().contains("injected embed failure"), "{err}");
+    assert_eq!(
+        fs::read(vectors_dir.join("manifest.json")).expect("manifest"),
+        manifest_before,
+        "failed record must not touch the manifest"
+    );
+    // Phase 2b: embedder works, reranker fails after the vector commit.
+    let emb2: Arc<dyn Embedder> = Arc::new(FailingEmbedder::working(4, 0.0));
+    let err = record_fixtures_with(
+        &env,
+        &[case.clone()],
+        &emb2,
+        Arc::new(FailingReranker {
+            fail: AtomicBool::new(true),
+        })
+        .as_ref(),
+        "test/rerank",
+        &vectors_dir,
+        &rerank_path,
+    )
+    .expect_err("failing reranker must fail the record");
+    assert!(err.to_string().contains("injected rerank failure"), "{err}");
+    // The committed vectors stay valid and loadable; the rerank file is
+    // untouched (written only on full success); no temp files leak.
+    let vectors = VectorFixture::load(&vectors_dir).expect("vectors stay valid");
+    assert!(
+        vectors
+            .get("alpha alpha alpha alpha alpha beta gamma.\n")
+            .is_ok()
+    );
+    assert_eq!(
+        fs::read(&rerank_path).expect("rerank json"),
+        rerank_before,
+        "failed rerank must not touch the rerank file"
+    );
+    assert!(RerankFixture::load(&rerank_path).is_ok());
+    for entry in [&vectors_dir, tmp.path()]
+        .iter()
+        .flat_map(|d| fs::read_dir(d).expect("ls"))
+    {
+        let is_tmp = entry
+            .expect("entry")
+            .path()
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"));
+        assert!(!is_tmp, "temp file leaked");
+    }
+}
+
+#[test]
+fn record_mode_does_not_mix_model_pins() {
+    use support::bench::VectorFixture;
+    let tmp = TempDir::new().expect("tmp");
+    tiny_corpus(tmp.path());
+    let env =
+        support::bench::build_env(&tmp.path().join("corpus"), "pins", 3..=3).expect("index corpus");
+    let case = record_case();
+    let vectors_dir = tmp.path().join("vectors");
+    let rerank_path = tmp.path().join("rerank.json");
+    let fake = Arc::new(FailingReranker {
+        fail: AtomicBool::new(false),
+    });
+    let emb_a: Arc<dyn Embedder> = Arc::new(FailingEmbedder::working(4, 0.0));
+    record_fixtures_with(
+        &env,
+        &[case.clone()],
+        &emb_a,
+        fake.as_ref(),
+        "test/rerank",
+        &vectors_dir,
+        &rerank_path,
+    )
+    .expect("record A");
+    let emb_b: Arc<dyn Embedder> = Arc::new(FailingEmbedder {
+        dim: 4,
+        bias: 100.0,
+        fail_after_calls: AtomicUsize::new(usize::MAX),
+    });
+    record_fixtures_with(
+        &env,
+        &[case],
+        &emb_b,
+        fake.as_ref(),
+        "test/rerank",
+        &vectors_dir,
+        &rerank_path,
+    )
+    .expect("record B");
+    let loaded = VectorFixture::load(&vectors_dir).expect("load");
+    let text = "alpha alpha alpha alpha alpha beta gamma.\n";
+    let got = loaded.get(text).expect("vector present");
+    assert!(
+        got.iter().all(|v| *v >= 100.0),
+        "second pin must fully replace the first: {got:?}"
+    );
 }

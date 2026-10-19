@@ -5,6 +5,11 @@
 //! reason), lexical control for the semantic slice. No production code is
 //! touched; the harness lives in `tests/**`.
 
+// Shared by `search_bench` (offline) and `search_bench_live` (record smoke):
+// each target uses a different subset, so per-target dead-code lints would
+// fire on the remainder.
+#![allow(dead_code)]
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::RangeInclusive;
 use std::path::{Component, Path};
@@ -56,8 +61,18 @@ impl<'de> Deserialize<'de> for LineRange {
     }
 }
 
+impl serde::Serialize for LineRange {
+    /// Mirror of the `[start, end]` wire form above.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        (self.start, self.end).serialize(serializer)
+    }
+}
+
 /// One relevant document for a case.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct ExpectedHit {
     pub path: String,
     pub lines: Option<LineRange>,
@@ -66,7 +81,7 @@ pub struct ExpectedHit {
 }
 
 /// One document that must not appear in top-k (FR-10, FR-26).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct AbsentHit {
     pub path: String,
     pub lines: Option<LineRange>,
@@ -76,7 +91,7 @@ pub struct AbsentHit {
 }
 
 /// One benchmark case.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[allow(dead_code)] // query/source consumed by runner (T7) and gate (T10); notes by T6 provenance
 pub struct QueryCase {
     pub id: String,
@@ -94,11 +109,11 @@ pub struct QueryCase {
 }
 
 /// `queries.json` is a bare array of cases.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct QueryFile(pub Vec<QueryCase>);
 
 /// One frozen corpus document (FR-1).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[allow(dead_code)] // origin/license/frozen_at consumed by provenance checks (T2+)
 pub struct ManifestDoc {
     pub path: String,
@@ -109,7 +124,7 @@ pub struct ManifestDoc {
 }
 
 /// `corpus/MANIFEST.json`: the frozen corpus inventory.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct CorpusManifest {
     pub documents: Vec<ManifestDoc>,
 }
@@ -191,7 +206,7 @@ impl Fixtures {
             .with_context(|| "read corpus/MANIFEST.json")?;
         let manifest: CorpusManifest =
             serde_json::from_str(&manifest_raw).context("parse corpus/MANIFEST.json")?;
-        let corpus_hash = corpus_hash(root)?;
+        let corpus_hash = corpus_hash(&root.join("corpus"))?;
         Ok(Self {
             cases,
             manifest,
@@ -213,12 +228,11 @@ fn blake3_hash_bytes(bytes: &[u8]) -> String {
 }
 
 /// Canonical corpus hash: blake3 over the sorted `(relative_path,
-/// blake3(file_bytes))` list of `.md` documents under `root/corpus`
+/// blake3(file_bytes))` list of `.md` documents directly under `corpus_dir`
 /// (`MANIFEST.json` itself is not a document and is excluded).
-pub fn corpus_hash(root: &Path) -> anyhow::Result<String> {
-    let corpus_dir = root.join("corpus");
+pub fn corpus_hash(corpus_dir: &Path) -> anyhow::Result<String> {
     let mut entries: BTreeMap<String, String> = BTreeMap::new();
-    collect_markdown(&corpus_dir, &corpus_dir, &mut entries)?;
+    collect_markdown(corpus_dir, corpus_dir, &mut entries)?;
     let mut canonical = String::new();
     for (rel, hash) in &entries {
         canonical.push_str(rel);
@@ -891,8 +905,7 @@ impl VectorFixture {
         let tmp = dir.join("manifest.json.tmp");
         std::fs::write(&tmp, manifest.to_string())
             .with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, dir.join("manifest.json"))
-            .with_context(|| format!("replace {}", dir.join("manifest.json").display()))?;
+        atomic_replace(&tmp, &dir.join("manifest.json"))?;
         Ok(())
     }
 
@@ -1068,7 +1081,7 @@ impl RerankFixture {
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, file.to_string())
             .with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
+        atomic_replace(&tmp, path)?;
         Ok(())
     }
 
@@ -1094,6 +1107,7 @@ impl RerankFixture {
 }
 
 /// [`Embedder`] replaying recorded vectors (FR-5).
+#[derive(Debug, Clone)]
 pub struct ReplayEmbedder {
     pub pin: String,
     pub fixture: Arc<VectorFixture>,
@@ -1117,6 +1131,7 @@ impl Embedder for ReplayEmbedder {
 }
 
 /// [`Reranker`] replaying recorded scores (FR-6).
+#[derive(Debug, Clone)]
 pub struct ReplayReranker {
     pub fixture: Arc<RerankFixture>,
 }
@@ -1178,8 +1193,8 @@ pub fn stages_for(
 }
 
 /// One citation as returned by `search_docs` (design §5.6).
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // chunk_id/heading_path/lines consumed by T8 metrics
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // chunk_id/heading_path/lines read by T8 metrics + T10 report
 pub struct Citation {
     pub chunk_id: u64,
     pub path: String,
@@ -1296,6 +1311,42 @@ pub fn preload_vectors(env: &BenchEnv, fixture: &VectorFixture) -> anyhow::Resul
         cache.put(&fixture.model_pin, &hash, vector)?;
     }
     Ok(())
+}
+
+/// Atomic file replace via temp file + rename (FR-19): readers never see a
+/// half-written fixture. Both fixture writers commit through this.
+pub fn atomic_replace(tmp: &Path, dst: &Path) -> anyhow::Result<()> {
+    std::fs::rename(tmp, dst)
+        .with_context(|| format!("replace {} with {}", dst.display(), tmp.display()))
+}
+
+/// Test-only reranker that records the exact candidate lists production
+/// sends it (design §5.10: the T9 stand-in for T11's live capture).
+/// An empty candidate list is a fail-closed error, never silent.
+pub struct CollectingReranker {
+    pub seen: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+}
+
+impl docsbase_memory::hybrid::Reranker for CollectingReranker {
+    fn rerank(
+        &self,
+        query: &str,
+        docs: &[String],
+        _top_n: usize,
+    ) -> docsbase_memory::error::Result<Vec<(usize, f32)>> {
+        if docs.is_empty() {
+            return Err(docsbase_memory::error::Error::internal(
+                "collecting reranker saw an empty candidate list",
+            ));
+        }
+        self.seen
+            .lock()
+            .map_err(|_| {
+                docsbase_memory::error::Error::internal("collecting reranker lock poisoned")
+            })?
+            .push((query.to_owned(), docs.to_vec()));
+        Ok((0..docs.len()).map(|index| (index, 1.0)).collect())
+    }
 }
 
 /// Checked-in nDCG discounts `1 / log2(rank + 1)` for ranks 1..=20
@@ -1677,4 +1728,111 @@ pub fn early_metrics(hits: &[Citation], case: &QueryCase) -> EarlyMetrics {
         recall_at_3: at_3.recall,
         ndcg_at_3: at_3.ndcg,
     }
+}
+
+/// Writes one vector blob: `.bin` first, then the manifest as the atomic
+/// commit point (design §5.2). A crash leaves at most an orphan `.bin`
+/// that no manifest references.
+pub fn write_vector_fixture(fixture: &VectorFixture, dir: &Path) -> anyhow::Result<()> {
+    fixture.write(dir)
+}
+
+/// Writes one rerank JSON atomically (design §5.3).
+pub fn write_rerank_fixture(fixture: &RerankFixture, path: &Path) -> anyhow::Result<()> {
+    fixture.write(path)
+}
+
+/// Records replayable fixtures (FR-19, design §5.10): embeds every unique
+/// chunk + query text, writes the vector fixture, preloads the cache, runs
+/// the `Bm25Rerank` and `RrfRerank` configs through a collecting rerank
+/// stage to capture the exact candidate windows production sends, replays
+/// them through `reranker` for real scores, and writes the rerank fixture.
+/// Every write is atomic; a failure anywhere before the final commit leaves
+/// the previous fixture set untouched and valid.
+///
+/// `rerank_model` is an explicit parameter because [`Reranker`] carries no
+/// identity by design (scores are never cached, so there is no consumer).
+#[allow(clippy::too_many_arguments)]
+pub fn record_fixtures_with(
+    env: &BenchEnv,
+    cases: &[QueryCase],
+    embedder: &Arc<dyn Embedder>,
+    reranker: &dyn Reranker,
+    rerank_model: &str,
+    vector_out: &Path,
+    rerank_out: &Path,
+) -> anyhow::Result<()> {
+    let mut texts: Vec<String> = repo::chunk_texts(env.db.connection(), env.project.id)?;
+    for case in cases {
+        if !texts.iter().any(|text| text == &case.query) {
+            texts.push(case.query.clone());
+        }
+    }
+    let mut fixture = VectorFixture {
+        model_pin: embedder.model_id().to_owned(),
+        dim: 0,
+        corpus_hash: corpus_hash(env.root.path())?,
+        queries_hash: blake3_hash_bytes(&serde_json::to_vec(cases)?),
+        vectors: HashMap::new(),
+    };
+    let matrix = embedder
+        .embed(&texts)
+        .map_err(|err| anyhow::anyhow!("record embed: {err}"))?;
+    if matrix.is_empty() {
+        anyhow::bail!("record embed: empty result");
+    }
+    let dim = matrix
+        .first()
+        .map(Vec::len)
+        .ok_or_else(|| anyhow::anyhow!("record embed: empty result"))?;
+    fixture.dim = dim;
+    for (text, vector) in texts.iter().zip(matrix) {
+        if vector.len() != dim || vector.iter().any(|value| !value.is_finite()) {
+            anyhow::bail!("record embed: bad vector for text hash");
+        }
+        fixture
+            .vectors
+            .insert(blake3_hash_bytes(text.as_bytes()), vector);
+    }
+    write_vector_fixture(&fixture, vector_out)?;
+    preload_vectors(env, &fixture)?;
+    let collector = Arc::new(CollectingReranker {
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    for cfg in [ConfigId::Bm25Rerank, ConfigId::RrfRerank] {
+        let stages = stages_for(cfg, Some(embedder.clone()), Some(collector.clone()));
+        run_config(env, cases, cfg, &stages)?;
+    }
+    let mut pools = HashMap::new();
+    for (query, docs) in collector
+        .seen
+        .lock()
+        .map_err(|_| anyhow::anyhow!("collector lock"))?
+        .iter()
+    {
+        let results = reranker
+            .rerank(query, docs, docs.len())
+            .map_err(|err| anyhow::anyhow!("record rerank: {err}"))?;
+        let key = RerankKey {
+            query_hash: blake3_hash_bytes(query.as_bytes()),
+            candidate_hashes: docs
+                .iter()
+                .map(|doc| blake3_hash_bytes(doc.as_bytes()))
+                .collect(),
+        };
+        pools.insert(
+            key,
+            RerankPool {
+                top_n: docs.len(),
+                results,
+                usage: None,
+            },
+        );
+    }
+    let rr = RerankFixture {
+        model_pin: rerank_model.to_owned(),
+        pools,
+    };
+    write_rerank_fixture(&rr, rerank_out)?;
+    Ok(())
 }

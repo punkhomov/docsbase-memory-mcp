@@ -100,3 +100,19 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   ссылка §5.1→§5.5, alignment-чек, load-time top_n/dup-пулы, chunk_id
   fail-closed, split set-vs-top_n атрибуции, Arc-фикстуры по дизайну,
   ConfigId Ord, T6-тест вне скоупа T7).
+- Task T9: complete (2026-10-19). Record mode: `record_fixtures_with`
+  (embed chunk_texts + queries → `write_vector_fixture` + `preload_vectors`,
+  rerun Bm25Rerank/RrfRerank под `CollectingReranker` → exact-set pools →
+  atomic `write_rerank_fixture`), `CollectingReranker` (records post-truncation
+  presented docs + query-keyed top_n), `atomic_replace` (fsync+rename, no
+  temp files left), `FmtUsage` Display, `VectorFixture::get`. Verify: 3 новых
+  теста (record→replay byte-identical citations на reversed rerank —
+  доказывает что replay идёт с диска а не из in-memory; atomicity на
+  embed-fail и rerank-fail — файлы untouched; pin-mismatch rejected by
+  `parse_model_pin`), сьют 43 passed / 2 ignored (T6 RED до DELTA-2 +
+  corpus-inventory print); fmt/clippy clean incl. `--features hybrid-remote`;
+  `tests/search_bench_live.rs` (ignored smoke: live record 5 docs/2 cases +
+  offline replay 4 configs, только с экспортированным ключом).
+  Ruling: self-review (stop-инструкция, fresh-reviewer отложен); два
+  по-ходу фикса — `corpus_hash` контракт унифицирован на сам корпус
+  (было двойное `corpus/corpus`), `record_*` берёт `&Arc<dyn Embedder>`.
