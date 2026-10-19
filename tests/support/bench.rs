@@ -6,13 +6,24 @@
 //! touched; the harness lives in `tests/**`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::RangeInclusive;
 use std::path::{Component, Path};
 
 use anyhow::Context;
 use serde::Deserialize;
 use tantivy::tokenizer::{TokenStream, Tokenizer};
 
+use docsbase_memory::config::Config;
+use docsbase_memory::daemon::registry;
+use docsbase_memory::daemon::tools::search_docs_with;
+use docsbase_memory::hybrid::HybridStages;
+use docsbase_memory::hybrid::dense::DenseCache;
+use docsbase_memory::index::job::run_full;
+use docsbase_memory::index::tantivy_index::IndexHandle;
 use docsbase_memory::index::tokenizer::IdentifierTokenizer;
+use docsbase_memory::store::Db;
+use docsbase_memory::store::models::{Project, ProjectStatus};
+use docsbase_memory::store::repo;
 
 /// Minimum cases per query class (FR-3).
 pub const MIN_CASES_PER_SLICE: usize = 8;
@@ -551,4 +562,195 @@ pub fn validate_model_pins(pins: &[ModelPin]) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Rerank window used when a configuration needs candidates beyond the limit
+/// (design §5.5; production default, not tuned here).
+pub const RERANK_WINDOW: u32 = 50;
+
+/// Temporary indexed project (design §5.4). The tantivy handle is kept alive
+/// for the env lifetime; chunk vectors are preloaded by T7.
+pub struct BenchEnv {
+    pub cache: tempfile::TempDir,
+    /// Kept alive for the env lifetime: dropping `TempDir` deletes the corpus.
+    #[allow(dead_code)]
+    pub root: tempfile::TempDir,
+    pub db: Db,
+    pub project: Project,
+    #[allow(dead_code)] // consumed by T7 preload_vectors
+    pub chunk_hashes: Vec<(u64, String)>,
+    #[allow(dead_code)] // consumed by T7 preload_vectors
+    pub chunk_texts: Vec<String>,
+    pub _index: IndexHandle,
+}
+
+/// Copies `corpus_dir` into a temp root without touching file bytes, opens a
+/// `Db`, registers the project (current `SCHEMA_VERSION`, never hardcoded),
+/// and runs a full index with `Config::default()`.
+pub fn build_env(
+    corpus_dir: &Path,
+    name: &str,
+    expected_docs: RangeInclusive<usize>,
+) -> anyhow::Result<BenchEnv> {
+    let cache = tempfile::TempDir::new().context("temp cache")?;
+    let root = tempfile::TempDir::new().context("temp root")?;
+    copy_tree(corpus_dir, root.path())?;
+    let mut db = Db::open(cache.path()).context("open bench db")?;
+    let canonical = root
+        .path()
+        .canonicalize()
+        .context("canonicalize bench root")?;
+    let project = registry::ensure_project(&mut db, &canonical).context("register project")?;
+    let index_dir = cache
+        .path()
+        .join("projects")
+        .join(project.id.to_string())
+        .join("tantivy");
+    let mut index = IndexHandle::open_or_create(&index_dir).context("open bench index")?;
+    let stats = run_full(&mut db, &mut index, &project, &Config::default())
+        .context("index bench corpus")?;
+    if !expected_docs.contains(&stats.docs) {
+        anyhow::bail!(
+            "{name}: expected {} docs, indexed {}",
+            format_range(&expected_docs),
+            stats.docs
+        );
+    }
+    let chunk_hashes = repo::chunk_hashes(db.connection(), project.id)?;
+    let chunk_texts = repo::chunk_texts(db.connection(), project.id)?;
+    if chunk_hashes.is_empty() || chunk_hashes.len() != chunk_texts.len() {
+        anyhow::bail!(
+            "{name}: chunk join broken ({} hashes vs {} texts)",
+            chunk_hashes.len(),
+            chunk_texts.len()
+        );
+    }
+    let mut project = project;
+    project.status = ProjectStatus::Indexed;
+    Ok(BenchEnv {
+        cache,
+        root,
+        db,
+        project,
+        chunk_hashes,
+        chunk_texts,
+        _index: index,
+    })
+}
+
+fn format_range(range: &RangeInclusive<usize>) -> String {
+    format!("{}..={}", range.start(), range.end())
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(src).with_context(|| format!("list {}", src.display()))? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// One legacy-parity case report: `hit`/`absent_hit` must match the frozen
+/// old baseline (FR-16); `ndcg` is diagnostic only. Single-relevant nDCG.
+#[derive(Debug)]
+#[allow(dead_code)] // per-case fields consumed by the T8/T10 report
+pub struct LegacyCaseReport {
+    pub id: String,
+    pub query: String,
+    pub hit: bool,
+    pub absent_hit: bool,
+    pub ndcg: f64,
+}
+
+/// Legacy parity outcome over the exact old corpus copy.
+#[derive(Debug)]
+pub struct LegacyParity {
+    pub cases: Vec<LegacyCaseReport>,
+    pub matches: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OldBaselineCase {
+    query: String,
+    class: String,
+    hit: bool,
+    absent_hit: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OldBaseline {
+    cases: Vec<OldBaselineCase>,
+}
+
+/// Runs the 12 frozen legacy cases (Bm25, `k=3`) on a byte-identical copy of
+/// the old corpus and compares `hit`/`absent_hit` with the frozen
+/// `search-quality/baseline.json` (FR-16, SC-6).
+pub fn run_legacy_parity() -> anyhow::Result<LegacyParity> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/search-bench");
+    let env = build_env(&root.join("legacy-corpus"), "search-bench-legacy", 10..=10)?;
+    let queries_raw =
+        std::fs::read_to_string(root.join("legacy.json")).context("read legacy.json")?;
+    let QueryFile(cases) = serde_json::from_str(&queries_raw).context("parse legacy.json")?;
+    let baseline_raw = std::fs::read_to_string(root.join("legacy-baseline.json"))
+        .context("read legacy-baseline.json")?;
+    let baseline: OldBaseline =
+        serde_json::from_str(&baseline_raw).context("parse legacy-baseline.json")?;
+    let mut reports = Vec::with_capacity(cases.len());
+    let mut matches = true;
+    for case in &cases {
+        let value = search_docs_with(
+            &HybridStages::default(),
+            &DenseCache::new(),
+            &env.db,
+            env.cache.path(),
+            &env.project,
+            &serde_json::json!({ "query": case.query, "limit": case.k }),
+            RERANK_WINDOW,
+        )
+        .with_context(|| format!("legacy search for {:?}", case.id))?;
+        let paths: Vec<&str> = value
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("legacy search returned no array"))?
+            .iter()
+            .filter_map(|hit| hit.get("path")?.as_str())
+            .collect();
+        let expected: Vec<&str> = case.expected.iter().map(|hit| hit.path.as_str()).collect();
+        let absent: Vec<&str> = case.absent.iter().map(|hit| hit.path.as_str()).collect();
+        let rank = paths.iter().position(|path| expected.contains(path));
+        let hit = rank.is_some();
+        let absent_hit = paths.iter().any(|path| absent.contains(path));
+        let ndcg = rank.map_or(0.0, |r| {
+            // Ranks are single digits; the float holds them exactly.
+            #[allow(clippy::cast_precision_loss)]
+            let denom = (r + 2) as f64;
+            1.0 / denom.log2()
+        });
+        let old = baseline
+            .cases
+            .iter()
+            .find(|old| old.query == case.query && old.class == case.class)
+            .ok_or_else(|| {
+                anyhow::anyhow!("legacy baseline has no {:?} / {:?}", case.query, case.class)
+            })?;
+        if old.hit != hit || old.absent_hit != absent_hit {
+            matches = false;
+        }
+        reports.push(LegacyCaseReport {
+            id: case.id.clone(),
+            query: case.query.clone(),
+            hit,
+            absent_hit,
+            ndcg,
+        });
+    }
+    Ok(LegacyParity {
+        cases: reports,
+        matches,
+    })
 }

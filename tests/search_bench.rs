@@ -13,8 +13,8 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use support::bench::{
-    Fixtures, MIN_CASES_PER_SLICE, ModelPin, lexical_jaccard, parse_model_pin, validate_model_pins,
-    validate_queries,
+    Fixtures, MIN_CASES_PER_SLICE, ModelPin, lexical_jaccard, parse_model_pin, run_legacy_parity,
+    validate_model_pins, validate_queries,
 };
 
 /// Minimal fixture tree: `corpus/<rel>` files + `MANIFEST.json` + `queries.json`.
@@ -408,4 +408,15 @@ fn lexical_jaccard_matches_hand_computed() {
     assert!((lexical_jaccard("alpha beta", "alpha beta") - 1.0).abs() < 1e-9);
     // Disjoint sets.
     assert!(lexical_jaccard("alpha beta", "delta epsilon").abs() < 1e-9);
+}
+
+#[test]
+fn legacy_parity_matches_old_baseline() {
+    let parity = run_legacy_parity().expect("legacy parity runs on the frozen corpus");
+    assert_eq!(parity.cases.len(), 12, "all legacy cases ran");
+    assert!(
+        parity.matches,
+        "hit/absent_hit must match tests/fixtures/search-quality/baseline.json: {:?}",
+        parity.cases
+    );
 }
