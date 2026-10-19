@@ -31,18 +31,17 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   legacy-классы некритичны, absent только у legacy-10 (2 reviewers есть).
   Minor закрыты кодом: per-case dump при mismatch, join по (query, class),
   verbatim reason из брифа.
-- Task T5: complete (2026-10-19). Content C: 24 документа
-  (`mixed/` 4: RU/EN/CJK миксы; `semantic/` 7: парафразы; `traps/` 13:
-  зеркальные near-duplicate ловушки), 38 кейсов (mixed 10 / semantic 14 /
-  hard 14). Verify: `query_group_c_is_valid` (счётчики + полная валидация
-  9 срезов, Jaccard-гейт), сьют 22 passed / 1 ignored; fmt/clippy clean.
-  Ruling: adjudication 27 кейсов (13 trap + 14 semantic): 9 REJECT —
-  4 парафраза оказались BM25-тривиальны (переписаны в настоящие
-  парафразы: sem-03/05/09/11), 5 причин неточны (перепроверены грепом
-  по текстам ловушек, включая невыявленные тем же классом ошибки
-  в hard-07/12). Второй круг ревью: reasons сверены с текстами
-  дословно (подстрока ≠ токен: `config` в `configurable` не считается);
-  sem-11 переписан в zero-overlap. Minor: notes sem-03/05 уточнены.
+- Task T3: complete (2026-10-19). Content A: 22 документа
+  (`ru/`, `en/`, `api/` + 2 frozen-real: `docs/MCP.md`, `docs/QUICKSTART.md`,
+  license MIT, `blake3`/`frozen_at` в `MANIFEST.json`), 32 кейса
+  (ru 12 / en 10 / id 10, все с `lines`+grade+notes, ловушки с `reason` +
+  2 reviewers). Verify: `query_group_a_is_valid` (счётчики + полная
+  валидация) зелёный, полный сьют 20 passed / 1 ignored; fmt/clippy clean.
+  Ruling: adjudication 8 ловушек отдельным агентом до коммита — 8/8
+  CONFIRM (релевантность absent, лексическая правдоподобность, точность
+  reason и строк). Reviewer: PASS/APPROVED + 4 minor (слабые
+  флективные дистанции ru-morph-05, en-morph-09/10, частичный спан
+  ru-morph-09) — исправлены в таске. T6 наследует чистую группу A.
 - Task T4: complete (2026-10-19). Content B: 16 документов
   (`phrases/` 6: exact/bag-of-words пары + 3 pure-trap; `cjk/` 5: зеркальные
   пары 新年/新聞, 地下鉄/地下室 + 北京; `ar/` 5: same-root пары
@@ -56,14 +55,33 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   group A тест возвращён к slice-standalone валидации; 7/10 unquoted —
   оставлено: 3 quoted + 3 quoted-trap уже тестируют порядок, варианты —
   робастность). T6 наследует чистые группы A+B.
-- Task T3: complete (2026-10-19). Content A: 22 документа
-  (`ru/`, `en/`, `api/` + 2 frozen-real: `docs/MCP.md`, `docs/QUICKSTART.md`,
-  license MIT, `blake3`/`frozen_at` в `MANIFEST.json`), 32 кейса
-  (ru 12 / en 10 / id 10, все с `lines`+grade+notes, ловушки с `reason` +
-  2 reviewers). Verify: `query_group_a_is_valid` (счётчики + полная
-  валидация) зелёный, полный сьют 20 passed / 1 ignored; fmt/clippy clean.
-  Ruling: adjudication 8 ловушек отдельным агентом до коммита — 8/8
-  CONFIRM (релевантность absent, лексическая правдоподобность, точность
-  reason и строк). Reviewer: PASS/APPROVED + 4 minor (слабые
-  флективные дистанции ru-morph-05, en-morph-09/10, частичный спан
-  ru-morph-09) — исправлены в таске. T6 наследует чистую группу A.
+- Task T5: complete (2026-10-19). Content C: 24 документа
+  (`mixed/` 4: RU/EN/CJK миксы; `semantic/` 7: парафразы; `traps/` 13:
+  зеркальные near-duplicate ловушки), 38 кейсов (mixed 10 / semantic 14 /
+  hard 14). Verify: `query_group_c_is_valid` (счётчики + полная валидация
+  9 срезов, Jaccard-гейт), сьют 22 passed / 1 ignored; fmt/clippy clean.
+  Ruling: adjudication 27 кейсов (13 trap + 14 semantic): 9 REJECT —
+  4 парафраза оказались BM25-тривиальны (переписаны в настоящие
+  парафразы: sem-03/05/09/11), 5 причин неточны (перепроверены грепом
+  по текстам ловушек, включая невыявленные тем же классом ошибки
+  в hard-07/12). Второй круг ревью: reasons сверены дословно с текстами
+  (подстрока ≠ токен: `config` в `configurable` не считается; `trace`
+  отсутствует в debug-доке). Minor: notes sem-03/05 уточнены.
+- Task T7: complete (2026-10-19). Replay fixtures + config runner:
+  `VectorFixture` (manifest + `.bin` raw LE f32, atomic write, offset/len/
+  finite/dim checks), `RerankFixture` (exact-set pools, top_n/index/usage
+  validation, atomic write), `ReplayEmbedder`/`ReplayReranker` (fail-closed),
+  `stages_for` (4 configs), `run_config` (warm-up, per-case limit,
+  citations parse), `preload_vectors`. Verify: 5 новых тестов
+  (missing hash, exact-set incl. order/top_n splits, out-of-range index,
+  fetch window 50 на 60-doc probe, 4-config citations с record-then-replay
+  reversed rerank — доказывает что стадия применяется), сьют 27 passed
+  / 1 ignored (+T6 RED как planned); fmt/clippy clean; `cargo tree`
+  default без `reqwest`. Ruling: record-then-replay в тесте — скаффолд
+  для T9 `CollectingReranker`, не циркулярность (пулы строятся из
+  наблюдаемых candidate set'ов, перевёрнутый порядок доказывает применение
+  rerank); dense-вектора — детерминированные фейки (только для тестов).
+  Reviewer: PASS/APPROVED + 9 minor, все закрыты кодом в таске (empty-guard,
+  ссылка §5.1→§5.5, alignment-чек, load-time top_n/dup-пулы, chunk_id
+  fail-closed, split set-vs-top_n атрибуции, Arc-фикстуры по дизайну,
+  ConfigId Ord, T6-тест вне скоупа T7).

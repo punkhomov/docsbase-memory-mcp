@@ -5,9 +5,10 @@
 //! reason), lexical control for the semantic slice. No production code is
 //! touched; the harness lives in `tests/**`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::RangeInclusive;
 use std::path::{Component, Path};
+use std::sync::Arc;
 
 use anyhow::Context;
 use serde::Deserialize;
@@ -16,14 +17,15 @@ use tantivy::tokenizer::{TokenStream, Tokenizer};
 use docsbase_memory::config::Config;
 use docsbase_memory::daemon::registry;
 use docsbase_memory::daemon::tools::search_docs_with;
-use docsbase_memory::hybrid::HybridStages;
 use docsbase_memory::hybrid::dense::DenseCache;
+use docsbase_memory::hybrid::{HybridStages, Ranking, Reranker};
 use docsbase_memory::index::job::run_full;
 use docsbase_memory::index::tantivy_index::IndexHandle;
 use docsbase_memory::index::tokenizer::IdentifierTokenizer;
 use docsbase_memory::store::Db;
 use docsbase_memory::store::models::{Project, ProjectStatus};
 use docsbase_memory::store::repo;
+use docsbase_memory::vector_cache::{Embedder, VectorCache};
 
 /// Minimum cases per query class (FR-3).
 pub const MIN_CASES_PER_SLICE: usize = 8;
@@ -564,10 +566,6 @@ pub fn validate_model_pins(pins: &[ModelPin]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Rerank window used when a configuration needs candidates beyond the limit
-/// (design §5.5; production default, not tuned here).
-pub const RERANK_WINDOW: u32 = 50;
-
 /// Temporary indexed project (design §5.4). The tantivy handle is kept alive
 /// for the env lifetime; chunk vectors are preloaded by T7.
 pub struct BenchEnv {
@@ -753,4 +751,549 @@ pub fn run_legacy_parity() -> anyhow::Result<LegacyParity> {
         cases: reports,
         matches,
     })
+}
+
+/// Rerank window used when a configuration needs candidates beyond the
+/// limit (design §5.1; matches the production default).
+pub const RERANK_WINDOW: u32 = 50;
+
+/// Which pipeline to run (design §5.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConfigId {
+    Bm25,
+    Bm25Rerank,
+    Rrf,
+    RrfRerank,
+}
+
+/// Offline vector fixture: raw LE f32 vectors keyed by content hash (FR-5).
+#[derive(Debug, Clone)]
+pub struct VectorFixture {
+    pub model_pin: String,
+    pub dim: usize,
+    pub corpus_hash: String,
+    pub queries_hash: String,
+    pub vectors: HashMap<String, Vec<f32>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct VectorManifest {
+    model_pin: String,
+    dim: usize,
+    #[allow(dead_code)]
+    count: usize,
+    corpus_hash: String,
+    queries_hash: String,
+    bin: String,
+    entries: Vec<VectorEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct VectorEntry {
+    text_hash: String,
+    offset_bytes: u64,
+    len_floats: usize,
+}
+
+impl VectorFixture {
+    /// Loads `manifest.json` + the referenced `.bin` from `dir`,
+    /// validating offsets, lengths, finiteness and dim.
+    pub fn load(dir: &Path) -> anyhow::Result<Self> {
+        let raw = std::fs::read_to_string(dir.join("manifest.json"))
+            .with_context(|| format!("read {}", dir.join("manifest.json").display()))?;
+        let manifest: VectorManifest =
+            serde_json::from_str(&raw).context("parse vector manifest")?;
+        let bytes = std::fs::read(dir.join(&manifest.bin))
+            .with_context(|| format!("read {}", dir.join(&manifest.bin).display()))?;
+        let floats = bytes_to_f32_le(&bytes)?;
+        let mut vectors = HashMap::with_capacity(manifest.entries.len());
+        for entry in &manifest.entries {
+            if entry.offset_bytes % 4 != 0 {
+                anyhow::bail!(
+                    "vector {} has misaligned offset {}",
+                    entry.text_hash,
+                    entry.offset_bytes
+                );
+            }
+            let start = usize::try_from(entry.offset_bytes)
+                .map_err(|_| anyhow::anyhow!("offset overflow for {}", entry.text_hash))?;
+            let end = start
+                .checked_add(
+                    entry
+                        .len_floats
+                        .checked_mul(4)
+                        .ok_or_else(|| anyhow::anyhow!("len overflow for {}", entry.text_hash))?,
+                )
+                .ok_or_else(|| anyhow::anyhow!("range overflow for {}", entry.text_hash))?;
+            if end > floats.len() * 4 || entry.len_floats != manifest.dim {
+                anyhow::bail!(
+                    "vector {} out of bounds or wrong dim (want {}, manifest dim {})",
+                    entry.text_hash,
+                    entry.len_floats,
+                    manifest.dim
+                );
+            }
+            let start_f = start / 4;
+            let vec: Vec<f32> = floats[start_f..start_f + entry.len_floats].to_vec();
+            if vec.iter().any(|v| !v.is_finite()) {
+                anyhow::bail!("vector {} is not finite", entry.text_hash);
+            }
+            vectors.insert(entry.text_hash.clone(), vec);
+        }
+        Ok(Self {
+            model_pin: manifest.model_pin,
+            dim: manifest.dim,
+            corpus_hash: manifest.corpus_hash,
+            queries_hash: manifest.queries_hash,
+            vectors,
+        })
+    }
+
+    /// Writes `.bin` (concatenated LE f32, entries sorted by hash) and then
+    /// atomically replaces `manifest.json` (commit point: readers never see
+    /// a manifest pointing at a half-written blob).
+    pub fn write(&self, dir: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        let mut entries: Vec<(&String, &Vec<f32>)> = self.vectors.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        let mut bytes = Vec::new();
+        let mut meta = Vec::new();
+        for (hash, vec) in &entries {
+            if vec.len() != self.dim {
+                anyhow::bail!("vector {hash} has dim {}, want {}", vec.len(), self.dim);
+            }
+            if vec.iter().any(|v| !v.is_finite()) {
+                anyhow::bail!("vector {hash} is not finite");
+            }
+            let offset = bytes.len();
+            for value in *vec {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            meta.push(serde_json::json!({
+                "text_hash": hash,
+                "offset_bytes": offset,
+                "len_floats": vec.len(),
+            }));
+        }
+        let digest = blake3_hash_bytes(&bytes);
+        let bin_name = format!("vectors-{digest}.bin");
+        std::fs::write(dir.join(&bin_name), &bytes)
+            .with_context(|| format!("write {}", dir.join(&bin_name).display()))?;
+        let manifest = serde_json::json!({
+            "model_pin": self.model_pin,
+            "dim": self.dim,
+            "count": entries.len(),
+            "corpus_hash": self.corpus_hash,
+            "queries_hash": self.queries_hash,
+            "bin": bin_name,
+            "entries": meta,
+        });
+        let tmp = dir.join("manifest.json.tmp");
+        std::fs::write(&tmp, manifest.to_string())
+            .with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::rename(&tmp, dir.join("manifest.json"))
+            .with_context(|| format!("replace {}", dir.join("manifest.json").display()))?;
+        Ok(())
+    }
+
+    /// Looks up one text by its content hash; missing hash is a fail-closed
+    /// error naming the key (FR-7), never a silent skip.
+    pub fn get(&self, text: &str) -> anyhow::Result<&[f32]> {
+        let hash = blake3_hash_bytes(text.as_bytes());
+        self.get_by_hash(&hash)
+            .with_context(|| format!("no vector for text {text:?} (model {})", self.model_pin))
+    }
+
+    /// Looks up one pre-hashed text (used by [`preload_vectors`]).
+    pub fn get_by_hash(&self, text_hash: &str) -> anyhow::Result<&[f32]> {
+        self.vectors
+            .get(text_hash)
+            .map(Vec::as_slice)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no vector for text_hash {text_hash} (model {})",
+                    self.model_pin
+                )
+            })
+    }
+}
+
+fn bytes_to_f32_le(bytes: &[u8]) -> anyhow::Result<Vec<f32>> {
+    if bytes.len() % 4 != 0 {
+        anyhow::bail!("vector blob length {} is not a multiple of 4", bytes.len());
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
+/// Offline rerank fixture: recorded scores keyed by the exact candidate set
+/// (FR-6). A replayed query must present byte-identical candidates.
+#[derive(Debug, Clone)]
+pub struct RerankFixture {
+    pub model_pin: String,
+    pub pools: HashMap<RerankKey, RerankPool>,
+}
+
+/// Exact candidate set address: query hash + ordered candidate hashes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RerankKey {
+    pub query_hash: String,
+    pub candidate_hashes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RerankPool {
+    pub top_n: usize,
+    pub results: Vec<(usize, f32)>,
+    pub usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Usage {
+    #[serde(default)]
+    pub tokens: Option<u64>,
+    #[serde(default)]
+    pub search_units: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawRerankFile {
+    model_pin: String,
+    pools: Vec<RawRerankPool>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawRerankPool {
+    query_hash: String,
+    top_n: usize,
+    candidate_hashes: Vec<String>,
+    results: Vec<RawRerankResult>,
+    #[serde(default)]
+    usage: Option<Usage>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawRerankResult {
+    index: usize,
+    score: f32,
+}
+
+impl RerankFixture {
+    /// Loads and validates one rerank JSON (`top_n` within the candidate set,
+    /// no duplicate pools).
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let file: RawRerankFile = serde_json::from_str(&raw).context("parse rerank fixture")?;
+        let mut pools = HashMap::with_capacity(file.pools.len());
+        for pool in file.pools {
+            if pool.top_n == 0 || pool.top_n > pool.candidate_hashes.len() {
+                anyhow::bail!(
+                    "rerank top_n {} outside 1..={} candidates (query {})",
+                    pool.top_n,
+                    pool.candidate_hashes.len(),
+                    pool.query_hash
+                );
+            }
+            for result in &pool.results {
+                if result.index >= pool.candidate_hashes.len() {
+                    anyhow::bail!(
+                        "rerank result index {} out of range for {} candidates (query {})",
+                        result.index,
+                        pool.candidate_hashes.len(),
+                        pool.query_hash
+                    );
+                }
+                if !result.score.is_finite() {
+                    anyhow::bail!("rerank score is not finite (query {})", pool.query_hash);
+                }
+            }
+            let key = RerankKey {
+                query_hash: pool.query_hash.clone(),
+                candidate_hashes: pool.candidate_hashes.clone(),
+            };
+            if pools.contains_key(&key) {
+                anyhow::bail!("duplicate rerank pool for query {}", key.query_hash);
+            }
+            pools.insert(
+                key,
+                RerankPool {
+                    top_n: pool.top_n,
+                    results: pool
+                        .results
+                        .into_iter()
+                        .map(|result| (result.index, result.score))
+                        .collect(),
+                    usage: pool.usage,
+                },
+            );
+        }
+        Ok(Self {
+            model_pin: file.model_pin,
+            pools,
+        })
+    }
+
+    /// Writes the fixture atomically (temp file + rename).
+    pub fn write(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        let mut pools: Vec<_> = self.pools.iter().collect();
+        pools.sort_by(|a, b| {
+            a.0.query_hash
+                .cmp(&b.0.query_hash)
+                .then_with(|| a.0.candidate_hashes.cmp(&b.0.candidate_hashes))
+        });
+        let pools_json: Vec<serde_json::Value> = pools
+            .iter()
+            .map(|(key, pool)| {
+                serde_json::json!({
+                    "query_hash": key.query_hash,
+                    "top_n": pool.top_n,
+                    "candidate_hashes": key.candidate_hashes,
+                    "results": pool.results.iter().map(|(index, score)| {
+                        serde_json::json!({"index": index, "score": score})
+                    }).collect::<Vec<_>>(),
+                    "usage": pool.usage.as_ref().map(|usage| {
+                        serde_json::json!({"tokens": usage.tokens, "search_units": usage.search_units})
+                    }),
+                })
+            })
+            .collect();
+        let file = serde_json::json!({"model_pin": self.model_pin, "pools": pools_json});
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, file.to_string())
+            .with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Finds the pool for the exact candidate set; any deviation (order,
+    /// membership, count) is a fail-closed error, never a stale-score reuse.
+    pub fn pool(&self, query: &str, docs: &[String]) -> anyhow::Result<&RerankPool> {
+        let key = RerankKey {
+            query_hash: blake3_hash_bytes(query.as_bytes()),
+            candidate_hashes: docs
+                .iter()
+                .map(|doc| blake3_hash_bytes(doc.as_bytes()))
+                .collect(),
+        };
+        self.pools.get(&key).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no rerank pool for query {} with {} candidates (model {})",
+                key.query_hash,
+                key.candidate_hashes.len(),
+                self.model_pin
+            )
+        })
+    }
+}
+
+/// [`Embedder`] replaying recorded vectors (FR-5).
+pub struct ReplayEmbedder {
+    pub pin: String,
+    pub fixture: Arc<VectorFixture>,
+}
+
+impl Embedder for ReplayEmbedder {
+    fn model_id(&self) -> &str {
+        &self.pin
+    }
+
+    fn embed(&self, texts: &[String]) -> docsbase_memory::error::Result<Vec<Vec<f32>>> {
+        texts
+            .iter()
+            .map(|text| {
+                self.fixture.get(text).map(<[f32]>::to_vec).map_err(|err| {
+                    docsbase_memory::error::Error::internal(format!("replay embed: {err}"))
+                })
+            })
+            .collect()
+    }
+}
+
+/// [`Reranker`] replaying recorded scores (FR-6).
+pub struct ReplayReranker {
+    pub fixture: Arc<RerankFixture>,
+}
+
+impl Reranker for ReplayReranker {
+    fn rerank(
+        &self,
+        query: &str,
+        docs: &[String],
+        top_n: usize,
+    ) -> docsbase_memory::error::Result<Vec<(usize, f32)>> {
+        let pool = self.fixture.pool(query, docs).map_err(|err| {
+            docsbase_memory::error::Error::internal(format!("replay rerank: {err}"))
+        })?;
+        if pool.top_n != top_n {
+            return Err(docsbase_memory::error::Error::internal(format!(
+                "rerank top_n {top_n} != recorded {} (query {})",
+                pool.top_n,
+                blake3_hash_bytes(query.as_bytes())
+            )));
+        }
+        for (index, _) in &pool.results {
+            if *index >= docs.len() {
+                return Err(docsbase_memory::error::Error::internal(format!(
+                    "rerank result index {index} out of range for {} candidates",
+                    docs.len()
+                )));
+            }
+        }
+        Ok(pool.results.clone())
+    }
+}
+
+/// Builds [`HybridStages`] for one harness configuration (design §5.5).
+#[must_use]
+pub fn stages_for(
+    cfg: ConfigId,
+    embedder: Option<Arc<dyn Embedder>>,
+    reranker: Option<Arc<dyn Reranker>>,
+) -> HybridStages {
+    match cfg {
+        ConfigId::Bm25 => HybridStages::default(),
+        ConfigId::Bm25Rerank => HybridStages {
+            embedder: None,
+            reranker,
+            ranking: Ranking::Lexical,
+        },
+        ConfigId::Rrf => HybridStages {
+            embedder,
+            reranker: None,
+            ranking: Ranking::Rrf,
+        },
+        ConfigId::RrfRerank => HybridStages {
+            embedder,
+            reranker,
+            ranking: Ranking::Rrf,
+        },
+    }
+}
+
+/// One citation as returned by `search_docs` (design §5.6).
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // chunk_id/heading_path/lines consumed by T8 metrics
+pub struct Citation {
+    pub chunk_id: u64,
+    pub path: String,
+    pub heading_path: String,
+    pub lines: (u32, u32),
+}
+
+/// One case run: the ranked citations for a case id.
+#[derive(Debug, Clone)]
+pub struct ConfigCaseRun {
+    #[allow(dead_code)] // id consumed by T8 metrics/T10 report
+    pub id: String,
+    pub citations: Vec<Citation>,
+}
+
+/// One configuration run over all cases.
+#[derive(Debug, Clone)]
+pub struct ConfigRun {
+    pub cases: Vec<ConfigCaseRun>,
+}
+
+/// Runs one configuration over all cases through [`search_docs_with`]:
+/// one warm-up call (discarded), then every case with its own `k`.
+/// A fresh [`DenseCache`] per run keeps the cold-scan measurement honest.
+pub fn run_config(
+    env: &BenchEnv,
+    cases: &[QueryCase],
+    cfg: ConfigId,
+    stages: &HybridStages,
+) -> anyhow::Result<ConfigRun> {
+    let dense = DenseCache::new();
+    // Warm-up call (discarded): warms the tantivy reader and the dense
+    // scan. Errors surface on the first real case below with case context,
+    // which diagnoses better than failing the warm-up.
+    let first = cases
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("run_config needs at least one case"))?;
+    let _ = search_docs_with(
+        stages,
+        &dense,
+        &env.db,
+        env.cache.path(),
+        &env.project,
+        &serde_json::json!({"query": first.query, "limit": first.k}),
+        RERANK_WINDOW,
+    );
+    let mut out = Vec::with_capacity(cases.len());
+    for case in cases {
+        let value = search_docs_with(
+            stages,
+            &dense,
+            &env.db,
+            env.cache.path(),
+            &env.project,
+            &serde_json::json!({"query": case.query, "limit": case.k}),
+            RERANK_WINDOW,
+        )
+        .with_context(|| format!("run {:?} for case {:?}", cfg, case.id))?;
+        out.push(ConfigCaseRun {
+            id: case.id.clone(),
+            citations: parse_citations(&value, &case.id)?,
+        });
+    }
+    Ok(ConfigRun { cases: out })
+}
+
+fn parse_citations(value: &serde_json::Value, case_id: &str) -> anyhow::Result<Vec<Citation>> {
+    let hits = value
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("case {case_id}: search did not return an array"))?;
+    hits.iter()
+        .map(|hit| {
+            let path = hit
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("case {case_id}: citation without path"))?
+                .to_owned();
+            let heading_path = hit
+                .get("heading_path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let lines = hit.get("lines").and_then(|lines| {
+                let array = lines.as_array()?;
+                if array.len() != 2 {
+                    return None;
+                }
+                let start = u32::try_from(array[0].as_u64()?).ok()?;
+                let end = u32::try_from(array[1].as_u64()?).ok()?;
+                Some((start, end))
+            });
+            let lines =
+                lines.ok_or_else(|| anyhow::anyhow!("case {case_id}: citation without lines"))?;
+            let chunk_id = hit
+                .get("chunk_id")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| anyhow::anyhow!("case {case_id}: citation without chunk_id"))?;
+            Ok(Citation {
+                chunk_id,
+                path,
+                heading_path,
+                lines,
+            })
+        })
+        .collect()
+}
+
+/// Fills the [`VectorCache`] with the fixture vectors for every chunk of the
+/// project (missing hash is a fail-closed error, never a partial cache).
+pub fn preload_vectors(env: &BenchEnv, fixture: &VectorFixture) -> anyhow::Result<()> {
+    let mut cache = VectorCache::open(env.cache.path()).context("open vector cache")?;
+    for (_chunk_id, hash) in repo::chunk_hashes(env.db.connection(), env.project.id)? {
+        let vector = fixture.get_by_hash(&hash)?;
+        cache.put(&fixture.model_pin, &hash, vector)?;
+    }
+    Ok(())
 }

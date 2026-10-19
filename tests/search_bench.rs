@@ -554,3 +554,465 @@ fn query_group_c_is_valid() {
     )
     .expect("groups A+B+C validate");
 }
+
+#[test]
+#[ignore = "blocked on DELTA-2: chunk bound 500..=1000 unreachable (measured 132); un-ignore after T6 content + bound fix"]
+fn fixtures_are_valid() {
+    let root = bench_root();
+    let fixtures = Fixtures::load(&root).expect("full fixtures load");
+    // Corpus size bounds (FR-1): frozen docs plus authored content.
+    let docs = fixtures.manifest.documents.len();
+    assert!(
+        (60..=80).contains(&docs),
+        "corpus has {docs} docs, need 60..=80"
+    );
+    assert!(
+        (120..=150).contains(&fixtures.cases.len()),
+        "corpus has {} cases, need 120..=150",
+        fixtures.cases.len()
+    );
+    for class in [
+        "ru_morph",
+        "en_morph",
+        "identifier",
+        "phrase",
+        "cjk",
+        "arabic",
+        "mixed_lang",
+        "semantic",
+        "hard_negative",
+        "multi_relevant",
+        "long_doc_boundary",
+    ] {
+        let count = fixtures.cases.iter().filter(|c| c.class == class).count();
+        assert!(count >= 8, "slice {class} has {count} cases, need >=8");
+    }
+    // Full DELTA-1 validation over every case.
+    validate_queries(
+        &fixtures.cases,
+        &root.join("corpus"),
+        &[
+            "ru_morph",
+            "en_morph",
+            "identifier",
+            "phrase",
+            "cjk",
+            "arabic",
+            "mixed_lang",
+            "semantic",
+            "hard_negative",
+            "multi_relevant",
+            "long_doc_boundary",
+        ],
+    )
+    .expect("full corpus validates");
+    // Chunk-count bound (FR-1): runs the real indexer over the frozen corpus.
+    let env = support::bench::build_env(&root.join("corpus"), "search-bench", 60..=80)
+        .expect("index corpus");
+    let chunks = env.chunk_hashes.len();
+    assert!(
+        (500..=1000).contains(&chunks),
+        "corpus has {chunks} chunks, need 500..=1000"
+    );
+}
+
+use std::sync::{Arc, Mutex};
+
+use docsbase_memory::hybrid::Reranker;
+use docsbase_memory::vector_cache::Embedder;
+use support::bench::{
+    ConfigId, RerankFixture, RerankPool, Usage, VectorFixture, preload_vectors, run_config,
+    stages_for,
+};
+
+fn tiny_corpus(root: &std::path::Path) {
+    // Graded term frequency: doc A mentions the query terms most.
+    // Each doc is one chunk (single line, no headings).
+    fs::create_dir_all(root.join("corpus")).expect("mkdir");
+    fs::write(
+        root.join("corpus/a.md"),
+        "alpha alpha alpha alpha alpha beta gamma.\n",
+    )
+    .expect("a");
+    fs::write(root.join("corpus/b.md"), "alpha alpha beta gamma.\n").expect("b");
+    fs::write(root.join("corpus/c.md"), "delta epsilon zeta.\n").expect("c");
+    let manifest = json!({"documents": [
+        {"path": "a.md", "origin": "synthetic", "license": "MIT",
+         "frozen_at": "2026-10-19", "blake3": blake3_of("alpha alpha alpha alpha alpha beta gamma.\n")},
+        {"path": "b.md", "origin": "synthetic", "license": "MIT",
+         "frozen_at": "2026-10-19", "blake3": blake3_of("alpha alpha beta gamma.\n")},
+        {"path": "c.md", "origin": "synthetic", "license": "MIT",
+         "frozen_at": "2026-10-19", "blake3": blake3_of("delta epsilon zeta.\n")},
+    ]});
+    fs::write(root.join("corpus/MANIFEST.json"), manifest.to_string()).expect("manifest");
+    fs::write(root.join("queries.json"), "[]").expect("queries");
+}
+
+/// Deterministic fake vectors from text bytes (test-only, dim 4).
+fn fake_vector(text: &str, dim: usize) -> Vec<f32> {
+    let digest = blake3_of_bytes(text.as_bytes());
+    (0..dim)
+        .map(|i| f32::from(digest[i % digest.len()]) / 255.0)
+        .collect()
+}
+
+fn blake3_of_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(bytes);
+    hasher.finalize().as_bytes().to_vec()
+}
+
+struct FakeEmbedder {
+    dim: usize,
+}
+
+impl Embedder for FakeEmbedder {
+    fn model_id(&self) -> &'static str {
+        "test/fake@d4@l2"
+    }
+
+    fn embed(&self, texts: &[String]) -> docsbase_memory::error::Result<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|t| fake_vector(t, self.dim)).collect())
+    }
+}
+
+#[test]
+fn replay_embedder_missing_hash_is_error() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = VectorFixture {
+        model_pin: "test/fake@d4@l2".to_owned(),
+        dim: 4,
+        corpus_hash: "test".to_owned(),
+        queries_hash: "test".to_owned(),
+        vectors: [("known".to_owned(), vec![1.0, 0.0, 0.0, 0.0])]
+            .into_iter()
+            .collect(),
+    };
+    fixture.write(&tmp.path().join("vectors")).expect("write");
+    let loaded = VectorFixture::load(&tmp.path().join("vectors")).expect("load");
+    let embedder = support::bench::ReplayEmbedder {
+        pin: "test/fake@d4@l2".to_owned(),
+        fixture: Arc::new(loaded),
+    };
+    let err = embedder
+        .embed(&["unknown".to_owned()])
+        .expect_err("missing hash must fail");
+    assert!(err.to_string().contains("unknown"), "{err}");
+}
+
+#[test]
+fn replay_reranker_requires_exact_candidate_set() {
+    use support::bench::ReplayReranker;
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = RerankFixture {
+        model_pin: "test/rerank".to_owned(),
+        pools: [(
+            support::bench::RerankKey {
+                query_hash: blake3_of("q"),
+                candidate_hashes: vec![blake3_of("a"), blake3_of("b")],
+            },
+            RerankPool {
+                top_n: 2,
+                results: vec![(0, 0.9), (1, 0.1)],
+                usage: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    fixture
+        .write(&tmp.path().join("rerank.json"))
+        .expect("write");
+    let loaded = RerankFixture::load(&tmp.path().join("rerank.json")).expect("load");
+    let reranker = ReplayReranker {
+        fixture: Arc::new(loaded),
+    };
+    let ok = reranker
+        .rerank("q", &["a".to_owned(), "b".to_owned()], 2)
+        .expect("exact set passes");
+    assert_eq!(ok, vec![(0, 0.9), (1, 0.1)]);
+    // Same docs, different order: a different candidate set.
+    let err = rerank_call(&reranker, "q", &["b".to_owned(), "a".to_owned()], 2)
+        .expect_err("reordered set must fail");
+    assert!(!err.to_string().is_empty());
+    // Same docs, different top_n: the recorded window changed.
+    let err = rerank_call(&reranker, "q", &["a".to_owned(), "b".to_owned()], 1)
+        .expect_err("top_n mismatch must fail");
+    assert!(!err.to_string().is_empty());
+    // Superset: extra candidates change the set.
+    let err = rerank_call(
+        &reranker,
+        "q",
+        &["a".to_owned(), "b".to_owned(), "c".to_owned()],
+        3,
+    )
+    .expect_err("superset must fail");
+    assert!(!err.to_string().is_empty());
+}
+
+#[test]
+fn replay_reranker_rejects_out_of_range_index() {
+    use support::bench::ReplayReranker;
+    let fixture = RerankFixture {
+        model_pin: "test/rerank".to_owned(),
+        pools: [(
+            support::bench::RerankKey {
+                query_hash: blake3_of("q"),
+                candidate_hashes: vec![blake3_of("a"), blake3_of("b")],
+            },
+            RerankPool {
+                top_n: 2,
+                results: vec![(5, 0.9)],
+                usage: Some(Usage {
+                    tokens: None,
+                    search_units: Some(1),
+                }),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let reranker = ReplayReranker {
+        fixture: Arc::new(fixture),
+    };
+    let err = rerank_call(&reranker, "q", &["a".to_owned(), "b".to_owned()], 2)
+        .expect_err("out-of-range index must fail");
+    assert!(err.to_string().contains('5'), "{err}");
+}
+
+fn rerank_call(
+    reranker: &impl Reranker,
+    query: &str,
+    docs: &[String],
+    top_n: usize,
+) -> docsbase_memory::error::Result<Vec<(usize, f32)>> {
+    reranker.rerank(query, docs, top_n)
+}
+
+struct ProbeReranker {
+    seen: Mutex<Vec<usize>>,
+}
+
+impl Reranker for ProbeReranker {
+    fn rerank(
+        &self,
+        _query: &str,
+        docs: &[String],
+        top_n: usize,
+    ) -> docsbase_memory::error::Result<Vec<(usize, f32)>> {
+        assert_eq!(top_n, docs.len(), "provider ranks exactly what it receives");
+        self.seen.lock().expect("lock").push(docs.len());
+        Ok((0..docs.len()).map(|i| (i, 1.0)).collect())
+    }
+}
+
+#[test]
+fn run_config_uses_fetch_window_fifty_for_hybrid() {
+    let tmp = TempDir::new().expect("tmp");
+    fs::create_dir_all(tmp.path().join("corpus")).expect("mkdir");
+    for i in 0..60 {
+        fs::write(
+            tmp.path().join(format!("corpus/d{i:02}.md")),
+            format!("alpha filler terms document number {i}.\n"),
+        )
+        .expect("doc");
+    }
+    let manifest_docs: Vec<_> = (0..60)
+        .map(|i: u32| {
+            let body = format!("alpha filler terms document number {i}.\n");
+            json!({"path": format!("d{i:02}.md"), "origin": "synthetic",
+                   "license": "MIT", "frozen_at": "2026-10-19", "blake3": blake3_of(&body)})
+        })
+        .collect();
+    fs::write(
+        tmp.path().join("corpus/MANIFEST.json"),
+        json!({"documents": manifest_docs}).to_string(),
+    )
+    .expect("manifest");
+    fs::write(tmp.path().join("queries.json"), "[]").expect("queries");
+    let env = support::bench::build_env(&tmp.path().join("corpus"), "probe", 60..=60)
+        .expect("index probe corpus");
+    let probe = Arc::new(ProbeReranker {
+        seen: Mutex::new(Vec::new()),
+    });
+    let fake = Arc::new(FakeEmbedder { dim: 4 });
+    let case = support::bench::QueryCase {
+        id: "probe-01".to_owned(),
+        query: "alpha".to_owned(),
+        class: "probe".to_owned(),
+        k: 3,
+        expected: vec![],
+        absent: vec![],
+        source: "test".to_owned(),
+        notes: "window probe".to_owned(),
+        reviewed_by: vec![],
+    };
+    for cfg in [ConfigId::Bm25Rerank, ConfigId::RrfRerank] {
+        let stages = stages_for(cfg, Some(fake.clone()), Some(probe.clone()));
+        run_config(&env, &[case.clone()], cfg, &stages).expect("run");
+    }
+    let seen = probe.seen.lock().expect("lock");
+    // Warm-up + case call per hybrid config, each seeing the full window.
+    assert_eq!(seen.len(), 4, "warm-up + case call per hybrid config");
+    assert!(
+        seen.iter().all(|&n| n == 50),
+        "hybrid fetch window is 50, got {seen:?}"
+    );
+}
+
+/// Recording reranker: captures (query, docs), returns reversed identity so
+/// the replayed run must show the reversed order (proves rerank applied).
+struct RecordingReranker {
+    seen: Mutex<Vec<(String, Vec<String>)>>,
+}
+
+impl Reranker for RecordingReranker {
+    fn rerank(
+        &self,
+        query: &str,
+        docs: &[String],
+        _top_n: usize,
+    ) -> docsbase_memory::error::Result<Vec<(usize, f32)>> {
+        self.seen
+            .lock()
+            .expect("lock")
+            .push((query.to_owned(), docs.to_vec()));
+        let n = docs.len();
+        // Small deterministic scores; the count is what the test asserts.
+        #[allow(clippy::cast_precision_loss)]
+        let ranked: Vec<(usize, f32)> = (0..n).rev().map(|i| (i, 1.0 - i as f32 * 0.01)).collect();
+        Ok(ranked)
+    }
+}
+
+fn probe_case(id: &str, query: &str, k: usize) -> support::bench::QueryCase {
+    support::bench::QueryCase {
+        id: id.to_owned(),
+        query: query.to_owned(),
+        class: "probe".to_owned(),
+        k,
+        expected: vec![],
+        absent: vec![],
+        source: "test".to_owned(),
+        notes: "citation probe".to_owned(),
+        reviewed_by: vec![],
+    }
+}
+
+fn write_vector_fixture(
+    tmp: &std::path::Path,
+    texts: &[String],
+    pin: &str,
+) -> support::bench::VectorFixture {
+    let mut vectors = std::collections::HashMap::new();
+    for text in texts {
+        vectors.insert(blake3_of(text), fake_vector(text, 4));
+    }
+    let fixture = VectorFixture {
+        model_pin: pin.to_owned(),
+        dim: 4,
+        corpus_hash: "test".to_owned(),
+        queries_hash: "test".to_owned(),
+        vectors,
+    };
+    fixture.write(&tmp.join("vectors")).expect("write vectors");
+    VectorFixture::load(&tmp.join("vectors")).expect("load vectors")
+}
+
+fn record_rerank_pools(
+    env: &support::bench::BenchEnv,
+    case: &support::bench::QueryCase,
+    fake: &Arc<FakeEmbedder>,
+) -> RerankFixture {
+    let recorder = Arc::new(RecordingReranker {
+        seen: Mutex::new(Vec::new()),
+    });
+    for cfg in [ConfigId::Bm25Rerank, ConfigId::RrfRerank] {
+        let stages = stages_for(cfg, Some(fake.clone()), Some(recorder.clone()));
+        run_config(env, std::slice::from_ref(case), cfg, &stages).expect("record run");
+    }
+    let mut pools = std::collections::HashMap::new();
+    for (query, docs) in recorder.seen.lock().expect("lock").iter() {
+        let key = support::bench::RerankKey {
+            query_hash: blake3_of(query),
+            candidate_hashes: docs.iter().map(|d| blake3_of(d)).collect(),
+        };
+        let n = docs.len();
+        #[allow(clippy::cast_precision_loss)]
+        let results: Vec<(usize, f32)> = (0..n).rev().map(|i| (i, 1.0 - i as f32 * 0.01)).collect();
+        pools.insert(
+            key,
+            RerankPool {
+                top_n: n,
+                results,
+                usage: None,
+            },
+        );
+    }
+    let rr = RerankFixture {
+        model_pin: "test/rerank".to_owned(),
+        pools,
+    };
+    rr.write(&env.cache.path().join("rerank.json"))
+        .expect("write pools");
+    RerankFixture::load(&env.cache.path().join("rerank.json")).expect("load pools")
+}
+
+#[test]
+fn run_config_returns_citations_for_four_configs() {
+    let tmp = TempDir::new().expect("tmp");
+    tiny_corpus(tmp.path());
+    let env = support::bench::build_env(&tmp.path().join("corpus"), "citations", 3..=3)
+        .expect("index citation corpus");
+    // Fixture vectors cover every chunk text plus the query texts.
+    let mut texts = docsbase_memory::store::repo::chunk_texts(env.db.connection(), env.project.id)
+        .expect("chunk texts");
+    texts.push("alpha beta".to_owned());
+    let pin = "test/fake@d4@l2".to_owned();
+    let loaded = write_vector_fixture(tmp.path(), &texts, &pin);
+    preload_vectors(&env, &loaded).expect("preload");
+    let fake = Arc::new(FakeEmbedder { dim: 4 });
+    let case = probe_case("cite-01", "alpha beta", 10);
+    let pools = record_rerank_pools(&env, &case, &fake);
+    let replay_embedder = Arc::new(support::bench::ReplayEmbedder {
+        pin,
+        fixture: Arc::new(loaded),
+    });
+    let replay_reranker = Arc::new(support::bench::ReplayReranker {
+        fixture: Arc::new(pools),
+    });
+    let no_rerank_embedder = replay_embedder.clone() as Arc<dyn Embedder>;
+    let both = replay_reranker.clone() as Arc<dyn Reranker>;
+    let cfgs = [
+        (
+            ConfigId::Bm25,
+            stages_for(ConfigId::Bm25, None, None),
+            "bm25 must cite",
+        ),
+        (
+            ConfigId::Bm25Rerank,
+            stages_for(ConfigId::Bm25Rerank, None, Some(both.clone())),
+            "bm25+rerank must cite",
+        ),
+        (
+            ConfigId::Rrf,
+            stages_for(ConfigId::Rrf, Some(no_rerank_embedder.clone()), None),
+            "rrf must cite",
+        ),
+        (
+            ConfigId::RrfRerank,
+            stages_for(ConfigId::RrfRerank, Some(no_rerank_embedder), Some(both)),
+            "rrf+rerank must cite",
+        ),
+    ];
+    let mut tops = Vec::new();
+    for (cfg, stages, msg) in &cfgs {
+        let run = run_config(&env, &[case.clone()], *cfg, stages).expect("run");
+        assert_eq!(run.cases.len(), 1);
+        let citations = &run.cases[0].citations;
+        assert!(!citations.is_empty(), "{msg}");
+        tops.push(citations[0].path.clone());
+    }
+    // The recorded (reversed) order proves the rerank stage ran through replay.
+    assert_ne!(tops[0], tops[1], "rerank must reorder Bm25 hits");
+}
