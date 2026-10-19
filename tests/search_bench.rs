@@ -420,3 +420,57 @@ fn legacy_parity_matches_old_baseline() {
         parity.cases
     );
 }
+
+fn bench_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/search-bench")
+}
+
+#[test]
+fn query_group_a_is_valid() {
+    let root = bench_root();
+    let fixtures = Fixtures::load(&root).expect("group A fixtures load");
+    for (class, min) in [("ru_morph", 12), ("en_morph", 10), ("identifier", 10)] {
+        let count = fixtures.cases.iter().filter(|c| c.class == class).count();
+        assert!(
+            count >= min,
+            "slice {class} has {count} cases, need >={min}"
+        );
+    }
+    // Full validation now, so T6 inherits a clean group A (lines, grades,
+    // hashes, adjudication fields).
+    validate_queries(
+        &fixtures.cases,
+        &root.join("corpus"),
+        &["ru_morph", "en_morph", "identifier"],
+    )
+    .expect("group A validates");
+}
+
+/// Helper for authoring: prints `path blake3` for every corpus document to
+/// fill `corpus/MANIFEST.json`. Ignored by default; never part of the gate.
+#[test]
+#[ignore = "authoring helper, prints corpus hashes for MANIFEST.json"]
+fn print_corpus_hashes() {
+    use support::bench::blake3_file;
+    let corpus = bench_root().join("corpus");
+    let mut paths = Vec::new();
+    let mut stack = vec![corpus.clone()];
+    while let Some(dir) = stack.pop() {
+        let mut names: Vec<_> = fs::read_dir(&dir)
+            .expect("read dir")
+            .map(|entry| entry.expect("entry").path())
+            .collect();
+        names.sort();
+        for path in names {
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "md") {
+                paths.push(path);
+            }
+        }
+    }
+    for path in paths {
+        let rel = path.strip_prefix(&corpus).expect("under corpus");
+        println!("{} {}", rel.display(), blake3_file(&path).expect("hash"));
+    }
+}

@@ -31,3 +31,14 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   legacy-классы некритичны, absent только у legacy-10 (2 reviewers есть).
   Minor закрыты кодом: per-case dump при mismatch, join по (query, class),
   verbatim reason из брифа.
+- Task T3: complete (2026-10-19). Content A: 22 документа
+  (`ru/`, `en/`, `api/` + 2 frozen-real: `docs/MCP.md`, `docs/QUICKSTART.md`,
+  license MIT, `blake3`/`frozen_at` в `MANIFEST.json`), 32 кейса
+  (ru 12 / en 10 / id 10, все с `lines`+grade+notes, ловушки с `reason` +
+  2 reviewers). Verify: `query_group_a_is_valid` (счётчики + полная
+  валидация) зелёный, полный сьют 20 passed / 1 ignored; fmt/clippy clean.
+  Ruling: adjudication 8 ловушек отдельным агентом до коммита — 8/8
+  CONFIRM (релевантность absent, лексическая правдоподобность, точность
+  reason и строк). Reviewer: PASS/APPROVED + 4 minor (слабые
+  флективные дистанции ru-morph-05, en-morph-09/10, частичный спан
+  ru-morph-09) — исправлены в таске. T6 наследует чистую группу A.

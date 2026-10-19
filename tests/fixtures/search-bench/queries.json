@@ -1,0 +1,682 @@
+[
+  {
+    "id": "ru-morph-01",
+    "query": "заменой чанков памяти",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/memory-replace.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: instrumental vs nominative (заменой vs замена)"
+  },
+  {
+    "id": "ru-morph-02",
+    "query": "о замене кэша",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/memory-replace.md",
+        "lines": [
+          13,
+          13
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: prepositional vs nominative (замене vs замена)"
+  },
+  {
+    "id": "ru-morph-03",
+    "query": "замена чанков памяти",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/memory-replace.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "ru/oil-change.md",
+        "reason": "shares lemma замена, disjoint topic: engine oil vs memory chunks"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "trap: lexical match on замена, wrong domain",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "ru-morph-04",
+    "query": "замена масла в двигателе",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/oil-change.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "ru/memory-replace.md",
+        "reason": "shares lemma замена, disjoint topic: memory chunks vs engine oil"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of ru-morph-03",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "ru-morph-05",
+    "query": "залить свежее масло",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/oil-change.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: infinitive vs imperative/finite (залить vs залейте/заливают)"
+  },
+  {
+    "id": "ru-morph-06",
+    "query": "настройке сокета",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/socket-setup.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: prepositional vs nominative (настройке vs настройка)"
+  },
+  {
+    "id": "ru-morph-07",
+    "query": "сокетом демона",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/socket-setup.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: instrumental vs accusative (сокетом vs сокет)"
+  },
+  {
+    "id": "ru-morph-08",
+    "query": "демонов",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/socket-setup.md",
+        "lines": [
+          6,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: genitive plural vs nominative singular (демонов vs демон)"
+  },
+  {
+    "id": "ru-morph-09",
+    "query": "таймаутам сокета",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/socket-timeout.md",
+        "lines": [
+          5,
+          8
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: dative plural vs nominative singular (таймаутам vs таймаут); span covers both query terms"
+  },
+  {
+    "id": "ru-morph-10",
+    "query": "токенизатором корпуса",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/tokenizer-tuning.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: instrumental vs nominative (токенизатором vs токенизатор)"
+  },
+  {
+    "id": "ru-morph-11",
+    "query": "повторных попыток",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/batch-retry.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: adjective + genitive plural vs nominative (повторных попыток vs повторная попытка)"
+  },
+  {
+    "id": "ru-morph-12",
+    "query": "маске файла",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/grep-patterns.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: dative vs nominative (маске vs маска)"
+  },
+  {
+    "id": "en-morph-01",
+    "query": "evicting stale entries",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/chunk-eviction.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: gerund vs finite/participial forms (evicting vs evicts/evicted)"
+  },
+  {
+    "id": "en-morph-02",
+    "query": "eviction thresholds",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/chunk-eviction.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: plural vs singular (thresholds vs threshold)"
+  },
+  {
+    "id": "en-morph-03",
+    "query": "tenant eviction notice",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/eviction-notice.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "en/chunk-eviction.md",
+        "reason": "shares eviction/evicted, disjoint topic: legal tenancy vs cache eviction"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "trap: lexical match on eviction, wrong domain",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "en-morph-04",
+    "query": "retrying failed batches",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/retry-policy.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: gerund vs finite/participial forms (retrying vs retried)"
+  },
+  {
+    "id": "en-morph-05",
+    "query": "retries with backoff",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/retry-policy.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: plural vs singular (retries vs retry)"
+  },
+  {
+    "id": "en-morph-06",
+    "query": "binding daemon sockets",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/socket-bind.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: gerund + plural vs imperative + singular (binding sockets vs bind socket)"
+  },
+  {
+    "id": "en-morph-07",
+    "query": "bound socket peers",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/socket-bind.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: participle vs infinitive (bound vs bind)"
+  },
+  {
+    "id": "en-morph-08",
+    "query": "exceeded deadlines",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/query-timeout.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: past participle vs gerund/noun (exceeded vs exceeding/deadline)"
+  },
+  {
+    "id": "en-morph-09",
+    "query": "stdio MCP server",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/frozen-mcp.md",
+        "lines": [
+          3,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "frozen-real",
+    "notes": "frozen copy of docs/MCP.md; prose match on stdio MCP server"
+  },
+  {
+    "id": "en-morph-10",
+    "query": "indexing a different folder",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/frozen-quickstart.md",
+        "lines": [
+          32,
+          35
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "frozen-real",
+    "notes": "frozen copy of docs/QUICKSTART.md; stemming (indexing vs Index) + synonym without doc support (folder)"
+  },
+  {
+    "id": "identifier-01",
+    "query": "WATCH_BATCH_SIZE",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/watch-policy.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/watch-batch-limit.md",
+        "reason": "different constant: LIMIT answers another setting, shares WATCH_BATCH prefix"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "trap: near-duplicate identifier with shared prefix",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "identifier-02",
+    "query": "WATCH_DEBOUNCE_MS",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/watch-policy.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "exact identifier match"
+  },
+  {
+    "id": "identifier-03",
+    "query": "WATCH_BATCH_LIMIT",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/watch-batch-limit.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/watch-policy.md",
+        "reason": "different constant: SIZE answers another setting, shares WATCH_BATCH prefix"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of identifier-01",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "identifier-04",
+    "query": "MAX_FRAME_BYTES",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/frame-budget.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/frame-budget-legacy.md",
+        "reason": "different constant: singular historic name, must not match the current plural"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "trap: singular vs plural historic name",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "identifier-05",
+    "query": "FRAME_BUDGET_MS",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/frame-budget.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "exact identifier match"
+  },
+  {
+    "id": "identifier-06",
+    "query": "EMBEDDING_MODEL",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/embed-model.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/embed-config.md",
+        "reason": "different constant: deprecated alias without dimensions, shares EMBED prefix"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "trap: truncated alias vs full name",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "identifier-07",
+    "query": "EMBED_MODEL",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/embed-config.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/embed-model.md",
+        "reason": "different constant: full name answers another setting, shares EMBED prefix"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of identifier-06",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "identifier-08",
+    "query": "OPENROUTER_API_KEY",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/provider-key.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "exact identifier match"
+  },
+  {
+    "id": "identifier-09",
+    "query": "docsbase search",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/cli-search.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "CLI command match"
+  },
+  {
+    "id": "identifier-10",
+    "query": "search_docs",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/frozen-mcp.md",
+        "lines": [
+          24,
+          24
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "frozen-real",
+    "notes": "frozen copy of docs/MCP.md; exact tool-name match"
+  }
+]

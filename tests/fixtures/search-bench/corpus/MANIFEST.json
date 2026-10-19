@@ -1,0 +1,158 @@
+{
+  "documents": [
+    {
+      "path": "api/cli-search.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "48ea6d48e3d62149b8e5703149e573d0b712a597f724b762905c5beb1f7d6d56"
+    },
+    {
+      "path": "api/embed-config.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "8fecc6052e9b692a9897f987e52eb279b0a4f1d4929bcedf5d2f55a3a0daece2"
+    },
+    {
+      "path": "api/embed-model.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "109606f7b0dcba32021d5f61eb1cdbb2d0f97527f58920fc2dc6872c4e92fa4c"
+    },
+    {
+      "path": "api/frame-budget-legacy.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "977b2f8a921a71314253476798464b22d5859b469487b26f3a5dc7f31d799c8e"
+    },
+    {
+      "path": "api/frame-budget.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "8ca9326af0263e77b658bc1e14b165e29efaef00812ff99c58bdc160130aabf3"
+    },
+    {
+      "path": "api/provider-key.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "01e288b91512bb58cc1e45dbb2b81e967894e27b3d28eb44922c91b23a355e97"
+    },
+    {
+      "path": "api/watch-batch-limit.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "1676590324586b605fc5f3ca2ad97272931273979a5e5db437b9b53f9dbe362c"
+    },
+    {
+      "path": "api/watch-policy.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "79d4fa77a6e0978dd392577e003e36e700a3ecf7486c31ce4f339f8946bcdba7"
+    },
+    {
+      "path": "en/chunk-eviction.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "8af0aa92eba627645a798af322c95495113db70aed5aac3b113a8ccbe33e708f"
+    },
+    {
+      "path": "en/eviction-notice.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "42d9399d486e16b8bf885997f81295950ad03b576ee2dfe875193153b66fce68"
+    },
+    {
+      "path": "en/frozen-mcp.md",
+      "origin": "frozen-real",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "d051286626d62b12f879f9c92e8e86f6b1ecb6f6bf5abe921f9448f62ed823c8"
+    },
+    {
+      "path": "en/frozen-quickstart.md",
+      "origin": "frozen-real",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "c7ac1331cde5cd16f1626b124177420a731635e21da211d857eb2340ff9601f8"
+    },
+    {
+      "path": "en/query-timeout.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "28ec24bbc551428b09e9811ef5ea877092b16c38fe88f8bf3bc680b273529e09"
+    },
+    {
+      "path": "en/retry-policy.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "92288557dfc5a457f2d88768828e5657e4a4c396e392cfd681e3ddc72e45b9fc"
+    },
+    {
+      "path": "en/socket-bind.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "76e788e0e46b28252e0ee68590be30c95fa3ffe18ba89912f4c383adaf8b29b7"
+    },
+    {
+      "path": "ru/batch-retry.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "29fdb94ab0b69312660440f56f335082c3497a1d414d9c05d3ba71b3cd979ab9"
+    },
+    {
+      "path": "ru/grep-patterns.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "97d8c4eb052219075958c947576b82db7e19455ebebbeaca91d61df793c6cf72"
+    },
+    {
+      "path": "ru/memory-replace.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "575f5eb110d1da3b306d5d75d14252f684b83acf589dc3daef570f175e585207"
+    },
+    {
+      "path": "ru/oil-change.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "015e602a21bf1e694581cb5deab3261c29a27ea9aac57efca3ccf95e3571eb2a"
+    },
+    {
+      "path": "ru/socket-setup.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "a2c53d4c142618623bfc49ced6370b363c75db0e1d6495c3ad59ff79aff0e83a"
+    },
+    {
+      "path": "ru/socket-timeout.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "6e63c428875f2dd5ec1d93dec6352fc58952a76dfd9d76d7dd9d67b9ef152856"
+    },
+    {
+      "path": "ru/tokenizer-tuning.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "05e05f373f362fcd2503470f9b41bd764a5af62b1830de836657d770196768b0"
+    }
+  ]
+}
