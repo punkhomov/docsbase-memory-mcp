@@ -463,9 +463,25 @@ fn query_group_b_is_valid() {
             "slice {class} has {count} cases, need >={min}"
         );
     }
-    // Full validation across groups A and B.
+    // Slice-standalone validation for group B, same pattern as group A.
+    let group_b: Vec<_> = fixtures
+        .cases
+        .iter()
+        .filter(|c| {
+            [
+                "ru_morph",
+                "en_morph",
+                "identifier",
+                "phrase",
+                "cjk",
+                "arabic",
+            ]
+            .contains(&c.class.as_str())
+        })
+        .cloned()
+        .collect();
     validate_queries(
-        &fixtures.cases,
+        &group_b,
         &root.join("corpus"),
         &[
             "ru_morph",
@@ -506,4 +522,35 @@ fn print_corpus_hashes() {
         let rel = path.strip_prefix(&corpus).expect("under corpus");
         println!("{} {}", rel.display(), blake3_file(&path).expect("hash"));
     }
+}
+
+#[test]
+fn query_group_c_is_valid() {
+    let root = bench_root();
+    let fixtures = Fixtures::load(&root).expect("group A+B+C fixtures load");
+    for (class, min) in [("mixed_lang", 10), ("semantic", 14), ("hard_negative", 14)] {
+        let count = fixtures.cases.iter().filter(|c| c.class == class).count();
+        assert!(
+            count >= min,
+            "slice {class} has {count} cases, need >={min}"
+        );
+    }
+    // Full validation across groups A, B and C (incl. DELTA-1 adjudication
+    // gates and the semantic Jaccard ceiling).
+    validate_queries(
+        &fixtures.cases,
+        &root.join("corpus"),
+        &[
+            "ru_morph",
+            "en_morph",
+            "identifier",
+            "phrase",
+            "cjk",
+            "arabic",
+            "mixed_lang",
+            "semantic",
+            "hard_negative",
+        ],
+    )
+    .expect("groups A+B+C validate");
 }

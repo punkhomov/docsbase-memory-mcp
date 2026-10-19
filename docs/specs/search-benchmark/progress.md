@@ -31,6 +31,18 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   legacy-классы некритичны, absent только у legacy-10 (2 reviewers есть).
   Minor закрыты кодом: per-case dump при mismatch, join по (query, class),
   verbatim reason из брифа.
+- Task T5: complete (2026-10-19). Content C: 24 документа
+  (`mixed/` 4: RU/EN/CJK миксы; `semantic/` 7: парафразы; `traps/` 13:
+  зеркальные near-duplicate ловушки), 38 кейсов (mixed 10 / semantic 14 /
+  hard 14). Verify: `query_group_c_is_valid` (счётчики + полная валидация
+  9 срезов, Jaccard-гейт), сьют 22 passed / 1 ignored; fmt/clippy clean.
+  Ruling: adjudication 27 кейсов (13 trap + 14 semantic): 9 REJECT —
+  4 парафраза оказались BM25-тривиальны (переписаны в настоящие
+  парафразы: sem-03/05/09/11), 5 причин неточны (перепроверены грепом
+  по текстам ловушек, включая невыявленные тем же классом ошибки
+  в hard-07/12). Второй круг ревью: reasons сверены с текстами
+  дословно (подстрока ≠ токен: `config` в `configurable` не считается);
+  sem-11 переписан в zero-overlap. Minor: notes sem-03/05 уточнены.
 - Task T4: complete (2026-10-19). Content B: 16 документов
   (`phrases/` 6: exact/bag-of-words пары + 3 pure-trap; `cjk/` 5: зеркальные
   пары 新年/新聞, 地下鉄/地下室 + 北京; `ar/` 5: same-root пары

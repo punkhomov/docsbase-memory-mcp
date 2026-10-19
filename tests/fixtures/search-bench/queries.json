@@ -1347,5 +1347,904 @@
     "absent": [],
     "source": "synthetic",
     "notes": "plural vs singular (دروس vs درس); الأسبوع unmatched"
+  },
+  {
+    "id": "mixed-01",
+    "query": "откат деплоя",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/deploy-guide.md",
+        "lines": [
+          8,
+          8
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU query, RU span"
+  },
+  {
+    "id": "mixed-02",
+    "query": "deploy the project",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/deploy-guide.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN query, EN span in mixed doc"
+  },
+  {
+    "id": "mixed-03",
+    "query": "docsbase index для деплоя",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/deploy-guide.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "mixed RU+EN query"
+  },
+  {
+    "id": "mixed-04",
+    "query": "флаги конфигурации",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/config-flags.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU query, RU span"
+  },
+  {
+    "id": "mixed-05",
+    "query": "config flags",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/config-flags.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN query, RU span: dense-channel probe, negative-control for lexical"
+  },
+  {
+    "id": "mixed-06",
+    "query": "地下鉄 station",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/cjk-glossary.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "mixed CJK+EN query"
+  },
+  {
+    "id": "mixed-07",
+    "query": "subway train in Japanese",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/cjk-glossary.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN gloss of CJK term"
+  },
+  {
+    "id": "mixed-08",
+    "query": "admission error",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/api-errors.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN error string"
+  },
+  {
+    "id": "mixed-09",
+    "query": "ошибка протокола",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/api-errors.md",
+        "lines": [
+          4,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU error string, cognate протокол/protocol"
+  },
+  {
+    "id": "mixed-10",
+    "query": "protocol error",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/api-errors.md",
+        "lines": [
+          4,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN variant of the same error"
+  },
+  {
+    "id": "sem-01",
+    "query": "memory cleanup interruptions",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/gc-pauses.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: no shared stems with span; negative-control for bm25",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-02",
+    "query": "pause time spikes",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/gc-pauses.md",
+        "lines": [
+          6,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "near-match control within the same doc",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-03",
+    "query": "who takes over coordination duties",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/leader-election.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "shares coordinator stem; otherwise disjoint; negative-control for bm25",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-04",
+    "query": "coordinator failover",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/leader-election.md",
+        "lines": [
+          6,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "failover vs failure stems differ",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-05",
+    "query": "slowing down abusive clients",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/rate-limits.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: slowing/throttling and clients/backend terminology differ",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-06",
+    "query": "request quota exhaustion",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/rate-limits.md",
+        "lines": [
+          4,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: exhaustion vs exceeding",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-07",
+    "query": "archiving old log files",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/log-rotation.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "old/stale differ; cold storage unmatched",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-08",
+    "query": "log retention policy",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/log-rotation.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: retention vs Retention span",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-09",
+    "query": "how to tell the daemon froze",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/health-checks.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: detection asked, span describes probe failure",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-10",
+    "query": "readiness gate checks",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/health-checks.md",
+        "lines": [
+          4,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "near-verbatim gates, distinct query terms",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-11",
+    "query": "emergency copies of the search data",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/backup-restore.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: zero shared stems with span; copies/snapshots and emergencies/disaster differ",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-12",
+    "query": "point-in-time restore",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/backup-restore.md",
+        "lines": [
+          4,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "restore vs restores; point-in-time unmatched",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-13",
+    "query": "gradual rollout toggles",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/feature-flags.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "toggles unmatched; rollout shared",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-14",
+    "query": "kill switch activation",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/feature-flags.md",
+        "lines": [
+          4,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "activation unmatched; kill switch shared",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-01",
+    "query": "unix socket path",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/unix-socket.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/windows-pipe.md",
+        "reason": "shares daemon/connect/config phrasing, disjoint: unix socket vs named pipe"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "socket-path trap vs named pipe",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-02",
+    "query": "windows named pipe",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/windows-pipe.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/unix-socket.md",
+        "reason": "shares daemon/connect/config phrasing, disjoint: named pipe vs unix socket"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of hard-01",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-03",
+    "query": "install with curl",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/install-curl.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/install-wget.md",
+        "reason": "shares install/download/verify terms, disjoint: curl vs wget"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "downloader trap",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-04",
+    "query": "install with wget",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/install-wget.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/install-curl.md",
+        "reason": "shares install/download/verify terms, disjoint: wget vs curl"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of hard-03",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-05",
+    "query": "EMBEDDING_MODELS",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/embedding-models.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/embed-model.md",
+        "reason": "shares EMBEDDING_MODEL prefix, disjoint: model list vs single model"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "plural-listing trap",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-06",
+    "query": "supported provider models",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/embedding-models.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "prose variant of hard-05, no trap",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-07",
+    "query": "default port",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/default-port.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/port-env.md",
+        "reason": "shares port/default terms, disjoint: fixed default vs env override"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "default-vs-override trap",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-08",
+    "query": "PORT environment variable",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/port-env.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/default-port.md",
+        "reason": "shares port/default terms, disjoint: env override vs fixed default"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of hard-07",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-09",
+    "query": "timeout milliseconds",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/timeout-ms.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/timeout-sec.md",
+        "reason": "shares timeout/unit terms, disjoint: ms counting vs seconds display"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "unit trap",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-10",
+    "query": "timeout in seconds",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/timeout-sec.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/timeout-ms.md",
+        "reason": "shares timeout/milliseconds terms, disjoint: seconds display vs ms counting"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of hard-09",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-11",
+    "query": "debug logging",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/log-debug.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/log-trace.md",
+        "reason": "shares log/level/output terms, disjoint: debug vs trace"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "log-level trap",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-12",
+    "query": "trace logging",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/log-trace.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/log-debug.md",
+        "reason": "shares log/level/output terms, disjoint: trace vs debug"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of hard-11",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-13",
+    "query": "config file",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/config-toml.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/config-json.md",
+        "reason": "shares config/keys terms, disjoint: current TOML doc vs legacy JSON doc"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "format trap",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-14",
+    "query": "json config",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/config-json.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/config-toml.md",
+        "reason": "shares config/keys terms, disjoint: legacy JSON doc vs current TOML doc"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of hard-13",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
   }
 ]
