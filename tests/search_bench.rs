@@ -428,7 +428,7 @@ fn bench_root() -> std::path::PathBuf {
 #[test]
 fn query_group_a_is_valid() {
     let root = bench_root();
-    let fixtures = Fixtures::load(&root).expect("group A fixtures load");
+    let fixtures = Fixtures::load(&root).expect("group A+B fixtures load");
     for (class, min) in [("ru_morph", 12), ("en_morph", 10), ("identifier", 10)] {
         let count = fixtures.cases.iter().filter(|c| c.class == class).count();
         assert!(
@@ -436,14 +436,47 @@ fn query_group_a_is_valid() {
             "slice {class} has {count} cases, need >={min}"
         );
     }
-    // Full validation now, so T6 inherits a clean group A (lines, grades,
-    // hashes, adjudication fields).
+    // Slice-standalone validation: group A stays fail-closed on its own
+    // cases even as later groups extend the file.
+    let group_a: Vec<_> = fixtures
+        .cases
+        .iter()
+        .filter(|c| ["ru_morph", "en_morph", "identifier"].contains(&c.class.as_str()))
+        .cloned()
+        .collect();
     validate_queries(
-        &fixtures.cases,
+        &group_a,
         &root.join("corpus"),
         &["ru_morph", "en_morph", "identifier"],
     )
     .expect("group A validates");
+}
+
+#[test]
+fn query_group_b_is_valid() {
+    let root = bench_root();
+    let fixtures = Fixtures::load(&root).expect("group A+B fixtures load");
+    for (class, min) in [("phrase", 10), ("cjk", 10), ("arabic", 10)] {
+        let count = fixtures.cases.iter().filter(|c| c.class == class).count();
+        assert!(
+            count >= min,
+            "slice {class} has {count} cases, need >={min}"
+        );
+    }
+    // Full validation across groups A and B.
+    validate_queries(
+        &fixtures.cases,
+        &root.join("corpus"),
+        &[
+            "ru_morph",
+            "en_morph",
+            "identifier",
+            "phrase",
+            "cjk",
+            "arabic",
+        ],
+    )
+    .expect("groups A+B validate");
 }
 
 /// Helper for authoring: prints `path blake3` for every corpus document to

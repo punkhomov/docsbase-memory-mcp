@@ -31,6 +31,19 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   legacy-классы некритичны, absent только у legacy-10 (2 reviewers есть).
   Minor закрыты кодом: per-case dump при mismatch, join по (query, class),
   verbatim reason из брифа.
+- Task T4: complete (2026-10-19). Content B: 16 документов
+  (`phrases/` 6: exact/bag-of-words пары + 3 pure-trap; `cjk/` 5: зеркальные
+  пары 新年/新聞, 地下鉄/地下室 + 北京; `ar/` 5: same-root пары
+  مكتبة/مكتب, مدرسة/درس + بوابة), 30 кейсов (phrase/cjk/arabic по 10,
+  quoted phrase queries, vocalized مَكتَبة — харакат сносит нормализация).
+  Verify: `query_group_b_is_valid` (счётчики + полная валидация 6 срезов),
+  сьют 21 passed / 1 ignored; fmt/clippy clean. Ruling: adjudication
+  11 ловушек отдельным агентом до коммита — 11/11 CONFIRM. Reviewer:
+  PASS/APPROVED + 1 Important (ar-06 спан без второго терма → [5,5])
+  + 3 minor (cjk-02 произвольный спан → точный compound-запрос;
+  group A тест возвращён к slice-standalone валидации; 7/10 unquoted —
+  оставлено: 3 quoted + 3 quoted-trap уже тестируют порядок, варианты —
+  робастность). T6 наследует чистые группы A+B.
 - Task T3: complete (2026-10-19). Content A: 22 документа
   (`ru/`, `en/`, `api/` + 2 frozen-real: `docs/MCP.md`, `docs/QUICKSTART.md`,
   license MIT, `blake3`/`frozen_at` в `MANIFEST.json`), 32 кейса

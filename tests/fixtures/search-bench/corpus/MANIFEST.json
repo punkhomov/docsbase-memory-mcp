@@ -57,6 +57,76 @@
       "blake3": "79d4fa77a6e0978dd392577e003e36e700a3ecf7486c31ce4f339f8946bcdba7"
     },
     {
+      "path": "ar/gate.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "baad2f51d9d7d4d1a3d0030834a7d3e7510869d34cadb9234a2eeb2d73aeaa9c"
+    },
+    {
+      "path": "ar/lesson.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "f15f1fb4ab15694bdbcfec59b136b7c559a5c92dba434e8d91b715f68a0324a9"
+    },
+    {
+      "path": "ar/library.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "65bf9a36829499bd14c55a547a72ba5f3ee5498d5d4ecfbf679dc5cd9e8c3ce7"
+    },
+    {
+      "path": "ar/office.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "c96179cb3b63273e70488061590623548c3cd1d6b281cdcf657122794e4a2ccd"
+    },
+    {
+      "path": "ar/school.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "c283e4a8b38c47680440e50cbd4e78fbe162561418b06125183794f3c248bbfd"
+    },
+    {
+      "path": "cjk/basement.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "42bf34700e7b12ccf0ca824e75748e3a972451cd4898061a0e3f99e759ede938"
+    },
+    {
+      "path": "cjk/beijing.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "a9518cbfafe729216a48a64d18e9399f20c839ebcd064efb79e25c3a3b5ffc8d"
+    },
+    {
+      "path": "cjk/newspaper.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "d5fee6b7c722690631848d4bc3df227378890d1ed33fe33e255daa0a0530157b"
+    },
+    {
+      "path": "cjk/newyear.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "cbb345d7f58aa80b8bbd84cb7e494a29735e7acf682aa823e06fbedafe21762d"
+    },
+    {
+      "path": "cjk/subway.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "02e94bba6b2b0ddd1dc13cc01663556b9ffae86180c59091d133c94ddccef6c6"
+    },
+    {
       "path": "en/chunk-eviction.md",
       "origin": "synthetic",
       "license": "MIT",
@@ -104,6 +174,48 @@
       "license": "MIT",
       "frozen_at": "2026-10-19",
       "blake3": "76e788e0e46b28252e0ee68590be30c95fa3ffe18ba89912f4c383adaf8b29b7"
+    },
+    {
+      "path": "phrases/merge-queue.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "36a62276d48dbe8488cf56e9b747b26a6c98c521dc9c0a9e819fa00a76b4393e"
+    },
+    {
+      "path": "phrases/plan-review.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "9d5fba1b5068f513f1a49b52cbf0f06fbf984f9c412948bbe7f5d2632dceb410"
+    },
+    {
+      "path": "phrases/queue-fairness.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "f24ab67957da3c7b1f7e8a3751401710127751c1eab52e7a8d9e1fecc513ed32"
+    },
+    {
+      "path": "phrases/read-timeout.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "e123a7dad9fe46e0d47ed46be4f867ed7a0f6db3432aef651835813155b89efb"
+    },
+    {
+      "path": "phrases/review-plan.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "6590f3d31bada4fa583f82372c62202a94aa2ca3fbb565e1dae09711d5233682"
+    },
+    {
+      "path": "phrases/timeout-read.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "5993a6111ddfd63408340260d82281db38279963df079a8434e537e601d0f872"
     },
     {
       "path": "ru/batch-retry.md",

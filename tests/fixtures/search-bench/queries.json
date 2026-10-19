@@ -678,5 +678,674 @@
     "absent": [],
     "source": "frozen-real",
     "notes": "frozen copy of docs/MCP.md; exact tool-name match"
+  },
+  {
+    "id": "phrase-01",
+    "query": "\"merge queue\"",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/merge-queue.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "phrases/queue-fairness.md",
+        "reason": "shares merge+queue apart, different concept: fairness vs queue policy"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "exact quoted phrase; trap shares both terms non-adjacently",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "phrase-02",
+    "query": "merging the queue",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/merge-queue.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "inflected variant (merging vs merge)"
+  },
+  {
+    "id": "phrase-03",
+    "query": "queued merge builds",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/merge-queue.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "participle variant (queued vs queue)"
+  },
+  {
+    "id": "phrase-04",
+    "query": "fair queue ordering",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/queue-fairness.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "trap doc as expected target"
+  },
+  {
+    "id": "phrase-05",
+    "query": "\"read timeout\"",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/read-timeout.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "phrases/timeout-read.md",
+        "reason": "shares read+timeout apart, different concept: config reload vs abort"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "exact quoted phrase; trap shares both terms reversed",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "phrase-06",
+    "query": "stalled connections timeout",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/read-timeout.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "content-word variant (stalled vs aborts)"
+  },
+  {
+    "id": "phrase-07",
+    "query": "client read timeout",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/read-timeout.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "extra unmatched term (client)"
+  },
+  {
+    "id": "phrase-08",
+    "query": "\"plan review\"",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/plan-review.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "phrases/review-plan.md",
+        "reason": "shares plan+review apart, different concept: migration checklist vs release review"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "exact quoted phrase; trap shares both terms apart",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "phrase-09",
+    "query": "quarterly plan review",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/plan-review.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "extra unmatched term (quarterly)"
+  },
+  {
+    "id": "phrase-10",
+    "query": "release plan review",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/plan-review.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "extra unmatched term (release)"
+  },
+  {
+    "id": "cjk-01",
+    "query": "新年",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/newyear.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "cjk/newspaper.md",
+        "reason": "shares 新 unigram, disjoint: new year vs newspaper"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "unigram overlap only at bigram tokenization",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "cjk-02",
+    "query": "新年の抱負",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/newyear.md",
+        "lines": [
+          8,
+          8
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "compound query; both bigrams must co-occur in the span"
+  },
+  {
+    "id": "cjk-03",
+    "query": "新聞",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/newspaper.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "cjk/newyear.md",
+        "reason": "shares 新 unigram, disjoint: newspaper vs new year"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of cjk-01",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "cjk-04",
+    "query": "新聞記事",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/newspaper.md",
+        "lines": [
+          8,
+          8
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "compound query, exact span"
+  },
+  {
+    "id": "cjk-05",
+    "query": "地下鉄",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/subway.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "cjk/basement.md",
+        "reason": "shares 地下 bigrams, disjoint: subway vs basement"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "shared bigram prefix, disjoint topics",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "cjk-06",
+    "query": "地下鉄の駅",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/subway.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "longer query, exact span"
+  },
+  {
+    "id": "cjk-07",
+    "query": "地下室",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/basement.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "cjk/subway.md",
+        "reason": "shares 地下 bigrams, disjoint: basement vs subway"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of cjk-05",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "cjk-08",
+    "query": "地下室の鍵",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/basement.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "spans the key sentence"
+  },
+  {
+    "id": "cjk-09",
+    "query": "北京",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/beijing.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "exact toponym"
+  },
+  {
+    "id": "cjk-10",
+    "query": "北京の故宮",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/beijing.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "longer query, exact span"
+  },
+  {
+    "id": "ar-01",
+    "query": "مكتبة",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/library.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "ar/office.md",
+        "reason": "shares root ك-ت-ب (مكتب office), disjoint: library vs office"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "same-root trap, office vs library",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "ar-02",
+    "query": "مَكتَبة",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/library.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "vocalized query; harakat stripped by normalization"
+  },
+  {
+    "id": "ar-03",
+    "query": "مكتب",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/office.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "ar/library.md",
+        "reason": "shares root ك-ت-ب (مكتبة library), disjoint: office vs library"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of ar-01",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "ar-04",
+    "query": "مكاتب",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/office.md",
+        "lines": [
+          8,
+          8
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "plural vs singular (مكاتب vs مكتب)"
+  },
+  {
+    "id": "ar-05",
+    "query": "بوابة",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/gate.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "exact match"
+  },
+  {
+    "id": "ar-06",
+    "query": "بوابات السفر",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/gate.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "span covers both query terms (gate + travel); plural handled by morphology"
+  },
+  {
+    "id": "ar-07",
+    "query": "مدرسة",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/school.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "ar/lesson.md",
+        "reason": "shares root د-ر-س (درس lesson), disjoint: school day vs a lesson"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "same-root trap, lesson vs school",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "ar-08",
+    "query": "المدرسة الابتدائية",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/school.md",
+        "lines": [
+          8,
+          8
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "definite article + adjective, exact span"
+  },
+  {
+    "id": "ar-09",
+    "query": "درس",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/lesson.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "ar/school.md",
+        "reason": "shares root د-ر-س (مدرسة school), disjoint: a lesson vs school day"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of ar-07",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "ar-10",
+    "query": "دروس الأسبوع",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/lesson.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "plural vs singular (دروس vs درس); الأسبوع unmatched"
   }
 ]
