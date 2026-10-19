@@ -433,6 +433,118 @@
       "license": "MIT",
       "frozen_at": "2026-10-19",
       "blake3": "e5f919c1ca1fb9d6f69ebcaabda96b171026ccb32ca7c361d0fd860319648b92"
+    },
+    {
+      "path": "multi/retry-http.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "6c85d3ee7d9f463956838c90acf9cc290422e0b34ad459fce99f82c5713d0eaf"
+    },
+    {
+      "path": "multi/retry-queue.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "48228b200ef29258e117bacbb825fa06a59be5bd21c06e1440f472d29cd7467d"
+    },
+    {
+      "path": "multi/timeout-connect.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "cdc4dc87a1468635f42ec62801e85cfdb5efb64ef863a949343c4aa29264f4c7"
+    },
+    {
+      "path": "multi/timeout-read.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "8d15ee4cd06da6c8e8527fff4025edec88d30088c16c648740357eeca21eecfa"
+    },
+    {
+      "path": "multi/log-levels.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "a3927b96bc1d14f5d4ccd5bcd5ae314bf3fedc5af5d933b8a241eebde3a88aa7"
+    },
+    {
+      "path": "multi/log-format.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "506976ebcb8ff689d579c57f410df992392a15130359480ffd619b500a6fe8a7"
+    },
+    {
+      "path": "multi/backup-full.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "a9c499731aaa95491310f878d3527cb122219c5de927b77d616c11525a676e68"
+    },
+    {
+      "path": "multi/backup-incr.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "495e8434de4f6415331bedb8e4a19378d3d2d1850be4c3e504643fc911306cf9"
+    },
+    {
+      "path": "boundary/index-rebuild.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "51fcca11df0ef49ae14ad512352bfc7478095f7f82ab0ab0e5cecfa80da69b0c"
+    },
+    {
+      "path": "boundary/embedding-cache.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "0e4289a5485d44ec01fc2c2258d09a1d468b7cd34629eb2a1bca30e77fab71d7"
+    },
+    {
+      "path": "boundary/rerank-window.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "c2b9a5e793f32cb2a86485ae72301d0ab5ec4391a0f810338dc46d125ca7c0dd"
+    },
+    {
+      "path": "boundary/daemon-protocol.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "4d36a7d3228d41cac20d1cd18476878c3e1ed9b5c97cc602719e05743bddcddc"
+    },
+    {
+      "path": "boundary/watcher-debounce.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "aaf301e3343468afc7238e691a8863f0f4d3b45d1289eb3aab8e602a8132f1f8"
+    },
+    {
+      "path": "boundary/tokenizer-cjk.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "ea072bd1b6b42dfac86c16de9178bc48ee93720db069622f227319920794185b"
+    },
+    {
+      "path": "boundary/config-migration.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "4d876b314a523ba92f7b7d3409a5ca7fb1ad71948ce8bd0fc18f9542228e0114"
+    },
+    {
+      "path": "boundary/quotas-limits.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-19",
+      "blake3": "61677419c65cb9216a92d03058d4a06f5106f1f593094c0a2ddba528fb8ff7e7"
     }
   ]
 }

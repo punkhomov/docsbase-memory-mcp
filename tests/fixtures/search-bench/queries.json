@@ -2246,5 +2246,696 @@
       "t5-author",
       "t5-adjudicator"
     ]
+  },
+  {
+    "id": "mr-01",
+    "query": "экспоненциальная задержка с джиттером для повторов http",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/retry-http.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/retry-queue.md",
+        "lines": [
+          22,
+          23
+        ],
+        "grade": 1
+      },
+      {
+        "path": "ru/batch-retry.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "multi: три политики повторов; primary — http. grade-1: та же сетка задержек для очередей (минута/час) и политика батчей без джиттера.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-02",
+    "query": "очередь мёртвых писем poison сообщения",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/retry-queue.md",
+        "lines": [
+          11,
+          12
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/retry-http.md",
+        "lines": [
+          42,
+          43
+        ],
+        "grade": 1
+      },
+      {
+        "path": "multi/retry-queue.md",
+        "lines": [
+          16,
+          18
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "primary — DLQ/poison в очередях. grade-1: разделение политик http/очередь — смежный вопрос, не про мёртвые письма. grade-1 [16,18]: детали poison-сообщений без DLQ — отвечает на poison-половину, требует соседа про очередь.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-03",
+    "query": "идемпотентная обработка повторных сообщений ключ",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/retry-queue.md",
+        "lines": [
+          28,
+          30
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/retry-http.md",
+        "lines": [
+          31,
+          33
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "два primary: обработчик очереди (ключ в журнале) и http-приёмник (таблица ключей); разные транспорты, оба самодостаточны.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-04",
+    "query": "таймаут установки tcp соединения хендшейк syn",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/timeout-connect.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      },
+      {
+        "path": "ru/socket-timeout.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 1
+      },
+      {
+        "path": "multi/timeout-connect.md",
+        "lines": [
+          15,
+          16
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/timeout-sec.md",
+        "reason": "единицы отображения таймаутов в CLI, а не установка соединения"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "primary — фаза хендшейка. grade-1: общий таймаут сокета без деталей фаз. grade-1 [15,16]: ретрансмит SYN — деталь фазы, не определение скоупа хендшейка.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-05",
+    "query": "таймаут чтения потоковых ответов sse heartbeat",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/timeout-read.md",
+        "lines": [
+          11,
+          12
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/timeout-connect.md",
+        "lines": [
+          41,
+          42
+        ],
+        "grade": 1
+      },
+      {
+        "path": "multi/timeout-read.md",
+        "lines": [
+          16,
+          17
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/timeout-ms.md",
+        "reason": "единицы измерения таймаутов, а не поведение при чтении"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "primary — паузы между событиями SSE. grade-1: таймаут connect — смежная фаза до чтения.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-06",
+    "query": "общий бюджет повторных попыток дедлайн запроса",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/retry-http.md",
+        "lines": [
+          37,
+          38
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/retry-queue.md",
+        "lines": [
+          45,
+          47
+        ],
+        "grade": 1
+      },
+      {
+        "path": "multi/retry-http.md",
+        "lines": [
+          21,
+          22
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/timeout-sec.md",
+        "reason": "единицы отображения таймаутов, а не бюджет попыток"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "primary — бюджет попыток против клиентского таймаута. grade-1: согласование бюджетов очередь+http, частный случай. grade-1 [21,22]: кап пять попыток — компонент бюджета, не дедлайн.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-07",
+    "query": "как выбрать уровень логирования error warn info",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/log-levels.md",
+        "lines": [
+          33,
+          35
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "single primary: рубрика выбора уровня. Смежных русскоязычных документов по выбору уровней в корпусе нет.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-08",
+    "query": "json схема логов обязательные поля request id",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/log-format.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/log-levels.md",
+        "lines": [
+          17,
+          18
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/config-json.md",
+        "reason": "формат legacy-конфига docsbase.json, а не схема логов"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "primary — обязательные поля записи. grade-1: уровень info vs формат — смежный вопрос операций.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-09",
+    "query": "can debug logging be enabled in production",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/log-debug.md",
+        "lines": [
+          8,
+          8
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/log-levels.md",
+        "lines": [
+          39,
+          40
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/log-trace.md",
+        "reason": "про медленный trace-режим, а не про запрет debug в production"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "EN-кейс. primary — прямой запрет. grade-1: временное включение через сигнал — нюанс, а не запрет.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-10",
+    "query": "расписание полных бэкапов хранение копий",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/backup-full.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/backup-incr.md",
+        "lines": [
+          15,
+          17
+        ],
+        "grade": 1
+      },
+      {
+        "path": "multi/backup-full.md",
+        "lines": [
+          16,
+          17
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "primary — cadence полных копий. grade-1: цепочки между полными — контекст расписания, не ответ.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-11",
+    "query": "восстановление по инкрементной цепочке порядок",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/backup-incr.md",
+        "lines": [
+          31,
+          32
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/backup-full.md",
+        "lines": [
+          46,
+          47
+        ],
+        "grade": 1
+      },
+      {
+        "path": "multi/backup-incr.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "primary — порядок прохода цепочки. grade-1: полные как база цепочек — контекст. grade-1 [5,6]: хрупкость цепочки — rationale порядка, не сам порядок.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-12",
+    "query": "проверка восстановления бэкапа на стенде",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/backup-full.md",
+        "lines": [
+          10,
+          12
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/backup-incr.md",
+        "lines": [
+          21,
+          22
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "primary — дымовые проверки развёртки. grade-1: сверка хешей цепочки — часть проверки, но не стенд.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-01",
+    "query": "маркер перестройки оборванная перестройка индекса",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/index-rebuild.md",
+        "lines": [
+          31,
+          33
+        ],
+        "grade": 2
+      },
+      {
+        "path": "boundary/index-rebuild.md",
+        "lines": [
+          85,
+          87
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "ответ straddles разрез seq2/seq3 (строка 31 в оверлапе обоих чанков). grade-1 [85,87]: маркер в сценарии backup-recovery — частный путь, не основной протокол маркера.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-02",
+    "query": "строка ключа кэша openrouter размерность l2 raw",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/embedding-cache.md",
+        "lines": [
+          29,
+          30
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "ответ в оверлапе seq2/seq3: виден из обоих чанков.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-03",
+    "query": "окно реранка пятьдесят кандидатов golden",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/rerank-window.md",
+        "lines": [
+          29,
+          31
+        ],
+        "grade": 2
+      },
+      {
+        "path": "boundary/rerank-window.md",
+        "lines": [
+          47,
+          48
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "ответ straddles разрез seq2/seq3. grade-1 [47,48]: окно 50 в контексте стоимости — фиксирует число, не компромисс golden.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-04",
+    "query": "framing length prefix eight byte big endian",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/daemon-protocol.md",
+        "lines": [
+          29,
+          31
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN-кейс. ответ straddles разрез seq2/seq3.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-05",
+    "query": "debounce delay 250 milliseconds coalesce scan",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/watcher-debounce.md",
+        "lines": [
+          28,
+          30
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN-кейс. ответ в оверлапе seq2/seq3.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-06",
+    "query": "cjk биграммы перекрытие сдвиг цепочка",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/tokenizer-cjk.md",
+        "lines": [
+          30,
+          32
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "ответ straddles разрез seq2/seq3.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-07",
+    "query": "транзакция миграции немедленная блокировка записи",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/config-migration.md",
+        "lines": [
+          29,
+          31
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "ответ straddles разрез seq2/seq3.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-08",
+    "query": "token bucket continuous refill rate tokens",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/quotas-limits.md",
+        "lines": [
+          35,
+          37
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN-кейс. ответ в оверлапе seq3/seq4.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-09",
+    "query": "флаг нормализации входит в ключ кэша l2",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/embedding-cache.md",
+        "lines": [
+          52,
+          53
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "ответ в 4-м чанке дока (глубокий ответ, не у разреза — честная вариативность среза).",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-10",
+    "query": "frame length cap 64 MB malicious prefix",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/daemon-protocol.md",
+        "lines": [
+          36,
+          37
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN-кейс. ответ в хвосте длинной секции seq3 (глубокий ответ).",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
   }
 ]

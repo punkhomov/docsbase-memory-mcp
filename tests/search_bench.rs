@@ -550,13 +550,14 @@ fn query_group_c_is_valid() {
             "mixed_lang",
             "semantic",
             "hard_negative",
+            "multi_relevant",
+            "long_doc_boundary",
         ],
     )
     .expect("groups A+B+C validate");
 }
 
 #[test]
-#[ignore = "blocked on DELTA-2: chunk bound 500..=1000 unreachable (measured 132); un-ignore after T6 content + bound fix"]
 fn fixtures_are_valid() {
     let root = bench_root();
     let fixtures = Fixtures::load(&root).expect("full fixtures load");
@@ -611,8 +612,8 @@ fn fixtures_are_valid() {
         .expect("index corpus");
     let chunks = env.chunk_hashes.len();
     assert!(
-        (500..=1000).contains(&chunks),
-        "corpus has {chunks} chunks, need 500..=1000"
+        (200..=400).contains(&chunks),
+        "corpus has {chunks} chunks, need 200..=400"
     );
 }
 
