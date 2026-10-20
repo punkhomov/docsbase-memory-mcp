@@ -670,7 +670,7 @@ fn copy_tree(src: &Path, dst: &Path) -> anyhow::Result<()> {
 
 /// One legacy-parity case report: `hit`/`absent_hit` must match the frozen
 /// old baseline (FR-16); `ndcg` is diagnostic only. Single-relevant nDCG.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)] // per-case fields consumed by the T8/T10 report
 pub struct LegacyCaseReport {
     pub id: String,
@@ -681,7 +681,7 @@ pub struct LegacyCaseReport {
 }
 
 /// Legacy parity outcome over the exact old corpus copy.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LegacyParity {
     pub cases: Vec<LegacyCaseReport>,
     pub matches: bool,
@@ -737,12 +737,7 @@ pub fn run_legacy_parity() -> anyhow::Result<LegacyParity> {
         let rank = paths.iter().position(|path| expected.contains(path));
         let hit = rank.is_some();
         let absent_hit = paths.iter().any(|path| absent.contains(path));
-        let ndcg = rank.map_or(0.0, |r| {
-            // Ranks are single digits; the float holds them exactly.
-            #[allow(clippy::cast_precision_loss)]
-            let denom = (r + 2) as f64;
-            1.0 / denom.log2()
-        });
+        let ndcg = rank.map_or(0.0, |r| discount(r + 1)); // table, never libm (design §5.6)
         let old = baseline
             .cases
             .iter()
@@ -772,7 +767,9 @@ pub fn run_legacy_parity() -> anyhow::Result<LegacyParity> {
 pub const RERANK_WINDOW: u32 = 50;
 
 /// Which pipeline to run (design §5.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum ConfigId {
     Bm25,
     Bm25Rerank,
@@ -1193,7 +1190,7 @@ pub fn stages_for(
 }
 
 /// One citation as returned by `search_docs` (design §5.6).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)] // chunk_id/heading_path/lines read by T8 metrics + T10 report
 pub struct Citation {
     pub chunk_id: u64,
@@ -1225,6 +1222,18 @@ pub fn run_config(
     cfg: ConfigId,
     stages: &HybridStages,
 ) -> anyhow::Result<ConfigRun> {
+    run_config_timed(env, cases, cfg, stages).map(|(run, _latencies_ms)| run)
+}
+
+/// Same as [`run_config`] plus per-call `search_docs_with` latency in
+/// milliseconds (warm-up excluded; one sample per case, call order).
+/// T10 needs the samples for the per-config p50/p95 latency report (FR-22).
+pub fn run_config_timed(
+    env: &BenchEnv,
+    cases: &[QueryCase],
+    cfg: ConfigId,
+    stages: &HybridStages,
+) -> anyhow::Result<(ConfigRun, Vec<f64>)> {
     let dense = DenseCache::new();
     // Warm-up call (discarded): warms the tantivy reader and the dense
     // scan. Errors surface on the first real case below with case context,
@@ -1242,7 +1251,9 @@ pub fn run_config(
         RERANK_WINDOW,
     );
     let mut out = Vec::with_capacity(cases.len());
+    let mut latencies_ms = Vec::with_capacity(cases.len());
     for case in cases {
+        let started = std::time::Instant::now();
         let value = search_docs_with(
             stages,
             &dense,
@@ -1253,12 +1264,13 @@ pub fn run_config(
             RERANK_WINDOW,
         )
         .with_context(|| format!("run {:?} for case {:?}", cfg, case.id))?;
+        latencies_ms.push(started.elapsed().as_secs_f64() * 1000.0);
         out.push(ConfigCaseRun {
             id: case.id.clone(),
             citations: parse_citations(&value, &case.id)?,
         });
     }
-    Ok(ConfigRun { cases: out })
+    Ok((ConfigRun { cases: out }, latencies_ms))
 }
 
 fn parse_citations(value: &serde_json::Value, case_id: &str) -> anyhow::Result<Vec<Citation>> {
@@ -1387,7 +1399,7 @@ fn discount(rank_1based: usize) -> f64 {
 }
 
 /// Per-case metrics (design §5.6, FR-8).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CaseMetrics {
     pub hit: bool,
     pub recall: f64,
@@ -1402,7 +1414,7 @@ pub struct CaseMetrics {
 /// is the full [`CaseMetrics`], so it is not duplicated here). Field names
 /// mirror the spec verbatim.
 #[allow(clippy::struct_field_names)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EarlyMetrics {
     pub hit_at_3: bool,
     pub recall_at_3: f64,
@@ -1410,7 +1422,7 @@ pub struct EarlyMetrics {
 }
 
 /// One slice aggregate: macro-average over its cases (design §5.7).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SliceReport {
     pub cases: usize,
     pub hit_rate: f64,
@@ -1423,7 +1435,7 @@ pub struct SliceReport {
 }
 
 /// Baseline-vs-current delta (design §5.7; computed in the gate, T10).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeltaReport {
     pub ndcg_delta: f64,
     pub hit_rate_delta: f64,
@@ -1434,7 +1446,7 @@ pub struct DeltaReport {
 }
 
 /// Hit pattern of one case across configurations (design §5.7, FR-31).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CasePattern {
     AllHit,
     AllMiss,
@@ -1442,7 +1454,7 @@ pub enum CasePattern {
 }
 
 /// Per-slice outcome counts (design §5.7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutcomeCounts {
     pub all_hit: usize,
     pub all_miss: usize,
@@ -1450,7 +1462,7 @@ pub struct OutcomeCounts {
 }
 
 /// Outcome matrix by slice (design §5.7, FR-31).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutcomeMatrix {
     pub by_slice: BTreeMap<String, OutcomeCounts>,
 }
@@ -1835,4 +1847,1145 @@ pub fn record_fixtures_with(
     };
     write_rerank_fixture(&rr, rerank_out)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// T10: baseline, gate, report (FR-12…FR-15, FR-20, FR-22, FR-28, FR-30,
+// FR-31; NFR-1, NFR-3, NFR-8).
+// ---------------------------------------------------------------------------
+
+/// Harness version stamped into every baseline (FR-12).
+pub const BENCH_VERSION: u32 = 1;
+/// Fixture-schema version stamped into every baseline (FR-12).
+pub const FIXTURE_VERSION: u32 = 1;
+/// Per-case and per-slice nDCG drop tolerance (FR-14).
+pub const NDCG_DROP_TOLERANCE: f64 = 0.02;
+/// Float comparison epsilon: no-change must never false-fail (design §5.8).
+pub const GATE_EPSILON: f64 = 1e-9;
+/// Absolute latency ceiling in milliseconds (FR-22).
+pub const MAX_LATENCY_MS: f64 = 500.0;
+/// Saturated-case ceiling: at most 70% of cases may hit on all configs.
+pub const SATURATED_RATIO_MAX: f64 = 0.70;
+/// Minimum semantic-slice disagreements (direction-agnostic, FR-28).
+pub const SEMANTIC_DISAGREEMENTS_MIN: usize = 3;
+/// Minimum bm25 vs bm25+rerank disagreements (direction-agnostic, FR-28).
+pub const RERANK_DISAGREEMENTS_MIN: usize = 1;
+
+/// One case in a baseline/report: full ranked list plus metrics at k and 3.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CaseReport {
+    pub id: String,
+    pub class: String,
+    pub k: usize,
+    pub ranks: Vec<Citation>,
+    pub metrics: CaseMetrics,
+    pub early: EarlyMetrics,
+}
+
+/// Local search latency distribution in milliseconds (FR-22).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LatencyReport {
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+}
+
+/// One configuration in a baseline/report.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ConfigReport {
+    pub cases: Vec<CaseReport>,
+    pub slices: BTreeMap<String, SliceReport>,
+    pub latency: LatencyReport,
+}
+
+/// Baseline self-check: the benchmark must discriminate (FR-28).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DiscriminationReport {
+    pub saturated_total: usize,
+    pub saturated_ratio: f64,
+    pub non_saturated_by_slice: BTreeMap<String, usize>,
+    pub semantic_disagreements: usize,
+    pub rerank_disagreements: usize,
+    pub semantic_max_lexical_jaccard: f64,
+    pub lexical_tokenizer_version: u32,
+}
+
+/// Frozen benchmark outcome: quality shape of one full run (FR-13).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Baseline {
+    pub bench_version: u32,
+    pub fixture_version: u32,
+    pub corpus_hash: String,
+    pub legacy_corpus_hash: String,
+    pub queries_hash: String,
+    pub model_pins: Vec<String>,
+    pub generated_at: String,
+    pub index_build_ms: f64,
+    pub configs: BTreeMap<ConfigId, ConfigReport>,
+    pub legacy_parity: LegacyParity,
+    pub discrimination: DiscriminationReport,
+    pub outcome_matrix: OutcomeMatrix,
+}
+
+/// Pareto point of one configuration (live only, FR-32).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ParetoPoint {
+    pub config: ConfigId,
+    pub quality: f64,
+    pub cost_usd: f64,
+    pub latency_p95_ms: f64,
+    pub on_frontier: bool,
+}
+
+/// Quality-vs-cost frontier (live only, FR-32).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ParetoReport {
+    pub points: Vec<ParetoPoint>,
+}
+
+/// Gate input: the current run in baseline shape plus comparison output.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Report {
+    pub baseline: Baseline,
+    pub deltas: BTreeMap<ConfigId, BTreeMap<String, DeltaReport>>,
+    pub warnings: Vec<String>,
+    pub discrimination: DiscriminationReport,
+    pub outcome_matrix: OutcomeMatrix,
+    pub pareto: Option<ParetoReport>,
+}
+
+/// Machine-readable gate failure (NFR-8: every hard fail carries a reason).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Failure {
+    pub config: Option<ConfigId>,
+    pub slice: Option<String>,
+    pub case_id: Option<String>,
+    pub kind: FailureKind,
+    pub expected: String,
+    pub actual: String,
+}
+
+/// Gate failure kinds (FR-14 check list, design §5.8).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FailureKind {
+    VersionMismatch,
+    HashMismatch,
+    ForbiddenHit,
+    HitDrop,
+    NdcgDrop,
+    SliceHitRateDrop,
+    SliceNdcgDrop,
+    MissingConfig,
+    CaseDrift,
+    LegacyMismatch,
+    Latency,
+    Discrimination(String),
+}
+
+/// Inputs for [`build_baseline_like`] that are not derived from runs.
+#[derive(Debug, Clone)]
+pub struct ReportMeta {
+    pub corpus_hash: String,
+    pub legacy_corpus_hash: String,
+    pub queries_hash: String,
+    pub model_pins: Vec<String>,
+    pub legacy_parity: LegacyParity,
+    pub index_build_ms: f64,
+}
+
+impl ReportMeta {
+    /// Stand-in for fake-stage unit tests: fixed hashes, empty parity.
+    #[must_use]
+    pub fn synthetic() -> Self {
+        Self {
+            corpus_hash: "synthetic".to_owned(),
+            legacy_corpus_hash: "synthetic-legacy".to_owned(),
+            queries_hash: "synthetic-queries".to_owned(),
+            model_pins: vec!["test/fake@d4@l2".to_owned()],
+            legacy_parity: LegacyParity {
+                cases: vec![],
+                matches: true,
+            },
+            index_build_ms: 0.0,
+        }
+    }
+
+    /// Meta for a current run compared against an existing baseline: hashes
+    /// and pins must reproduce the baseline, otherwise the gate fails.
+    #[must_use]
+    pub fn from_baseline(baseline: &Baseline) -> Self {
+        Self {
+            corpus_hash: baseline.corpus_hash.clone(),
+            legacy_corpus_hash: baseline.legacy_corpus_hash.clone(),
+            queries_hash: baseline.queries_hash.clone(),
+            model_pins: baseline.model_pins.clone(),
+            legacy_parity: baseline.legacy_parity.clone(),
+            index_build_ms: 0.0,
+        }
+    }
+}
+
+/// Builds the current run in baseline shape from config runs (FR-13).
+///
+/// # Errors
+/// Bails on empty latency samples, unknown case ids, or metric failures.
+pub fn build_baseline_like(
+    cases: &[QueryCase],
+    runs: &[(ConfigId, ConfigRun, Vec<f64>)],
+    meta: ReportMeta,
+    semantic_jaccard_max: f64,
+) -> anyhow::Result<Baseline> {
+    let mut configs = BTreeMap::new();
+    // Per-case hits across configs, in canonical order, for the outcome
+    // matrix (FR-31) and the discrimination report (FR-28).
+    let mut hits_by_case: BTreeMap<&str, Vec<bool>> = BTreeMap::new();
+    for (cfg, run, latencies) in runs {
+        if latencies.is_empty() {
+            anyhow::bail!("config {cfg:?}: no latency samples");
+        }
+        let run_by_id: BTreeMap<&str, &ConfigCaseRun> = run
+            .cases
+            .iter()
+            .map(|case_run| (case_run.id.as_str(), case_run))
+            .collect();
+        let mut reports = Vec::with_capacity(cases.len());
+        for case in cases {
+            let case_run = run_by_id
+                .get(case.id.as_str())
+                .ok_or_else(|| anyhow::anyhow!("config {cfg:?}: unknown case {:?}", case.id))?;
+            let metrics = evaluate_case(&case_run.citations, case);
+            let early = early_metrics(&case_run.citations, case);
+            hits_by_case
+                .entry(case.id.as_str())
+                .or_default()
+                .push(metrics.hit);
+            reports.push(CaseReport {
+                id: case.id.clone(),
+                class: case.class.clone(),
+                k: case.k,
+                ranks: case_run.citations.clone(),
+                metrics,
+                early,
+            });
+        }
+        let class_metrics: Vec<(&str, &CaseMetrics)> = cases
+            .iter()
+            .map(|case| {
+                let report = reports
+                    .iter()
+                    .find(|report| report.id == case.id)
+                    .expect("report built for every case above");
+                (case.class.as_str(), &report.metrics)
+            })
+            .collect();
+        let slices = aggregate_slices(class_metrics);
+        let latency = LatencyReport {
+            p50_ms: percentile(latencies, 0.5),
+            p95_ms: percentile(latencies, 0.95),
+        };
+        configs.insert(
+            *cfg,
+            ConfigReport {
+                cases: reports,
+                slices,
+                latency,
+            },
+        );
+    }
+    let patterns: Vec<(&str, CasePattern)> = cases
+        .iter()
+        .map(|case| {
+            let hits: &[bool] = hits_by_case
+                .get(case.id.as_str())
+                .map_or(&[], Vec::as_slice);
+            (case.class.as_str(), classify_case(hits))
+        })
+        .collect();
+    let outcome_matrix = outcome_matrix(&patterns);
+    let discrimination = compute_discrimination(&configs, cases, semantic_jaccard_max);
+    Ok(Baseline {
+        bench_version: BENCH_VERSION,
+        fixture_version: FIXTURE_VERSION,
+        corpus_hash: meta.corpus_hash,
+        legacy_corpus_hash: meta.legacy_corpus_hash,
+        queries_hash: meta.queries_hash,
+        model_pins: meta.model_pins,
+        generated_at: unix_timestamp(),
+        index_build_ms: meta.index_build_ms,
+        configs,
+        legacy_parity: meta.legacy_parity,
+        discrimination,
+        outcome_matrix,
+    })
+}
+
+/// Wraps a baseline-shaped current run with deltas against a baseline.
+#[must_use]
+pub fn build_report(current: &Baseline, baseline: Option<&Baseline>) -> Report {
+    let mut deltas: BTreeMap<ConfigId, BTreeMap<String, DeltaReport>> = BTreeMap::new();
+    let mut warnings = Vec::new();
+    if let Some(base) = baseline {
+        for (cfg, cur) in &current.configs {
+            let Some(base_cfg) = base.configs.get(cfg) else {
+                continue;
+            };
+            let mut by_slice = BTreeMap::new();
+            for (slice, cur_slice) in &cur.slices {
+                let Some(base_slice) = base_cfg.slices.get(slice) else {
+                    continue;
+                };
+                match paired_ndcg(&base_cfg.cases, &cur.cases, slice) {
+                    Some((base_ndcg, cur_ndcg)) => {
+                        if let Ok(delta) = delta_report(
+                            &base_ndcg,
+                            &cur_ndcg,
+                            base_slice.hit_rate,
+                            cur_slice.hit_rate,
+                            NDCG_DROP_TOLERANCE,
+                        ) {
+                            by_slice.insert(slice.clone(), delta);
+                        }
+                    }
+                    None => warnings.push(format!(
+                        "deltas unavailable for {cfg:?}/{slice}: case set drift"
+                    )),
+                }
+            }
+            deltas.insert(*cfg, by_slice);
+        }
+    } else {
+        warnings.push("no baseline attached; deltas unavailable".to_owned());
+    }
+    Report {
+        baseline: current.clone(),
+        deltas,
+        warnings,
+        discrimination: current.discrimination.clone(),
+        outcome_matrix: current.outcome_matrix.clone(),
+        pareto: None,
+    }
+}
+
+/// Pairs per-case nDCG lists of one slice by case id (baseline, current).
+fn paired_ndcg(
+    base_cases: &[CaseReport],
+    cur_cases: &[CaseReport],
+    slice: &str,
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    let base: BTreeMap<&str, f64> = base_cases
+        .iter()
+        .filter(|report| report.class == slice)
+        .map(|report| (report.id.as_str(), report.metrics.ndcg))
+        .collect();
+    let mut base_list = Vec::new();
+    let mut cur_list = Vec::new();
+    for report in cur_cases.iter().filter(|report| report.class == slice) {
+        let value = base.get(report.id.as_str())?;
+        base_list.push(*value);
+        cur_list.push(report.metrics.ndcg);
+    }
+    if base_list.is_empty() || base_list.len() != base.len() {
+        return None;
+    }
+    Some((base_list, cur_list))
+}
+
+/// Linear-interpolation percentile over milliseconds (deterministic).
+/// Counts are tiny (cases per config), so float casts below are exact.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+#[must_use]
+pub fn percentile(samples: &[f64], q: f64) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let mut sorted: Vec<f64> = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let rank = q.clamp(0.0, 1.0) * (sorted.len() - 1) as f64;
+    let lower = rank.floor() as usize;
+    let upper = rank.ceil() as usize;
+    if lower == upper {
+        sorted[lower]
+    } else {
+        sorted[lower] + (sorted[upper] - sorted[lower]) * (rank - lower as f64)
+    }
+}
+
+/// Latency budget for one configuration (FR-22): baseline p95 × 1.5 + 5 ms,
+/// capped at the absolute 500 ms ceiling.
+#[must_use]
+pub fn latency_allowed_ms(baseline_p95_ms: f64) -> f64 {
+    (baseline_p95_ms * 1.5 + 5.0).min(MAX_LATENCY_MS)
+}
+
+fn unix_timestamp() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs().to_string())
+        .unwrap_or_default()
+}
+
+/// Hard-fail gate: every [`FailureKind`] carries config/slice/case context
+/// (FR-14, NFR-8). Improvements never fail; only regressions do.
+#[must_use]
+pub fn gate_failures(current: &Report, baseline: &Baseline) -> Vec<Failure> {
+    let cur = &current.baseline;
+    let mut out = version_failures(cur, baseline);
+    for (cfg, base_cfg) in &baseline.configs {
+        let Some(cur_cfg) = cur.configs.get(cfg) else {
+            out.push(Failure {
+                config: Some(*cfg),
+                slice: None,
+                case_id: None,
+                kind: FailureKind::MissingConfig,
+                expected: format!("config {cfg:?} present"),
+                actual: format!("config {cfg:?} missing"),
+            });
+            continue;
+        };
+        out.extend(config_failures(*cfg, base_cfg, cur_cfg));
+    }
+    for cfg in cur.configs.keys() {
+        if !baseline.configs.contains_key(cfg) {
+            out.push(Failure {
+                config: Some(*cfg),
+                slice: None,
+                case_id: None,
+                kind: FailureKind::CaseDrift,
+                expected: format!("config {cfg:?} absent (baseline set)"),
+                actual: format!("config {cfg:?} added"),
+            });
+        }
+    }
+    out.extend(legacy_failures(&cur.legacy_parity, &baseline.legacy_parity));
+    out
+}
+
+/// Version, hash and pin-set comparison (FR-14 checks 1-2).
+fn version_failures(cur: &Baseline, baseline: &Baseline) -> Vec<Failure> {
+    let mut out = Vec::new();
+    if cur.bench_version != baseline.bench_version {
+        out.push(Failure {
+            config: None,
+            slice: None,
+            case_id: None,
+            kind: FailureKind::VersionMismatch,
+            expected: format!("bench_version {}", baseline.bench_version),
+            actual: format!("bench_version {}", cur.bench_version),
+        });
+    }
+    if cur.fixture_version != baseline.fixture_version {
+        out.push(Failure {
+            config: None,
+            slice: None,
+            case_id: None,
+            kind: FailureKind::VersionMismatch,
+            expected: format!("fixture_version {}", baseline.fixture_version),
+            actual: format!("fixture_version {}", cur.fixture_version),
+        });
+    }
+    for (label, base_hash, cur_hash) in [
+        ("corpus_hash", &baseline.corpus_hash, &cur.corpus_hash),
+        (
+            "legacy_corpus_hash",
+            &baseline.legacy_corpus_hash,
+            &cur.legacy_corpus_hash,
+        ),
+        ("queries_hash", &baseline.queries_hash, &cur.queries_hash),
+    ] {
+        if base_hash != cur_hash {
+            out.push(Failure {
+                config: None,
+                slice: None,
+                case_id: None,
+                kind: FailureKind::HashMismatch,
+                expected: format!("{label} {base_hash}"),
+                actual: format!("{label} {cur_hash}"),
+            });
+        }
+    }
+    let mut base_pins = baseline.model_pins.clone();
+    let mut cur_pins = cur.model_pins.clone();
+    base_pins.sort();
+    cur_pins.sort();
+    if base_pins != cur_pins {
+        out.push(Failure {
+            config: None,
+            slice: None,
+            case_id: None,
+            kind: FailureKind::HashMismatch,
+            expected: format!("model_pins {}", base_pins.join(",")),
+            actual: format!("model_pins {}", cur_pins.join(",")),
+        });
+    }
+    out
+}
+
+/// Per-config gate checks: case drift, forbidden hits, hit/nDCG drops,
+/// slice regressions (FR-14 checks 3-6).
+fn config_failures(cfg: ConfigId, base_cfg: &ConfigReport, cur_cfg: &ConfigReport) -> Vec<Failure> {
+    let mut out = Vec::new();
+    let base_ids: BTreeMap<&str, &CaseReport> = base_cfg
+        .cases
+        .iter()
+        .map(|report| (report.id.as_str(), report))
+        .collect();
+    let cur_ids: BTreeMap<&str, &CaseReport> = cur_cfg
+        .cases
+        .iter()
+        .map(|report| (report.id.as_str(), report))
+        .collect();
+    out.extend(case_drift_failures(cfg, &base_ids, &cur_ids));
+    out.extend(case_metric_failures(cfg, &base_ids, &cur_ids));
+    out.extend(slice_failures(cfg, base_cfg, cur_cfg));
+    out
+}
+
+/// Missing/extra cases within one configuration.
+fn case_drift_failures(
+    cfg: ConfigId,
+    base_ids: &BTreeMap<&str, &CaseReport>,
+    cur_ids: &BTreeMap<&str, &CaseReport>,
+) -> Vec<Failure> {
+    let mut out = Vec::new();
+    for id in base_ids.keys() {
+        if !cur_ids.contains_key(id) {
+            out.push(Failure {
+                config: Some(cfg),
+                slice: None,
+                case_id: Some((*id).to_owned()),
+                kind: FailureKind::CaseDrift,
+                expected: format!("case {id} present"),
+                actual: format!("case {id} missing"),
+            });
+        }
+    }
+    for id in cur_ids.keys() {
+        if !base_ids.contains_key(id) {
+            out.push(Failure {
+                config: Some(cfg),
+                slice: None,
+                case_id: Some((*id).to_owned()),
+                kind: FailureKind::CaseDrift,
+                expected: format!("case {id} absent (baseline set)"),
+                actual: format!("case {id} added"),
+            });
+        }
+    }
+    out
+}
+
+/// Forbidden hits and hit/nDCG regressions per case.
+fn case_metric_failures(
+    cfg: ConfigId,
+    base_ids: &BTreeMap<&str, &CaseReport>,
+    cur_ids: &BTreeMap<&str, &CaseReport>,
+) -> Vec<Failure> {
+    let mut out = Vec::new();
+    for (id, base_case) in base_ids {
+        let Some(cur_case) = cur_ids.get(id) else {
+            continue;
+        };
+        if cur_case.metrics.forbidden_hit {
+            out.push(Failure {
+                config: Some(cfg),
+                slice: Some(cur_case.class.clone()),
+                case_id: Some((*id).to_owned()),
+                kind: FailureKind::ForbiddenHit,
+                expected: "no forbidden hit".to_owned(),
+                actual: "forbidden_hit = true".to_owned(),
+            });
+        }
+        if base_case.metrics.hit && !cur_case.metrics.hit {
+            out.push(Failure {
+                config: Some(cfg),
+                slice: Some(cur_case.class.clone()),
+                case_id: Some((*id).to_owned()),
+                kind: FailureKind::HitDrop,
+                expected: "hit = true".to_owned(),
+                actual: "hit = false".to_owned(),
+            });
+        }
+        if base_case.metrics.ndcg - cur_case.metrics.ndcg > NDCG_DROP_TOLERANCE + GATE_EPSILON {
+            out.push(Failure {
+                config: Some(cfg),
+                slice: Some(cur_case.class.clone()),
+                case_id: Some((*id).to_owned()),
+                kind: FailureKind::NdcgDrop,
+                expected: format!(
+                    "nDCG >= {:.4}",
+                    base_case.metrics.ndcg - NDCG_DROP_TOLERANCE
+                ),
+                actual: format!("nDCG = {:.4}", cur_case.metrics.ndcg),
+            });
+        }
+    }
+    out
+}
+
+/// Slice regressions, missing slices (class renames) and added slices.
+fn slice_failures(cfg: ConfigId, base_cfg: &ConfigReport, cur_cfg: &ConfigReport) -> Vec<Failure> {
+    let mut out = Vec::new();
+    for (slice, base_slice) in &base_cfg.slices {
+        let Some(cur_slice) = cur_cfg.slices.get(slice) else {
+            // Same case ids under a renamed class: the case-set check
+            // passes (ids match) but the slice vanished — that is drift,
+            // and it must fail rather than silently drop the slice (and
+            // its deltas).
+            out.push(Failure {
+                config: Some(cfg),
+                slice: Some(slice.clone()),
+                case_id: None,
+                kind: FailureKind::CaseDrift,
+                expected: format!("slice {slice} present"),
+                actual: format!("slice {slice} missing"),
+            });
+            continue;
+        };
+        if base_slice.hit_rate - cur_slice.hit_rate > GATE_EPSILON {
+            out.push(Failure {
+                config: Some(cfg),
+                slice: Some(slice.clone()),
+                case_id: None,
+                kind: FailureKind::SliceHitRateDrop,
+                expected: format!("hit_rate >= {:.4}", base_slice.hit_rate),
+                actual: format!("hit_rate = {:.4}", cur_slice.hit_rate),
+            });
+        }
+        if base_slice.ndcg - cur_slice.ndcg > NDCG_DROP_TOLERANCE + GATE_EPSILON {
+            out.push(Failure {
+                config: Some(cfg),
+                slice: Some(slice.clone()),
+                case_id: None,
+                kind: FailureKind::SliceNdcgDrop,
+                expected: format!("nDCG >= {:.4}", base_slice.ndcg - NDCG_DROP_TOLERANCE),
+                actual: format!("nDCG = {:.4}", cur_slice.ndcg),
+            });
+        }
+    }
+    for slice in cur_cfg.slices.keys() {
+        if !base_cfg.slices.contains_key(slice) {
+            out.push(Failure {
+                config: Some(cfg),
+                slice: Some(slice.clone()),
+                case_id: None,
+                kind: FailureKind::CaseDrift,
+                expected: format!("slice {slice} absent (baseline set)"),
+                actual: format!("slice {slice} added"),
+            });
+        }
+    }
+    out
+}
+
+/// Legacy parity comparison (FR-16): any `hit`/`absent_hit` divergence fails.
+fn legacy_failures(current: &LegacyParity, baseline: &LegacyParity) -> Vec<Failure> {
+    let mut out = Vec::new();
+    if current.cases.len() != baseline.cases.len() {
+        out.push(Failure {
+            config: None,
+            slice: Some("legacy".to_owned()),
+            case_id: None,
+            kind: FailureKind::LegacyMismatch,
+            expected: format!("{} legacy cases", baseline.cases.len()),
+            actual: format!("{} legacy cases", current.cases.len()),
+        });
+        return out;
+    }
+    for (base, cur) in baseline.cases.iter().zip(current.cases.iter()) {
+        if base.id != cur.id || base.hit != cur.hit || base.absent_hit != cur.absent_hit {
+            out.push(Failure {
+                config: None,
+                slice: Some("legacy".to_owned()),
+                case_id: Some(cur.id.clone()),
+                kind: FailureKind::LegacyMismatch,
+                expected: format!("hit={} absent_hit={}", base.hit, base.absent_hit),
+                actual: format!("hit={} absent_hit={}", cur.hit, cur.absent_hit),
+            });
+        }
+    }
+    if baseline.matches != current.matches {
+        out.push(Failure {
+            config: None,
+            slice: Some("legacy".to_owned()),
+            case_id: None,
+            kind: FailureKind::LegacyMismatch,
+            expected: format!("matches={}", baseline.matches),
+            actual: format!("matches={}", current.matches),
+        });
+    }
+    out
+}
+
+/// Latency gate (FR-22): pure comparison; the caller applies it on Linux
+/// only (`cfg!(target_os = "linux")`), other hosts record and publish.
+#[must_use]
+pub fn latency_failures(current: &Report, baseline: &Baseline) -> Vec<Failure> {
+    let mut out = Vec::new();
+    for (cfg, cur_cfg) in &current.baseline.configs {
+        let Some(base_cfg) = baseline.configs.get(cfg) else {
+            continue;
+        };
+        let allowed = latency_allowed_ms(base_cfg.latency.p95_ms);
+        if cur_cfg.latency.p95_ms > allowed + GATE_EPSILON {
+            out.push(Failure {
+                config: Some(*cfg),
+                slice: None,
+                case_id: None,
+                kind: FailureKind::Latency,
+                expected: format!("p95 <= {allowed:.2} ms"),
+                actual: format!("p95 = {:.2} ms", cur_cfg.latency.p95_ms),
+            });
+        }
+    }
+    out
+}
+
+/// Computes the discrimination self-check from config reports (FR-28).
+/// Case counts are tiny, so the float casts below are exact.
+#[allow(clippy::cast_precision_loss)]
+#[must_use]
+pub fn compute_discrimination(
+    configs: &BTreeMap<ConfigId, ConfigReport>,
+    cases: &[QueryCase],
+    semantic_jaccard_max: f64,
+) -> DiscriminationReport {
+    let hits: BTreeMap<&str, Vec<bool>> = cases
+        .iter()
+        .map(|case| {
+            let per_config = [
+                ConfigId::Bm25,
+                ConfigId::Bm25Rerank,
+                ConfigId::Rrf,
+                ConfigId::RrfRerank,
+            ]
+            .iter()
+            .filter_map(|cfg| {
+                configs
+                    .get(cfg)?
+                    .cases
+                    .iter()
+                    .find(|report| report.id == case.id)
+            })
+            .map(|report| report.metrics.hit)
+            .collect();
+            (case.id.as_str(), per_config)
+        })
+        .collect();
+    let saturated_total = hits
+        .values()
+        .filter(|list| classify_case(list) == CasePattern::AllHit)
+        .count();
+    let total = cases.len().max(1) as f64;
+    // Every slice in the corpus gets an entry (zero when fully saturated)
+    // so the gate can tell "saturated" from "unevaluated".
+    let mut non_saturated_by_slice: BTreeMap<String, usize> = BTreeMap::new();
+    for case in cases {
+        non_saturated_by_slice
+            .entry(case.class.clone())
+            .or_default();
+    }
+    for case in cases {
+        let saturated = hits
+            .get(case.id.as_str())
+            .is_some_and(|list| classify_case(list) == CasePattern::AllHit);
+        if !saturated {
+            *non_saturated_by_slice
+                .entry(case.class.clone())
+                .or_default() += 1;
+        }
+    }
+    let semantic_disagreements = cases
+        .iter()
+        .filter(|case| case.class == "semantic")
+        .filter(|case| {
+            hits.get(case.id.as_str())
+                .is_some_and(|list| !list.is_empty() && !list.iter().all(|hit| *hit == list[0]))
+        })
+        .count();
+    let rerank_disagreements = cases
+        .iter()
+        .filter(|case| {
+            let bm25 = configs
+                .get(&ConfigId::Bm25)
+                .and_then(|report| report.cases.iter().find(|r| r.id == case.id))
+                .map(|r| r.metrics.hit);
+            let reranked = configs
+                .get(&ConfigId::Bm25Rerank)
+                .and_then(|report| report.cases.iter().find(|r| r.id == case.id))
+                .map(|r| r.metrics.hit);
+            matches!((bm25, reranked), (Some(a), Some(b)) if a != b)
+        })
+        .count();
+    DiscriminationReport {
+        saturated_total,
+        saturated_ratio: saturated_total as f64 / total,
+        non_saturated_by_slice,
+        semantic_disagreements,
+        rerank_disagreements,
+        semantic_max_lexical_jaccard: semantic_jaccard_max,
+        lexical_tokenizer_version: docsbase_memory::index::tokenizer::TOKENIZER_VERSION,
+    }
+}
+
+/// Validates the discrimination self-check (FR-28): a non-discriminating
+/// baseline is rejected before it can be committed.
+#[must_use]
+pub fn discrimination_failures(disc: &DiscriminationReport) -> Vec<Failure> {
+    let mut out = Vec::new();
+    let mut rule = |name: &str, expected: String, actual: String| {
+        out.push(Failure {
+            config: None,
+            slice: None,
+            case_id: None,
+            kind: FailureKind::Discrimination(name.to_owned()),
+            expected,
+            actual,
+        });
+    };
+    if disc.saturated_ratio > SATURATED_RATIO_MAX + GATE_EPSILON {
+        rule(
+            "saturated_ratio",
+            format!("saturated_ratio <= {SATURATED_RATIO_MAX}"),
+            format!("saturated_ratio = {:.3}", disc.saturated_ratio),
+        );
+    }
+    for (slice, count) in &disc.non_saturated_by_slice {
+        if *count == 0 {
+            rule(
+                "slice_coverage",
+                format!("slice {slice} has >= 1 non-saturated case"),
+                format!("slice {slice} is fully saturated"),
+            );
+        }
+    }
+    // Slices missing from the map have zero non-saturated cases only when
+    // the caller passes the full slice set (see below); a map that names no
+    // slice at all is unconditionally wrong.
+    if disc.non_saturated_by_slice.is_empty() {
+        rule(
+            "slice_coverage",
+            "every slice has >= 1 non-saturated case".to_owned(),
+            "no non-saturated cases at all".to_owned(),
+        );
+    }
+    if disc.semantic_disagreements < SEMANTIC_DISAGREEMENTS_MIN {
+        rule(
+            "semantic_disagreement",
+            format!("semantic_disagreements >= {SEMANTIC_DISAGREEMENTS_MIN}"),
+            format!("semantic_disagreements = {}", disc.semantic_disagreements),
+        );
+    }
+    if disc.rerank_disagreements < RERANK_DISAGREEMENTS_MIN {
+        rule(
+            "rerank_disagreement",
+            format!("rerank_disagreements >= {RERANK_DISAGREEMENTS_MIN}"),
+            format!("rerank_disagreements = {}", disc.rerank_disagreements),
+        );
+    }
+    if disc.semantic_max_lexical_jaccard > SEMANTIC_MAX_LEXICAL_JACCARD + GATE_EPSILON {
+        rule(
+            "lexical_jaccard",
+            format!("semantic_max_lexical_jaccard <= {SEMANTIC_MAX_LEXICAL_JACCARD}"),
+            format!(
+                "semantic_max_lexical_jaccard = {:.3}",
+                disc.semantic_max_lexical_jaccard
+            ),
+        );
+    }
+    if disc.lexical_tokenizer_version != docsbase_memory::index::tokenizer::TOKENIZER_VERSION {
+        rule(
+            "tokenizer_version",
+            format!(
+                "lexical_tokenizer_version == {}",
+                docsbase_memory::index::tokenizer::TOKENIZER_VERSION
+            ),
+            format!(
+                "lexical_tokenizer_version = {}",
+                disc.lexical_tokenizer_version
+            ),
+        );
+    }
+    out
+}
+
+/// Deterministic quality JSON: ranks, metrics, slices — no latency, no
+/// timestamps (FR-12, NFR-3). Byte-identical across reruns and hosts.
+#[must_use]
+pub fn quality_json(report: &Report) -> String {
+    let mut configs = serde_json::Map::new();
+    for (cfg, config) in &report.baseline.configs {
+        let cases: Vec<serde_json::Value> = config
+            .cases
+            .iter()
+            .map(|case| {
+                serde_json::json!({
+                    "id": case.id,
+                    "class": case.class,
+                    "k": case.k,
+                    "ranks": case.ranks,
+                    "metrics": case.metrics,
+                    "early": case.early,
+                })
+            })
+            .collect();
+        configs.insert(
+            format!("{cfg:?}"),
+            serde_json::json!({
+                "cases": cases,
+                "slices": config.slices,
+            }),
+        );
+    }
+    serde_json::json!({
+        "bench_version": report.baseline.bench_version,
+        "fixture_version": report.baseline.fixture_version,
+        "corpus_hash": report.baseline.corpus_hash,
+        "legacy_corpus_hash": report.baseline.legacy_corpus_hash,
+        "queries_hash": report.baseline.queries_hash,
+        "model_pins": report.baseline.model_pins,
+        "configs": configs,
+        "legacy_parity": report.baseline.legacy_parity,
+        "outcome_matrix": report.outcome_matrix,
+        "discrimination": {
+            "saturated_total": report.discrimination.saturated_total,
+            "saturated_ratio": report.discrimination.saturated_ratio,
+            "non_saturated_by_slice": report.discrimination.non_saturated_by_slice,
+            "semantic_disagreements": report.discrimination.semantic_disagreements,
+            "rerank_disagreements": report.discrimination.rerank_disagreements,
+            "semantic_max_lexical_jaccard": report.discrimination.semantic_max_lexical_jaccard,
+            "lexical_tokenizer_version": report.discrimination.lexical_tokenizer_version,
+        },
+    })
+    .to_string()
+}
+
+/// Reads a frozen baseline (missing file is a hard fail, never a skip).
+///
+/// # Errors
+/// Bails when the file is missing or unparsable (NFR-3).
+pub fn load_baseline(path: &std::path::Path) -> anyhow::Result<Baseline> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("read baseline {}", path.display()))?;
+    serde_json::from_str(&raw).context("parse baseline.json")
+}
+
+/// Writes a baseline atomically; when the quality part is identical the
+/// file (and its mtime) is preserved, so unchanged regenerations stay
+/// no-op commits (NFR-3, SC-9). `generated_at` and `index_build_ms` are
+/// host-dependent and excluded from the comparison — but when the quality
+/// part matches, the OLD values are kept (no timestamp churn).
+///
+/// # Errors
+/// Bails on serialization or filesystem failures.
+pub fn write_baseline(baseline: &Baseline, path: &std::path::Path) -> anyhow::Result<()> {
+    let mut canonical = canonical_baseline_value(baseline)?;
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        if let Ok(existing_value) = serde_json::from_str::<serde_json::Value>(&existing) {
+            strip_volatile(&mut canonical);
+            let mut existing_canonical = existing_value;
+            strip_volatile(&mut existing_canonical);
+            if existing_canonical == canonical {
+                return Ok(());
+            }
+        }
+    }
+    let payload = serde_json::to_string_pretty(baseline).context("serialize baseline")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &payload).with_context(|| format!("write {}", tmp.display()))?;
+    atomic_replace(&tmp, path)?;
+    Ok(())
+}
+
+/// Canonical baseline JSON minus volatile fields.
+fn canonical_baseline_value(baseline: &Baseline) -> anyhow::Result<serde_json::Value> {
+    let mut value = serde_json::to_value(baseline).context("serialize baseline")?;
+    strip_volatile(&mut value);
+    Ok(value)
+}
+
+/// Removes host-dependent fields from a baseline JSON value in place.
+fn strip_volatile(value: &mut serde_json::Value) {
+    if let Some(map) = value.as_object_mut() {
+        map.remove("generated_at");
+        map.remove("index_build_ms");
+    }
+}
+
+/// Directory-safe slug for a model pin: `openrouter/qwen@...` becomes a
+/// single path component. T11 record paths and T10 replay must agree.
+#[must_use]
+pub fn pin_slug(pin: &str) -> String {
+    pin.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Loads replay stages for the pins declared in the baseline (FR-5, FR-21).
+/// Missing fixture files are a hard fail, never a silent skip (NFR-3).
+///
+/// # Errors
+/// Bails on missing/invalid fixtures or unparsable pins.
+#[allow(clippy::type_complexity)]
+pub fn replay_stages(
+    root: &std::path::Path,
+    baseline: &Baseline,
+) -> anyhow::Result<(Option<Arc<dyn Embedder>>, Option<Arc<dyn Reranker>>)> {
+    let mut embedder: Option<Arc<dyn Embedder>> = None;
+    let mut reranker: Option<Arc<dyn Reranker>> = None;
+    for pin in &baseline.model_pins {
+        match parse_model_pin(pin)? {
+            ModelPin::Embedding { .. } => {
+                if embedder.is_some() {
+                    anyhow::bail!("two embedding pins in baseline (second: {pin})");
+                }
+                let dir = root.join("vectors").join(pin_slug(pin));
+                let fixture = VectorFixture::load(&dir).with_context(|| {
+                    format!("missing vector fixture for pin {pin} (run record first)")
+                })?;
+                embedder = Some(Arc::new(ReplayEmbedder {
+                    pin: pin.clone(),
+                    fixture: Arc::new(fixture),
+                }));
+            }
+            ModelPin::Rerank { .. } => {
+                if reranker.is_some() {
+                    anyhow::bail!("two rerank pins in baseline (second: {pin})");
+                }
+                let path = root.join("rerank").join(format!("{}.json", pin_slug(pin)));
+                let fixture = RerankFixture::load(&path).with_context(|| {
+                    format!("missing rerank fixture for pin {pin} (run record first)")
+                })?;
+                reranker = Some(Arc::new(ReplayReranker {
+                    fixture: Arc::new(fixture),
+                }));
+            }
+        }
+    }
+    Ok((embedder, reranker))
+}
+
+/// Maximum FR-27 lexical Jaccard over semantic expected spans.
+pub fn max_semantic_jaccard(
+    cases: &[QueryCase],
+    corpus_dir: &std::path::Path,
+) -> anyhow::Result<f64> {
+    let mut max: f64 = 0.0;
+    for case in cases.iter().filter(|case| case.class == "semantic") {
+        for expected in &case.expected {
+            let Some(range) = expected.lines else {
+                continue;
+            };
+            let span = span_text(corpus_dir, &expected.path, range)?;
+            max = max.max(lexical_jaccard(&case.query, &span));
+        }
+    }
+    Ok(max)
+}
+
+/// Regenerates the baseline from recorded fixtures: index the frozen corpus,
+/// run all four configs through replay stages, attach legacy parity,
+/// discrimination and hashes (FR-13, FR-15). Writes nothing; the ignored
+/// `regenerate_baseline` test persists the result deliberately.
+///
+/// # Errors
+/// Bails on ambiguous pins, missing fixtures, or run failures.
+pub fn regenerate_from_fixtures(root: &std::path::Path) -> anyhow::Result<Baseline> {
+    let fixtures = Fixtures::load(root).context("load fixtures")?;
+    let embed_pins = discover_pins(&root.join("vectors"), true)?;
+    let rerank_pins = discover_pins(&root.join("rerank"), false)?;
+    if embed_pins.len() != 1 || rerank_pins.len() != 1 {
+        anyhow::bail!(
+            "need exactly one embedding + one rerank pin, found {embed_pins:?} / {rerank_pins:?}"
+        );
+    }
+    let model_pins = vec![embed_pins[0].clone(), rerank_pins[0].clone()];
+    let pseudo = Baseline {
+        bench_version: BENCH_VERSION,
+        fixture_version: FIXTURE_VERSION,
+        corpus_hash: String::new(),
+        legacy_corpus_hash: String::new(),
+        queries_hash: String::new(),
+        model_pins: model_pins.clone(),
+        generated_at: String::new(),
+        index_build_ms: 0.0,
+        configs: BTreeMap::new(),
+        legacy_parity: LegacyParity {
+            cases: vec![],
+            matches: true,
+        },
+        discrimination: DiscriminationReport {
+            saturated_total: 0,
+            saturated_ratio: 0.0,
+            non_saturated_by_slice: BTreeMap::new(),
+            semantic_disagreements: 0,
+            rerank_disagreements: 0,
+            semantic_max_lexical_jaccard: 0.0,
+            lexical_tokenizer_version: docsbase_memory::index::tokenizer::TOKENIZER_VERSION,
+        },
+        outcome_matrix: OutcomeMatrix::default(),
+    };
+    let (embedder, reranker) = replay_stages(root, &pseudo)?;
+    let started = std::time::Instant::now();
+    let env = build_env(&root.join("corpus"), "baseline", 60..=80).context("index corpus")?;
+    let index_build_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let mut runs = Vec::new();
+    for cfg in [
+        ConfigId::Bm25,
+        ConfigId::Bm25Rerank,
+        ConfigId::Rrf,
+        ConfigId::RrfRerank,
+    ] {
+        let stages = stages_for(cfg, embedder.clone(), reranker.clone());
+        let (run, latencies) = run_config_timed(&env, &fixtures.cases, cfg, &stages)?;
+        runs.push((cfg, run, latencies));
+    }
+    let legacy_parity = run_legacy_parity()?;
+    let meta = ReportMeta {
+        corpus_hash: fixtures.corpus_hash,
+        legacy_corpus_hash: corpus_hash(&root.join("legacy-corpus"))?,
+        queries_hash: blake3_file(&root.join("queries.json"))?,
+        model_pins,
+        legacy_parity,
+        index_build_ms,
+    };
+    let jaccard = max_semantic_jaccard(&fixtures.cases, &root.join("corpus"))?;
+    build_baseline_like(&fixtures.cases, &runs, meta, jaccard)
+}
+
+/// Lists recorded model pins: subdirectories of `vectors/`, `*.json` files
+/// of `rerank/`. Returns the pin strings (read back from manifests).
+fn discover_pins(dir: &std::path::Path, vector_side: bool) -> anyhow::Result<Vec<String>> {
+    let mut pins = Vec::new();
+    let entries = std::fs::read_dir(dir).with_context(|| format!("list {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("read entry of {}", dir.display()))?;
+        if vector_side {
+            if entry.path().is_dir() {
+                let manifest_raw = std::fs::read_to_string(entry.path().join("manifest.json"))
+                    .with_context(|| {
+                        format!("read {}", entry.path().join("manifest.json").display())
+                    })?;
+                let manifest: VectorManifest =
+                    serde_json::from_str(&manifest_raw).context("parse vector manifest")?;
+                pins.push(manifest.model_pin);
+            }
+        } else if entry.path().extension().is_some_and(|ext| ext == "json") {
+            let fixture = RerankFixture::load(&entry.path())?;
+            pins.push(fixture.model_pin);
+        }
+    }
+    pins.sort();
+    Ok(pins)
 }

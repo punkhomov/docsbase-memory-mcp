@@ -143,3 +143,32 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   слабейшие grade-1 (mr-02 http-сторона, mr-08 levels-сторона) и
   single-expected mr-07 — на пересмотр в T7+ pooling, сейчас честные notes
   спасают. A1-спан уточнён [84,87]→[85,87] (84-я строка пустая).
+- Task T10: complete (2026-10-20). Baseline/gate/report: `Baseline`,
+  `Report` (+`deltas` via paired nDCG, `warnings`), `Failure`/`FailureKind`
+  (12 kinds), `gate_failures` (FR-14 a–ж: versions/hashes/pins, forbidden,
+  hit/nDCG drops, slice regressions, missing/extra config, case/slice drift,
+  legacy parity), `latency_failures` (pure math, Linux-gating at call site),
+  `discrimination_failures` (FR-28 six rules), `quality_json` (deterministic,
+  no latency/timestamps), `write_baseline` (canonical skip-if-identical +
+  atomic), `replay_stages` (fail-closed pins), `regenerate_from_fixtures`,
+  `run_config_timed` (per-call latency; `run_config` delegates).
+  Verify: 15 новых тестов (7 FR-14 failure kinds по отдельности, improvement
+  pass, 2 sabotage end-to-end, determinism, latency math, baseline IO incl.
+  SC-9 restamp, discrimination 6+1, missing-file hard fails); сьют 59 passed
+  / 3 ignored; fmt/clippy clean; полный default-сбор зелёный.
+  Ruling: fresh review NEEDS CHANGES → все 8 принято и закрыто кодом:
+  (1) skip-compare по canonical без generated_at/index_build_ms (SC-9);
+  (2) legacy nDCG через NDCG_DISCOUNT вместо libm log2 (к Baseline bytes
+  кроссплатформенны; parity не затронут — сравнивает только hit/absent);
+  (3) quality_json покрывает legacy_corpus_hash + legacy_parity;
+  (4) replay_stages bail на дублирующем пине (FR-25 fail-closed);
+  (5) paired_ndcg-None → warnings, missing/extra slice → CaseDrift
+  (переименование класса больше не молчит); (6)(7) добавлены тесты
+  LegacyMismatch, exact-0.02, generated_at, bench_version, хэши/пины,
+  extra-config, zero-entry coverage; (8) compute сидит все классы в 0
+  (документировано: полнота из compute, не из сигнатуры). Отклонений нет.
+  Sabotage-механика зафиксирована: rerank-тест пинит b.md (length-norm бьёт
+  5×TF — измерено), shuffle-тест на BM25-tied тройке с self-calibration
+  top-2 (2-доковый вариант давал точную RRF-ничью 1/61+1/62 — тоже измерено).
+  minor: `Baseline.index_build_ms` (требует FR-22, в дизайне §5.8 поля не
+  было — расхождение зафиксировано здесь, гейт поле игнорирует).

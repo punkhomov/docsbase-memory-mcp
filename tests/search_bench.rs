@@ -1611,3 +1611,801 @@ fn record_mode_does_not_mix_model_pins() {
         "second pin must fully replace the first: {got:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// T10: baseline, gate, determinism, latency, report (RED)
+// ---------------------------------------------------------------------------
+
+use support::bench::{
+    Baseline, CaseReport, ConfigId as BenchConfigId, ConfigReport, DiscriminationReport,
+    FailureKind, LatencyReport, Report,
+};
+
+fn toy_citation(path: &str, start: u32, end: u32) -> support::bench::Citation {
+    support::bench::Citation {
+        chunk_id: 7,
+        path: path.to_owned(),
+        heading_path: String::new(),
+        lines: (start, end),
+    }
+}
+
+fn toy_case_report(id: &str, hit: bool, ndcg: f64, forbidden: bool) -> CaseReport {
+    CaseReport {
+        id: id.to_owned(),
+        class: "probe".to_owned(),
+        k: 10,
+        ranks: vec![toy_citation("a.md", 1, 2)],
+        metrics: support::bench::CaseMetrics {
+            hit,
+            recall: if hit { 1.0 } else { 0.0 },
+            mrr: if hit { 1.0 } else { 0.0 },
+            ndcg,
+            citation_overlap: 1.0,
+            forbidden_hit: forbidden,
+            duplicate_path_ratio: 0.0,
+        },
+        early: support::bench::EarlyMetrics {
+            hit_at_3: hit,
+            recall_at_3: if hit { 1.0 } else { 0.0 },
+            ndcg_at_3: ndcg,
+        },
+    }
+}
+
+fn toy_slice(hit_rate: f64, ndcg: f64) -> support::bench::SliceReport {
+    support::bench::SliceReport {
+        cases: 2,
+        hit_rate,
+        recall: hit_rate,
+        mrr: hit_rate,
+        ndcg,
+        citation_overlap: 1.0,
+        forbidden_rate: 0.0,
+        duplicate_path_ratio: 0.0,
+    }
+}
+
+fn toy_baseline() -> Baseline {
+    let mut slices = std::collections::BTreeMap::new();
+    slices.insert("probe".to_owned(), toy_slice(1.0, 0.9));
+    let mut configs = std::collections::BTreeMap::new();
+    configs.insert(
+        BenchConfigId::Bm25,
+        ConfigReport {
+            cases: vec![
+                toy_case_report("t10-01", true, 0.9, false),
+                toy_case_report("t10-02", true, 0.9, false),
+            ],
+            slices,
+            latency: LatencyReport {
+                p50_ms: 10.0,
+                p95_ms: 20.0,
+            },
+        },
+    );
+    Baseline {
+        bench_version: support::bench::BENCH_VERSION,
+        fixture_version: support::bench::FIXTURE_VERSION,
+        corpus_hash: "corpus".to_owned(),
+        legacy_corpus_hash: "legacy".to_owned(),
+        queries_hash: "queries".to_owned(),
+        model_pins: vec!["test/fake@d4@l2".to_owned()],
+        generated_at: "t0".to_owned(),
+        index_build_ms: 0.0,
+        configs,
+        legacy_parity: support::bench::LegacyParity {
+            cases: vec![],
+            matches: true,
+        },
+        discrimination: DiscriminationReport {
+            saturated_total: 0,
+            saturated_ratio: 0.0,
+            non_saturated_by_slice: std::collections::BTreeMap::default(),
+            semantic_disagreements: 3,
+            rerank_disagreements: 1,
+            semantic_max_lexical_jaccard: 0.1,
+            lexical_tokenizer_version: docsbase_memory::index::tokenizer::TOKENIZER_VERSION,
+        },
+        outcome_matrix: support::bench::OutcomeMatrix::default(),
+    }
+}
+
+fn toy_current() -> Report {
+    support::bench::build_report(&toy_baseline(), None)
+}
+
+fn gate_has_kind(current: &Report, base: &Baseline, kind: &FailureKind) -> bool {
+    support::bench::gate_failures(current, base)
+        .iter()
+        .any(|f| std::mem::discriminant(&f.kind) == std::mem::discriminant(kind))
+}
+
+#[test]
+fn gate_detects_each_failure_kind() {
+    // Clean pair: no failures.
+    let base = toy_baseline();
+    assert!(
+        support::bench::gate_failures(&toy_current(), &base).is_empty(),
+        "identical run must pass the gate"
+    );
+    // (1) version mismatch.
+    let mut bad = toy_baseline();
+    bad.fixture_version += 1;
+    let current = support::bench::build_report(&bad, None);
+    assert!(
+        gate_has_kind(&current, &base, &FailureKind::VersionMismatch),
+        "fixture_version drift must fail"
+    );
+    // (1b) hash mismatch.
+    let mut bad = toy_baseline();
+    bad.corpus_hash = "other".to_owned();
+    let current = support::bench::build_report(&bad, None);
+    assert!(
+        gate_has_kind(&current, &base, &FailureKind::HashMismatch),
+        "corpus hash drift must fail"
+    );
+}
+
+#[test]
+fn gate_detects_hit_and_forbidden_failures() {
+    let base = toy_baseline();
+    // (2) forbidden hit.
+    let mut bad = toy_baseline();
+    bad.configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("cfg")
+        .cases[0]
+        .metrics
+        .forbidden_hit = true;
+    let current = support::bench::build_report(&bad, None);
+    assert!(
+        gate_has_kind(&current, &base, &FailureKind::ForbiddenHit),
+        "forbidden_hit must fail"
+    );
+    // (3) hit true -> false.
+    let mut bad = toy_baseline();
+    let case = &mut bad
+        .configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("cfg")
+        .cases[0];
+    case.metrics.hit = false;
+    case.metrics.ndcg = 0.0;
+    case.metrics.recall = 0.0;
+    let current = support::bench::build_report(&bad, None);
+    assert!(
+        gate_has_kind(&current, &base, &FailureKind::HitDrop),
+        "hit drop must fail"
+    );
+}
+
+#[test]
+fn gate_detects_ndcg_failures() {
+    let base = toy_baseline();
+    // (4) per-case nDCG drop beyond tolerance.
+    let mut bad = toy_baseline();
+    bad.configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("cfg")
+        .cases[0]
+        .metrics
+        .ndcg = 0.5;
+    let current = support::bench::build_report(&bad, None);
+    assert!(
+        gate_has_kind(&current, &base, &FailureKind::NdcgDrop),
+        "nDCG drop 0.4 must fail"
+    );
+    // ...but a 0.01 wobble passes.
+    let mut ok = toy_baseline();
+    ok.configs.get_mut(&BenchConfigId::Bm25).expect("cfg").cases[0]
+        .metrics
+        .ndcg = 0.89;
+    let current = support::bench::build_report(&ok, None);
+    assert!(
+        !gate_has_kind(&current, &base, &FailureKind::NdcgDrop),
+        "nDCG wobble within tolerance must pass"
+    );
+    // (6) slice nDCG drop beyond tolerance.
+    let mut bad = toy_baseline();
+    bad.configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("cfg")
+        .slices
+        .get_mut("probe")
+        .expect("slice")
+        .ndcg = 0.5;
+    let current = support::bench::build_report(&bad, None);
+    assert!(
+        gate_has_kind(&current, &base, &FailureKind::SliceNdcgDrop),
+        "slice nDCG drop must fail"
+    );
+}
+
+#[test]
+fn gate_detects_slice_and_drift_failures() {
+    let base = toy_baseline();
+    // (5) slice hit_rate drop.
+    let mut bad = toy_baseline();
+    bad.configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("cfg")
+        .slices
+        .get_mut("probe")
+        .expect("slice")
+        .hit_rate = 0.5;
+    let current = support::bench::build_report(&bad, None);
+    assert!(
+        gate_has_kind(&current, &base, &FailureKind::SliceHitRateDrop),
+        "slice hit_rate drop must fail"
+    );
+    // (7a) missing config.
+    let mut bad = toy_baseline();
+    bad.configs.remove(&BenchConfigId::Bm25);
+    let current = support::bench::build_report(&bad, None);
+    assert!(
+        gate_has_kind(&current, &base, &FailureKind::MissingConfig),
+        "missing config must fail"
+    );
+    // (7b) case set drift.
+    let mut bad = toy_baseline();
+    bad.configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("cfg")
+        .cases
+        .pop();
+    let current = support::bench::build_report(&bad, None);
+    assert!(
+        gate_has_kind(&current, &base, &FailureKind::CaseDrift),
+        "case set drift must fail"
+    );
+}
+
+#[test]
+fn gate_detects_legacy_and_version_drift() {
+    let mut base = toy_baseline();
+    base.legacy_parity = support::bench::LegacyParity {
+        cases: vec![support::bench::LegacyCaseReport {
+            id: "legacy-01".to_owned(),
+            query: "q".to_owned(),
+            hit: true,
+            absent_hit: false,
+            ndcg: 1.0,
+        }],
+        matches: true,
+    };
+    let mut bad = base.clone();
+    bad.legacy_parity.cases[0].hit = false;
+    bad.legacy_parity.matches = false;
+    let current = support::bench::build_report(&bad, None);
+    assert!(
+        gate_has_kind(&current, &base, &FailureKind::LegacyMismatch),
+        "legacy hit drift must fail"
+    );
+    // Version and identity-field drift.
+    for mutate in [
+        (|b: &mut Baseline| b.bench_version += 1) as fn(&mut Baseline),
+        (|b: &mut Baseline| b.queries_hash = "other".to_owned()),
+        (|b: &mut Baseline| b.legacy_corpus_hash = "other".to_owned()),
+        (|b: &mut Baseline| b.model_pins = vec!["other".to_owned()]),
+    ] {
+        let mut bad = toy_baseline();
+        mutate(&mut bad);
+        let current = support::bench::build_report(&bad, None);
+        assert!(
+            !support::bench::gate_failures(&current, &toy_baseline()).is_empty(),
+            "identity drift must fail"
+        );
+    }
+    // Extra config is drift, not a silent extension.
+    let mut bad = toy_baseline();
+    bad.configs.insert(
+        support::bench::ConfigId::Rrf,
+        bad.configs.get(&BenchConfigId::Bm25).expect("cfg").clone(),
+    );
+    let current = support::bench::build_report(&bad, None);
+    assert!(
+        gate_has_kind(&current, &toy_baseline(), &FailureKind::CaseDrift),
+        "extra config must fail as drift"
+    );
+}
+
+#[test]
+fn gate_boundary_values_pass() {
+    let base = toy_baseline();
+    // Exactly the tolerance: not "beyond", must pass.
+    let mut edge = toy_baseline();
+    edge.configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("cfg")
+        .cases[0]
+        .metrics
+        .ndcg = 0.88;
+    let current = support::bench::build_report(&edge, None);
+    assert!(
+        support::bench::gate_failures(&current, &base).is_empty(),
+        "exact 0.02 nDCG drop must pass"
+    );
+    // Timestamps never gate.
+    let mut restamped = toy_baseline();
+    restamped.generated_at = "whenever".to_owned();
+    let current = support::bench::build_report(&restamped, None);
+    assert!(
+        support::bench::gate_failures(&current, &base).is_empty(),
+        "generated_at drift must not fail"
+    );
+}
+
+#[test]
+fn gate_allows_improvement_without_baseline_update() {
+    let base = toy_baseline();
+    let mut better = toy_baseline();
+    let case = &mut better
+        .configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("cfg")
+        .cases[0];
+    case.metrics.ndcg = 1.0;
+    better
+        .configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("cfg")
+        .slices
+        .get_mut("probe")
+        .expect("slice")
+        .ndcg = 0.95;
+    let current = support::bench::build_report(&better, None);
+    assert!(
+        support::bench::gate_failures(&current, &base).is_empty(),
+        "pure improvement must pass without a baseline update"
+    );
+}
+
+#[test]
+fn gate_rejects_sabotaged_reranker() {
+    let tmp = TempDir::new().expect("tmp");
+    tiny_corpus(tmp.path());
+    let env =
+        support::bench::build_env(&tmp.path().join("corpus"), "sabotage", 3..=3).expect("index");
+    // k = 1 and the answer is BM25 top-1 (b.md wins on length norm):
+    // any reorder flips the hit.
+    let case = sabotage_case("alpha beta", 1, &["b.md"]);
+    let embedder: Arc<dyn Embedder> = Arc::new(FailingEmbedder::working(4, 0.0));
+    let good = Arc::new(FailingReranker {
+        fail: AtomicBool::new(false),
+    });
+    let cfg = support::bench::ConfigId::Bm25Rerank;
+    let stages = support::bench::stages_for(
+        cfg,
+        Some(embedder.clone()),
+        Some(good.clone() as Arc<dyn docsbase_memory::hybrid::Reranker>),
+    );
+    let (run, lat) =
+        support::bench::run_config_timed(&env, &[case.clone()], cfg, &stages).expect("good run");
+    let baseline_like = support::bench::build_baseline_like(
+        &[case.clone()],
+        &[(cfg, run, lat)],
+        support::bench::ReportMeta::synthetic(),
+        0.0,
+    )
+    .expect("baseline-like");
+    assert!(
+        baseline_like.configs.get(&cfg).expect("cfg").cases[0]
+            .metrics
+            .hit,
+        "good run must hit b.md at k=1"
+    );
+    // Saboteur: reranker that inverts the candidate order.
+    let evil = Arc::new(ReversingReranker);
+    let evil_stages = support::bench::stages_for(
+        cfg,
+        Some(embedder.clone()),
+        Some(evil as Arc<dyn docsbase_memory::hybrid::Reranker>),
+    );
+    let (evil_run, evil_lat) =
+        support::bench::run_config_timed(&env, &[case.clone()], cfg, &evil_stages)
+            .expect("evil run");
+    let evil_like = support::bench::build_baseline_like(
+        &[case],
+        &[(cfg, evil_run, evil_lat)],
+        support::bench::ReportMeta::synthetic(),
+        0.0,
+    )
+    .expect("evil baseline-like");
+    let current = support::bench::build_report(&evil_like, None);
+    assert!(
+        !support::bench::gate_failures(&current, &baseline_like).is_empty(),
+        "reversed rerank must trip the gate"
+    );
+}
+
+/// Three docs with identical BM25 (same terms, same length): dense decides.
+/// A one-slot vector rotation permutes dense similarities without a
+/// symmetric tie, so the RRF order deterministically changes.
+fn tie_corpus(root: &std::path::Path) {
+    fs::create_dir_all(root.join("corpus")).expect("mkdir");
+    fs::write(root.join("corpus/a.md"), "alpha beta gamma.\n").expect("a");
+    fs::write(root.join("corpus/b.md"), "alpha beta delta.\n").expect("b");
+    fs::write(root.join("corpus/c.md"), "alpha beta epsilon.\n").expect("c");
+    let manifest = json!({"documents": [
+        {"path": "a.md", "origin": "synthetic", "license": "MIT",
+         "frozen_at": "2026-10-19", "blake3": "00"},
+        {"path": "b.md", "origin": "synthetic", "license": "MIT",
+         "frozen_at": "2026-10-19", "blake3": "00"},
+        {"path": "c.md", "origin": "synthetic", "license": "MIT",
+         "frozen_at": "2026-10-19", "blake3": "00"},
+    ]});
+    fs::write(
+        root.join("corpus/MANIFEST.json"),
+        serde_json::to_string(&manifest).expect("manifest"),
+    )
+    .expect("manifest");
+}
+
+fn sabotage_case(query: &str, k: usize, paths: &[&str]) -> support::bench::QueryCase {
+    support::bench::QueryCase {
+        id: "sabotage-01".to_owned(),
+        query: query.to_owned(),
+        class: "probe".to_owned(),
+        k,
+        expected: paths
+            .iter()
+            .map(|path| support::bench::ExpectedHit {
+                path: (*path).to_owned(),
+                lines: None,
+                grade: 2,
+            })
+            .collect(),
+        absent: vec![],
+        source: "test".to_owned(),
+        notes: "sabotage probe".to_owned(),
+        reviewed_by: vec![],
+    }
+}
+
+/// Preloads the vector cache with fake vectors for every chunk; with
+/// `rotate`, the batch is shifted by one slot (deterministic sabotage that
+/// permutes dense similarities while the single-text query embedding is
+/// unaffected).
+fn preload_fixture(env: &support::bench::BenchEnv, rotate: bool) {
+    let texts = docsbase_memory::store::repo::chunk_texts(env.db.connection(), env.project.id)
+        .expect("chunk texts");
+    let mut vecs: Vec<Vec<f32>> = texts.iter().map(|text| fake_vector(text, 4)).collect();
+    if rotate {
+        vecs.rotate_right(1);
+    }
+    let fixture = VectorFixture {
+        model_pin: "test/fake@d4@l2".to_owned(),
+        dim: 4,
+        corpus_hash: "test".to_owned(),
+        queries_hash: "test".to_owned(),
+        vectors: texts
+            .iter()
+            .zip(vecs)
+            .map(|(text, vec)| (blake3_of(text), vec))
+            .collect(),
+    };
+    support::bench::preload_vectors(env, &fixture).expect("preload");
+}
+
+#[test]
+fn gate_rejects_shuffled_embedder() {
+    let tmp = TempDir::new().expect("tmp");
+    tie_corpus(tmp.path());
+    let good_env = support::bench::build_env(&tmp.path().join("corpus"), "shuffle-good", 3..=3)
+        .expect("index");
+    preload_fixture(&good_env, false);
+    let evil_env = support::bench::build_env(&tmp.path().join("corpus"), "shuffle-evil", 3..=3)
+        .expect("index");
+    preload_fixture(&evil_env, true);
+    let good: Arc<dyn Embedder> = Arc::new(FailingEmbedder::working(4, 0.0));
+    let cfg = support::bench::ConfigId::Rrf;
+    let stages = support::bench::stages_for(cfg, Some(good.clone()), None);
+    // Self-calibrating: the good run's top-2 set becomes the expected set
+    // (fixed blake3 vectors make this deterministic across runs/hosts).
+    let probe = sabotage_case("alpha beta", 2, &["a.md"]);
+    let (probe_run, _) =
+        support::bench::run_config_timed(&good_env, &[probe], cfg, &stages).expect("probe run");
+    let top2: Vec<String> = probe_run.cases[0]
+        .citations
+        .iter()
+        .take(2)
+        .map(|citation| citation.path.clone())
+        .collect();
+    assert_eq!(top2.len(), 2, "good run must return 2 citations at k=2");
+    let case = sabotage_case("alpha beta", 2, &[top2[0].as_str(), top2[1].as_str()]);
+    let (run, lat) = support::bench::run_config_timed(&good_env, &[case.clone()], cfg, &stages)
+        .expect("good run");
+    let baseline_like = support::bench::build_baseline_like(
+        &[case.clone()],
+        &[(cfg, run, lat)],
+        support::bench::ReportMeta::synthetic(),
+        0.0,
+    )
+    .expect("baseline-like");
+    assert!(
+        baseline_like.configs.get(&cfg).expect("cfg").cases[0]
+            .metrics
+            .hit,
+        "good run must hit its own top-2"
+    );
+    // Rotated chunk vectors permute dense similarities; the BM25-tied RRF
+    // order changes and the expected set breaks.
+    let evil_stages = support::bench::stages_for(cfg, Some(good), None);
+    let (evil_run, evil_lat) =
+        support::bench::run_config_timed(&evil_env, &[case.clone()], cfg, &evil_stages)
+            .expect("evil run");
+    let evil_top2: Vec<String> = evil_run.cases[0]
+        .citations
+        .iter()
+        .take(2)
+        .map(|citation| citation.path.clone())
+        .collect();
+    assert_ne!(
+        evil_top2, top2,
+        "rotated embeddings must change the RRF top-2 on a BM25-tied triple"
+    );
+    let evil_like = support::bench::build_baseline_like(
+        &[case],
+        &[(cfg, evil_run, evil_lat)],
+        support::bench::ReportMeta::synthetic(),
+        0.0,
+    )
+    .expect("evil baseline-like");
+    let current = support::bench::build_report(&evil_like, None);
+    assert!(
+        !support::bench::gate_failures(&current, &baseline_like).is_empty(),
+        "rotated embeddings must break RRF ranking and trip the gate"
+    );
+}
+
+/// Reranker that inverts whatever order the collector observed.
+struct ReversingReranker;
+
+#[allow(clippy::cast_precision_loss)]
+impl docsbase_memory::hybrid::Reranker for ReversingReranker {
+    fn rerank(
+        &self,
+        _query: &str,
+        docs: &[String],
+        top_n: usize,
+    ) -> docsbase_memory::error::Result<Vec<(usize, f32)>> {
+        Ok((0..docs.len())
+            .rev()
+            .take(top_n)
+            .enumerate()
+            .map(|(rank, i)| (i, 100.0 - rank as f32))
+            .collect())
+    }
+}
+
+#[test]
+fn evaluate_is_deterministic() {
+    let base = toy_baseline();
+    let first = support::bench::quality_json(&support::bench::build_report(&base, None));
+    let second = support::bench::quality_json(&support::bench::build_report(&base, None));
+    assert_eq!(first, second, "quality JSON must be byte-identical");
+    assert!(
+        !first.contains("p50_ms") && !first.contains("generated_at"),
+        "quality JSON must exclude latency and timestamps"
+    );
+}
+
+#[test]
+fn latency_budget_math() {
+    for (baseline, want) in [(100.0, 155.0), (400.0, 500.0), (0.0, 5.0)] {
+        let got = support::bench::latency_allowed_ms(baseline);
+        assert!(
+            (got - want).abs() < 1e-9,
+            "latency_allowed_ms({baseline}) = {got}, want {want}"
+        );
+    }
+    let base = toy_baseline();
+    let mut slow = toy_baseline();
+    slow.configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("cfg")
+        .latency
+        .p95_ms = 156.0;
+    let current = support::bench::build_report(&slow, None);
+    assert!(
+        !support::bench::latency_failures(&current, &base).is_empty(),
+        "p95 156 > 20*1.5+5=35 must breach"
+    );
+    let mut ok = toy_baseline();
+    ok.configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("cfg")
+        .latency
+        .p95_ms = 34.9;
+    let current = support::bench::build_report(&ok, None);
+    assert!(
+        support::bench::latency_failures(&current, &base).is_empty(),
+        "p95 within budget must pass"
+    );
+}
+
+#[test]
+fn baseline_preserves_timestamp_when_unchanged() {
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("baseline.json");
+    support::bench::write_baseline(&toy_baseline(), &path).expect("first write");
+    let before = std::fs::metadata(&path)
+        .expect("meta")
+        .modified()
+        .expect("mtime");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    support::bench::write_baseline(&toy_baseline(), &path).expect("second write");
+    let after = std::fs::metadata(&path)
+        .expect("meta")
+        .modified()
+        .expect("mtime");
+    assert_eq!(before, after, "identical baseline must not touch the file");
+    let mut changed = toy_baseline();
+    changed.model_pins.push("other".to_owned());
+    support::bench::write_baseline(&changed, &path).expect("changed write");
+    let reloaded = support::bench::load_baseline(&path).expect("reload");
+    assert_eq!(
+        reloaded.model_pins.len(),
+        2,
+        "changed baseline must persist"
+    );
+    // SC-9: timestamp/index-build churn alone must not rewrite the file.
+    let mtime = std::fs::metadata(&path)
+        .expect("meta")
+        .modified()
+        .expect("mtime");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let mut restamped = toy_baseline();
+    restamped.model_pins.push("other".to_owned());
+    restamped.generated_at = "t1".to_owned();
+    restamped.index_build_ms = 123.0;
+    support::bench::write_baseline(&restamped, &path).expect("restamp write");
+    let after_restamp = std::fs::metadata(&path)
+        .expect("meta")
+        .modified()
+        .expect("mtime");
+    assert_eq!(
+        mtime, after_restamp,
+        "timestamp-only drift must not touch the file"
+    );
+    let reread = support::bench::load_baseline(&path).expect("reread");
+    assert_eq!(
+        reread.generated_at, "t0",
+        "skipped write keeps the old timestamp"
+    );
+}
+
+#[test]
+fn discrimination_detects_each_failure() {
+    let ok = DiscriminationReport {
+        saturated_total: 10,
+        saturated_ratio: 0.5,
+        non_saturated_by_slice: [("semantic".to_owned(), 2)].into_iter().collect(),
+        semantic_disagreements: 3,
+        rerank_disagreements: 1,
+        semantic_max_lexical_jaccard: 0.4,
+        lexical_tokenizer_version: docsbase_memory::index::tokenizer::TOKENIZER_VERSION,
+    };
+    assert!(
+        support::bench::discrimination_failures(&ok).is_empty(),
+        "healthy discrimination must pass"
+    );
+    let mut bad = ok.clone();
+    bad.saturated_ratio = 0.8;
+    assert!(
+        !support::bench::discrimination_failures(&bad).is_empty(),
+        "saturated_ratio 0.8 must fail"
+    );
+    let mut bad = ok.clone();
+    bad.non_saturated_by_slice.clear();
+    assert!(
+        !support::bench::discrimination_failures(&bad).is_empty(),
+        "slice without non-saturated case must fail"
+    );
+    let mut bad = ok.clone();
+    bad.semantic_disagreements = 2;
+    assert!(
+        !support::bench::discrimination_failures(&bad).is_empty(),
+        "2 semantic disagreements must fail"
+    );
+    let mut bad = ok.clone();
+    bad.rerank_disagreements = 0;
+    assert!(
+        !support::bench::discrimination_failures(&bad).is_empty(),
+        "0 rerank disagreements must fail"
+    );
+    let mut bad = ok.clone();
+    bad.semantic_max_lexical_jaccard = 0.6;
+    assert!(
+        !support::bench::discrimination_failures(&bad).is_empty(),
+        "jaccard 0.6 must fail"
+    );
+    bad = ok.clone();
+    bad.lexical_tokenizer_version = docsbase_memory::index::tokenizer::TOKENIZER_VERSION - 1;
+    assert!(
+        !support::bench::discrimination_failures(&bad).is_empty(),
+        "stale tokenizer version must fail"
+    );
+    // A complete map with a fully-saturated slice fails the coverage rule.
+    let mut bad = ok.clone();
+    bad.non_saturated_by_slice.insert("semantic".to_owned(), 0);
+    assert!(
+        !support::bench::discrimination_failures(&bad).is_empty(),
+        "fully-saturated slice must fail coverage"
+    );
+}
+
+#[test]
+fn missing_baseline_is_hard_fail() {
+    let dir = TempDir::new().expect("tmp");
+    let err = support::bench::load_baseline(&dir.path().join("baseline.json"))
+        .expect_err("absent baseline must fail");
+    assert!(!err.to_string().is_empty());
+}
+
+#[test]
+fn missing_vectors_is_hard_fail() {
+    let dir = TempDir::new().expect("tmp");
+    let err = support::bench::VectorFixture::load(&dir.path().join("vectors"))
+        .expect_err("absent vectors must fail");
+    assert!(!err.to_string().is_empty());
+}
+
+/// Full offline gate against the recorded baseline (T11 enables this).
+#[test]
+#[ignore = "needs T11 recorded fixtures + baseline.json"]
+fn metrics_match_baseline() {
+    let root = bench_root();
+    let baseline = support::bench::load_baseline(&root.join("baseline.json")).expect("baseline");
+    let fixtures = Fixtures::load(&root).expect("fixtures");
+    let env = support::bench::build_env(&root.join("corpus"), "gate", 60..=80).expect("index");
+    let mut runs = Vec::new();
+    for cfg in [
+        support::bench::ConfigId::Bm25,
+        support::bench::ConfigId::Bm25Rerank,
+        support::bench::ConfigId::Rrf,
+        support::bench::ConfigId::RrfRerank,
+    ] {
+        let (embedder, reranker) =
+            support::bench::replay_stages(&root, &baseline).expect("replay stages");
+        let stages = support::bench::stages_for(cfg, embedder, reranker);
+        let (run, lat) =
+            support::bench::run_config_timed(&env, &fixtures.cases, cfg, &stages).expect("run");
+        runs.push((cfg, run, lat));
+    }
+    let current_like = support::bench::build_baseline_like(
+        &fixtures.cases,
+        &runs,
+        support::bench::ReportMeta::from_baseline(&baseline),
+        baseline.discrimination.semantic_max_lexical_jaccard,
+    )
+    .expect("current");
+    let current = support::bench::build_report(&current_like, Some(&baseline));
+    let failures = support::bench::gate_failures(&current, &baseline);
+    assert!(failures.is_empty(), "gate failures: {failures:?}");
+    if cfg!(target_os = "linux") {
+        let latency = support::bench::latency_failures(&current, &baseline);
+        assert!(latency.is_empty(), "latency failures: {latency:?}");
+    }
+}
+
+/// Regenerates `baseline.json` from the recorded fixtures (manual, T11 runs
+/// it after legacy parity; T12 re-runs after hardening).
+#[test]
+#[ignore = "manual: rewrites baseline.json; run only deliberately (FR-15)"]
+fn regenerate_baseline() {
+    let root = bench_root();
+    let parity = support::bench::run_legacy_parity().expect("legacy parity");
+    assert!(
+        parity.matches,
+        "baseline requires green legacy parity (FR-15)"
+    );
+    let baseline = support::bench::regenerate_from_fixtures(&root).expect("regenerate");
+    let failures = support::bench::discrimination_failures(&baseline.discrimination);
+    assert!(
+        failures.is_empty(),
+        "baseline must discriminate before it is accepted (FR-28): {failures:?}"
+    );
+    support::bench::write_baseline(&baseline, &root.join("baseline.json")).expect("write");
+}
