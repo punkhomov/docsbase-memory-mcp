@@ -2,6 +2,7 @@
 
 pub mod index;
 pub mod install;
+pub mod models;
 pub mod search;
 pub mod status;
 pub mod update;
@@ -73,6 +74,12 @@ pub enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    /// Model management commands.
+    Models {
+        /// Model subcommand.
+        #[command(subcommand)]
+        command: models::ModelsCommand,
+    },
     /// Install (or update) the binary and register owned artifacts.
     Install,
     /// Update the installed binary from a GitHub release (network).
@@ -122,6 +129,9 @@ pub fn run() -> anyhow::Result<()> {
         Command::Mcp => crate::mcp::frontend::run_blocking(),
         Command::Daemon { command } => match command {
             DaemonCommand::Stop => daemon_stop(),
+        },
+        Command::Models { command } => match command {
+            models::ModelsCommand::Use(args) => models::run(&args),
         },
         Command::Install => install::install(),
         Command::Update {
