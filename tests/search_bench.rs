@@ -58,6 +58,7 @@ fn case(id: &str, class: &str, expected: &[&str]) -> serde_json::Value {
         "absent": [],
         "source": "test",
         "notes": "t1",
+        "reviewed_by": ["t1"],
     })
 }
 
@@ -317,6 +318,25 @@ fn validator_rejects_missing_reviewer() {
     write_tree(tmp.path(), &docs, &queries);
     let err = load_validated(tmp.path(), &["semantic"]).expect_err("no reviewer must fail");
     assert!(err.to_string().contains("review-02"), "{err}");
+}
+
+#[test]
+fn validator_rejects_ordinary_case_without_reviewer() {
+    let tmp = TempDir::new().expect("tmp");
+    let docs = [("ru/a.md", "# A\n\nline one\nline two\n")];
+    let queries = json!([{
+        "id": "review-03",
+        "query": "query for review-03",
+        "class": "ru_morph",
+        "k": 10,
+        "expected": [{"path": "ru/a.md", "lines": [1, 2], "grade": 2}],
+        "absent": [],
+        "source": "test",
+        "notes": "t1",
+    }]);
+    write_tree(tmp.path(), &docs, &queries);
+    let err = load_validated(tmp.path(), &["ru_morph"]).expect_err("ordinary case needs >=1 reviewer (FR-2)");
+    assert!(err.to_string().contains("review-03"), "{err}");
 }
 
 #[test]

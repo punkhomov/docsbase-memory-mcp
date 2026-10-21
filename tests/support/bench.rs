@@ -357,8 +357,9 @@ fn check_grades(cases: &[QueryCase]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// FR-26: critical classes and absent-bearing cases need ≥2 reviewers;
-/// grade-1 or critical cases need a rationale in `notes`.
+/// FR-2/FR-26: critical classes and absent-bearing cases need ≥2 reviewers;
+/// every other case needs ≥1; grade-1 or critical cases need a rationale in
+/// `notes`.
 fn check_notes_reviewers(cases: &[QueryCase]) -> anyhow::Result<()> {
     for case in cases {
         let critical = CRITICAL_CLASSES.contains(&case.class.as_str());
@@ -367,6 +368,12 @@ fn check_notes_reviewers(cases: &[QueryCase]) -> anyhow::Result<()> {
                 "case {:?}: needs >=2 reviewers (semantic/hard_negative/absent), found {}",
                 case.id,
                 case.reviewed_by.len()
+            );
+        }
+        if case.reviewed_by.is_empty() {
+            anyhow::bail!(
+                "case {:?}: needs >=1 reviewer (FR-2), found none",
+                case.id,
             );
         }
         let needs_notes = critical || case.expected.iter().any(|hit| hit.grade == 1);

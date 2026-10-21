@@ -301,6 +301,17 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   stderr note for `:free` routes (FR-33 condition now met in docs + CLI).
 - Blocker 3 deferred (customer decision): FR-2 `reviewed_by` ≥1 for ordinary
   cases stays unenforced; risk-based validator (≥2 critical/absent) stands.
+- Blocker 3 in progress (2026-10-21, customer-approved review instead of
+  deferral): validator now enforces FR-2 ≥1 for ordinary cases
+  (`validator_rejects_ordinary_case_without_reviewer` RED→GREEN) — the suite
+  went RED on the real corpus (53 empty, all non-critical/no-absent) as the
+  forcing function. Pass 1 done by a fresh-context subagent: 53/53 signed as
+  `t15-reviewer`, 1 real fix (phrase-10 notes: `release` IS matched in line 6,
+  note corrected), 5 honest weak-spot flags for pass 2 (en-morph-05 span vs
+  heading `backoff`, mixed-06/phrase-03 unmatched terms unnoted, phrase-06
+  wording, mixed-03 cross-script bridge). Verified independently: diff is
+  purely mechanical + the phrase-10 fix, `fixtures_are_valid` green again.
+  Pass 2 pending: customer runs a different-model agent over the same 53.
 - Blocker 4 implemented as option A (2026-10-21, customer-approved):
   `check_known_growth` (pure, unit-tested: steady/healed/bootstrap pass,
   unaccepted growth fails naming the case) + `regenerate_from_fixtures`

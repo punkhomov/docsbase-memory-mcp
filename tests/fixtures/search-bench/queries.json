@@ -16,7 +16,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: instrumental vs nominative (заменой vs замена)"
+    "notes": "morphology: instrumental vs nominative (заменой vs замена)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ru-morph-02",
@@ -35,7 +38,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: prepositional vs nominative (замене vs замена)"
+    "notes": "morphology: prepositional vs nominative (замене vs замена)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ru-morph-03",
@@ -110,7 +116,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: infinitive vs imperative/finite (залить vs залейте/заливают)"
+    "notes": "morphology: infinitive vs imperative/finite (залить vs залейте/заливают)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ru-morph-06",
@@ -129,7 +138,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: prepositional vs nominative (настройке vs настройка)"
+    "notes": "morphology: prepositional vs nominative (настройке vs настройка)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ru-morph-07",
@@ -148,7 +160,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: instrumental vs accusative (сокетом vs сокет)"
+    "notes": "morphology: instrumental vs accusative (сокетом vs сокет)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ru-morph-08",
@@ -167,7 +182,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: genitive plural vs nominative singular (демонов vs демон)"
+    "notes": "morphology: genitive plural vs nominative singular (демонов vs демон)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ru-morph-09",
@@ -186,7 +204,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: dative plural vs nominative singular (таймаутам vs таймаут); span covers both query terms"
+    "notes": "morphology: dative plural vs nominative singular (таймаутам vs таймаут); span covers both query terms",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ru-morph-10",
@@ -205,7 +226,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: instrumental vs nominative (токенизатором vs токенизатор)"
+    "notes": "morphology: instrumental vs nominative (токенизатором vs токенизатор)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ru-morph-11",
@@ -224,7 +248,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: adjective + genitive plural vs nominative (повторных попыток vs повторная попытка)"
+    "notes": "morphology: adjective + genitive plural vs nominative (повторных попыток vs повторная попытка)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ru-morph-12",
@@ -243,7 +270,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: dative vs nominative (маске vs маска)"
+    "notes": "morphology: dative vs nominative (маске vs маска)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "en-morph-01",
@@ -262,7 +292,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: gerund vs finite/participial forms (evicting vs evicts/evicted)"
+    "notes": "morphology: gerund vs finite/participial forms (evicting vs evicts/evicted)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "en-morph-02",
@@ -281,7 +314,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: plural vs singular (thresholds vs threshold)"
+    "notes": "morphology: plural vs singular (thresholds vs threshold)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "en-morph-03",
@@ -328,7 +364,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: gerund vs finite/participial forms (retrying vs retried)"
+    "notes": "morphology: gerund vs finite/participial forms (retrying vs retried)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "en-morph-05",
@@ -347,7 +386,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: plural vs singular (retries vs retry)"
+    "notes": "morphology: plural vs singular (retries vs retry)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "en-morph-06",
@@ -366,7 +408,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: gerund + plural vs imperative + singular (binding sockets vs bind socket)"
+    "notes": "morphology: gerund + plural vs imperative + singular (binding sockets vs bind socket)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "en-morph-07",
@@ -385,7 +430,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: participle vs infinitive (bound vs bind)"
+    "notes": "morphology: participle vs infinitive (bound vs bind)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "en-morph-08",
@@ -404,7 +452,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "morphology: past participle vs gerund/noun (exceeded vs exceeding/deadline)"
+    "notes": "morphology: past participle vs gerund/noun (exceeded vs exceeding/deadline)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "en-morph-09",
@@ -423,7 +474,10 @@
     ],
     "absent": [],
     "source": "frozen-real",
-    "notes": "frozen copy of docs/MCP.md; prose match on stdio MCP server"
+    "notes": "frozen copy of docs/MCP.md; prose match on stdio MCP server",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "en-morph-10",
@@ -442,7 +496,10 @@
     ],
     "absent": [],
     "source": "frozen-real",
-    "notes": "frozen copy of docs/QUICKSTART.md; stemming (indexing vs Index) + synonym without doc support (folder)"
+    "notes": "frozen copy of docs/QUICKSTART.md; stemming (indexing vs Index) + synonym without doc support (folder)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "identifier-01",
@@ -489,7 +546,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "exact identifier match"
+    "notes": "exact identifier match",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "identifier-03",
@@ -564,7 +624,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "exact identifier match"
+    "notes": "exact identifier match",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "identifier-06",
@@ -639,7 +702,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "exact identifier match"
+    "notes": "exact identifier match",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "identifier-09",
@@ -658,7 +724,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "CLI command match"
+    "notes": "CLI command match",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "identifier-10",
@@ -677,7 +746,10 @@
     ],
     "absent": [],
     "source": "frozen-real",
-    "notes": "frozen copy of docs/MCP.md; exact tool-name match"
+    "notes": "frozen copy of docs/MCP.md; exact tool-name match",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "phrase-01",
@@ -724,7 +796,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "inflected variant (merging vs merge)"
+    "notes": "inflected variant (merging vs merge)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "phrase-03",
@@ -743,7 +818,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "participle variant (queued vs queue)"
+    "notes": "participle variant (queued vs queue)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "phrase-04",
@@ -762,7 +840,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "trap doc as expected target"
+    "notes": "trap doc as expected target",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "phrase-05",
@@ -809,7 +890,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "content-word variant (stalled vs aborts)"
+    "notes": "content-word variant (stalled vs aborts)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "phrase-07",
@@ -828,7 +912,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "extra unmatched term (client)"
+    "notes": "extra unmatched term (client)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "phrase-08",
@@ -875,7 +962,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "extra unmatched term (quarterly)"
+    "notes": "extra unmatched term (quarterly)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "phrase-10",
@@ -894,7 +984,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "extra unmatched term (release)"
+    "notes": "extra term (release), also matched in line 6",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "cjk-01",
@@ -941,7 +1034,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "compound query; both bigrams must co-occur in the span"
+    "notes": "compound query; both bigrams must co-occur in the span",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "cjk-03",
@@ -988,7 +1084,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "compound query, exact span"
+    "notes": "compound query, exact span",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "cjk-05",
@@ -1035,7 +1134,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "longer query, exact span"
+    "notes": "longer query, exact span",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "cjk-07",
@@ -1082,7 +1184,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "spans the key sentence"
+    "notes": "spans the key sentence",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "cjk-09",
@@ -1101,7 +1206,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "exact toponym"
+    "notes": "exact toponym",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "cjk-10",
@@ -1120,7 +1228,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "longer query, exact span"
+    "notes": "longer query, exact span",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ar-01",
@@ -1167,7 +1278,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "vocalized query; harakat stripped by normalization"
+    "notes": "vocalized query; harakat stripped by normalization",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ar-03",
@@ -1214,7 +1328,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "plural vs singular (مكاتب vs مكتب)"
+    "notes": "plural vs singular (مكاتب vs مكتب)",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ar-05",
@@ -1233,7 +1350,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "exact match"
+    "notes": "exact match",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ar-06",
@@ -1252,7 +1372,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "span covers both query terms (gate + travel); plural handled by morphology"
+    "notes": "span covers both query terms (gate + travel); plural handled by morphology",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ar-07",
@@ -1299,7 +1422,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "definite article + adjective, exact span"
+    "notes": "definite article + adjective, exact span",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "ar-09",
@@ -1346,7 +1472,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "plural vs singular (دروس vs درس); الأسبوع unmatched"
+    "notes": "plural vs singular (دروس vs درس); الأسبوع unmatched",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "mixed-01",
@@ -1365,7 +1494,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "RU query, RU span"
+    "notes": "RU query, RU span",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "mixed-02",
@@ -1384,7 +1516,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "EN query, EN span in mixed doc"
+    "notes": "EN query, EN span in mixed doc",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "mixed-03",
@@ -1403,7 +1538,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "mixed RU+EN query"
+    "notes": "mixed RU+EN query",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "mixed-04",
@@ -1422,7 +1560,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "RU query, RU span"
+    "notes": "RU query, RU span",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "mixed-05",
@@ -1441,7 +1582,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "EN query, RU span: dense-channel probe, negative-control for lexical"
+    "notes": "EN query, RU span: dense-channel probe, negative-control for lexical",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "mixed-06",
@@ -1460,7 +1604,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "mixed CJK+EN query"
+    "notes": "mixed CJK+EN query",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "mixed-07",
@@ -1479,7 +1626,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "EN gloss of CJK term"
+    "notes": "EN gloss of CJK term",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "mixed-08",
@@ -1498,7 +1648,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "EN error string"
+    "notes": "EN error string",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "mixed-09",
@@ -1517,7 +1670,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "RU error string, cognate протокол/protocol"
+    "notes": "RU error string, cognate протокол/protocol",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "mixed-10",
@@ -1536,7 +1692,10 @@
     ],
     "absent": [],
     "source": "synthetic",
-    "notes": "EN variant of the same error"
+    "notes": "EN variant of the same error",
+    "reviewed_by": [
+      "t15-reviewer"
+    ]
   },
   {
     "id": "sem-01",
