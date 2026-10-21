@@ -35,3 +35,58 @@ fn min_publish_age_configured() {
     );
     assert!(cfg.contains("incompatible-publish-age = \"deny\""), "{cfg}");
 }
+
+/// End-to-end `models use --dry-run`: real binary, arg parsing, merge and
+/// render through the CLI — the unit tests only cover `resolve_hybrid_table`
+/// in-process. The dry-run path needs no key and writes nothing.
+#[test]
+fn models_use_dry_run_prints_pinnable_table() {
+    let dir = tempfile::TempDir::new().expect("tmp");
+    let out = Command::new(env!("CARGO_BIN_EXE_docsbase"))
+        .args([
+            "models",
+            "use",
+            "--embedding",
+            "m/e",
+            "--dims",
+            "128",
+            "--dry-run",
+            "--path",
+        ])
+        .arg(dir.path())
+        .output()
+        .expect("run models use");
+    assert!(
+        out.status.success(),
+        "exit status: {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("[hybrid]"),
+        "root-shaped table required for paste-in: {stdout}"
+    );
+    assert!(stdout.contains("m/e"), "{stdout}");
+    assert!(stdout.contains("128"), "{stdout}");
+    assert!(
+        std::fs::read_dir(dir.path()).expect("ls").next().is_none(),
+        "dry-run must not write anything"
+    );
+}
+
+/// Bare `models use` must fail loudly (nothing to set), not silently succeed.
+#[test]
+fn models_use_without_flags_fails() {
+    let dir = tempfile::TempDir::new().expect("tmp");
+    let out = Command::new(env!("CARGO_BIN_EXE_docsbase"))
+        .args(["models", "use", "--path"])
+        .arg(dir.path())
+        .output()
+        .expect("run models use");
+    assert!(
+        !out.status.success(),
+        "bare models use must fail: {:?}",
+        out.status
+    );
+}

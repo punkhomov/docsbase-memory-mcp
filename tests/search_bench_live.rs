@@ -260,6 +260,11 @@ fn cost_cap_default_is_two_dollars() {
     assert_eq!(cost_cap_from_raw(Some("0.5")), (0.5, false));
     assert_eq!(cost_cap_from_raw(Some("junk")), (2.0, true));
     assert_eq!(cost_cap_from_raw(Some("-1")), (2.0, true));
+    // A mandatory cap must not be silently disabled: infinities and NaN
+    // fall back to the default instead of passing through.
+    assert_eq!(cost_cap_from_raw(Some("inf")), (2.0, true));
+    assert_eq!(cost_cap_from_raw(Some("1e999")), (2.0, true));
+    assert_eq!(cost_cap_from_raw(Some("NaN")), (2.0, true));
 }
 
 /// Cost math: free pins cost nothing, paid pins follow the price list,

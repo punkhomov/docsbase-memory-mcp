@@ -283,3 +283,11 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   `EmbeddingCfg::default().dimensions`; R6 gate policy names the enforceable
   entity (required `linux` job, not the test name) in AGENTS/requirements/
   bench-live comment; R7 ar-01 tracked as issue #47 and linked in the ledger.
+- Review fix round 2 (2026-10-21, 3 findings): R8 `bench-live.yml` gains
+  top-level `permissions: contents: read` like the other workflows; R9
+  `cost_cap_from_raw` rejects infinities (`is_finite` — a mandatory cap
+  cannot be disabled by `inf`/`1e999`; NaN already fell through) + pin
+  tests via the pure function; R10 `models use` gets CLI end-to-end coverage
+  in `tests/smoke.rs` (dry-run prints a paste-ready `[hybrid]` table and
+  writes nothing; bare invocation fails loudly) — units covered the merge,
+  E2E covers the wiring.

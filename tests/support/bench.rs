@@ -3241,15 +3241,16 @@ pub fn cost_cap_from_env() -> (f64, bool) {
     cost_cap_from_raw(std::env::var("DOCSBASE_BENCH_COST_CAP_USD").ok().as_deref())
 }
 
-/// Pure policy behind [`cost_cap_from_env`]: explicit non-negative values
-/// pass through, anything else falls back to the $2 default with a warning
-/// flag. Pure so the contract is unit-testable without touching the process
-/// environment.
+/// Pure policy behind [`cost_cap_from_env`]: explicit finite non-negative
+/// values pass through, anything else falls back to the $2 default with a
+/// warning flag. Pure so the contract is unit-testable without touching the
+/// process environment. Infinities are rejected: an unbounded cap would
+/// silently disable the mandatory limit (FR-18).
 #[must_use]
 pub fn cost_cap_from_raw(raw: Option<&str>) -> (f64, bool) {
     match raw {
         Some(value) => match value.parse::<f64>() {
-            Ok(cap) if cap >= 0.0 => (cap, false),
+            Ok(cap) if cap.is_finite() && cap >= 0.0 => (cap, false),
             _ => (2.0, true),
         },
         None => (2.0, true),
