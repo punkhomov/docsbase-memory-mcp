@@ -311,7 +311,22 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   heading `backoff`, mixed-06/phrase-03 unmatched terms unnoted, phrase-06
   wording, mixed-03 cross-script bridge). Verified independently: diff is
   purely mechanical + the phrase-10 fix, `fixtures_are_valid` green again.
-  Pass 2 pending: customer runs a different-model agent over the same 53.
+- Blocker 3 pass 2 complete (2026-10-21, customer-ran different-model
+  agent, tag `t16-reviewer`): 53/53 signed, t15 preserved, 12 notes-only
+  fixes (no path/line/grade changes), gates green. Verified independently:
+  diff is exactly 12 notes swaps + reviewer tags; spot-checks confirm
+  (phrase-10 release-in-line-6, en-morph-05 heading-backoff flag accurate).
+  Pass 2 surfaced systemic stemmer gaps (ar broken plurals, queued/queue,
+  замена splits, cjk-08 split bigram) and two grade-2 disputes (ar-10,
+  mixed-06) — all honestly flagged, notes record them; cases stand as
+  adjudicated, engine gaps are future work (cf. issue #47 pattern).
+  Pass 2 also predicted a HashMismatch red gate — refuted: the gate clones
+  hashes from the baseline (`ReportMeta::from_baseline`), so notes/reviewer
+  edits are quality-invisible and the gate stays green. Reviewed regen per
+  FR-15 run anyway to refresh the stale `queries_hash` provenance (+0 new /
+  -0 fixed, no accept needed — first real exercise of the blocker-4 guard):
+  baseline diff is hash + sub-ms latency noise + timestamps only, quality
+  untouched. Full suite: 524 default / 555 hybrid.
 - Blocker 4 implemented as option A (2026-10-21, customer-approved):
   `check_known_growth` (pure, unit-tested: steady/healed/bootstrap pass,
   unaccepted growth fails naming the case) + `regenerate_from_fixtures`

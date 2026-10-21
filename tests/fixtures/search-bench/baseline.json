@@ -3,13 +3,13 @@
   "fixture_version": 1,
   "corpus_hash": "d0b29ab5ed44ddd0bbccd92558d19ecd5d60ecace6c6ad4c2bf24401bdc290d0",
   "legacy_corpus_hash": "4390565d463332c47ae8110e97dc910b772f5ee1796a557b2ad57397152de20b",
-  "queries_hash": "9cc2b072d5b6a40c3d6dddbcf77b0da774a0c168ab117dcce0c162ad8184d706",
+  "queries_hash": "897acfbdac8f73347145a763205a42f6a7e886d11c8533456a15fc486b8cad4a",
   "model_pins": [
     "openrouter/nvidia/nemotron-3-embed-1b:free@d2048@l2",
     "openrouter/nvidia/llama-nemotron-rerank-vl-1b-v2:free"
   ],
-  "generated_at": "1792565807",
-  "index_build_ms": 266.5906,
+  "generated_at": "1792604283",
+  "index_build_ms": 247.41989999999998,
   "configs": {
     "Bm25": {
       "cases": [
@@ -15318,8 +15318,8 @@
         }
       },
       "latency": {
-        "p50_ms": 0.8465,
-        "p95_ms": 1.1421
+        "p50_ms": 0.8490000000000001,
+        "p95_ms": 1.14358
       }
     },
     "Bm25Rerank": {
@@ -30629,8 +30629,8 @@
         }
       },
       "latency": {
-        "p50_ms": 0.9616,
-        "p95_ms": 1.6400599999999999
+        "p50_ms": 0.9517,
+        "p95_ms": 1.56378
       }
     },
     "Rrf": {
@@ -52172,8 +52172,8 @@
         }
       },
       "latency": {
-        "p50_ms": 12.5649,
-        "p95_ms": 13.03126
+        "p50_ms": 12.624,
+        "p95_ms": 13.15762
       }
     },
     "RrfRerank": {
@@ -73715,8 +73715,8 @@
         }
       },
       "latency": {
-        "p50_ms": 12.9664,
-        "p95_ms": 13.41776
+        "p50_ms": 13.3339,
+        "p95_ms": 13.98088
       }
     }
   },
