@@ -301,7 +301,11 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   stderr note for `:free` routes (FR-33 condition now met in docs + CLI).
 - Blocker 3 deferred (customer decision): FR-2 `reviewed_by` ≥1 for ordinary
   cases stays unenforced; risk-based validator (≥2 critical/absent) stands.
-- Blocker 4 deferred (customer decision): regenerate may still launder new
-  rank-1 traps into known-failures; technical guard (old known-set +
-  accept flag + regression test) pending; FR-15 process guard is the only
-  protection meanwhile — regenerate deliberately and diff known Failures.
+- Blocker 4 implemented as option A (2026-10-21, customer-approved):
+  `check_known_growth` (pure, unit-tested: steady/healed/bootstrap pass,
+  unaccepted growth fails naming the case) + `regenerate_from_fixtures`
+  takes `accept_new_known`, diffs against the previous `baseline.json` and
+  bails on new failures; the manual test reads
+  `DOCSBASE_BENCH_ACCEPT_NEW_KNOWN=1` and prints the known-set diff always.
+  FR-15 carries the technical guard. A regression can no longer be greened
+  through regenerate without the explicit human accept.

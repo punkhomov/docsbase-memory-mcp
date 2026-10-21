@@ -2995,9 +2995,18 @@ pub fn max_semantic_jaccard(
 /// discrimination and hashes (FR-13, FR-15). Writes nothing; the ignored
 /// `regenerate_baseline` test persists the result deliberately.
 ///
+/// `accept_new_known` must be true to legalize fresh failures outside the
+/// previous known set (blocker 4): without it, a regression smuggled into a
+/// regenerate fails here instead of turning green. The bootstrap (no
+/// previous `baseline.json`) accepts whatever the first run produces.
+///
 /// # Errors
-/// Bails on ambiguous pins, missing fixtures, or run failures.
-pub fn regenerate_from_fixtures(root: &std::path::Path) -> anyhow::Result<Baseline> {
+/// Bails on ambiguous pins, missing fixtures, run failures, or unaccepted
+/// known-set growth.
+pub fn regenerate_from_fixtures(
+    root: &std::path::Path,
+    accept_new_known: bool,
+) -> anyhow::Result<Baseline> {
     let fixtures = Fixtures::load(root).context("load fixtures")?;
     let embed_pins = discover_pins(&root.join("vectors"), true)?;
     let rerank_pins = discover_pins(&root.join("rerank"), false)?;
@@ -3069,7 +3078,12 @@ pub fn regenerate_from_fixtures(root: &std::path::Path) -> anyhow::Result<Baseli
     // Future runs fail only on NEW failures; fixed ones surface as
     // improvements. The file stays an honest snapshot, never forced green.
     let self_report = build_report(&baseline, None);
-    baseline.known_failures = gate_failures(&self_report, &baseline);
+    let fresh_known = gate_failures(&self_report, &baseline);
+    let old_known = load_baseline(&root.join("baseline.json"))
+        .map(|previous| previous.known_failures)
+        .unwrap_or_default();
+    check_known_growth(&old_known, &fresh_known, accept_new_known)?;
+    baseline.known_failures = fresh_known;
     Ok(baseline)
 }
 
@@ -3093,6 +3107,33 @@ pub fn gate_new_failures(current: &[Failure], known: &[Failure]) -> (Vec<Failure
     new.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
     fixed.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
     (new, fixed)
+}
+
+/// Regenerate guard (blocker 4, FR-15): fresh failures outside the old known
+/// set are a laundering attempt until explicitly accepted. Without accept,
+/// new failures fail loudly with their case ids; healed failures always
+/// pass (DELTA-3 fix→regen). An empty old set is the first bootstrap — there
+/// is nothing to compare against; reaching it by deleting `baseline.json`
+/// is itself the visible destructive act.
+pub fn check_known_growth(
+    old_known: &[Failure],
+    fresh_known: &[Failure],
+    accept_new: bool,
+) -> anyhow::Result<()> {
+    if old_known.is_empty() {
+        return Ok(());
+    }
+    let (new, _) = gate_new_failures(fresh_known, old_known);
+    if new.is_empty() || accept_new {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "regenerate refuses {} unaccepted new known-failure(s): {:?} (re-run with DOCSBASE_BENCH_ACCEPT_NEW_KNOWN=1 to legalize deliberately)",
+        new.len(),
+        new.iter()
+            .map(|failure| failure.case_id.clone())
+            .collect::<Vec<_>>()
+    )
 }
 
 /// Lists recorded model pins: subdirectories of `vectors/`, `*.json` files

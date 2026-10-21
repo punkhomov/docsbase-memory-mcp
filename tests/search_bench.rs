@@ -2023,6 +2023,34 @@ fn gate_tolerates_known_failures_but_not_new_ones() {
     assert!(new.is_empty(), "gate output must tolerate itself");
 }
 
+/// Regenerate must not launder regressions into known-failures (blocker 4):
+/// fresh failures outside the old known set fail without explicit accept.
+#[test]
+fn regenerate_refuses_unaccepted_known_growth() {
+    use support::bench::{Failure, FailureKind, check_known_growth};
+    let trap = |id: &str| Failure {
+        config: Some(BenchConfigId::Bm25),
+        slice: Some("hard_negative".to_owned()),
+        case_id: Some(id.to_owned()),
+        kind: FailureKind::ForbiddenHit,
+        expected: "no forbidden hit".to_owned(),
+        actual: "forbidden_hit = true".to_owned(),
+    };
+    let old = vec![trap("hn-99")];
+    // No growth: always fine.
+    check_known_growth(&old, &[trap("hn-99")], false).expect("steady state");
+    // Healed trap: fine, reported as fixed elsewhere.
+    check_known_growth(&old, &[], false).expect("healed trap");
+    // New trap without accept: refuse, naming the case.
+    let err = check_known_growth(&old, &[trap("hn-99"), trap("hn-100")], false)
+        .expect_err("unaccepted growth must fail");
+    assert!(err.to_string().contains("hn-100"), "{err}");
+    // Same growth with explicit accept: allowed.
+    check_known_growth(&old, &[trap("hn-99"), trap("hn-100")], true).expect("accepted");
+    // Bootstrap (no old baseline): anything goes once.
+    check_known_growth(&[], &[trap("hn-99")], false).expect("bootstrap");
+}
+
 #[test]
 fn gate_allows_improvement_without_baseline_update() {
     let base = toy_baseline();
@@ -2609,7 +2637,10 @@ fn metrics_match_baseline() {
 }
 
 /// Regenerates `baseline.json` from the recorded fixtures (manual, T11 runs
-/// it after legacy parity; T12 re-runs after hardening).
+/// it after legacy parity; T12 re-runs after hardening). Fresh failures
+/// outside the previous known set refuse to persist unless
+/// `DOCSBASE_BENCH_ACCEPT_NEW_KNOWN=1` (blocker 4): a regression smuggled
+/// into a regenerate fails here instead of turning green.
 #[test]
 #[ignore = "manual: rewrites baseline.json; run only deliberately (FR-15)"]
 fn regenerate_baseline() {
@@ -2619,7 +2650,24 @@ fn regenerate_baseline() {
         parity.matches,
         "baseline requires green legacy parity (FR-15)"
     );
-    let baseline = support::bench::regenerate_from_fixtures(&root).expect("regenerate");
+    let accept_new =
+        std::env::var("DOCSBASE_BENCH_ACCEPT_NEW_KNOWN").is_ok_and(|value| value == "1");
+    let old_known = support::bench::load_baseline(&root.join("baseline.json"))
+        .map(|previous| previous.known_failures)
+        .unwrap_or_default();
+    let baseline = support::bench::regenerate_from_fixtures(&root, accept_new).expect("regenerate");
+    let (new, fixed) = support::bench::gate_new_failures(&baseline.known_failures, &old_known);
+    println!(
+        "known-set diff vs previous baseline: +{} new, -{} fixed",
+        new.len(),
+        fixed.len()
+    );
+    for failure in &new {
+        println!("  new known: {failure:?}");
+    }
+    for failure in &fixed {
+        println!("  fixed: {failure:?}");
+    }
     let failures = support::bench::discrimination_failures(&baseline.discrimination);
     assert!(
         failures.is_empty(),
