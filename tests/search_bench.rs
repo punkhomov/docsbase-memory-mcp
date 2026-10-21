@@ -335,7 +335,8 @@ fn validator_rejects_ordinary_case_without_reviewer() {
         "notes": "t1",
     }]);
     write_tree(tmp.path(), &docs, &queries);
-    let err = load_validated(tmp.path(), &["ru_morph"]).expect_err("ordinary case needs >=1 reviewer (FR-2)");
+    let err = load_validated(tmp.path(), &["ru_morph"])
+        .expect_err("ordinary case needs >=1 reviewer (FR-2)");
     assert!(err.to_string().contains("review-03"), "{err}");
 }
 

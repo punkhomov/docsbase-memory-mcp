@@ -371,10 +371,7 @@ fn check_notes_reviewers(cases: &[QueryCase]) -> anyhow::Result<()> {
             );
         }
         if case.reviewed_by.is_empty() {
-            anyhow::bail!(
-                "case {:?}: needs >=1 reviewer (FR-2), found none",
-                case.id,
-            );
+            anyhow::bail!("case {:?}: needs >=1 reviewer (FR-2), found none", case.id,);
         }
         let needs_notes = critical || case.expected.iter().any(|hit| hit.grade == 1);
         if needs_notes && case.notes.trim().is_empty() {
