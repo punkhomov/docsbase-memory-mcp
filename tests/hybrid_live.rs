@@ -8,8 +8,8 @@
 //!
 //! The measurement is a report, not a gate (NFR-1): it prints hit@3 and
 //! nDCG@3 for BM25 vs BM25+rerank over a representative subset of the
-//! search-quality golden cases (kept in sync by hand with
-//! `tests/search_quality.rs::CASES`).
+//! search-bench legacy cases (kept in sync by hand with
+//! `tests/fixtures/search-bench/legacy.json`).
 
 use std::fs;
 use std::path::Path;
@@ -73,10 +73,17 @@ fn live_smoke_embed_and_rerank() {
         ];
         let vectors = embedder.embed(&texts).expect("live embed");
         assert_eq!(vectors.len(), 3);
+        // Width follows the default config, never a hardcoded constant, so
+        // the smoke test survives model rotations (the 1024-pin rot is why
+        // this used to fail after the free-defaults switch).
+        let dims = docsbase_memory::hybrid::EmbeddingCfg::default().dimensions as usize;
         for vector in &vectors {
-            assert_eq!(vector.len(), 1024);
+            assert_eq!(vector.len(), dims);
             let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-            assert!((norm - 1.0).abs() < 1e-3, "qwen3 vectors are normalized");
+            assert!(
+                (norm - 1.0).abs() < 1e-3,
+                "default embedder vectors are L2-normalized"
+            );
         }
 
         let reranker = docsbase_memory::hybrid::openrouter::OpenRouterReranker::new(

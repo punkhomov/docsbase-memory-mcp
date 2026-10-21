@@ -24,7 +24,9 @@ OpenRouter, плюс opt-in RRF-fusion по кэшу векторов — `ranki
 включаются явно per-project/per-request, поставляются за feature-флагом
 `hybrid-remote` и требуют `OPENROUTER_API_KEY`; дефолтная сборка остаётся
 полностью офлайн и не делает молчаливого fallback
-(см. [`docs/CONFIG.md`](docs/CONFIG.md)).
+(см. [`docs/CONFIG.md`](docs/CONFIG.md)). Дефолтные пины моделей —
+бесплатные маршруты OpenRouter: могут учиться на промптах и меняются
+ежемесячно; платные пины — через `docsbase models use`.
 
 Поддерживаемые платформы: **Linux x86_64** (статический бинарь),
 **Windows x64** (`.exe`) и **macOS 12+ на Apple Silicon**. Intel-маки вне
@@ -184,8 +186,9 @@ Linux/macOS vs Windows named pipe). Публичные контракты (MCP-�
 | Все | `ё`→`е` (с сохранением регистра), width folding | — | `ёлка` находит `елка` |
 | Идентификаторы | не стеммятся (`_`, CamelCase, ALL_CAPS, цифры) | точные мульти-токены | `assessment_plan_id`, `MAX_FRAME_BYTES` |
 
-Замеры на SQ18 (directional; источник истины:
-[`tests/fixtures/search-quality/baseline.json`](tests/fixtures/search-quality/baseline.json)):
+Замеры на SQ18 (directional; замороженная копия хранится как
+[`tests/fixtures/search-bench/legacy-baseline.json`](tests/fixtures/search-bench/legacy-baseline.json)
+после вывода search-quality harness):
 все шесть golden-классов hit_rate/ndcg 1.0; p95 поиска ≈ 0.6 мс (латиница) и
 ≈ 5 мс (CJK) на 50k чанков; CJK-индекс ≈ 0.8× размера текста корпуса.
 

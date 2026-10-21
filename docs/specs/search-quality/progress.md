@@ -104,3 +104,8 @@ Task SQ19: Ruling: выжиг deferred-миноров — исправлено: 
 Task SQ19: Ruling: оставлено с обоснованием: naming/tolerance SQ1–SQ2 (осознанный дрейф M3), Unicode-границы SQ4 (осознанно), SQ4-gap недостижим (проба: heading всегда сливается merge_heading_only в следующий piece), SQ4 test hygiene (покрытие по всем токенам уже есть, cap-ассерты в chunker-тестах), скрипт-пробелы/halfwidth/dotless ı SQ9 (документированные ограничения), SQ7 длинные alnum-раны стеммятся до лимита emit (безвредно), headroom бюджетов SQ12, defensive-ветки SQ13/SQ17, flake-3 (Windows-репро).
 Task SQ19: Ruling: split_script_runs для letter-less входа возвращает один прикреплённый ран (не пустой Vec) — так цифровые токены вообще эмитятся; запинено тестом.
 Task SQ19: complete (commit 0bff60e; full suite 374 passed / 0 failed / 8 ignored; baseline delta — только trailing newline)
+Task RETIRE (2026-10-21): search-benchmark T11+T12 complete with green
+legacy parity (12/12 hit/absent match). The old harness
+(`tests/search_quality.rs` + `tests/fixtures/search-quality/baseline.json`)
+is retired; the frozen corpus stays for `search_golden`. Successor spec:
+`docs/specs/search-benchmark/` (requirements, design, tasks, progress).

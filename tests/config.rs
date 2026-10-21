@@ -118,10 +118,10 @@ fn hybrid_bool_shorthand_enables_stage_defaults() {
         embedding.model,
         docsbase_memory::hybrid::config::DEFAULT_EMBEDDING_MODEL
     );
-    assert_eq!(embedding.dimensions, 1024);
+    assert_eq!(embedding.dimensions, 2048);
     assert!(embedding.normalize);
     let reranker = config.hybrid_cfg.reranker.expect("reranker stage");
-    assert_eq!(reranker.model, "cohere/rerank-v3.5");
+    assert_eq!(reranker.model, "nvidia/llama-nemotron-rerank-vl-1b-v2:free");
     assert_eq!(reranker.window, 50);
 }
 

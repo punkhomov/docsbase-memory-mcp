@@ -1,0 +1,4823 @@
+[
+  {
+    "id": "ru-morph-01",
+    "query": "заменой чанков памяти",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/memory-replace.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: instrumental vs nominative (заменой vs замена)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ru-morph-02",
+    "query": "о замене кэша",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/memory-replace.md",
+        "lines": [
+          13,
+          13
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: prepositional vs genitive (замене vs замены); genitive singular vs plural (кэша vs кэши)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ru-morph-03",
+    "query": "замена чанков памяти",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/memory-replace.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "ru/oil-change.md",
+        "reason": "shares lemma замена, disjoint topic: engine oil vs memory chunks"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "trap: lexical match on замена, wrong domain",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "ru-morph-04",
+    "query": "замена масла в двигателе",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/oil-change.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "ru/memory-replace.md",
+        "reason": "shares lemma замена, disjoint topic: memory chunks vs engine oil"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of ru-morph-03",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "ru-morph-05",
+    "query": "залить свежее масло",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/oil-change.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: infinitive vs imperative/finite (залить vs залейте/заливают)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ru-morph-06",
+    "query": "настройке сокета",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/socket-setup.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: dative/prepositional vs genitive (настройке vs настройки)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ru-morph-07",
+    "query": "сокетом демона",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/socket-setup.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: instrumental vs accusative (сокетом vs сокет)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ru-morph-08",
+    "query": "демонов",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/socket-setup.md",
+        "lines": [
+          6,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: genitive plural vs nominative singular (демонов vs демон)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ru-morph-09",
+    "query": "таймаутам сокета",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/socket-timeout.md",
+        "lines": [
+          5,
+          8
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: dative plural vs nominative singular (таймаутам vs таймаут); span covers both query terms",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ru-morph-10",
+    "query": "токенизатором корпуса",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/tokenizer-tuning.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: instrumental vs accusative (токенизатором vs токенизатор); genitive vs prepositional (корпуса vs корпусе)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ru-morph-11",
+    "query": "повторных попыток",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/batch-retry.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: adjective + genitive plural vs nominative (повторных попыток vs повторная попытка)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ru-morph-12",
+    "query": "маске файла",
+    "class": "ru_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/grep-patterns.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: dative vs nominative (маске vs маска)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "en-morph-01",
+    "query": "evicting stale entries",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/chunk-eviction.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: gerund vs finite/participial forms (evicting vs evicts/evicted)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "en-morph-02",
+    "query": "eviction thresholds",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/chunk-eviction.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: plural vs singular (thresholds vs threshold)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "en-morph-03",
+    "query": "tenant eviction notice",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/eviction-notice.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "en/chunk-eviction.md",
+        "reason": "shares eviction/evicted, disjoint topic: legal tenancy vs cache eviction"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "trap: lexical match on eviction, wrong domain",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "en-morph-04",
+    "query": "retrying failed batches",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/retry-policy.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: gerund vs finite/participial forms (retrying vs retried)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "en-morph-05",
+    "query": "retries with backoff",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/retry-policy.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: plural vs singular (retries vs retry); backoff is matched in the heading (line 8) and line 5, outside the cited span",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "en-morph-06",
+    "query": "binding daemon sockets",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/socket-bind.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: gerund + plural vs imperative + singular (binding sockets vs bind socket)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "en-morph-07",
+    "query": "bound socket peers",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/socket-bind.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: participle vs infinitive (bound vs bind)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "en-morph-08",
+    "query": "exceeded deadlines",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/query-timeout.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morphology: past participle vs gerund/noun (exceeded vs exceeding/deadline)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "en-morph-09",
+    "query": "stdio MCP server",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/frozen-mcp.md",
+        "lines": [
+          3,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "frozen-real",
+    "notes": "frozen copy of docs/MCP.md; prose match on stdio MCP server",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "en-morph-10",
+    "query": "indexing a different folder",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/frozen-quickstart.md",
+        "lines": [
+          32,
+          35
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "frozen-real",
+    "notes": "frozen copy of docs/QUICKSTART.md; stemming (indexing vs Index) + synonym without doc support (folder)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "identifier-01",
+    "query": "WATCH_BATCH_SIZE",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/watch-policy.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/watch-batch-limit.md",
+        "reason": "different constant: LIMIT answers another setting, shares WATCH_BATCH prefix"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "trap: near-duplicate identifier with shared prefix",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "identifier-02",
+    "query": "WATCH_DEBOUNCE_MS",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/watch-policy.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "exact identifier match",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "identifier-03",
+    "query": "WATCH_BATCH_LIMIT",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/watch-batch-limit.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/watch-policy.md",
+        "reason": "different constant: SIZE answers another setting, shares WATCH_BATCH prefix"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of identifier-01",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "identifier-04",
+    "query": "MAX_FRAME_BYTES",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/frame-budget.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/frame-budget-legacy.md",
+        "reason": "different constant: singular historic name, must not match the current plural"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "trap: singular vs plural historic name",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "identifier-05",
+    "query": "FRAME_BUDGET_MS",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/frame-budget.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "exact identifier match",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "identifier-06",
+    "query": "EMBEDDING_MODEL",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/embed-model.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/embed-config.md",
+        "reason": "different constant: deprecated alias without dimensions, shares EMBED prefix"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "trap: truncated alias vs full name",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "identifier-07",
+    "query": "EMBED_MODEL",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/embed-config.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/embed-model.md",
+        "reason": "different constant: full name answers another setting, shares EMBED prefix"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of identifier-06",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "identifier-08",
+    "query": "OPENROUTER_API_KEY",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/provider-key.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "exact identifier match",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "identifier-09",
+    "query": "docsbase search",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/cli-search.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "CLI command match",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "identifier-10",
+    "query": "search_docs",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/frozen-mcp.md",
+        "lines": [
+          24,
+          24
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "frozen-real",
+    "notes": "frozen copy of docs/MCP.md; exact tool-name match",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "phrase-01",
+    "query": "\"merge queue\"",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/merge-queue.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "phrases/queue-fairness.md",
+        "reason": "shares merge+queue apart, different concept: fairness vs queue policy"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "exact quoted phrase; trap shares both terms non-adjacently",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "phrase-02",
+    "query": "merging the queue",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/merge-queue.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "inflected variant (merging vs merge)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "phrase-03",
+    "query": "queued merge builds",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/merge-queue.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "participle variant (queued vs queue); extra unmatched term (builds)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "phrase-04",
+    "query": "fair queue ordering",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/queue-fairness.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "trap doc as expected target",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "phrase-05",
+    "query": "\"read timeout\"",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/read-timeout.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "phrases/timeout-read.md",
+        "reason": "shares read+timeout apart, different concept: config reload vs abort"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "exact quoted phrase; trap shares both terms reversed",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "phrase-06",
+    "query": "stalled connections timeout",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/read-timeout.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "all query content words occur in the span (stalled, connections, timeout); doc adds the verb 'aborts'",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "phrase-07",
+    "query": "client read timeout",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/read-timeout.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "extra term (client) matched in line 6; span covers all query terms",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "phrase-08",
+    "query": "\"plan review\"",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/plan-review.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "phrases/review-plan.md",
+        "reason": "shares plan+review apart, different concept: migration checklist vs release review"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "exact quoted phrase; trap shares both terms apart",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "phrase-09",
+    "query": "quarterly plan review",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/plan-review.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "extra unmatched term (quarterly)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "phrase-10",
+    "query": "release plan review",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/plan-review.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "extra term (release), also matched in line 6",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "cjk-01",
+    "query": "新年",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/newyear.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "cjk/newspaper.md",
+        "reason": "shares 新 unigram, disjoint: new year vs newspaper"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "unigram overlap only at bigram tokenization",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "cjk-02",
+    "query": "新年の抱負",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/newyear.md",
+        "lines": [
+          8,
+          8
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "compound query; content bigrams 新年 and 抱負 both occur in the exact span",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "cjk-03",
+    "query": "新聞",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/newspaper.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "cjk/newyear.md",
+        "reason": "shares 新 unigram, disjoint: newspaper vs new year"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of cjk-01",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "cjk-04",
+    "query": "新聞記事",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/newspaper.md",
+        "lines": [
+          8,
+          8
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "compound query, exact span",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "cjk-05",
+    "query": "地下鉄",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/subway.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "cjk/basement.md",
+        "reason": "shares 地下 bigrams, disjoint: subway vs basement"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "shared bigram prefix, disjoint topics",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "cjk-06",
+    "query": "地下鉄の駅",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/subway.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "longer query, exact span",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "cjk-07",
+    "query": "地下室",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/basement.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "cjk/subway.md",
+        "reason": "shares 地下 bigrams, disjoint: basement vs subway"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of cjk-05",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "cjk-08",
+    "query": "地下室の鍵",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/basement.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "span covers both terms across two sentences (basement on line 5, key on line 6)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "cjk-09",
+    "query": "北京",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/beijing.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "exact toponym",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "cjk-10",
+    "query": "北京の故宮",
+    "class": "cjk",
+    "k": 10,
+    "expected": [
+      {
+        "path": "cjk/beijing.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "longer query, exact span",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ar-01",
+    "query": "مكتبة",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/library.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "ar/office.md",
+        "reason": "shares root ك-ت-ب (مكتب office), disjoint: library vs office"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "same-root trap, office vs library",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "ar-02",
+    "query": "مَكتَبة",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/library.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "vocalized query; harakat stripped by normalization",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ar-03",
+    "query": "مكتب",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/office.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "ar/library.md",
+        "reason": "shares root ك-ت-ب (مكتبة library), disjoint: office vs library"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of ar-01",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "ar-04",
+    "query": "مكاتب",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/office.md",
+        "lines": [
+          8,
+          8
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "plural vs singular (مكاتب vs مكتب)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ar-05",
+    "query": "بوابة",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/gate.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "exact match",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ar-06",
+    "query": "بوابات السفر",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/gate.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "span covers both query terms (gate + travel); plural vs singular (بوابات vs بوابة); the Arabic stemmer does not bridge the plural, السفر carries the lexical match",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ar-07",
+    "query": "مدرسة",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/school.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "ar/lesson.md",
+        "reason": "shares root د-ر-س (درس lesson), disjoint: school day vs a lesson"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "same-root trap, lesson vs school",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "ar-08",
+    "query": "المدرسة الابتدائية",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/school.md",
+        "lines": [
+          8,
+          8
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "definite article + adjective, exact span",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "ar-09",
+    "query": "درس",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/lesson.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "ar/school.md",
+        "reason": "shares root د-ر-س (مدرسة school), disjoint: a lesson vs school day"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of ar-07",
+    "reviewed_by": [
+      "t3-author",
+      "t3-adjudicator"
+    ]
+  },
+  {
+    "id": "ar-10",
+    "query": "دروس الأسبوع",
+    "class": "arabic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ar/lesson.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "plural vs singular (دروس vs درس); الأسبوع unmatched",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "mixed-01",
+    "query": "откат деплоя",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/deploy-guide.md",
+        "lines": [
+          8,
+          8
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU query, RU span",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "mixed-02",
+    "query": "deploy the project",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/deploy-guide.md",
+        "lines": [
+          5,
+          5
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN query, EN span in mixed doc",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "mixed-03",
+    "query": "docsbase index для деплоя",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/deploy-guide.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "mixed RU+EN query; line 5 carries the RU деплоя sense via EN deploy (line 8 is rollback, a different operation)",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "mixed-04",
+    "query": "флаги конфигурации",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/config-flags.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU query, RU span",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "mixed-05",
+    "query": "config flags",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/config-flags.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN query, RU span: dense-channel probe, negative-control for lexical",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "mixed-06",
+    "query": "地下鉄 station",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/cjk-glossary.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "mixed CJK+EN query; station is unmatched (the doc glosses 地下鉄 as 'subway train', not 'station')",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "mixed-07",
+    "query": "subway train in Japanese",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/cjk-glossary.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN gloss of CJK term",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "mixed-08",
+    "query": "admission error",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/api-errors.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN error string",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "mixed-09",
+    "query": "ошибка протокола",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/api-errors.md",
+        "lines": [
+          4,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU error string, cognate протокол/protocol",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "mixed-10",
+    "query": "protocol error",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "mixed/api-errors.md",
+        "lines": [
+          4,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN variant of the same error",
+    "reviewed_by": [
+      "t15-reviewer",
+      "t16-reviewer"
+    ]
+  },
+  {
+    "id": "sem-01",
+    "query": "memory cleanup interruptions",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/gc-pauses.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: no shared stems with span; negative-control for bm25",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-02",
+    "query": "pause time spikes",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/gc-pauses.md",
+        "lines": [
+          6,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "near-match control within the same doc",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-03",
+    "query": "who takes over coordination duties",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/leader-election.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "shares coordinator stem; otherwise disjoint; negative-control for bm25",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-04",
+    "query": "coordinator failover",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/leader-election.md",
+        "lines": [
+          6,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "failover vs failure stems differ",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-05",
+    "query": "slowing down abusive clients",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/rate-limits.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: slowing/throttling and clients/backend terminology differ",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-06",
+    "query": "request quota exhaustion",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/rate-limits.md",
+        "lines": [
+          4,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: exhaustion vs exceeding",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-07",
+    "query": "archiving old log files",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/log-rotation.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "old/stale differ; cold storage unmatched",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-08",
+    "query": "log retention policy",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/log-rotation.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: retention vs Retention span",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-09",
+    "query": "how to tell the daemon froze",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/health-checks.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: detection asked, span describes probe failure",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-10",
+    "query": "readiness gate checks",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/health-checks.md",
+        "lines": [
+          4,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "near-verbatim gates, distinct query terms",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-11",
+    "query": "emergency copies of the search data",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/backup-restore.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: zero shared stems with span; copies/snapshots and emergencies/disaster differ",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-12",
+    "query": "point-in-time restore",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/backup-restore.md",
+        "lines": [
+          4,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "restore vs restores; point-in-time unmatched",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-13",
+    "query": "gradual rollout toggles",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/feature-flags.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "toggles unmatched; rollout shared",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "sem-14",
+    "query": "kill switch activation",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/feature-flags.md",
+        "lines": [
+          4,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "activation unmatched; kill switch shared",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-01",
+    "query": "unix socket path",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/unix-socket.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/windows-pipe.md",
+        "reason": "shares daemon/connect/config phrasing, disjoint: unix socket vs named pipe"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "socket-path trap vs named pipe",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-02",
+    "query": "windows named pipe",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/windows-pipe.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/unix-socket.md",
+        "reason": "shares daemon/connect/config phrasing, disjoint: named pipe vs unix socket"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of hard-01",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-03",
+    "query": "install with curl",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/install-curl.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/install-wget.md",
+        "reason": "shares install/download/verify terms, disjoint: curl vs wget"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "downloader trap",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-04",
+    "query": "install with wget",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/install-wget.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/install-curl.md",
+        "reason": "shares install/download/verify terms, disjoint: wget vs curl"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of hard-03",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-05",
+    "query": "EMBEDDING_MODELS",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/embedding-models.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/embed-model.md",
+        "reason": "shares EMBEDDING_MODEL prefix, disjoint: model list vs single model"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "plural-listing trap",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-06",
+    "query": "supported provider models",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/embedding-models.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "prose variant of hard-05, no trap",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-07",
+    "query": "default port",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/default-port.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/port-env.md",
+        "reason": "shares port/default terms, disjoint: fixed default vs env override"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "default-vs-override trap",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-08",
+    "query": "PORT environment variable",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/port-env.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/default-port.md",
+        "reason": "shares port/default terms, disjoint: env override vs fixed default"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of hard-07",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-09",
+    "query": "timeout milliseconds",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/timeout-ms.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/timeout-sec.md",
+        "reason": "shares timeout/unit terms, disjoint: ms counting vs seconds display"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "unit trap",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-10",
+    "query": "timeout in seconds",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/timeout-sec.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/timeout-ms.md",
+        "reason": "shares timeout/milliseconds terms, disjoint: seconds display vs ms counting"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of hard-09",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-11",
+    "query": "debug logging",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/log-debug.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/log-trace.md",
+        "reason": "shares log/level/output terms, disjoint: debug vs trace"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "log-level trap",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-12",
+    "query": "trace logging",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/log-trace.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/log-debug.md",
+        "reason": "shares log/level/output terms, disjoint: trace vs debug"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of hard-11",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-13",
+    "query": "config file",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/config-toml.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/config-json.md",
+        "reason": "shares config/keys terms, disjoint: current TOML doc vs legacy JSON doc"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "format trap",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "hard-14",
+    "query": "json config",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/config-json.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/config-toml.md",
+        "reason": "shares config/keys terms, disjoint: legacy JSON doc vs current TOML doc"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "mirror trap of hard-13",
+    "reviewed_by": [
+      "t5-author",
+      "t5-adjudicator"
+    ]
+  },
+  {
+    "id": "mr-01",
+    "query": "экспоненциальная задержка с джиттером для повторов http",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/retry-http.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/retry-queue.md",
+        "lines": [
+          22,
+          23
+        ],
+        "grade": 1
+      },
+      {
+        "path": "ru/batch-retry.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "multi: три политики повторов; primary — http. grade-1: та же сетка задержек для очередей (минута/час) и политика батчей без джиттера.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-02",
+    "query": "очередь мёртвых писем poison сообщения",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/retry-queue.md",
+        "lines": [
+          11,
+          12
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/retry-http.md",
+        "lines": [
+          42,
+          43
+        ],
+        "grade": 1
+      },
+      {
+        "path": "multi/retry-queue.md",
+        "lines": [
+          16,
+          18
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "primary — DLQ/poison в очередях. grade-1: разделение политик http/очередь — смежный вопрос, не про мёртвые письма. grade-1 [16,18]: детали poison-сообщений без DLQ — отвечает на poison-половину, требует соседа про очередь.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-03",
+    "query": "идемпотентная обработка повторных сообщений ключ",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/retry-queue.md",
+        "lines": [
+          28,
+          30
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/retry-http.md",
+        "lines": [
+          31,
+          33
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "два primary: обработчик очереди (ключ в журнале) и http-приёмник (таблица ключей); разные транспорты, оба самодостаточны.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-04",
+    "query": "таймаут установки tcp соединения хендшейк syn",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/timeout-connect.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      },
+      {
+        "path": "ru/socket-timeout.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 1
+      },
+      {
+        "path": "multi/timeout-connect.md",
+        "lines": [
+          15,
+          16
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/timeout-sec.md",
+        "reason": "единицы отображения таймаутов в CLI, а не установка соединения"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "primary — фаза хендшейка. grade-1: общий таймаут сокета без деталей фаз. grade-1 [15,16]: ретрансмит SYN — деталь фазы, не определение скоупа хендшейка.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-05",
+    "query": "таймаут чтения потоковых ответов sse heartbeat",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/timeout-read.md",
+        "lines": [
+          11,
+          12
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/timeout-connect.md",
+        "lines": [
+          41,
+          42
+        ],
+        "grade": 1
+      },
+      {
+        "path": "multi/timeout-read.md",
+        "lines": [
+          16,
+          17
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/timeout-ms.md",
+        "reason": "единицы измерения таймаутов, а не поведение при чтении"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "primary — паузы между событиями SSE. grade-1: таймаут connect — смежная фаза до чтения.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-06",
+    "query": "общий бюджет повторных попыток дедлайн запроса",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/retry-http.md",
+        "lines": [
+          37,
+          38
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/retry-queue.md",
+        "lines": [
+          45,
+          47
+        ],
+        "grade": 1
+      },
+      {
+        "path": "multi/retry-http.md",
+        "lines": [
+          21,
+          22
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/timeout-sec.md",
+        "reason": "единицы отображения таймаутов, а не бюджет попыток"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "primary — бюджет попыток против клиентского таймаута. grade-1: согласование бюджетов очередь+http, частный случай. grade-1 [21,22]: кап пять попыток — компонент бюджета, не дедлайн.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-07",
+    "query": "как выбрать уровень логирования error warn info",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/log-levels.md",
+        "lines": [
+          33,
+          35
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "single primary: рубрика выбора уровня. Смежных русскоязычных документов по выбору уровней в корпусе нет.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-08",
+    "query": "json схема логов обязательные поля request id",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/log-format.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/log-levels.md",
+        "lines": [
+          17,
+          18
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/config-json.md",
+        "reason": "формат legacy-конфига docsbase.json, а не схема логов"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "primary — обязательные поля записи. grade-1: уровень info vs формат — смежный вопрос операций.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-09",
+    "query": "can debug logging be enabled in production",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/log-debug.md",
+        "lines": [
+          8,
+          8
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/log-levels.md",
+        "lines": [
+          39,
+          40
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/log-trace.md",
+        "reason": "про медленный trace-режим, а не про запрет debug в production"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "EN-кейс. primary — прямой запрет. grade-1: временное включение через сигнал — нюанс, а не запрет.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-10",
+    "query": "расписание полных бэкапов хранение копий",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/backup-full.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/backup-incr.md",
+        "lines": [
+          15,
+          17
+        ],
+        "grade": 1
+      },
+      {
+        "path": "multi/backup-full.md",
+        "lines": [
+          16,
+          17
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "primary — cadence полных копий. grade-1: цепочки между полными — контекст расписания, не ответ.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-11",
+    "query": "восстановление по инкрементной цепочке порядок",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/backup-incr.md",
+        "lines": [
+          31,
+          32
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/backup-full.md",
+        "lines": [
+          46,
+          47
+        ],
+        "grade": 1
+      },
+      {
+        "path": "multi/backup-incr.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "primary — порядок прохода цепочки. grade-1: полные как база цепочек — контекст. grade-1 [5,6]: хрупкость цепочки — rationale порядка, не сам порядок.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "mr-12",
+    "query": "проверка восстановления бэкапа на стенде",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/backup-full.md",
+        "lines": [
+          10,
+          12
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/backup-incr.md",
+        "lines": [
+          21,
+          22
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "primary — дымовые проверки развёртки. grade-1: сверка хешей цепочки — часть проверки, но не стенд.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-01",
+    "query": "маркер перестройки оборванная перестройка индекса",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/index-rebuild.md",
+        "lines": [
+          31,
+          33
+        ],
+        "grade": 2
+      },
+      {
+        "path": "boundary/index-rebuild.md",
+        "lines": [
+          85,
+          87
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "ответ straddles разрез seq2/seq3 (строка 31 в оверлапе обоих чанков). grade-1 [85,87]: маркер в сценарии backup-recovery — частный путь, не основной протокол маркера.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-02",
+    "query": "строка ключа кэша openrouter размерность l2 raw",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/embedding-cache.md",
+        "lines": [
+          29,
+          30
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "ответ в оверлапе seq2/seq3: виден из обоих чанков.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-03",
+    "query": "окно реранка пятьдесят кандидатов golden",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/rerank-window.md",
+        "lines": [
+          29,
+          31
+        ],
+        "grade": 2
+      },
+      {
+        "path": "boundary/rerank-window.md",
+        "lines": [
+          47,
+          48
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "ответ straddles разрез seq2/seq3. grade-1 [47,48]: окно 50 в контексте стоимости — фиксирует число, не компромисс golden.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-04",
+    "query": "framing length prefix eight byte big endian",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/daemon-protocol.md",
+        "lines": [
+          29,
+          31
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN-кейс. ответ straddles разрез seq2/seq3.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-05",
+    "query": "debounce delay 250 milliseconds coalesce scan",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/watcher-debounce.md",
+        "lines": [
+          28,
+          30
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN-кейс. ответ в оверлапе seq2/seq3.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-06",
+    "query": "cjk биграммы перекрытие сдвиг цепочка",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/tokenizer-cjk.md",
+        "lines": [
+          30,
+          32
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "ответ straddles разрез seq2/seq3.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-07",
+    "query": "транзакция миграции немедленная блокировка записи",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/config-migration.md",
+        "lines": [
+          29,
+          31
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "ответ straddles разрез seq2/seq3.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-08",
+    "query": "token bucket continuous refill rate tokens",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/quotas-limits.md",
+        "lines": [
+          35,
+          37
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN-кейс. ответ в оверлапе seq3/seq4.",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-09",
+    "query": "флаг нормализации входит в ключ кэша l2",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/embedding-cache.md",
+        "lines": [
+          52,
+          53
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "ответ в 4-м чанке дока (глубокий ответ, не у разреза — честная вариативность среза).",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "lb-10",
+    "query": "frame length cap 64 MB malicious prefix",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/daemon-protocol.md",
+        "lines": [
+          36,
+          37
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN-кейс. ответ в хвосте длинной секции seq3 (глубокий ответ).",
+    "reviewed_by": [
+      "t6-author",
+      "t6-reviewer"
+    ]
+  },
+  {
+    "id": "enm-11",
+    "query": "children",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/child-processes.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "morph isolation: bare irregular plural; doc holds only 'child'. BM25 has no bridge by design.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "enm-12",
+    "query": "indices",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/child-processes.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "bare latin plural; doc holds only 'index'.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "enm-13",
+    "query": "ran",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/nightly-runs.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "bare irregular past; doc holds only 'runs/run'.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "enm-14",
+    "query": "went",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/nightly-runs.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "suppletive past; doc holds only 'go'.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "enm-15",
+    "query": "written",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/nightly-runs.md",
+        "lines": [
+          15,
+          16
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "participle; expected doc holds only 'writes'. NOTE: 'written' occurs verbatim in two non-relevant docs (boundary/daemon-protocol.md:12, boundary/watcher-debounce.md:33), so this is a morphology-plus-distractor trap, not a pure isolation probe; the expected span itself stays bridgeless.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "enm-16",
+    "query": "matrix",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/telemetry-matrices.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "bare singular; doc holds only 'matrices'.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "enm-17",
+    "query": "analysis",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/telemetry-matrices.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "bare singular; doc holds only 'analyses'.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "enm-18",
+    "query": "datum",
+    "class": "en_morph",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/telemetry-matrices.md",
+        "lines": [
+          20,
+          21
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "bare singular; doc holds only 'data'.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "idn-11",
+    "query": "WATCH_BATCHLIMIT",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/watch-batch-limit.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "missing underscore: one token vs three; partial 'watch' only.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "idn-12",
+    "query": "WATCHDEBOUNCEMS",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/watch-policy.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "glued identifier vs underscored constant.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "idn-13",
+    "query": "MAXFRAMEBYTES",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/frame-budget.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "glued vs snake_case.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "idn-14",
+    "query": "EMBEDDINGMODEL",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/embed-model.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "glued vs snake_case.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "idn-15",
+    "query": "FRAMEBUDGETMS",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/frame-budget.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "glued vs snake_case.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "idn-16",
+    "query": "OPENROUTERAPIKEY",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/provider-key.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "glued vs snake_case.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "idn-17",
+    "query": "search-docs",
+    "class": "identifier",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/frozen-mcp.md",
+        "lines": [
+          24,
+          24
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "hyphen vs underscore in tool name.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "phr-11",
+    "query": "sequenced arrivals of revisions",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/merge-queue.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase with no shared stems (was: landing/pull/requests/sequence).",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "phr-12",
+    "query": "folding pending edits together",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/merge-queue.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "second paraphrase angle, lexically disjoint.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "phr-13",
+    "query": "silent socket expiry",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/read-timeout.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase of 'read timeout ... stalled connections'.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "phr-14",
+    "query": "dormant link severance",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/read-timeout.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "was 'idle connection cutoff' — 'connection' bridged BM25.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "phr-15",
+    "query": "quarterly roadmap inspection",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/plan-review.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase of 'plan review ... scope, risks'.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "phr-16",
+    "query": "freight train departure approval",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/plan-review.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "was sharing 'release' with line 6; now disjoint.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "phr-17",
+    "query": "even-handed arbitration",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/queue-fairness.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase with no shared stems; concept-only bridge for dense configs.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "phr-18",
+    "query": "hung transfers expiring",
+    "class": "phrase",
+    "k": 10,
+    "expected": [
+      {
+        "path": "phrases/read-timeout.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "third read-timeout angle, disjoint lexicon.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "hn-15",
+    "query": "MAX_FRAME_BYTES one megabyte IPC cap",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/frame-budget.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "boundary/daemon-protocol.md",
+        "reason": "64 MB protocol-frame cap is a different subsystem and value"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "trap shares frame/cap lexicon with a 64x different value.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "hn-16",
+    "query": "historic singular MAX_FRAME_BYTE name",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/frame-budget-legacy.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/frame-budget.md",
+        "reason": "current plural constant; legacy query must not resolve to it"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "one-letter trap: legacy vs current name.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "hn-17",
+    "query": "transaction journal closing the gap between increments",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/backup-incr.md",
+        "lines": [
+          36,
+          37
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "boundary/config-migration.md",
+        "reason": "migration transaction is schema migration, not a backup journal"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "trap shares transaction lexicon.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "hn-18",
+    "query": "locking the schema store upfront",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/config-migration.md",
+        "lines": [
+          29,
+          31
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "multi/backup-incr.md",
+        "reason": "backup chain order shares transaction/restore lexicon, not schema locking"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "diluted query: 'locking/upfront' avoid the answer's own words.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "hn-19",
+    "query": "staging host smoke checks after restore",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/backup-full.md",
+        "lines": [
+          10,
+          12
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "boundary/index-rebuild.md",
+        "reason": "index self-healing by marker is restore-adjacent, not backup verification"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "trap surfaced rank 5 in T6 pooling.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "hn-20",
+    "query": "SYN retransmit timing versus client give-up",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/timeout-connect.md",
+        "lines": [
+          15,
+          16
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/timeout-ms.md",
+        "reason": "timeout units share the lexicon, not SYN behavior"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "units trap for a behavior question.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "hn-21",
+    "query": "which variable selects the embedding model",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "api/embed-model.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/embed-config.md",
+        "reason": "EMBED_MODEL is a deprecated alias that ignores dimensions — prefix trap"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "prefix trap: alias vs canonical pin.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "hn-22",
+    "query": "TOML config unknown keys behavior",
+    "class": "hard_negative",
+    "k": 10,
+    "expected": [
+      {
+        "path": "traps/config-toml.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "traps/config-json.md",
+        "reason": "JSON silently ignores unknown keys; TOML fails loudly — format trap"
+      }
+    ],
+    "source": "synthetic",
+    "notes": "format trap with opposite behavior.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "mrx-11",
+    "query": "jitter random delay spread",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/retry-http.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/retry-queue.md",
+        "lines": [
+          22,
+          23
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "grade-1: queue jitter in minutes/hours, not the http grid.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mrx-12",
+    "query": "poison message detection",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/retry-queue.md",
+        "lines": [
+          16,
+          18
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/retry-queue.md",
+        "lines": [
+          11,
+          12
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "same-doc pair: DLQ routing vs poison detail — both needed for full handling.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mrx-13",
+    "query": "happy eyeballs IPv6 fallback",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/timeout-connect.md",
+        "lines": [
+          20,
+          22
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/timeout-connect.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "same-doc pair: dual-stack racing vs handshake scope.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mrx-14",
+    "query": "heartbeat distinguishing stall from silence",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/timeout-read.md",
+        "lines": [
+          16,
+          17
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/timeout-read.md",
+        "lines": [
+          11,
+          12
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "same-doc pair: heartbeat vs SSE pause budget.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mrx-15",
+    "query": "RTO drill on the stand",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/backup-full.md",
+        "lines": [
+          36,
+          37
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/backup-full.md",
+        "lines": [
+          10,
+          12
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "same-doc pair: RTO measurement vs restore smoke checks.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mrx-16",
+    "query": "differential backup two-step restore",
+    "class": "multi_relevant",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/backup-incr.md",
+        "lines": [
+          46,
+          47
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/backup-incr.md",
+        "lines": [
+          31,
+          32
+        ],
+        "grade": 1
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "same-doc pair: differential shortcut vs chain order.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "lb-11",
+    "query": "how many at once then how fast",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/quotas-limits.md",
+        "lines": [
+          48,
+          50
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "diluted burst/sustained numbers; answer in the last third of the doc.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "lb-12",
+    "query": "unknown tool structured error echo",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/daemon-protocol.md",
+        "lines": [
+          43,
+          44
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "request-schema section past the long framing section.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "lb-13",
+    "query": "kana hangul unified ranges",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/tokenizer-cjk.md",
+        "lines": [
+          42,
+          44
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "unicode-range section past the long bigram section.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "lb-14",
+    "query": "dry run diff before manual production migration",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/config-migration.md",
+        "lines": [
+          60,
+          61
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "dry-run section past the long transaction section.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "lb-15",
+    "query": "top-k versus window confusion",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/rerank-window.md",
+        "lines": [
+          42,
+          43
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "window-vs-topk section past the long sizing section.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "lb-16",
+    "query": "snapshot catalog before rebuild",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/index-rebuild.md",
+        "lines": [
+          80,
+          81
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "rollback section at the doc tail.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "sem-15",
+    "query": "periodic copies for catastrophe recuperation",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/backup-restore.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: hourly snapshots/disaster recovery; no shared stems expected.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "sem-16",
+    "query": "collector stalls Python runtime",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/gc-pauses.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: reclaims objects during pauses; long pauses stall handling.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "sem-17",
+    "query": "dead daemon unnoticed by watchers",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/health-checks.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: liveness probes fail on hang; readiness gates traffic.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "sem-18",
+    "query": "excessive callers get refused entry",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/rate-limits.md",
+        "lines": [
+          3,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: throttle requests, quotas reset, admission errors.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "mix-11",
+    "query": "архивация старых логов в холодное хранилище",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/log-rotation.md",
+        "lines": [
+          3,
+          3
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU query, EN doc: zero shared stems by construction.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mix-12",
+    "query": "проверка восстановления на стендовом хосте",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/backup-restore.md",
+        "lines": [
+          6,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU query, EN doc.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mix-13",
+    "query": "предел скорости запросов защита бэкенда",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/rate-limits.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU query, EN doc.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mix-14",
+    "query": "index rebuild marker file",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/index-rebuild.md",
+        "lines": [
+          31,
+          33
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN query, RU doc: filed under boundary (same span as lb-01, cross-lingual angle).",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mix-15",
+    "query": "cache key model size normalization flag",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/embedding-cache.md",
+        "lines": [
+          29,
+          30
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN query, RU doc; same span as lb-02.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mix-16",
+    "query": "watcher quiet period single scan",
+    "class": "long_doc_boundary",
+    "k": 10,
+    "expected": [
+      {
+        "path": "boundary/watcher-debounce.md",
+        "lines": [
+          28,
+          30
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN paraphrase angle on the same boundary span as lb-05 (filed under boundary).",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mix-17",
+    "query": "сборка мусора паузы настройка кучи",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/gc-pauses.md",
+        "lines": [
+          4,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU query, EN doc; zero shared stems.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mix-18",
+    "query": "пробы живости демон завис",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/health-checks.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU query, EN doc.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mix-19",
+    "query": "троттлинг квоты сброс каждую минуту",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/rate-limits.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU query, EN doc.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mix-20",
+    "query": "постепенный раскат когорты рубильник",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/feature-flags.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU query, EN doc: gradual rollout/kill switch.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mix-21",
+    "query": "log rotation size archives",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "multi/log-format.md",
+        "lines": [
+          30,
+          31
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN query, RU doc; 'log' is latin in both? doc has 'логов' — no match.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mix-22",
+    "query": "socket timeout milliseconds",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/socket-timeout.md",
+        "lines": [
+          5,
+          8
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN query, RU doc; transliteration differs.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mix-23",
+    "query": "oil change interval kilometers",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "ru/oil-change.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "EN query, RU doc.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mix-24",
+    "query": "привязка сокетов демона путь из конфига",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "en/socket-bind.md",
+        "lines": [
+          5,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU query, EN doc.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "sem-19",
+    "query": "memory sweeper halts program",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/gc-pauses.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase; disjoint lexicon by design.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "sem-20",
+    "query": "cold start request holdback",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/health-checks.md",
+        "lines": [
+          4,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase of readiness gating; disjoint lexicon.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "sem-21",
+    "query": "cluster coordinator ballot lease",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/leader-election.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "paraphrase: vote/coordinator/lease; 'coordinator' shared — jaccard self-checked.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "sem-22",
+    "query": "gradual cohort rollout kill switch",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/feature-flags.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "shares rollout/cohort/kill/switch — jaccard must stay <=0.5; validator decides.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "sem-23",
+    "query": "aged records cold tier",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/log-rotation.md",
+        "lines": [
+          3,
+          6
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "shares 'cold' only; validator decides.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "sem-24",
+    "query": "overload protection minute windows",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/rate-limits.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "shares 'minute' only; validator decides.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "sem-25",
+    "query": "catastrophe copy replay",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/backup-restore.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "shares 'replay(s)' stem; validator decides.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "sem-26",
+    "query": "sweeper halts execution",
+    "class": "semantic",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/gc-pauses.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "second gc angle; disjoint lexicon.",
+    "reviewed_by": [
+      "t12-author",
+      "t12-reviewer"
+    ]
+  },
+  {
+    "id": "mix-25",
+    "query": "голосование узлов координатор аренда",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/leader-election.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU query, EN doc.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  },
+  {
+    "id": "mix-26",
+    "query": "переключатель остановка раскатки",
+    "class": "mixed_lang",
+    "k": 10,
+    "expected": [
+      {
+        "path": "semantic/feature-flags.md",
+        "lines": [
+          3,
+          4
+        ],
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "synthetic",
+    "notes": "RU query, EN doc.",
+    "reviewed_by": [
+      "t12-author"
+    ]
+  }
+]

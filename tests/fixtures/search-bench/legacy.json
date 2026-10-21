@@ -1,0 +1,202 @@
+[
+  {
+    "id": "legacy-01",
+    "query": "замена",
+    "class": "ru",
+    "k": 3,
+    "expected": [
+      {
+        "path": "ru/binary-replace.md",
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "legacy",
+    "notes": "transferred from tests/search_quality.rs CASES",
+    "reviewed_by": []
+  },
+  {
+    "id": "legacy-02",
+    "query": "замены",
+    "class": "ru",
+    "k": 3,
+    "expected": [
+      {
+        "path": "ru/binary-replace.md",
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "legacy",
+    "notes": "transferred from tests/search_quality.rs CASES",
+    "reviewed_by": []
+  },
+  {
+    "id": "legacy-03",
+    "query": "заменой",
+    "class": "ru",
+    "k": 3,
+    "expected": [
+      {
+        "path": "ru/binary-replace.md",
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "legacy",
+    "notes": "transferred from tests/search_quality.rs CASES",
+    "reviewed_by": []
+  },
+  {
+    "id": "legacy-04",
+    "query": "каталоги",
+    "class": "ru",
+    "k": 3,
+    "expected": [
+      {
+        "path": "ru/system-dirs.md",
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "legacy",
+    "notes": "transferred from tests/search_quality.rs CASES",
+    "reviewed_by": []
+  },
+  {
+    "id": "legacy-05",
+    "query": "каталогов",
+    "class": "ru",
+    "k": 3,
+    "expected": [
+      {
+        "path": "ru/system-dirs.md",
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "legacy",
+    "notes": "transferred from tests/search_quality.rs CASES",
+    "reviewed_by": []
+  },
+  {
+    "id": "legacy-06",
+    "query": "atomic replace",
+    "class": "en",
+    "k": 3,
+    "expected": [
+      {
+        "path": "en/atomic-replace.md",
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "legacy",
+    "notes": "transferred from tests/search_quality.rs CASES",
+    "reviewed_by": []
+  },
+  {
+    "id": "legacy-07",
+    "query": "system directories",
+    "class": "en",
+    "k": 3,
+    "expected": [
+      {
+        "path": "en/system-dirs.md",
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "legacy",
+    "notes": "transferred from tests/search_quality.rs CASES",
+    "reviewed_by": []
+  },
+  {
+    "id": "legacy-08",
+    "query": "assessment_plan_id",
+    "class": "identifiers",
+    "k": 3,
+    "expected": [
+      {
+        "path": "api/assessment-plan.md",
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "legacy",
+    "notes": "transferred from tests/search_quality.rs CASES",
+    "reviewed_by": []
+  },
+  {
+    "id": "legacy-09",
+    "query": "MAX_FRAME_BYTES",
+    "class": "identifiers",
+    "k": 3,
+    "expected": [
+      {
+        "path": "api/frame-limits.md",
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "legacy",
+    "notes": "transferred from tests/search_quality.rs CASES",
+    "reviewed_by": []
+  },
+  {
+    "id": "legacy-10",
+    "query": "\"plan id\"",
+    "class": "phrases",
+    "k": 3,
+    "expected": [
+      {
+        "path": "plans/plan-lifecycle.md",
+        "grade": 2
+      }
+    ],
+    "absent": [
+      {
+        "path": "api/assessment-plan.md",
+        "reason": "must not match assessment_plan_id"
+      }
+    ],
+    "source": "legacy",
+    "notes": "transferred from tests/search_quality.rs CASES",
+    "reviewed_by": [
+      "ann",
+      "bob"
+    ]
+  },
+  {
+    "id": "legacy-11",
+    "query": "東京",
+    "class": "cjk",
+    "k": 3,
+    "expected": [
+      {
+        "path": "cjk/airport.md",
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "legacy",
+    "notes": "transferred from tests/search_quality.rs CASES",
+    "reviewed_by": []
+  },
+  {
+    "id": "legacy-12",
+    "query": "مطار",
+    "class": "arabic",
+    "k": 3,
+    "expected": [
+      {
+        "path": "ar/airport.md",
+        "grade": 2
+      }
+    ],
+    "absent": [],
+    "source": "legacy",
+    "notes": "transferred from tests/search_quality.rs CASES",
+    "reviewed_by": []
+  }
+]

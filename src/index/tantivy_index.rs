@@ -646,7 +646,8 @@ fn register_tokenizer(index: &Index) {
 /// `identifiers 3.5` variants produce identical per-class golden metrics
 /// (all achievable classes saturated at `hit_rate`/`ndcg` 1.0; `cjk`/`arabic`
 /// pending SQ10/SQ11), so the least-biased values are kept and guarded by
-/// `tests/search_quality.rs::no_regression_gate`.
+/// `tests/search_bench.rs::metrics_match_baseline` (successor of the retired
+/// search-quality gate).
 fn build_parser(index: &Index, fields: &Fields) -> QueryParser {
     let mut parser = QueryParser::for_index(
         index,

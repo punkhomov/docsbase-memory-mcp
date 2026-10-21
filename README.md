@@ -23,7 +23,9 @@ Optional hybrid search stages (OpenRouter embeddings + rerank, with opt-in
 RRF fusion over the cached vectors via `ranking = "rrf"`) are opt-in per
 project/request, ship behind the `hybrid-remote` build feature and require
 `OPENROUTER_API_KEY`; the default build stays fully offline and never falls
-back silently (see [`docs/CONFIG.md`](docs/CONFIG.md)).
+back silently (see [`docs/CONFIG.md`](docs/CONFIG.md)). Default model pins
+are free OpenRouter routes, which may train on prompts and rotate monthly;
+paid pins via `docsbase models use`.
 
 Supported platforms: **Linux x86_64** (static binary), **Windows x64**
 (`.exe`) and **macOS 12+ on Apple Silicon**. Intel Macs are out of scope
@@ -183,8 +185,9 @@ tokenizer is script-aware and versioned — changing the pipeline bumps
 | All | `ё`→`е` (case-preserving), width folding | — | `ёлка` finds `елка` |
 | Identifiers | not stemmed (`_`, CamelCase, ALL_CAPS, digits) | exact multi-token | `assessment_plan_id`, `MAX_FRAME_BYTES` |
 
-Measured at SQ18 (directional; source of truth:
-[`tests/fixtures/search-quality/baseline.json`](tests/fixtures/search-quality/baseline.json)):
+Measured at SQ18 (directional; frozen copy kept as
+[`tests/fixtures/search-bench/legacy-baseline.json`](tests/fixtures/search-bench/legacy-baseline.json)
+after the search-quality harness was retired):
 all six golden classes at hit_rate/ndcg 1.0; search p95 ≈ 0.6 ms (Latin) and
 ≈ 5 ms (CJK) over 50k chunks; a CJK index stays ≈ 0.8× the corpus text size.
 

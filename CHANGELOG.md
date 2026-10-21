@@ -6,6 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [Semantic Versioning](https://semver.org/).
 Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
+## [Unreleased]
+
+### Changed
+
+- Hybrid default model pins are free OpenRouter routes
+  (`nvidia/nemotron-3-embed-1b:free` @2048, `nvidia/llama-nemotron-rerank-vl-1b-v2:free`).
+  Free routes may train on prompts and rotate monthly; paid pins stay
+  available via explicit `docsbase models use`.
+
 ## [0.1.0-alpha.4] — 2026-10-14
 
 ### Added
