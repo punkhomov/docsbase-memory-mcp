@@ -39,8 +39,8 @@ pub struct UseArgs {
     #[arg(long)]
     pub rerank: Option<String>,
     /// Rerank candidate window.
-    #[arg(long, default_value_t = DEFAULT_RERANK_WINDOW)]
-    pub window: u32,
+    #[arg(long)]
+    pub window: Option<u32>,
     /// Validate and print the resulting config without probing or writing.
     #[arg(long)]
     pub dry_run: bool,
@@ -117,6 +117,12 @@ fn resolve_hybrid_table(
         }
         .into());
     }
+    if args.dims.is_some() && args.embedding.is_none() {
+        return Err(Error::Admission {
+            message: "--dims without --embedding is meaningless".to_owned(),
+        }
+        .into());
+    }
     if args.embedding.is_some() && args.dims.is_none() {
         return Err(Error::Admission {
             message: "setting --embedding requires explicit --dims (widths are model-specific)"
@@ -140,7 +146,9 @@ fn resolve_hybrid_table(
             .into());
         }
     }
-    if !(MIN_RERANK_WINDOW..=MAX_RERANK_WINDOW).contains(&args.window) {
+    if let Some(window) = args.window
+        && !(MIN_RERANK_WINDOW..=MAX_RERANK_WINDOW).contains(&window)
+    {
         return Err(Error::Admission {
             message: format!("--window must be {MIN_RERANK_WINDOW}..={MAX_RERANK_WINDOW}"),
         }
@@ -159,7 +167,10 @@ fn resolve_hybrid_table(
             "provider".to_owned(),
             toml::Value::String(PROVIDER_OPENROUTER.to_owned()),
         );
-        stage.insert("model".to_owned(), toml::Value::String(model.clone()));
+        stage.insert(
+            "model".to_owned(),
+            toml::Value::String(model.trim().to_owned()),
+        );
         stage.insert(
             "dimensions".to_owned(),
             toml::Value::Integer(i64::from(dims)),
@@ -173,14 +184,32 @@ fn resolve_hybrid_table(
             "provider".to_owned(),
             toml::Value::String(PROVIDER_OPENROUTER.to_owned()),
         );
-        stage.insert("model".to_owned(), toml::Value::String(model.clone()));
+        stage.insert(
+            "model".to_owned(),
+            toml::Value::String(model.trim().to_owned()),
+        );
         stage.insert(
             "window".to_owned(),
-            toml::Value::Integer(i64::from(args.window)),
+            toml::Value::Integer(i64::from(
+                args.window
+                    .unwrap_or(existing_window(&hybrid).unwrap_or(DEFAULT_RERANK_WINDOW)),
+            )),
         );
         hybrid.insert("reranker".to_owned(), toml::Value::Table(stage));
     }
-    Ok(toml::Value::Table(hybrid))
+    let mut root = toml::map::Map::new();
+    root.insert("hybrid".to_owned(), toml::Value::Table(hybrid));
+    Ok(toml::Value::Table(root))
+}
+
+/// Existing rerank window survives when `--window` is not given.
+fn existing_window(hybrid: &toml::map::Map<String, toml::Value>) -> Option<u32> {
+    hybrid
+        .get("reranker")
+        .and_then(toml::Value::as_table)
+        .and_then(|reranker| reranker.get("window"))
+        .and_then(toml::Value::as_integer)
+        .and_then(|window| u32::try_from(window).ok())
 }
 
 /// Probes exactly what was configured: one embed call (vector count and
@@ -269,18 +298,24 @@ fn table_int(stage: &toml::map::Map<String, toml::Value>, key: &str) -> crate::e
 
 /// Merges the resolved `hybrid` table into the project file, preserving
 /// every other key. Comments are not preserved by the TOML round-trip.
-#[cfg(feature = "hybrid-remote")]
 fn write_project_toml(
     path: &std::path::Path,
     existing: Option<&toml::Value>,
     table: &toml::Value,
 ) -> anyhow::Result<()> {
+    let hybrid = table
+        .get("hybrid")
+        .ok_or_else(|| Error::internal("resolved config has no hybrid table; refusing to write"))?;
     let mut root = existing
         .cloned()
         .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
-    if let (Some(map), Some(hybrid)) = (root.as_table_mut(), table.get("hybrid")) {
-        map.insert("hybrid".to_owned(), hybrid.clone());
-    }
+    let map = root.as_table_mut().ok_or_else(|| {
+        Error::internal(format!(
+            "existing {} is not a TOML table; refusing to overwrite",
+            path.display()
+        ))
+    })?;
+    map.insert("hybrid".to_owned(), hybrid.clone());
     let rendered =
         toml::to_string(&root).map_err(|err| Error::internal_with_source("render config", err))?;
     std::fs::write(path, rendered)
@@ -289,7 +324,6 @@ fn write_project_toml(
 }
 
 /// Prints pins, storage estimate and the reload note.
-#[cfg(feature = "hybrid-remote")]
 fn print_summary(table: &toml::Value) {
     use crate::hybrid::EmbeddingCfg;
     use crate::hybrid::config::cache_model_id;
@@ -339,7 +373,7 @@ mod tests {
             embedding: embedding.map(str::to_owned),
             dims,
             rerank: rerank.map(str::to_owned),
-            window: DEFAULT_RERANK_WINDOW,
+            window: None,
             dry_run: false,
             path: None,
         }
@@ -353,11 +387,12 @@ mod tests {
     fn fresh_file_gets_enabled_table() {
         let table = resolve_hybrid_table(None, &args(Some("m/e"), Some(512), Some("m/r")))
             .expect("resolve");
+        let hybrid = table.get("hybrid").expect("hybrid table");
         assert_eq!(
-            table.get("enabled").and_then(toml::Value::as_bool),
+            hybrid.get("enabled").and_then(toml::Value::as_bool),
             Some(true)
         );
-        let embedding = table.get("embedding").expect("embedding");
+        let embedding = hybrid.get("embedding").expect("embedding");
         assert_eq!(
             embedding.get("model").and_then(toml::Value::as_str),
             Some("m/e")
@@ -369,7 +404,7 @@ mod tests {
             Some(512)
         );
         assert_eq!(
-            table
+            hybrid
                 .get("reranker")
                 .and_then(|reranker| reranker.get("window"))
                 .and_then(toml::Value::as_integer),
@@ -384,17 +419,18 @@ mod tests {
         );
         let table = resolve_hybrid_table(Some(&existing), &args(Some("new/e"), Some(256), None))
             .expect("resolve");
+        let hybrid = table.get("hybrid").expect("hybrid table");
         assert_eq!(
-            table.get("ranking").and_then(toml::Value::as_str),
+            hybrid.get("ranking").and_then(toml::Value::as_str),
             Some("rrf")
         );
-        let reranker = table.get("reranker").expect("reranker kept");
+        let reranker = hybrid.get("reranker").expect("reranker kept");
         assert_eq!(
             reranker.get("model").and_then(toml::Value::as_str),
             Some("old/r")
         );
         assert_eq!(
-            table
+            hybrid
                 .get("embedding")
                 .and_then(|embedding| embedding.get("dimensions"))
                 .and_then(toml::Value::as_integer),
@@ -407,7 +443,75 @@ mod tests {
         let existing = parse("[hybrid]\nenabled = true\n");
         let table = resolve_hybrid_table(Some(&existing), &args(Some("m/e"), Some(128), None))
             .expect("resolve");
-        assert!(table.is_table());
+        assert!(table.get("hybrid").expect("hybrid").is_table());
+        assert!(
+            table
+                .get("hybrid")
+                .expect("hybrid")
+                .get("ranking")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_write_reparse_roundtrip() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let path = dir.path().join(".docsbase.toml");
+        std::fs::write(
+            &path,
+            "max_file_size = 1
+",
+        )
+        .expect("seed");
+        let existing = read_project_toml(&path).expect("read").expect("some");
+        let table =
+            resolve_hybrid_table(Some(&existing), &args(Some("m/e"), Some(128), Some("m/r")))
+                .expect("resolve");
+        write_project_toml(&path, Some(&existing), &table).expect("write");
+        let reloaded: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).expect("read back")).expect("reparse");
+        assert_eq!(
+            reloaded
+                .get("max_file_size")
+                .and_then(toml::Value::as_integer),
+            Some(1),
+            "unrelated keys survive"
+        );
+        let hybrid = reloaded.get("hybrid").expect("hybrid table");
+        assert_eq!(
+            hybrid
+                .get("embedding")
+                .and_then(|embedding| embedding.get("dimensions"))
+                .and_then(toml::Value::as_integer),
+            Some(128)
+        );
+        // And the written file parses as a real config.
+        assert!(hybrid.get("reranker").is_some());
+    }
+
+    #[test]
+    fn dims_without_embedding_rejected() {
+        assert!(
+            resolve_hybrid_table(None, &args(None, Some(512), None)).is_err(),
+            "dims without embedding"
+        );
+    }
+
+    #[test]
+    fn window_kept_when_unset() {
+        let existing = parse(
+            "[hybrid]\n[hybrid.reranker]\nprovider = \"openrouter\"\nmodel = \"old/r\"\nwindow = 20\n",
+        );
+        let table = resolve_hybrid_table(Some(&existing), &args(None, None, Some("new/r")))
+            .expect("resolve");
+        assert_eq!(
+            table
+                .get("hybrid")
+                .and_then(|hybrid| hybrid.get("reranker"))
+                .and_then(|reranker| reranker.get("window"))
+                .and_then(toml::Value::as_integer),
+            Some(20)
+        );
     }
 
     #[test]
@@ -432,7 +536,7 @@ mod tests {
             "blank model"
         );
         let mut bad_window = args(None, None, Some("m/r"));
-        bad_window.window = 5;
+        bad_window.window = Some(5);
         assert!(
             resolve_hybrid_table(None, &bad_window).is_err(),
             "window below minimum"

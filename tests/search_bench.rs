@@ -564,12 +564,12 @@ fn fixtures_are_valid() {
     // Corpus size bounds (FR-1): frozen docs plus authored content.
     let docs = fixtures.manifest.documents.len();
     assert!(
-        (60..=80).contains(&docs),
-        "corpus has {docs} docs, need 60..=80"
+        (60..=85).contains(&docs),
+        "corpus has {docs} docs, need 60..=85"
     );
     assert!(
-        (120..=150).contains(&fixtures.cases.len()),
-        "corpus has {} cases, need 120..=150",
+        (120..=200).contains(&fixtures.cases.len()),
+        "corpus has {} cases, need 120..=200",
         fixtures.cases.len()
     );
     for class in [
@@ -608,7 +608,7 @@ fn fixtures_are_valid() {
     )
     .expect("full corpus validates");
     // Chunk-count bound (FR-1): runs the real indexer over the frozen corpus.
-    let env = support::bench::build_env(&root.join("corpus"), "search-bench", 60..=80)
+    let env = support::bench::build_env(&root.join("corpus"), "search-bench", 60..=85)
         .expect("index corpus");
     let chunks = env.chunk_hashes.len();
     assert!(
@@ -1143,7 +1143,7 @@ fn citation_overlap_uses_lines() {
 }
 
 #[test]
-fn forbidden_hit_is_sticky() {
+fn rank1_forbidden_only() {
     use support::bench::AbsentHit;
     let mut no_lines = t8_case("fh-01", vec![("a.md", None, 2)]);
     no_lines.absent = vec![AbsentHit {
@@ -1151,23 +1151,26 @@ fn forbidden_hit_is_sticky() {
         lines: None,
         reason: "trap".to_owned(),
     }];
-    // Forbidden doc without lines: any hit on the path counts.
-    let hits = vec![citation(1, "a.md", 1, 1), citation(2, "d.md", 1, 1)];
+    // Forbidden doc without lines: only rank 1 counts (DELTA-3).
+    let hits = vec![citation(1, "d.md", 1, 1), citation(2, "a.md", 1, 1)];
     let metrics = evaluate_case(&hits, &no_lines);
     assert!(metrics.hit);
     assert!(metrics.forbidden_hit);
     let clean = evaluate_case(&[citation(1, "a.md", 1, 1)], &no_lines);
     assert!(!clean.forbidden_hit);
-    // Forbidden doc WITH lines: only an intersecting range counts.
+    // Same trap at rank 2: visible to the reading agent, not a failure.
+    let below = vec![citation(1, "a.md", 1, 1), citation(2, "d.md", 1, 1)];
+    assert!(!evaluate_case(&below, &no_lines).forbidden_hit);
+    // Forbidden doc WITH lines: only an intersecting range at rank 1 counts.
     let mut ranged = t8_case("fh-02", vec![("a.md", None, 2)]);
     ranged.absent = vec![AbsentHit {
         path: "d.md".to_owned(),
         lines: Some(support::bench::LineRange { start: 10, end: 20 }),
         reason: "trap".to_owned(),
     }];
-    let overlapping = vec![citation(1, "a.md", 1, 1), citation(2, "d.md", 15, 25)];
+    let overlapping = vec![citation(1, "d.md", 15, 25), citation(2, "a.md", 1, 1)];
     assert!(evaluate_case(&overlapping, &ranged).forbidden_hit);
-    let disjoint = vec![citation(1, "a.md", 1, 1), citation(2, "d.md", 21, 30)];
+    let disjoint = vec![citation(1, "a.md", 1, 1), citation(2, "d.md", 15, 25)];
     assert!(!evaluate_case(&disjoint, &ranged).forbidden_hit);
 }
 
@@ -1322,7 +1325,8 @@ fn gain_requires_line_overlap_when_expected_has_lines() {
         "overlap={}",
         miss.citation_overlap
     );
-    assert!(miss.forbidden_hit);
+    // Trap at rank 2 is not a failure under DELTA-3 (rank-1 rule).
+    assert!(!miss.forbidden_hit);
     // Intersecting chunk: full gain at its rank.
     let right_chunk = vec![citation(1, "x.md", 1, 1), citation(2, "a.md", 5, 6)];
     let hit = evaluate_case(&right_chunk, &case);
@@ -1708,6 +1712,7 @@ fn toy_baseline() -> Baseline {
             lexical_tokenizer_version: docsbase_memory::index::tokenizer::TOKENIZER_VERSION,
         },
         outcome_matrix: support::bench::OutcomeMatrix::default(),
+        known_failures: Vec::new(),
     }
 }
 
@@ -1937,6 +1942,45 @@ fn gate_boundary_values_pass() {
 }
 
 #[test]
+fn gate_tolerates_known_failures_but_not_new_ones() {
+    use support::bench::{Failure, FailureKind, gate_new_failures};
+    let known_trap = |id: &str| Failure {
+        config: Some(BenchConfigId::Bm25),
+        slice: Some("hard_negative".to_owned()),
+        case_id: Some(id.to_owned()),
+        kind: FailureKind::ForbiddenHit,
+        expected: "no forbidden hit".to_owned(),
+        actual: "forbidden_hit = true".to_owned(),
+    };
+    let known = vec![known_trap("hn-99")];
+    // Same failure again: no regression, no fix.
+    let (new, fixed) = gate_new_failures(&[known_trap("hn-99")], &known);
+    assert!(new.is_empty() && fixed.is_empty());
+    // A different trap: regression.
+    let (new, _) = gate_new_failures(&[known_trap("hn-99"), known_trap("hn-100")], &known);
+    assert_eq!(new.len(), 1);
+    assert_eq!(new[0].case_id.as_deref(), Some("hn-100"));
+    // Trap gone: fixed (reported, not failed).
+    let (new, fixed) = gate_new_failures(&[], &known);
+    assert!(new.is_empty());
+    assert_eq!(fixed.len(), 1);
+    // Production strings round-trip: a real gate Failure tolerates itself.
+    let mut base = toy_baseline();
+    base.configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("cfg")
+        .cases[0]
+        .metrics
+        .forbidden_hit = true;
+    let current = support::bench::build_report(&base, None);
+    let real: Vec<support::bench::Failure> =
+        support::bench::gate_failures(&current, &toy_baseline());
+    assert!(!real.is_empty());
+    let (new, _) = gate_new_failures(&real, &real);
+    assert!(new.is_empty(), "gate output must tolerate itself");
+}
+
+#[test]
 fn gate_allows_improvement_without_baseline_update() {
     let base = toy_baseline();
     let mut better = toy_baseline();
@@ -2067,14 +2111,14 @@ fn sabotage_case(query: &str, k: usize, paths: &[&str]) -> support::bench::Query
 /// `rotate`, the batch is shifted by one slot (deterministic sabotage that
 /// permutes dense similarities while the single-text query embedding is
 /// unaffected).
-fn preload_fixture(env: &support::bench::BenchEnv, rotate: bool) {
+fn make_fixture(env: &support::bench::BenchEnv, rotate: bool) -> VectorFixture {
     let texts = docsbase_memory::store::repo::chunk_texts(env.db.connection(), env.project.id)
         .expect("chunk texts");
     let mut vecs: Vec<Vec<f32>> = texts.iter().map(|text| fake_vector(text, 4)).collect();
     if rotate {
         vecs.rotate_right(1);
     }
-    let fixture = VectorFixture {
+    VectorFixture {
         model_pin: "test/fake@d4@l2".to_owned(),
         dim: 4,
         corpus_hash: "test".to_owned(),
@@ -2084,8 +2128,65 @@ fn preload_fixture(env: &support::bench::BenchEnv, rotate: bool) {
             .zip(vecs)
             .map(|(text, vec)| (blake3_of(text), vec))
             .collect(),
-    };
+    }
+}
+
+fn preload_fixture(env: &support::bench::BenchEnv, rotate: bool) {
+    let fixture = make_fixture(env, rotate);
     support::bench::preload_vectors(env, &fixture).expect("preload");
+}
+
+#[test]
+fn observe_pools_is_deterministic() {
+    let tmp = TempDir::new().expect("tmp");
+    tiny_corpus(tmp.path());
+    let env =
+        support::bench::build_env(&tmp.path().join("corpus"), "observe", 3..=3).expect("index");
+    let case = record_case();
+    let mut fixture = make_fixture(&env, false);
+    // The query embedding also goes through the fixture (as in record).
+    fixture
+        .vectors
+        .insert(blake3_of(&case.query), fake_vector(&case.query, 4));
+    support::bench::preload_vectors(&env, &fixture).expect("preload");
+    let replay: Arc<dyn Embedder> = Arc::new(support::bench::ReplayEmbedder {
+        pin: fixture.model_pin.clone(),
+        fixture: Arc::new(fixture),
+    });
+    let reranker = FailingReranker {
+        fail: AtomicBool::new(false),
+    };
+    let case = record_case();
+    let first = support::bench::observe_rerank_pools(
+        &env,
+        &[case.clone()],
+        &replay,
+        &reranker,
+        "test/rerank",
+    )
+    .expect("observe once");
+    let second =
+        support::bench::observe_rerank_pools(&env, &[case], &replay, &reranker, "test/rerank")
+            .expect("observe twice");
+    let keys = |pools: &std::collections::HashMap<
+        support::bench::RerankKey,
+        support::bench::RerankPool,
+    >| {
+        pools
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+    };
+    assert_eq!(
+        keys(&first),
+        keys(&second),
+        "observation through fixture vectors must be deterministic"
+    );
+    assert_eq!(
+        first.len(),
+        2,
+        "warm-up must dedup against the real call (one pool per config)"
+    );
 }
 
 #[test]
@@ -2337,6 +2438,47 @@ fn discrimination_detects_each_failure() {
 }
 
 #[test]
+fn vector_rewrite_sweeps_orphan_bins() {
+    let tmp = TempDir::new().expect("tmp");
+    let dir = tmp.path();
+    let fixture = |value: f32| VectorFixture {
+        model_pin: "test/fake@d4@l2".to_owned(),
+        dim: 1,
+        corpus_hash: "c".to_owned(),
+        queries_hash: "q".to_owned(),
+        vectors: [("deadbeef".to_owned(), vec![value])].into_iter().collect(),
+    };
+    fixture(1.0).write(dir).expect("write v1");
+    fixture(2.0).write(dir).expect("write v2");
+    let names: Vec<String> = fs::read_dir(dir)
+        .expect("ls")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| std::path::Path::new(name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("bin")))
+            .count(),
+        1,
+        "exactly one live bin must remain: {names:?}"
+    );
+    assert!(
+        names.contains(&"manifest.json".to_owned()),
+        "manifest must remain: {names:?}"
+    );
+    let loaded = VectorFixture::load(dir).expect("reload");
+    assert_eq!(loaded.vectors["deadbeef"], vec![2.0]);
+}
+
+#[test]
 fn missing_baseline_is_hard_fail() {
     let dir = TempDir::new().expect("tmp");
     let err = support::bench::load_baseline(&dir.path().join("baseline.json"))
@@ -2352,14 +2494,13 @@ fn missing_vectors_is_hard_fail() {
     assert!(!err.to_string().is_empty());
 }
 
-/// Full offline gate against the recorded baseline (T11 enables this).
+/// Full offline gate against the recorded baseline (enabled in T11).
 #[test]
-#[ignore = "needs T11 recorded fixtures + baseline.json"]
 fn metrics_match_baseline() {
     let root = bench_root();
     let baseline = support::bench::load_baseline(&root.join("baseline.json")).expect("baseline");
     let fixtures = Fixtures::load(&root).expect("fixtures");
-    let env = support::bench::build_env(&root.join("corpus"), "gate", 60..=80).expect("index");
+    let env = support::bench::build_env(&root.join("corpus"), "gate", 60..=85).expect("index");
     let mut runs = Vec::new();
     for cfg in [
         support::bench::ConfigId::Bm25,
@@ -2367,9 +2508,13 @@ fn metrics_match_baseline() {
         support::bench::ConfigId::Rrf,
         support::bench::ConfigId::RrfRerank,
     ] {
-        let (embedder, reranker) =
-            support::bench::replay_stages(&root, &baseline).expect("replay stages");
-        let stages = support::bench::stages_for(cfg, embedder, reranker);
+        let replay = support::bench::replay_stages(&root, &baseline).expect("replay stages");
+        // Chunk vectors live on disk: without the preload every dense
+        // config silently degrades to its lexical base.
+        if let Some(fixture) = &replay.vectors {
+            support::bench::preload_vectors(&env, fixture).expect("preload");
+        }
+        let stages = support::bench::stages_for(cfg, replay.embedder, replay.reranker);
         let (run, lat) =
             support::bench::run_config_timed(&env, &fixtures.cases, cfg, &stages).expect("run");
         runs.push((cfg, run, lat));
@@ -2382,8 +2527,22 @@ fn metrics_match_baseline() {
     )
     .expect("current");
     let current = support::bench::build_report(&current_like, Some(&baseline));
+    // Trap placements below rank 1 are diagnostics for release review
+    // (DELTA-3), not failures. Print the full list on failure only.
+    let warnings = support::bench::trap_warnings(&current_like, &fixtures.cases);
     let failures = support::bench::gate_failures(&current, &baseline);
-    assert!(failures.is_empty(), "gate failures: {failures:?}");
+    // DELTA-3: fail only on NEW failures (regressions vs the known set);
+    // fixed known failures are reported as improvements.
+    let (new_failures, fixed) =
+        support::bench::gate_new_failures(&failures, &baseline.known_failures);
+    assert!(
+        new_failures.is_empty(),
+        "new gate failures: {new_failures:?}\ntrap diagnostics:\n{}",
+        warnings.join("\n")
+    );
+    if !fixed.is_empty() {
+        println!("fixed since baseline: {fixed:?}");
+    }
     if cfg!(target_os = "linux") {
         let latency = support::bench::latency_failures(&current, &baseline);
         assert!(latency.is_empty(), "latency failures: {latency:?}");
@@ -2408,4 +2567,17 @@ fn regenerate_baseline() {
         "baseline must discriminate before it is accepted (FR-28): {failures:?}"
     );
     support::bench::write_baseline(&baseline, &root.join("baseline.json")).expect("write");
+}
+
+/// The benchmark must discriminate (FR-28): reads the frozen baseline.
+/// RED in T12 until the baseline is recorded and passes.
+#[test]
+fn benchmark_is_discriminating() {
+    let root = bench_root();
+    let baseline = support::bench::load_baseline(&root.join("baseline.json")).expect("baseline");
+    let failures = support::bench::discrimination_failures(&baseline.discrimination);
+    assert!(
+        failures.is_empty(),
+        "benchmark must discriminate (FR-28): {failures:?}"
+    );
 }

@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use docsbase_memory::hybrid::config::cache_model_id;
 use docsbase_memory::hybrid::openrouter::{OpenRouterEmbedder, OpenRouterReranker};
 use docsbase_memory::hybrid::{EmbeddingCfg, RerankerCfg};
 use docsbase_memory::vector_cache::Embedder;
@@ -19,8 +20,71 @@ fn openrouter_key() -> Option<String> {
         .filter(|key| !key.trim().is_empty())
 }
 
-/// Record with the pinned production models, then replay offline.
-/// Cost: 5 graded docs + 2 queries — well under the FR-18 $2 cap.
+/// Records production fixtures for the full frozen corpus (FR-19):
+/// vectors for every chunk + query under the embedding pin, rerank pools
+/// for both rerank configs under the rerank pin. Manual, keyed, atomic.
+/// Run: `OPENROUTER_API_KEY=... cargo test --locked --features
+/// hybrid-remote --test search_bench_live -- --ignored record_fixtures`.
+#[test]
+#[ignore = "manual: records production fixtures with OPENROUTER_API_KEY (FR-19)"]
+fn record_fixtures() {
+    openrouter_key().expect("export OPENROUTER_API_KEY to record fixtures");
+    let embed_cfg = EmbeddingCfg::default();
+    let rerank_cfg = RerankerCfg::default();
+    let embed_pin = cache_model_id(&embed_cfg);
+    assert_eq!(
+        embed_pin,
+        "openrouter/nvidia/nemotron-3-embed-1b:free@d2048@l2"
+    );
+    let rerank_pin = format!("{}/{}", rerank_cfg.provider, rerank_cfg.model);
+    assert_eq!(
+        rerank_pin,
+        "openrouter/nvidia/llama-nemotron-rerank-vl-1b-v2:free"
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/search-bench");
+    let fixtures = support::bench::Fixtures::load(&root).expect("fixtures");
+    assert!(
+        fixtures.cases.len() >= 120,
+        "record needs the finalized corpus (T6+)"
+    );
+    let env = support::bench::build_env(&root.join("corpus"), "record", 60..=85).expect("index");
+    let embedder: Arc<dyn Embedder> =
+        Arc::new(OpenRouterEmbedder::new(embed_cfg).expect("embedder"));
+    let reranker = OpenRouterReranker::new(rerank_cfg).expect("reranker");
+    let vectors_dir = root
+        .join("vectors")
+        .join(support::bench::pin_slug(&embed_pin));
+    let rerank_path = root
+        .join("rerank")
+        .join(format!("{}.json", support::bench::pin_slug(&rerank_pin)));
+    // Network calls require the sanctioned blocking context (I3); the test
+    // thread is not one, so enter it explicitly.
+    docsbase_memory::hybrid::blocking::enter(|| {
+        support::bench::record_fixtures_with(
+            &env,
+            &fixtures.cases,
+            &embedder,
+            &reranker,
+            &rerank_pin,
+            &vectors_dir,
+            &rerank_path,
+        )
+        .map_err(|err| docsbase_memory::error::Error::internal(err.to_string()))
+    })
+    .expect("record");
+    // Reload what was written: the replay path must accept it verbatim.
+    let loaded_vectors = support::bench::VectorFixture::load(&vectors_dir).expect("reload vectors");
+    assert_eq!(loaded_vectors.model_pin, embed_pin);
+    let loaded_rerank = support::bench::RerankFixture::load(&rerank_path).expect("reload rerank");
+    assert_eq!(loaded_rerank.model_pin, rerank_pin);
+    println!(
+        "recorded {} vectors + {} rerank pools",
+        loaded_vectors.vectors.len(),
+        loaded_rerank.pools.len()
+    );
+}
+/// Tiny live smoke: records 5 docs + 2 cases, then replays offline.
+/// Cost is negligible (FR-18 $2 cap).
 #[test]
 #[ignore = "needs OPENROUTER_API_KEY + hybrid-remote (live record smoke)"]
 fn live_record_and_replay() {
@@ -62,22 +126,25 @@ fn live_record_and_replay() {
     let reranker = OpenRouterReranker::new(RerankerCfg::default()).expect("reranker");
     let vectors_dir = tmp.path().join("vectors");
     let rerank_path = tmp.path().join("rerank.json");
-    support::bench::record_fixtures_with(
-        &env,
-        &cases,
-        &embedder,
-        &reranker,
-        "openrouter/cohere/rerank-v3.5",
-        &vectors_dir,
-        &rerank_path,
-    )
+    docsbase_memory::hybrid::blocking::enter(|| {
+        support::bench::record_fixtures_with(
+            &env,
+            &cases,
+            &embedder,
+            &reranker,
+            "openrouter/nvidia/llama-nemotron-rerank-vl-1b-v2:free",
+            &vectors_dir,
+            &rerank_path,
+        )
+        .map_err(|err| docsbase_memory::error::Error::internal(err.to_string()))
+    })
     .expect("live record");
     // Reload from disk and replay fully offline.
     let loaded_vectors = support::bench::VectorFixture::load(&vectors_dir).expect("load vectors");
     let loaded_rerank = support::bench::RerankFixture::load(&rerank_path).expect("load rerank");
     assert_eq!(
         loaded_vectors.model_pin,
-        "openrouter/qwen/qwen3-embedding-8b@d1024@l2"
+        "openrouter/nvidia/nemotron-3-embed-1b:free@d2048@l2"
     );
     let replay_embedder = support::bench::ReplayEmbedder {
         pin: loaded_vectors.model_pin.clone(),

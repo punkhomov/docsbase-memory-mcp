@@ -768,7 +768,7 @@ pub const RERANK_WINDOW: u32 = 50;
 
 /// Which pipeline to run (design §5.5).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub enum ConfigId {
     Bm25,
@@ -903,6 +903,36 @@ impl VectorFixture {
         std::fs::write(&tmp, manifest.to_string())
             .with_context(|| format!("write {}", tmp.display()))?;
         atomic_replace(&tmp, &dir.join("manifest.json"))?;
+        // Re-records with different content land under a new content-hashed
+        // name; the manifest is the commit point, so anything it does not
+        // reference is garbage (NFR-2 storage cap). Sweep it now, while the
+        // new set is known-good.
+        Self::sweep_vector_dir(dir, &bin_name)?;
+        Ok(())
+    }
+
+    /// Removes unreferenced blobs from a vector fixture dir: any
+    /// `vectors-*.bin` that is not the live one, plus leftover `*.tmp`
+    /// files. Only runs after a successful manifest commit, so a failure
+    /// mid-write never deletes the previous good set.
+    fn sweep_vector_dir(dir: &Path, live_bin: &str) -> anyhow::Result<()> {
+        let entries = std::fs::read_dir(dir).with_context(|| format!("list {}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.with_context(|| format!("read entry of {}", dir.display()))?;
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+            let stale_bin = name.starts_with("vectors-")
+                && extension.eq_ignore_ascii_case("bin")
+                && name != live_bin;
+            if stale_bin || extension.eq_ignore_ascii_case("tmp") {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("remove {}", path.display()))?;
+            }
+        }
         Ok(())
     }
 
@@ -1706,7 +1736,9 @@ fn evaluate_at(hits: &[Citation], case: &QueryCase, k: usize) -> CaseMetrics {
         .enumerate()
         .map(|(position, grade)| (2f64.powi(i32::from(*grade)) - 1.0) * discount(position + 1))
         .sum();
-    let forbidden_hit = hits.iter().any(|hit| {
+    // DELTA-3: forbidden is a rank-1 property. A trap below rank 1 is the
+    // reading agent's to ignore; only a trap as the top answer misleads.
+    let forbidden_hit = hits.first().is_some_and(|hit| {
         case.absent
             .iter()
             .any(|trap| matches_hit(&trap.path, trap.lines, hit))
@@ -1808,6 +1840,42 @@ pub fn record_fixtures_with(
     }
     write_vector_fixture(&fixture, vector_out)?;
     preload_vectors(env, &fixture)?;
+    // Observe through the just-recorded fixture, never through the live
+    // embedder: provider inference is not bit-deterministic across calls,
+    // so warm-up, observation and every future replay must share the exact
+    // fixture vectors — otherwise pool keys drift and replay misses.
+    let replay: Arc<dyn Embedder> = Arc::new(ReplayEmbedder {
+        pin: fixture.model_pin.clone(),
+        fixture: Arc::new(fixture),
+    });
+    let pools = observe_rerank_pools(env, cases, &replay, reranker, rerank_model)?;
+    let rr = RerankFixture {
+        model_pin: rerank_model.to_owned(),
+        pools,
+    };
+    write_rerank_fixture(&rr, rerank_out)?;
+    Ok(())
+}
+
+/// Free-tier pacing between provider calls (`OpenRouter` free routes allow
+/// ~20 requests/minute; paid routes do not need it). Keyed off the `:free`
+/// suffix so paid records keep full speed.
+pub const FREE_MODEL_PACE: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Observes the exact candidate windows both rerank configs send (FR-6) and
+/// scores them through the live `reranker`. Deterministic in the fixture:
+/// every call — warm-up, observation, future replay — embeds through the
+/// same vectors, so pool keys are stable across runs and processes.
+///
+/// # Errors
+/// Bails on run, collection or scoring failures.
+pub fn observe_rerank_pools(
+    env: &BenchEnv,
+    cases: &[QueryCase],
+    embedder: &Arc<dyn Embedder>,
+    reranker: &dyn Reranker,
+    rerank_model: &str,
+) -> anyhow::Result<HashMap<RerankKey, RerankPool>> {
     let collector = Arc::new(CollectingReranker {
         seen: std::sync::Mutex::new(Vec::new()),
     });
@@ -1822,6 +1890,9 @@ pub fn record_fixtures_with(
         .map_err(|_| anyhow::anyhow!("collector lock"))?
         .iter()
     {
+        if rerank_model.contains(":free") {
+            std::thread::sleep(FREE_MODEL_PACE);
+        }
         let results = reranker
             .rerank(query, docs, docs.len())
             .map_err(|err| anyhow::anyhow!("record rerank: {err}"))?;
@@ -1841,12 +1912,7 @@ pub fn record_fixtures_with(
             },
         );
     }
-    let rr = RerankFixture {
-        model_pin: rerank_model.to_owned(),
-        pools,
-    };
-    write_rerank_fixture(&rr, rerank_out)?;
-    Ok(())
+    Ok(pools)
 }
 
 // ---------------------------------------------------------------------------
@@ -1924,6 +1990,10 @@ pub struct Baseline {
     pub legacy_parity: LegacyParity,
     pub discrimination: DiscriminationReport,
     pub outcome_matrix: OutcomeMatrix,
+    /// Failures the baseline run itself produced (DELTA-3): the gate fails
+    /// only on failures NOT in this set (regressions), and reports fixed
+    /// ones as improvements. A red baseline stays auditable, never silent.
+    pub known_failures: Vec<Failure>,
 }
 
 /// Pareto point of one configuration (live only, FR-32).
@@ -1954,7 +2024,7 @@ pub struct Report {
 }
 
 /// Machine-readable gate failure (NFR-8: every hard fail carries a reason).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Failure {
     pub config: Option<ConfigId>,
     pub slice: Option<String>,
@@ -1965,7 +2035,7 @@ pub struct Failure {
 }
 
 /// Gate failure kinds (FR-14 check list, design §5.8).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FailureKind {
     VersionMismatch,
     HashMismatch,
@@ -2115,6 +2185,9 @@ pub fn build_baseline_like(
         legacy_parity: meta.legacy_parity,
         discrimination,
         outcome_matrix,
+        // Filled by regenerate_from_fixtures via self-gate; direct builders
+        // leave it empty (no known state to tolerate).
+        known_failures: Vec::new(),
     })
 }
 
@@ -2832,18 +2905,26 @@ pub fn pin_slug(pin: &str) -> String {
         .collect()
 }
 
+/// Loaded replay stages plus the vector fixture they came from. The
+/// fixture must be preloaded into the run env ([`preload_vectors`]):
+/// chunk vectors come from the on-disk [`VectorCache`], only the query
+/// vector comes from the [`ReplayEmbedder`] live call. Skipping the preload
+/// silently degrades `Rrf` to `Bm25` — hence the explicit field.
+pub struct ReplaySet {
+    pub embedder: Option<Arc<dyn Embedder>>,
+    pub reranker: Option<Arc<dyn Reranker>>,
+    pub vectors: Option<VectorFixture>,
+}
+
 /// Loads replay stages for the pins declared in the baseline (FR-5, FR-21).
 /// Missing fixture files are a hard fail, never a silent skip (NFR-3).
 ///
 /// # Errors
 /// Bails on missing/invalid fixtures or unparsable pins.
-#[allow(clippy::type_complexity)]
-pub fn replay_stages(
-    root: &std::path::Path,
-    baseline: &Baseline,
-) -> anyhow::Result<(Option<Arc<dyn Embedder>>, Option<Arc<dyn Reranker>>)> {
+pub fn replay_stages(root: &std::path::Path, baseline: &Baseline) -> anyhow::Result<ReplaySet> {
     let mut embedder: Option<Arc<dyn Embedder>> = None;
     let mut reranker: Option<Arc<dyn Reranker>> = None;
+    let mut vectors: Option<VectorFixture> = None;
     for pin in &baseline.model_pins {
         match parse_model_pin(pin)? {
             ModelPin::Embedding { .. } => {
@@ -2856,8 +2937,9 @@ pub fn replay_stages(
                 })?;
                 embedder = Some(Arc::new(ReplayEmbedder {
                     pin: pin.clone(),
-                    fixture: Arc::new(fixture),
+                    fixture: Arc::new(fixture.clone()),
                 }));
+                vectors = Some(fixture);
             }
             ModelPin::Rerank { .. } => {
                 if reranker.is_some() {
@@ -2873,7 +2955,11 @@ pub fn replay_stages(
             }
         }
     }
-    Ok((embedder, reranker))
+    Ok(ReplaySet {
+        embedder,
+        reranker,
+        vectors,
+    })
 }
 
 /// Maximum FR-27 lexical Jaccard over semantic expected spans.
@@ -2935,10 +3021,17 @@ pub fn regenerate_from_fixtures(root: &std::path::Path) -> anyhow::Result<Baseli
             lexical_tokenizer_version: docsbase_memory::index::tokenizer::TOKENIZER_VERSION,
         },
         outcome_matrix: OutcomeMatrix::default(),
+        known_failures: Vec::new(),
     };
-    let (embedder, reranker) = replay_stages(root, &pseudo)?;
+    let replay = replay_stages(root, &pseudo)?;
+    let (embedder, reranker) = (replay.embedder, replay.reranker);
     let started = std::time::Instant::now();
-    let env = build_env(&root.join("corpus"), "baseline", 60..=80).context("index corpus")?;
+    let env = build_env(&root.join("corpus"), "baseline", 60..=85).context("index corpus")?;
+    // Chunk vectors live on disk: without the preload every dense config
+    // silently degrades to its lexical base (the T11 pilot caught this).
+    if let Some(fixture) = &replay.vectors {
+        preload_vectors(&env, fixture)?;
+    }
     let index_build_ms = started.elapsed().as_secs_f64() * 1000.0;
     let mut runs = Vec::new();
     for cfg in [
@@ -2961,7 +3054,35 @@ pub fn regenerate_from_fixtures(root: &std::path::Path) -> anyhow::Result<Baseli
         index_build_ms,
     };
     let jaccard = max_semantic_jaccard(&fixtures.cases, &root.join("corpus"))?;
-    build_baseline_like(&fixtures.cases, &runs, meta, jaccard)
+    let mut baseline = build_baseline_like(&fixtures.cases, &runs, meta, jaccard)?;
+    // Self-gate: the baseline records its own failures as known (DELTA-3).
+    // Future runs fail only on NEW failures; fixed ones surface as
+    // improvements. The file stays an honest snapshot, never forced green.
+    let self_report = build_report(&baseline, None);
+    baseline.known_failures = gate_failures(&self_report, &baseline);
+    Ok(baseline)
+}
+
+/// Splits current gate failures into regressions (not in the baseline's
+/// known set) and fixes (known failures that no longer reproduce).
+/// DELTA-3: the benchmark answers "worse or better", never forced green.
+#[must_use]
+pub fn gate_new_failures(current: &[Failure], known: &[Failure]) -> (Vec<Failure>, Vec<Failure>) {
+    let known_set: std::collections::HashSet<&Failure> = known.iter().collect();
+    let current_set: std::collections::HashSet<&Failure> = current.iter().collect();
+    let mut new: Vec<Failure> = current
+        .iter()
+        .filter(|failure| !known_set.contains(failure))
+        .cloned()
+        .collect();
+    let mut fixed: Vec<Failure> = known
+        .iter()
+        .filter(|failure| !current_set.contains(failure))
+        .cloned()
+        .collect();
+    new.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    fixed.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    (new, fixed)
 }
 
 /// Lists recorded model pins: subdirectories of `vectors/`, `*.json` files
@@ -2988,4 +3109,65 @@ fn discover_pins(dir: &std::path::Path, vector_side: bool) -> anyhow::Result<Vec
     }
     pins.sort();
     Ok(pins)
+}
+
+/// Trap placement diagnostics (DELTA-3): traps below rank 1 are the reading
+/// agent's to ignore, but their positions are recorded for release review;
+/// a rank-1 citation matching neither expected nor absent is an unjudged
+/// top answer and a pooling candidate (FR-29). Informational only — the
+/// gate fails solely on rank-1 traps (FR-10) and missing expected (FR-14).
+#[must_use]
+pub fn trap_warnings(current: &Baseline, cases: &[QueryCase]) -> Vec<String> {
+    let by_id: std::collections::BTreeMap<&str, &QueryCase> =
+        cases.iter().map(|case| (case.id.as_str(), case)).collect();
+    let mut out = Vec::new();
+    for (cfg, report) in &current.configs {
+        for case_report in &report.cases {
+            let Some(case) = by_id.get(case_report.id.as_str()) else {
+                continue;
+            };
+            for (position, citation) in case_report.ranks.iter().enumerate() {
+                let rank = position + 1;
+                let is_trap = case
+                    .absent
+                    .iter()
+                    .any(|trap| matches_hit(&trap.path, trap.lines, citation));
+                if !is_trap {
+                    continue;
+                }
+                if rank == 1 {
+                    // The gate hard-fails known rank-1 traps too; tag them
+                    // here so the diagnostic stream stays complete.
+                    out.push(format!(
+                        "trap {} at rank 1 (case {}, {cfg:?}) [known]",
+                        citation.path, case.id,
+                    ));
+                    continue;
+                }
+                out.push(format!(
+                    "trap {} at rank {rank} (case {}, {cfg:?})",
+                    citation.path, case.id,
+                ));
+            }
+            if let Some(top) = case_report.ranks.first() {
+                let judged = case
+                    .expected
+                    .iter()
+                    .any(|expected| matches_hit(&expected.path, expected.lines, top))
+                    || case
+                        .absent
+                        .iter()
+                        .any(|trap| matches_hit(&trap.path, trap.lines, top));
+                if !judged {
+                    out.push(format!(
+                        "unjudged rank 1: {} (case {}, {cfg:?}) — pooling candidate",
+                        top.path, case.id,
+                    ));
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }

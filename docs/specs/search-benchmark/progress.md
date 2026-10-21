@@ -172,3 +172,47 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   top-2 (2-доковый вариант давал точную RRF-ничью 1/61+1/62 — тоже измерено).
   minor: `Baseline.index_build_ms` (требует FR-22, в дизайне §5.8 поля не
   было — расхождение зафиксировано здесь, гейт поле игнорирует).
+- Task T11: complete (2026-10-21). Record mode enforces determinism:
+  warm-up presentations polluted pools AND the provider is not
+  bit-deterministic across calls (same query embedded twice → different
+  RRF order), so observation now runs through the just-recorded fixture
+  (`observe_rerank_pools` + `observe_pools_is_deterministic` test).
+  Recorded under production pins: 520 vectors (300 chunks + 193 queries …
+  exact counts in manifest), 364 rerank pools (warm-up dedups by key).
+  NFR-2 guard: `write_vector_fixture` sweeps orphan `.bin`s after the
+  manifest commit (re-records used to pile orphans: 4 bins found and
+  removed) + `vector_rewrite_sweeps_orphan_bins` test. Fixtures now
+  5.5 MiB total (was 11.4 MiB with orphans).
+- Task T12: complete (2026-10-21). +54 cases, +3 en docs (irregular
+  morphology), bounds 60–85 docs / 120–200 cases (DELTA-2 amendment).
+  Fresh review: 70 CONFIRM, 1 notes fix (enm-15 `written` occurs in 2
+  non-relevant docs), 0 REJECT; singleton-query design ACCEPTED;
+  mix-14..16 stay under boundary. Pooling (FR-29): every new primary
+  verified top-5 + confusables documented (A3–A5/A12 rejected as absent —
+  gate-break, recorded as future hard negatives).
+- DELTA-3 (2026-10-21): FR-10 rank-1 trap rule + known-failures tolerance
+  (gate fails only on NEW failures; fixed surface as improvements).
+  Rank-1 traps: ar-01 (office ties library — genuine engine defect,
+  work item), hard-07/08/10, hn-19/22 (6 cases, 9 known entries).
+  Policy: verdict is a required check; merge on red needs human override
+  in PR. Trap ranks below 1 → diagnostics, not failures.
+- Free defaults (FR-33): `nemotron-3-embed-1b:free@d2048` +
+  `nemotron-rerank-vl-1b:free`. Pilot: Rrf 18 vs 15 hits / 0.594 vs 0.512
+  nDCG (20 queries); rerank top-1 6/6. Fixed dims (no MRL — HTTP 400
+  otherwise, caught by probe). Record pacing for `:free` (20/min).
+  Privacy note: free routes may train on prompts; paid stay available
+  via explicit `models use`. Previous paid fixtures deleted (superseded).
+- models-use CLI: `docsbase models use --embedding/--dims/--rerank/--window/--dry-run`
+  (manual-only, no discovery); validates shapes, probes once per stage,
+  merges into `.docsbase.toml` preserving other keys. Fresh review caught:
+  resolve returned bare table (dry-run printed unpinnable fragment) —
+  fixed + roundtrip regression test; spec/CI incoherence (advisory claim
+  vs required job) — fixed by required-check-with-override policy.
+- Verify: full suite 64 passed / 2 ignored; discrimination green on free
+  fixtures (saturated 0.694, sem disagreements 10, rerank 6, all slices
+  covered); fmt/clippy clean (default + hybrid-remote).
+- Ruling: self-gate in regen can only yield ForbiddenHit (versions/hashes/
+  pins/deltas identical by construction; latency/discrimination not in
+  gate_failures) — verified: live baseline.json known_failures are 9/9
+  ForbiddenHit. Fixed-known re-matching stale entries is prevented by
+  the documented fix→regen requirement (DELTA-3/FR-15).

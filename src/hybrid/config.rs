@@ -15,16 +15,20 @@ use super::Reranker;
 /// The only provider accepted in iteration 1 (FR-3).
 pub const PROVIDER_OPENROUTER: &str = "openrouter";
 
-/// Default embedding model. Spike 2026-10-14: `qwen/qwen3-embedding-0.6b` is
-/// not in the `OpenRouter` catalog (404); the 8B model with MRL truncation to
-/// 1024 dimensions keeps 4 KiB per chunk and is L2-normalized server-side.
-pub const DEFAULT_EMBEDDING_MODEL: &str = "qwen/qwen3-embedding-8b";
+/// Default embedding model (FR-33): the free Nemotron route. Pilot T11
+/// showed parity or better vs paid qwen-8b on the benchmark probe
+/// (Rrf 18 vs 15 hits / 0.594 vs 0.512 nDCG on 20 queries). Paid routes
+/// stay available via explicit `models use`.
+pub const DEFAULT_EMBEDDING_MODEL: &str = "nvidia/nemotron-3-embed-1b:free";
 
-/// Default MRL truncation (the model's native width is 4096).
-pub const DEFAULT_DIMENSIONS: u32 = 1024;
+/// Default dimensions: the model's fixed native width (no MRL truncation;
+/// other widths are rejected by the provider with HTTP 400).
+pub const DEFAULT_DIMENSIONS: u32 = 2048;
 
-/// Default rerank model (spike: `$0.001/search`, 4k ctx covers our chunks).
-pub const DEFAULT_RERANK_MODEL: &str = "cohere/rerank-v3.5";
+/// Default rerank model (FR-33): the free Nemotron route. Pilot T11 showed
+/// 6/6 top-1 agreement with cohere on probe queries; paid routes stay
+/// available via explicit `models use`.
+pub const DEFAULT_RERANK_MODEL: &str = "nvidia/llama-nemotron-rerank-vl-1b-v2:free";
 
 /// Lowest accepted rerank window (BM25 candidates sent to the provider).
 pub const MIN_RERANK_WINDOW: u32 = 10;

@@ -545,6 +545,27 @@
       "license": "MIT",
       "frozen_at": "2026-10-19",
       "blake3": "61677419c65cb9216a92d03058d4a06f5106f1f593094c0a2ddba528fb8ff7e7"
+    },
+    {
+      "path": "en/child-processes.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-20",
+      "blake3": "fb85cf2401df43c41a16843e7d66a5897784672ceae683be40bfc16aa61c1278"
+    },
+    {
+      "path": "en/nightly-runs.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-20",
+      "blake3": "e59854cc332197d709d499d2abd3e8bf4607d03c222bf9d46b584ee69ec4e95b"
+    },
+    {
+      "path": "en/telemetry-matrices.md",
+      "origin": "synthetic",
+      "license": "MIT",
+      "frozen_at": "2026-10-20",
+      "blake3": "037400a9e00aea991abfc06836663c355160c89e4c5ca51b5be02e6f1fd5d80c"
     }
   ]
 }
