@@ -10,7 +10,8 @@ linked below. This file only indexes them — do not duplicate spec content here
   (`src/daemon`), MCP frontend (`src/mcp`), index/tokenizer/chunker
   (`src/index`), store (`src/store`), OS seam (`src/platform`).
 - `tests/` — functional suites per area; `tests/fixtures/search-quality/`
-  holds the golden corpus and `baseline.json`.
+  holds the golden corpus (old harness retired, see search-benchmark),
+  `tests/fixtures/search-bench/` the benchmark corpus + `baseline.json`.
 - `docs/` — product docs and `docs/specs/<name>/{requirements,design,tasks,progress}.md`.
 - `.opencode/` — commands and the project-design skill (machine-mode protocol).
 
@@ -33,8 +34,17 @@ cargo fmt --check
 RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --release --test perf_budget
 RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test offline            # Linux only
 INSTA_UPDATE=always RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_golden
-RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_quality -- --ignored regenerate_baseline
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_bench
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --features hybrid-remote --test search_bench_live   # unit only, no key
+OPENROUTER_API_KEY=... RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --features hybrid-remote --test search_bench_live -- --ignored live_measurement   # manual, cost-capped
 ```
+
+Search-benchmark gate policy (DELTA-3): `metrics_match_baseline` is a
+required check — a red gate needs an explicit human override recorded in
+the PR (merging stays a human act). The gate answers "worse or better",
+not "perfect": trap at rank 1 or missing expected = fail; everything else
+is diagnostics. Live runs are advisory (weekly + manual dispatch only),
+never per-PR CI.
 
 Accept snapshots/baseline only as a deliberate, reviewed delta (see below).
 

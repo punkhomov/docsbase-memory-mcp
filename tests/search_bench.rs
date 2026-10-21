@@ -416,7 +416,7 @@ fn legacy_parity_matches_old_baseline() {
     assert_eq!(parity.cases.len(), 12, "all legacy cases ran");
     assert!(
         parity.matches,
-        "hit/absent_hit must match tests/fixtures/search-quality/baseline.json: {:?}",
+        "hit/absent_hit must match tests/fixtures/search-bench/legacy-baseline.json: {:?} (frozen copy of the retired search-quality/baseline.json)",
         parity.cases
     );
 }
@@ -2579,5 +2579,23 @@ fn benchmark_is_discriminating() {
     assert!(
         failures.is_empty(),
         "benchmark must discriminate (FR-28): {failures:?}"
+    );
+}
+
+#[test]
+fn pacing_reranker_spaces_calls() {
+    let reranker = support::bench::PacingReranker::new(
+        FailingReranker {
+            fail: AtomicBool::new(false),
+        },
+        std::time::Duration::from_millis(120),
+    );
+    let docs = vec!["a".to_owned(), "b".to_owned()];
+    let started = std::time::Instant::now();
+    reranker.rerank("q", &docs, 2).expect("first");
+    reranker.rerank("q", &docs, 2).expect("second");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(100),
+        "second call must wait out the interval"
     );
 }

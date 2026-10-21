@@ -630,12 +630,20 @@ pub fn discrimination_failures(disc: &DiscriminationReport) -> Vec<Failure>;
 `gate_failures` проверяет:
 
 1. Совпадение `fixture_version`, хэшей, config set и case set.
-2. `forbidden_hit` в любом кейсе.
+2. `forbidden_hit` в любом кейсе (DELTA-3: флаг означает ловушку на
+   ранге 1; ловушка ниже — диагностика `trap_warnings`, не провал).
 3. `baseline.hit == true && current.hit == false`.
 4. Per-case `nDCG` ниже baseline больше чем на `0.02`.
 5. Per-slice `hit_rate` ниже baseline (любое падение).
 6. Per-slice `nDCG` ниже baseline больше чем на `0.02`.
 7. Legacy parity `hit`/`absent_hit` не совпал.
+
+Тест `metrics_match_baseline` сравнивает не с нулём, а с
+`baseline.known_failures`: падают только НОВЫЕ провалы (регрессии),
+исправленные старые — информация, не провал (DELTA-3: "стало хуже или
+лучше"). `regenerate_from_fixtures` заполняет `known_failures`
+самопроверкой текущего прогона (там возможны только rank-1 ловушки —
+версии/хэши/пины совпадают сами с собой).
 
 Каждый `Failure` содержит `config`, `slice`, `case_id`, `kind`,
 `expected`, `actual`; сообщение печатается целиком (NFR-8).

@@ -334,7 +334,7 @@ fn embedder_adapter_reports_the_cache_key() {
     let embedder = OpenRouterEmbedder::with_client(cfg, client);
     assert_eq!(
         embedder.model_id(),
-        "openrouter/qwen/qwen3-embedding-8b@d1024@l2"
+        "openrouter/nvidia/nemotron-3-embed-1b:free@d2048@l2"
     );
 }
 

@@ -1,0 +1,41 @@
+# Weekly + manual live benchmark Run (search-benchmark T13/T14).
+#
+# Advisory only: NEVER a required check, NEVER gating merge. The live run
+# exercises real provider models (free tier by default) and uploads the
+# report as an artifact for release review. Offline per-PR CI stays the
+# enforcement point (DELTA-3: required check with human override on red).
+name: bench-live
+
+on:
+  schedule:
+    # Weekly, Monday 06:00 UTC — after the OpenRouter free-tier daily reset.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Live measurement (free tier, cost-capped)
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # Must stay well under the free daily cap (1000 req/day);
+          # a full run issues ~400 free calls with 4 s pacing.
+          SEARCH_BENCH_COST_CAP_USD: "1"
+        run: >
+          cargo test --locked --features hybrid-remote
+          --test search_bench_live -- --ignored live_measurement --nocapture
+      - name: Upload live report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-report
+          path: target/search-bench/live-report.json
+          if-no-files-found: warn

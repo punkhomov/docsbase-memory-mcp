@@ -216,3 +216,54 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   gate_failures) — verified: live baseline.json known_failures are 9/9
   ForbiddenHit. Fixed-known re-matching stale entries is prevented by
   the documented fix→regen requirement (DELTA-3/FR-15).
+- Task T13: complete (code + units; live execution pending free-tier reset).
+  `RecordingTransport` (usage parse + cost cap per request),
+  `estimate_cost_usd` (free $0 / qwen $0.01+M / cohere $0.001/call, unknown
+  fail-closed), `cost_cap_from_env` ($1 default), `check_cost_cap`,
+  `pareto_frontier`, `live_measurement` (ignored, writes
+  `target/search-bench/live-report.json` with quality/latency/usage/cost/
+  pareto + baseline deltas), `PacingEmbedder`/`PacingReranker` for the
+  free 20/min tier, index-time backfill in live runs (production parity).
+  Verify: 5 unit tests (cap, usage parse both shapes, live report shape,
+  pareto dominated/frontier); live_measurement ran 12 min then hit the
+  free DAILY cap (1000/day, resets 00:00 UTC) — code path proven to the
+  cap, full report pending reset. Free-tier lesson recorded: bulk jobs
+  need pacing (done) + daily-cap chunking (record in slices if needed).
+- Task T14: complete. `bench-live.yml` (weekly + dispatch, artifact upload,
+  continue-on-error, advisory by design). Old harness retired
+  (`tests/search_quality.rs` + `search-quality/baseline.json` deleted;
+  corpus stays for `search_golden`; legacy parity was green 12/12).
+  AGENTS.md: bench commands + DELTA-3 policy (required check, human
+  override in PR; live advisory). Design §5.8 aligned (rank-1, known set).
+- Ruling: fresh review NEEDS CHANGES → all accepted: Blocker 1 (models use
+  wrote rootless fragment — wrapped in `hybrid` + roundtrip regression
+  test); Blocker 2 (advisory-vs-required incoherence — required check +
+  human override); M1 (dims without embedding rejected), M2 (window kept
+  when unset), M3 (ends_with + skip-first pacing + dedup before scoring),
+  M4 (known rank-1 traps in diagnostics), M5 (fix→regen documented),
+  M6 (tolerance test from a real gate Failure; sticky test renamed),
+  M7 (trimmed model ids). T13 live execution is the only open item
+  (blocked on the free daily reset, not on code).
+- Task T13: complete (code + units; live execution blocked on the free
+  daily cap — 1000/day, resets 00:00 UTC; rerun after reset, report lands
+  in target/search-bench/live-report.json). `RecordingTransport`
+  (usage parse + per-call cost + worst-case preflight cap),
+  `estimate_cost_usd` (free $0 / qwen $0.01+M / cohere $0.001/call,
+  unknown fail-closed), `cost_cap_from_env` ($1 default, garbage counts
+  as unset), `pareto_frontier`, `live_measurement` (ignored, paced,
+  backfills dense cache like production, asserts cap). Free-tier pacing
+  for both embed and rerank (`PacingEmbedder`/`PacingReranker`, 4 s).
+  Verify: 5 unit tests (cap incl. exact-fit, usage shapes, cost table,
+  report shape, pareto) green; live run started, hit the daily cap at
+  backfill (no report yet — expected, not a code defect).
+- Task T14: complete. `bench-live.yml` (weekly Monday 06:00 UTC +
+  dispatch, continue-on-error, artifact upload; secret
+  `OPENROUTER_API_KEY`). Old harness retired (test + old baseline.json
+  deleted; corpus stays for search_golden; parity was green 12/12).
+  AGENTS.md: bench commands + DELTA-3 gate policy (offline required with
+  human override; live advisory). Design §5.8 aligned (rank-1,
+  known-failures, fix→regen). Search-quality ledger closed with successor
+  pointer. Full suite: default 516 passed, hybrid 546 passed, 0 failed.
+- Reviewer (final): B1 double-count fixed via spent deltas; B2 paid-rerank
+  substring fixed to require `:free`; B3 stale refs fixed
+  (search_bench message, AGENTS map, tantivy comment, hybrid_live docs).

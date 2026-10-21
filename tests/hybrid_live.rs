@@ -8,8 +8,8 @@
 //!
 //! The measurement is a report, not a gate (NFR-1): it prints hit@3 and
 //! nDCG@3 for BM25 vs BM25+rerank over a representative subset of the
-//! search-quality golden cases (kept in sync by hand with
-//! `tests/search_quality.rs::CASES`).
+//! search-bench legacy cases (kept in sync by hand with
+//! `tests/fixtures/search-bench/legacy.json`).
 
 use std::fs;
 use std::path::Path;

@@ -3171,3 +3171,293 @@ pub fn trap_warnings(current: &Baseline, cases: &[QueryCase]) -> Vec<String> {
     out.dedup();
     out
 }
+
+// ---------------------------------------------------------------------------
+// T13: live measurement + cost cap (FR-17, FR-18, FR-32; NFR-7).
+// Everything network-shaped lives behind `hybrid-remote`; the math below
+// is pure and unit-tested without a key.
+// ---------------------------------------------------------------------------
+
+/// Usage recorded from live provider responses (FR-18).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LiveUsage {
+    /// Input tokens (embeddings) or 0 when the provider omits usage.
+    pub prompt_tokens: u64,
+    /// Output/total tokens where reported, else 0.
+    pub total_tokens: u64,
+    /// Provider search units (rerank) where reported, else 0.
+    pub search_units: u64,
+    /// Requests sent, always counted even when usage is absent.
+    pub calls: u64,
+}
+
+/// Price list for cost estimates (FR-18). Unknown models return `None` and
+/// the live run refuses to guess (fail-closed); add the model explicitly.
+/// Token/call counts are tiny, so the float casts below are exact.
+#[allow(clippy::cast_precision_loss)]
+#[must_use]
+pub fn estimate_cost_usd(model_pin: &str, usage: &LiveUsage) -> Option<f64> {
+    // Embedding models are priced per million prompt tokens ...
+    if model_pin.contains("nemotron-3-embed-1b:free") {
+        return Some(0.0);
+    }
+    if model_pin.contains("qwen/qwen3-embedding-8b") {
+        return Some(usage.prompt_tokens as f64 / 1_000_000.0 * 0.01);
+    }
+    // ... rerank models per call.
+    // Rerank models are priced per call; only the free route is $0 —
+    // a paid `nemotron-rerank` id must not match the free arm.
+    if model_pin.contains("nemotron-rerank") && model_pin.contains(":free") {
+        return Some(0.0);
+    }
+    if model_pin.contains("cohere/rerank") {
+        return Some(usage.calls as f64 * 0.001);
+    }
+    None
+}
+
+/// Cost-cap source of truth (FR-18): `SEARCH_BENCH_COST_CAP_USD`, defaulting
+/// to $1 with a warning when unset or unparsable. The cap is mandatory:
+/// there is no uncapped mode.
+#[must_use]
+pub fn cost_cap_from_env() -> (f64, bool) {
+    match std::env::var("SEARCH_BENCH_COST_CAP_USD") {
+        Ok(raw) => match raw.parse::<f64>() {
+            Ok(cap) if cap >= 0.0 => (cap, false),
+            _ => (1.0, true),
+        },
+        Err(_) => (1.0, true),
+    }
+}
+
+/// Refuses the next request when it would breach the cap (FR-18).
+/// Pure so the policy is unit-testable without a network.
+pub fn check_cost_cap(spent_usd: f64, next_estimate_usd: f64, cap_usd: f64) -> anyhow::Result<()> {
+    if spent_usd + next_estimate_usd > cap_usd {
+        anyhow::bail!(
+            "cost cap exceeded: spent ${spent_usd:.4}, next ~${next_estimate_usd:.4}, cap ${cap_usd:.4}"
+        );
+    }
+    Ok(())
+}
+
+/// Worst-case single-request cost used for the pre-flight cap check.
+/// Flat bounds (not batch-scaled): backfill batches are few and bounded by
+/// the client's own batching, so the marginal check stays conservative
+/// without per-call accounting complexity.
+#[must_use]
+pub fn worst_case_next_usd(url: &str) -> f64 {
+    if url.contains("/rerank") {
+        0.002
+    } else {
+        0.005
+    }
+}
+
+#[cfg(feature = "hybrid-remote")]
+pub mod live_transport {
+    use std::sync::{Arc, Mutex};
+
+    use docsbase_memory::hybrid::wire::{Transport, TransportResponse};
+
+    use super::{
+        LiveUsage, check_cost_cap, cost_cap_from_env, estimate_cost_usd, worst_case_next_usd,
+    };
+
+    /// [`Transport`] wrapper that records usage from live provider responses
+    /// and enforces the cost cap before every request (FR-17, FR-18).
+    /// Parsing is defensive: unknown shapes count calls only, never fail.
+    /// Cost is charged per response from the model pin; unknown pins fall
+    /// back to the worst-case bound (fail toward blocking, never guessing).
+    #[derive(Clone)]
+    pub struct RecordingTransport {
+        inner: Arc<dyn Transport>,
+        model_pin: String,
+        usage: Arc<Mutex<LiveUsage>>,
+        spent_usd: Arc<Mutex<f64>>,
+    }
+
+    impl RecordingTransport {
+        /// Wraps an inner transport with a fresh usage accumulator.
+        pub fn new(inner: Arc<dyn Transport>, model_pin: &str) -> Self {
+            Self {
+                inner,
+                model_pin: model_pin.to_owned(),
+                usage: Arc::new(Mutex::new(LiveUsage::default())),
+                spent_usd: Arc::new(Mutex::new(0.0)),
+            }
+        }
+
+        /// Snapshot of recorded usage so far.
+        #[must_use]
+        pub fn usage(&self) -> LiveUsage {
+            self.usage
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default()
+        }
+
+        /// Dollars spent so far (estimated from recorded usage).
+        #[must_use]
+        pub fn spent_usd(&self) -> f64 {
+            self.spent_usd
+                .lock()
+                .map(|guard| *guard)
+                .unwrap_or_default()
+        }
+    }
+
+    impl Transport for RecordingTransport {
+        fn post_json(
+            &self,
+            url: &str,
+            headers: &[(String, String)],
+            body: &str,
+        ) -> docsbase_memory::error::Result<TransportResponse> {
+            let (cap, defaulted) = cost_cap_from_env();
+            if defaulted {
+                eprintln!("warning: SEARCH_BENCH_COST_CAP_USD unset, using default $1.00");
+            }
+            let spent = self.spent_usd();
+            if let Err(err) = check_cost_cap(spent, worst_case_next_usd(url), cap) {
+                return Err(docsbase_memory::error::Error::internal(format!(
+                    "cost cap refuses the next request: {err}"
+                )));
+            }
+            let response = self.inner.post_json(url, headers, body)?;
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&response.body) {
+                let prompt = parsed
+                    .pointer("/usage/prompt_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let total = parsed
+                    .pointer("/usage/total_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let units = parsed
+                    .pointer("/meta/billed_units/search_units")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let call = LiveUsage {
+                    prompt_tokens: prompt,
+                    total_tokens: total,
+                    search_units: units,
+                    calls: 1,
+                };
+                let charge = estimate_cost_usd(&self.model_pin, &call)
+                    .unwrap_or_else(|| worst_case_next_usd(url));
+                if let Ok(mut guard) = self.usage.lock() {
+                    guard.calls += 1;
+                    guard.prompt_tokens += prompt;
+                    guard.total_tokens += total;
+                    guard.search_units += units;
+                }
+                if let Ok(mut spent) = self.spent_usd.lock() {
+                    *spent += charge;
+                }
+            }
+            Ok(response)
+        }
+    }
+}
+
+/// Marks the Pareto frontier in place: a point is on it when no other point
+/// has at least as much quality for at most as much cost and latency, with
+/// at least one strict inequality (FR-32).
+pub fn pareto_frontier(points: &mut [ParetoPoint]) {
+    fn dominates(other: &ParetoPoint, point: &ParetoPoint) -> bool {
+        other.quality >= point.quality
+            && other.cost_usd <= point.cost_usd
+            && other.latency_p95_ms <= point.latency_p95_ms
+            && (other.quality > point.quality
+                || other.cost_usd < point.cost_usd
+                || other.latency_p95_ms < point.latency_p95_ms)
+    }
+    let dominated: Vec<bool> = points
+        .iter()
+        .map(|point| {
+            points
+                .iter()
+                .any(|other| !std::ptr::eq(point, other) && dominates(other, point))
+        })
+        .collect();
+    for (point, dominated) in points.iter_mut().zip(dominated) {
+        point.on_frontier = !dominated;
+    }
+}
+
+/// Pacing wrapper for rate-limited rerankers (free tiers): sleeps before a
+/// call when the previous one was too recent. Interactive search never uses
+/// this (retries cover the occasional 429); bulk jobs (record, live) do.
+pub struct PacingReranker<R: Reranker> {
+    inner: R,
+    min_interval: std::time::Duration,
+    last_call: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl<R: Reranker> PacingReranker<R> {
+    pub fn new(inner: R, min_interval: std::time::Duration) -> Self {
+        Self {
+            inner,
+            min_interval,
+            last_call: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl<R: Reranker> Reranker for PacingReranker<R> {
+    fn rerank(
+        &self,
+        query: &str,
+        docs: &[String],
+        top_n: usize,
+    ) -> docsbase_memory::error::Result<Vec<(usize, f32)>> {
+        if let Ok(mut last) = self.last_call.lock() {
+            if let Some(previous) = *last {
+                let elapsed = previous.elapsed();
+                if elapsed < self.min_interval {
+                    std::thread::sleep(self.min_interval - elapsed);
+                }
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        self.inner.rerank(query, docs, top_n)
+    }
+}
+
+/// Pacing wrapper for rate-limited embedders (free tiers): sleeps before a
+/// call when the previous one was too recent. Mirrors [`PacingReranker`].
+pub struct PacingEmbedder<E: Embedder> {
+    inner: E,
+    min_interval: std::time::Duration,
+    last_call: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl<E: Embedder> PacingEmbedder<E> {
+    pub fn new(inner: E, min_interval: std::time::Duration) -> Self {
+        Self {
+            inner,
+            min_interval,
+            last_call: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl<E: Embedder> Embedder for PacingEmbedder<E> {
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+
+    fn embed(&self, texts: &[String]) -> docsbase_memory::error::Result<Vec<Vec<f32>>> {
+        if let Ok(mut last) = self.last_call.lock() {
+            if let Some(previous) = *last {
+                let elapsed = previous.elapsed();
+                if elapsed < self.min_interval {
+                    std::thread::sleep(self.min_interval - elapsed);
+                }
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        self.inner.embed(texts)
+    }
+}

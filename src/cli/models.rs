@@ -146,13 +146,19 @@ fn resolve_hybrid_table(
             .into());
         }
     }
-    if let Some(window) = args.window
-        && !(MIN_RERANK_WINDOW..=MAX_RERANK_WINDOW).contains(&window)
-    {
-        return Err(Error::Admission {
-            message: format!("--window must be {MIN_RERANK_WINDOW}..={MAX_RERANK_WINDOW}"),
+    if let Some(window) = args.window {
+        if args.rerank.is_none() {
+            return Err(Error::Admission {
+                message: "--window requires --rerank in the same call".to_owned(),
+            }
+            .into());
         }
-        .into());
+        if !(MIN_RERANK_WINDOW..=MAX_RERANK_WINDOW).contains(&window) {
+            return Err(Error::Admission {
+                message: format!("--window must be {MIN_RERANK_WINDOW}..={MAX_RERANK_WINDOW}"),
+            }
+            .into());
+        }
     }
     let mut hybrid = match existing.and_then(|root| root.get("hybrid")).cloned() {
         Some(toml::Value::Table(table)) => table,
@@ -298,6 +304,7 @@ fn table_int(stage: &toml::map::Map<String, toml::Value>, key: &str) -> crate::e
 
 /// Merges the resolved `hybrid` table into the project file, preserving
 /// every other key. Comments are not preserved by the TOML round-trip.
+#[cfg_attr(not(feature = "hybrid-remote"), allow(dead_code))]
 fn write_project_toml(
     path: &std::path::Path,
     existing: Option<&toml::Value>,
@@ -324,6 +331,7 @@ fn write_project_toml(
 }
 
 /// Prints pins, storage estimate and the reload note.
+#[cfg_attr(not(feature = "hybrid-remote"), allow(dead_code))]
 fn print_summary(table: &toml::Value) {
     use crate::hybrid::EmbeddingCfg;
     use crate::hybrid::config::cache_model_id;
