@@ -23,7 +23,9 @@ Optional hybrid search stages (OpenRouter embeddings + rerank, with opt-in
 RRF fusion over the cached vectors via `ranking = "rrf"`) are opt-in per
 project/request, ship behind the `hybrid-remote` build feature and require
 `OPENROUTER_API_KEY`; the default build stays fully offline and never falls
-back silently (see [`docs/CONFIG.md`](docs/CONFIG.md)).
+back silently (see [`docs/CONFIG.md`](docs/CONFIG.md)). Default model pins
+are free OpenRouter routes, which may train on prompts and rotate monthly;
+paid pins via `docsbase models use`.
 
 Supported platforms: **Linux x86_64** (static binary), **Windows x64**
 (`.exe`) and **macOS 12+ on Apple Silicon**. Intel Macs are out of scope

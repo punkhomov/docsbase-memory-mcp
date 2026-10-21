@@ -488,7 +488,7 @@ const NDCG_DISCOUNT: [f64; 20] = [
 ```
 - `citation_overlap` — доля top-k позиций, чьи `lines` пересекают любой
   expected-диапазон (если `lines` не задан — совпадение пути).
-- `forbidden_hit` — любой `AbsentHit` в top-k (path + lines, если задан).
+- `forbidden_hit` — `AbsentHit` на ранге 1 (DELTA-3; path + lines, если задан).
 - `duplicate_path_ratio` — доля позиций (после первой), чей `path` уже
   встречался выше, от числа возвращённых позиций.
 - `k` берётся из кейса; для main это 10, для legacy — 3.

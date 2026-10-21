@@ -291,3 +291,17 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   in `tests/smoke.rs` (dry-run prints a paste-ready `[hybrid]` table and
   writes nothing; bare invocation fails loudly) — units covered the merge,
   E2E covers the wiring.
+- Blocker 1 resolved (2026-10-21, customer-approved): FR-10/FR-8/FR-14(a)/
+  SC-5/P2 rewritten as the rank-1 rule (DELTA-3) — spec matches code and the
+  `rank1_forbidden_only` test; design §5.6 rule updated; rollback rejected
+  (corpus is built for top-10 traps, zero-tolerance could never go green).
+- Blocker 2 noted minimally (2026-10-21, no inflation per customer):
+  CONFIG.md carries the true free defaults + a short privacy note, README/
+  README.ru one line, CHANGELOG entry, `models use` prints a one-line
+  stderr note for `:free` routes (FR-33 condition now met in docs + CLI).
+- Blocker 3 deferred (customer decision): FR-2 `reviewed_by` ≥1 for ordinary
+  cases stays unenforced; risk-based validator (≥2 critical/absent) stands.
+- Blocker 4 deferred (customer decision): regenerate may still launder new
+  rank-1 traps into known-failures; technical guard (old known-set +
+  accept flag + regression test) pending; FR-15 process guard is the only
+  protection meanwhile — regenerate deliberately and diff known Failures.

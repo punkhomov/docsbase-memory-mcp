@@ -46,15 +46,20 @@ ranking = "lexical"                # "lexical" | "rrf" (see below)
 
 [hybrid.embedding]
 provider = "openrouter"            # iteration 1 allows only openrouter
-model = "qwen/qwen3-embedding-8b"  # default; MRL-truncated
-dimensions = 1024                  # part of the vector cache key
+model = "nvidia/nemotron-3-embed-1b:free"  # default; fixed width, no MRL
+dimensions = 2048                  # part of the vector cache key
 normalize = true                   # L2; part of the cache key
 
 [hybrid.reranker]
 provider = "openrouter"
-model = "cohere/rerank-v3.5"
+model = "nvidia/llama-nemotron-rerank-vl-1b-v2:free"  # default
 window = 50                        # candidate window per search (10..=100)
 ```
+
+Default pins are free OpenRouter routes: they may train on prompts and the
+roster rotates monthly. Paid pins (e.g. `qwen/qwen3-embedding-8b`,
+`cohere/rerank-v3.5`) are one explicit `docsbase models use` away and stay
+pinned once set.
 
 Semantics: chunk vectors are cached content-addressed
 (`openrouter/<model>@d<dim>@<l2|raw>`); opening a project with incomplete

@@ -62,6 +62,9 @@ pub fn run(args: &UseArgs) -> anyhow::Result<()> {
     };
     let existing = read_project_toml(&root.join(".docsbase.toml"))?;
     let table = resolve_hybrid_table(existing.as_ref(), args)?;
+    if let Some(note) = free_route_note(&table) {
+        eprintln!("{note}");
+    }
     if args.dry_run {
         println!(
             "{}",
@@ -287,6 +290,30 @@ fn existing_window(hybrid: &toml::map::Map<String, toml::Value>) -> Option<u32> 
         .and_then(|window| u32::try_from(window).ok())
 }
 
+/// One-line privacy note for free-tier routes (FR-33): hybrid itself is an
+/// explicit opt-in, but the free-vs-paid distinction is stated once, on both
+/// dry-run and write paths. Pure for unit tests.
+fn free_route_note(table: &toml::Value) -> Option<String> {
+    let hybrid = table.get("hybrid")?.as_table()?;
+    let mut routes = Vec::new();
+    for stage in ["embedding", "reranker"] {
+        let model = hybrid
+            .get(stage)
+            .and_then(|value| value.get("model"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        if model.contains(":free") {
+            routes.push(format!("{stage} ({model})"));
+        }
+    }
+    if routes.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "note: free route(s) {} may train on prompts and rotate monthly; paid pins stay available via models use",
+        routes.join(", ")
+    ))
+}
 /// Probes exactly what was configured: one embed call (vector count and
 /// width must match) and, when a reranker is set, one rerank call over two
 /// documents. Provider rejections surface here, not at index time.
@@ -655,5 +682,16 @@ mod tests {
         let err = resolve_hybrid_table(Some(&bogus_ranking), &args(Some("m/e"), Some(128), None))
             .expect_err("unknown preserved ranking");
         assert!(err.to_string().contains("ranking"), "{err}");
+    }
+
+    #[test]
+    fn free_routes_get_a_privacy_note() {
+        let free =
+            parse("[hybrid]\n[hybrid.embedding]\nmodel = \"nvidia/nemotron-3-embed-1b:free\"\n");
+        let note = free_route_note(&free).expect("free route noted");
+        assert!(note.contains("train on prompts"), "{note}");
+        let paid = parse("[hybrid]\n[hybrid.embedding]\nmodel = \"qwen/qwen3-embedding-8b\"\n");
+        assert!(free_route_note(&paid).is_none(), "paid route stays silent");
+        assert!(free_route_note(&parse("[other]\n")).is_none());
     }
 }

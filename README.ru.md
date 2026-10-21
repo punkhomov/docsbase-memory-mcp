@@ -24,7 +24,9 @@ OpenRouter, плюс opt-in RRF-fusion по кэшу векторов — `ranki
 включаются явно per-project/per-request, поставляются за feature-флагом
 `hybrid-remote` и требуют `OPENROUTER_API_KEY`; дефолтная сборка остаётся
 полностью офлайн и не делает молчаливого fallback
-(см. [`docs/CONFIG.md`](docs/CONFIG.md)).
+(см. [`docs/CONFIG.md`](docs/CONFIG.md)). Дефолтные пины моделей —
+бесплатные маршруты OpenRouter: могут учиться на промптах и меняются
+ежемесячно; платные пины — через `docsbase models use`.
 
 Поддерживаемые платформы: **Linux x86_64** (статический бинарь),
 **Windows x64** (`.exe`) и **macOS 12+ на Apple Silicon**. Intel-маки вне

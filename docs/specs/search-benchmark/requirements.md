@@ -103,9 +103,9 @@
 
 - **Why P2:** именно этого не хватает текущему насыщенному набору.
 - **Independent test:** каждый срез имеет не менее 8 кейсов; near-duplicate
-  ловушка ловится как `forbidden_hit`, а перефразировка требует dense-канала.
+  ловушка на ранге 1 ловится как `forbidden_hit`, а перефразировка требует dense-канала.
 - **Acceptance scenarios:**
-  - Given hard-negative кейс, When запрещённый документ попадает в top-k,
+  - Given hard-negative кейс, When запрещённый документ занимает ранг 1,
     Then кейс и гейт падают независимо от среднего nDCG.
   - Given перефразировка без общих лексических терминов, When включён `rrf`,
     Then ожидаемый документ поднимается в top-k; на `bm25` кейс может быть
@@ -203,17 +203,21 @@ baseline, **so that** смена модели или чанкера была о�
   `grade >= 1` в top-k), `recall@k` (доля expected, попавших в top-k),
   `MRR@k` (обратный ранг первого релевантного), `nDCG@k` (graded),
   `citation_overlap@k` (доля позиций top-k, чьи `lines` пересекают ожидаемый
-  диапазон), `forbidden_hit` (bool), `duplicate_path_ratio@k` (доля позиций
-  top-k, чей `path` уже встречался выше в выдаче).
+   `citation_overlap@k` (доля позиций top-k, чьи `lines` пересекают ожидаемый
+   диапазон), `forbidden_hit` (bool; DELTA-3: true iff ловушка на ранге 1),
+   `duplicate_path_ratio@k` (доля позиций top-k, чей `path` уже встречался
+   выше в выдаче).
 - **FR-9 (must) Цитаты.** `citation_overlap@k` считается по пересечению
   возвращённых `lines` с ожидаемым диапазоном для того же `path`; если
   диапазон не задан, достаточно совпадения пути. Разметка lines — 1-based,
   включительно.
-- **FR-10 (must) Запрещённые документы.** Любой `absent` документ в top-k —
-  hard fail кейса независимо от остальных метрик. `absent` — только явно
-  adjudicated ловушки с непустым `reason`; отсутствие документа в `expected`
-  само по себе не делает его `absent`. При заданных `lines` запрет
-  применяется к пересечению диапазона.
+- **FR-10 (must) Запрещённые документы.** `absent` в top-k — hard fail
+  кейса, только если ловушка занимает **ранг 1** (DELTA-3; до DELTA-3 —
+  любая позиция в top-k). Ловушка ниже при верном первом — зелёный кейс;
+  её позиция пишется в отчёт как диагностика (`trap_diagnostics`).
+  `absent` — только явно adjudicated ловушки с непустым `reason`;
+  отсутствие документа в `expected` само по себе не делает его `absent`.
+  При заданных `lines` запрет применяется к пересечению диапазона.
 - **FR-11 (must) Срезы и дельты.** Отчёт агрегирует метрики по срезу
   (макро-среднее) и сравнивает с baseline: per-case win/loss/tie,
   per-slice delta, paired bootstrap CI с фиксированным seed.
@@ -227,8 +231,8 @@ baseline, **so that** смена модели или чанкера была о�
   ранги, per-slice агрегаты, early cutoffs 3/10, outcome matrix,
   legacy-parity, discrimination, локальные p50/p95, версию harness и дату
   генерации. BM25-скоры не сравниваются побитово.
-- **FR-14 (must) Гейт.** Hard fail, если: (а) `forbidden_hit`; (б) baseline
-  `hit = true`, current `hit = false`; (в) per-case `nDCG` упал больше допуска
+- **FR-14 (must) Гейт.** Hard fail, если: (а) `forbidden_hit` (ловушка на
+  ранге 1, DELTA-3); (б) baseline `hit = true`, current `hit = false`; (в) per-case `nDCG` упал больше допуска
   (0.02); (г) `hit_rate` любого среза упал; (д) `nDCG` среза упал больше
   допуска; (е) missing fixture/hash mismatch; (ж) конфигурация отсутствует.
   Улучшения не требуют обновления baseline, но и не обновляют его
@@ -453,8 +457,9 @@ cargo test --locked --features hybrid-remote --test search_bench_live -- --ignor
   rerank, поломка RRF) переводит гейт в fail и указывает срез/кейс.
 - **SC-4.** Все четыре конфигурации присутствуют в каждом прогоне; каждый
   обязательный срез основного корпуса содержит ≥8 кейсов.
-- **SC-5.** Hard-negative ловушки дают `forbidden_hit = 0` на baseline; любая
-  ловушка в top-k — fail.
+- **SC-5.** Rank-1 ловушек вне известного множества нет; известные
+  перечислены в `baseline.known_failures` и видны в диагностике. Ловушки
+  ниже ранга 1 при верном первом — `trap_diagnostics`, не fail (DELTA-3).
 - **SC-6.** Legacy-parity на `legacy-corpus/` воспроизводит 12 старых кейсов:
   `hit`/`absent_hit` совпадают с `search-quality/baseline.json`.
 - **SC-7.** Offline-прогон укладывается в 30 с debug; фикстуры ≤12 MiB.
