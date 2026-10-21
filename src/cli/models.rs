@@ -204,8 +204,77 @@ fn resolve_hybrid_table(
         hybrid.insert("reranker".to_owned(), toml::Value::Table(stage));
     }
     let mut root = toml::map::Map::new();
-    root.insert("hybrid".to_owned(), toml::Value::Table(hybrid));
+    root.insert("hybrid".to_owned(), toml::Value::Table(hybrid.clone()));
+    validate_hybrid_table(&hybrid)?;
     Ok(toml::Value::Table(root))
+}
+
+/// Validates the merged `hybrid` table: flag arguments were checked on the
+/// way in, but preserved stages pass through untouched — a stale window,
+/// zero dims, blank model id or unknown ranking must fail here with a fix
+/// hint, not later at index time.
+fn validate_hybrid_table(hybrid: &toml::map::Map<String, toml::Value>) -> anyhow::Result<()> {
+    if let Some(stage) = hybrid.get("embedding").and_then(toml::Value::as_table) {
+        let model = stage
+            .get("model")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        if model.trim().is_empty() {
+            return Err(Error::Admission {
+                message:
+                    "existing hybrid.embedding.model is blank (pass --embedding --dims to fix)"
+                        .to_owned(),
+            }
+            .into());
+        }
+        let dims = stage
+            .get("dimensions")
+            .and_then(toml::Value::as_integer)
+            .unwrap_or(0);
+        if dims <= 0 {
+            return Err(Error::Admission {
+                message: "existing hybrid.embedding.dimensions must be positive (pass --embedding --dims to fix)"
+                    .to_owned(),
+            }
+            .into());
+        }
+    }
+    if let Some(stage) = hybrid.get("reranker").and_then(toml::Value::as_table) {
+        let model = stage
+            .get("model")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        if model.trim().is_empty() {
+            return Err(Error::Admission {
+                message: "existing hybrid.reranker.model is blank (pass --rerank to fix)"
+                    .to_owned(),
+            }
+            .into());
+        }
+        if let Some(window) = stage.get("window").and_then(toml::Value::as_integer) {
+            let valid = u32::try_from(window)
+                .is_ok_and(|value| (MIN_RERANK_WINDOW..=MAX_RERANK_WINDOW).contains(&value));
+            if !valid {
+                return Err(Error::Admission {
+                    message: format!(
+                        "existing hybrid.reranker.window {window} out of range {MIN_RERANK_WINDOW}..={MAX_RERANK_WINDOW} (pass --window to fix)"
+                    ),
+                }
+                .into());
+            }
+        }
+    }
+    if let Some(ranking) = hybrid.get("ranking").and_then(toml::Value::as_str) {
+        if ranking != "lexical" && ranking != "rrf" {
+            return Err(Error::Admission {
+                message: format!(
+                    "existing hybrid.ranking {ranking:?} is unknown (want \"lexical\" or \"rrf\"); edit .docsbase.toml"
+                ),
+            }
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Existing rerank window survives when `--window` is not given.
@@ -304,6 +373,8 @@ fn table_int(stage: &toml::map::Map<String, toml::Value>, key: &str) -> crate::e
 
 /// Merges the resolved `hybrid` table into the project file, preserving
 /// every other key. Comments are not preserved by the TOML round-trip.
+/// The write is atomic: readers see the old or the new file, never a
+/// half-written one (same temp + rename pattern as the daemon state).
 #[cfg_attr(not(feature = "hybrid-remote"), allow(dead_code))]
 fn write_project_toml(
     path: &std::path::Path,
@@ -325,8 +396,11 @@ fn write_project_toml(
     map.insert("hybrid".to_owned(), hybrid.clone());
     let rendered =
         toml::to_string(&root).map_err(|err| Error::internal_with_source("render config", err))?;
-    std::fs::write(path, rendered)
-        .map_err(|err| Error::internal_with_source(format!("write {}", path.display()), err))?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, rendered)
+        .map_err(|err| Error::internal_with_source(format!("write {}", tmp.display()), err))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|err| Error::internal_with_source(format!("publish {}", path.display()), err))?;
     Ok(())
 }
 
@@ -528,7 +602,6 @@ mod tests {
             resolve_hybrid_table(None, &args(Some("m/e"), None, None)).expect_err("dims required");
         assert!(err.to_string().contains("--dims"));
     }
-
     #[test]
     fn rejects_shapes() {
         assert!(
@@ -549,5 +622,38 @@ mod tests {
             resolve_hybrid_table(None, &bad_window).is_err(),
             "window below minimum"
         );
+    }
+
+    #[test]
+    fn preserved_window_out_of_range_rejected() {
+        let existing = parse(
+            "[hybrid]\n[hybrid.embedding]\nprovider = \"openrouter\"\nmodel = \"m/e\"\ndimensions = 128\n[hybrid.reranker]\nprovider = \"openrouter\"\nmodel = \"old/r\"\nwindow = 5\n",
+        );
+        // Only --embedding is set; the stale preserved window must still fail.
+        let err = resolve_hybrid_table(Some(&existing), &args(Some("new/e"), Some(256), None))
+            .expect_err("stale preserved window");
+        assert!(err.to_string().contains("--window"), "{err}");
+    }
+
+    #[test]
+    fn preserved_stages_validated() {
+        let zero_dims = parse(
+            "[hybrid]\n[hybrid.embedding]\nprovider = \"openrouter\"\nmodel = \"m/e\"\ndimensions = 0\n",
+        );
+        let err = resolve_hybrid_table(Some(&zero_dims), &args(None, None, Some("m/r")))
+            .expect_err("stale preserved dims");
+        assert!(err.to_string().contains("--dims"), "{err}");
+
+        let blank_model = parse(
+            "[hybrid]\n[hybrid.reranker]\nprovider = \"openrouter\"\nmodel = \"  \"\nwindow = 20\n",
+        );
+        let err = resolve_hybrid_table(Some(&blank_model), &args(Some("m/e"), Some(128), None))
+            .expect_err("blank preserved model");
+        assert!(err.to_string().contains("--rerank"), "{err}");
+
+        let bogus_ranking = parse("[hybrid]\nranking = \"bogus\"\n");
+        let err = resolve_hybrid_table(Some(&bogus_ranking), &args(Some("m/e"), Some(128), None))
+            .expect_err("unknown preserved ranking");
+        assert!(err.to_string().contains("ranking"), "{err}");
     }
 }

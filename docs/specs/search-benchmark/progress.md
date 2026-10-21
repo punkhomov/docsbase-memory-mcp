@@ -192,8 +192,8 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   gate-break, recorded as future hard negatives).
 - DELTA-3 (2026-10-21): FR-10 rank-1 trap rule + known-failures tolerance
   (gate fails only on NEW failures; fixed surface as improvements).
-  Rank-1 traps: ar-01 (office ties library — genuine engine defect,
-  work item), hard-07/08/10, hn-19/22 (6 cases, 9 known entries).
+  Rank-1 traps: ar-01 (office ties library — genuine engine defect, tracked
+  as issue #47), hard-07/08/10, hn-19/22 (6 cases, 9 known entries).
   Policy: verdict is a required check; merge on red needs human override
   in PR. Trap ranks below 1 → diagnostics, not failures.
 - Free defaults (FR-33): `nemotron-3-embed-1b:free@d2048` +
@@ -267,3 +267,19 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
 - Reviewer (final): B1 double-count fixed via spent deltas; B2 paid-rerank
   substring fixed to require `:free`; B3 stale refs fixed
   (search_bench message, AGENTS map, tantivy comment, hybrid_live docs).
+- Review fix round (2026-10-21, 7 findings, all accepted):
+  R1 diagnostics persisted — `Report.trap_diagnostics` + `attach_trap_diagnostics`,
+  in `quality_json`, `target/search-bench/gate-report.json` (offline gate),
+  `trap_diagnostics` in `live-report.json` (`trap_diagnostics_persist_in_report`
+  test); R2 `models use` writes atomically (temp + rename) and validates the
+  merged table — stale window/zero dims/blank model/unknown ranking fail with
+  fix hints (3 new unit tests); R3 docs unified — README links point at
+  `legacy-baseline.json`, one bound set 60–85 docs / 120–200 cases (FR-1/FR-2,
+  §8, layouts, tasks T6 + dated correction of the 120–180 amendment), ADR-B4
+  1024→2048, report-shape example pins → free defaults, DELTA-3 carries the
+  diagnostics implementation note; R4 cost cap realigned to the spec contract
+  (`DOCSBASE_BENCH_COST_CAP_USD`, $2 default) in code + workflow, pinned by
+  `cost_cap_default_is_two_dollars`; R5 `hybrid_live` smoke asserts against
+  `EmbeddingCfg::default().dimensions`; R6 gate policy names the enforceable
+  entity (required `linux` job, not the test name) in AGENTS/requirements/
+  bench-live comment; R7 ar-01 tracked as issue #47 and linked in the ledger.

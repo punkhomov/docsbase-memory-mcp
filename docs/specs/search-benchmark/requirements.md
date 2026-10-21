@@ -330,7 +330,7 @@ baseline, **so that** смена модели или чанкера была о�
 ## 6. Non-functional requirements
 
 - **NFR-1 (performance).** Offline-гейт (индексация + 4 конфигурации на
-  120–150 запросах) — не более 30 с в debug на CI-хосте, жёсткий предел 60 с.
+  120–200 запросах) — не более 30 с в debug на CI-хосте, жёсткий предел 60 с.
 - **NFR-2 (storage).** Фикстуры бенчмарка (корпус + векторы + скоры +
   baseline) — не более 12 MiB; векторы — raw little-endian f32.
 - **NFR-3 (reliability).** Повторный прогон даёт идентичную quality-часть
@@ -396,7 +396,7 @@ tests/fixtures/search-bench/
   corpus/                      # frozen .md docs (main)
   corpus/MANIFEST.json         # origin/license/blake3
   legacy-corpus/               # byte-identical copy of the old 10-doc corpus
-  queries.json                 # 120–150 main cases
+  queries.json                 # 120–200 main cases
   legacy.json                  # 12 parity cases (k=3)
   legacy-baseline.json         # frozen copy of search-quality/baseline.json
   vectors/<model-pin>/         # manifest.json + raw f32 files
@@ -425,7 +425,7 @@ cargo test --locked --features hybrid-remote --test search_bench_live -- --ignor
   "fixture_version": 1,
   "corpus_hash": "blake3:...",
   "queries_hash": "blake3:...",
-  "model_pins": ["openrouter/qwen/qwen3-embedding-8b@d1024@l2"],
+  "model_pins": ["openrouter/nvidia/nemotron-3-embed-1b:free@d2048@l2"],
   "configs": {
     "bm25": {
       "cases": [{"id": "ru-morph-01", "ranks": ["..."], "metrics": {}}],
@@ -612,6 +612,10 @@ rationale в ledger (DELTA-1).
 - FR-2: кейсов 120–150 → **120–180** (T12 discrimination требует ~40+
   сложных кейсов; время прогона прежнее — доли секунды на replay,
   запас NFR-1 не тронут).
+- Correction (2026-10-21): 120–180 → **120–200**. Фактический T12-корпус —
+  193 кейса, что вышло за amendment-границу; единый набор зафиксирован
+  как 60–85 документов / 120–200 кейсов (FR-1/FR-2, §8, tasks T6, design
+  §5.8/§13).
 
 ## DELTA-3 (2026-10-20) — контракт движка: присутствие и порядок, не чистота
 
@@ -627,7 +631,11 @@ rationale в ledger (DELTA-1).
   Ловушка на 2–10 при верном первом — зелёный кейс; лучший ранг каждой
   ловушки пишется в отчёт как диагностика (`trap warnings`). Топ-1,
   не покрытый ни expected, ни absent, — warning (кандидат в pooling
-  по FR-29), не провал.
+  по FR-29), не провал. Реализация диагностики (2026-10-21):
+  `Report.trap_diagnostics` (наполняется `attach_trap_diagnostics`, входит
+  в `quality_json`), артефакт `target/search-bench/gate-report.json`
+  в offline-гейте и поле `trap_diagnostics` в `live-report.json` —
+  движение ловушек видно и на зелёных прогонах.
 - Философия контракта (обязательно к прочтению): движок не гарантирует
   отсутствие ошибок в выдаче — для этого нужен понимающий задачу слой
   (gateway LLM). Контракт движка — присутствие (hit/recall) и порядок
@@ -636,8 +644,8 @@ rationale в ledger (DELTA-1).
   видимое пользователю качество (неправильный топ-ответ, пропавший
   верный, просевший nDCG), а не внутреннюю чистоту.
 - FR-14(a) читается через новый FR-10. Остальные пункты FR-14 без изменений.
-- Политика гейта: вердикт — required check (тест падает громко, причина
-  в отчёте); мерж при красном гейте — только явным override ревьюера,
+- Политика гейта: вердикт — required `linux` check (гейт-тест падает
+  громко внутри него, причина в отчёте); мерж при красном гейте — только явным override ревьюера,
   зафиксированным в PR (как и сам мерж — действие человека). Benchmark
   отвечает «стало хуже или лучше», а не сертифицирует совершенство.
 - Исправленная известная ловушка требует перезаписи baseline (`regenerate`,

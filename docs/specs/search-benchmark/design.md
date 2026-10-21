@@ -606,6 +606,7 @@ pub struct Report {
     pub discrimination: DiscriminationReport,
     pub outcome_matrix: OutcomeMatrix,
     pub pareto: Option<ParetoReport>,   // live only
+    pub trap_diagnostics: Vec<String>,   // DELTA-3: attach via attach_trap_diagnostics
 }
 
 pub struct Failure {
@@ -976,8 +977,8 @@ Test-harness использует `anyhow` и печатает контекст.
 
 ### ADR-B4. JSON-массивы vs raw f32
 
-- **JSON:** читаемо, но 200–400 векторов × 1024 float раздувают файл и
-  замедляют загрузку.
+- **JSON:** читаемо, но сотни векторов × 2048 float (дефолт; на момент
+  написания ADR было 1024) раздувают файл и замедляют загрузку.
 - **Raw LE f32 + manifest (выбрано):** компактно, быстро, без новых крейтов;
   требует аккуратной валидации offset/len.
 
@@ -1004,7 +1005,7 @@ tests/
     ├── legacy-corpus/           # byte-identical old 10-doc corpus
     ├── legacy.json              # 12 parity cases (k=3)
     ├── legacy-baseline.json     # frozen old search-quality baseline
-    ├── queries.json             # 120–150 main cases
+    ├── queries.json             # 120–200 main cases
     ├── vectors/<pin_slug>/
     │   ├── manifest.json
     │   └── vectors-<blake3>.bin

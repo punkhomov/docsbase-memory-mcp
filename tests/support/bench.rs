@@ -2021,6 +2021,12 @@ pub struct Report {
     pub discrimination: DiscriminationReport,
     pub outcome_matrix: OutcomeMatrix,
     pub pareto: Option<ParetoReport>,
+    /// Trap placement diagnostics (DELTA-3): traps below rank 1 and unjudged
+    /// top-1 pooling candidates. Attached explicitly via
+    /// [`attach_trap_diagnostics`]; advisory only, never a gate input, so a
+    /// green run still shows trap movement toward the top.
+    #[serde(default)]
+    pub trap_diagnostics: Vec<String>,
 }
 
 /// Machine-readable gate failure (NFR-8: every hard fail carries a reason).
@@ -2235,6 +2241,9 @@ pub fn build_report(current: &Baseline, baseline: Option<&Baseline>) -> Report {
         discrimination: current.discrimination.clone(),
         outcome_matrix: current.outcome_matrix.clone(),
         pareto: None,
+        // Attached explicitly by callers with cases in hand
+        // (`attach_trap_diagnostics`); never a default.
+        trap_diagnostics: Vec::new(),
     }
 }
 
@@ -2822,6 +2831,7 @@ pub fn quality_json(report: &Report) -> String {
         "configs": configs,
         "legacy_parity": report.baseline.legacy_parity,
         "outcome_matrix": report.outcome_matrix,
+        "trap_diagnostics": report.trap_diagnostics,
         "discrimination": {
             "saturated_total": report.discrimination.saturated_total,
             "saturated_ratio": report.discrimination.saturated_ratio,
@@ -3172,6 +3182,13 @@ pub fn trap_warnings(current: &Baseline, cases: &[QueryCase]) -> Vec<String> {
     out
 }
 
+/// Records [`trap_warnings`] into the report (DELTA-3): the diagnostics live
+/// in the report artifact, not just in the failure message, so trap movement
+/// stays visible on green runs. Advisory only — the gate never reads this.
+pub fn attach_trap_diagnostics(report: &mut Report, cases: &[QueryCase]) {
+    report.trap_diagnostics = trap_warnings(&report.baseline, cases);
+}
+
 // ---------------------------------------------------------------------------
 // T13: live measurement + cost cap (FR-17, FR-18, FR-32; NFR-7).
 // Everything network-shaped lives behind `hybrid-remote`; the math below
@@ -3216,17 +3233,26 @@ pub fn estimate_cost_usd(model_pin: &str, usage: &LiveUsage) -> Option<f64> {
     None
 }
 
-/// Cost-cap source of truth (FR-18): `SEARCH_BENCH_COST_CAP_USD`, defaulting
-/// to $1 with a warning when unset or unparsable. The cap is mandatory:
-/// there is no uncapped mode.
+/// Cost-cap source of truth (FR-18, NFR-7): `DOCSBASE_BENCH_COST_CAP_USD`,
+/// defaulting to $2 with a warning when unset or unparsable. The cap is
+/// mandatory: there is no uncapped mode.
 #[must_use]
 pub fn cost_cap_from_env() -> (f64, bool) {
-    match std::env::var("SEARCH_BENCH_COST_CAP_USD") {
-        Ok(raw) => match raw.parse::<f64>() {
+    cost_cap_from_raw(std::env::var("DOCSBASE_BENCH_COST_CAP_USD").ok().as_deref())
+}
+
+/// Pure policy behind [`cost_cap_from_env`]: explicit non-negative values
+/// pass through, anything else falls back to the $2 default with a warning
+/// flag. Pure so the contract is unit-testable without touching the process
+/// environment.
+#[must_use]
+pub fn cost_cap_from_raw(raw: Option<&str>) -> (f64, bool) {
+    match raw {
+        Some(value) => match value.parse::<f64>() {
             Ok(cap) if cap >= 0.0 => (cap, false),
-            _ => (1.0, true),
+            _ => (2.0, true),
         },
-        Err(_) => (1.0, true),
+        None => (2.0, true),
     }
 }
 
@@ -3316,7 +3342,7 @@ pub mod live_transport {
         ) -> docsbase_memory::error::Result<TransportResponse> {
             let (cap, defaulted) = cost_cap_from_env();
             if defaulted {
-                eprintln!("warning: SEARCH_BENCH_COST_CAP_USD unset, using default $1.00");
+                eprintln!("warning: DOCSBASE_BENCH_COST_CAP_USD unset, using default $2.00");
             }
             let spent = self.spent_usd();
             if let Err(err) = check_cost_cap(spent, worst_case_next_usd(url), cap) {

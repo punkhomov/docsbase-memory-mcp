@@ -251,6 +251,17 @@ fn usage_is_parsed_from_recorded_response() {
     assert_eq!(usage.search_units, 3);
 }
 
+/// Cost-cap contract (FR-18, NFR-7): explicit values pass through,
+/// unset/garbage/negative fall back to the $2 default with a warning.
+#[test]
+fn cost_cap_default_is_two_dollars() {
+    use support::bench::cost_cap_from_raw;
+    assert_eq!(cost_cap_from_raw(None), (2.0, true));
+    assert_eq!(cost_cap_from_raw(Some("0.5")), (0.5, false));
+    assert_eq!(cost_cap_from_raw(Some("junk")), (2.0, true));
+    assert_eq!(cost_cap_from_raw(Some("-1")), (2.0, true));
+}
+
 /// Cost math: free pins cost nothing, paid pins follow the price list,
 /// unknown pins refuse to guess.
 #[test]
@@ -383,7 +394,7 @@ fn measure_live_config(
     stages: &docsbase_memory::hybrid::HybridStages,
     embed_recorder: &support::bench::live_transport::RecordingTransport,
     rerank_recorder: &support::bench::live_transport::RecordingTransport,
-) -> (serde_json::Value, ParetoPoint, f64) {
+) -> (serde_json::Value, ParetoPoint, f64, Vec<String>) {
     let spent_before = embed_recorder.spent_usd() + rerank_recorder.spent_usd();
     let used_before = (
         embed_recorder.usage().prompt_tokens,
@@ -439,7 +450,9 @@ fn measure_live_config(
         latency_p95_ms: latency.p95_ms,
         on_frontier: false,
     };
-    (entry, point, cost)
+    // DELTA-3: trap placements ride along in the live report as diagnostics.
+    let trap_diagnostics = support::bench::trap_warnings(&report, &fixtures.cases);
+    (entry, point, cost, trap_diagnostics)
 }
 
 /// Delta warnings vs the frozen baseline (diagnostic, not a gate).
@@ -503,7 +516,7 @@ fn live_measurement() {
     };
     let (cap, defaulted) = cost_cap_from_env();
     if defaulted {
-        eprintln!("note: SEARCH_BENCH_COST_CAP_USD unset, using default $1.00");
+        eprintln!("note: DOCSBASE_BENCH_COST_CAP_USD unset, using default $2.00");
     }
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/search-bench");
     let fixtures = support::bench::Fixtures::load(&root).expect("fixtures");
@@ -541,6 +554,7 @@ fn live_measurement() {
     let mut configs = serde_json::Map::new();
     let mut points = Vec::new();
     let mut total_cost = 0.0;
+    let mut trap_diagnostics = Vec::new();
     for cfg in [
         support::bench::ConfigId::Bm25,
         support::bench::ConfigId::Bm25Rerank,
@@ -549,7 +563,7 @@ fn live_measurement() {
     ] {
         let stages =
             support::bench::stages_for(cfg, Some(embedder.clone()), Some(reranker.clone()));
-        let (entry, point, cost) = measure_live_config(
+        let (entry, point, cost, traps) = measure_live_config(
             &env,
             &fixtures,
             cfg,
@@ -558,10 +572,13 @@ fn live_measurement() {
             &rerank_recorder,
         );
         total_cost += cost;
+        trap_diagnostics.extend(traps);
         points.push(point);
         configs.insert(format!("{cfg:?}"), entry);
     }
     pareto_frontier(&mut points);
+    trap_diagnostics.sort();
+    trap_diagnostics.dedup();
     let warnings = baseline_delta_warnings(&root, &points);
     assert!(
         total_cost <= cap,
@@ -575,6 +592,7 @@ fn live_measurement() {
         "cost_usd": total_cost,
         "cost_cap_usd": cap,
         "warnings": warnings,
+        "trap_diagnostics": trap_diagnostics,
     });
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target/search-bench/live-report.json");

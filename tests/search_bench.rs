@@ -1174,6 +1174,49 @@ fn rank1_forbidden_only() {
     assert!(!evaluate_case(&disjoint, &ranged).forbidden_hit);
 }
 
+/// Trap movement below rank 1 must persist in the report (DELTA-3): a green
+/// run still shows traps climbing toward the top, not just failures.
+#[test]
+fn trap_diagnostics_persist_in_report() {
+    use support::bench::AbsentHit;
+    let mut base = toy_baseline();
+    base.configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("bm25")
+        .cases[0]
+        .ranks = vec![toy_citation("a.md", 1, 1), toy_citation("d.md", 1, 1)];
+    base.configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("bm25")
+        .cases[0]
+        .id = "td-01".to_owned();
+    let mut case = t8_case("td-01", vec![("a.md", None, 2)]);
+    case.absent = vec![AbsentHit {
+        path: "d.md".to_owned(),
+        lines: None,
+        reason: "trap".to_owned(),
+    }];
+    let mut report = support::bench::build_report(&base, None);
+    assert!(
+        report.trap_diagnostics.is_empty(),
+        "diagnostics attach explicitly, never by default"
+    );
+    support::bench::attach_trap_diagnostics(&mut report, std::slice::from_ref(&case));
+    assert!(
+        report
+            .trap_diagnostics
+            .iter()
+            .any(|warning| warning.contains("d.md") && warning.contains("rank 2")),
+        "trap at rank 2 must be recorded: {:?}",
+        report.trap_diagnostics
+    );
+    let quality = support::bench::quality_json(&report);
+    assert!(
+        quality.contains("trap_diagnostics") && quality.contains("d.md"),
+        "quality JSON must carry the diagnostics"
+    );
+}
+
 #[test]
 fn duplicate_path_ratio_counts_repeats() {
     let case = t8_case("dup-01", vec![("a.md", None, 2), ("b.md", None, 1)]);
@@ -2526,10 +2569,26 @@ fn metrics_match_baseline() {
         baseline.discrimination.semantic_max_lexical_jaccard,
     )
     .expect("current");
-    let current = support::bench::build_report(&current_like, Some(&baseline));
+    let mut current = support::bench::build_report(&current_like, Some(&baseline));
     // Trap placements below rank 1 are diagnostics for release review
-    // (DELTA-3), not failures. Print the full list on failure only.
-    let warnings = support::bench::trap_warnings(&current_like, &fixtures.cases);
+    // (DELTA-3), not failures. They persist in the report artifact, so trap
+    // movement toward the top stays visible on green runs too.
+    support::bench::attach_trap_diagnostics(&mut current, &fixtures.cases);
+    let report_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/search-bench/gate-report.json");
+    if let Some(parent) = report_path.parent() {
+        std::fs::create_dir_all(parent).expect("mkdir gate report dir");
+    }
+    std::fs::write(
+        &report_path,
+        serde_json::to_string_pretty(&current).expect("serialize gate report"),
+    )
+    .expect("write gate report");
+    println!(
+        "trap diagnostics: {} recorded -> {}",
+        current.trap_diagnostics.len(),
+        report_path.display()
+    );
     let failures = support::bench::gate_failures(&current, &baseline);
     // DELTA-3: fail only on NEW failures (regressions vs the known set);
     // fixed known failures are reported as improvements.
@@ -2538,7 +2597,7 @@ fn metrics_match_baseline() {
     assert!(
         new_failures.is_empty(),
         "new gate failures: {new_failures:?}\ntrap diagnostics:\n{}",
-        warnings.join("\n")
+        current.trap_diagnostics.join("\n")
     );
     if !fixed.is_empty() {
         println!("fixed since baseline: {fixed:?}");

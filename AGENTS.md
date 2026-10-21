@@ -39,9 +39,11 @@ RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --features hybrid-remote --test sear
 OPENROUTER_API_KEY=... RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --features hybrid-remote --test search_bench_live -- --ignored live_measurement   # manual, cost-capped
 ```
 
-Search-benchmark gate policy (DELTA-3): `metrics_match_baseline` is a
-required check — a red gate needs an explicit human override recorded in
-the PR (merging stays a human act). The gate answers "worse or better",
+Search-benchmark gate policy (DELTA-3): the gate test
+(`metrics_match_baseline`) runs inside the required `linux` CI job — a red
+gate is a red `linux` check, which branch protection blocks from merging.
+Overriding a red gate needs an explicit human override recorded in the PR
+(merging stays a human act in any case). The gate answers "worse or better",
 not "perfect": trap at rank 1 or missing expected = fail; everything else
 is diagnostics. Live runs are advisory (weekly + manual dispatch only),
 never per-PR CI.

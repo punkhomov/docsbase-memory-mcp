@@ -245,8 +245,8 @@ SC-12 (частично).
 - Modify: `tests/search_bench.rs` (тест `fixtures_are_valid`)
 **Interfaces:** использует `Fixtures::load`, `validate_queries`.
 **Steps (TDD):**
-1. RED: `fixtures_are_valid` требует 60–80 документов, 200–400 чанков,
-   120–150 кейсов, ≥8 на каждый из 11 срезов, все hashes/lines/grades,
+1. RED: `fixtures_are_valid` требует 60–85 документов, 200–400 чанков,
+   120–200 кейсов, ≥8 на каждый из 11 срезов, все hashes/lines/grades,
    `reviewed_by`/`reason`/`notes` по FR-26 и lexical Jaccard по FR-27.
 2. Добавить ≥15 документов: несколько релевантных документов на запрос;
    длинные секции и ответ на границе чанка.
