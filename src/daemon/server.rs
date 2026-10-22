@@ -20,7 +20,8 @@ use crate::daemon::session::SessionRegistry;
 use crate::daemon::tools;
 use crate::error::{Error, Result};
 use crate::hybrid::HybridStages;
-use crate::hybrid::dense::DenseCache;
+use crate::hybrid::config::cache_model_id;
+use crate::hybrid::dense::{AnnPolicy, DenseCache};
 use crate::hybrid::jobs as hybrid_jobs;
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 use crate::platform::Stream;
@@ -87,7 +88,7 @@ impl Shared {
             global_config_stamp: stamp,
             project_configs: Mutex::new(HashMap::new()),
             stages: Mutex::new(HashMap::new()),
-            dense: DenseCache::new(),
+            dense: DenseCache::with_policy(AnnPolicy::BuildOrLoad, cache),
         });
         match shared.start_watchers() {
             Ok(started) if started > 0 => eprintln!("watching {started} indexed project(s)"),
@@ -207,6 +208,34 @@ impl Shared {
             return Ok(Arc::clone(config));
         }
         self.load_project_config(project)
+    }
+
+    /// Invalidates the stale ANN index and warms the current one for
+    /// `project` after a successful sync/backfill (FR-8, FR-4; design §10).
+    /// Runs in the background; search keeps streaming exact while the build
+    /// runs. A no-op when the project has no embedding stage.
+    fn refresh_ann_after_sync(self: &Arc<Self>, project: &crate::store::models::Project) {
+        let Ok(config) = self.project_config(project) else {
+            return;
+        };
+        let Some(embed_cfg) = config.hybrid_cfg.embedding.as_ref() else {
+            return;
+        };
+        let model_id = cache_model_id(embed_cfg);
+        let cache_path = self.cache.clone();
+        let dense = self.dense.snapshot();
+        let project_id = project.id;
+        std::thread::spawn(move || {
+            let Ok(db) = Db::open(&cache_path) else {
+                return;
+            };
+            if let Err(err) = dense.invalidate(project_id) {
+                eprintln!("warning: ann invalidate failed for project {project_id}: {err}");
+            }
+            if let Err(err) = dense.warm(&db, project_id, &model_id) {
+                eprintln!("warning: ann warm failed for project {project_id}: {err}");
+            }
+        });
     }
 
     /// Re-reads the project config; called when a session opens the project so
@@ -769,8 +798,10 @@ fn route_tool(
             let project = registry::ensure_project(&mut job_db, &root)?;
             let config = shared.project_config(&project)?;
             let (job_id, created) = tools::enqueue_sync(&job_db, &project)?;
+            let mut just_indexed = false;
             if created {
                 tools::run_sync_job_in(&mut job_db, &shared.cache, job_id, &project, &config)?;
+                just_indexed = true;
             }
             let fresh =
                 registry::project_by_id(&job_db, project.id)?.ok_or_else(|| Error::Project {
@@ -779,6 +810,9 @@ fn route_tool(
                 })?;
             if let Err(err) = shared.ensure_watcher(&fresh) {
                 eprintln!("warning: cannot watch project {}: {err}", fresh.id);
+            }
+            if just_indexed {
+                shared.refresh_ann_after_sync(&fresh);
             }
             current_job(&job_db, job_id)
         }
@@ -841,6 +875,7 @@ fn spawn_sync_job(shared: Arc<Shared>, job_id: i64, project_id: i64, config: Arc
                         if let Err(err) = shared.ensure_watcher(&project) {
                             eprintln!("warning: cannot watch project {}: {err}", project.id);
                         }
+                        shared.refresh_ann_after_sync(&project);
                     }
                     Err(err) => eprintln!("warning: sync job {job_id} failed: {err}"),
                 }

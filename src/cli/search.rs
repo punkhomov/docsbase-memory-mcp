@@ -36,7 +36,13 @@ pub fn run(query: &str, limit: usize) -> anyhow::Result<()> {
         .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |reranker| {
             reranker.window
         });
-    let dense = crate::hybrid::dense::DenseCache::new();
+    // Direct mode loads a persisted ANN index if one exists and never builds
+    // one (FR-8, FR-5): a one-shot process must not pay for HNSW build
+    // latency.
+    let dense = crate::hybrid::dense::DenseCache::with_policy(
+        crate::hybrid::dense::AnnPolicy::LoadOnly,
+        &cache,
+    );
     let value = tools::search_docs_with(
         &stages,
         &dense,

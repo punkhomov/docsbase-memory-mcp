@@ -338,3 +338,48 @@ fn disabled_policy_never_touches_the_store() {
     assert!(matches!(out, DenseRows::Ready(_)));
     assert!(!cache.path().join("projects/1/ann").exists());
 }
+
+#[test]
+fn load_only_never_builds() {
+    let cache = TempDir::new().expect("cache");
+    let (db, project_id) = project_with_files(cache.path(), &["a.md", "b.md", "c.md"]);
+    embed_project_chunks_with(&db, &FakeEmbedder, project_id).expect("embed");
+
+    let dense = DenseCache::with_policy_limits(
+        AnnPolicy::LoadOnly,
+        cache.path(),
+        limits_with_min_vectors(2),
+    );
+    let out = dense
+        .get(&db, project_id, FakeEmbedder.model_id())
+        .expect("get");
+    assert!(
+        matches!(out, DenseRows::Ready(_)),
+        "CLI never builds: {out:?}"
+    );
+    assert!(!cache.path().join("projects/1/ann").exists());
+}
+
+#[test]
+fn warm_builds_in_background_and_is_idempotent() {
+    let cache = TempDir::new().expect("cache");
+    let (db, project_id) = project_with_files(cache.path(), &["a.md", "b.md", "c.md"]);
+    embed_project_chunks_with(&db, &FakeEmbedder, project_id).expect("embed");
+
+    let dense = DenseCache::with_policy_limits(
+        AnnPolicy::BuildOrLoad,
+        cache.path(),
+        limits_with_min_vectors(2),
+    );
+    dense
+        .warm(&db, project_id, FakeEmbedder.model_id())
+        .expect("warm 1");
+    dense
+        .warm(&db, project_id, FakeEmbedder.model_id())
+        .expect("warm 2");
+    let ann = wait_for_ann(&dense, &db, project_id, FakeEmbedder.model_id());
+    assert!(ann.estimated_bytes() > 0);
+    dense
+        .warm(&db, project_id, FakeEmbedder.model_id())
+        .expect("warm after publish");
+}
