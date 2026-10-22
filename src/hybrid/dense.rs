@@ -11,6 +11,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -271,6 +272,7 @@ struct BuildJob {
     key: AnnKey,
     estimated: usize,
     dim: usize,
+    store_root: Option<PathBuf>,
 }
 
 /// Per-project dense cache keyed by `(index generation, model_id)` with an
@@ -457,37 +459,36 @@ impl DenseCache {
             chunk_set_digest: digest,
             format_version: ANN_FORMAT_VERSION,
         };
-        if let Ok(Some(slot)) = self.store.as_ref().expect("seeking ann").load(&key)
+        if let Some(store) = &self.store
+            && let Ok(Some(slot)) = store.load(&key)
             && let Ok(ann) = AnnIndex::load(&slot)
         {
             let state = DenseRows::Ann(Arc::new(ann));
             self.stash(project_id, generation, model_id, state.clone());
             return Ok(state);
         }
-        match self.policy {
-            AnnPolicy::BuildOrLoad => {
-                let hashes = Arc::new(chunks);
-                Ok(self.start_build(BuildJob {
-                    project_id,
-                    generation,
-                    model_id: model_id.to_owned(),
-                    rows,
-                    hashes,
-                    key,
-                    estimated,
-                    dim,
-                }))
-            }
-            AnnPolicy::LoadOnly => {
-                let state = DenseRows::Ready(Arc::new(DenseIndex {
-                    generation,
-                    model_id: model_id.to_owned(),
-                    rows,
-                }));
-                self.stash(project_id, generation, model_id, state.clone());
-                Ok(state)
-            }
-            AnnPolicy::Disabled => unreachable!("seek_ann is false when disabled"),
+        if self.policy == AnnPolicy::BuildOrLoad {
+            let hashes = Arc::new(chunks);
+            let store_root = self.store.as_ref().map(|store| store.root().to_path_buf());
+            Ok(self.start_build(BuildJob {
+                project_id,
+                generation,
+                model_id: model_id.to_owned(),
+                rows,
+                hashes,
+                key,
+                estimated,
+                dim,
+                store_root,
+            }))
+        } else {
+            let state = DenseRows::Ready(Arc::new(DenseIndex {
+                generation,
+                model_id: model_id.to_owned(),
+                rows,
+            }));
+            self.stash(project_id, generation, model_id, state.clone());
+            Ok(state)
         }
     }
 
@@ -510,12 +511,6 @@ impl DenseCache {
             }
             let rows = Arc::from(job.rows);
             let cache = Arc::new(self.snapshot());
-            let store_root = self
-                .store
-                .as_ref()
-                .expect("seeking ann")
-                .root()
-                .to_path_buf();
             let entry = Entry {
                 state: DenseRows::Building(Arc::clone(&building)),
                 generation: job.generation,
@@ -530,8 +525,11 @@ impl DenseCache {
                 let key = job.key.clone();
                 let project_id = job.project_id;
                 let dim = job.dim;
+                let store_root = job.store_root;
                 move || {
-                    build_in_background(cache, project_id, key, rows, dim, store_root);
+                    if let Some(store_root) = store_root {
+                        build_in_background(cache, project_id, key, rows, dim, store_root);
+                    }
                 }
             };
             std::thread::spawn(spawn);
@@ -634,7 +632,8 @@ impl DenseCache {
 }
 
 /// Background build: builds, dumps, loads and publishes the `Ann` entry
-/// unless the project moved on meanwhile (design §8).
+/// unless the project moved on meanwhile (design §8). Any panic from the
+/// underlying index is caught and treated like a build failure (FR-5).
 #[allow(clippy::needless_pass_by_value)]
 fn build_in_background(
     cache: Arc<DenseCache>,
@@ -644,7 +643,7 @@ fn build_in_background(
     dim: usize,
     store_root: PathBuf,
 ) {
-    let result: Result<()> = (|| {
+    let result: Result<()> = catch_unwind(AssertUnwindSafe(|| {
         let ann = AnnIndex::build(&rows, dim)?;
         let store = AnnStore::new(store_root);
         let slot = ann.dump(&store, &key)?;
@@ -660,7 +659,8 @@ fn build_in_background(
             entry.failed_until = None;
         }
         Ok(())
-    })();
+    }))
+    .unwrap_or_else(|payload| Err(Error::internal(format!("ann build panic: {payload:?}"))));
     if let Err(err) = result {
         eprintln!("warning: ann build failed for project {project_id}: {err}; keeping exact");
         let mut entries = cache.lock_entries();

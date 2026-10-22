@@ -116,10 +116,17 @@ fn dense_candidates(
     let model_id = embedder.model_id();
     match dense.get(db, project.id, model_id)? {
         DenseRows::Ready(index) => dense::top_k(&vector, index.rows(), fetch),
-        DenseRows::Ann(ann) => ann.search(&vector, fetch).or_else(|err| {
-            eprintln!("warning: ann search failed: {err}; falling back to exact");
-            stream_exact(db, model_id, project.id, &vector, fetch)
-        }),
+        DenseRows::Ann(ann) => match ann.search(&vector, fetch) {
+            Ok(hits) if !hits.is_empty() => Ok(hits),
+            Ok(_) => {
+                eprintln!("warning: ann returned no candidates; falling back to exact");
+                stream_exact(db, model_id, project.id, &vector, fetch)
+            }
+            Err(err) => {
+                eprintln!("warning: ann search failed: {err}; falling back to exact");
+                stream_exact(db, model_id, project.id, &vector, fetch)
+            }
+        },
         DenseRows::TooLarge(hashes) => stream_hashes(db, model_id, &hashes, &vector, fetch),
         DenseRows::Building(building) => {
             stream_hashes(db, model_id, &building.hashes, &vector, fetch)
