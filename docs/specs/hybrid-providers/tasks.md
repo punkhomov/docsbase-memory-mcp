@@ -3,7 +3,7 @@
 **Goal:** OpenRouter embed + rerank за флагом, дефолт офлайн.
 **Architecture:** `src/hybrid/` — wire-клиент (`Transport`-трейт), sync-трейты
 (`Embedder` существующий + новый `Reranker`).
-**Spec:** `docs/specs/hybrid-providers/{requirements,design}.md` (ревизия 2.1)
+**Spec:** `docs/specs/hybrid-providers/{requirements,design}.md` (ревизия 2.2)
 **Global constraints:** constitution 1.2.0; `cargo fmt`, `clippy -D warnings`;
 offline-дефолт; сеть только за `hybrid-remote` + hybrid enabled; ключ только env.
 
@@ -186,3 +186,37 @@ fetch=окно. MCP-схема без изменений.
 
 **Goal:** свежий ревьюер (whole-branch), фиксы Critical/Important, scoped re-review.
 **Depends:** T11.
+
+## T13 — VectorCache capacity/pinning for ANN (DELTA-9)
+
+**Status:** partial (2026-10-22): default `max_bytes` raised to 1 GiB with a
+guard test; configurable key and per-project lease/pin remain open.
+
+**Goal:** дать ANN-build стабильные 100% coverage на 75k×2048: настраиваемый
+byte limit + per-project lease/pin.
+
+**Files:**
+- Modify: `src/vector_cache.rs` (`CacheLimits`/config), `src/hybrid/jobs.rs`
+  (backfill lease), `src/hybrid/dense.rs` (build lease), `docs/CONFIG.md`.
+- Test: `tests/vector_cache.rs`, `tests/hybrid_ann.rs`, scale test T10 in
+  ann-index.
+
+**Steps (TDD):**
+1. RED: 75k×2048 backfill с дефолтом 256 MiB → coverage <100%; после lease/pin
+   + 1 GiB — coverage=100%.
+2. GREEN: configurable `max_bytes` (default 1 GiB); lease/pin, который
+   запрещает eviction векторов проекта на время backfill+ANN build; release
+   после `READY`/fallback.
+3. Coverage gate: `cached < total` → ANN не строится, причина в status/логе.
+4. Не менять публичный `search_docs`/MCP; `[hybrid.cache]` — единственное
+   новое исключение, задокументировать.
+5. Если ключ становится публичным — записать ADR-16 (capacity/pinning
+   policy) в `docs/specs/docsbase-memory-mcp/design.md`.
+
+**Acceptance:** DELTA-9; ann-index Delta 0.2/T10 coverage=100%; eviction
+другого проекта не ломает активный build.
+
+**Verify:** `cargo test --locked --test vector_cache`;
+`cargo test --locked --test hybrid_ann`; ann-index scale test.
+
+**Depends:** T4/T9; blocks ann-index T9/T10.

@@ -5,11 +5,11 @@
 **Architecture:** `src/hybrid/{ann,ann_store}.rs` + расширение `DenseCache`;
 `hnsw_rs 0.3.5` + `ouroboros 0.18.5`; 0.3.5 — единственная версия; daemon строит/загружает,
 direct CLI только загружает.
-**Spec:** `docs/specs/ann-index/requirements.md` (0.1)
-**Design:** `docs/specs/ann-index/design.md` (0.1)
-**Status:** T1 complete; T2–T6 complete (2026-10-22); T1.5 deferred by human
-(13-day cooldown stays in effect until scheduled); T7 complete. Числа — финальные
-для v1 (provisional отметки сняты в T6/T7).
+**Spec:** `docs/specs/ann-index/requirements.md` (0.2)
+**Design:** `docs/specs/ann-index/design.md` (0.2)
+**Status:** T1 complete; T2–T7 complete (2026-10-22); T1.5 deferred by human
+(13-day cooldown stays in effect until scheduled); T8 complete; T9 core and T10 dynamic ef landed; T9 disk budget, T10 end-to-end scale and T11 remain.
+Числа T6 — core-`AnnIndex`, end-to-end подтверждает T10.
 
 **Global constraints:**
 - Rust edition 2024, MSRV 1.88; `cargo fmt`; clippy `--all-targets -- -D warnings`.
@@ -303,13 +303,136 @@ this spec.
 
 ---
 
+## T8 — DenseCache byte-cap + failed-build retry (Delta 0.2)
+
+**Goal:** закрыть FR-7/NFR-4 и FR-5/FR-12: `max_bytes` ограничивает весь
+резидентный working set, failed build не залипает в `Building`.
+
+**Files:**
+- Modify: `src/hybrid/dense.rs`.
+- Test: `tests/hybrid_ann.rs`, unit-тесты в `dense.rs`.
+
+**Steps (TDD):**
+1. RED: `max_bytes` меньше exact rows → ожидать `TooLarge`, не `Ready`;
+   failed build → после backoff должен быть новый spawn.
+2. GREEN: считать `Entry.bytes` для `Ann`/`Ready`/`TooLarge`/`Building`;
+   вести общий byte-budget и LRU по байтам; один проект сверх cap → `TooLarge`.
+3. Ввести `Failed { retry_at }` (или эквивалент); `start_build` переиспользует
+   entry только если build реально в полёте; `warm` ретраит после backoff.
+4. Убрать двойной полный `resolve`-скан после истечения backoff.
+
+**Acceptance:** FR-7/FR-12; SC-6/SC-11; нет вечного `Building`; `TooLarge`
+стримит exact; byte-LRU покрыт тестом.
+
+**Verify:** `cargo test --locked --test hybrid_ann`; targeted unit-тесты;
+`cargo clippy --locked --all-targets -- -D warnings`.
+
+**Depends:** T4/T5.
+
+---
+
+## T9 — Cold start + Windows persistence + cleanup (Delta 0.2)
+
+**Goal:** закрыть FR-8/NFR-3 (ANN-first cold start), FR-11/NFR-5 (Windows sync),
+FR-7/lifecycle (cleanup race, model-aware retention, disk budget).
+
+**Files:**
+- Modify: `src/hybrid/dense.rs`, `src/hybrid/ann_store.rs`,
+  `src/daemon/server.rs`.
+- Test: `tests/ann_store.rs`, `tests/hybrid_ann.rs`, daemon unit/E2E.
+
+**Steps (TDD):**
+1. RED: persisted ANN + пустой/удалённый `vectors.db` → `get` возвращает
+   `Ann`, а не exact; cleanup во время delayed build не убивает tmp.
+2. GREEN: `resolve` собирает key/`dim` из model/meta (или одного вектора) и
+   грузит ANN до rows; rows читаются только на miss/build.
+3. `sync_dump_files` открывает graph/data/meta write-handle; Windows runtime
+   тест; READY/dir sync — по решению T9.
+4. Cleanup: mtime/active-set для tmp; retention per model; глобальный disk
+   budget; вытесненные проекты чистятся.
+5. Убрать/переписать `refresh_ann_after_sync` cleanup так, чтобы не было гонки.
+
+**Acceptance:** FR-8/NFR-3/FR-11/NFR-5/FR-7; SC-3/SC-6/SC-9; cold start без
+полного vector scan; Windows `ann_store` зелёный.
+
+**Verify:** targeted tests + Windows CI; `cargo test --locked --test ann_store`;
+`cargo test --locked --test hybrid_ann`.
+
+**Depends:** T8, hybrid-providers T13.
+
+---
+
+## T10 — End-to-end scale + dynamic ef (Delta 0.2)
+
+**Goal:** доказать 75k×2048 через реальный путь `DenseCache`/`VectorCache`/
+`search_docs`, а не только `AnnIndex`; закрыть SC-1/SC-3/SC-11.
+
+**Files:**
+- Modify: `src/hybrid/ann.rs` (`ef = max(64, fetch*4)` с cap).
+- Create/modify: `tests/ann_scale.rs` (ignored manual) и CI-тест 8k×256.
+- Update: `docs/specs/ann-index/progress.md`.
+
+**Steps:**
+1. Dynamic `ef` + high-`fetch` recall (10/50/100/1000).
+2. CI-тест 8k×256 через `DenseCache` + `VectorCache`: coverage, ANN, cold
+   start, fallback.
+3. Manual 75k×2048: build/load/query p50/p95, recall, real RSS, persisted
+   reload; coverage=100%; `search_bench` baseline unchanged.
+4. Записать числа и ruling в ledger; T6 core-числа оставить как core-only.
+
+**Acceptance:** SC-1/SC-3/SC-6/SC-11; end-to-end numbers recorded; no baseline
+change.
+
+**Verify:**
+```sh
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test ann_recall
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test ann_scale -- --ignored
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_bench
+```
+
+**Depends:** T8, T9, hybrid-providers T13.
+
+---
+
+## T11 — Delta 0.2 close-out + merge gate
+
+**Goal:** привести спеку/доки/CHANGELOG к фактическому состоянию после T8–T10
+и проверить merge gate.
+
+**Files:**
+- Modify: `docs/specs/ann-index/{requirements,design,tasks,progress}.md`,
+  `docs/specs/docsbase-memory-mcp/design.md`, `CHANGELOG.md`,
+  `docs/CONFIG.md` (если появился cache-key).
+- Verify: T1.5 (14 days), Windows CI, full targeted suite.
+
+**Steps:**
+1. Закрыть OQ-4 после Windows runtime; подтвердить остальные OQ.
+2. Убрать противоречия «exact scan remains»/`invalidate` vs warm-only.
+3. CHANGELOG: core vs end-to-end числа; без «near-instant» до T10.
+4. T1.5: вернуть 14 days, обновить smoke/docs; 0.3.5 остаётся в lock.
+5. Fresh whole-branch reviewer; ledger entry; статус Final только после
+   зелёных T8–T10 и T1.5.
+
+**Acceptance:** docs не противоречат коду; T1.5 выполнен; targeted suite и
+Windows CI зелёные; delta 0.2 закрыта.
+
+**Depends:** T8–T10, hybrid-providers T13, T1.5.
+
+---
+
 ## Definition of done
 
-- `hnsw_rs 0.3.5` + `ouroboros` compile on MSRV 1.88 and all CI platforms.
-- Persisted ANN: atomic write, metadata, `READY`, load, stale/corrupt fallback.
-- `DenseCache`: `Ann`, LRU/byte-cap, `TooLarge` hash cache.
-- Daemon build/load; direct CLI load-only; backfill invalidation.
-- 75k scale numbers recorded (parallel build, recall-vs-ef, binary size);
-  recall/latency targets met or explicitly adjusted; warm non-blocking.
+- `hnsw_rs 0.3.5` + `ouroboros` compile on MSRV 1.88 and all CI platforms;
+  Windows runtime (sync/mmap/cleanup) actually green.
+- Persisted ANN: atomic write, metadata, `READY`, writable sync, load,
+  stale/corrupt fallback.
+- Cold start loads persisted ANN before any full vector scan.
+- `DenseCache`: `Ann`, global byte-cap/LRU incl. exact rows, `TooLarge` hash
+  cache, failed-build retry after backoff.
+- Daemon build/load; direct CLI load-only; backfill key-based invalidation +
+  warm; no `tmp-*` race; model-aware cleanup and disk budget.
+- 75k×2048 end-to-end через `DenseCache`/`VectorCache`/`search_docs`:
+  coverage=100%, recall/latency/RSS recorded; core `AnnIndex` numbers labelled
+  separately.
 - `search_bench` baseline unchanged; no MCP/CLI changes.
-- ADR-15 + docs + ledger complete.
+- T1.5 done (14 days), ADR-15 + delta 0.2 + docs + ledger complete.

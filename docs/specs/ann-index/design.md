@@ -1,7 +1,7 @@
 # Technical Design: ann-index (итерация 3 hybrid-providers)
 
-**Status:** Draft, ревизия 0.1 · **Дата:** 2026-10-22
-**Spec:** `docs/specs/ann-index/requirements.md` (ревизия 0.1)
+**Status:** Draft, ревизия 0.2 · **Дата:** 2026-10-22
+**Spec:** `docs/specs/ann-index/requirements.md` (ревизия 0.2)
 **Связано:** `docs/specs/hybrid-providers/design.md` (dense + RRF), ADR-12,
 ADR-14; **ADR-15** — ANN-зависимость и формат.
 
@@ -30,6 +30,23 @@ struct LoadedAnn {
 `parallel_insert` — дефолт, warm — фоновый, exact streaming во время сборки.
 Добавлены `usize`/`u64`, `set_searching_mode`, basename, env_logger size,
 `DistCosine`/recall-ef. ADR-15 recorded in product design; final version/format pin in T6.
+
+**Delta 0.2 (2026-10-22, post-T7 review):** implementation rules corrected:
+1. §5.1: sync dump/meta через write-handle; Windows `FlushFileBuffers` требует
+   `GENERIC_WRITE`.
+2. §6: `ef_search = max(64, fetch * 4)` с cap; фиксированные 64 — не финал.
+3. §8: порядок lookup — generation+digest → key/`dim` → `AnnStore::load` →
+   `AnnIndex::load`; rows читаются только на miss/build. `max_bytes` — общий
+   резидентный cap, включая exact rows; проект сверх cap → `TooLarge`.
+   Failed build → `Failed(retry_at)` и retry после backoff, не вечный
+   `Building`.
+4. §9: backfill — key-based invalidation + warm; explicit `invalidate` — для
+   удаления проекта. Cleanup не трогает активные `tmp-*`, хранит поколения
+   per-model, соблюдает глобальный disk budget.
+5. §10: cleanup не запускается слепо сразу после warm; mtime/active-set.
+6. §12: добавлены тесты cold start без `VectorCache`-скана, failed-build
+   retry, byte-cap/`TooLarge`, Windows sync, cleanup race, high-`fetch` recall
+   и end-to-end 75k×2048 через `DenseCache`/`VectorCache`/`search_docs`.
 
 ## 1. Overview
 
@@ -189,7 +206,8 @@ struct AnnKey {
 1. Создать `<ann>/tmp-<pid>-<nanos>/`.
 2. `Hnsw::file_dump(tmp, "index")`.
 3. Записать `meta.json`.
-4. `File::sync_all` для graph/data/meta.
+4. Открыть graph/data/meta write-handle и вызвать `File::sync_all` (Windows:
+   `FlushFileBuffers` требует `GENERIC_WRITE`; read-only handle не подходит).
 5. Записать `READY`.
 6. Rename tmp-dir в финальный `<key>/`.
 
@@ -225,9 +243,9 @@ exact fallback.
 ```text
 M                = 16
 ef_construction  = 200
-ef_search        = max(64, fetch * 4) // provisional; final by recall-vs-ef
-ANN_MIN_VECTORS  = 4096        // provisional
-MAX_ANN_FILE_BYTES = 2 GiB     // provisional
+ef_search        = max(64, fetch * 4) // final; capped by count/recall-vs-ef
+ANN_MIN_VECTORS  = 4096        // final v1
+MAX_ANN_FILE_BYTES = 2 GiB     // final v1
 ```
 
 Шаги:
@@ -264,8 +282,8 @@ fn search(&self, query: &[f32], fetch: usize) -> Result<Vec<(u64, f32)>> {
   исключает `acos`/угловую меру. Если `DistCosine` вернёт другую шкалу —
   адаптер обязан это исправить, а не маскировать.
 - `fetch` остаётся `max(limit, window)`, как в hybrid-providers.
-- `ef_search` выбирается по recall-vs-ef кривой (16/32/64/128/256), а не
-  только по эвристике `max(64, fetch*4)`.
+- `ef_search = max(64, fetch * 4)` с cap; recall-vs-ef кривая
+  (16/32/64/128/256) проверяет формулу и выбирает cap, а не заменяет её.
 - Если ANN вернул пустой/недостаточный список при непустом корпусе, это
   трактуется как сбой ANN и уходит в exact fallback.
 
@@ -274,9 +292,10 @@ fn search(&self, query: &[f32], fetch: usize) -> Result<Vec<(u64, f32)>> {
 ```rust
 pub enum DenseRows {
     Ready(Arc<DenseIndex>),
-    Ann(Arc<LoadedAnn>),
+    Ann(Arc<AnnIndex>),
     TooLarge(Arc<Vec<(u64, String)>>), // hashes cached
     Building(Arc<BuildingAnn>),        // exact streaming while warm
+    Failed { retry_at: Instant },      // exact; retry after backoff
 }
 
 pub enum AnnPolicy {
@@ -292,28 +311,36 @@ pub enum AnnPolicy {
    использовать его. Иначе один раз вызвать `repo::chunk_hashes`, посчитать
    digest и сохранить в `DenseCache`. На каждом поиске `chunk_hashes` **не**
    вызывается.
-2. cache hit с тем же ключом → `Ann`/`Ready`/`TooLarge`/`Building`.
-3. `AnnStore::load` → `Ann`.
+2. cache hit с тем же ключом → `Ann`/`Ready`/`TooLarge`/`Building`/`Failed`.
+3. Собрать `AnnKey` из generation/model/count/digest и `dim` из model/meta
+   (допустимо прочитать один вектор). `AnnStore::load` → `AnnIndex::load` →
+   `Ann`. Полный `VectorCache`-скан здесь **не** выполняется.
 4. Если `BuildOrLoad`, coverage полное, лимиты ок и ANN ещё нет — запустить
    `warm` в фоне и вернуть `Building`; текущий поиск идёт exact streaming по
    закэшированным hashes. Синхронного build в `get` нет.
-5. Иначе exact `Ready` (если под cap) или `TooLarge`.
+5. Если ANN нет/невалиден — exact `Ready` только если entry укладывается в
+   `max_bytes`; иначе `TooLarge` (streaming). `max_bytes` — общий резидентный
+   cap по всем entries, включая exact rows.
 6. Любая ошибка ANN → exact + диагностика; не `Err`. Ошибка фонового build
-   снимает `Building`, логируется, следующий retry — после backoff; проект
-   не переводится в error.
+   переводит entry в `Failed(retry_at)`, логируется, следующий retry — после
+   backoff; проект не переводится в error.
 
 Лимиты:
 
 ```rust
 struct DenseCacheLimits {
-    max_vectors: usize,   // 1_000_000
-    max_bytes: u64,       // 1 GiB
+    max_vectors: usize,   // 1_000_000 — per-project
+    max_bytes: u64,       // 1 GiB — global resident cap (ANN + exact rows)
     max_projects: usize,  // 8
+    min_vectors: usize,   // ANN_MIN_VECTORS, internal/test only
 }
 ```
 
-- LRU по `last_used`; при превышении удаляем старейший проект.
-- `ann.estimated_bytes = count * (dim*4 + graph_overhead)`.
+- LRU по `last_used` и по байтам; при превышении `max_bytes` удаляем
+  старейшие entries, пока сумма не войдёт в cap.
+- `ann.estimated_bytes = count * (dim*4 + graph_overhead)`; exact
+  `Ready.bytes = rows * dim * 4`.
+- Если один проект сам больше `max_bytes` — `TooLarge`, не `Ready`.
 - `TooLarge` хранит hashes, чтобы не вызывать `repo::chunk_hashes` каждый
   запрос.
 - `DenseIndex` rows не держим одновременно с `Ann`: это две копии векторов.
@@ -322,15 +349,23 @@ struct DenseCacheLimits {
   после `READY` и проверки, что generation/model всё ещё актуальны.
 - `DenseRows::Building` хранит только hashes/статус; `dense_candidates` идёт
   через `top_k_iter` (exact streaming), без `DenseIndex.rows`.
+- `DenseRows::Failed { retry_at }` хранит hashes/статус; search стримит exact,
+  retry запускает новый build после `retry_at` (не переиспользует старый
+  `Building`).
 
 ## 9. Invalidation / lifecycle
 
 - `index_generation` change → другой `AnnKey`.
 - model/dim change → другой `AnnKey`.
-- backfill завершён → `DenseCache::invalidate(project_id)`.
+- backfill завершён → key-based invalidation + `warm`: stale on-disk indexes
+  отвергаются по generation/digest/format, старый ANN не используется.
+  Явный `DenseCache::invalidate(project_id)` остаётся для удаления проекта.
 - format/hnsw version mismatch → rebuild.
 - corrupt/missing files → exact; daemon может rebuild.
-- старые generation-каталоги: keep last 2, cleanup best-effort.
+- старые generation-каталоги: keep last 2 **на model**, cleanup best-effort;
+  глобальный disk budget ограничивает сумму, вытесненные проекты чистятся.
+- cleanup не удаляет `tmp-*` активного build: только stale по mtime или
+  отсутствующие в active-set.
 - Windows: не удалять mmap-файлы, пока `HnswIo` жив; cleanup после drop.
 
 ## 10. Direct CLI / daemon
@@ -339,6 +374,8 @@ struct DenseCacheLimits {
   `DenseCache::warm(project, model)` **в фоне**. Пока build не завершён,
   `search_docs` идёт exact; ошибка build логируется, проект не становится
   error.
+- Cleanup после warm запускается только с guard-ом (mtime/active-set) и не
+  удаляет `tmp-*` строящегося индекса.
 - `docsbase search` direct: `AnnPolicy::LoadOnly`; если persisted ANN нет —
   exact. Это защищает одноразовый процесс от build latency.
 - Если daemon запущен, CLI идёт через него и получает ANN.
@@ -368,15 +405,23 @@ Unit:
 - `ann_034_dump_rejected_by_035` (metadata/format gate; no panic).
 - `ann_search_during_build_uses_exact` (задержанная сборка, поиск не блокируется).
 - `ann_score_is_one_minus_cos` (cos=1/0/-1).
-- `ann_recall_ef_curve` (16/32/64/128/256, recall@10 + p95).
+- `ann_recall_ef_curve` (16/32/64/128/256, recall@10 + p95; plus fetch
+  10/50/100/1000).
 - `ann_build_is_nonblocking` (warm в фоне; ошибка не валит поиск).
+- `ann_failed_build_retries_after_backoff` (не вечный `Building`).
+- `ann_cold_start_does_not_scan_vectors` (persisted ANN без `VectorCache`).
+- `ann_byte_cap_streams_exact_rows` (`TooLarge`, не `Ready`).
+- `ann_windows_sync_uses_write_handle` (runtime, Windows CI).
+- `ann_cleanup_skips_active_tmp` (delayed build + cleanup).
+- `ann_high_fetch_recall` (`limit=100/1000`, dynamic ef).
 
 Integration:
 - `hybrid_ranking` with `ann_threshold=1`: exact vs ANN order on separated
   vectors; RRF tie-break.
 - `search_bench`: unchanged for 331 chunks; ANN threshold > corpus.
-- `ann_scale` (`#[ignore]`): 75k × 2048; build/query p50/p95; recall@10;
-  estimated memory; persisted reload.
+- `ann_scale` (`#[ignore]`): 75k × 2048 через `DenseCache`/`VectorCache`/
+  `search_docs`; build/query p50/p95; recall@10; real RSS; persisted reload;
+  coverage=100%.
 
 CI:
 - `cargo test --locked`, clippy, fmt; Linux/macOS/Windows; MSRV 1.88.
@@ -386,12 +431,12 @@ CI:
 
 | SC | Test/measure |
 |---|---|
-| SC-1 | `ann_scale` recall/latency/build; manual report |
+| SC-1 | `ann_scale` end-to-end через `DenseCache`/`VectorCache`; recall/latency/build; manual report |
 | SC-2 | `search_bench` baseline unchanged; threshold test |
-| SC-3 | dump → drop → load; no rebuild; metadata/mtime |
+| SC-3 | dump → drop → load; no rebuild; metadata/mtime; zero `VectorCache::get` |
 | SC-4 | stale/corrupt/missing tests + exact fallback |
 | SC-5 | atomic write/crash test (`READY` absent) |
-| SC-6 | LRU/byte-cap tests |
+| SC-6 | global byte-cap/LRU; exact rows → `TooLarge` |
 | SC-7 | `metrics_match_baseline` unchanged |
 | SC-8 | `cargo tree`, offline test |
 | SC-9 | CI matrix + MSRV |
@@ -415,14 +460,17 @@ CI:
 | Build blocks search | publish after `READY`; exact streaming during build |
 | ANN changes ranking | threshold > golden corpus; recall test; baseline unchanged |
 
-## 15. Open decisions
+## 15. Decisions
 
-1. `ANN_MIN_VECTORS` / `max_bytes` / `max_projects` (T6).
-2. `status` vs log only (FR-9).
-3. `ef_search` по recall-vs-ef кривой; окончательное значение — T6.
-4. Детерминизм `parallel_insert` (fixed seed) — T6; если недетерминирован,
-   это допустимо для persisted-индекса.
-5. 0.3.5 finalization — условное решение; финализация в T6.
+1. `ANN_MIN_VECTORS = 4096`, `max_bytes = 1 GiB`, `max_projects = 8`;
+   `ef_search = max(64, fetch * 4)` с cap (Delta 0.2, T6).
+2. `status` vs log: v1 — log-only; публичный контракт не меняется (T5).
+3. `ef_search` — dynamic formula выше; high-`fetch` recall проверяется T8/T10.
+4. Детерминизм `parallel_insert`: seed API нет; побайтовая идентичность не
+   обещается, детерминизм запросов обязателен (T6).
+5. 0.3.5 finalization — закрыто T6; T1.5 остаётся merge gate для cooldown.
+6. Windows runtime — открыто до T9 (OQ-4).
+7. `VectorCache` capacity/pinning — `hybrid-providers` DELTA-9, задача T13.
 
 ## 16. References
 
@@ -430,5 +478,8 @@ CI:
 - `docs/specs/hybrid-providers/progress.md` — accepted minors.
 - `src/hybrid/dense.rs`, `src/daemon/tools.rs`, `src/vector_cache.rs`,
   `src/store/repo.rs`.
-- `hnsw_rs` 0.3.5 docs: `Hnsw`, `HnswIo`, `DistCosine`, `AnnT::file_dump`.
+- `hnsw_rs` 0.3.5 docs: `Hnsw`, `HnswIo`, `ReloadOptions`, `DistCosine`,
+  `AnnT::file_dump`; `Hnsw::search` (`ef` vs `knbn`).
 - `ouroboros` 0.18.5 docs.
+- Windows `FlushFileBuffers`: требует `GENERIC_WRITE`
+  (<https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers>).

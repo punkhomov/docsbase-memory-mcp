@@ -230,3 +230,8 @@
   first-try-success). Ruling: баг родился вместе с циклом в `dde6a1f` —
   гейтов на ретрай не было; паттерн проверен по всему `src/` — единственный
   экземпляр класса.
+- 2026-10-22: DELTA-9 (post-T7 ANN review): `VectorCache` byte limit becomes
+  configurable (default 1 GiB) and a per-project lease/pin protects vectors
+  during backfill + ANN build; coverage remains the gate. Reason: 75k×2048
+  (~586 MiB) does not fit the 256 MiB default, so ann-index FR-6 can never
+  reach 100%. Task T13 opened; no code changes yet.

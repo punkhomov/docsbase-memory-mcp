@@ -1,6 +1,6 @@
 # SPECIFICATION: ann-index (итерация 3 hybrid-providers)
 
-**Status:** Draft, ревизия 0.1 · **Дата:** 2026-10-22
+**Status:** Draft, ревизия 0.2 · **Дата:** 2026-10-22
 **Constitution:** `docs/specs/constitution.md` (1.3.0)
 **Связано:** `docs/specs/hybrid-providers/` (dense + RRF), ADR-12
 (`(model_id, chunk_hash)` кэш), ADR-14 (OpenRouter), ADR-15 (ANN).
@@ -24,6 +24,31 @@ Migration layer не делаем: dump чужой версии/формата �
 время сборки идёт exact streaming и не блокируется. Добавлены проверки
 `usize`/`u64`, `set_searching_mode`, basename `file_dump`, `env_logger` size,
 `DistCosine`/recall-ef. ADR-15 финализируется после T6.
+
+**Delta 0.2 (2026-10-22, post-T7 review):** вторая независимая проверка ветки
+нашла разрывы между реализацией и уже принятыми FR/NFR. Они входят в scope v1
+и закрываются T8–T11; до этого ветка не считается merge-ready:
+- **FR-7 / NFR-4:** `DenseCache.max_bytes` — это лимит всего резидентного
+  working set, включая exact rows. Один проект сверх лимита отдаётся как
+  `TooLarge` (streaming), а не `Ready` со всеми rows; byte-LRU считается по
+  всем entries.
+- **FR-8 / NFR-3:** cold start сначала пытается загрузить persisted ANN
+  (`AnnStore::load`/`AnnIndex::load`), а не читает все векторы. `dim` берётся
+  из model/meta (допустимо прочитать один вектор), полный `VectorCache`-скан
+  для валидного ANN запрещён.
+- **FR-5 / FR-12:** failed background build переходит в явное failed-состояние
+  и повторяется после backoff; `Building` не может быть вечным состоянием.
+- **FR-11 / NFR-5:** dump/meta синхронизируются через write-handle (Windows
+  `FlushFileBuffers` требует `GENERIC_WRITE`); Windows runtime входит в SC-9.
+- **FR-7 / lifecycle:** cleanup не удаляет `tmp-*` активного build; retention
+  поколений учитывает model; дисковый бюджет ограничен.
+- **ef_search:** финальное правило — `max(64, fetch * 4)` с cap, а не
+  фиксированные 64; высокие `fetch` покрываются recall-тестом.
+- **Coverage capacity:** FR-6 остаётся строгим (ANN только при 100% coverage);
+  решение по ёмкости `VectorCache`/pin — в `hybrid-providers` DELTA-9. ANN
+  никогда не строится по частичному покрытию.
+- **SC-1 scope:** 56.5 s / p95 5.4 ms из T6 — это core-`AnnIndex`, не
+  end-to-end; T10 обязан измерить путь `DenseCache`/`VectorCache`/`search_docs`.
 
 ## 1. Problem
 
@@ -169,11 +194,14 @@ Non-goals:
 
 - **SC-1.** 75k × 2048: recall@10 ≥ 0.95; p95 ANN ≤ 10 ms (или ≥5× exact).
   Build измеряется отдельно; 5 s не является обещанием: spike дал 4.8 s уже
-  на 10k × 64, поэтому бюджет 75k фиксируется в T6 после замера.
+  на 10k × 64, поэтому бюджет 75k фиксируется в T6 после замера. T6-числа —
+  core-`AnnIndex`; end-to-end через `DenseCache`/`VectorCache`/`search_docs`
+  обязан подтвердить T10 (Delta 0.2).
 - **SC-2.** При `N < ANN_MIN_VECTORS` результаты и baseline не меняются;
   exact-путь остаётся байт-в-байт прежним.
-- **SC-3.** Повторный старт daemon загружает persisted ANN и не пересобирает
-  его; проверяется по metadata/времени.
+- **SC-3.** Повторный старт daemon загружает persisted ANN без полного чтения
+  векторов и не пересобирает его; проверяется по metadata/времени и счётчику
+  `VectorCache::get` (Delta 0.2).
 - **SC-4.** Stale/corrupt/missing ANN, включая dump чужой версии/формата,
   даёт exact fallback и явную диагностику; поиск не падает и не пытается
   интерпретировать чужой формат.
@@ -207,30 +235,31 @@ Non-goals:
   `self_cell` не подходит из-за `&mut HnswIo` и инвариантного `Hnsw`;
   `hnswlib-rs` остаётся запасным вариантом, если `ouroboros` упрётся в
   платформу/CI.
-- **OQ-2 (условно закрыт 2026-10-22; финализация в T6).** v1 —
-  `hnsw_rs 0.3.5`; fallback-версии нет. Dump чужой версии/формата не
-  мигрируем; пересобираем. ADR-15 recorded in product design; final
-  version/format pin in T6. Для 0.3.5 временно используется **глобальный**
-  cooldown 13 дней (2026-10-22 → 23), потому что Cargo 1.101 nightly не умеет
-  per-package декларативные исключения. На следующий день — обязательный
-  шаг T1.5: вернуть `14 days`; 0.3.5 остаётся в `Cargo.lock`.
-- **OQ-3.** `ANN_MIN_VECTORS` = 4096 или 10k; `max_bytes` = 1 GiB;
-  `max_projects` = 8. Калибровать на T6.
-- **OQ-4.** Mmap на Windows: `cargo check` для Windows/macOS прошёл; runtime
-  (удаление старых generation-каталогов после drop `HnswIo`) ещё нужно
-  проверить в CI/T5.
+- **OQ-2 (закрыт T6, 2026-10-22).** v1 — `hnsw_rs 0.3.5`; fallback-версии
+  нет. Dump чужой версии/формата не мигрируем; пересобираем. ADR-15 recorded
+  in product design. Для 0.3.5 временно используется **глобальный** cooldown
+  13 дней (2026-10-22 → 23), потому что Cargo 1.101 nightly не умеет
+  per-package декларативные исключения. T1.5 — обязательный merge gate:
+  вернуть `14 days`; 0.3.5 остаётся в `Cargo.lock`.
+- **OQ-3 (закрыт Delta 0.2, 2026-10-22).** `ANN_MIN_VECTORS = 4096`,
+  `DenseCacheLimits.max_bytes = 1 GiB` (глобальный резидентный cap),
+  `max_projects = 8`; `ef_search = max(64, fetch * 4)` с cap. `min_vectors`
+  остаётся тестовым/внутренним, не публичным контрактом.
+- **OQ-4 (открыт до T9).** Windows runtime, включая writable sync dump/meta и
+  удаление generation-каталогов после drop `HnswIo`; `cargo check` не
+  считается доказательством.
 - **OQ-5 (решено 2026-10-22).** Прогрев — после sync/backfill, в фоне;
   до `READY` поиск идёт exact streaming, без блокировки.
-- **OQ-6.** Показывать ANN-состояние в `status` (FR-9) или только в логе?
-  Рекомендация: `status` (should), без публичного контракта.
-- **OQ-7.** Детерминизм сборки: 0.3.5 fixed seed проверяется двойной
-  single-thread сборкой. `parallel_insert` — дефолт для скорости; если он
-  делает граф недетерминированным, это допустимо: обязателен детерминизм
-  запросов к persisted-индексу, а не побайтовая идентичность сборки.
+- **OQ-6 (закрыт T5, 2026-10-22).** v1 — log-only диагностика; публичный
+  `status`-контракт не меняется, расширение остаётся should на потом.
+- **OQ-7 (закрыт T6, 2026-10-22).** Seed API у 0.3.5 нет; побайтовая
+  детерминированность `parallel_insert` не обещается. Обязателен детерминизм
+  запросов к persisted-индексу, а не идентичность сборки.
 
 ## 10. References
 
-- `docs/specs/hybrid-providers/requirements.md` — FR-15…FR-18 (dense/RRF).
+- `docs/specs/hybrid-providers/requirements.md` — FR-15…FR-18 (dense/RRF);
+  DELTA-9 — `VectorCache` capacity/pinning для ANN coverage.
 - `docs/specs/hybrid-providers/progress.md` — accepted minor: byte-cap,
   DenseCache eviction, `TooLarge` hash memoization.
 - `src/hybrid/dense.rs` — текущий exact scan, `DENSE_CACHE_MAX_VECTORS`.

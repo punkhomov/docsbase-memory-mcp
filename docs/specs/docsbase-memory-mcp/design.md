@@ -285,12 +285,14 @@ pub struct Project {
   не входят в итерацию 1.
 - **Delta 2026-10-22:** ANN proposal — отдельная спека
   `docs/specs/ann-index/`; выбран `hnsw_rs` + `ouroboros`, не `usearch`
-  (ADR-15). Текущий exact dense scan остаётся до реализации спеки.
+  (ADR-15). Exact dense scan остаётся fallback; после T2–T7 ANN — основной
+  путь для проектов выше порога.
 - **Delta 2026-10-22 (T7):** ADR-15 финализирован: `hnsw_rs 0.3.5` +
   `ouroboros 0.18.5` — единственные версии v1 (fallback-версии нет);
-  формат `meta.json`/`READY`/atomic write — v1; scale-замеры (release,
-  75k×2048): build 56.5 s, p95 5.4 ms, recall@10 1.0000, mmap load 549 ms,
-  bin 12 MiB (бюджет 40 MiB).
+  формат `meta.json`/`READY`/atomic write — v1; core-замеры `AnnIndex`
+  (release, 75k×2048): build 56.5 s, p95 5.4 ms, recall@10 1.0000, mmap load
+  549 ms, bin 12 MiB (бюджет 40 MiB). End-to-end `DenseCache`/`VectorCache`/
+  `search_docs` — ann-index Delta 0.2, T10.
 
 ## 9. Error handling
 

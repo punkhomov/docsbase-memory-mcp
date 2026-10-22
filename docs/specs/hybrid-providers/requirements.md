@@ -1,6 +1,7 @@
 # SPECIFICATION: hybrid-providers (итерация 1 — OpenRouter-only)
 
-**Status:** Draft, ревизия 2.1 · **Дата:** 2026-10-14 (черновик — 2026-10-08)
+**Status:** Draft, ревизия 2.2 · **Дата:** 2026-10-14 (черновик — 2026-10-08;
+delta 2026-10-22)
 **Constitution:** `docs/specs/constitution.md` (1.2.0)
 **Связано:** ADR-12 (кэш `(model_id, chunk_hash)`), ADR-13 (OpenRouter-старт, флаги, 40 MiB — вес ПО)
 
@@ -8,6 +9,20 @@
 `docs/specs/ann-index/` (draft 0.1): persisted HNSW для dense-канала RRF,
 `hnsw_rs` + `ouroboros`, exact fallback. Для итерации 2 ANN остаётся
 non-goal; реализация — iteration 3.
+
+**DELTA-9 (2026-10-22, post-T7 review):** ANN требует 100% покрытия
+(ann-index FR-6), а дефолтный `VectorCache` в 256 MiB не вмещает целевой
+75k×2048 (~586 MiB f32); LRU-eviction делает coverage <100% постоянным, и
+повторный sync не помогает (он снова вытесняет часть). Решение:
+- `VectorCache` byte limit становится настраиваемым; дефолт поднимается до
+  **1 GiB** (это disk-cache, не RAM).
+- Backfill/ANN build держит per-project lease/pin: векторы проекта нельзя
+  вытеснить, пока индекс строится; lease снимается после `READY`/fallback.
+- Coverage остаётся гейтом: `cached < total` → ANN не строится, причина
+  видна в `status`/логе.
+- Это осознанное исключение из ann-index FR-10 «no new config keys»: ключ
+  принадлежит hybrid-providers и будет добавлен в `docs/CONFIG.md` в T13.
+Cross-ref: `docs/specs/ann-index/requirements.md` Delta 0.2; задача T13.
 
 **Delta T1-спайка (2026-10-14, живые вызовы):** дефолтная embedding-модель —
 `qwen/qwen3-embedding-8b` @ `dimensions=1024` (MRL): `qwen/qwen3-embedding-0.6b`
@@ -196,8 +211,10 @@ Non-goals (явно позже, отдельными задачами): dense re
   (`cached/total`). Поиск на протяжении backfill работает; rerank не зависит от
   покрытия. Эвикция LRU-кэша (дефолт 256 MiB) может держать покрытие < 100%
   (особенно на больших проектах); повторный sync до-embed'ит выпавшее — это
-  документированная стоимость, покрытие видно в `status`. `DELTA-2` (блокер:
-  политики backfill не было).
+  документированная стоимость, покрытие видно в `status`. Для ANN этого
+  недостаточно: ann-index FR-6 требует 100%, поэтому capacity/pinning
+  регулируются DELTA-9 (настраиваемый кап + lease на время build).
+  `DELTA-2` (блокер: политики backfill не было).
 
 ## Non-functional requirements (ISO 25010)
 

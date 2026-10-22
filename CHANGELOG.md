@@ -18,9 +18,11 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 ### Performance
 
 - Dense channel gains a persisted HNSW ANN tier for large projects
-  (spec `docs/specs/ann-index`): near-instant reload, p95 search ~5 ms at
-  75k×2048, exact fallback on any ANN failure; daemon builds in the
-  background, direct CLI never builds.
+  (spec `docs/specs/ann-index`): exact fallback on any ANN failure; daemon
+  builds in the background, direct CLI never builds. Core `AnnIndex`
+  benchmark at 75k×2048: p95 ~5 ms on synthetic separated clusters; the
+  end-to-end `DenseCache`/`VectorCache`/`search_docs` validation is tracked
+  by ann-index Delta 0.2 (T10).
 
 ## [0.1.0-alpha.4] — 2026-10-14
 

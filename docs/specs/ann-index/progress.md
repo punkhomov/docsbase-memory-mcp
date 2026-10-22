@@ -194,3 +194,46 @@
   (4) `GRAPH_OVERHEAD_BYTES` 128 → 1024 (spike-measured ~780 B/vertex;
   75k×2048 estimate 691 MiB, still under the 1 GiB cap). No behavior
   changes affecting search or baseline.
+
+- 2026-10-22: Delta 0.2 (post-T7 independent review). Opened T8–T11 for
+  end-to-end gaps: (a) `VectorCache` 256 MiB vs 75k×2048 ~586 MiB → coverage
+  never reaches 100% (cross-ref hybrid-providers DELTA-9/T13); (b)
+  `DenseCache.max_bytes` does not cap exact rows; (c) cold start reads all
+  vectors before persisted ANN; (d) failed build never retries because
+  `start_build` reuses `Building`; (e) Windows `sync_all` uses read-only
+  handles; (f) cleanup deletes active `tmp-*`; (g) fixed `ef=64` vs
+  `max(64, fetch*4)`; (h) T6 numbers are core-`AnnIndex`, not end-to-end.
+  Requirements/design/tasks updated with dated deltas and open OQ-4 until
+  Windows runtime. No code changes in this entry; T1.5 remains merge gate.
+
+- Task T8: complete (2026-10-22). `DenseCache.max_bytes` is now a global
+  resident cap (byte LRU across entries, exact rows included); a single
+  over-cap project becomes `TooLarge` and streams exact; the pre-decode check
+  uses the `@dN` model width. Failed background builds enter `DenseRows::Failed`
+  with `retry_at`; `Building` is no longer reused forever and `warm` retries
+  after backoff. Fresh review: 2 rounds — Important findings (start_build
+  bypassing caps, stale Failed bytes, Building under-accounting) fixed and
+  re-reviewed ADDRESSED; no new breakage.
+  Verify: `cargo test --locked --lib --test hybrid_ann --test hybrid_rank_ann
+  --test ann_store` (96+12+14+1 pass); clippy `--all-targets -D warnings`
+  clean; fmt clean.
+  Minor (deferred): the pre-decode byte check uses total `chunk_count`, so a
+  partially covered project can be classified `TooLarge` although its loaded
+  rows would fit; results remain exact, only caching is lost. T9's ANN-first
+  lookup will revisit this path.
+
+- Task T9: core complete (2026-10-22); disk budget deferred to T13/T9b.
+  Cold start now tries `AnnStore::load`/`AnnIndex::load` before opening
+  `VectorCache`, using the `@dN` model width to build the key; a persisted ANN
+  is served with `vectors.db` deleted. `sync_dump_files` opens graph/data/meta
+  with a write handle (Windows `FlushFileBuffers` needs `GENERIC_WRITE`).
+  Cleanup skips `tmp-<current-pid>-*` and keeps two generations per model.
+  Verify: `cargo test --locked --test hybrid_ann --test ann_store` (15+14
+  pass); clippy clean; fmt clean.
+  Remaining: global disk budget, full Windows/macOS runtime evidence.
+- Task T13 (hybrid-providers): capacity default landed (2026-10-22). `VectorCache`
+  default `max_bytes` is now 1 GiB (75k×2048 ≈586 MiB) with a guard test;
+  configurable key and per-project lease/pin remain open.
+- Task T10: dynamic `ef` landed (2026-10-22): `max(64, fetch*4)` capped at
+  4096, unit test for 0/10/50/1000/MAX. End-to-end 75k×2048 through
+  `DenseCache`/`VectorCache`/`search_docs` remains open.
