@@ -1,17 +1,24 @@
 //! Dense candidate generation: cosine top-`fetch` over cached vectors (FR-15).
 //!
 //! The scan is intentionally brute-force: iteration 2 selects the best
-//! `fetch` chunks by cosine similarity against the query embedding; an ANN
-//! index is a later iteration (DELTA-7 non-goals). Every stored vector is
-//! scored with a true cosine (division by both norms), which degenerates to
-//! the dot product for the L2-normalized vectors produced by the default
-//! embedder configuration, so the same code serves `normalize = false`.
+//! `fetch` chunks by cosine similarity against the query embedding; iteration
+//! 3 (spec ann-index) adds a persisted ANN path for projects above
+//! `ANN_MIN_VECTORS`, keeping exact fallback on any ANN failure (FR-5).
+//! Every stored vector is scored with a true cosine (division by both norms),
+//! which degenerates to the dot product for the L2-normalized vectors
+//! produced by the default embedder configuration, so the same code serves
+//! `normalize = false`.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
+use crate::hybrid::ann::{self, ANN_MIN_VECTORS, AnnIndex};
+use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore};
 use crate::store::Db;
 use crate::store::repo;
 use crate::vector_cache::VectorCache;
@@ -19,6 +26,9 @@ use crate::vector_cache::VectorCache;
 /// Hard per-project cap on cached vectors (DELTA-7): above it the cache
 /// refuses to build and callers stream the scan instead.
 pub const DENSE_CACHE_MAX_VECTORS: usize = 1_000_000;
+
+/// Backoff after a failed background ANN build before retrying.
+const BUILD_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Returns the best `fetch` candidates by cosine similarity, best first.
 ///
@@ -184,22 +194,95 @@ impl DenseIndex {
     }
 }
 
+/// In-flight ANN build handle: while it is `Building`, search streams exact
+/// `top_k_iter` from the cached hashes and never blocks on the build.
+#[derive(Debug, Clone)]
+pub struct BuildingAnn {
+    pub(crate) hashes: Arc<Vec<(u64, String)>>,
+}
+
 /// Outcome of a dense-cache lookup.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum DenseRows {
     /// Rows for the current index generation (fresh or cached).
     Ready(Arc<DenseIndex>),
-    /// The project exceeds [`DENSE_CACHE_MAX_VECTORS`]; stream [`top_k_iter`].
-    TooLarge,
+    /// A loaded ANN index for the current key (persisted).
+    Ann(Arc<AnnIndex>),
+    /// The project exceeds [`DENSE_CACHE_MAX_VECTORS`]; stream [`top_k_iter`]
+    /// over the cached hashes.
+    TooLarge(Arc<Vec<(u64, String)>>),
+    /// An ANN build is running in the background; search streams exact.
+    Building(Arc<BuildingAnn>),
 }
 
-/// Per-project dense cache keyed by `(index generation, model_id)`
-/// (DELTA-7, DELTA-7.1): a new generation or embedding model replaces the
-/// entry, a no-op sync keeps it.
-#[derive(Debug)]
+/// ANN build/load policy (design §8, FR-8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnPolicy {
+    /// Load if present, otherwise build in the background (daemon).
+    BuildOrLoad,
+    /// Load if present, never build (direct CLI).
+    LoadOnly,
+    /// Never touch ANN (tests/explicit fallback).
+    Disabled,
+}
+
+/// Memory/disk caps for the dense cache (FR-7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DenseCacheLimits {
+    /// Maximum vectors per project; above it the project streams exact.
+    pub max_vectors: usize,
+    /// Maximum estimated resident bytes for an ANN entry.
+    pub max_bytes: u64,
+    /// Maximum cached projects; oldest entries are evicted (LRU).
+    pub max_projects: usize,
+    /// ANN is considered only at or above this vector count (OQ-3, T6
+    /// calibrates; defaults to [`ANN_MIN_VECTORS`]).
+    pub min_vectors: usize,
+}
+
+impl Default for DenseCacheLimits {
+    fn default() -> Self {
+        Self {
+            max_vectors: DENSE_CACHE_MAX_VECTORS,
+            max_bytes: 1024 * 1024 * 1024,
+            max_projects: 8,
+            min_vectors: ANN_MIN_VECTORS,
+        }
+    }
+}
+
+/// One cached project entry.
+struct Entry {
+    state: DenseRows,
+    generation: i64,
+    model_id: String,
+    last_used: u64,
+    bytes: u64,
+    failed_until: Option<Instant>,
+}
+
+/// Everything a background ANN build needs (design §8).
+struct BuildJob {
+    project_id: i64,
+    generation: i64,
+    model_id: String,
+    rows: Vec<(u64, Arc<[f32]>)>,
+    hashes: Arc<Vec<(u64, String)>>,
+    key: AnnKey,
+    estimated: usize,
+    dim: usize,
+}
+
+/// Per-project dense cache keyed by `(index generation, model_id)` with an
+/// optional ANN tier (spec ann-index): a new generation or embedding model
+/// replaces the entry, a no-op sync keeps it.
 pub struct DenseCache {
-    cap: usize,
-    entries: Mutex<HashMap<i64, Arc<DenseIndex>>>,
+    limits: DenseCacheLimits,
+    policy: AnnPolicy,
+    store: Option<AnnStore>,
+    entries: Arc<Mutex<HashMap<i64, Entry>>>,
+    digests: Arc<Mutex<HashMap<(i64, i64), String>>>,
+    clock: Arc<AtomicU64>,
 }
 
 impl Default for DenseCache {
@@ -209,55 +292,384 @@ impl Default for DenseCache {
 }
 
 impl DenseCache {
-    /// Cache with the [`DENSE_CACHE_MAX_VECTORS`] cap.
+    /// Cache with default limits and ANN disabled (exact-only, as before the
+    /// ANN iteration). Daemon/CLI opt into ANN via [`Self::with_policy`].
     #[must_use]
     pub fn new() -> Self {
-        Self::with_cap(DENSE_CACHE_MAX_VECTORS)
+        Self::with_policy_and_limits(AnnPolicy::Disabled, None, DenseCacheLimits::default())
     }
 
-    /// Cache with an explicit cap (tests and future tuning).
+    /// Cache with an explicit vector cap (tests and future tuning).
     #[must_use]
     pub fn with_cap(cap: usize) -> Self {
+        Self::with_policy_and_limits(
+            AnnPolicy::Disabled,
+            None,
+            DenseCacheLimits {
+                max_vectors: cap,
+                ..DenseCacheLimits::default()
+            },
+        )
+    }
+
+    /// Cache with an ANN policy and store root (daemon/CLI; design §10).
+    #[must_use]
+    pub fn with_policy(policy: AnnPolicy, cache_root: &std::path::Path) -> Self {
+        let store =
+            (policy != AnnPolicy::Disabled).then(|| AnnStore::new(cache_root.to_path_buf()));
+        Self::with_policy_and_limits(policy, store, DenseCacheLimits::default())
+    }
+
+    /// Full constructor used by tests.
+    #[must_use]
+    pub fn with_policy_limits(
+        policy: AnnPolicy,
+        cache_root: &std::path::Path,
+        limits: DenseCacheLimits,
+    ) -> Self {
+        let store =
+            (policy != AnnPolicy::Disabled).then(|| AnnStore::new(cache_root.to_path_buf()));
+        Self::with_policy_and_limits(policy, store, limits)
+    }
+
+    fn with_policy_and_limits(
+        policy: AnnPolicy,
+        store: Option<AnnStore>,
+        limits: DenseCacheLimits,
+    ) -> Self {
         Self {
-            cap,
-            entries: Mutex::new(HashMap::new()),
+            limits,
+            policy,
+            store,
+            entries: Arc::new(Mutex::new(HashMap::new())),
+            digests: Arc::new(Mutex::new(HashMap::new())),
+            clock: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    /// Returns the project's rows, rebuilding when the index generation moved.
+    fn tick(&self) -> u64 {
+        self.clock.fetch_add(1, AtomicOrdering::Relaxed)
+    }
+
+    fn lock_entries(&self) -> std::sync::MutexGuard<'_, HashMap<i64, Entry>> {
+        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Digest of the current chunk set for `(project, generation)`, computed
+    /// once and reused until the generation changes (design §8).
+    fn digest_for(&self, project_id: i64, generation: i64, chunks: &[(u64, String)]) -> String {
+        let key = (project_id, generation);
+        {
+            let digests = self.digests.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(digest) = digests.get(&key) {
+                return digest.clone();
+            }
+        }
+        let digest = crate::hybrid::ann_store::chunk_set_digest(chunks);
+        let mut digests = self.digests.lock().unwrap_or_else(PoisonError::into_inner);
+        digests.insert(key, digest.clone());
+        digest
+    }
+
+    /// Returns the project's rows (or ANN state), rebuilding when the index
+    /// generation moved.
     ///
     /// # Errors
     /// Registry failures (generation, chunk rows) and vector-cache failures.
     pub fn get(&self, db: &Db, project_id: i64, model_id: &str) -> Result<DenseRows> {
         let generation = repo::index_generation(db.connection(), project_id)?;
         {
-            let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(entry) = entries.get(&project_id)
+            let mut entries = self.lock_entries();
+            if let Some(entry) = entries.get_mut(&project_id)
                 && entry.generation == generation
                 && entry.model_id == model_id
             {
-                return Ok(DenseRows::Ready(Arc::clone(entry)));
+                entry.last_used = self.tick();
+                let expired_building = matches!(entry.state, DenseRows::Building(_))
+                    && entry
+                        .failed_until
+                        .is_some_and(|until| until <= Instant::now());
+                if !expired_building {
+                    return Ok(entry.state.clone());
+                }
             }
         }
+        self.resolve(db, project_id, generation, model_id)
+    }
+
+    /// Full lookup path: exact rows, ANN load or background build.
+    fn resolve(
+        &self,
+        db: &Db,
+        project_id: i64,
+        generation: i64,
+        model_id: &str,
+    ) -> Result<DenseRows> {
         let chunks = repo::chunk_hashes(db.connection(), project_id)?;
-        if chunks.len() > self.cap {
-            return Ok(DenseRows::TooLarge);
+        let digest = self.digest_for(project_id, generation, &chunks);
+        if chunks.len() > self.limits.max_vectors {
+            let hashes = Arc::new(chunks);
+            let state = DenseRows::TooLarge(Arc::clone(&hashes));
+            self.stash(project_id, generation, model_id, state.clone());
+            return Ok(state);
         }
         let mut cache = VectorCache::open(db.cache_root())?;
         let mut rows = Vec::with_capacity(chunks.len());
-        for (chunk_id, hash) in chunks {
-            if let Some(vector) = cache.get(model_id, &hash)? {
-                rows.push((chunk_id, Arc::from(vector)));
+        let mut full_coverage = true;
+        for (chunk_id, hash) in &chunks {
+            match cache.get(model_id, hash)? {
+                Some(vector) => rows.push((*chunk_id, Arc::from(vector))),
+                None => full_coverage = false,
             }
         }
-        let entry = Arc::new(DenseIndex {
+        let dim = rows
+            .first()
+            .map_or(0, |(_, vector): &(u64, Arc<[f32]>)| vector.len());
+        let estimated = ann::ann_estimated_bytes(rows.len(), dim);
+        let in_backoff = {
+            let entries = self.lock_entries();
+            matches!(entries.get(&project_id), Some(entry)
+                if entry.generation == generation
+                    && entry.model_id == model_id
+                    && entry.failed_until.is_some_and(|until| until > Instant::now()))
+        };
+        let seek_ann = self.policy != AnnPolicy::Disabled
+            && self.store.is_some()
+            && chunks.len() >= self.limits.min_vectors
+            && full_coverage
+            && !in_backoff
+            && u64::try_from(estimated).unwrap_or(u64::MAX) <= self.limits.max_bytes;
+        if !seek_ann {
+            let state = DenseRows::Ready(Arc::new(DenseIndex {
+                generation,
+                model_id: model_id.to_owned(),
+                rows,
+            }));
+            self.stash(project_id, generation, model_id, state.clone());
+            return Ok(state);
+        }
+        let key = AnnKey {
+            project_id,
             generation,
             model_id: model_id.to_owned(),
-            rows,
+            dim,
+            chunk_count: chunks.len(),
+            chunk_set_digest: digest,
+            format_version: ANN_FORMAT_VERSION,
+        };
+        if let Ok(Some(slot)) = self.store.as_ref().expect("seeking ann").load(&key)
+            && let Ok(ann) = AnnIndex::load(&slot)
+        {
+            let state = DenseRows::Ann(Arc::new(ann));
+            self.stash(project_id, generation, model_id, state.clone());
+            return Ok(state);
+        }
+        match self.policy {
+            AnnPolicy::BuildOrLoad => {
+                let hashes = Arc::new(chunks);
+                Ok(self.start_build(BuildJob {
+                    project_id,
+                    generation,
+                    model_id: model_id.to_owned(),
+                    rows,
+                    hashes,
+                    key,
+                    estimated,
+                    dim,
+                }))
+            }
+            AnnPolicy::LoadOnly => {
+                let state = DenseRows::Ready(Arc::new(DenseIndex {
+                    generation,
+                    model_id: model_id.to_owned(),
+                    rows,
+                }));
+                self.stash(project_id, generation, model_id, state.clone());
+                Ok(state)
+            }
+            AnnPolicy::Disabled => unreachable!("seek_ann is false when disabled"),
+        }
+    }
+
+    /// Starts one background build for `(project, generation, model)` and
+    /// publishes the `Building` state; a build already in flight is reused
+    /// (design §8).
+    #[allow(clippy::needless_pass_by_value)]
+    fn start_build(&self, job: BuildJob) -> DenseRows {
+        let building = Arc::new(BuildingAnn {
+            hashes: Arc::clone(&job.hashes),
         });
-        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        entries.insert(project_id, Arc::clone(&entry));
-        Ok(DenseRows::Ready(entry))
+        {
+            let mut entries = self.lock_entries();
+            if let Some(entry) = entries.get(&job.project_id)
+                && entry.generation == job.generation
+                && entry.model_id == job.model_id
+                && matches!(entry.state, DenseRows::Building(_))
+            {
+                return entry.state.clone();
+            }
+            let rows = Arc::from(job.rows);
+            let cache = Arc::new(self.snapshot());
+            let store_root = self
+                .store
+                .as_ref()
+                .expect("seeking ann")
+                .root()
+                .to_path_buf();
+            let entry = Entry {
+                state: DenseRows::Building(Arc::clone(&building)),
+                generation: job.generation,
+                model_id: job.model_id.clone(),
+                last_used: self.tick(),
+                bytes: job.estimated as u64,
+                failed_until: None,
+            };
+            entries.insert(job.project_id, entry);
+            let spawn = {
+                let cache = Arc::clone(&cache);
+                let key = job.key.clone();
+                let project_id = job.project_id;
+                let dim = job.dim;
+                move || {
+                    build_in_background(cache, project_id, key, rows, dim, store_root);
+                }
+            };
+            std::thread::spawn(spawn);
+        }
+        DenseRows::Building(building)
+    }
+
+    /// Idempotent background warm for `(project, model)`: starts a build if
+    /// none exists for the current generation and returns immediately
+    /// (design §8). Search keeps streaming exact while it runs.
+    ///
+    /// # Errors
+    /// Registry or vector-cache failures on the way to a build.
+    pub fn warm(&self, db: &Db, project_id: i64, model_id: &str) -> Result<()> {
+        let generation = repo::index_generation(db.connection(), project_id)?;
+        {
+            let entries = self.lock_entries();
+            if let Some(entry) = entries.get(&project_id)
+                && entry.generation == generation
+                && entry.model_id == model_id
+                && matches!(entry.state, DenseRows::Ann(_) | DenseRows::Building(_))
+            {
+                return Ok(());
+            }
+        }
+        self.resolve(db, project_id, generation, model_id)
+            .map(|_| ())
+    }
+
+    /// Invalidates a project: drops the cached entry/digest and the on-disk
+    /// ANN tree (FR-4; backfill hook).
+    ///
+    /// # Errors
+    /// Filesystem failures while removing the ANN tree.
+    pub fn invalidate(&self, project_id: i64) -> Result<()> {
+        self.lock_entries().remove(&project_id);
+        self.digests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|(project, _), _| *project != project_id);
+        if let Some(store) = &self.store {
+            store.invalidate(project_id)?;
+        }
+        Ok(())
+    }
+
+    /// Best-effort cleanup of old ANN generations (design §9).
+    ///
+    /// # Errors
+    /// Filesystem failures while scanning the ann root.
+    pub fn cleanup(&self, project_id: i64) -> Result<()> {
+        if let Some(store) = &self.store {
+            store.cleanup(project_id)?;
+        }
+        Ok(())
+    }
+
+    fn stash(&self, project_id: i64, generation: i64, model_id: &str, state: DenseRows) {
+        let bytes = match &state {
+            DenseRows::Ann(ann) => ann.estimated_bytes() as u64,
+            DenseRows::Ready(index) => index
+                .rows()
+                .iter()
+                .map(|(_, vector)| vector.len() * 4)
+                .sum::<usize>() as u64,
+            DenseRows::TooLarge(hashes) => hashes.len() as u64 * 64,
+            DenseRows::Building(building) => building.hashes.len() as u64 * 64,
+        };
+        let entry = Entry {
+            state,
+            generation,
+            model_id: model_id.to_owned(),
+            last_used: self.tick(),
+            bytes,
+            failed_until: None,
+        };
+        let mut entries = self.lock_entries();
+        if entries.len() >= self.limits.max_projects && !entries.contains_key(&project_id) {
+            let oldest = entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(id, _)| *id);
+            if let Some(oldest) = oldest {
+                entries.remove(&oldest);
+            }
+        }
+        entries.insert(project_id, entry);
+    }
+
+    fn snapshot(&self) -> Self {
+        Self {
+            limits: self.limits,
+            policy: self.policy,
+            store: self.store.clone(),
+            entries: Arc::clone(&self.entries),
+            digests: Arc::clone(&self.digests),
+            clock: Arc::clone(&self.clock),
+        }
+    }
+}
+
+/// Background build: builds, dumps, loads and publishes the `Ann` entry
+/// unless the project moved on meanwhile (design §8).
+#[allow(clippy::needless_pass_by_value)]
+fn build_in_background(
+    cache: Arc<DenseCache>,
+    project_id: i64,
+    key: AnnKey,
+    rows: Arc<[(u64, Arc<[f32]>)]>,
+    dim: usize,
+    store_root: PathBuf,
+) {
+    let result: Result<()> = (|| {
+        let ann = AnnIndex::build(&rows, dim)?;
+        let store = AnnStore::new(store_root);
+        let slot = ann.dump(&store, &key)?;
+        let loaded = AnnIndex::load(&slot)?;
+        let mut entries = cache.lock_entries();
+        if let Some(entry) = entries.get_mut(&project_id)
+            && entry.generation == key.generation
+            && entry.model_id == key.model_id
+        {
+            entry.state = DenseRows::Ann(Arc::new(loaded));
+            entry.bytes = ann.estimated_bytes() as u64;
+            entry.last_used = cache.tick();
+            entry.failed_until = None;
+        }
+        Ok(())
+    })();
+    if let Err(err) = result {
+        eprintln!("warning: ann build failed for project {project_id}: {err}; keeping exact");
+        let mut entries = cache.lock_entries();
+        if let Some(entry) = entries.get_mut(&project_id)
+            && entry.generation == key.generation
+            && entry.model_id == key.model_id
+        {
+            entry.failed_until = Some(Instant::now() + BUILD_BACKOFF);
+        }
     }
 }
 
@@ -503,7 +915,10 @@ mod tests {
     fn ready(rows: DenseRows) -> Arc<DenseIndex> {
         match rows {
             DenseRows::Ready(index) => index,
-            DenseRows::TooLarge => panic!("fixture project must fit the dense cache"),
+            DenseRows::TooLarge(_) => panic!("fixture project must fit the dense cache"),
+            DenseRows::Ann(_) | DenseRows::Building(_) => {
+                panic!("fixture cache has ANN disabled")
+            }
         }
     }
 
@@ -614,6 +1029,6 @@ mod tests {
         let (_cache, db, project_id) = indexed_project();
         let dense = DenseCache::with_cap(1);
         let out = dense.get(&db, project_id, "fake/model@d3@l2").expect("get");
-        assert!(matches!(out, DenseRows::TooLarge));
+        assert!(matches!(out, DenseRows::TooLarge(_)));
     }
 }

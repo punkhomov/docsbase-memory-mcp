@@ -209,9 +209,15 @@ impl AnnIndex {
     /// Estimated resident bytes: vectors plus graph overhead (design §8).
     #[must_use]
     pub fn estimated_bytes(&self) -> usize {
-        self.count
-            .saturating_mul(self.dim * 4 + GRAPH_OVERHEAD_BYTES)
+        ann_estimated_bytes(self.count, self.dim)
     }
+}
+
+/// Estimated resident bytes for `count` vectors of `dim` dimensions (design
+/// §8): vectors plus a per-point graph overhead.
+#[must_use]
+pub(crate) fn ann_estimated_bytes(count: usize, dim: usize) -> usize {
+    count.saturating_mul(dim * 4 + GRAPH_OVERHEAD_BYTES)
 }
 
 /// Loads a dump with `mmap` storage; panics and load errors are unified into

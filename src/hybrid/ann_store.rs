@@ -154,6 +154,12 @@ impl AnnStore {
             .join("ann")
     }
 
+    /// The cache root this store is rooted at.
+    #[must_use]
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Final directory for `key`; unique per key by construction.
     #[must_use]
     pub fn ann_dir(&self, key: &AnnKey) -> PathBuf {
