@@ -216,7 +216,7 @@ fn cleanup_keeps_last_two_generations() {
             .persist_dump(k, |dir| Ok(write_dump(dir)))
             .expect("persist");
     }
-    let tmp = store.project_ann_root(1).join("tmp-123-456");
+    let tmp = store.project_ann_root(1).join("tmp-0-456");
     fs::create_dir_all(&tmp).expect("tmp dir");
     fs::write(tmp.join("index.hnsw.graph"), b"graph").expect("write");
 
@@ -238,6 +238,61 @@ fn cleanup_keeps_last_two_generations() {
         .collect();
     left.sort();
     assert_eq!(left.len(), 2, "{left:?}");
+}
+
+#[test]
+fn cleanup_skips_the_current_process_tmp() {
+    let (_cache, store) = store();
+    let tmp = store
+        .project_ann_root(1)
+        .join(format!("tmp-{}-999", std::process::id()));
+    fs::create_dir_all(&tmp).expect("tmp dir");
+    fs::write(tmp.join("index.hnsw.graph"), b"graph").expect("write");
+
+    store.cleanup(1).expect("cleanup");
+    assert!(
+        tmp.exists(),
+        "an in-flight build's tmp must survive cleanup"
+    );
+}
+
+#[test]
+fn cleanup_keeps_two_generations_per_model() {
+    let (_cache, store) = store();
+    for model in ["model-a@d8", "model-b@d8"] {
+        for generation in 1..=3 {
+            let k = key(1, generation, model, 8, 3, "abcdef01");
+            store
+                .persist_dump(&k, |dir| Ok(write_dump(dir)))
+                .expect("persist");
+        }
+    }
+
+    store.cleanup(1).expect("cleanup");
+
+    for model in ["model-a@d8", "model-b@d8"] {
+        assert!(
+            store
+                .load(&key(1, 1, model, 8, 3, "abcdef01"))
+                .expect("load")
+                .is_none(),
+            "{model}: oldest generation removed"
+        );
+        assert!(
+            store
+                .load(&key(1, 2, model, 8, 3, "abcdef01"))
+                .expect("load")
+                .is_some(),
+            "{model}: gen 2 kept"
+        );
+        assert!(
+            store
+                .load(&key(1, 3, model, 8, 3, "abcdef01"))
+                .expect("load")
+                .is_some(),
+            "{model}: gen 3 kept"
+        );
+    }
 }
 
 #[test]

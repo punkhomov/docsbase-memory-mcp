@@ -4,6 +4,7 @@
 //! No HNSW logic lives here: a dump is written by the caller through
 //! [`AnnStore::persist_dump`] and consumed later by `hybrid::ann`.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -284,25 +285,37 @@ impl AnnStore {
                 return Err(Error::internal_with_source("read ann index dir", err));
             }
         };
-        let mut generations: Vec<(i64, PathBuf)> = Vec::new();
+        let current_tmp = format!("tmp-{}-", std::process::id());
+        let mut by_model: HashMap<String, Vec<(i64, PathBuf)>> = HashMap::new();
         let mut tmp_dirs: Vec<PathBuf> = Vec::new();
         for entry in entries {
             let Ok(entry) = entry else { continue };
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if name.starts_with("tmp-") {
-                tmp_dirs.push(entry.path());
-            } else if let Some(generation) = parse_generation(&name) {
-                generations.push((generation, entry.path()));
+                // Never delete the temp dir of a build running in this
+                // process; stale dirs from crashed processes are fair game.
+                if !name.starts_with(&current_tmp) {
+                    tmp_dirs.push(entry.path());
+                }
+            } else if let (Some(model), Some(generation)) =
+                (parse_model(&name), parse_generation(&name))
+            {
+                by_model
+                    .entry(model.to_owned())
+                    .or_default()
+                    .push((generation, entry.path()));
             }
         }
         for dir in tmp_dirs {
             let _ = fs::remove_dir_all(dir);
         }
-        generations.sort_by_key(|(generation, _)| *generation);
-        let remove_count = generations.len().saturating_sub(ANN_KEEP_GENERATIONS);
-        for (_, dir) in generations.into_iter().take(remove_count) {
-            let _ = fs::remove_dir_all(dir);
+        for generations in by_model.values_mut() {
+            generations.sort_by_key(|(generation, _)| *generation);
+            let remove_count = generations.len().saturating_sub(ANN_KEEP_GENERATIONS);
+            for (_, dir) in generations.drain(..remove_count) {
+                let _ = fs::remove_dir_all(dir);
+            }
         }
         Ok(())
     }
@@ -330,6 +343,12 @@ fn dir_name(key: &AnnKey) -> String {
         "{model_hash}-g{}-d{}-c{}-{digest8}",
         key.generation, key.dim, key.chunk_count
     )
+}
+
+/// Parses the model hash prefix of a key directory name.
+fn parse_model(name: &str) -> Option<&str> {
+    let (model, rest) = name.split_once("-g")?;
+    (!model.is_empty() && !rest.is_empty()).then_some(model)
 }
 
 /// Parses the generation out of a key directory name.
@@ -362,7 +381,11 @@ fn sync_dump_files(dir: &Path) -> Result<()> {
         format!("{DUMP_BASENAME}.hnsw.data"),
         "meta.json".to_owned(),
     ] {
-        let file = fs::File::open(dir.join(name))
+        // Windows `FlushFileBuffers` (used by `sync_all`) requires a
+        // GENERIC_WRITE handle; a read-only `File::open` fails there.
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join(name))
             .map_err(|err| Error::internal_with_source("open ann dump file", err))?;
         file.sync_all()
             .map_err(|err| Error::internal_with_source("sync ann dump file", err))?;
