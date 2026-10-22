@@ -461,11 +461,17 @@ impl DenseCache {
         };
         if let Some(store) = &self.store
             && let Ok(Some(slot)) = store.load(&key)
-            && let Ok(ann) = AnnIndex::load(&slot)
         {
-            let state = DenseRows::Ann(Arc::new(ann));
-            self.stash(project_id, generation, model_id, state.clone());
-            return Ok(state);
+            match AnnIndex::load(&slot) {
+                Ok(ann) => {
+                    let state = DenseRows::Ann(Arc::new(ann));
+                    self.stash(project_id, generation, model_id, state.clone());
+                    return Ok(state);
+                }
+                Err(err) => {
+                    eprintln!("warning: ann load failed: {err}; falling back to exact");
+                }
+            }
         }
         if self.policy == AnnPolicy::BuildOrLoad {
             let hashes = Arc::new(chunks);
@@ -1038,5 +1044,34 @@ mod tests {
         let dense = DenseCache::with_cap(1);
         let out = dense.get(&db, project_id, "fake/model@d3@l2").expect("get");
         assert!(matches!(out, DenseRows::TooLarge(_)));
+    }
+
+    #[test]
+    fn digest_is_cached_per_project_generation() {
+        let (cache, db, project_id) = indexed_project();
+        let embedder = FakeEmbedder {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        crate::hybrid::jobs::embed_project_chunks_with(&db, &embedder, project_id).expect("embed");
+
+        let dense = DenseCache::with_policy_limits(
+            AnnPolicy::Disabled,
+            cache.path(),
+            DenseCacheLimits::default(),
+        );
+        dense
+            .get(&db, project_id, embedder.model_id())
+            .expect("get");
+        {
+            let digests = dense.digests.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(digests.len(), 1, "first lookup computes the digest");
+        }
+        dense
+            .get(&db, project_id, embedder.model_id())
+            .expect("get hit");
+        {
+            let digests = dense.digests.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(digests.len(), 1, "a hit must not recompute the digest");
+        }
     }
 }

@@ -15,7 +15,7 @@ pub const ANN_FORMAT_VERSION: u32 = 1;
 
 /// The only v1 `hnsw_rs` version (FR-13); a dump from any other version is
 /// rejected on load and rebuilt.
-pub const HNNSW_RS_VERSION: &str = "0.3.5";
+pub const HNSW_RS_VERSION: &str = "0.3.5";
 
 /// Default graph fan-out during construction (design §6).
 pub const ANN_DEFAULT_M: usize = 16;
@@ -70,7 +70,7 @@ impl AnnMeta {
     pub fn new(key: &AnnKey) -> Self {
         Self {
             format: key.format_version,
-            hnsw_rs_version: HNNSW_RS_VERSION.to_owned(),
+            hnsw_rs_version: HNSW_RS_VERSION.to_owned(),
             project_id: key.project_id,
             generation: key.generation,
             model_id: key.model_id.clone(),
@@ -192,7 +192,7 @@ impl AnnStore {
             reject(key, "metadata does not match the requested key");
             return Ok(None);
         }
-        if meta.hnsw_rs_version != HNNSW_RS_VERSION {
+        if meta.hnsw_rs_version != HNSW_RS_VERSION {
             reject(key, "hnsw_rs version mismatch");
             return Ok(None);
         }

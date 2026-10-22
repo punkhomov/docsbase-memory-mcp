@@ -30,8 +30,9 @@ const LAYERS: usize = 16;
 const EF_SEARCH_DEFAULT: usize = 64;
 
 /// Per-point graph overhead estimate used by [`AnnIndex::estimated_bytes`]
-/// (design §8).
-const GRAPH_OVERHEAD_BYTES: usize = 128;
+/// (design §8). Measured from the T1 spike dump: ~780 B/vertex at 10k×64;
+/// rounded up to 1024 so the cap estimate never understates resident bytes.
+const GRAPH_OVERHEAD_BYTES: usize = 1024;
 
 /// Owning wrapper for a persisted index (spike T1): `HnswIo` owns the mmap
 /// or heap storage and `Hnsw` borrows it, so `HnswIo` must outlive `Hnsw`.

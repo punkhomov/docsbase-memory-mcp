@@ -72,7 +72,8 @@
   persist_dump does not pre-validate dump file presence/size (load rejects
   later with fallback). Minor (deferred): tests don't assert `format_version`/
   `dim` mismatch explicitly (matches_key covers all fields). Minor (deferred):
-  `HNNSW_RS_VERSION` double-N name cosmetic.
+  `HNNSW_RS_VERSION` double-N name cosmetic — fixed in the human review pass
+  (renamed `HNSW_RS_VERSION`).
 
 - Task T3: complete (commits 90b8774..1097da4, incl. temporary 13-day
   cooldown commit 77b50ae; tests: `cargo test --locked --lib` → 94/94; `--test
@@ -145,7 +146,8 @@
   (parallel insert) 56.5 s; dump 1.29 s; mmap load 549 ms (no rebuild,
   SC-3/NFR-3); search p50 3.84 ms / p95 5.40 ms over 100 queries
   (NFR-1 ≤10 ms met); recall@10 on separated clusters 1.0000 (NFR-2 ≥0.95
-  met); estimated resident 624 MiB (NFR-4 ≤1 GiB met). `cargo build --release`
+  met); estimated resident ~691 MiB (NFR-4 ≤1 GiB met; overhead estimate
+  1024 B/vertex, calibrated from the T1 spike dump ~780 B/vertex). `cargo build --release`
   binary 12 MiB (NFR-9: 40 MiB budget met; delta from pre-ANN release not
   archived, budget-checked forward). Ruling: 75k build budget is fixed at
   observed ~56 s (release) — SC-1's "5 s" was provisional for 10k × 64; a
@@ -182,3 +184,13 @@
   gate (human): T1.5 revert of the 13-day cooldown — deferred by human, not
   committed; branch intentionally carries the temporary exception
   (commit 77b50ae).
+
+- 2026-10-22 human review of T2–T7: verdict accept, no blockers. Four
+  minors addressed in this pass: (1) direct digest-reuse test added
+  (`hybrid::dense::tests::digest_is_cached_per_project_generation`, lib
+  96/96); (2) silent `AnnIndex::load` graph failure now logs in `resolve`
+  (`warning: ann load failed ...; falling back to exact`, completes FR-9
+  diagnostics); (3) `HNNSW_RS_VERSION` renamed to `HNSW_RS_VERSION`;
+  (4) `GRAPH_OVERHEAD_BYTES` 128 → 1024 (spike-measured ~780 B/vertex;
+  75k×2048 estimate 691 MiB, still under the 1 GiB cap). No behavior
+  changes affecting search or baseline.
