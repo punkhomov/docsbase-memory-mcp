@@ -8,7 +8,7 @@ direct CLI только загружает.
 **Spec:** `docs/specs/ann-index/requirements.md` (0.2)
 **Design:** `docs/specs/ann-index/design.md` (0.2)
 **Status:** T1 complete; T2–T7 complete (2026-10-22); T1.5 deferred by human
-(13-day cooldown stays in effect until scheduled); T8 complete; T9 code and T10 dynamic ef/8k e2e landed; T10 manual 75k e2e and T11 remain.
+(13-day cooldown stays in effect until scheduled); T8 complete; T9 code and T10 (8k CI + 75k manual e2e) complete; T11 close-out/T1.5 and Windows CI evidence remain.
 Числа T6 — core-`AnnIndex`, end-to-end подтверждает T10.
 
 **Global constraints:**
