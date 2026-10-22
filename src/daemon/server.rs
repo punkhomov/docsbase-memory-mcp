@@ -197,6 +197,8 @@ impl Shared {
             &self.global_config,
             &project.canonical_root,
         )?);
+        self.dense
+            .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes);
         let previous = self.configs().insert(project.id, Arc::clone(&config));
         drop(previous);
         Ok(config)

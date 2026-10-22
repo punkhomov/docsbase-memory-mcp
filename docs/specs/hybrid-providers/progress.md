@@ -240,5 +240,7 @@
   key (default 1 GiB, zero rejected), threaded through `embed_texts`,
   `embed_project_chunks`, `coverage` and `DenseCache`'s VectorCache open.
   Guard test `default_budget_holds_the_target_ann_corpus`; config parse test
-  `hybrid_cache_budget_parsed_and_validated`. Remaining: per-project
-  lease/pin so another project cannot evict vectors during an ANN build.
+  `hybrid_cache_budget_parsed_and_validated`. Daemon applies project-level
+  `[hybrid.cache]` overrides to `DenseCache` on config load. Remaining:
+  per-project lease/pin so another project cannot evict vectors during an
+  ANN build.

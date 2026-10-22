@@ -336,6 +336,7 @@ pub struct DenseCache {
     store: Option<AnnStore>,
     entries: Arc<Mutex<HashMap<i64, Entry>>>,
     digests: Arc<Mutex<HashMap<(i64, i64), String>>>,
+    vector_cache_limits: Arc<Mutex<HashMap<i64, u64>>>,
     clock: Arc<AtomicU64>,
 }
 
@@ -397,6 +398,7 @@ impl DenseCache {
             store,
             entries: Arc::new(Mutex::new(HashMap::new())),
             digests: Arc::new(Mutex::new(HashMap::new())),
+            vector_cache_limits: Arc::new(Mutex::new(HashMap::new())),
             clock: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -509,10 +511,17 @@ impl DenseCache {
                 }
             }
         }
+        let vector_cache_max_bytes = self
+            .vector_cache_limits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&project_id)
+            .copied()
+            .unwrap_or(self.limits.vector_cache_max_bytes);
         let mut cache = VectorCache::open_with_limits(
             db.cache_root(),
             CacheLimits {
-                max_bytes: self.limits.vector_cache_max_bytes,
+                max_bytes: vector_cache_max_bytes,
                 ..CacheLimits::default()
             },
         )?;
@@ -722,6 +731,14 @@ impl DenseCache {
             .map(|_| ())
     }
 
+    /// Applies a project-level vector-cache budget (daemon config reload).
+    pub fn set_vector_cache_max_bytes(&self, project_id: i64, max_bytes: u64) {
+        self.vector_cache_limits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(project_id, max_bytes);
+    }
+
     /// Invalidates a project: drops the cached entry/digest and the on-disk
     /// ANN tree (FR-4; backfill hook).
     ///
@@ -817,6 +834,7 @@ impl DenseCache {
             store: self.store.clone(),
             entries: Arc::clone(&self.entries),
             digests: Arc::clone(&self.digests),
+            vector_cache_limits: Arc::clone(&self.vector_cache_limits),
             clock: Arc::clone(&self.clock),
         }
     }
