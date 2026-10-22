@@ -114,3 +114,25 @@
   "loading" until retry. Minor (deferred): digest-reuse and "no rows+Ann
   double memory" are implemented but not directly observable from outside.
   Next: T5 daemon/CLI policy + warm/invalidate.
+
+- Task T5: complete (commits ef659bb..a83d150; tests: `cargo test --locked
+  --lib` → 95/95 (incl. daemon E2E `sync_refresh_builds_ann_in_background`);
+  `--test hybrid_ann` → 11/11; `--test hybrid_rank_ann` → 1/1; `--test
+  hybrid_ranking` → 10/10; `--test cli_routing` → 16/16; `--test cli_read`
+  → 4/4; `--test smoke` → 5/5; clippy/fmt clean). Fresh review: round 1 —
+  Critical (uncommitted `snapshot` visibility fix) + Important (daemon hook
+  untested) + minors; fixed and re-reviewed (ADDRESSED except deferred).
+  Ruling: `refresh_ann_after_sync` is warm-only — invalidation is not needed
+  because stale on-disk indexes are rejected by the AnnKey
+  (generation/digest/format), and `warm` is idempotent, so a no-op sync
+  keeps a valid ANN (FR-4 satisfied via key matching; avoids rebuild churn).
+  Ruling: daemon E2E test uses a 5000-chunk project so the real
+  `ANN_MIN_VECTORS` threshold applies; fake provider name is rejected by
+  `from_config` but the hook only uses `cache_model_id` from config, so no
+  network/feature is needed. Ruling: FR-9 diagnostics are log-only
+  (`eprintln` warnings on build/search failure); public `status` contract
+  untouched. Minor (deferred): the background warm uses `std::thread::spawn`
+  rather than tokio `spawn_blocking` (call sites include both runtime and
+  non-runtime contexts; bounded by one build per key). Minor (deferred):
+  E2E test hardcodes `projects/1/ann` and a 10s poll (fails loudly, not
+  silently). Next: T6 scale/recall/golden verification.
