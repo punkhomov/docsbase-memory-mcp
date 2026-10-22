@@ -167,3 +167,18 @@
   `tasks.md` status header updated (T1–T7 complete; T1.5 human-deferred).
   No stale "ANN later" statements remain (grep checked). Docs-only changes;
   no code touched. Next: final whole-branch convergence review.
+
+- Final convergence review (2026-10-22): fresh final reviewer over `d9ac518..HEAD` —
+  verdict **converged**; one fix pass applied and re-reviewed (all 4 Important
+  findings ADDRESSED, no new breakage): tie-test de-flake (distinct-but-tied
+  vectors), rejected-ANN diagnostics (`reject` eprintln in `AnnStore::load`),
+  daemon `cleanup` wiring (post-sync warm thread), digest LRU prune on
+  eviction. Minor (deferred) from final review: digest cache retains older
+  generations per resident project (bounded by project count × generations;
+  fully bounded maintenance deferred); insufficient-candidates warning prints
+  per-search when `fetch > N`; `fetch > corpus` always falls back to exact
+  (correct, suboptimal); transient build-phase RSS (rows + building HNSW)
+  not counted against the 1 GiB budget (steady state within budget). Merge
+  gate (human): T1.5 revert of the 13-day cooldown — deferred by human, not
+  committed; branch intentionally carries the temporary exception
+  (commit 77b50ae).
