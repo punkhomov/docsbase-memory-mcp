@@ -59,3 +59,17 @@
   13-day cooldown and T1.5 revert. Spec tightened: DenseCache digest is cached
   per generation, background `Building`/`warm` state added, T2 persistence is
   split from HNSW build, stale `usearch`/ANN-later references removed.
+
+- Task T2: complete (commits 895c5fd..8b5f708; tests: `cargo test --locked
+  --test ann_store` → 12/12 pass; `cargo clippy --locked --all-targets -- -D
+  warnings` → clean; `cargo fmt --check` → clean). Fresh reviewer: spec
+  compliance PASS, quality APPROVED. Ruling: T1.5 deferred by human (2026-10-22);
+  13-day cooldown stays in effect until the human schedules the revert.
+  Minor (deferred): persist_dump removes existing final dir before rename
+  (not an atomic swap; Windows rename-over limitation; crash window only ever
+  yields exact fallback). Minor (deferred): no directory fsync after rename
+  (cache semantics; NFR-5 satisfied via READY ordering). Minor (deferred):
+  persist_dump does not pre-validate dump file presence/size (load rejects
+  later with fallback). Minor (deferred): tests don't assert `format_version`/
+  `dim` mismatch explicitly (matches_key covers all fields). Minor (deferred):
+  `HNNSW_RS_VERSION` double-N name cosmetic.
