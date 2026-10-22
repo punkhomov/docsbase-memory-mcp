@@ -22,7 +22,7 @@ use crate::hybrid::ann::{self, ANN_MIN_VECTORS, AnnIndex};
 use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore};
 use crate::store::Db;
 use crate::store::repo;
-use crate::vector_cache::VectorCache;
+use crate::vector_cache::{CacheLimits, VectorCache};
 
 /// Hard per-project cap on cached vectors (DELTA-7): above it the cache
 /// refuses to build and callers stream the scan instead.
@@ -279,6 +279,8 @@ pub struct DenseCacheLimits {
     pub min_vectors: usize,
     /// Backoff after a failed background build before the next retry.
     pub build_backoff: Duration,
+    /// Vector-cache byte budget used by this dense path (DELTA-9).
+    pub vector_cache_max_bytes: u64,
 }
 
 impl Default for DenseCacheLimits {
@@ -289,6 +291,7 @@ impl Default for DenseCacheLimits {
             max_projects: 8,
             min_vectors: ANN_MIN_VECTORS,
             build_backoff: BUILD_BACKOFF,
+            vector_cache_max_bytes: CacheLimits::default().max_bytes,
         }
     }
 }
@@ -506,7 +509,13 @@ impl DenseCache {
                 }
             }
         }
-        let mut cache = VectorCache::open(db.cache_root())?;
+        let mut cache = VectorCache::open_with_limits(
+            db.cache_root(),
+            CacheLimits {
+                max_bytes: self.limits.vector_cache_max_bytes,
+                ..CacheLimits::default()
+            },
+        )?;
         let mut rows = Vec::with_capacity(chunks.len());
         let mut full_coverage = true;
         for (chunk_id, hash) in &chunks {

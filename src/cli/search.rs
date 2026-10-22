@@ -39,9 +39,14 @@ pub fn run(query: &str, limit: usize) -> anyhow::Result<()> {
     // Direct mode loads a persisted ANN index if one exists and never builds
     // one (FR-8, FR-5): a one-shot process must not pay for HNSW build
     // latency.
-    let dense = crate::hybrid::dense::DenseCache::with_policy(
+    let limits = crate::hybrid::dense::DenseCacheLimits {
+        vector_cache_max_bytes: config.hybrid_cfg.cache.max_bytes,
+        ..crate::hybrid::dense::DenseCacheLimits::default()
+    };
+    let dense = crate::hybrid::dense::DenseCache::with_policy_limits(
         crate::hybrid::dense::AnnPolicy::LoadOnly,
         &cache,
+        limits,
     );
     let value = tools::search_docs_with(
         &stages,

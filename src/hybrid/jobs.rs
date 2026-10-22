@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::error::Result;
 use crate::store::Db;
 use crate::store::repo;
-use crate::vector_cache::{Embedder, VectorCache};
+use crate::vector_cache::{CacheLimits, Embedder, VectorCache};
 
 use super::{HybridCfg, blocking, from_config};
 
@@ -36,7 +36,7 @@ pub fn embed_texts(cache_root: &Path, cfg: &HybridCfg, texts: &[String]) -> Resu
     let Some(embedder) = stages.embedder else {
         return Ok(0);
     };
-    embed_texts_with(cache_root, embedder.as_ref(), texts)
+    embed_texts_with_limits(cache_root, embedder.as_ref(), texts, cfg.cache.limits())
 }
 
 /// [`embed_texts`] with an explicit embedder (tests, future local models).
@@ -48,10 +48,23 @@ pub fn embed_texts_with(
     embedder: &dyn Embedder,
     texts: &[String],
 ) -> Result<u64> {
+    embed_texts_with_limits(cache_root, embedder, texts, CacheLimits::default())
+}
+
+/// [`embed_texts_with`] with explicit vector-cache limits.
+///
+/// # Errors
+/// Cache and embedder failures.
+pub fn embed_texts_with_limits(
+    cache_root: &Path,
+    embedder: &dyn Embedder,
+    texts: &[String],
+    limits: CacheLimits,
+) -> Result<u64> {
     if texts.is_empty() {
         return Ok(0);
     }
-    let mut cache = VectorCache::open(cache_root)?;
+    let mut cache = VectorCache::open_with_limits(cache_root, limits)?;
     let vectors = blocking::enter(|| cache.embed_missing(embedder, texts))?;
     Ok(vectors.len() as u64)
 }
@@ -69,7 +82,7 @@ pub fn embed_project_chunks(db: &Db, cfg: &HybridCfg, project_id: i64) -> Result
     let Some(embedder) = stages.embedder else {
         return Ok(0);
     };
-    embed_project_chunks_with(db, embedder.as_ref(), project_id)
+    embed_project_chunks_with_limits(db, embedder.as_ref(), project_id, cfg.cache.limits())
 }
 
 /// [`embed_project_chunks`] with an explicit embedder (tests).
@@ -77,8 +90,21 @@ pub fn embed_project_chunks(db: &Db, cfg: &HybridCfg, project_id: i64) -> Result
 /// # Errors
 /// Registry, cache and embedder failures.
 pub fn embed_project_chunks_with(db: &Db, embedder: &dyn Embedder, project_id: i64) -> Result<u64> {
+    embed_project_chunks_with_limits(db, embedder, project_id, CacheLimits::default())
+}
+
+/// [`embed_project_chunks_with`] with explicit vector-cache limits.
+///
+/// # Errors
+/// Registry, cache and embedder failures.
+pub fn embed_project_chunks_with_limits(
+    db: &Db,
+    embedder: &dyn Embedder,
+    project_id: i64,
+    limits: CacheLimits,
+) -> Result<u64> {
     let texts = repo::chunk_texts(db.connection(), project_id)?;
-    embed_texts_with(db.cache_root(), embedder, &texts)
+    embed_texts_with_limits(db.cache_root(), embedder, &texts, limits)
 }
 
 /// Cached/total chunk coverage for the configured stage; `None` when the
@@ -95,7 +121,13 @@ pub fn coverage(db: &Db, cfg: &HybridCfg, project_id: i64) -> Result<Option<Cove
     };
     // Coverage needs only the cache key, not a provider client: reporting
     // stays cheap and never builds runtimes per status call (NFR-1).
-    coverage_for_key(db, &super::config::cache_model_id(embedding), project_id).map(Some)
+    coverage_for_key_with_limits(
+        db,
+        &super::config::cache_model_id(embedding),
+        project_id,
+        cfg.cache.limits(),
+    )
+    .map(Some)
 }
 
 /// [`coverage`] with an explicit embedder (tests).
@@ -113,6 +145,19 @@ pub fn coverage_with(db: &Db, embedder: &dyn Embedder, project_id: i64) -> Resul
 /// # Errors
 /// Registry and cache failures.
 pub fn coverage_for_key(db: &Db, model_id: &str, project_id: i64) -> Result<Coverage> {
+    coverage_for_key_with_limits(db, model_id, project_id, CacheLimits::default())
+}
+
+/// [`coverage_for_key`] with explicit vector-cache limits.
+///
+/// # Errors
+/// Registry and cache failures.
+pub fn coverage_for_key_with_limits(
+    db: &Db,
+    model_id: &str,
+    project_id: i64,
+    limits: CacheLimits,
+) -> Result<Coverage> {
     let texts = repo::chunk_texts(db.connection(), project_id)?;
     let hashes: std::collections::HashSet<String> = texts
         .iter()
@@ -126,7 +171,7 @@ pub fn coverage_for_key(db: &Db, model_id: &str, project_id: i64) -> Result<Cove
         });
     }
     let unique: Vec<String> = hashes.into_iter().collect();
-    let cache = VectorCache::open(db.cache_root())?;
+    let cache = VectorCache::open_with_limits(db.cache_root(), limits)?;
     let cached = cache.count_present(model_id, &unique)?;
     Ok(Coverage { cached, total })
 }

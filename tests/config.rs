@@ -322,3 +322,27 @@ fn config_payload_includes_resolved_stages() {
         serde_json::json!(50)
     );
 }
+
+#[test]
+fn hybrid_cache_budget_parsed_and_validated() {
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[hybrid]\nenabled = true\n[hybrid.cache]\nmax_bytes = 12345\n",
+    );
+    let config = Config::load_from(config_dir.path(), None).expect("load");
+    assert_eq!(config.hybrid_cfg.cache.max_bytes, 12345);
+
+    let bad = TempDir::new().expect("tempdir");
+    write(
+        bad.path(),
+        "config.toml",
+        "[hybrid]\nenabled = true\n[hybrid.cache]\nmax_bytes = 0\n",
+    );
+    let err = Config::load_from(bad.path(), None).expect_err("zero budget must fail");
+    assert!(
+        matches!(err, docsbase_memory::error::Error::Admission { .. }),
+        "{err:?}"
+    );
+}

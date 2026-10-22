@@ -54,7 +54,15 @@ normalize = true                   # L2; part of the cache key
 provider = "openrouter"
 model = "nvidia/llama-nemotron-rerank-vl-1b-v2:free"  # default
 window = 50                        # candidate window per search (10..=100)
+
+[hybrid.cache]
+max_bytes = 1073741824             # vector-cache budget; ANN needs full coverage
 ```
+
+`hybrid.cache.max_bytes` bounds the content-addressed vector cache. The default
+(1 GiB) fits the 75k×2048 ANN target (~586 MiB); lowering it below the project's
+working set keeps `embed_coverage` under 100% and therefore disables ANN
+(ann-index FR-6 / hybrid-providers DELTA-9).
 
 Default pins are free OpenRouter routes: they may train on prompts and the
 roster rotates monthly. Paid pins (e.g. `qwen/qwen3-embedding-8b`,

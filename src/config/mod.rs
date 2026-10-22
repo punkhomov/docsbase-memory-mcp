@@ -7,9 +7,9 @@ use serde::Deserialize;
 
 use crate::error::{Error, Result};
 use crate::hybrid::config::{
-    DEFAULT_DIMENSIONS, DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANK_MODEL, DEFAULT_RERANK_WINDOW,
-    EmbeddingCfg, HybridCfg, MAX_RERANK_WINDOW, MIN_RERANK_WINDOW, PROVIDER_OPENROUTER, Ranking,
-    RerankerCfg,
+    CacheCfg, DEFAULT_DIMENSIONS, DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANK_MODEL,
+    DEFAULT_RERANK_WINDOW, EmbeddingCfg, HybridCfg, MAX_RERANK_WINDOW, MIN_RERANK_WINDOW,
+    PROVIDER_OPENROUTER, Ranking, RerankerCfg,
 };
 
 pub mod paths;
@@ -103,6 +103,11 @@ impl HybridToggle {
                         RankingFile::Lexical => Ranking::Lexical,
                         RankingFile::Rrf => Ranking::Rrf,
                     }),
+                cache: table
+                    .cache
+                    .map_or_else(CacheCfg::default, |cache| CacheCfg {
+                        max_bytes: cache.max_bytes,
+                    }),
             },
         }
     }
@@ -119,6 +124,8 @@ struct HybridTable {
     reranker: Option<HybridReranker>,
     #[serde(default)]
     ranking: Option<RankingFile>,
+    #[serde(default)]
+    cache: Option<HybridCache>,
 }
 
 /// File spelling of the fusion mode (FR-17); unknown values fail parsing.
@@ -140,6 +147,13 @@ struct HybridEmbedding {
     dimensions: u32,
     #[serde(default = "def_true")]
     normalize: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HybridCache {
+    #[serde(default = "def_cache_max_bytes")]
+    max_bytes: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -167,6 +181,10 @@ fn def_embedding_model() -> String {
 
 fn def_dimensions() -> u32 {
     DEFAULT_DIMENSIONS
+}
+
+fn def_cache_max_bytes() -> u64 {
+    CacheCfg::default().max_bytes
 }
 
 fn def_rerank_model() -> String {
@@ -310,6 +328,11 @@ impl Config {
     /// Hybrid-specific admission checks: provider allowlist (iteration 1)
     /// and bounded, sane stage values (FR-3, FR-13).
     fn validate_hybrid(&self) -> Result<()> {
+        if self.hybrid_cfg.cache.max_bytes == 0 {
+            return Err(Error::Admission {
+                message: "hybrid.cache.max_bytes must be > 0".to_owned(),
+            });
+        }
         if self.hybrid_cfg.enabled
             && self.hybrid_cfg.ranking == Ranking::Rrf
             && self.hybrid_cfg.embedding.is_none()

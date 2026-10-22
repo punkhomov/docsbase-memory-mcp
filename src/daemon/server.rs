@@ -21,7 +21,7 @@ use crate::daemon::tools;
 use crate::error::{Error, Result};
 use crate::hybrid::HybridStages;
 use crate::hybrid::config::cache_model_id;
-use crate::hybrid::dense::{AnnPolicy, DenseCache};
+use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits};
 use crate::hybrid::jobs as hybrid_jobs;
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 use crate::platform::Stream;
@@ -77,6 +77,10 @@ impl Shared {
                 (Config::default(), Some(err.to_string()))
             }
         };
+        let dense_limits = DenseCacheLimits {
+            vector_cache_max_bytes: global_config.hybrid_cfg.cache.max_bytes,
+            ..DenseCacheLimits::default()
+        };
         let shared = Arc::new(Self {
             cache: cache.to_path_buf(),
             db: Mutex::new(db),
@@ -88,7 +92,7 @@ impl Shared {
             global_config_stamp: stamp,
             project_configs: Mutex::new(HashMap::new()),
             stages: Mutex::new(HashMap::new()),
-            dense: DenseCache::with_policy(AnnPolicy::BuildOrLoad, cache),
+            dense: DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, cache, dense_limits),
         });
         match shared.start_watchers() {
             Ok(started) if started > 0 => eprintln!("watching {started} indexed project(s)"),

@@ -235,3 +235,10 @@
   during backfill + ANN build; coverage remains the gate. Reason: 75k×2048
   (~586 MiB) does not fit the 256 MiB default, so ann-index FR-6 can never
   reach 100%. Task T13 opened; no code changes yet.
+
+- 2026-10-22: T13 partial — `[hybrid.cache] max_bytes` is now a real config
+  key (default 1 GiB, zero rejected), threaded through `embed_texts`,
+  `embed_project_chunks`, `coverage` and `DenseCache`'s VectorCache open.
+  Guard test `default_budget_holds_the_target_ann_corpus`; config parse test
+  `hybrid_cache_budget_parsed_and_validated`. Remaining: per-project
+  lease/pin so another project cannot evict vectors during an ANN build.

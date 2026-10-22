@@ -190,7 +190,8 @@ fetch=окно. MCP-схема без изменений.
 ## T13 — VectorCache capacity/pinning for ANN (DELTA-9)
 
 **Status:** partial (2026-10-22): default `max_bytes` raised to 1 GiB with a
-guard test; configurable key and per-project lease/pin remain open.
+guard test; `[hybrid.cache] max_bytes` is parsed, validated and threaded
+through backfill/coverage/dense; per-project lease/pin remains open.
 
 **Goal:** дать ANN-build стабильные 100% coverage на 75k×2048: настраиваемый
 byte limit + per-project lease/pin.
