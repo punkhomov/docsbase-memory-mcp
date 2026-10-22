@@ -136,3 +136,34 @@
   non-runtime contexts; bounded by one build per key). Minor (deferred):
   E2E test hardcodes `projects/1/ann` and a 10s poll (fails loudly, not
   silently). Next: T6 scale/recall/golden verification.
+
+- Task T6: complete (2026-10-22). Verify commands and results recorded fresh
+  this session: `cargo test --locked --test search_bench` → 68/68 pass incl.
+  `metrics_match_baseline` (SC-7: golden baseline unchanged, ANN inactive at
+  331 chunks < `ANN_MIN_VECTORS`). `cargo test --locked --release --test
+  ann_spike -- --ignored` (75k × 2048, release): data gen 0.39 s; build
+  (parallel insert) 56.5 s; dump 1.29 s; mmap load 549 ms (no rebuild,
+  SC-3/NFR-3); search p50 3.84 ms / p95 5.40 ms over 100 queries
+  (NFR-1 ≤10 ms met); recall@10 on separated clusters 1.0000 (NFR-2 ≥0.95
+  met); estimated resident 624 MiB (NFR-4 ≤1 GiB met). `cargo build --release`
+  binary 12 MiB (NFR-9: 40 MiB budget met; delta from pre-ANN release not
+  archived, budget-checked forward). Ruling: 75k build budget is fixed at
+  observed ~56 s (release) — SC-1's "5 s" was provisional for 10k × 64; a
+  sub-minute background build is acceptable for daemon warm (non-blocking).
+  Ruling: hnsw_rs 0.3.5 exposes no seed API, so double-build byte determinism
+  cannot be asserted; persisted-index query results are deterministic (repeat
+  equality in `hybrid_rank_ann`), parallel-insert graph nondeterminism is
+  acceptable (OQ-7). Ruling: `ANN_MIN_VECTORS=4096`, `max_bytes=1 GiB`,
+  `max_projects=8`, `ef_search=64` stay provisional-final (no calibration
+  change needed: recall 0.994/0.999/1.0 at ef 16/32/64 on 2k×32; p95 5.4 ms
+  at 75k×2048). Next: T7 ADR-15 finalization + docs + ledger.
+
+- Task T7: complete (2026-10-22). ADR-15 finalized in
+  `docs/specs/docsbase-memory-mcp/design.md`: `hnsw_rs 0.3.5` +
+  `ouroboros 0.18.5` — единственные версии v1; format v1
+  (`meta.json`/`READY`/atomic rename); scale numbers recorded (release
+  75k×2048: build 56.5 s, p95 5.4 ms, recall 1.0000, mmap load 549 ms,
+  binary 12 MiB ≤ 40 MiB budget). `CHANGELOG.md` gets a Performance entry.
+  `tasks.md` status header updated (T1–T7 complete; T1.5 human-deferred).
+  No stale "ANN later" statements remain (grep checked). Docs-only changes;
+  no code touched. Next: final whole-branch convergence review.

@@ -7,7 +7,9 @@
 direct CLI только загружает.
 **Spec:** `docs/specs/ann-index/requirements.md` (0.1)
 **Design:** `docs/specs/ann-index/design.md` (0.1)
-**Status:** initial plan; T1 complete; T1.5 scheduled 2026-10-23; T2 next. Числа — provisional.
+**Status:** T1 complete; T2–T6 complete (2026-10-22); T1.5 deferred by human
+(13-day cooldown stays in effect until scheduled); T7 complete. Числа — финальные
+для v1 (provisional отметки сняты в T6/T7).
 
 **Global constraints:**
 - Rust edition 2024, MSRV 1.88; `cargo fmt`; clippy `--all-targets -- -D warnings`.

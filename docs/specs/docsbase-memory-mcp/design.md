@@ -278,13 +278,19 @@ pub struct Project {
   `reqwest` + rustls (`webpki-roots`) за feature `hybrid-remote`; дефолтная сборка
   остаётся офлайн (SC-4: `cargo tree` без `reqwest`, CI-джоба `linux-hybrid`).
 - ANN (спека `docs/specs/ann-index`, ADR-15): `hnsw_rs 0.3.5` +
-  `ouroboros`; текущий exact dense scan остаётся до реализации спеки.
+  `ouroboros`; реализовано (T2–T6): persisted index, daemon BuildOrLoad,
+  direct CLI LoadOnly, exact fallback.
   `usearch`/`sqlite-vector-rs` — отклонённые альтернативы (C++/FFI).
 - Позже (ADR-13): `fastembed`/ONNX-runtime — локальные embedding-модели;
   не входят в итерацию 1.
 - **Delta 2026-10-22:** ANN proposal — отдельная спека
   `docs/specs/ann-index/`; выбран `hnsw_rs` + `ouroboros`, не `usearch`
   (ADR-15). Текущий exact dense scan остаётся до реализации спеки.
+- **Delta 2026-10-22 (T7):** ADR-15 финализирован: `hnsw_rs 0.3.5` +
+  `ouroboros 0.18.5` — единственные версии v1 (fallback-версии нет);
+  формат `meta.json`/`READY`/atomic write — v1; scale-замеры (release,
+  75k×2048): build 56.5 s, p95 5.4 ms, recall@10 1.0000, mmap load 549 ms,
+  bin 12 MiB (бюджет 40 MiB).
 
 ## 9. Error handling
 
@@ -509,13 +515,14 @@ Build: `parallel_insert` — дефолт; warm — фоновый, поиск �
 exact streaming; `set_searching_mode(true)` после вставки. Ошибка ANN всегда
 даёт exact fallback, не ошибку поиска. Ограничения: byte/vector/project caps,
 LRU, `TooLarge` streaming; `env_logger` — normal-зависимость
-`hnsw_rs`, размер static-бинаря измеряется в T6.
+`hnsw_rs`; размер release-бинаря после реализации — 12 MiB (бюджет 40 MiB).
 Версия/cooldown: `0.3.5` опубликован 2026-10-09; на 2026-10-22 он моложе
 14 дней. Временно (2026-10-22 → 23) используется **глобальный** 13-дневный
 `min-publish-age`, потому что Cargo 1.101 nightly поддерживает только
 global/per-registry policy и не имеет декларативного per-package allowlist;
 `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow` тоже действует на весь resolve.
-T1.5 возвращает `14 days` 2026-10-23; `0.3.5` остаётся в `Cargo.lock`.
+T1.5 возвращает `14 days` 2026-10-23 (по решению человека отложен);
+`0.3.5` остаётся в `Cargo.lock`.
 Отклонено: `instant-distance` (archived 2026-07-23, no persistence),
 `self_cell` (lifetime/`&mut`), `sqlite-vector-rs`/`usearch` (C++/FFI, Arrow,
 static/MSRV), `hnsw` (rust-cv; 2021, hamming-oriented), `hannoy`/LMDB (C).

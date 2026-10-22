@@ -15,6 +15,13 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
   Free routes may train on prompts and rotate monthly; paid pins stay
   available via explicit `docsbase models use`.
 
+### Performance
+
+- Dense channel gains a persisted HNSW ANN tier for large projects
+  (spec `docs/specs/ann-index`): near-instant reload, p95 search ~5 ms at
+  75k×2048, exact fallback on any ANN failure; daemon builds in the
+  background, direct CLI never builds.
+
 ## [0.1.0-alpha.4] — 2026-10-14
 
 ### Added
