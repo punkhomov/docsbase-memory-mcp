@@ -292,7 +292,7 @@ pub struct Project {
   формат `meta.json`/`READY`/atomic write — v1; core-замеры `AnnIndex`
   (release, 75k×2048): build 56.5 s, p95 5.4 ms, recall@10 1.0000, mmap load
   549 ms, bin 12 MiB (бюджет 40 MiB). End-to-end `DenseCache`/`VectorCache`/
-  `search_docs` — ann-index Delta 0.2, T10.
+  `search_docs` подтверждён T10 (8k CI + 75k manual).
 
 ## 9. Error handling
 

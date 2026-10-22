@@ -247,3 +247,12 @@
   full coverage, ANN served). `ann_spike` remains the core-only
   build/load/recall/latency measurement; real RSS is still not instrumented
   (deferred diagnostic).
+
+- Delta 0.2 status (2026-10-22): T8, T9 (code), T10 and hybrid T13 are
+  complete with fresh review. Evidence: lib 98; config 17; hybrid_config 10
+  (feature), hybrid_jobs 4; vector_cache 12; ann_store 15; ann_recall 9;
+  hybrid_ann 15; hybrid_rank_ann 1; ann_e2e 8k CI + 75k manual (398.77 s).
+  Clippy `--all-targets` clean with and without `hybrid-remote`; fmt clean.
+  Remaining T11 gates: T1.5 (revert 13-day cooldown on 2026-10-23), actual
+  Windows/macOS runtime CI, and the final spec status flip. T10 real RSS is
+  an un-instrumented diagnostic, not a blocker.
