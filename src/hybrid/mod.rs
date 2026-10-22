@@ -11,6 +11,7 @@
 //! so a sanctioned blocking context is always available without blocking an
 //! async worker (ADR-7, I3).
 
+pub mod ann_store;
 pub mod config;
 pub mod dense;
 pub mod jobs;
