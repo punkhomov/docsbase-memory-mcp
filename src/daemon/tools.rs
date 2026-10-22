@@ -117,13 +117,9 @@ fn dense_candidates(
     match dense.get(db, project.id, model_id)? {
         DenseRows::Ready(index) => dense::top_k(&vector, index.rows(), fetch),
         DenseRows::Ann(ann) => match ann.search(&vector, fetch) {
-            Ok(hits) if !hits.is_empty() => Ok(hits),
-            Ok(_) => {
-                eprintln!("warning: ann returned no candidates; falling back to exact");
-                stream_exact(db, model_id, project.id, &vector, fetch)
-            }
-            Err(err) => {
-                eprintln!("warning: ann search failed: {err}; falling back to exact");
+            Ok(hits) if hits.len() >= fetch => Ok(hits),
+            _ => {
+                eprintln!("warning: ann returned insufficient candidates; falling back to exact");
                 stream_exact(db, model_id, project.id, &vector, fetch)
             }
         },

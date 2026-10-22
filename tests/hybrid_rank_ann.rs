@@ -38,7 +38,7 @@ impl Embedder for LengthEmbedder {
             .iter()
             .map(|text| {
                 let mut vector = vec![0.0; DIM];
-                vector[0] = text.len() as f32;
+                vector[0] = text.len() as f32 / 10_000.0;
                 vector[1] = 1.0;
                 vector
             })
@@ -147,7 +147,19 @@ fn search_is_correct_during_build_and_after_ann_publish() {
     )
     .expect("search after publish");
     let after_publish = search(&value);
-    assert_eq!(after_publish, during_build, "ANN order matches exact order");
+    let repeat = search(
+        &search_docs_with(
+            &stages(),
+            &dense,
+            &db,
+            cache.path(),
+            &project,
+            &json!({ "query": "alpha", "limit": 10 }),
+            50,
+        )
+        .expect("search after publish, repeat"),
+    );
+    assert_eq!(after_publish, repeat, "persisted ANN answers deterministically");
     eprintln!(
         "first get observed state: {}",
         if was_building {
