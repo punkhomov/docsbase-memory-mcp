@@ -2,6 +2,9 @@
 
 ## Ledger
 
+- 2026-10-22: ANN-индекс вынесен в отдельную спеку `docs/specs/ann-index/`
+  (draft 0.1, initial plan): persisted `hnsw_rs` + `ouroboros`, exact fallback.
+  Код и зависимости не менялись; ANN остаётся non-goal итерации 2.
 - 2026-10-08: черновик итерации 1 (requirements/design/tasks, ревизия 1).
   Ревью: NEEDS FIXES — 7 блокеров (`[hybrid]` TOML vs текущий `hybrid: bool`,
   поведение feature-off при `hybrid=true`, отсутствие backfill-политики,

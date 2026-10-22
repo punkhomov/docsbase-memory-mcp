@@ -4,6 +4,11 @@
 **Constitution:** `docs/specs/constitution.md` (1.2.0)
 **Связано:** ADR-12 (кэш `(model_id, chunk_hash)`), ADR-13 (OpenRouter-старт, флаги, 40 MiB — вес ПО)
 
+**DELTA-8 (2026-10-22):** ANN-индекс вынесен в отдельную спеку
+`docs/specs/ann-index/` (draft 0.1): persisted HNSW для dense-канала RRF,
+`hnsw_rs` + `ouroboros`, exact fallback. Для итерации 2 ANN остаётся
+non-goal; реализация — iteration 3.
+
 **Delta T1-спайка (2026-10-14, живые вызовы):** дефолтная embedding-модель —
 `qwen/qwen3-embedding-8b` @ `dimensions=1024` (MRL): `qwen/qwen3-embedding-0.6b`
 в каталоге OpenRouter ОТСУТСТВУЕТ (404). Факты: qwen3-8b нормирует вектора

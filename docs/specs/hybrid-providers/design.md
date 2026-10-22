@@ -3,6 +3,11 @@
 **Status:** Draft, ревизия 2.1 · **Дата:** 2026-10-14 (черновик — 2026-10-08)
 **Spec:** `docs/specs/hybrid-providers/requirements.md` (ревизия 2)
 
+**Delta 2026-10-22:** ANN proposal moved to `docs/specs/ann-index/`; the
+current exact dense scan remains the behavior until that spec is implemented.
+ADR-15 (proposed) chooses `hnsw_rs` + `ouroboros`, replacing `usearch` as the
+ANN candidate.
+
 **Delta T1-спайка (2026-10-14):** дефолт — `qwen/qwen3-embedding-8b` @1024
 (`qwen3-embedding-0.6b` в каталоге отсутствует); qwen3-8b нормирует вектора
 (`normalize=true` идемпотентен); `input_type` — минимальный эффект; rerank

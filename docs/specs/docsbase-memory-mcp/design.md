@@ -278,6 +278,9 @@ pub struct Project {
   остаётся офлайн (SC-4: `cargo tree` без `reqwest`, CI-джоба `linux-hybrid`).
 - Позже (ADR-13): `fastembed`/ONNX-runtime, `usearch`, dense-поиск + RRF — после
   бенчмарка; не входят в итерацию 1.
+- **Delta 2026-10-22:** ANN proposal — отдельная спека
+  `docs/specs/ann-index/`; выбран `hnsw_rs` + `ouroboros`, не `usearch`
+  (ADR-15 proposed). Текущий exact dense scan остаётся до реализации спеки.
 
 ## 9. Error handling
 
