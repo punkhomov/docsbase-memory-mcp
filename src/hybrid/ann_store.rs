@@ -270,6 +270,59 @@ impl AnnStore {
         }
     }
 
+    /// Best-effort global disk budget: removes the oldest index directories
+    /// across all projects until their total size fits `max_bytes` (keeping at
+    /// least one directory). Loaded indexes on Windows may fail to delete;
+    /// those removals are skipped.
+    ///
+    /// # Errors
+    /// Filesystem failures while scanning the cache root.
+    pub fn cleanup_disk(&self, max_bytes: u64) -> Result<()> {
+        let projects = self.root.join("projects");
+        let entries = match fs::read_dir(&projects) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(Error::internal_with_source("read projects dir", err)),
+        };
+        let mut dirs: Vec<(u64, SystemTime, PathBuf)> = Vec::new();
+        for project in entries {
+            let Ok(project) = project else { continue };
+            let ann = project.path().join("ann");
+            let Ok(entries) = fs::read_dir(&ann) else {
+                continue;
+            };
+            for entry in entries {
+                let Ok(entry) = entry else { continue };
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("tmp-") || !entry.path().is_dir() {
+                    continue;
+                }
+                let size = dir_size(&entry.path());
+                let modified = fs::metadata(entry.path())
+                    .and_then(|meta| meta.modified())
+                    .unwrap_or(UNIX_EPOCH);
+                dirs.push((size, modified, entry.path()));
+            }
+        }
+        let mut total = dirs.iter().map(|(size, _, _)| *size).sum::<u64>();
+        if total <= max_bytes || dirs.len() <= 1 {
+            return Ok(());
+        }
+        dirs.sort_by_key(|(_, modified, path)| (*modified, path.clone()));
+        let mut remaining = dirs.len();
+        for (size, _, path) in dirs {
+            if total <= max_bytes || remaining <= 1 {
+                break;
+            }
+            if fs::remove_dir_all(&path).is_ok() {
+                total = total.saturating_sub(size);
+                remaining -= 1;
+            }
+        }
+        Ok(())
+    }
+
     /// Best-effort cleanup: removes stale `tmp-*` directories and keeps only
     /// the newest [`ANN_KEEP_GENERATIONS`] generations per project (design §9).
     ///
@@ -319,6 +372,24 @@ impl AnnStore {
         }
         Ok(())
     }
+}
+
+/// Recursive directory size in bytes (best-effort: unreadable entries are 0).
+fn dir_size(path: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(std::result::Result::ok)
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                dir_size(&path)
+            } else {
+                fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+            }
+        })
+        .sum()
 }
 
 /// Logs why a present index was rejected, so a corrupted persisted index

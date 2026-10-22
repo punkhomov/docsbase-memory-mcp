@@ -316,3 +316,26 @@ fn chunk_set_digest_is_order_independent_and_content_sensitive() {
     );
     assert_eq!(a.len(), 64);
 }
+
+#[test]
+fn cleanup_disk_keeps_the_newest_index_under_budget() {
+    let (_cache, store) = store();
+    let mut keys = Vec::new();
+    for project in 1..=3 {
+        let k = key(project, 1, "model@d8", 8, 3, "abcdef01");
+        store
+            .persist_dump(&k, |dir| Ok(write_dump(dir)))
+            .expect("persist");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        keys.push(k);
+    }
+
+    store.cleanup_disk(0).expect("cleanup disk");
+
+    assert!(
+        store.load(&keys[2]).expect("load newest").is_some(),
+        "the newest index must survive"
+    );
+    assert!(store.load(&keys[0]).expect("load first").is_none());
+    assert!(store.load(&keys[1]).expect("load second").is_none());
+}

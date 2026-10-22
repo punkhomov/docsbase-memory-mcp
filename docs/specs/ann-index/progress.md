@@ -222,15 +222,16 @@
   rows would fit; results remain exact, only caching is lost. T9's ANN-first
   lookup will revisit this path.
 
-- Task T9: core complete (2026-10-22); disk budget deferred to T13/T9b.
+- Task T9: code complete (2026-10-22); Windows/macOS runtime CI pending.
   Cold start now tries `AnnStore::load`/`AnnIndex::load` before opening
   `VectorCache`, using the `@dN` model width to build the key; a persisted ANN
   is served with `vectors.db` deleted. `sync_dump_files` opens graph/data/meta
   with a write handle (Windows `FlushFileBuffers` needs `GENERIC_WRITE`).
-  Cleanup skips `tmp-<current-pid>-*` and keeps two generations per model.
-  Verify: `cargo test --locked --test hybrid_ann --test ann_store` (15+14
-  pass); clippy clean; fmt clean.
-  Remaining: global disk budget, full Windows/macOS runtime evidence.
+  Cleanup skips `tmp-<current-pid>-*`, keeps two generations per model and
+  enforces a global ANN dump budget (4 GiB default, oldest first, newest
+  kept). Verify: `cargo test --locked --test hybrid_ann --test ann_store`
+  (15+15 pass); clippy clean; fmt clean. Remaining: full Windows/macOS
+  runtime evidence (CI).
 - Task T13 (hybrid-providers): capacity default landed (2026-10-22). `VectorCache`
   default `max_bytes` is now 1 GiB (75k×2048 ≈586 MiB) with a guard test;
   configurable key and per-project lease/pin remain open.

@@ -281,6 +281,8 @@ pub struct DenseCacheLimits {
     pub build_backoff: Duration,
     /// Vector-cache byte budget used by this dense path (DELTA-9).
     pub vector_cache_max_bytes: u64,
+    /// Global ANN dump budget (T9).
+    pub max_ann_disk_bytes: u64,
 }
 
 impl Default for DenseCacheLimits {
@@ -292,6 +294,7 @@ impl Default for DenseCacheLimits {
             min_vectors: ANN_MIN_VECTORS,
             build_backoff: BUILD_BACKOFF,
             vector_cache_max_bytes: CacheLimits::default().max_bytes,
+            max_ann_disk_bytes: 4 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -766,6 +769,17 @@ impl DenseCache {
     pub fn cleanup(&self, project_id: i64) -> Result<()> {
         if let Some(store) = &self.store {
             store.cleanup(project_id)?;
+        }
+        Ok(())
+    }
+
+    /// Best-effort global ANN disk budget (T9).
+    ///
+    /// # Errors
+    /// Filesystem failures while scanning the cache root.
+    pub fn cleanup_disk(&self) -> Result<()> {
+        if let Some(store) = &self.store {
+            store.cleanup_disk(self.limits.max_ann_disk_bytes)?;
         }
         Ok(())
     }

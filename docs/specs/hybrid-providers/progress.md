@@ -245,4 +245,4 @@
   Backfill pins unique project hashes for 10 minutes (`vector_cache_pins`);
   `VectorCache::evict` skips live pins, and a successful ANN build unpins
   after `READY`. Test `pinned_vectors_survive_the_byte_cap_until_unpinned`.
-  Remaining: global ANN disk budget (ann-index T9).
+  ANN disk budget is enforced in ann-index T9 (4 GiB default).
