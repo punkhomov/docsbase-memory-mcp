@@ -210,10 +210,11 @@ impl Shared {
         self.load_project_config(project)
     }
 
-    /// Invalidates the stale ANN index and warms the current one for
-    /// `project` after a successful sync/backfill (FR-8, FR-4; design §10).
-    /// Runs in the background; search keeps streaming exact while the build
-    /// runs. A no-op when the project has no embedding stage.
+    /// Warms the ANN index for `project` after a successful sync/backfill
+    /// (FR-8; design §10). Runs in the background; search keeps streaming
+    /// exact while the build runs. Stale on-disk indexes are rejected by the
+    /// key (generation/digest/format), so no explicit invalidation is needed
+    /// here (FR-4). A no-op when the project has no embedding stage.
     fn refresh_ann_after_sync(self: &Arc<Self>, project: &crate::store::models::Project) {
         let Ok(config) = self.project_config(project) else {
             return;
@@ -229,9 +230,6 @@ impl Shared {
             let Ok(db) = Db::open(&cache_path) else {
                 return;
             };
-            if let Err(err) = dense.invalidate(project_id) {
-                eprintln!("warning: ann invalidate failed for project {project_id}: {err}");
-            }
             if let Err(err) = dense.warm(&db, project_id, &model_id) {
                 eprintln!("warning: ann warm failed for project {project_id}: {err}");
             }
@@ -947,7 +945,16 @@ fn error_response(err: &Error) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::time::{Duration, Instant};
+
     use super::*;
+    use crate::config::Config;
+    use crate::daemon::registry;
+    use crate::daemon::tools::run_project_index;
+    use crate::hybrid::dense::DenseRows;
+    use crate::hybrid::jobs::embed_project_chunks_with;
+    use crate::vector_cache::Embedder;
 
     #[tokio::test]
     async fn drain_timeout_is_bounded() {
@@ -961,5 +968,60 @@ mod tests {
 
         let idle = AtomicUsize::new(1);
         assert!(wait_for_drain(&idle, Duration::from_millis(50)).await);
+    }
+
+    struct FakeEmbedder;
+
+    impl crate::vector_cache::Embedder for FakeEmbedder {
+        fn model_id(&self) -> &'static str {
+            "fake/model@d3@l2"
+        }
+
+        #[allow(clippy::cast_precision_loss)]
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|text| vec![text.len() as f32, 0.5, 0.25])
+                .collect())
+        }
+    }
+
+    #[test]
+    fn sync_refresh_builds_ann_in_background() {
+        let cache = tempfile::TempDir::new().expect("cache");
+        let root = tempfile::TempDir::new().expect("root");
+        for i in 0..5000 {
+            fs::write(
+                root.path().join(format!("d{i:05}.md")),
+                format!("# doc {i}\n\nbody {i}.\n"),
+            )
+            .expect("write doc");
+        }
+        fs::write(
+            root.path().join(".docsbase.toml"),
+            "[hybrid]\nenabled = true\n[hybrid.embedding]\nprovider = \"fake\"\nmodel = \"model\"\ndimensions = 3\nnormalize = true\n",
+        )
+        .expect("write config");
+
+        let mut db = Db::open(cache.path()).expect("db");
+        let canonical = root.path().canonicalize().expect("canonical");
+        let project = registry::ensure_project(&mut db, &canonical).expect("project");
+        run_project_index(&mut db, cache.path(), &project, &Config::default()).expect("index");
+        embed_project_chunks_with(&db, &FakeEmbedder, project.id).expect("embed");
+
+        let shared = Shared::open(cache.path()).expect("shared");
+        shared.refresh_ann_after_sync(&project);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match shared.dense.get(&db, project.id, FakeEmbedder.model_id()) {
+                Ok(DenseRows::Ann(_)) => break,
+                _ if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                other => panic!("no ann within timeout: {other:?}"),
+            }
+        }
+        assert!(cache.path().join("projects/1/ann").is_dir());
     }
 }
