@@ -237,3 +237,10 @@
 - Task T10: dynamic `ef` landed (2026-10-22): `max(64, fetch*4)` capped at
   4096, unit test for 0/10/50/1000/MAX. End-to-end 75k×2048 through
   `DenseCache`/`VectorCache`/`search_docs` remains open.
+
+- Task T10: CI end-to-end test added (2026-10-22). `tests/ann_e2e.rs`
+  (`ann_e2e_8k_x_256`, 8k docs, dim 256, real `DenseCache` + `VectorCache` +
+  `search_docs_with`) asserts coverage=100%, ANN publication, high-fetch
+  (limit 100) determinism. Verify: `cargo test --locked --test ann_e2e` (1/1,
+  ~18 s); clippy/fmt clean. Manual 75k×2048 end-to-end (real RSS) remains
+  open; the existing `ann_spike` still measures `AnnIndex` core only.
