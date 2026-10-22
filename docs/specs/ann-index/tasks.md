@@ -3,7 +3,7 @@
 **Goal:** добавить persisted HNSW для dense-канала RRF, сохранив exact fallback
 и текущие публичные контракты.
 **Architecture:** `src/hybrid/{ann,ann_store}.rs` + расширение `DenseCache`;
-`hnsw_rs 0.3.5` + `ouroboros 0.18.5`; 0.3.4 — fallback; daemon строит/загружает,
+`hnsw_rs 0.3.5` + `ouroboros 0.18.5`; 0.3.5 — единственная версия; daemon строит/загружает,
 direct CLI только загружает.
 **Spec:** `docs/specs/ann-index/requirements.md` (0.1)
 **Design:** `docs/specs/ann-index/design.md` (0.1)
@@ -38,14 +38,14 @@ direct CLI только загружает.
 - Later T2: `Cargo.toml`/`Cargo.lock` after ADR-15.
 
 **Steps (spike, not production):**
-1. `hnsw_rs = "=0.3.4"` + `ouroboros = "0.18.5"`.
+1. `hnsw_rs = "=0.3.5"` + `ouroboros = "0.18.5"`.
 2. `Hnsw::new(16, n, 16, 200, DistCosine)`, insert 10k × 64.
 3. `file_dump`; `ouroboros` load; `mmap=true` и `mmap=false`.
 4. `Send + Sync` wrapper; drop/cleanup; Windows/macOS `cargo check`.
 5. Замерить build/load; записать факты в `progress.md`.
 
-**Result:** top-10 совпал; build 5.1 s, dump 18 ms, load 49 ms (mmap и heap),
-10.6 MB dump, `LoadedAnn: Send + Sync`. `self_cell` не подошёл
+**Result:** top-10 совпал; build 4.8 s, dump 15 ms, load 43/42 ms (mmap/heap),
+10.3 MB dump, `LoadedAnn: Send + Sync`. `self_cell` не подошёл
 (`&mut HnswIo` + invariant `Hnsw`); `ouroboros` работает.
 
 **Acceptance:** dump/load даёт те же соседи; mmap работает; MSRV/CI
@@ -102,10 +102,12 @@ lock; temporary note удалён; smoke test зелёный.
 struct AnnKey { project_id, generation, model_id, dim, chunk_count,
                 chunk_set_digest, format_version }
 struct AnnMeta { format, hnsw_rs_version, key..., count, m, ef_construction, created_at }
+struct AnnSlot { dir: PathBuf, meta: AnnMeta }
 struct AnnStore { root: PathBuf }
 impl AnnStore {
-    fn load(&self, key: &AnnKey) -> Result<Option<LoadedAnn>>;
-    fn build_and_persist(&self, key: &AnnKey, rows: &[(u64, Arc<[f32]>)]) -> Result<LoadedAnn>;
+    fn load(&self, key: &AnnKey) -> Result<Option<AnnSlot>>;
+    fn persist_dump(&self, key: &AnnKey, write: impl FnOnce(&Path) -> Result<String>)
+        -> Result<AnnSlot>;
     fn invalidate(&self, project_id: i64);
     fn cleanup(&self, project_id: i64);
 }
@@ -120,8 +122,9 @@ impl AnnStore {
    mismatch, cleanup old generations; `file_dump` basename is `"index"` (or
    fresh temp-dir on collision).
 
-**Acceptance:** FR-2/FR-3/FR-5; SC-4/SC-5; no HNSW build logic in this task
-(build callback/mocked).
+**Acceptance:** FR-2/FR-3/FR-5; SC-4/SC-5; no HNSW build logic in this task:
+`persist_dump` only provides temp dir/atomic publish; `AnnIndex` writes the dump
+in T3.
 
 **Verify:** `cargo test --locked --test ann_store`;
 `cargo clippy --locked --all-targets -- -D warnings`.
@@ -153,14 +156,15 @@ impl AnnIndex {
 1. RED: dim mismatch/empty query; deterministic tie-break; recall@10 ≥ 0.99
    on separated vectors; `score = 1 - cos` for cos=1/0/-1.
 2. GREEN: `hnsw_rs 0.3.5`; `parallel_insert` default; `set_searching_mode(true)`;
+   `AnnIndex::dump` через `AnnStore::persist_dump`; `AnnIndex::load(AnnSlot)`;
    `ouroboros` load; mmap/heap fallback. Map `chunk_id` via
    `usize::try_from`; `Neighbour.d_id` via `u64::try_from`; no `as`.
 3. Add synthetic recall test 5k × 64 in CI; 75k × 2048 ignored scale;
    recall-vs-ef curve 16/32/64/128/256.
-4. Verify 0.3.4 dump is rejected by 0.3.5 (version/format metadata) without
+4. Verify dump чужой версии rejected (version/format metadata) without
    panic; verify double single-thread build with fixed seed.
-5. Measure build; if 0.3.5 regresses vs 0.3.4, fallback to 0.3.4 with
-   `format_version=1` (no migration).
+5. Measure build on 0.3.5; version fallback не предусмотрен, только
+   exact fallback при ошибке ANN.
 
 **Acceptance:** FR-1/FR-5/FR-13; NFR-1/2; SC-1/SC-12; OQ-2 остаётся
 условным до T6; no `DenseCache` changes yet.
@@ -187,9 +191,13 @@ LRU/byte-cap.
 1. RED: below threshold exact unchanged; above threshold ANN; ANN error →
    exact; coverage incomplete → exact; stale key → exact/rebuild.
 2. GREEN: `DenseCacheLimits` (`max_vectors`, `max_bytes`, `max_projects`);
-   `ann.digest`; `AnnPolicy::{BuildOrLoad, LoadOnly, Disabled}`.
-3. Cache `TooLarge` hashes; no per-query `repo::chunk_hashes`.
-4. Tests: LRU, byte-cap, no rows+Ann double memory, `TooLarge` no allocation.
+   digest cache по `(project, generation)`; `AnnPolicy::{BuildOrLoad, LoadOnly,
+   Disabled}`; `DenseRows::Building`.
+3. `warm` запускает один фоновый build; на время build `dense_candidates`
+   использует `top_k_iter` и cached hashes. Cache `TooLarge` hashes; no
+   per-query `repo::chunk_hashes`.
+4. Tests: digest не пересчитывается на hit; LRU, byte-cap, no rows+Ann double
+   memory, `TooLarge` no allocation, `Building` не блокирует.
 
 **Acceptance:** FR-1/FR-4/FR-6/FR-7; SC-2/SC-6; `search_bench` unchanged.
 
@@ -214,7 +222,8 @@ LRU/byte-cap.
 **Steps (TDD):**
 1. RED: direct CLI без persisted ANN не строит; daemon строит; после
    `embed_project_chunks` старый ANN не используется.
-2. GREEN: `AnnPolicy`; `DenseCache::invalidate`; warm after sync **в фоне**.
+2. GREEN: `AnnPolicy`; `DenseCache::invalidate`; `DenseCache::warm` after sync
+   **в фоне**; `Building` → exact streaming.
 3. Status/log diagnostics (FR-9, should) — если решено в T5.
 4. Tests: no build in CLI; build in daemon; warm; stale after backfill;
    поиск во время build не блокируется и идёт exact.
@@ -241,9 +250,9 @@ LRU/byte-cap.
 2. Measure build (parallel default), p50/p95, exact vs ANN, recall@10,
    recall-vs-ef curve (16/32/64/128/256), estimated bytes.
 3. Verify persisted reload (no rebuild), LRU, and non-blocking warm.
-4. Compare `hnsw_rs 0.3.4` vs `0.3.5`: recall and dump compatibility
-   (0.3.4 dump must be rejected by 0.3.5); double single-thread build with
-   fixed seed; parallel determinism as separate observation.
+4. Verify 0.3.5 dump/load, fixed-seed double single-thread build, and
+   refusal of a foreign version/format; parallel determinism as separate
+   observation.
 5. Measure release/static binary size delta (`env_logger`); 40 MiB budget.
 6. Run `search_bench`; baseline must be unchanged (ANN not active).
 7. Record numbers; adjust `ANN_MIN_VECTORS`/caps/`ef_search` only with ruling.
@@ -262,24 +271,23 @@ RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_bench
 
 ---
 
-## T7 — ADR-15, docs, ledger
+## T7 — ADR-15 finalization, docs, ledger
 
 **Goal:** зафиксировать выбор, контракт и ограничения; обновить spec relations.
 
 **Files:**
 - Create: `docs/specs/ann-index/{requirements,design,tasks,progress}.md`
   (already draft; finalize).
-- Modify: `docs/specs/docsbase-memory-mcp/design.md` (ADR-15 + dependency
-  table; dated delta).
+- Modify: `docs/specs/docsbase-memory-mcp/design.md` (finalize ADR-15
+  version/format; dependency table already updated).
 - Modify: `docs/specs/hybrid-providers/requirements.md`/`design.md` (dated
   delta: ANN moved to iteration 3).
 - Modify: `CHANGELOG.md` (performance) if user-visible.
 - Maybe `docs/CONFIG.md` only if a user-facing knob is added (not planned).
 
 **Steps:**
-1. ADR-15: `hnsw_rs 0.3.5` + `ouroboros`; alternatives (incl. honest
-   `hnswlib-rs` rationale); MSRV; persistence format; rejected
-   `instant-distance`/`self_cell`/`sqlite-vector-rs`; binary size delta.
+1. Finalize ADR-15: version/format, alternatives, MSRV, persistence,
+   binary size delta; pin `hnsw_rs 0.3.5` / `ouroboros` (no fallback version).
 2. Add dependency table row; update "later" notes.
 3. Ledger: `Task T1..T7 complete (...)`.
 4. Docs check: no contradictions about ANN being non-goal.

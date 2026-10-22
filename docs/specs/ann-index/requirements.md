@@ -3,23 +3,23 @@
 **Status:** Draft, ревизия 0.1 · **Дата:** 2026-10-22
 **Constitution:** `docs/specs/constitution.md` (1.3.0)
 **Связано:** `docs/specs/hybrid-providers/` (dense + RRF), ADR-12
-(`(model_id, chunk_hash)` кэш), ADR-14 (OpenRouter), ADR-15 (proposed, ANN).
+(`(model_id, chunk_hash)` кэш), ADR-14 (OpenRouter), ADR-15 (ANN).
 **Delta 0.1 (2026-10-22):** первичный план; кода ещё нет. Числа (threshold,
 recall, latency, memory cap) — стартовые гипотезы, калибруются в T1/T6.
 
-**Delta T1 (2026-10-22):** spike прошёл на Linux: `hnsw_rs 0.3.4` dump/reload
+**Delta T1 (2026-10-22):** spike прошёл на Linux: `hnsw_rs 0.3.5` dump/reload
 и mmap работают, `LoadedAnn: Send + Sync`. `self_cell` отклонён: его
 `try_new` даёт `&Owner`, а `HnswIo::load_hnsw` требует `&mut self`; `Hnsw`
 инвариантен по lifetime, поэтому `#[covariant]` не подходит. Рабочий wrapper —
 `ouroboros 0.18.5` с `#[borrows(mut io)]` и `#[not_covariant]`. Windows/macOS
-проверены только `cargo check`; runtime — в CI. 10k × 64: build 5.1 s,
-mmap/heap load 49 ms; жёсткий build ≤5 s для 75k не подтверждён — цель
+проверены только `cargo check`; runtime — в CI. 10k × 64: build 4.8 s,
+mmap/heap load 43/42 ms; жёсткий build ≤5 s для 75k не подтверждён — цель
 перенесена в T6.
 
 **Delta T1.1 (2026-10-22, ревью):** v1 переводится на `hnsw_rs 0.3.5`
-(0.3.4 — fallback) после временного 13-дневного cooldown (2026-10-22 → 23),
+(0.3.5 — единственная версия) после временного 13-дневного cooldown (2026-10-22 → 23),
 потому что 0.3.5 содержит graph-correctness фиксы и убирает `bincode`.
-Migration layer не делаем: dump 0.3.4 отвергается по `hnsw_rs`/`format_version`
+Migration layer не делаем: dump чужой версии/формата отвергается по `hnsw_rs`/`format_version`
 и пересобирается. `parallel_insert` — дефолт; warm только фоновый, поиск во
 время сборки идёт exact streaming и не блокируется. Добавлены проверки
 `usize`/`u64`, `set_searching_mode`, basename `file_dump`, `env_logger` size,
@@ -140,7 +140,7 @@ Non-goals:
   `DenseIndex.rows`), публикация происходит только после `READY`.
   Ошибка фоновой сборки не переводит проект в error.
 - **FR-13 (must) Version/format.** v1 пинится на `hnsw_rs 0.3.5`;
-  0.3.4 остаётся fallback. Dump другой версии/формата отвергается по
+  fallback-версии нет. Dump другой версии/формата отвергается по
   metadata и пересобирается; migration layer не нужен.
 
 ## 6. Non-functional requirements
@@ -168,13 +168,13 @@ Non-goals:
 ## 7. Success criteria
 
 - **SC-1.** 75k × 2048: recall@10 ≥ 0.95; p95 ANN ≤ 10 ms (или ≥5× exact).
-  Build измеряется отдельно; 5 s не является обещанием: spike дал 5.1 s уже
+  Build измеряется отдельно; 5 s не является обещанием: spike дал 4.8 s уже
   на 10k × 64, поэтому бюджет 75k фиксируется в T6 после замера.
 - **SC-2.** При `N < ANN_MIN_VECTORS` результаты и baseline не меняются;
   exact-путь остаётся байт-в-байт прежним.
 - **SC-3.** Повторный старт daemon загружает persisted ANN и не пересобирает
   его; проверяется по metadata/времени.
-- **SC-4.** Stale/corrupt/missing ANN, включая несовместимый dump 0.3.4,
+- **SC-4.** Stale/corrupt/missing ANN, включая dump чужой версии/формата,
   даёт exact fallback и явную диагностику; поиск не падает и не пытается
   интерпретировать чужой формат.
 - **SC-5.** Прерывание записи не оставляет валидный `READY`-индекс.
@@ -188,7 +188,7 @@ Non-goals:
 - **SC-10.** MCP/CLI-контракты и `docs/MCP.md` не расходятся с кодом.
 - **SC-11.** Поиск во время фоновой сборки возвращает exact-результаты и не
   ждёт завершения build; проверяется тестом с задержанной сборкой.
-- **SC-12.** 0.3.5 dump читается после рестарта; 0.3.4 dump отвергается;
+- **SC-12.** 0.3.5 dump читается после рестарта; dump чужой версии отвергается;
   двойная сборка 0.3.5 с fixed seed проверена (single-thread; parallel —
   отдельный ruling).
 
@@ -207,11 +207,11 @@ Non-goals:
   `self_cell` не подходит из-за `&mut HnswIo` и инвариантного `Hnsw`;
   `hnswlib-rs` остаётся запасным вариантом, если `ouroboros` упрётся в
   платформу/CI.
-- **OQ-2 (условно закрыт 2026-10-22; финализация в T6).** v1 target —
-  `hnsw_rs 0.3.5`; 0.3.4 — fallback, если T3/T6 покажет регрессию. Dump
-  0.3.4 не мигрируем; пересобираем. ADR-15 — после T6.
-  Для 0.3.5 временно используется **глобальный** cooldown 13 дней
-  (2026-10-22 → 23), потому что Cargo 1.101 nightly не умеет
+- **OQ-2 (условно закрыт 2026-10-22; финализация в T6).** v1 —
+  `hnsw_rs 0.3.5`; fallback-версии нет. Dump чужой версии/формата не
+  мигрируем; пересобираем. ADR-15 recorded in product design; final
+  version/format pin in T6. Для 0.3.5 временно используется **глобальный**
+  cooldown 13 дней (2026-10-22 → 23), потому что Cargo 1.101 nightly не умеет
   per-package декларативные исключения. На следующий день — обязательный
   шаг T1.5: вернуть `14 days`; 0.3.5 остаётся в `Cargo.lock`.
 - **OQ-3.** `ANN_MIN_VECTORS` = 4096 или 10k; `max_bytes` = 1 GiB;

@@ -5,7 +5,7 @@
 
 **Delta 2026-10-22:** ANN proposal moved to `docs/specs/ann-index/`; the
 current exact dense scan remains the behavior until that spec is implemented.
-ADR-15 (proposed) chooses `hnsw_rs` + `ouroboros`, replacing `usearch` as the
+ADR-15 chooses `hnsw_rs` + `ouroboros`, replacing `usearch` as the
 ANN candidate.
 
 **Delta T1-спайка (2026-10-14):** дефолт — `qwen/qwen3-embedding-8b` @1024
@@ -184,7 +184,7 @@ BM25-порядок. Оба режима тестируются через seam 
 | `reqwest` (`default-features = false`, `rustls-tls-webpki-roots`, `json`) | async HTTP, пул, таймауты; sync-обёртка через `block_on` в `spawn_blocking` | `rustls-tls-manual-roots` — **без рутов не верифицирует ничего** (блокер ревью, исправлено); `native-roots` — зависимость от системного стора; `ureq` — второй стек; `rig`/`async-openai` — чужие API-дизайны |
 | `serde`/`serde_json` | уже в дереве | — |
 
-`tokio` уже есть. `fastembed`/`usearch`/`sqlite-vector-rs` — будущие итерации.
+`tokio` уже есть. ANN — spec `docs/specs/ann-index` + ADR-15; `fastembed`/локальные модели — ADR-13; `usearch`/`sqlite-vector-rs` отклонены для ANN.
 `webpki-roots` — статические Mozilla-руты, офлайн-сборка (CI собирает `--locked`).
 
 ## 8. Required / Forbidden stack

@@ -3,7 +3,7 @@
 **Status:** Draft, ревизия 0.1 · **Дата:** 2026-10-22
 **Spec:** `docs/specs/ann-index/requirements.md` (ревизия 0.1)
 **Связано:** `docs/specs/hybrid-providers/design.md` (dense + RRF), ADR-12,
-ADR-14; **ADR-15 (proposed)** — ANN-зависимость и формат.
+ADR-14; **ADR-15** — ANN-зависимость и формат.
 
 **Delta 0.1 (2026-10-22):** первичный дизайн; код не реализован. Все числа и
 выбор крейта подтверждаются spike T1 до интеграции.
@@ -22,14 +22,14 @@ struct LoadedAnn {
 }
 ```
 
-10k × 64: build 5.1 s, dump 18 ms, mmap/heap load 49 ms, top-10 совпал;
+10k × 64: build 4.8 s, dump 15 ms, mmap/heap load 43/42 ms, top-10 совпал;
 `LoadedAnn: Send + Sync`. Windows/macOS — `cargo check`, runtime в CI.
 
-**Delta T1.1 (2026-10-22, ревью):** v1 — `hnsw_rs 0.3.5` (0.3.4 fallback),
-временный 13-дневный cooldown; dump 0.3.4 отвергается, не мигрируется.
+**Delta T1.1 (2026-10-22, ревью):** v1 — `hnsw_rs 0.3.5`,
+временный 13-дневный cooldown; dump чужой версии отвергается, не мигрируется.
 `parallel_insert` — дефолт, warm — фоновый, exact streaming во время сборки.
 Добавлены `usize`/`u64`, `set_searching_mode`, basename, env_logger size,
-`DistCosine`/recall-ef. ADR-15 — после T6.
+`DistCosine`/recall-ef. ADR-15 recorded in product design; final version/format pin in T6.
 
 ## 1. Overview
 
@@ -57,10 +57,10 @@ Persistence — обязательная часть v1, потому что от
 - ANN — внутренняя оптимизация: ошибка ANN не должна валить поиск.
 - Платформы: Linux x86_64, Windows x64, macOS aarch64; little-endian.
 
-## 3. Crate decision (ADR-15, proposed)
+## 3. Crate decision (ADR-15)
 
 **Выбрано:** `hnsw_rs` 0.3.5 + `ouroboros` 0.18.5 для owning-wrapper.
-0.3.4 — только fallback, если T3 на 0.3.5 не пройдёт.
+Единственная версия v1 — 0.3.5.
 
 Почему:
 - pure Rust, без C++/FFI;
@@ -73,7 +73,7 @@ Persistence — обязательная часть v1, потому что от
 Ограничения:
 - `HnswIo` borrow-ит `Hnsw`; без wrapper хранить загруженный индекс нельзя.
 - 0.3.5 содержит graph-correctness фиксы и убирает `bincode`; dump
-  0.3.4/0.3.5 несовместим. Для persisted-индекса это нормально: старый dump
+  формат несовместим между версиями. Для persisted-индекса это нормально: старый dump
   отвергается и пересобирается.
 - 0.3.5 fixed seed проверяется двойной single-thread сборкой; для
   `parallel_insert` побайтовая идентичность не обещается.
@@ -144,10 +144,11 @@ struct AnnKey {
 ```
 
 `model_id` уже содержит provider/model/dim/normalize (FR-5 hybrid-providers).
-`chunk_set_digest` — защита от stale generation/backfill; считается из
-`repo::chunk_hashes` только при build/load, не на каждом запросе.
-`format_version` входит в ключ; версия `hnsw_rs` живёт в `AnnMeta` и
-проверяется при load (FR-3).
+`chunk_set_digest` — защита от stale generation/backfill; `DenseCache`
+кэширует его по `(project_id, index_generation)`. `chunk_hashes`/digest
+пересчитываются только при смене generation или явном `invalidate`, не на
+каждом запросе. `format_version` входит в ключ; версия `hnsw_rs` живёт в
+`AnnMeta` и проверяется при load (FR-3).
 
 ## 5. On-disk format
 
@@ -275,6 +276,7 @@ pub enum DenseRows {
     Ready(Arc<DenseIndex>),
     Ann(Arc<LoadedAnn>),
     TooLarge(Arc<Vec<(u64, String)>>), // hashes cached
+    Building(Arc<BuildingAnn>),        // exact streaming while warm
 }
 
 pub enum AnnPolicy {
@@ -286,12 +288,19 @@ pub enum AnnPolicy {
 
 `DenseCache::get`:
 
-1. `generation`, `chunk_hashes`, digest.
-2. cache hit с тем же ключом → `Ann`/`Ready`/`TooLarge`.
+1. Прочитать `generation`; если digest для этой generation уже кэширован —
+   использовать его. Иначе один раз вызвать `repo::chunk_hashes`, посчитать
+   digest и сохранить в `DenseCache`. На каждом поиске `chunk_hashes` **не**
+   вызывается.
+2. cache hit с тем же ключом → `Ann`/`Ready`/`TooLarge`/`Building`.
 3. `AnnStore::load` → `Ann`.
-4. Если `BuildOrLoad`, coverage полное, лимиты ок → build + persist → `Ann`.
+4. Если `BuildOrLoad`, coverage полное, лимиты ок и ANN ещё нет — запустить
+   `warm` в фоне и вернуть `Building`; текущий поиск идёт exact streaming по
+   закэшированным hashes. Синхронного build в `get` нет.
 5. Иначе exact `Ready` (если под cap) или `TooLarge`.
-6. Любая ошибка ANN → exact + диагностика; не `Err`.
+6. Любая ошибка ANN → exact + диагностика; не `Err`. Ошибка фонового build
+   снимает `Building`, логируется, следующий retry — после backoff; проект
+   не переводится в error.
 
 Лимиты:
 
@@ -308,6 +317,11 @@ struct DenseCacheLimits {
 - `TooLarge` хранит hashes, чтобы не вызывать `repo::chunk_hashes` каждый
   запрос.
 - `DenseIndex` rows не держим одновременно с `Ann`: это две копии векторов.
+- `DenseCache::warm(project_id, model_id, dim, key, hashes)` идемпотентен:
+  один build на `(project, generation, model)`; результат публикуется только
+  после `READY` и проверки, что generation/model всё ещё актуальны.
+- `DenseRows::Building` хранит только hashes/статус; `dense_candidates` идёт
+  через `top_k_iter` (exact streaming), без `DenseIndex.rows`.
 
 ## 9. Invalidation / lifecycle
 
@@ -383,7 +397,7 @@ CI:
 | SC-9 | CI matrix + MSRV |
 | SC-10 | docs/MCP contract diff empty |
 | SC-11 | search during delayed build; exact response, no block |
-| SC-12 | 0.3.5 roundtrip; 0.3.4 dump rejected; fixed-seed double build |
+| SC-12 | 0.3.5 roundtrip; dump чужой версии rejected; fixed-seed double build |
 
 ## 14. Risks / mitigations
 
@@ -397,7 +411,7 @@ CI:
 | Format drift | `format_version` + rebuild |
 | Build latency spikes | parallel insert default; background warm; exact streaming; CLI LoadOnly |
 | New deps | ADR-15; `cargo tree`; MSRV; no C++/FFI; env_logger size measured |
-| Version/format drift | 0.3.5 v1; 0.3.4 dump rejected; rebuild, no migration |
+| Version/format drift | 0.3.5 v1; dump чужой версии rejected; rebuild, no migration |
 | Build blocks search | publish after `READY`; exact streaming during build |
 | ANN changes ranking | threshold > golden corpus; recall test; baseline unchanged |
 
@@ -408,7 +422,7 @@ CI:
 3. `ef_search` по recall-vs-ef кривой; окончательное значение — T6.
 4. Детерминизм `parallel_insert` (fixed seed) — T6; если недетерминирован,
    это допустимо для persisted-индекса.
-5. 0.3.5 vs fallback 0.3.4 — условное решение; финализация в T6.
+5. 0.3.5 finalization — условное решение; финализация в T6.
 
 ## 16. References
 

@@ -260,7 +260,8 @@ pub struct Project {
 | `interprocess` (`cfg(windows)`, feature `tokio`) | local sockets: daemon-транспорт на Windows | FR-33, ADR-10 |
 | `windows-sys` (`cfg(windows)`, `Win32_System_Threading`, `Win32_Foundation`) | `process_alive` (OpenProcess/GetExitCodeProcess) и флаги `detach` (std не экспортирует `CREATE_*`) | ADR-10 |
 | `reqwest` (`default-features = false`, `rustls-tls-webpki-roots`, `json`; feature `hybrid-remote`) | HTTP-клиент hybrid-ступеней (embeddings + rerank через OpenRouter); вне дефолтной сборки — SC-4-гейт «без reqwest в `cargo tree`» | hybrid-providers FR-1/2/7, ADR-14 |
-| (фаза 2, за флагом, ADR-13) `fastembed` + ONNX-runtime, `usearch` | локальные эмбеддинги и ANN-индекс; опция, не дефолт | FR-27, ADR-12, ADR-13 |
+| `hnsw_rs` 0.3.5 + `ouroboros` 0.18.5 | persisted HNSW для dense-канала (ANN), exact fallback | ann-index FR-1…FR-13, ADR-15 |
+| (фаза 2, за флагом, ADR-13) `fastembed` + ONNX-runtime | локальные embedding-модели; опция, не дефолт | FR-27, ADR-12, ADR-13 |
 | dev: `tempfile`, `assert_cmd`, `insta`, `criterion` | интеграционные, golden и perf-тесты (T27, T30) | NFR-1, NFR-7 |
 
 **Точечные альтернативы:** вместо `serde_yaml` — минимальный flat-парсер frontmatter
@@ -276,11 +277,14 @@ pub struct Project {
 - Реализовано (spec `docs/specs/hybrid-providers`, ADR-14): HTTP-клиент OpenRouter —
   `reqwest` + rustls (`webpki-roots`) за feature `hybrid-remote`; дефолтная сборка
   остаётся офлайн (SC-4: `cargo tree` без `reqwest`, CI-джоба `linux-hybrid`).
-- Позже (ADR-13): `fastembed`/ONNX-runtime, `usearch`, dense-поиск + RRF — после
-  бенчмарка; не входят в итерацию 1.
+- ANN (спека `docs/specs/ann-index`, ADR-15): `hnsw_rs 0.3.5` +
+  `ouroboros`; текущий exact dense scan остаётся до реализации спеки.
+  `usearch`/`sqlite-vector-rs` — отклонённые альтернативы (C++/FFI).
+- Позже (ADR-13): `fastembed`/ONNX-runtime — локальные embedding-модели;
+  не входят в итерацию 1.
 - **Delta 2026-10-22:** ANN proposal — отдельная спека
   `docs/specs/ann-index/`; выбран `hnsw_rs` + `ouroboros`, не `usearch`
-  (ADR-15 proposed). Текущий exact dense scan остаётся до реализации спеки.
+  (ADR-15). Текущий exact dense scan остаётся до реализации спеки.
 
 ## 9. Error handling
 
@@ -490,7 +494,34 @@ embedding-ступень — `Admission`). Списки BM25 и dense (коси�
 плана) инвалидирует in-memory dense-кэш (`DENSE_CACHE_MAX_VECTORS = 1M`,
 выше — стриминговый скан с bounded-хипом). Публичная библиотечная поверхность
 расширена: `store::repo`, `Db::{connection,begin_write}` (конституция 1.3.0).
-ANN, локальные модели и тюнинг `k`/весов — отдельные итерации.
+ANN — ADR-15; локальные модели и тюнинг `k`/весов — отдельные итерации.
+
+**ADR-15. ANN для dense-канала: persisted HNSW (`hnsw_rs`) + `ouroboros` (spec `docs/specs/ann-index`).**
+Выбрано: `hnsw_rs 0.3.5` + `ouroboros 0.18.5`; fallback-версии нет. Это внутренняя оптимизация dense-канала RRF:
+`search_docs_with` получает те же `(chunk_id, score)`, rerank и MCP/CLI-контракты
+не меняются. Persistence обязательна с v1: `AnnKey` (`project_id`,
+`index_generation`, `model_id`, `dim`, count, chunk-set digest, format version),
+`AnnMeta` (`hnsw_rs` version), `meta.json` + `READY`, atomic temp→rename, mmap
+через `HnswIo` и owning-wrapper `ouroboros` (self_cell не подходит: builder даёт
+`&Owner`, а `load_hnsw` требует `&mut`; `Hnsw` инвариантен по lifetime).
+Dump чужой версии/формата отвергается и пересобирается; migration layer нет.
+Build: `parallel_insert` — дефолт; warm — фоновый, поиск во время сборки идёт
+exact streaming; `set_searching_mode(true)` после вставки. Ошибка ANN всегда
+даёт exact fallback, не ошибку поиска. Ограничения: byte/vector/project caps,
+LRU, `TooLarge` streaming; `env_logger` — normal-зависимость
+`hnsw_rs`, размер static-бинаря измеряется в T6.
+Версия/cooldown: `0.3.5` опубликован 2026-10-09; на 2026-10-22 он моложе
+14 дней. Временно (2026-10-22 → 23) используется **глобальный** 13-дневный
+`min-publish-age`, потому что Cargo 1.101 nightly поддерживает только
+global/per-registry policy и не имеет декларативного per-package allowlist;
+`CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow` тоже действует на весь resolve.
+T1.5 возвращает `14 days` 2026-10-23; `0.3.5` остаётся в `Cargo.lock`.
+Отклонено: `instant-distance` (archived 2026-07-23, no persistence),
+`self_cell` (lifetime/`&mut`), `sqlite-vector-rs`/`usearch` (C++/FFI, Arrow,
+static/MSRV), `hnsw` (rust-cv; 2021, hamming-oriented), `hannoy`/LMDB (C).
+`hnswlib-rs` (wilsonzlin) — запасной вариант: owned API и int8-квантование
+интересны для следующей итерации, но сейчас меньше adoption, частые breaking
+releases, кастомные `corenn-kernels` и нет mmap-истории в нашем сценарии.
 
 ## 13. Directory structure
 

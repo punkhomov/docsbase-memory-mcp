@@ -53,8 +53,8 @@ Goals (итерация 1):
 - G4. Дефолтная сборка остаётся полностью офлайн (SC-8, NFR-5 без изменений).
 
 Non-goals (явно позже, отдельными задачами): dense retrieval + RRF-fusion
-(итерация 2; embeddings итерации 1 готовят кэш под неё), ANN-индекс (`usearch`
-или `sqlite-vector-rs`), прямые вендоры (Cohere/Voyage/…), Ollama/llama.cpp,
+(итерация 2; embeddings итерации 1 готовят кэш под неё), ANN-индекс
+(iteration 3, spec `ann-index`, ADR-15; `usearch`/`sqlite-vector-rs` отклонены), прямые вендоры (Cohere/Voyage/…), Ollama/llama.cpp,
 локальные модели (`fastembed`, Model2Vec), `encoding_format=base64`,
 автоподбор `dimensions`, `return_logits`-rerank, streaming, async-трейт
 (решение 2026-10-08, триггер пересмотра: веерные per-request запросы с дедлайном).
@@ -311,7 +311,7 @@ pub trait Reranker: Send + Sync {
   Уточнение FR-12 из 2.1: `rerank=false` отключает только rerank-ступень, порядок
   определяет `ranking`; формулировка «строгий BM25» относится к `ranking = "lexical"`.
 
-**Non-goals итерации 2:** ANN-индекс, локальные модели, тюнинг `k`/весов,
+**Non-goals итерации 2:** ANN-индекс (iteration 3, spec `ann-index`), локальные модели, тюнинг `k`/весов,
 per-request `ranking`, квантование/сжатие векторов, параллельный скан.
 
 ## Open questions
