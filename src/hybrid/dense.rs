@@ -511,13 +511,7 @@ impl DenseCache {
                 }
             }
         }
-        let vector_cache_max_bytes = self
-            .vector_cache_limits
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&project_id)
-            .copied()
-            .unwrap_or(self.limits.vector_cache_max_bytes);
+        let vector_cache_max_bytes = self.vector_cache_max_bytes(project_id);
         let mut cache = VectorCache::open_with_limits(
             db.cache_root(),
             CacheLimits {
@@ -731,6 +725,15 @@ impl DenseCache {
             .map(|_| ())
     }
 
+    fn vector_cache_max_bytes(&self, project_id: i64) -> u64 {
+        self.vector_cache_limits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&project_id)
+            .copied()
+            .unwrap_or(self.limits.vector_cache_max_bytes)
+    }
+
     /// Applies a project-level vector-cache budget (daemon config reload).
     pub fn set_vector_cache_max_bytes(&self, project_id: i64, max_bytes: u64) {
         self.vector_cache_limits
@@ -853,6 +856,8 @@ fn build_in_background(
     dim: usize,
     store_root: PathBuf,
 ) {
+    let vector_root = store_root.clone();
+    let unpin_hashes = Arc::clone(&hashes);
     let result: Result<()> = catch_unwind(AssertUnwindSafe(|| {
         let ann = AnnIndex::build(&rows, dim)?;
         let store = AnnStore::new(store_root);
@@ -868,6 +873,19 @@ fn build_in_background(
             entry.last_used = cache.tick();
         }
         cache.enforce_byte_cap(&mut entries, project_id);
+        // The dump is READY: release the backfill lease. On failure the pins
+        // stay until their TTL so the retry still sees full coverage.
+        let max_bytes = cache.vector_cache_max_bytes(project_id);
+        if let Ok(mut vectors) = VectorCache::open_with_limits(
+            &vector_root,
+            CacheLimits {
+                max_bytes,
+                ..CacheLimits::default()
+            },
+        ) {
+            let hashes: Vec<String> = unpin_hashes.iter().map(|(_, hash)| hash.clone()).collect();
+            let _ = vectors.unpin(&key.model_id, &hashes);
+        }
         Ok(())
     }))
     .unwrap_or_else(|payload| Err(Error::internal(format!("ann build panic: {payload:?}"))));

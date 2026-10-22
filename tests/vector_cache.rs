@@ -235,3 +235,33 @@ fn limits_are_enforced() {
     }
     assert_eq!(cache.len().expect("len"), 2, "entries cap enforced");
 }
+
+#[test]
+fn pinned_vectors_survive_the_byte_cap_until_unpinned() {
+    let dir = TempDir::new().expect("dir");
+    let limits = CacheLimits {
+        max_entries: 100,
+        max_bytes: 8,
+    };
+    let mut cache = VectorCache::open_with_limits(dir.path(), limits).expect("cache");
+    cache.put("m", "h1", &[1.0, 2.0]).expect("put h1");
+    cache
+        .pin("m", &["h1".to_owned()], std::time::Duration::from_secs(60))
+        .expect("pin h1");
+    cache.put("m", "h2", &[3.0, 4.0]).expect("put h2");
+    assert!(
+        cache.get("m", "h1").expect("get h1").is_some(),
+        "pinned vector must survive eviction"
+    );
+    assert!(
+        cache.get("m", "h2").expect("get h2").is_none(),
+        "unpinned newest row is evicted instead"
+    );
+
+    cache.unpin("m", &["h1".to_owned()]).expect("unpin h1");
+    cache.put("m", "h3", &[5.0, 6.0]).expect("put h3");
+    assert!(
+        cache.get("m", "h1").expect("get h1").is_none(),
+        "after unpin the old row can be evicted"
+    );
+}

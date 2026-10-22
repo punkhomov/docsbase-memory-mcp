@@ -5,7 +5,9 @@
 //! cache calls inside [`super::blocking::enter`]; the `*_with` variants take
 //! an explicit embedder so tests can run without the network.
 
+use std::collections::HashSet;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::error::Result;
 use crate::store::Db;
@@ -13,6 +15,9 @@ use crate::store::repo;
 use crate::vector_cache::{CacheLimits, Embedder, VectorCache};
 
 use super::{HybridCfg, blocking, from_config};
+
+/// Backfill lease duration: long enough to cover a 75k ANN build + retry.
+const BACKFILL_PIN_TTL: Duration = Duration::from_secs(600);
 
 /// Coverage of one project under the configured embedding model (FR-15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +109,24 @@ pub fn embed_project_chunks_with_limits(
     limits: CacheLimits,
 ) -> Result<u64> {
     let texts = repo::chunk_texts(db.connection(), project_id)?;
-    embed_texts_with_limits(db.cache_root(), embedder, &texts, limits)
+    if texts.is_empty() {
+        return Ok(0);
+    }
+    let hashes: Vec<String> = texts
+        .iter()
+        .map(|text| crate::vector_cache::chunk_hash(text))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut cache = VectorCache::open_with_limits(db.cache_root(), limits)?;
+    // Lease the project's vectors for the ANN build; without this a
+    // concurrent backfill can evict them and coverage never reaches 100%.
+    cache.pin(embedder.model_id(), &hashes, BACKFILL_PIN_TTL)?;
+    let result = blocking::enter(|| cache.embed_missing(embedder, &texts));
+    if result.is_err() {
+        let _ = cache.unpin(embedder.model_id(), &hashes);
+    }
+    result.map(|vectors| vectors.len() as u64)
 }
 
 /// Cached/total chunk coverage for the configured stage; `None` when the

@@ -241,6 +241,8 @@
   `embed_project_chunks`, `coverage` and `DenseCache`'s VectorCache open.
   Guard test `default_budget_holds_the_target_ann_corpus`; config parse test
   `hybrid_cache_budget_parsed_and_validated`. Daemon applies project-level
-  `[hybrid.cache]` overrides to `DenseCache` on config load. Remaining:
-  per-project lease/pin so another project cannot evict vectors during an
-  ANN build.
+  `[hybrid.cache]` overrides to `DenseCache` on config load.
+  Backfill pins unique project hashes for 10 minutes (`vector_cache_pins`);
+  `VectorCache::evict` skips live pins, and a successful ANN build unpins
+  after `READY`. Test `pinned_vectors_survive_the_byte_cap_until_unpinned`.
+  Remaining: global ANN disk budget (ann-index T9).

@@ -92,6 +92,12 @@ impl VectorCache {
                  vector BLOB NOT NULL,
                  used_at INTEGER NOT NULL,
                  PRIMARY KEY (model_id, chunk_hash)
+             );
+             CREATE TABLE IF NOT EXISTS vector_cache_pins (
+                 model_id TEXT NOT NULL,
+                 chunk_hash TEXT NOT NULL,
+                 expires_at INTEGER NOT NULL,
+                 PRIMARY KEY (model_id, chunk_hash)
              );",
         )
         .map_err(|err| Error::internal_with_source("create vector cache schema", err))?;
@@ -167,6 +173,53 @@ impl VectorCache {
             )
             .map_err(|err| Error::internal_with_source("store vector", err))?;
         self.evict()
+    }
+
+    /// Protects `hashes` from LRU eviction until `ttl` expires (backfill
+    /// lease for ANN builds, DELTA-9).
+    ///
+    /// # Errors
+    /// Returns [`Error::Internal`] on `SQLite` failures.
+    pub fn pin(&mut self, model_id: &str, hashes: &[String], ttl: Duration) -> Result<()> {
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        let expires = now_secs().saturating_add(i64::try_from(ttl.as_secs()).unwrap_or(i64::MAX));
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|err| Error::internal_with_source("begin pin transaction", err))?;
+        for hash in hashes {
+            tx.execute(
+                "INSERT INTO vector_cache_pins (model_id, chunk_hash, expires_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(model_id, chunk_hash) DO UPDATE SET expires_at = excluded.expires_at",
+                params![model_id, hash, expires],
+            )
+            .map_err(|err| Error::internal_with_source("pin vector", err))?;
+        }
+        tx.commit()
+            .map_err(|err| Error::internal_with_source("commit pins", err))
+    }
+
+    /// Releases a backfill lease.
+    ///
+    /// # Errors
+    /// Returns [`Error::Internal`] on `SQLite` failures.
+    pub fn unpin(&mut self, model_id: &str, hashes: &[String]) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|err| Error::internal_with_source("begin unpin transaction", err))?;
+        for hash in hashes {
+            tx.execute(
+                "DELETE FROM vector_cache_pins WHERE model_id = ?1 AND chunk_hash = ?2",
+                params![model_id, hash],
+            )
+            .map_err(|err| Error::internal_with_source("unpin vector", err))?;
+        }
+        tx.commit()
+            .map_err(|err| Error::internal_with_source("commit unpins", err))
     }
 
     /// Embeds `texts`, reusing cached vectors keyed by `(model, chunk_hash)`.
@@ -309,14 +362,25 @@ impl VectorCache {
             if count <= self.limits.max_entries && bytes <= self.limits.max_bytes {
                 return Ok(());
             }
+            let now = now_secs();
+            let _ = self.conn.execute(
+                "DELETE FROM vector_cache_pins WHERE expires_at <= ?1",
+                params![now],
+            );
             let removed = self
                 .conn
                 .execute(
                     "DELETE FROM vector_cache WHERE rowid = (
-                         SELECT rowid FROM vector_cache
-                         ORDER BY used_at ASC, rowid ASC LIMIT 1
+                         SELECT v.rowid FROM vector_cache v
+                         WHERE NOT EXISTS (
+                             SELECT 1 FROM vector_cache_pins p
+                             WHERE p.model_id = v.model_id
+                               AND p.chunk_hash = v.chunk_hash
+                               AND p.expires_at > ?1
+                         )
+                         ORDER BY v.used_at ASC, v.rowid ASC LIMIT 1
                      )",
-                    [],
+                    params![now],
                 )
                 .map_err(|err| Error::internal_with_source("evict vector", err))?;
             if removed == 0 {
@@ -324,6 +388,14 @@ impl VectorCache {
             }
         }
     }
+}
+
+/// Unix seconds for pin expiry.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 fn decode_vector(dim: usize, bytes: &[u8]) -> Result<Vec<f32>> {
