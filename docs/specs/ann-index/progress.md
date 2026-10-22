@@ -73,3 +73,23 @@
   later with fallback). Minor (deferred): tests don't assert `format_version`/
   `dim` mismatch explicitly (matches_key covers all fields). Minor (deferred):
   `HNNSW_RS_VERSION` double-N name cosmetic.
+
+- Task T3: complete (commits 90b8774..1097da4, incl. temporary 13-day
+  cooldown commit 77b50ae; tests: `cargo test --locked --lib` → 94/94; `--test
+  ann_recall` → 9/9; `--test ann_store` → 12/12; `--test smoke` → 5/5;
+  clippy `--all-targets -- -D warnings` → clean; fmt → clean). Fresh reviewer:
+  spec compliance PASS, quality CHANGES → one Important (tests/support/mod.rs
+  `pub mod ann;` not committed) fixed and re-reviewed ADDRESSED, no new
+  breakage. Ruling: hnsw_rs 0.3.5 exposes no seed parameter, so the "double
+  single-thread build with fixed seed" check cannot be asserted at build time;
+  double-build determinism is observed in T6 (OQ-7) instead. Ruling: lock diff
+  audited — hnsw_rs 0.3.5 (2026-10-09) passes the temporary 13-day cooldown;
+  remaining new transitives are older; no fresh publish besides the pinned
+  version. Minor (deferred): `build` runs `parallel_insert_slice`/
+  `set_searching_mode` outside `run_unwind` (panics there would escape; low
+  likelihood, validation covers realistic cases). Minor (deferred): mmap load
+  error is swallowed when the heap retry succeeds (diagnostics only). Minor
+  (deferred): `ouroboros = "0.18.5"` caret pin vs exact `hnsw_rs` (lockfile
+  pins anyway; align on exact pin in T7 if desired). Recall-vs-ef measured:
+  2k×32 random → recall@10 0.994/0.999/1.000/1.000/1.000 at ef 16/32/64/128/256.
+  Next: T4 `DenseCache` integration.
