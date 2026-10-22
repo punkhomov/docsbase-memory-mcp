@@ -25,14 +25,24 @@ const M: usize = 16;
 /// Number of layers in the constructed graph (design §6).
 const LAYERS: usize = 16;
 
-/// Default beam width during search; the recall-vs-ef curve is measured in
-/// T6 (design §7).
+/// Minimum beam width during search; the effective beam is
+/// `max(this, fetch * 4)` so high `limit`/window values keep recall.
 const EF_SEARCH_DEFAULT: usize = 64;
+
+/// Upper bound on the dynamic beam to keep a pathological `fetch` bounded.
+const EF_SEARCH_MAX: usize = 4096;
 
 /// Per-point graph overhead estimate used by [`AnnIndex::estimated_bytes`]
 /// (design §8). Measured from the T1 spike dump: ~780 B/vertex at 10k×64;
 /// rounded up to 1024 so the cap estimate never understates resident bytes.
 const GRAPH_OVERHEAD_BYTES: usize = 1024;
+
+/// Beam width for a requested `fetch`: `max(64, fetch * 4)`, capped.
+fn ef_for(fetch: usize) -> usize {
+    EF_SEARCH_DEFAULT
+        .max(fetch.saturating_mul(4))
+        .min(EF_SEARCH_MAX)
+}
 
 /// Owning wrapper for a persisted index (spike T1): `HnswIo` owns the mmap
 /// or heap storage and `Hnsw` borrows it, so `HnswIo` must outlive `Hnsw`.
@@ -124,7 +134,7 @@ impl AnnIndex {
     /// # Errors
     /// Empty `query` or a dimension mismatch with the index.
     pub fn search(&self, query: &[f32], fetch: usize) -> Result<Vec<(u64, f32)>> {
-        self.search_inner(query, fetch, EF_SEARCH_DEFAULT)
+        self.search_inner(query, fetch, ef_for(fetch))
     }
 
     /// [`Self::search`] with an explicit `ef` beam (recall-vs-ef curve).
@@ -293,6 +303,15 @@ mod tests {
 
     fn exact_top_k(query: &[f32], rows: &[(u64, Arc<[f32]>)], fetch: usize) -> Vec<(u64, f32)> {
         crate::hybrid::dense::top_k(query, rows, fetch).expect("exact top_k")
+    }
+
+    #[test]
+    fn ef_scales_with_fetch_and_caps() {
+        assert_eq!(ef_for(0), EF_SEARCH_DEFAULT);
+        assert_eq!(ef_for(10), EF_SEARCH_DEFAULT);
+        assert_eq!(ef_for(50), 200);
+        assert_eq!(ef_for(1000), 4_000);
+        assert_eq!(ef_for(usize::MAX), EF_SEARCH_MAX);
     }
 
     #[test]
