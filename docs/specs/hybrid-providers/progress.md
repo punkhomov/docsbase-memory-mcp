@@ -246,3 +246,12 @@
   `VectorCache::evict` skips live pins, and a successful ANN build unpins
   after `READY`. Test `pinned_vectors_survive_the_byte_cap_until_unpinned`.
   ANN disk budget is enforced in ann-index T9 (4 GiB default).
+
+- Task T13: complete (2026-10-22). `[hybrid.cache] max_bytes` default 1 GiB
+  (zero rejected), threaded through backfill/coverage/dense; daemon applies
+  project overrides on config load. Backfill leases are keyed by project,
+  model and chunk hash (`vector_cache_leases`), live for 1 hour, refreshed
+  after a successful backfill, skipped by eviction, and released after
+  `READY` on success; a failed build keeps them for retry. Test
+  `pinned_vectors_survive_the_byte_cap_until_unpinned`. ANN disk budget
+  (ann-index T9) is separate: 4 GiB default.

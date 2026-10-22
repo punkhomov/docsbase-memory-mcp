@@ -243,7 +243,7 @@ LRU/byte-cap.
 **Goal:** измерить эффект и зафиксировать пороги; не менять baseline.
 
 **Files:**
-- Create: `tests/ann_scale.rs` (`#[ignore]`).
+- Create: `tests/ann_spike.rs` (`#[ignore]`; implemented instead of the planned `ann_scale`).
 - Maybe modify `tests/search_bench.rs` threshold assertion only (no baseline).
 - Update `docs/specs/ann-index/progress.md`.
 
@@ -265,7 +265,7 @@ OQ-2 finalized and ADR-15 version pinned here.
 **Verify:**
 ```sh
 RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test ann_recall
-RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test ann_scale -- --ignored
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test ann_spike -- --ignored
 RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_bench
 ```
 
@@ -369,7 +369,7 @@ FR-7/lifecycle (cleanup race, model-aware retention, disk budget).
 
 **Files:**
 - Modify: `src/hybrid/ann.rs` (`ef = max(64, fetch*4)` с cap).
-- Create/modify: `tests/ann_scale.rs` (ignored manual) и CI-тест 8k×256.
+- Create/modify: `tests/ann_e2e.rs` (ignored 75k manual + CI 8k×256).
 - Update: `docs/specs/ann-index/progress.md`.
 
 **Steps:**
@@ -386,7 +386,7 @@ change.
 **Verify:**
 ```sh
 RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test ann_recall
-RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test ann_scale -- --ignored
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test ann_spike -- --ignored
 RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_bench
 ```
 

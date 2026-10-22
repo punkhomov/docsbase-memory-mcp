@@ -532,6 +532,18 @@ static/MSRV), `hnsw` (rust-cv; 2021, hamming-oriented), `hannoy`/LMDB (C).
 интересны для следующей итерации, но сейчас меньше adoption, частые breaking
 releases, кастомные `corenn-kernels` и нет mmap-истории в нашем сценарии.
 
+**ADR-16. Vector-cache capacity/pinning для ANN (spec `docs/specs/hybrid-providers`, DELTA-9).**
+Выбрано: `[hybrid.cache] max_bytes` (default 1 GiB) ограничивает
+content-addressed `VectorCache`; ANN требует 100% coverage, поэтому дефолт
+256 MiB заменён. Backfill берёт per-project lease: уникальные хеши проекта
+пишутся в `vector_cache_leases` на 1 час, `evict` их не трогает; успешный ANN
+build снимает lease после `READY`, failed build оставляет его для retry.
+Глобальный ANN-диск ограничен 4 GiB (oldest-first, newest/current project
+kept). Отклонено: строить ANN по частичному покрытию (тихий recall-риск),
+отдельный vector store (дублирует source of truth), безусловное удаление
+tmp-каталогов (гонка с build), удаление текущего проекта при disk cleanup.
+Остаток: Windows/macOS runtime CI, T1.5 cooldown revert.
+
 ## 13. Directory structure
 
 ```

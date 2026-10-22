@@ -243,10 +243,14 @@
   and an ignored 75k×2048 manual run through the real `DenseCache` +
   `VectorCache` + `search_docs_with` path; both assert coverage=100%, ANN
   publication, high-fetch (limit 100) determinism. CI run ~18 s. Manual
-  release run `ann_e2e_75k_x_2048` passed (398.77 s wall, 75k docs, dim 2048,
-  full coverage, ANN served). `ann_spike` remains the core-only
-  build/load/recall/latency measurement; real RSS is still not instrumented
-  (deferred diagnostic).
+  release run `ann_e2e_75k_x_2048` passed twice: first 398.77 s wall, then
+  with diagnostics 415.57 s wall, p50 1.46 ms / p95 2.88 ms over 20
+  `search_docs_with` calls, process RSS 1995.6 MiB (peak includes the
+  in-process build + allocator retention; cold-start steady state is not
+  isolated). `ann_spike` remains the core-only build/load/recall/latency
+  measurement. RSS above the 1 GiB steady-state budget is a diagnostic to
+  investigate, not hidden: the value is peak process RSS, not the
+  `DenseCache::estimated_bytes` 691 MiB model.
 
 - Delta 0.2 status (2026-10-22): T8, T9 (code), T10 and hybrid T13 are
   complete with fresh review. Evidence: lib 98; config 17; hybrid_config 10

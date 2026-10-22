@@ -419,7 +419,7 @@ Integration:
 - `hybrid_ranking` with `ann_threshold=1`: exact vs ANN order on separated
   vectors; RRF tie-break.
 - `search_bench`: unchanged for 331 chunks; ANN threshold > corpus.
-- `ann_scale` (`#[ignore]`): 75k × 2048 через `DenseCache`/`VectorCache`/
+- `ann_e2e` (`#[ignore]`): 75k × 2048 через `DenseCache`/`VectorCache`/
   `search_docs`; build/query p50/p95; recall@10; real RSS; persisted reload;
   coverage=100%.
 
@@ -431,7 +431,7 @@ CI:
 
 | SC | Test/measure |
 |---|---|
-| SC-1 | `ann_scale` end-to-end через `DenseCache`/`VectorCache`; recall/latency/build; manual report |
+| SC-1 | `ann_e2e` end-to-end через `DenseCache`/`VectorCache`; recall/latency/build; manual report |
 | SC-2 | `search_bench` baseline unchanged; threshold test |
 | SC-3 | dump → drop → load; no rebuild; metadata/mtime; zero `VectorCache::get` |
 | SC-4 | stale/corrupt/missing tests + exact fallback |
