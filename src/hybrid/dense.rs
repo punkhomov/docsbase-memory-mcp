@@ -619,7 +619,9 @@ impl DenseCache {
         entries.insert(project_id, entry);
     }
 
-    fn snapshot(&self) -> Self {
+    /// Snapshot of the cache sharing its entries, digests and clock; used by
+    /// background builds to publish results (design §8).
+    pub(crate) fn snapshot(&self) -> Self {
         Self {
             limits: self.limits,
             policy: self.policy,

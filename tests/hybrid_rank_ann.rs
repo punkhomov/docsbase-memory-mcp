@@ -159,7 +159,10 @@ fn search_is_correct_during_build_and_after_ann_publish() {
         )
         .expect("search after publish, repeat"),
     );
-    assert_eq!(after_publish, repeat, "persisted ANN answers deterministically");
+    assert_eq!(
+        after_publish, repeat,
+        "persisted ANN answers deterministically"
+    );
     eprintln!(
         "first get observed state: {}",
         if was_building {
