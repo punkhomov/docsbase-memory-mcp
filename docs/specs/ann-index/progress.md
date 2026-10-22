@@ -93,3 +93,24 @@
   pins anyway; align on exact pin in T7 if desired). Recall-vs-ef measured:
   2k×32 random → recall@10 0.994/0.999/1.000/1.000/1.000 at ef 16/32/64/128/256.
   Next: T4 `DenseCache` integration.
+
+- Task T4: complete (commits 3c77d12..7e7eb52; tests: `cargo test --locked
+  --lib` → 94/94; `--test hybrid_ann` → 9/9; `--test hybrid_rank_ann` →
+  1/1 (4 consecutive runs); `--test hybrid_ranking` → 10/10; `--test
+  ann_store` → 12/12; `--test ann_recall` → 9/9; `--test smoke` → 5/5;
+  clippy `--all-targets -- -D warnings` → clean; fmt → clean). Fresh review:
+  round 1 — 3 Important (expect/unreachable in src; zero coverage of
+  `dense_candidates` Ann/Building arms) + minors; fixed in rounds 1–2 and
+  re-reviewed (ADDRESSED except deferred minors). Ruling: `DenseCache::new()`
+  stays ANN-disabled; daemon/CLI opt in via `with_policy` (T5). Ruling:
+  `DenseCacheLimits.min_vectors` defaults to `ANN_MIN_VECTORS` and is used by
+  tests to exercise the ANN path at small N (not a public contract). Ruling:
+  search-level ANN test asserts per-run determinism and non-blocking
+  correctness instead of exact-vs-ANN top-k equality (recall is asserted in
+  `ann_recall`; HNSW boundary ties on near-equal vectors are nondeterministic).
+  Minor (deferred): after a failed background build the entry state stays
+  `Building` with `failed_until` set; `get` retries after backoff
+  (`expired_building`), so behavior is correct while diagnostics stay
+  "loading" until retry. Minor (deferred): digest-reuse and "no rows+Ann
+  double memory" are implemented but not directly observable from outside.
+  Next: T5 daemon/CLI policy + warm/invalidate.
