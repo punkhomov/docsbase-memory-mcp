@@ -5,6 +5,15 @@ Short version: Dependabot is our freshness watchman, **not** our supply-chain
 defense. Trust is enforced by quarantine (time) today and by audit (`cargo-vet`)
 in stage 2.
 
+> **Temporary exception (2026-10-22 → 2026-10-23):** `.cargo/config.toml`
+> uses `13 days` instead of `14 days` to resolve `hnsw_rs 0.3.5` for the
+> `ann-index` work (0.3.5 published 2026-10-09). This is a workaround, not a
+> new policy default: Cargo 1.101 nightly supports `min-publish-age` only
+> globally or per-registry and has no declarative per-package allowlist.
+> Revert to `14 days` on 2026-10-23 as task T1.5; `0.3.5` stays pinned in
+> `Cargo.lock`. The lock diff and rationale are recorded in
+> `docs/specs/ann-index/progress.md`.
+
 ## Problem
 
 A malicious or compromised crate version can enter the build through:
@@ -24,7 +33,7 @@ lock file alone proves nothing about age. Any age check must happen at version
 |---|---|---|---|
 | Dependabot security updates | known CVEs, immediately (bypass all delays) | direct + transitive (via lock) | active |
 | `cooldown: default-days 14` (dependabot) | fresh releases: PR opens only 14+ days after publish | **direct only** — transitives are resolved by cargo with no age check (confirmed upstream, dependabot-core#14683) | active |
-| `min-publish-age = 14 days` (`.cargo/config.toml`, nightly-only) | fresh releases at resolve time | direct + transitive, **but enforced only under nightly**; stable cargo prints `unused config key` and ignores it, and `--locked` builds skip resolution entirely | partial (see gaps) |
+| `min-publish-age = 14 days` (temporarily 13 days 2026-10-22 → 2026-10-23; `.cargo/config.toml`, nightly-only) | fresh releases at resolve time | direct + transitive, **but enforced only under nightly**; stable cargo prints `unused config key` and ignores it, and `--locked` builds skip resolution entirely | partial (see gaps) |
 | SLSA provenance + sha256 (releases) | tampered artifacts after build | release assets | attestations published per release; installers/`docsbase update` check sha256 (integrity) and point to `gh attestation verify` for authenticity |
 | `cargo-vet` audit gate | untrusted code, including transitives, regardless of age | everything in the build graph | **stage 2** |
 | CI age gate over the lock (all entries < 14d → red) | fresh transitives smuggled via lock | `Cargo.lock` fully | **TODO, blocked on cargo ~1.100** |
