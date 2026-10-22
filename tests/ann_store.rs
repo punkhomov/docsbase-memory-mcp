@@ -330,7 +330,7 @@ fn cleanup_disk_keeps_the_newest_index_under_budget() {
         keys.push(k);
     }
 
-    store.cleanup_disk(0).expect("cleanup disk");
+    store.cleanup_disk(0, None).expect("cleanup disk");
 
     assert!(
         store.load(&keys[2]).expect("load newest").is_some(),
@@ -338,4 +338,26 @@ fn cleanup_disk_keeps_the_newest_index_under_budget() {
     );
     assert!(store.load(&keys[0]).expect("load first").is_none());
     assert!(store.load(&keys[1]).expect("load second").is_none());
+}
+
+#[test]
+fn failed_publish_removes_the_temporary_directory() {
+    let (_cache, store) = store();
+    let k = key(1, 42, "model@d8", 8, 3, "abcdef01");
+    let final_dir = store.ann_dir(&k);
+    fs::create_dir_all(final_dir.parent().expect("parent")).expect("parent dir");
+    fs::write(&final_dir, b"not a directory").expect("block final dir");
+
+    let err = store
+        .persist_dump(&k, |dir| Ok(write_dump(dir)))
+        .expect_err("publish must fail");
+    assert!(!err.to_string().is_empty());
+
+    let leftovers: Vec<String> = fs::read_dir(store.project_ann_root(1))
+        .expect("read ann root")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("tmp-"))
+        .collect();
+    assert!(leftovers.is_empty(), "tmp leaked: {leftovers:?}");
 }

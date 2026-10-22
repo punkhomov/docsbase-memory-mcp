@@ -237,24 +237,30 @@ impl AnnStore {
             )));
         }
         let meta = AnnMeta::new(key);
-        let meta_json = serde_json::to_string_pretty(&meta)
-            .map_err(|err| Error::internal_with_source("serialize ann meta", err))?;
-        fs::write(tmp.join("meta.json"), meta_json)
-            .map_err(|err| Error::internal_with_source("write ann meta", err))?;
-        sync_dump_files(&tmp)?;
-        fs::write(tmp.join("READY"), "")
-            .map_err(|err| Error::internal_with_source("write ann READY", err))?;
-        let final_dir = self.ann_dir(key);
-        if final_dir.exists() {
-            fs::remove_dir_all(&final_dir)
-                .map_err(|err| Error::internal_with_source("replace ann index", err))?;
+        let publish = (|| -> Result<AnnSlot> {
+            let meta_json = serde_json::to_string_pretty(&meta)
+                .map_err(|err| Error::internal_with_source("serialize ann meta", err))?;
+            fs::write(tmp.join("meta.json"), meta_json)
+                .map_err(|err| Error::internal_with_source("write ann meta", err))?;
+            sync_dump_files(&tmp)?;
+            fs::write(tmp.join("READY"), "")
+                .map_err(|err| Error::internal_with_source("write ann READY", err))?;
+            let final_dir = self.ann_dir(key);
+            if final_dir.exists() {
+                fs::remove_dir_all(&final_dir)
+                    .map_err(|err| Error::internal_with_source("replace ann index", err))?;
+            }
+            fs::rename(&tmp, &final_dir)
+                .map_err(|err| Error::internal_with_source("publish ann index", err))?;
+            Ok(AnnSlot {
+                dir: final_dir,
+                meta,
+            })
+        })();
+        if publish.is_err() {
+            let _ = fs::remove_dir_all(&tmp);
         }
-        fs::rename(&tmp, &final_dir)
-            .map_err(|err| Error::internal_with_source("publish ann index", err))?;
-        Ok(AnnSlot {
-            dir: final_dir,
-            meta,
-        })
+        publish
     }
 
     /// Removes every ANN index of a project (invalidation, FR-4).
@@ -277,7 +283,7 @@ impl AnnStore {
     ///
     /// # Errors
     /// Filesystem failures while scanning the cache root.
-    pub fn cleanup_disk(&self, max_bytes: u64) -> Result<()> {
+    pub fn cleanup_disk(&self, max_bytes: u64, keep_project: Option<i64>) -> Result<()> {
         let projects = self.root.join("projects");
         let entries = match fs::read_dir(&projects) {
             Ok(entries) => entries,
@@ -287,6 +293,10 @@ impl AnnStore {
         let mut dirs: Vec<(u64, SystemTime, PathBuf)> = Vec::new();
         for project in entries {
             let Ok(project) = project else { continue };
+            let project_id = project.file_name().to_string_lossy().parse::<i64>().ok();
+            if project_id.is_some() && project_id == keep_project {
+                continue;
+            }
             let ann = project.path().join("ann");
             let Ok(entries) = fs::read_dir(&ann) else {
                 continue;

@@ -145,6 +145,53 @@ fn run_e2e(count: usize, embedder: DimEmbedder, timeout: Duration) {
         .expect("repeat"),
     );
     assert_eq!(hits, repeat, "ANN answers deterministically");
+
+    let mut latencies = Vec::with_capacity(20);
+    for _ in 0..20 {
+        let started = Instant::now();
+        let _ = search_docs_with(
+            &stages(embedder),
+            &dense,
+            &db,
+            cache.path(),
+            &project,
+            &json!({ "query": "alpha", "limit": 100 }),
+            50,
+        )
+        .expect("latency search");
+        latencies.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    latencies.sort_by(f64::total_cmp);
+    let p50 = latencies[latencies.len() / 2];
+    let p95 = latencies[(latencies.len() * 95 / 100).min(latencies.len() - 1)];
+    let dim = embedder.dim;
+    eprintln!("e2e {count}x{dim}: p50={p50:.2}ms p95={p95:.2}ms");
+    if let Some(rss) = rss_mib() {
+        eprintln!("e2e {count}x{dim}: rss={rss:.1}MiB");
+    }
+
+    drop(dense);
+    let cold = DenseCache::with_policy_limits(AnnPolicy::LoadOnly, cache.path(), limits);
+    let cold_out = cold
+        .get(&db, project.id, embedder.model_id())
+        .expect("cold get");
+    assert!(
+        matches!(cold_out, DenseRows::Ann(_)),
+        "persisted ANN must reload without a build, got {cold_out:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn rss_mib() -> Option<f64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+    let kib = line.split_whitespace().nth(1)?.parse::<f64>().ok()?;
+    Some(kib / 1024.0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rss_mib() -> Option<f64> {
+    None
 }
 
 #[test]

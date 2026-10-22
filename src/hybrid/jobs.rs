@@ -14,10 +14,11 @@ use crate::store::Db;
 use crate::store::repo;
 use crate::vector_cache::{CacheLimits, Embedder, VectorCache};
 
+use super::ann::ANN_MIN_VECTORS;
 use super::{HybridCfg, blocking, from_config};
 
-/// Backfill lease duration: long enough to cover a 75k ANN build + retry.
-const BACKFILL_PIN_TTL: Duration = Duration::from_secs(600);
+/// Backfill lease duration: covers a remote 75k backfill + ANN build/retry.
+const BACKFILL_PIN_TTL: Duration = Duration::from_secs(3_600);
 
 /// Coverage of one project under the configured embedding model (FR-15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,12 +122,25 @@ pub fn embed_project_chunks_with_limits(
     let mut cache = VectorCache::open_with_limits(db.cache_root(), limits)?;
     // Lease the project's vectors for the ANN build; without this a
     // concurrent backfill can evict them and coverage never reaches 100%.
-    cache.pin(embedder.model_id(), &hashes, BACKFILL_PIN_TTL)?;
+    cache.pin(project_id, embedder.model_id(), &hashes, BACKFILL_PIN_TTL)?;
     let result = blocking::enter(|| cache.embed_missing(embedder, &texts));
-    if result.is_err() {
-        let _ = cache.unpin(embedder.model_id(), &hashes);
+    match result {
+        Ok(vectors) => {
+            if hashes.len() >= ANN_MIN_VECTORS {
+                // The backfill may have taken close to the lease duration;
+                // restart it so the ANN build has the full window.
+                cache.pin(project_id, embedder.model_id(), &hashes, BACKFILL_PIN_TTL)?;
+            } else {
+                // No ANN tier will use these vectors; do not pin small caches.
+                cache.unpin(project_id, embedder.model_id(), &hashes)?;
+            }
+            Ok(vectors.len() as u64)
+        }
+        Err(err) => {
+            let _ = cache.unpin(project_id, embedder.model_id(), &hashes);
+            Err(err)
+        }
     }
-    result.map(|vectors| vectors.len() as u64)
 }
 
 /// Cached/total chunk coverage for the configured stage; `None` when the

@@ -93,11 +93,12 @@ impl VectorCache {
                  used_at INTEGER NOT NULL,
                  PRIMARY KEY (model_id, chunk_hash)
              );
-             CREATE TABLE IF NOT EXISTS vector_cache_pins (
+             CREATE TABLE IF NOT EXISTS vector_cache_leases (
+                 lease_id INTEGER NOT NULL,
                  model_id TEXT NOT NULL,
                  chunk_hash TEXT NOT NULL,
                  expires_at INTEGER NOT NULL,
-                 PRIMARY KEY (model_id, chunk_hash)
+                 PRIMARY KEY (lease_id, model_id, chunk_hash)
              );",
         )
         .map_err(|err| Error::internal_with_source("create vector cache schema", err))?;
@@ -180,21 +181,34 @@ impl VectorCache {
     ///
     /// # Errors
     /// Returns [`Error::Internal`] on `SQLite` failures.
-    pub fn pin(&mut self, model_id: &str, hashes: &[String], ttl: Duration) -> Result<()> {
+    pub fn pin(
+        &mut self,
+        lease_id: i64,
+        model_id: &str,
+        hashes: &[String],
+        ttl: Duration,
+    ) -> Result<()> {
         if hashes.is_empty() {
             return Ok(());
         }
-        let expires = now_secs().saturating_add(i64::try_from(ttl.as_secs()).unwrap_or(i64::MAX));
+        let now = now_secs();
+        let expires = now.saturating_add(i64::try_from(ttl.as_secs()).unwrap_or(i64::MAX));
         let tx = self
             .conn
             .transaction()
             .map_err(|err| Error::internal_with_source("begin pin transaction", err))?;
+        tx.execute(
+            "DELETE FROM vector_cache_leases WHERE expires_at <= ?1",
+            params![now],
+        )
+        .map_err(|err| Error::internal_with_source("purge expired leases", err))?;
         for hash in hashes {
             tx.execute(
-                "INSERT INTO vector_cache_pins (model_id, chunk_hash, expires_at)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(model_id, chunk_hash) DO UPDATE SET expires_at = excluded.expires_at",
-                params![model_id, hash, expires],
+                "INSERT INTO vector_cache_leases (lease_id, model_id, chunk_hash, expires_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(lease_id, model_id, chunk_hash)
+                 DO UPDATE SET expires_at = excluded.expires_at",
+                params![lease_id, model_id, hash, expires],
             )
             .map_err(|err| Error::internal_with_source("pin vector", err))?;
         }
@@ -206,15 +220,16 @@ impl VectorCache {
     ///
     /// # Errors
     /// Returns [`Error::Internal`] on `SQLite` failures.
-    pub fn unpin(&mut self, model_id: &str, hashes: &[String]) -> Result<()> {
+    pub fn unpin(&mut self, lease_id: i64, model_id: &str, hashes: &[String]) -> Result<()> {
         let tx = self
             .conn
             .transaction()
             .map_err(|err| Error::internal_with_source("begin unpin transaction", err))?;
         for hash in hashes {
             tx.execute(
-                "DELETE FROM vector_cache_pins WHERE model_id = ?1 AND chunk_hash = ?2",
-                params![model_id, hash],
+                "DELETE FROM vector_cache_leases
+                 WHERE lease_id = ?1 AND model_id = ?2 AND chunk_hash = ?3",
+                params![lease_id, model_id, hash],
             )
             .map_err(|err| Error::internal_with_source("unpin vector", err))?;
         }
@@ -364,7 +379,7 @@ impl VectorCache {
             }
             let now = now_secs();
             let _ = self.conn.execute(
-                "DELETE FROM vector_cache_pins WHERE expires_at <= ?1",
+                "DELETE FROM vector_cache_leases WHERE expires_at <= ?1",
                 params![now],
             );
             let removed = self
@@ -373,7 +388,7 @@ impl VectorCache {
                     "DELETE FROM vector_cache WHERE rowid = (
                          SELECT v.rowid FROM vector_cache v
                          WHERE NOT EXISTS (
-                             SELECT 1 FROM vector_cache_pins p
+                             SELECT 1 FROM vector_cache_leases p
                              WHERE p.model_id = v.model_id
                                AND p.chunk_hash = v.chunk_hash
                                AND p.expires_at > ?1

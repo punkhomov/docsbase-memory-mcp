@@ -777,9 +777,9 @@ impl DenseCache {
     ///
     /// # Errors
     /// Filesystem failures while scanning the cache root.
-    pub fn cleanup_disk(&self) -> Result<()> {
+    pub fn cleanup_disk(&self, project_id: i64) -> Result<()> {
         if let Some(store) = &self.store {
-            store.cleanup_disk(self.limits.max_ann_disk_bytes)?;
+            store.cleanup_disk(self.limits.max_ann_disk_bytes, Some(project_id))?;
         }
         Ok(())
     }
@@ -887,8 +887,13 @@ fn build_in_background(
             entry.last_used = cache.tick();
         }
         cache.enforce_byte_cap(&mut entries, project_id);
+        Ok(())
+    }))
+    .unwrap_or_else(|payload| Err(Error::internal(format!("ann build panic: {payload:?}"))));
+    if result.is_ok() {
         // The dump is READY: release the backfill lease. On failure the pins
-        // stay until their TTL so the retry still sees full coverage.
+        // stay until their TTL so the retry still sees full coverage. Do this
+        // without holding the entries lock (the vector DB may be busy).
         let max_bytes = cache.vector_cache_max_bytes(project_id);
         if let Ok(mut vectors) = VectorCache::open_with_limits(
             &vector_root,
@@ -898,11 +903,11 @@ fn build_in_background(
             },
         ) {
             let hashes: Vec<String> = unpin_hashes.iter().map(|(_, hash)| hash.clone()).collect();
-            let _ = vectors.unpin(&key.model_id, &hashes);
+            if let Err(err) = vectors.unpin(project_id, &key.model_id, &hashes) {
+                eprintln!("warning: cannot release ann vector lease: {err}");
+            }
         }
-        Ok(())
-    }))
-    .unwrap_or_else(|payload| Err(Error::internal(format!("ann build panic: {payload:?}"))));
+    }
     if let Err(err) = result {
         eprintln!("warning: ann build failed for project {project_id}: {err}; keeping exact");
         let mut entries = cache.lock_entries();
