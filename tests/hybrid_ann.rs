@@ -15,7 +15,9 @@ use docsbase_memory::daemon::{registry, tools::run_project_index};
 use docsbase_memory::error::Result;
 use docsbase_memory::hybrid::ann::AnnIndex;
 use docsbase_memory::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore, chunk_set_digest};
-use docsbase_memory::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits, DenseRows};
+use docsbase_memory::hybrid::dense::{
+    AnnPolicy, DenseCache, DenseCacheLimits, DenseIndex, DenseRows,
+};
 use docsbase_memory::hybrid::jobs::embed_project_chunks_with;
 use docsbase_memory::store::Db;
 use docsbase_memory::store::repo;
@@ -58,6 +60,13 @@ fn limits_with_min_vectors(min_vectors: usize) -> DenseCacheLimits {
     limits
 }
 
+fn ready(dense: &DenseCache, db: &Db, project_id: i64, model: &str) -> Arc<DenseIndex> {
+    match dense.get(db, project_id, model).expect("get") {
+        DenseRows::Ready(index) => index,
+        other => panic!("expected Ready, got {other:?}"),
+    }
+}
+
 fn wait_for_ann(dense: &DenseCache, db: &Db, project_id: i64, model: &str) -> Arc<AnnIndex> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -68,6 +77,19 @@ fn wait_for_ann(dense: &DenseCache, db: &Db, project_id: i64, model: &str) -> Ar
                 let _ = other;
             }
             other => panic!("no ANN within timeout: {other:?}"),
+        }
+    }
+}
+
+fn wait_for_failed(dense: &DenseCache, db: &Db, project_id: i64, model: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match dense.get(db, project_id, model).expect("get") {
+            DenseRows::Failed(_) => return,
+            _ if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            other => panic!("no Failed state within timeout: {other:?}"),
         }
     }
 }
@@ -382,4 +404,108 @@ fn warm_builds_in_background_and_is_idempotent() {
     dense
         .warm(&db, project_id, FakeEmbedder.model_id())
         .expect("warm after publish");
+}
+
+#[test]
+fn byte_cap_streams_exact_rows_instead_of_loading_them() {
+    let cache = TempDir::new().expect("cache");
+    let (db, project_id) = project_with_files(cache.path(), &["a.md", "b.md", "c.md"]);
+
+    let mut limits = DenseCacheLimits::default();
+    limits.max_bytes = 1;
+    limits.min_vectors = 1_000;
+    let dense = DenseCache::with_policy_limits(AnnPolicy::Disabled, cache.path(), limits);
+    let out = dense
+        .get(&db, project_id, FakeEmbedder.model_id())
+        .expect("get");
+    assert!(
+        matches!(out, DenseRows::TooLarge(_)),
+        "over byte cap must stream exact, got {out:?}"
+    );
+    assert!(
+        !cache.path().join("vectors.db").exists(),
+        "the byte-cap check must run before decoding any vector"
+    );
+}
+
+#[test]
+fn global_byte_cap_evicts_the_oldest_entry() {
+    let cache = TempDir::new().expect("cache");
+    let (db, first_id) = project_with_files(cache.path(), &["a.md", "b.md", "c.md"]);
+    let (_, second_id) = project_with_files(cache.path(), &["d.md", "e.md", "f.md"]);
+    embed_project_chunks_with(&db, &FakeEmbedder, first_id).expect("embed first");
+    embed_project_chunks_with(&db, &FakeEmbedder, second_id).expect("embed second");
+
+    let mut limits = DenseCacheLimits::default();
+    limits.max_bytes = 60;
+    limits.min_vectors = 1_000;
+    let dense = DenseCache::with_policy_limits(AnnPolicy::Disabled, cache.path(), limits);
+
+    let first = ready(&dense, &db, first_id, FakeEmbedder.model_id());
+    let _second = ready(&dense, &db, second_id, FakeEmbedder.model_id());
+    let first_again = ready(&dense, &db, first_id, FakeEmbedder.model_id());
+    assert!(
+        !Arc::ptr_eq(&first, &first_again),
+        "global byte cap must evict the oldest project"
+    );
+}
+
+#[test]
+fn failed_build_retries_after_backoff() {
+    let cache = TempDir::new().expect("cache");
+    let (db, project_id) = project_with_files(cache.path(), &["a.md", "b.md", "c.md"]);
+    embed_project_chunks_with(&db, &FakeEmbedder, project_id).expect("embed");
+
+    let blocker = cache.path().join("ann-store");
+    fs::write(&blocker, b"block the ann tree").expect("blocker");
+    let mut limits = limits_with_min_vectors(2);
+    limits.build_backoff = Duration::from_millis(10);
+    let dense = DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, &blocker, limits);
+
+    let first = dense
+        .get(&db, project_id, FakeEmbedder.model_id())
+        .expect("first get");
+    assert!(matches!(first, DenseRows::Building(_)), "{first:?}");
+    wait_for_failed(&dense, &db, project_id, FakeEmbedder.model_id());
+    fs::remove_file(&blocker).expect("unblock");
+
+    let ann = wait_for_ann(&dense, &db, project_id, FakeEmbedder.model_id());
+    assert!(ann.estimated_bytes() > 0);
+}
+
+#[test]
+fn cold_start_loads_persisted_ann_without_vectors_db() {
+    let cache = TempDir::new().expect("cache");
+    let (db, project_id) = project_with_files(cache.path(), &["a.md", "b.md", "c.md"]);
+    embed_project_chunks_with(&db, &FakeEmbedder, project_id).expect("embed");
+
+    let mut limits = limits_with_min_vectors(2);
+    limits.max_bytes = 1024 * 1024;
+    let dense = DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, cache.path(), limits);
+    let _ann = wait_for_ann(&dense, &db, project_id, FakeEmbedder.model_id());
+    drop(dense);
+    drop(db);
+
+    for suffix in ["", "-wal", "-shm"] {
+        let path = cache.path().join(format!("vectors.db{suffix}"));
+        if path.exists() {
+            fs::remove_file(path).expect("remove vectors db");
+        }
+    }
+
+    let db = Db::open(cache.path()).expect("db");
+    let mut limits = limits_with_min_vectors(2);
+    limits.max_bytes = 1024 * 1024;
+    let cold = DenseCache::with_policy_limits(AnnPolicy::LoadOnly, cache.path(), limits);
+    let out = cold
+        .get(&db, project_id, FakeEmbedder.model_id())
+        .expect("cold get");
+    assert!(
+        matches!(out, DenseRows::Ann(_)),
+        "cold start must load persisted ANN, got {out:?}"
+    );
+    assert!(
+        !cache.path().join("vectors.db").exists(),
+        "cold start must not open the vector cache"
+    );
 }

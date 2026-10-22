@@ -127,6 +127,7 @@ fn dense_candidates(
         DenseRows::Building(building) => {
             stream_hashes(db, model_id, &building.hashes, &vector, fetch)
         }
+        DenseRows::Failed(failed) => stream_hashes(db, model_id, &failed.hashes, &vector, fetch),
     }
 }
 
