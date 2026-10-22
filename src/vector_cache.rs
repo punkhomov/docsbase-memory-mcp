@@ -30,7 +30,9 @@ impl Default for CacheLimits {
     fn default() -> Self {
         Self {
             max_entries: 1_000_000,
-            max_bytes: 256 * 1024 * 1024,
+            // 75k x 2048 f32 is ~586 MiB; ANN requires full coverage
+            // (ann-index FR-6), so the default must hold the target corpus.
+            max_bytes: 1024 * 1024 * 1024,
         }
     }
 }
@@ -347,6 +349,16 @@ fn decode_vector(dim: usize, bytes: &[u8]) -> Result<Vec<f32>> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn default_budget_holds_the_target_ann_corpus() {
+        let target = 75_000_u64 * 2048 * 4;
+        assert!(
+            CacheLimits::default().max_bytes >= target,
+            "default {} < target {target}",
+            CacheLimits::default().max_bytes
+        );
+    }
 
     #[test]
     fn lru_eviction_keeps_recent_entries() {
