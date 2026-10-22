@@ -233,6 +233,9 @@ impl Shared {
             if let Err(err) = dense.warm(&db, project_id, &model_id) {
                 eprintln!("warning: ann warm failed for project {project_id}: {err}");
             }
+            if let Err(err) = dense.cleanup(project_id) {
+                eprintln!("warning: ann cleanup failed for project {project_id}: {err}");
+            }
         });
     }
 

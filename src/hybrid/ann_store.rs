@@ -180,17 +180,24 @@ impl AnnStore {
         if !dir.is_dir() || !dir.join("READY").is_file() {
             return Ok(None);
         }
-        let meta: AnnMeta = match fs::read_to_string(dir.join("meta.json")) {
-            Ok(raw) => match serde_json::from_str(&raw) {
-                Ok(meta) => meta,
-                Err(_) => return Ok(None),
-            },
-            Err(_) => return Ok(None),
+        let Some(raw) = fs::read_to_string(dir.join("meta.json")).ok() else {
+            reject(key, "meta.json is unreadable");
+            return Ok(None);
         };
-        if !meta.matches_key(key)
-            || meta.hnsw_rs_version != HNNSW_RS_VERSION
-            || !dump_sizes_ok(&dir)
-        {
+        let Ok(meta) = serde_json::from_str::<AnnMeta>(&raw) else {
+            reject(key, "meta.json is not valid JSON");
+            return Ok(None);
+        };
+        if !meta.matches_key(key) {
+            reject(key, "metadata does not match the requested key");
+            return Ok(None);
+        }
+        if meta.hnsw_rs_version != HNNSW_RS_VERSION {
+            reject(key, "hnsw_rs version mismatch");
+            return Ok(None);
+        }
+        if !dump_sizes_ok(&dir) {
+            reject(key, "dump files missing or oversized");
             return Ok(None);
         }
         Ok(Some(AnnSlot { dir, meta }))
@@ -299,6 +306,15 @@ impl AnnStore {
         }
         Ok(())
     }
+}
+
+/// Logs why a present index was rejected, so a corrupted persisted index
+/// degrades to exact with diagnostics (FR-9, SC-4).
+fn reject(key: &AnnKey, reason: &str) {
+    eprintln!(
+        "warning: ann index rejected (project {}, generation {}, model {}, dim {}, count {}): {reason}; falling back to exact",
+        key.project_id, key.generation, key.model_id, key.dim, key.chunk_count
+    );
 }
 
 /// Directory name of a key: `<model_hash>-g<generation>-d<dim>-c<count>-<digest8>`

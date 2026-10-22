@@ -97,16 +97,22 @@ fn scores_are_one_minus_cosine() {
 fn tie_break_by_chunk_id() {
     let rows: Vec<(u64, Arc<[f32]>)> = vec![
         (5, Arc::from(vec![1.0_f32, 0.0])),
-        (2, Arc::from(vec![1.0_f32, 0.0])),
+        (2, Arc::from(vec![0.0_f32, 1.0])),
     ];
     let ann = AnnIndex::build(&rows, 2).expect("build");
-    let hits = ann.search(&[1.0, 0.0], 2).expect("search");
+    let hits = ann
+        .search(&[0.5_f32.sqrt(), 0.5_f32.sqrt()], 2)
+        .expect("search");
+    assert_eq!(hits.len(), 2, "both tied neighbours must be returned");
     assert_eq!(
         hits.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
         vec![2, 5],
         "equal scores order by ascending chunk_id"
     );
-    assert!(hits.iter().all(|(_, score)| (score - 1.0).abs() < 1e-4));
+    assert!(
+        hits.iter()
+            .all(|(_, score)| (score - 0.5_f32.sqrt()).abs() < 1e-4)
+    );
 }
 
 #[test]

@@ -613,6 +613,12 @@ impl DenseCache {
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(id, _)| *id);
             if let Some(oldest) = oldest {
+                if let Some(entry) = entries.get(&oldest) {
+                    self.digests
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&(oldest, entry.generation));
+                }
                 entries.remove(&oldest);
             }
         }
