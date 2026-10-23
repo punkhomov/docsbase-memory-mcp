@@ -148,6 +148,19 @@ Ledger: одна запись на таск (что сделано, чем пр�
   целочисленно (`expected + expected/2 + 256MiB`), эквивалентно 1.5x с truncation, без
   float-кастов, clippy-pedantic clean. Minor (deferred): manifest warns `unused dependency`
   fastembed/tar/zip (используются в T2/T4/T5); `cargo fmt` применён; `lista` CLI output
-  пока без колонки selected (T6). Управляющие константы `PREFLIGHT_MULTIPLIER`/
+  пока без колонки selected (T6). Управляющие константы
+  `PREFLIGHT_MULTIPLIER_NUMERATOR/DENOMINATOR` (3/2, целочисленно),
   `PREFLIGHT_HEADROOM_BYTES`/`MAX_FILE_BYTES`/`MAX_TOTAL_BYTES` публичны для T2/T9.
   Feature-тесты покрыты `#![cfg(feature = "hybrid-local")]` (как hybrid_openrouter.rs).
+
+- Task 1 review (2026-10-23, `reviewer-muse`, fresh): spec compliance PASS; quality
+  CHANGES — 1 Important + 3 Minor. Fix round (commit `f6c390c`): Important → новый RED-тест
+  `fetch_rejects_total_over_cap` (total-ветка `install_all`, два файла по 1.5 GiB+, ни
+  одного вызова source; `FakeSource` стал ленивым — не аллоцирует заявленные размеры);
+  Minor #1 → убран неиспользуемый `PREFLIGHT_MULTIPLIER: f64`, порог теперь целочисленный
+  `expected*3/2 + 256MiB` через публичные константы (один источник истины); Minor #2 →
+  удалён `impl Default for HttpModelSource` (таймауты только через `new()`); Minor #3
+  (streaming fetch вместо буфера в `Vec<u8>`) — отложен: `ModelSource::fetch` возвращает
+  `Vec<u8>` по design §5, буфер транзиентный (только CLI-фаза fetch), бюджеты NFR-4
+  касаются embed/rerank, а не fetch; пересмотреть при T8 live-замере RSS на
+  `bge-reranker-base` (1.11 GB). Re-review: 3/3 ADDRESSED, new breakage none. T1 closed.
