@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
-use crate::vector_cache::Embedder;
+use crate::vector_cache::{CacheLimits, Embedder};
 
 use super::Reranker;
 
@@ -61,6 +61,8 @@ pub struct HybridCfg {
     pub reranker: Option<RerankerCfg>,
     /// Candidate ordering (FR-17); `Rrf` requires the embedding stage.
     pub ranking: Ranking,
+    /// Vector-cache capacity policy (DELTA-9).
+    pub cache: CacheCfg,
 }
 
 impl HybridCfg {
@@ -72,6 +74,33 @@ impl HybridCfg {
             embedding: Some(EmbeddingCfg::default()),
             reranker: Some(RerankerCfg::default()),
             ranking: Ranking::Lexical,
+            cache: CacheCfg::default(),
+        }
+    }
+}
+
+/// Vector-cache capacity policy (hybrid-providers DELTA-9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheCfg {
+    /// Total bytes of cached vectors; ANN needs full coverage.
+    pub max_bytes: u64,
+}
+
+impl Default for CacheCfg {
+    fn default() -> Self {
+        Self {
+            max_bytes: CacheLimits::default().max_bytes,
+        }
+    }
+}
+
+impl CacheCfg {
+    /// Cache limits for this policy.
+    #[must_use]
+    pub fn limits(&self) -> CacheLimits {
+        CacheLimits {
+            max_bytes: self.max_bytes,
+            ..CacheLimits::default()
         }
     }
 }
@@ -192,6 +221,11 @@ pub fn from_config(cfg: &HybridCfg, feature_on: bool) -> Result<HybridStages> {
         ranking: cfg.ranking,
         ..HybridStages::default()
     };
+    if cfg.cache.max_bytes == 0 {
+        return Err(Error::Admission {
+            message: "hybrid.cache.max_bytes must be > 0".to_owned(),
+        });
+    }
     if let Some(embedding) = &cfg.embedding {
         ensure_openrouter(&embedding.provider)?;
         if embedding.dimensions == 0 {

@@ -2,6 +2,9 @@
 
 ## Ledger
 
+- 2026-10-22: ANN-индекс вынесен в отдельную спеку `docs/specs/ann-index/`
+  (draft 0.1, initial plan): persisted `hnsw_rs` + `ouroboros`, exact fallback.
+  Код и зависимости не менялись; ANN остаётся non-goal итерации 2.
 - 2026-10-08: черновик итерации 1 (requirements/design/tasks, ревизия 1).
   Ревью: NEEDS FIXES — 7 блокеров (`[hybrid]` TOML vs текущий `hybrid: bool`,
   поведение feature-off при `hybrid=true`, отсутствие backfill-политики,
@@ -227,3 +230,28 @@
   first-try-success). Ruling: баг родился вместе с циклом в `dde6a1f` —
   гейтов на ретрай не было; паттерн проверен по всему `src/` — единственный
   экземпляр класса.
+- 2026-10-22: DELTA-9 (post-T7 ANN review): `VectorCache` byte limit becomes
+  configurable (default 1 GiB) and a per-project lease/pin protects vectors
+  during backfill + ANN build; coverage remains the gate. Reason: 75k×2048
+  (~586 MiB) does not fit the 256 MiB default, so ann-index FR-6 can never
+  reach 100%. Task T13 opened; no code changes yet.
+
+- 2026-10-22: T13 partial — `[hybrid.cache] max_bytes` is now a real config
+  key (default 1 GiB, zero rejected), threaded through `embed_texts`,
+  `embed_project_chunks`, `coverage` and `DenseCache`'s VectorCache open.
+  Guard test `default_budget_holds_the_target_ann_corpus`; config parse test
+  `hybrid_cache_budget_parsed_and_validated`. Daemon applies project-level
+  `[hybrid.cache]` overrides to `DenseCache` on config load.
+  Backfill pins unique project hashes for 10 minutes (`vector_cache_pins`);
+  `VectorCache::evict` skips live pins, and a successful ANN build unpins
+  after `READY`. Test `pinned_vectors_survive_the_byte_cap_until_unpinned`.
+  ANN disk budget is enforced in ann-index T9 (4 GiB default).
+
+- Task T13: complete (2026-10-22). `[hybrid.cache] max_bytes` default 1 GiB
+  (zero rejected), threaded through backfill/coverage/dense; daemon applies
+  project overrides on config load. Backfill leases are keyed by project,
+  model and chunk hash (`vector_cache_leases`), live for 1 hour, refreshed
+  after a successful backfill, skipped by eviction, and released after
+  `READY` on success; a failed build keeps them for retry. Test
+  `pinned_vectors_survive_the_byte_cap_until_unpinned`. ANN disk budget
+  (ann-index T9) is separate: 4 GiB default.

@@ -15,6 +15,37 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
   Free routes may train on prompts and rotate monthly; paid pins stay
   available via explicit `docsbase models use`.
 
+### Fixed
+
+- ANN tier (spec `docs/specs/ann-index`, Delta 0.3): release builds no longer
+  use `panic = "abort"`, which had silently disabled the corrupt-dump → exact
+  fallback and aborted the daemon instead (compile-time guard added, release
+  CI test added; binary +1.1 MiB). `DenseCache.max_bytes` now counts the exact
+  rows a background build keeps alive, an over-cap build stays exact instead of
+  exceeding the resident cap, backfill leases are only taken when an ANN build
+  can follow (including the resident-cap admission rule), releasing a lease
+  evicts, and a cache that is over budget while every row is leased warns once
+  instead of on every write. The default resident cap is 1.5 GiB so the
+  documented 75k×2048 corpus (1.22 GiB build peak) is still admitted.
+  Backfill leases follow the chunk-row count the build admits (duplicate texts
+  no longer pin a corpus that can never build), a second background build is
+  not admitted while the first occupies the cap, and publish releases the
+  source rows and the built graph before loading the copy it publishes. `search_docs` logs
+  ANN search errors separately from "insufficient candidates", and the daemon
+  no longer warms a persisted ANN for projects whose ranking is lexical.
+
+### Performance
+
+- Dense channel gains a persisted HNSW ANN tier for large projects
+  (spec `docs/specs/ann-index`): exact fallback on any ANN failure; daemon
+  builds in the background, direct CLI never builds. Core `AnnIndex`
+  benchmark at 75k×2048: p95 ~5 ms on synthetic separated clusters; the
+  end-to-end `DenseCache`/`VectorCache`/`search_docs` path is covered by an
+  8k×256 CI run and a manual 75k×2048 run (ann-index T10: p50 1.46 ms, p95
+  2.88 ms over 20 searches, peak process RSS 1995.6 MiB including the
+  in-process build). The 1.5 GiB resident cap is an accounting model
+  (graph 691 MB + exact rows 586 MB), not an RSS clamp.
+
 ## [0.1.0-alpha.4] — 2026-10-14
 
 ### Added

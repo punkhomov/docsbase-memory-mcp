@@ -1,7 +1,21 @@
 # Technical Design: hybrid-providers (итерация 1)
 
-**Status:** Draft, ревизия 2.1 · **Дата:** 2026-10-14 (черновик — 2026-10-08)
-**Spec:** `docs/specs/hybrid-providers/requirements.md` (ревизия 2)
+**Status:** Draft, ревизия 2.2 · **Дата:** 2026-10-14 (черновик — 2026-10-08;
+delta 2026-10-22)
+**Spec:** `docs/specs/hybrid-providers/requirements.md` (ревизия 2.2)
+
+**Delta 2026-10-22:** ANN proposal moved to `docs/specs/ann-index/`; the
+exact dense scan remained the behavior until that spec was implemented
+(T2–T7; follow-up gaps in ann-index Delta 0.2). ADR-15 chooses `hnsw_rs` +
+`ouroboros`, replacing `usearch` as the ANN candidate.
+
+**DELTA-9 (2026-10-22, post-T7 review):** ANN build needs full coverage, but
+the default `VectorCache` byte limit (256 MiB) cannot hold 75k×2048 (~586 MiB).
+`VectorCache` gets a configurable byte limit (default 1 GiB) and a per-project
+lease/pin for the duration of backfill + ANN build; eviction must not remove
+the project's vectors while the index is being built. Coverage remains the
+gate. This is a deliberate exception to ann-index FR-10's “no new config
+keys”; the key belongs to hybrid-providers and will be added to CONFIG in T13.
 
 **Delta T1-спайка (2026-10-14):** дефолт — `qwen/qwen3-embedding-8b` @1024
 (`qwen3-embedding-0.6b` в каталоге отсутствует); qwen3-8b нормирует вектора
@@ -161,8 +175,9 @@ count+dim → L2 (если `normalize`) → `put` под ключом FR-5. Ба
 **Backfill (FR-15).** Открытие проекта (хук — `daemon::server`) с hybrid →
 sync-джоба (FR-17) поверх всех чанков; `embed_missing` берёт только cache-miss
 (content-addressed). `embed_coverage = cached/total` в `status`; эвикция LRU
-может держать покрытие < 100% (R7) — повторный sync до-embed'ит выпавшее. Поиск
-в процессе — обычный BM25(+rerank).
+может держать покрытие < 100% (R7) — повторный sync до-embed'ит выпавшее.
+Для ANN (DELTA-9) backfill/build держит lease/pin, чтобы 75k×2048 дал 100%
+coverage; иначе ANN не строится. Поиск в процессе — обычный BM25(+rerank).
 
 **Rerank (запрос).** Финальный BM25-список → окно `window = max(limit,
 cfg.window)`, но ≤ числа хитов; ноль кандидатов → rerank не вызывается (пустой
@@ -179,7 +194,7 @@ BM25-порядок. Оба режима тестируются через seam 
 | `reqwest` (`default-features = false`, `rustls-tls-webpki-roots`, `json`) | async HTTP, пул, таймауты; sync-обёртка через `block_on` в `spawn_blocking` | `rustls-tls-manual-roots` — **без рутов не верифицирует ничего** (блокер ревью, исправлено); `native-roots` — зависимость от системного стора; `ureq` — второй стек; `rig`/`async-openai` — чужие API-дизайны |
 | `serde`/`serde_json` | уже в дереве | — |
 
-`tokio` уже есть. `fastembed`/`usearch`/`sqlite-vector-rs` — будущие итерации.
+`tokio` уже есть. ANN — spec `docs/specs/ann-index` + ADR-15; `fastembed`/локальные модели — ADR-13; `usearch`/`sqlite-vector-rs` отклонены для ANN.
 `webpki-roots` — статические Mozilla-руты, офлайн-сборка (CI собирает `--locked`).
 
 ## 8. Required / Forbidden stack
@@ -267,7 +282,7 @@ precedence). Существующие конфиги с `hybrid = true` оста
 | R4 | 503/529/429 при bulk-заливке | backoff + `Retry-After`; батчи последовательные (параллелизм — по данным замеров) |
 | R5 | Блокировка executor'а | I3-гард с явной ошибкой |
 | R6 | `webpki-roots` устарели для нового CA | руты обновляются редко; при инциденте — `native-roots` как fallback-конфиг |
-| R7 | Эвикция LRU при backfill (50k×1024d f32 ≈ 195 MiB от 256 MiB) | `embed_coverage` в `status`; повторный sync до-embed'ит; кап настраиваемый |
+| R7 | Эвикция LRU при backfill (50k×1024d f32 ≈ 195 MiB от 256 MiB) | `embed_coverage` в `status`; повторный sync до-embed'ит; кап настраиваемый (DELTA-9); ANN build держит lease/pin, иначе 75k×2048 никогда не даёт 100% coverage |
 
 ## 13. Alternatives considered (ADR-14, кратко)
 

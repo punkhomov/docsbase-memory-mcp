@@ -20,7 +20,8 @@ use crate::daemon::session::SessionRegistry;
 use crate::daemon::tools;
 use crate::error::{Error, Result};
 use crate::hybrid::HybridStages;
-use crate::hybrid::dense::DenseCache;
+use crate::hybrid::config::{Ranking, cache_model_id};
+use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits};
 use crate::hybrid::jobs as hybrid_jobs;
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 use crate::platform::Stream;
@@ -76,6 +77,10 @@ impl Shared {
                 (Config::default(), Some(err.to_string()))
             }
         };
+        let dense_limits = DenseCacheLimits {
+            vector_cache_max_bytes: global_config.hybrid_cfg.cache.max_bytes,
+            ..DenseCacheLimits::default()
+        };
         let shared = Arc::new(Self {
             cache: cache.to_path_buf(),
             db: Mutex::new(db),
@@ -87,7 +92,7 @@ impl Shared {
             global_config_stamp: stamp,
             project_configs: Mutex::new(HashMap::new()),
             stages: Mutex::new(HashMap::new()),
-            dense: DenseCache::new(),
+            dense: DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, cache, dense_limits),
         });
         match shared.start_watchers() {
             Ok(started) if started > 0 => eprintln!("watching {started} indexed project(s)"),
@@ -192,6 +197,8 @@ impl Shared {
             &self.global_config,
             &project.canonical_root,
         )?);
+        self.dense
+            .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes);
         let previous = self.configs().insert(project.id, Arc::clone(&config));
         drop(previous);
         Ok(config)
@@ -207,6 +214,43 @@ impl Shared {
             return Ok(Arc::clone(config));
         }
         self.load_project_config(project)
+    }
+
+    /// Warms the ANN index for `project` after a successful sync/backfill
+    /// (FR-8; design §10). Runs in the background; search keeps streaming
+    /// exact while the build runs. Stale on-disk indexes are rejected by the
+    /// key (generation/digest/format), so no explicit invalidation is needed
+    /// here (FR-4). A no-op when the project has no embedding stage.
+    fn refresh_ann_after_sync(self: &Arc<Self>, project: &crate::store::models::Project) {
+        let Ok(config) = self.project_config(project) else {
+            return;
+        };
+        let Some(embed_cfg) = config.hybrid_cfg.embedding.as_ref() else {
+            return;
+        };
+        // Warm only a project whose dense channel is actually read:
+        // `rrf_active` gates `dense_candidates`, and the `hybrid = true`
+        // shorthand keeps `Ranking::Lexical` (Delta 0.3). Cleanup stays
+        // unconditional: a ranking flip must still reclaim old dumps.
+        let warm = config.hybrid_cfg.enabled && config.hybrid_cfg.ranking == Ranking::Rrf;
+        let model_id = cache_model_id(embed_cfg);
+        let cache_path = self.cache.clone();
+        let dense = self.dense.snapshot();
+        let project_id = project.id;
+        std::thread::spawn(move || {
+            let Ok(db) = Db::open(&cache_path) else {
+                return;
+            };
+            if warm && let Err(err) = dense.warm(&db, project_id, &model_id) {
+                eprintln!("warning: ann warm failed for project {project_id}: {err}");
+            }
+            if let Err(err) = dense.cleanup(project_id) {
+                eprintln!("warning: ann cleanup failed for project {project_id}: {err}");
+            }
+            if let Err(err) = dense.cleanup_disk(project_id) {
+                eprintln!("warning: ann disk cleanup failed: {err}");
+            }
+        });
     }
 
     /// Re-reads the project config; called when a session opens the project so
@@ -769,8 +813,10 @@ fn route_tool(
             let project = registry::ensure_project(&mut job_db, &root)?;
             let config = shared.project_config(&project)?;
             let (job_id, created) = tools::enqueue_sync(&job_db, &project)?;
+            let mut just_indexed = false;
             if created {
                 tools::run_sync_job_in(&mut job_db, &shared.cache, job_id, &project, &config)?;
+                just_indexed = true;
             }
             let fresh =
                 registry::project_by_id(&job_db, project.id)?.ok_or_else(|| Error::Project {
@@ -779,6 +825,9 @@ fn route_tool(
                 })?;
             if let Err(err) = shared.ensure_watcher(&fresh) {
                 eprintln!("warning: cannot watch project {}: {err}", fresh.id);
+            }
+            if just_indexed {
+                shared.refresh_ann_after_sync(&fresh);
             }
             current_job(&job_db, job_id)
         }
@@ -841,6 +890,7 @@ fn spawn_sync_job(shared: Arc<Shared>, job_id: i64, project_id: i64, config: Arc
                         if let Err(err) = shared.ensure_watcher(&project) {
                             eprintln!("warning: cannot watch project {}: {err}", project.id);
                         }
+                        shared.refresh_ann_after_sync(&project);
                     }
                     Err(err) => eprintln!("warning: sync job {job_id} failed: {err}"),
                 }
@@ -912,7 +962,16 @@ fn error_response(err: &Error) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::time::{Duration, Instant};
+
     use super::*;
+    use crate::config::Config;
+    use crate::daemon::registry;
+    use crate::daemon::tools::run_project_index;
+    use crate::hybrid::dense::DenseRows;
+    use crate::hybrid::jobs::embed_project_chunks_with;
+    use crate::vector_cache::Embedder;
 
     #[tokio::test]
     async fn drain_timeout_is_bounded() {
@@ -926,5 +985,144 @@ mod tests {
 
         let idle = AtomicUsize::new(1);
         assert!(wait_for_drain(&idle, Duration::from_millis(50)).await);
+    }
+
+    struct FakeEmbedder;
+
+    impl crate::vector_cache::Embedder for FakeEmbedder {
+        fn model_id(&self) -> &'static str {
+            "openrouter/model@d3@l2"
+        }
+
+        #[allow(clippy::cast_precision_loss)]
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|text| vec![text.len() as f32, 0.5, 0.25])
+                .collect())
+        }
+    }
+
+    use crate::store::models::Project;
+
+    fn project_with_hybrid_config(
+        cache: &std::path::Path,
+        root: &std::path::Path,
+        ranking: Option<&str>,
+    ) -> (Db, Project) {
+        // Just above ANN_MIN_VECTORS (4096): the fixture must admit an ANN
+        // build, and 5000 files per test is slow on 2-core Windows runners.
+        for i in 0..4200 {
+            fs::write(
+                root.join(format!("d{i:05}.md")),
+                format!("# doc {i}\n\nbody {i}.\n"),
+            )
+            .expect("write doc");
+        }
+        let ranking = ranking.map_or(String::new(), |value| format!("ranking = \"{value}\"\n"));
+        fs::write(
+            root.join(".docsbase.toml"),
+            format!(
+                "[hybrid]\nenabled = true\n{ranking}[hybrid.embedding]\nprovider = \"openrouter\"\nmodel = \"model\"\ndimensions = 3\nnormalize = true\n"
+            ),
+        )
+        .expect("write config");
+
+        let mut db = Db::open(cache).expect("db");
+        let canonical = root.canonicalize().expect("canonical");
+        let project = registry::ensure_project(&mut db, &canonical).expect("project");
+        run_project_index(&mut db, cache, &project, &Config::default()).expect("index");
+        embed_project_chunks_with(&db, &FakeEmbedder, project.id).expect("embed");
+        (db, project)
+    }
+
+    /// A published ANN dump for `project_id` (a `READY` marker under the key
+    /// directory), found on disk without asking the dense cache for anything.
+    fn ann_ready(cache: &std::path::Path, project_id: i64) -> bool {
+        let Ok(keys) = fs::read_dir(cache.join(format!("projects/{project_id}/ann"))) else {
+            return false;
+        };
+        keys.filter_map(std::result::Result::ok)
+            .any(|key| key.path().join("READY").is_file())
+    }
+
+    fn wait_for_ann_ready(cache: &std::path::Path, project_id: i64, deadline: Duration) -> bool {
+        let until = Instant::now() + deadline;
+        loop {
+            if ann_ready(cache, project_id) {
+                return true;
+            }
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn sync_refresh_warms_ann_for_rrf() {
+        let cache = tempfile::TempDir::new().expect("cache");
+        let root = tempfile::TempDir::new().expect("root");
+        let (db, project) = project_with_hybrid_config(cache.path(), root.path(), Some("rrf"));
+
+        let shared = Shared::open(cache.path()).expect("shared");
+        shared.refresh_ann_after_sync(&project);
+
+        assert!(
+            // Generous: the warm thread competes with the rest of the lib
+            // suite and Windows CI runners are slow.
+            wait_for_ann_ready(cache.path(), project.id, Duration::from_secs(300)),
+            "warm must publish a persisted ANN for an RRF project"
+        );
+        // READY lands on disk just before the in-memory publish; poll for the
+        // Ann state rather than racing the publish step.
+        let until = Instant::now() + Duration::from_secs(300);
+        loop {
+            match shared
+                .dense
+                .get(&db, project.id, FakeEmbedder.model_id())
+                .expect("get")
+            {
+                DenseRows::Ann(_) => break,
+                state if Instant::now() < until => {
+                    let _ = state;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                state => panic!("warm did not publish an Ann entry: {state:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn sync_refresh_skips_ann_for_lexical_ranking() {
+        let cache = tempfile::TempDir::new().expect("cache");
+        let root = tempfile::TempDir::new().expect("root");
+        // The `[hybrid]` table defaults to lexical ranking, exactly like the
+        // `hybrid = true` shorthand (Delta 0.3).
+        let (_db, project) = project_with_hybrid_config(cache.path(), root.path(), None);
+
+        let shared = Shared::open(cache.path()).expect("shared");
+        shared.refresh_ann_after_sync(&project);
+
+        assert!(
+            !wait_for_ann_ready(cache.path(), project.id, Duration::from_secs(30)),
+            "lexical ranking must not build a dense ANN nobody reads"
+        );
+
+        // Cleanup must keep running after a ranking flip: a crashed build's
+        // tmp dir (another pid) is reclaimed even though warm is gated off.
+        let stale = cache
+            .path()
+            .join(format!("projects/{}/ann/tmp-999999-dead", project.id));
+        fs::create_dir_all(&stale).expect("stale tmp dir");
+        shared.refresh_ann_after_sync(&project);
+        let until = Instant::now() + Duration::from_secs(300);
+        while stale.exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !stale.exists(),
+            "cleanup must run for lexical projects so old dumps are reclaimed"
+        );
     }
 }

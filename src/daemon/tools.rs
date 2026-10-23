@@ -116,19 +116,74 @@ fn dense_candidates(
     let model_id = embedder.model_id();
     match dense.get(db, project.id, model_id)? {
         DenseRows::Ready(index) => dense::top_k(&vector, index.rows(), fetch),
-        DenseRows::TooLarge => {
-            let chunks = repo::chunk_hashes(db.connection(), project.id)?;
-            let mut cache = crate::vector_cache::VectorCache::open(db.cache_root())?;
-            let rows = chunks.into_iter().filter_map(move |(chunk_id, hash)| {
-                match cache.get(model_id, &hash) {
-                    Ok(Some(vector)) => Some(Ok((chunk_id, vector))),
-                    Ok(None) => None,
-                    Err(err) => Some(Err(err)),
-                }
-            });
-            dense::top_k_iter(&vector, rows, fetch)
+        DenseRows::Ann(ann) => match ann.search(&vector, fetch) {
+            Ok(hits) if hits.len() >= fetch => {
+                #[cfg(debug_assertions)]
+                ANN_SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(hits)
+            }
+            Ok(hits) => {
+                eprintln!(
+                    "warning: ann returned {} candidates for fetch {fetch}; falling back to exact",
+                    hits.len()
+                );
+                stream_exact(db, model_id, project.id, &vector, fetch)
+            }
+            Err(err) => {
+                eprintln!("warning: ann search failed: {err}; falling back to exact");
+                stream_exact(db, model_id, project.id, &vector, fetch)
+            }
+        },
+        DenseRows::TooLarge(hashes) => stream_hashes(db, model_id, &hashes, &vector, fetch),
+        DenseRows::Building(building) => {
+            stream_hashes(db, model_id, &building.hashes, &vector, fetch)
         }
+        DenseRows::Failed(failed) => stream_hashes(db, model_id, &failed.hashes, &vector, fetch),
     }
+}
+
+/// Debug-only counter: how many dense lookups the ANN tier actually *served*
+/// (a consultation that fell back to exact is not counted).
+/// Integration tests use it to prove the read path took the ANN branch rather
+/// than silently falling back to exact (Delta 0.3).
+#[cfg(debug_assertions)]
+static ANN_SEARCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only ANN read-path counter; absent in release builds.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+#[must_use]
+pub fn ann_search_count() -> u64 {
+    ANN_SEARCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn stream_exact(
+    db: &Db,
+    model_id: &str,
+    project_id: i64,
+    vector: &[f32],
+    fetch: usize,
+) -> Result<Vec<(u64, f32)>> {
+    let chunks = repo::chunk_hashes(db.connection(), project_id)?;
+    stream_hashes(db, model_id, &chunks, vector, fetch)
+}
+
+fn stream_hashes(
+    db: &Db,
+    model_id: &str,
+    hashes: &[(u64, String)],
+    vector: &[f32],
+    fetch: usize,
+) -> Result<Vec<(u64, f32)>> {
+    let mut cache = crate::vector_cache::VectorCache::open(db.cache_root())?;
+    let rows = hashes
+        .iter()
+        .filter_map(move |(chunk_id, hash)| match cache.get(model_id, hash) {
+            Ok(Some(vector)) => Some(Ok((*chunk_id, vector))),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        });
+    dense::top_k_iter(vector, rows, fetch)
 }
 
 /// [`search_docs`] with resolved hybrid stages, the dense cache and the

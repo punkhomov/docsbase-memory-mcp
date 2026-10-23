@@ -260,7 +260,8 @@ pub struct Project {
 | `interprocess` (`cfg(windows)`, feature `tokio`) | local sockets: daemon-транспорт на Windows | FR-33, ADR-10 |
 | `windows-sys` (`cfg(windows)`, `Win32_System_Threading`, `Win32_Foundation`) | `process_alive` (OpenProcess/GetExitCodeProcess) и флаги `detach` (std не экспортирует `CREATE_*`) | ADR-10 |
 | `reqwest` (`default-features = false`, `rustls-tls-webpki-roots`, `json`; feature `hybrid-remote`) | HTTP-клиент hybrid-ступеней (embeddings + rerank через OpenRouter); вне дефолтной сборки — SC-4-гейт «без reqwest в `cargo tree`» | hybrid-providers FR-1/2/7, ADR-14 |
-| (фаза 2, за флагом, ADR-13) `fastembed` + ONNX-runtime, `usearch` | локальные эмбеддинги и ANN-индекс; опция, не дефолт | FR-27, ADR-12, ADR-13 |
+| `hnsw_rs` 0.3.5 + `ouroboros` 0.18.5 | persisted HNSW для dense-канала (ANN), exact fallback | ann-index FR-1…FR-13, ADR-15 |
+| (фаза 2, за флагом, ADR-13) `fastembed` + ONNX-runtime | локальные embedding-модели; опция, не дефолт | FR-27, ADR-12, ADR-13 |
 | dev: `tempfile`, `assert_cmd`, `insta`, `criterion` | интеграционные, golden и perf-тесты (T27, T30) | NFR-1, NFR-7 |
 
 **Точечные альтернативы:** вместо `serde_yaml` — минимальный flat-парсер frontmatter
@@ -276,8 +277,22 @@ pub struct Project {
 - Реализовано (spec `docs/specs/hybrid-providers`, ADR-14): HTTP-клиент OpenRouter —
   `reqwest` + rustls (`webpki-roots`) за feature `hybrid-remote`; дефолтная сборка
   остаётся офлайн (SC-4: `cargo tree` без `reqwest`, CI-джоба `linux-hybrid`).
-- Позже (ADR-13): `fastembed`/ONNX-runtime, `usearch`, dense-поиск + RRF — после
-  бенчмарка; не входят в итерацию 1.
+- ANN (спека `docs/specs/ann-index`, ADR-15): `hnsw_rs 0.3.5` +
+  `ouroboros`; реализовано (T2–T6): persisted index, daemon BuildOrLoad,
+  direct CLI LoadOnly, exact fallback.
+  `usearch`/`sqlite-vector-rs` — отклонённые альтернативы (C++/FFI).
+- Позже (ADR-13): `fastembed`/ONNX-runtime — локальные embedding-модели;
+  не входят в итерацию 1.
+- **Delta 2026-10-22:** ANN proposal — отдельная спека
+  `docs/specs/ann-index/`; выбран `hnsw_rs` + `ouroboros`, не `usearch`
+  (ADR-15). Exact dense scan остаётся fallback; после T2–T7 ANN — основной
+  путь для проектов выше порога.
+- **Delta 2026-10-22 (T7):** ADR-15 финализирован: `hnsw_rs 0.3.5` +
+  `ouroboros 0.18.5` — единственные версии v1 (fallback-версии нет);
+  формат `meta.json`/`READY`/atomic write — v1; core-замеры `AnnIndex`
+  (release, 75k×2048): build 56.5 s, p95 5.4 ms, recall@10 1.0000, mmap load
+  549 ms, bin 12 MiB (бюджет 40 MiB). End-to-end `DenseCache`/`VectorCache`/
+  `search_docs` подтверждён T10 (8k CI + 75k manual).
 
 ## 9. Error handling
 
@@ -487,7 +502,45 @@ embedding-ступень — `Admission`). Списки BM25 и dense (коси�
 плана) инвалидирует in-memory dense-кэш (`DENSE_CACHE_MAX_VECTORS = 1M`,
 выше — стриминговый скан с bounded-хипом). Публичная библиотечная поверхность
 расширена: `store::repo`, `Db::{connection,begin_write}` (конституция 1.3.0).
-ANN, локальные модели и тюнинг `k`/весов — отдельные итерации.
+ANN — ADR-15; локальные модели и тюнинг `k`/весов — отдельные итерации.
+
+**ADR-15. ANN для dense-канала: persisted HNSW (`hnsw_rs`) + `ouroboros` (spec `docs/specs/ann-index`).**
+Выбрано: `hnsw_rs 0.3.5` + `ouroboros 0.18.5`; fallback-версии нет. Это внутренняя оптимизация dense-канала RRF:
+`search_docs_with` получает те же `(chunk_id, score)`, rerank и MCP/CLI-контракты
+не меняются. Persistence обязательна с v1: `AnnKey` (`project_id`,
+`index_generation`, `model_id`, `dim`, count, chunk-set digest, format version),
+`AnnMeta` (`hnsw_rs` version), `meta.json` + `READY`, atomic temp→rename, mmap
+через `HnswIo` и owning-wrapper `ouroboros` (self_cell не подходит: builder даёт
+`&Owner`, а `load_hnsw` требует `&mut`; `Hnsw` инвариантен по lifetime).
+Dump чужой версии/формата отвергается и пересобирается; migration layer нет.
+Build: `parallel_insert` — дефолт; warm — фоновый, поиск во время сборки идёт
+exact streaming; `set_searching_mode(true)` после вставки. Ошибка ANN всегда
+даёт exact fallback, не ошибку поиска. Ограничения: byte/vector/project caps,
+LRU, `TooLarge` streaming; `env_logger` — normal-зависимость
+`hnsw_rs`; размер release-бинаря после реализации — 12 MiB (бюджет 40 MiB).
+Версия/cooldown: `0.3.5` опубликован 2026-10-09; на 2026-10-22 он был
+моложе 14 дней, поэтому временно (2026-10-22 → 23) действовал **глобальный**
+13-дневный `min-publish-age` (Cargo 1.101 nightly не имеет декларативного
+per-package allowlist). T1.5 завершил исключение 2026-10-23: действует
+политика `14 days`, `0.3.5` остаётся в `Cargo.lock`.
+Отклонено: `instant-distance` (archived 2026-07-23, no persistence),
+`self_cell` (lifetime/`&mut`), `sqlite-vector-rs`/`usearch` (C++/FFI, Arrow,
+static/MSRV), `hnsw` (rust-cv; 2021, hamming-oriented), `hannoy`/LMDB (C).
+`hnswlib-rs` (wilsonzlin) — запасной вариант: owned API и int8-квантование
+интересны для следующей итерации, но сейчас меньше adoption, частые breaking
+releases, кастомные `corenn-kernels` и нет mmap-истории в нашем сценарии.
+
+**ADR-16. Vector-cache capacity/pinning для ANN (spec `docs/specs/hybrid-providers`, DELTA-9).**
+Выбрано: `[hybrid.cache] max_bytes` (default 1 GiB) ограничивает
+content-addressed `VectorCache`; ANN требует 100% coverage, поэтому дефолт
+256 MiB заменён. Backfill берёт per-project lease: уникальные хеши проекта
+пишутся в `vector_cache_leases` на 1 час, `evict` их не трогает; успешный ANN
+build снимает lease после `READY`, failed build оставляет его для retry.
+Глобальный ANN-диск ограничен 4 GiB (oldest-first, newest/current project
+kept). Отклонено: строить ANN по частичному покрытию (тихий recall-риск),
+отдельный vector store (дублирует source of truth), безусловное удаление
+tmp-каталогов (гонка с build), удаление текущего проекта при disk cleanup.
+Закрыто T11 2026-10-23: Windows/macOS runtime подтверждён CI, T1.5 снят, спека ann-index — Final.
 
 ## 13. Directory structure
 

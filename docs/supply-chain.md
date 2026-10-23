@@ -5,6 +5,14 @@ Short version: Dependabot is our freshness watchman, **not** our supply-chain
 defense. Trust is enforced by quarantine (time) today and by audit (`cargo-vet`)
 in stage 2.
 
+> **Temporary exception closed (2026-10-22 → 2026-10-23):** the `ann-index`
+> work resolved `hnsw_rs 0.3.5` (published 2026-10-09) under a temporary
+> `13 days` window. The policy default `14 days` is restored as of 2026-10-23
+> (ann-index T1.5); `0.3.5` stays pinned in `Cargo.lock`, and the temporary
+> window/ rationale are recorded in `docs/specs/ann-index/progress.md`.
+> Cargo 1.101 nightly supports `min-publish-age` only globally or
+> per-registry; there is still no declarative per-package allowlist.
+
 ## Problem
 
 A malicious or compromised crate version can enter the build through:

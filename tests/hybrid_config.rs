@@ -7,7 +7,9 @@ use docsbase_memory::hybrid::Ranking;
 use docsbase_memory::hybrid::blocking;
 #[cfg(feature = "hybrid-remote")]
 use docsbase_memory::hybrid::config::RerankerCfg;
-use docsbase_memory::hybrid::config::{EmbeddingCfg, HybridCfg, cache_model_id, from_config};
+use docsbase_memory::hybrid::config::{
+    CacheCfg, EmbeddingCfg, HybridCfg, cache_model_id, from_config,
+};
 
 #[test]
 fn cache_key_carries_model_dim_and_postprocess() {
@@ -71,6 +73,7 @@ fn unknown_provider_is_rejected_before_any_network_setup() {
         }),
         reranker: None,
         ranking: Ranking::Lexical,
+        cache: CacheCfg::default(),
     };
     let error = from_config(&cfg, true).expect_err("provider must be validated");
     let Error::Admission { message } = error else {
@@ -86,6 +89,7 @@ fn unknown_provider_is_rejected_before_any_network_setup() {
             ..RerankerCfg::default()
         }),
         ranking: Ranking::Lexical,
+        cache: CacheCfg::default(),
     };
     assert!(matches!(
         from_config(&cfg, true),
@@ -105,6 +109,7 @@ fn rerank_window_bounds_are_enforced() {
                 ..RerankerCfg::default()
             }),
             ranking: Ranking::Lexical,
+            cache: CacheCfg::default(),
         };
         let error = from_config(&cfg, true).expect_err("window must be bounded");
         let Error::Admission { message } = error else {
@@ -158,6 +163,7 @@ fn rrf_without_the_embedding_stage_is_an_admission_error() {
         embedding: None,
         reranker: None,
         ranking: Ranking::Rrf,
+        cache: CacheCfg::default(),
     };
     let err = from_config(&cfg, true).expect_err("rrf without embedding");
     assert!(
@@ -173,6 +179,7 @@ fn rrf_keeps_the_configuration_error_across_feature_modes() {
         embedding: None,
         reranker: None,
         ranking: Ranking::Rrf,
+        cache: CacheCfg::default(),
     };
     for feature_on in [false, true] {
         let err = from_config(&cfg, feature_on).expect_err("rrf without embedding");
@@ -190,6 +197,7 @@ fn enabled_without_stages_resolves_to_empty_stages_offline() {
         embedding: None,
         reranker: None,
         ranking: Ranking::Lexical,
+        cache: CacheCfg::default(),
     };
     let stages = from_config(&cfg, false).expect("no stages, nothing to resolve");
     assert!(stages.embedder.is_none() && stages.reranker.is_none());

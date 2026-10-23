@@ -30,7 +30,9 @@ impl Default for CacheLimits {
     fn default() -> Self {
         Self {
             max_entries: 1_000_000,
-            max_bytes: 256 * 1024 * 1024,
+            // 75k x 2048 f32 is ~586 MiB; ANN requires full coverage
+            // (ann-index FR-6), so the default must hold the target corpus.
+            max_bytes: 1024 * 1024 * 1024,
         }
     }
 }
@@ -57,6 +59,9 @@ pub struct VectorCache {
     conn: Connection,
     sequence: i64,
     limits: CacheLimits,
+    /// Emits the over-budget warning once per operation instead of once per
+    /// `put` (a 75k backfill must not print 75k warnings).
+    warned_over_budget: bool,
 }
 
 impl VectorCache {
@@ -90,6 +95,13 @@ impl VectorCache {
                  vector BLOB NOT NULL,
                  used_at INTEGER NOT NULL,
                  PRIMARY KEY (model_id, chunk_hash)
+             );
+             CREATE TABLE IF NOT EXISTS vector_cache_leases (
+                 lease_id INTEGER NOT NULL,
+                 model_id TEXT NOT NULL,
+                 chunk_hash TEXT NOT NULL,
+                 expires_at INTEGER NOT NULL,
+                 PRIMARY KEY (lease_id, model_id, chunk_hash)
              );",
         )
         .map_err(|err| Error::internal_with_source("create vector cache schema", err))?;
@@ -104,6 +116,7 @@ impl VectorCache {
             conn,
             sequence,
             limits,
+            warned_over_budget: false,
         })
     }
 
@@ -165,6 +178,88 @@ impl VectorCache {
             )
             .map_err(|err| Error::internal_with_source("store vector", err))?;
         self.evict()
+    }
+
+    /// Protects `hashes` from LRU eviction until `ttl` expires (backfill
+    /// lease for ANN builds, DELTA-9).
+    ///
+    /// # Errors
+    /// Returns [`Error::Internal`] on `SQLite` failures.
+    pub fn pin(
+        &mut self,
+        lease_id: i64,
+        model_id: &str,
+        hashes: &[String],
+        ttl: Duration,
+    ) -> Result<()> {
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        let now = now_secs();
+        let expires = now.saturating_add(i64::try_from(ttl.as_secs()).unwrap_or(i64::MAX));
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|err| Error::internal_with_source("begin pin transaction", err))?;
+        tx.execute(
+            "DELETE FROM vector_cache_leases WHERE expires_at <= ?1",
+            params![now],
+        )
+        .map_err(|err| Error::internal_with_source("purge expired leases", err))?;
+        for hash in hashes {
+            tx.execute(
+                "INSERT INTO vector_cache_leases (lease_id, model_id, chunk_hash, expires_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(lease_id, model_id, chunk_hash)
+                 DO UPDATE SET expires_at = excluded.expires_at",
+                params![lease_id, model_id, hash, expires],
+            )
+            .map_err(|err| Error::internal_with_source("pin vector", err))?;
+        }
+        tx.commit()
+            .map_err(|err| Error::internal_with_source("commit pins", err))
+    }
+
+    /// Releases a backfill lease.
+    ///
+    /// # Errors
+    /// Returns [`Error::Internal`] on `SQLite` failures.
+    pub fn unpin(&mut self, lease_id: i64, model_id: &str, hashes: &[String]) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|err| Error::internal_with_source("begin unpin transaction", err))?;
+        for hash in hashes {
+            tx.execute(
+                "DELETE FROM vector_cache_leases
+                 WHERE lease_id = ?1 AND model_id = ?2 AND chunk_hash = ?3",
+                params![lease_id, model_id, hash],
+            )
+            .map_err(|err| Error::internal_with_source("unpin vector", err))?;
+        }
+        tx.commit()
+            .map_err(|err| Error::internal_with_source("commit unpins", err))?;
+        // Releasing leases is the moment the cache becomes evictable again;
+        // without this the over-budget rows would survive until the next put.
+        self.evict()
+    }
+
+    /// Debug-only: rows currently protected by a lease for `model_id`.
+    ///
+    /// # Errors
+    /// `SQLite` failures.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn lease_count(&self, model_id: &str) -> Result<u64> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM vector_cache_leases WHERE model_id = ?1",
+                params![model_id],
+                |row| row.get(0),
+            )
+            .map_err(|err| Error::internal_with_source("count vector leases", err))?;
+        Ok(u64::try_from(count).unwrap_or(u64::MAX))
     }
 
     /// Embeds `texts`, reusing cached vectors keyed by `(model, chunk_hash)`.
@@ -305,23 +400,63 @@ impl VectorCache {
             let count = u64::try_from(count).unwrap_or(u64::MAX);
             let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
             if count <= self.limits.max_entries && bytes <= self.limits.max_bytes {
+                self.warned_over_budget = false;
                 return Ok(());
             }
+            let now = now_secs();
+            let purged = self
+                .conn
+                .execute(
+                    "DELETE FROM vector_cache_leases WHERE expires_at <= ?1",
+                    params![now],
+                )
+                .map_err(|err| Error::internal_with_source("purge expired vector leases", err))?;
             let removed = self
                 .conn
                 .execute(
                     "DELETE FROM vector_cache WHERE rowid = (
-                         SELECT rowid FROM vector_cache
-                         ORDER BY used_at ASC, rowid ASC LIMIT 1
+                         SELECT v.rowid FROM vector_cache v
+                         WHERE NOT EXISTS (
+                             SELECT 1 FROM vector_cache_leases p
+                             WHERE p.model_id = v.model_id
+                               AND p.chunk_hash = v.chunk_hash
+                               AND p.expires_at > ?1
+                         )
+                         ORDER BY v.used_at ASC, v.rowid ASC LIMIT 1
                      )",
-                    [],
+                    params![now],
                 )
                 .map_err(|err| Error::internal_with_source("evict vector", err))?;
+            if removed > 0 {
+                self.warned_over_budget = false;
+            }
             if removed == 0 {
+                if purged > 0 {
+                    // Expired leases may have freed rows in this round; recheck
+                    // before giving up (Delta 0.3, FR-9 diagnostics).
+                    continue;
+                }
+                if !self.warned_over_budget {
+                    self.warned_over_budget = true;
+                    eprintln!(
+                        "warning: vector cache over budget with every candidate leased \
+                         ({bytes} > {} bytes, {count} > {} entries); keeping leased rows \
+                         until their leases are released or expire",
+                        self.limits.max_bytes, self.limits.max_entries
+                    );
+                }
                 return Ok(());
             }
         }
     }
+}
+
+/// Unix seconds for pin expiry.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 fn decode_vector(dim: usize, bytes: &[u8]) -> Result<Vec<f32>> {
@@ -347,6 +482,16 @@ fn decode_vector(dim: usize, bytes: &[u8]) -> Result<Vec<f32>> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn default_budget_holds_the_target_ann_corpus() {
+        let target = 75_000_u64 * 2048 * 4;
+        assert!(
+            CacheLimits::default().max_bytes >= target,
+            "default {} < target {target}",
+            CacheLimits::default().max_bytes
+        );
+    }
 
     #[test]
     fn lru_eviction_keeps_recent_entries() {

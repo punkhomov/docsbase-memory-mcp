@@ -4,6 +4,10 @@
 //! smoke, not here.
 
 use std::fs;
+#[cfg(debug_assertions)]
+use std::path::PathBuf;
+#[cfg(debug_assertions)]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use docsbase_memory::config::Config;
@@ -11,9 +15,13 @@ use docsbase_memory::daemon::registry;
 use docsbase_memory::daemon::tools::run_project_index;
 use docsbase_memory::error::Result;
 use docsbase_memory::hybrid::HybridCfg;
+#[cfg(debug_assertions)]
+use docsbase_memory::hybrid::jobs::set_test_ann_max_bytes;
 use docsbase_memory::hybrid::jobs::{coverage_with, embed_project_chunks_with, embed_texts};
 use docsbase_memory::store::Db;
 use docsbase_memory::vector_cache::Embedder;
+#[cfg(debug_assertions)]
+use docsbase_memory::vector_cache::VectorCache;
 use tempfile::TempDir;
 
 struct FakeEmbedder {
@@ -117,6 +125,83 @@ fn enabled_hybrid_in_the_offline_build_is_an_admission_error() {
     assert!(
         matches!(error, docsbase_memory::error::Error::Admission { .. }),
         "{error}"
+    );
+}
+
+/// Embedder that records how many leases the cache held while it ran: the
+/// backfill pins *before* embedding, so this observes the admission decision.
+#[cfg(debug_assertions)]
+struct LeaseProbe {
+    root: PathBuf,
+    seen: AtomicU64,
+}
+
+#[cfg(debug_assertions)]
+impl LeaseProbe {
+    fn new(root: &std::path::Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            seen: AtomicU64::new(u64::MAX),
+        }
+    }
+
+    fn seen(&self) -> u64 {
+        self.seen.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Embedder for LeaseProbe {
+    fn model_id(&self) -> &'static str {
+        "fake/model@d3@l2"
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let cache = VectorCache::open(&self.root)?;
+        self.seen
+            .store(cache.lease_count(self.model_id())?, Ordering::SeqCst);
+        Ok(texts
+            .iter()
+            .map(|text| vec![text.len() as f32, 0.5, 0.25])
+            .collect())
+    }
+}
+
+#[cfg(debug_assertions)]
+struct CapReset;
+
+#[cfg(debug_assertions)]
+impl Drop for CapReset {
+    fn drop(&mut self) {
+        set_test_ann_max_bytes(0);
+    }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn backfill_leases_only_when_the_build_can_be_admitted() {
+    let _reset = CapReset;
+    let (cache, db, project_id) = indexed_project();
+    // Dim 3 costs 1048 bytes per row (graph 1036 + exact 12): 4 distinct hashes
+    // fit 4500 bytes, 5 chunk rows do not. The lease must follow the row count
+    // (what `resolve_rows` admits), not the deduped hash count.
+    set_test_ann_max_bytes(4_500);
+    let probe = LeaseProbe::new(cache.path());
+    embed_project_chunks_with(&db, &probe, project_id).expect("backfill");
+    assert_eq!(
+        probe.seen(),
+        0,
+        "a corpus the build cannot admit must not take a backfill lease"
+    );
+
+    // Control: the default cap admits the same corpus, so the lease is taken.
+    set_test_ann_max_bytes(0);
+    let probe = LeaseProbe::new(cache.path());
+    embed_project_chunks_with(&db, &probe, project_id).expect("backfill");
+    assert!(
+        probe.seen() > 0,
+        "an admitted corpus must pin its vectors before embedding"
     );
 }
 
