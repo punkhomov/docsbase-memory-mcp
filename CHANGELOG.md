@@ -23,8 +23,10 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
   CI test added; binary +1.1 MiB). `DenseCache.max_bytes` now counts the exact
   rows a background build keeps alive, an over-cap build stays exact instead of
   exceeding the resident cap, backfill leases are only taken when an ANN build
-  can follow, releasing a lease evicts, and a cache that is over budget while
-  every row is leased warns once instead of on every write. `search_docs` logs
+  can follow (including the resident-cap admission rule), releasing a lease
+  evicts, and a cache that is over budget while every row is leased warns once
+  instead of on every write. The default resident cap is 1.5 GiB so the
+  documented 75k×2048 corpus (1.22 GiB build peak) is still admitted. `search_docs` logs
   ANN search errors separately from "insufficient candidates", and the daemon
   no longer warms a persisted ANN for projects whose ranking is lexical.
 

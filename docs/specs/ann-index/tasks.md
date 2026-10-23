@@ -502,6 +502,52 @@ profile.release.panic="abort"` падает с внятным сообщение
 
 **Acceptance:** оба теста зелёные; `search_bench` baseline не изменён.
 
+## Delta 0.3.1 tasks (2026-10-23, re-review)
+
+### T17 — Admit the documented corpus under the resident cap
+
+**Goal:** ANN снова собирается на 75k×2048 при дефолтах.
+
+**Files:** `src/hybrid/dense.rs`.
+
+**Steps:**
+1. `DenseCacheLimits::default().max_bytes` = 1.5 GiB (пик 1.22 GiB + запас).
+2. `ann_build_admitted` / `ann_build_admitted_for_model` как единственный
+   источник правила `graph + exact <= max_bytes`.
+3. Guard-тест на 75k×2048 и на steady-state ≤ 1 GiB.
+
+**Acceptance:** `default_cap_admits_the_documented_target_corpus` зелёный;
+75k admission проходит, 61 680-порог снят.
+
+### T18 — Pin only when a build can follow
+
+**Goal:** лиз не подвешивает бюджет, если сборка невозможна.
+
+**Files:** `src/hybrid/jobs.rs`.
+
+**Steps:**
+1. Внутри `embed_project_chunks_with_limits_and_pin` применять
+   `ann_build_admitted_for_model(hashes.len(), model_id, default.max_bytes)` к
+   `pin_for_ann`.
+2. Док-комментарий описывает фактическое правило.
+
+**Acceptance:** code + clippy; пин не ставится для корпуса вне admission.
+
+### T19 — Test hooks and lifecycle corrections
+
+**Goal:** release-сборка тестов компилируется; cleanup не блокируется warm-гейтом.
+
+**Files:** `tests/hybrid_rank_ann.rs`, `src/daemon/server.rs`,
+`src/daemon/tools.rs`.
+
+**Steps:**
+1. `#![cfg(debug_assertions)]` на тестовом таргете, RAII-сброс задержки.
+2. `refresh_ann_after_sync`: гейт только вокруг `warm`, cleanup — всегда.
+3. Счётчик ANN инкрементируется только при фактическом обслуживании.
+
+**Acceptance:** `cargo test --release --test hybrid_rank_ann --no-run`
+компилируется; server-тесты зелёные; e2e-ассерт «served» честный.
+
 ## Definition of done
 
 - `hnsw_rs 0.3.5` + `ouroboros` compile on MSRV 1.88 and all CI platforms;

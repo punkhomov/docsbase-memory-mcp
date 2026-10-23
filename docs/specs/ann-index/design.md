@@ -356,6 +356,10 @@ struct DenseCacheLimits {
   `hnsw_rs` — это и есть FR-5/SC-4 seam, а с abort паника парсера дампа
   становится abort'ом процесса. Инвариант закреплён const-assert в
   `src/hybrid/ann.rs` и release-тестом в CI (Delta 0.3).
+- Резидентный кап `DenseCacheLimits::max_bytes` (дефолт 1.5 GiB, Delta 0.3.1)
+  покрывает пик сборки: `ann_estimated_bytes + exact_rows` (1.22 GiB на
+  75k×2048). Admission проверяется общей функцией `ann_build_admitted`, её же
+  использует пин backfill-лиза.
 - `DenseRows::Failed { retry_at }` хранит hashes/статус; search стримит exact,
   retry запускает новый build после `retry_at` (не переиспользует старый
   `Building`).

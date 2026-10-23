@@ -307,3 +307,40 @@
   full `cargo test --locked --features hybrid-remote`; `search_bench
   metrics_match_baseline` (baseline unchanged). Still open (unchanged):
   Windows/macOS runtime CI (OQ-4), 75k manual run, T1.5 cooldown revert.
+
+- Task T17: complete (2026-10-23, re-review). The Delta 0.3 admission rule
+  (`graph + exact <= max_bytes`) made the ANN unreachable for the documented
+  75k×2048 corpus: 1,305,600,000 B needed vs a 1,073,741,824 B default cap
+  (ceiling 61,680 chunks at d2048, no config key). Raised the default resident
+  cap to 1.5 GiB and moved the rule into `ann_build_admitted` /
+  `ann_build_admitted_for_model`; steady-state ANN stays 691 MB (NFR-4 model
+  unchanged, the cap now covers the transient build peak). Guard test:
+  `default_cap_admits_the_documented_target_corpus`. Note: the earlier T10
+  figure "691 MiB, still under the 1 GiB cap" described the steady ANN, not the
+  build peak; the cap is 1.5 GiB now.
+
+- Task T18: complete (2026-10-23, re-review). Backfill leases now require build
+  admissibility, not only `enabled && ranking == rrf`:
+  `ann_build_admitted_for_model(hashes.len(), model_id, default.max_bytes)` is
+  applied inside `embed_project_chunks_with_limits_and_pin`, so a corpus the
+  cap cannot admit no longer suspends the vector-cache budget for one hour
+  without a build consuming the reservation.
+
+- Task T19: complete (2026-10-23, re-review). The e2e target is now wholly
+  `#![cfg(debug_assertions)]` with a RAII delay reset, so
+  `cargo test --release --test hybrid_rank_ann --no-run` compiles again (it
+  failed with E0432 after the debug hooks landed). `refresh_ann_after_sync`
+  gates only `warm` on `enabled && ranking == rrf`; `cleanup`/`cleanup_disk`
+  run for every project with an embedding stage so an rrf→lexical flip still
+  reclaims dumps. `ANN_SEARCHES` now counts only lookups the ANN actually
+  served, so "the published ANN serves the read path" is not satisfied by a
+  consultation that fell back to exact.
+
+- Delta 0.3.1 status (2026-10-23): re-review of `19c1766..7768870` by three
+  models: one BLOCK (corpus admission), two OK WITH NOTES (cleanup behind the
+  warm gate, release test target, counter semantics). All four are closed in
+  T17–T19. Verify: `cargo fmt --check`; clippy `--all-targets -D warnings`
+  (1.88); full default and `--features hybrid-remote` suites; `cargo test
+  --release --test hybrid_rank_ann --no-run`; arithmetic guard test. Known
+  pre-existing flakes (not introduced here, not fixed): `tie_break_by_chunk_id`
+  and `scores_are_one_minus_cosine` on 2–3 point graphs.
