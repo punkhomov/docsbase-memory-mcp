@@ -556,7 +556,9 @@ tmp-каталогов (гонка с build), удаление текущего 
 Сеть на index/search-путях запрещена: отсутствие рантайма/модели — admission-ошибка
 с подсказкой, без молчаливого fallback.
 ORT-стратегия: `ort-load-dynamic`; `connect` качает закреплённый ONNX Runtime
-(1.24.x, `api-24`) под платформу/арх, проверяет sha256 и кладёт в data-dir; на старте
+(**1.24.4**, `api-24`; `linux-x64/aarch64`, `osx-arm64`, `win-x64/arm64` — macOS
+x86_64 больше не публикуется, минимальная macOS 14.0) под платформу/арх, проверяет
+sha256 и кладёт в data-dir; на старте
 `ort::init_from(path)` до создания сессий (порядок резолва: `ORT_DYLIB_PATH` →
 data-dir → ошибка). Рантайм считается исполняемым кодом: explicit connect, pinned
 version + hash, запись в SECURITY. Бюджет 40 MiB (NFR-2) относится к бинарю;
@@ -565,8 +567,11 @@ version + hash, запись в SECURITY. Бюджет 40 MiB (NFR-2) относ
 пересмотреть после 2026-11-06), `ort = "=2.0.0-rc.13"` (release candidate — риск
 зафиксирован), `ureq 3.4.x` + `sha2` + `flate2/tar/zip` для загрузки/распаковки
 рантайма, `tokenizers` с Oniguruma (C, прецедент — bundled sqlite3). Модели:
-`bge-small-en-v1.5` (384, CLS), `multilingual-e5-small` (384, Mean),
-`bge-reranker-base` (MIT); `jina-reranker-v2` отклонён (CC-BY-NC).
+`bge-small-en-v1.5` (384, CLS, 133 MB), `multilingual-e5-small` int8 (384,
+Mean, 118 MB), rerank `jina-reranker-v1-turbo-en` int8 (38 MB, Apache-2.0, 8K);
+`jina-reranker-v2` отклонён (CC-BY-NC-4.0), `bge-reranker-base` (1.11 GB) — только
+опция. E5 требует `query: `/`passage: `, BGE — query-instruction; `Embedder`
+получает `embed_query`, `model_id` — `@p<prompt_version>` (FR-13).
 Отклонено: бандлить ORT в релизные артефакты, авто-скачивание при первом поиске,
 дефолтная модель, обязательный локальный вес в v1, candle-only путь (нет rerank),
 новые пользовательские ключи сверх `[providers]`/`[hybrid]`.

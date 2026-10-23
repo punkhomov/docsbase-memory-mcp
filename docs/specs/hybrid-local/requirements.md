@@ -1,10 +1,30 @@
 # SPECIFICATION: hybrid-local (итерация 4)
 
-**Status:** Draft, ревизия 0.2 · **Дата:** 2026-10-23
+**Status:** Draft, ревизия 0.3 · **Дата:** 2026-10-23
 **Constitution:** `docs/specs/constitution.md` (1.3.0)
 **Related:** `docs/specs/hybrid-providers/` (dense/RRF), `docs/specs/ann-index/` (ANN),
 ADR-12 (cache key), ADR-13 (local models behind a flag), ADR-14 (OpenRouter),
 ADR-17 (this iteration).
+
+**Delta 0.3 (2026-10-23, web verification):**
+- **ORT matrix is 5, not 6.** ONNX Runtime 1.24.4 ships `linux-x64`, `linux-aarch64`,
+  `osx-arm64`, `win-x64`, `win-arm64`; **macOS x86_64 was dropped** and minimum macOS is
+  **14.0**. `ort v2.0.0+` maps to ORT **1.24.4** (`api-24`), so pin `1.24.4`, not a range.
+- **Model sizes are decisive.** `bge-small-en-v1.5` onnx 133 MB (MIT, 384/Cls);
+  `multilingual-e5-small` fp32 470 MB / int8 118 MB (MIT, 384/Mean);
+  `bge-reranker-base` **1.11 GB** (MIT); `jina-reranker-v1-turbo-en` int8 **38 MB**
+  (Apache-2.0, 37.8M params, 8K tokens). The default reranker becomes **jina v1 turbo
+  int8**; `jina-reranker-v2` stays excluded (CC-BY-NC-4.0, verified).
+- **Role-aware prefixes are mandatory.** E5 requires `query: ` / `passage: ` prefixes;
+  BGE v1.5 requires the query instruction `Represent this sentence for searching relevant
+  passages: ` on queries only. Embedding a query without its prefix silently degrades
+  retrieval. The `Embedder` trait gains `embed_query` (default = `embed`); the registry
+  carries `query_prefix`/`passage_prefix` and `prompt_version`, and `model_id` includes
+  `@p<version>` so a prefix change invalidates vectors.
+- **fastembed 7.1.1 loads embedding ONNX via `Vec<u8>`** (no file-based source); file-based
+  loading lands in 7.5+, which is blocked by the 14-day cooldown until 2026-11-06. With the
+  chosen int8 models (118 MB, 38 MB) the peak is acceptable; rerank already supports
+  `OnnxSource::File` in 7.1.1.
 
 ## 1. Problem
 
@@ -152,8 +172,15 @@ returns `(index, score)` pairs; without it, config validation fails.
   config by default, the global config with `--global`, and errors when outside a project
   without `--global` or when both scope flags are present.
 - **FR-9 (must).** `provider = "fastembed"` constructs `Embedder`/`Reranker`; `model_id`
-  includes provider, model, dim, normalization and the first 8 chars of the model revision;
+  includes provider, model, dim, normalization, the first 8 chars of the model revision and
+  the prompt-scheme version: `fastembed/<name>@d<dim>@l2@r<rev8>@p<version>`.
   `normalize` must be true for registry models.
+- **FR-13 (must).** Asymmetric retrieval prefixes: `Embedder` gains
+  `embed_query(&self, text: &str) -> Result<Vec<f32>>` (default: `embed([text])`). The
+  search path uses `embed_query`; backfill uses `embed` for passages. Registry entries carry
+  `query_prefix`/`passage_prefix` (E5: `query: `/`passage: `; BGE: instruction/empty;
+  models without prefixes: both `None`). A prefix change bumps `prompt_version` and
+  therefore `model_id`.
 - **FR-10 (must).** Runtime resolution order: `ORT_DYLIB_PATH` → configured runtime path →
   docsbase data-dir → admission error naming `docsbase connect fastembed`. Initialization
   happens before any ONNX session.
@@ -198,7 +225,8 @@ returns `(index, score)` pairs; without it, config validation fails.
 
 **Model registry entry (code):** `name`, `task` (`Embedding|Rerank`), `repo`,
 `revision` (HF commit sha), `onnx`, `additional[]`, `dim`, `pooling` (`Cls|Mean`, embedding
-only), `quantization`, `output_key`, `license`, `files[]` (`path`, `size`, `sha256`).
+only), `quantization`, `output_key`, `license`, `files[]` (`path`, `size`, `sha256`),
+`query_prefix`, `passage_prefix`, `prompt_version`.
 
 **Model cache:** `<cache>/<name>/<revision>/` with registry files plus `.complete`; the
 revision is part of the path so updates never mix vectors.
@@ -206,7 +234,7 @@ revision is part of the path so updates never mix vectors.
 **Selection (project or global config):** `[hybrid.embedding]` (`provider`, `model`,
 `dimensions`, `normalize`) and `[hybrid.reranker]` (`provider`, `model`, `window`).
 
-**Cache key:** `model_id = fastembed/<name>@d<dim>@<l2|raw>@r<rev8>`.
+**Cache key:** `model_id = fastembed/<name>@d<dim>@<l2|raw>@r<rev8>@p<prompt_version>`.
 
 ## 8. Interfaces
 
@@ -243,16 +271,18 @@ fastembed`), and never contain keys or file contents.
 - **SC-7.** The ignored live test (connect/fetch/embed/rerank on a real model) passes on a
   machine with network, and the ledger records versions, hashes, sizes, latency and RSS.
 - **SC-8.** Docs updated: ADR-17, this spec, `docs/CONFIG.md`, README, SECURITY, CHANGELOG.
+- **SC-9.** Query/passage prefixes: search calls `embed_query`, backfill calls `embed`; a
+  test fails if a registry prefix is dropped or applied to the wrong role (FR-13).
 
 ## 10. Assumptions & challenges
 
 | Assumption | Adversarial question | Resolution |
 |---|---|---|
-| ORT can be downloaded per platform and loaded with `ort-load-dynamic` | What if `ort` rc.13 changes the dynamic-loading API or the prebuilt is unavailable? | Pin `ort = rc.13`; runtime version pinned; a live test + `--check`; fallback path `ORT_DYLIB_PATH`; revisit when 7.5.0 passes cooldown |
+| ORT 1.24.4 can be downloaded per platform and loaded with `ort-load-dynamic` | What if `ort` rc.13 changes the dynamic-loading API or the prebuilt is unavailable? | `ort v2.0.0+` maps to ORT 1.24.4 (`api-24`); five assets exist; pin both; a live test + `--check`; `ORT_DYLIB_PATH` fallback |
 | Pinned HF revision + sha256 is enough provenance | What if HF rewrites LFS objects or a repo is deleted? | Revision is a commit sha; sha256 is in-code; `fetch` fails closed; registry update is a code change |
 | `[providers]` only in global config | What about a project checked into a repo with a provider entry? | Explicit validation error; machine capabilities are not repository state |
 | No default model | Is the UX acceptable? | `models use --provider fastembed --embedding …` is explicit; `connect` prints the exact snippet; defaults would hide re-embedding costs |
-| 14-day cooldown allows `fastembed 7.1.1` | What if 7.1.1 has a bug fixed in 7.2? | Pin is temporary; revisit after 2026-11-06; ADR records the trade-off |
+| 14-day cooldown allows `fastembed 7.1.1` | What if 7.1.1 has a bug fixed in 7.2, or we need file-based embedding loading? | Pin is temporary; 7.5 adds `OnnxSource` for embeddings; revisit after 2026-11-06; int8 models keep the 7.1.1 memory spike acceptable |
 | No weights in the binary | Does `fastembed` embed any model? | Only code; `UserDefinedEmbeddingModel` is built from fetched files |
 | `models use` can rewrite TOML without `toml_edit` | Are comments lost? | Known limitation, printed by the command; no new dependency in v1 |
 | Oniguruma (C) builds on all CI targets | Windows/macOS toolchains? | Already build bundled sqlite3; CI matrix proves it in T7 |
@@ -264,9 +294,13 @@ MCP management tools, `docsbase serve` model endpoints, quantized-on-the-fly con
 
 ## 12. Open questions
 
-- **OQ-1.** Exact ORT 1.24.x release URLs/sha256 for six targets — resolved in T2; default:
-  official Microsoft release archives.
+- **OQ-1.** Exact ORT 1.24.4 release URLs/sha256 for the five targets — resolved in T2
+  (official Microsoft release archives; macOS x86_64 is not published).
 - **OQ-2.** Whether `connect --models` is worth keeping beyond convenience — default:
   keep as a thin wrapper around `fetch`.
 - **OQ-3.** Live CI run cadence for a real model — default: manual/nightly, never per-PR.
 - **OQ-4.** Cache location override name — default: `DOCSBASE_MODEL_CACHE`.
+- **OQ-5.** Multilingual default: E5-small int8 (118 MB, prefixes) vs bge-small (English,
+  133 MB). Proposed: list both; docs recommend E5 for RU/EN; no automatic default.
+- **OQ-6.** Whether to expose `jina-reranker-v1-turbo-en` fp32 (151 MB) as an alternative
+  to int8 (38 MB) — default: int8 only, quality is acceptable for rerank.

@@ -17,6 +17,7 @@ machine-local provider registry.
 1. Silent network on search/index (must fail with an admission hint) — T3/T4.
 2. Partial model/runtime install used after a crash — T1/T2 (`*.part` + `.complete` + rename).
 3. Scope mistakes in `models use` (writing global when project was meant) — T6.
+3b. Missing query/passage prefixes silently degrading retrieval — T4 (FR-13).
 4. `[providers]` leaking into a committed project config — T3.
 5. Default build growth (feature leakage/deps) — T7 tree gate.
 
@@ -32,16 +33,20 @@ machine-local provider registry.
 **Interfaces:**
 - Produces: `ModelEntry`, `FileSpec`, `Task`, `Pooling`, `ModelSource`, `entry(&str)`,
   `fetch(&ModelEntry, &dyn ModelSource) -> Result<PathBuf>`, `cached(&ModelEntry) -> bool`,
-  `cache_dir(name, revision) -> PathBuf`, `model_id(entry, dim, normalize) -> String`.
+  `cache_dir(name, revision) -> PathBuf`,
+  `model_id(entry, dim, normalize) -> String` (includes `@p<prompt_version>`).
 - Consumes: `Error`, `crate::paths` (cache dir), `fd-lock`.
 **Steps:**
 1. RED: `registry_entries_are_well_formed` — unique names, dim > 0, `onnx` + tokenizer
-   files listed with size/sha256, embedding entries have pooling, licenses non-empty.
+   files listed with size/sha256, embedding entries have pooling, licenses non-empty,
+   E5 entries carry `query: `/`passage: ` prefixes, BGE carries the query instruction,
+   `prompt_version` is set.
 2. RED: `fetch_installs_all_files_and_completes_last` with a fake `ModelSource` — every
    file written, `.complete` exists, second call downloads zero files.
 3. RED: `fetch_rejects_a_bad_hash` — fake source returns wrong bytes; assert error and no
    directory usable (`cached == false`, no `.complete`).
-4. RED: `model_id_includes_revision` — `fastembed/bge-small-en-v1.5@d384@l2@r<rev8>`.
+4. RED: `model_id_includes_revision_and_prompt` —
+   `fastembed/bge-small-en-v1.5@d384@l2@r<rev8>@p1`.
 5. Run: `cargo test --locked --features hybrid-local --lib hybrid::models` (fails).
 6. GREEN: implement registry type, cache layout, atomic write (`*.part` → fsync → rename),
    `.complete` last, lock file, hash/size checks, `list_state`.
@@ -62,8 +67,9 @@ machine-local provider registry.
   `install(Target, &dyn RuntimeSource, force)`, `init(path)`, `connect::run(args)`.
 - Consumes: `Config::global*`, `providers` config, `models::fetch`.
 **Steps:**
-1. RED: `targets_cover_six_platforms` — exactly linux-x64/aarch64, osx-arm64/x64,
-   win-x64/arm64; unknown target → admission.
+1. RED: `targets_cover_five_platforms` — exactly linux-x64/aarch64, osx-arm64,
+   win-x64/arm64 (macOS x86_64 is not published); unknown target → admission; ORT
+   version pinned to 1.24.4, macOS floor 14.0.
 2. RED: `install_verifies_hash_and_is_atomic` — fake source with bad sha leaves nothing;
    good source installs under `<data>/runtimes/onnxruntime/<ver>/<target>/`.
 3. RED: `connect_check_reports_missing_without_network` — `--check` never calls the source.
@@ -113,19 +119,23 @@ machine-local provider registry.
 **Steps:**
 1. RED: `embedder_without_runtime_fails_with_connect_hint` (no ORT needed).
 2. RED: `embedder_without_model_fails_with_fetch_hint`.
+2b. RED: `embed_query_applies_the_registry_query_prefix` and `embed_appends_passage_prefix`
+   — fake text capture in a test double; BGE gets the instruction on queries only, E5 gets
+   `query: `/`passage: `, models without prefixes stay unchanged (FR-13).
 3. RED: `embedder_model_id_matches_registry` (construct with a stub model dir and a fake
    runtime path? if ORT absent, assert the error precedes construction).
 4. GREEN: build `UserDefinedEmbeddingModel` (onnx bytes, tokenizer files) with pooling and
    quantization; `TextEmbedding::try_new_from_user_defined`; `OnceLock` per key; batch/thread
    options; `blocking::enter` at call sites.
 5. Verify: `cargo test --locked --features hybrid-local --lib hybrid::local`.
-**Acceptance:** FR-9, NFR-4, NFR-7, SC-6.
+**Acceptance:** FR-9, FR-13, NFR-4, NFR-7, SC-6, SC-9.
 **Verify:** `cargo test --locked --features hybrid-local --lib hybrid::local` → ok.
 **Depends:** T1, T3.
 
 ## T5 — `FastEmbedReranker`
 
-**Goal:** local cross-encoder rerank on the same provisioning path.
+**Goal:** local cross-encoder rerank on the same provisioning path; default model
+`jina-reranker-v1-turbo-en` int8 (38 MB, Apache-2.0, 8K), not the 1.11 GB bge-reranker-base.
 **Files:**
 - Modify: `src/hybrid/local.rs`
 - Test: `src/hybrid/local.rs::tests`
@@ -190,8 +200,9 @@ machine-local provider registry.
 - Create: `tests/hybrid_local_live.rs` (`#[ignore]`)
 - Modify: `docs/specs/hybrid-local/progress.md`
 **Steps:**
-1. Ignored test: `connect --check` (or `ORT_DYLIB_PATH`) → `models fetch` → embed 3 texts →
-   rerank 3 docs; assert dimensions/score ordering.
+1. Ignored test: `connect --check` (or `ORT_DYLIB_PATH`) → `models fetch bge-small-en-v1.5`
+   → embed 3 texts → `models fetch jina-reranker-v1-turbo-en` → rerank 3 docs; assert
+   dimensions, query-prefix presence in the embedder call, and score ordering.
 2. Run manually: `cargo test --release --features hybrid-local --test hybrid_local_live -- --ignored --nocapture`.
 3. Ledger: ORT version/sha, model sizes, fetch time, embed/rerank latency, RSS.
 **Acceptance:** SC-7.
@@ -203,7 +214,7 @@ machine-local provider registry.
 ## Task-list self-review
 
 - **Spec coverage:** FR-1→T3; FR-2/3/4/10→T2; FR-5/6/7→T1; FR-8→T6; FR-9→T3/T4;
-  FR-11→T2; FR-12→T3/T4/T5. NFR-1→T7; NFR-2→all; NFR-3→T1/T2; NFR-4/7→T4/T5;
+  FR-11→T2; FR-12→T3/T4/T5; FR-13→T4. NFR-1→T7; NFR-2→all; NFR-3→T1/T2; NFR-4/7→T4/T5;
   NFR-5/6→T1/T2/T3; NFR-8→T7. SC-1→T7; SC-2/3→T2/T3; SC-4→T1; SC-5→T6; SC-6→T4/T5;
   SC-7→T8; SC-8→T7. No uncovered requirement.
 - **Type consistency:** `ModelEntry`/`FileSpec`/`ModelSource` (T1) are consumed by T2/T3/T4;

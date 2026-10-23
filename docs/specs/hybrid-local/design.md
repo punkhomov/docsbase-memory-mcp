@@ -1,7 +1,7 @@
 # Technical Design: hybrid-local (итерация 4)
 
-**Status:** Draft, ревизия 0.2 · **Дата:** 2026-10-23
-**Spec:** `docs/specs/hybrid-local/requirements.md` (ревизия 0.2)
+**Status:** Draft, ревизия 0.3 · **Дата:** 2026-10-23
+**Spec:** `docs/specs/hybrid-local/requirements.md` (ревизия 0.3)
 **ADR:** ADR-17 (product design); ADR-12/13/14 (adjacent).
 
 ## 1. Overview
@@ -21,10 +21,12 @@ never downloads anything (FR-3…FR-10, NFR-1, NFR-6).
 - New crates only per ADR-17: `fastembed = "=7.1.1"`, `ort = "=2.0.0-rc.13"`,
   `ureq 3.4.x`, `sha2`, `flate2`, `tar`, `zip` — all optional, behind `hybrid-local`.
 - No model weights or runtime binaries inside the crate/binary (NFR-8).
+- ORT version: **1.24.4** exactly; supported targets: `linux-x64`, `linux-aarch64`,
+  `osx-arm64`, `win-x64`, `win-arm64` (macOS x86_64 is not published; macOS >= 14.0).
 - Network only in `connect`/`fetch`; none on index/search paths (FR-12).
 - `[providers]` only in the global config; `.docsbase.toml` may contain only `[hybrid]`.
-- `model_id = fastembed/<name>@d<dim>@<l2|raw>@r<rev8>`; a revision change invalidates
-  the vector cache and the ANN key by construction.
+- `model_id = fastembed/<name>@d<dim>@<l2|raw>@r<rev8>@p<prompt_version>`; a revision
+  or prefix change invalidates the vector cache and the ANN key by construction (FR-13).
 
 ## 3. Architecture
 
@@ -72,7 +74,8 @@ pub fn init(path: &Path) -> Result<()>;                 // ort::init_from(..).co
 // hybrid/models.rs
 pub struct FileSpec { pub path: &'static str, pub size: u64, pub sha256: &'static str }
 pub struct ModelEntry { /* name, task, repo, revision, onnx, additional, dim, pooling,
-                           quantization, output_key, license, files */ }
+                           quantization, output_key, license, files,
+                           query_prefix, passage_prefix, prompt_version */ }
 pub trait ModelSource { fn fetch(&self, repo: &str, revision: &str, path: &str) -> Result<Vec<u8>>; }
 pub fn entry(name: &str) -> Result<&'static ModelEntry>;
 pub fn cache_dir(name: &str, revision: &str) -> PathBuf;   // <cache>/<name>/<revision>
@@ -83,6 +86,9 @@ pub fn cached(entry: &ModelEntry) -> bool;                 // .complete present 
 pub fn embedder(cfg: &EmbeddingCfg, providers: &ProvidersCfg) -> Result<Arc<dyn Embedder>>;
 pub fn reranker(cfg: &RerankerCfg, providers: &ProvidersCfg) -> Result<Arc<dyn Reranker>>;
 // both: resolve runtime, require cached model, build TextEmbedding/TextRerank once (OnceLock)
+// embedder additionally implements: fn embed_query(&self, text: &str) -> Result<Vec<f32>>
+// (default trait method = embed(&[text]); local impl prepends query_prefix, while
+//  passage embeds prepend passage_prefix — FR-13)
 ```
 
 Invariants: `init` runs before any `fastembed` constructor; `model_id` is derived only from
@@ -102,6 +108,7 @@ the registry + dim + normalize + revision; `fetch` never leaves a directory with
    sections (comments are not preserved; the command says so).
 4. **search/index** → `from_config` resolves the provider → `local::embedder`/`reranker` →
    runtime `init_from` + `TextEmbedding::try_new_from_user_defined` (cached in `OnceLock`) →
+   search uses `embed_query` (query prefix), backfill uses `embed` (passage prefix) →
    vectors stored under `model_id` → ANN/RRF unchanged.
 5. **failure** → missing provider/runtime/model/dim → `Error::Admission` with one action;
    no network attempt, no fallback.
@@ -110,8 +117,8 @@ the registry + dim + normalize + revision; `fetch` never leaves a directory with
 
 | Crate | Why | Notes |
 |---|---|---|
-| `fastembed = "=7.1.1"` | local embed/rerank, user-defined ONNX models | Apache-2.0; 7.2+ blocked by the 14-day cooldown until 2026-11-06 |
-| `ort = "=2.0.0-rc.13"` | ONNX Runtime binding with `load-dynamic` and `init_from` | transitive via fastembed; rc risk accepted in ADR-17 |
+| `fastembed = "=7.1.1"` | local embed/rerank, user-defined ONNX models | Apache-2.0; 7.2+ blocked by the 14-day cooldown until 2026-11-06; embedding ONNX is loaded via `Vec<u8>` (7.5+ adds file-based `OnnxSource`) |
+| `ort = "=2.0.0-rc.13"` | ONNX Runtime binding with `load-dynamic` and `init_from` | transitive via fastembed; rc risk accepted in ADR-17; `ort v2` targets ORT 1.24.4 (`api-24`) |
 | `ureq 3.4.x` | blocking HTTPS for runtime/model downloads | matches `hf-hub`'s stack; rustls; no async runtime on CLI paths |
 | `sha2 0.10` | sha256 verification | RustCrypto, MIT/Apache |
 | `flate2`, `tar` | extract ORT `.tgz` (Linux/macOS) | standard, pure-Rust defaults |
@@ -162,7 +169,9 @@ Nothing above is linked into the default build (NFR-1).
 |---|---|---|
 | `ort` rc API churn | build/behaviour changes on upgrade | exact pin `=2.0.0-rc.13`; upgrade is a task with live test |
 | ORT download supply chain | malicious/corrupt runtime | pinned URL+sha256, explicit connect, SECURITY note |
-| Model size / first-run UX | 100–300 MB per model | explicit fetch with size shown; `.complete` prevents partial use |
+| Model size / first-run UX | 38–118 MB with the chosen int8 models (bge-reranker-base would be 1.11 GB and is not a default) | explicit fetch with size shown; `.complete` prevents partial use |
+| Prefix omission (BGE/E5) | silent retrieval-quality loss | FR-13 role-aware `embed_query`, registry prefixes, prompt-version in `model_id`, tests in T4 |
+| macOS 14 floor / no x64 macOS | users on older Intel Macs cannot run local models | documented; `connect` fails with a clear unsupported-target error |
 | Oniguruma C build | platform build failures | CI matrix in T7; same toolchain as bundled sqlite3 |
 | TOML rewrite loses comments | user annoyance | printed warning; `toml_edit` considered for a later iteration |
 | Global provider config drift | a repo selects a provider not installed elsewhere | project files cannot contain `[providers]`; admission at open |
@@ -179,6 +188,8 @@ Nothing above is linked into the default build (NFR-1).
    no defaults (FR-5).
 4. **`hf-hub`/fastembed built-in downloader**: rejected — hides network inside the stage and
    bypasses our revision/hash policy.
+5. **`bge-reranker-base` as default reranker**: rejected — 1.11 GB fp32 and 514-token
+   context; `jina-reranker-v1-turbo-en` int8 is 38 MB, Apache-2.0, 8K context (FR-5 set).
 5. **candle-only (pure Rust, qwen3)**: rejected for v1 — no rerank path, larger model set
    churn; may be a later provider.
 6. **Project-level `[providers]`**: rejected — machine capability cannot be committed.
