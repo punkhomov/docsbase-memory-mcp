@@ -50,6 +50,32 @@ Migration layer не делаем: dump чужой версии/формата �
 - **SC-1 scope:** 56.5 s / p95 5.4 ms из T6 — это core-`AnnIndex`, не
   end-to-end; T10 обязан измерить путь `DenseCache`/`VectorCache`/`search_docs`.
 
+**Delta 0.3 (2026-10-23, pre-merge panel + verifier):** три независимых
+ревьюера и отдельный верификатор нашли расхождения между заявленными
+гарантиями и релизными артефактами. Закрываются T12–T16:
+- **SC-4 / release profile:** `[profile.release] panic = "abort"` отключал
+  `catch_unwind`-обёртку `hnsw_rs`, поэтому битый persisted-ANN в шипнутом
+  бинаре абортил процесс вместо exact fallback. `abort` убран (+1.1 MiB на
+  glibc-strip; бюджет NFR-9 — 40 MiB), добавлены compile-time guard
+  (`panic = "abort"` = ошибка сборки) и release-профильный CI-тест
+  `ann_load_failure_falls_back_to_exact`.
+- **FR-7 / NFR-4:** `Building` учитывает граф **и** exact-rows, которые держит
+  тред сборки. Сборка не допускается, если сумма превышает `max_bytes` —
+  проект остаётся exact `Ready`, а не уходит в неучтённый по памяти build.
+- **FR-5 / SC-11 evidence:** e2e-тест обязан доказать, что поиск во время
+  сборки не обращается к ANN (debug-счётчик), что опубликованный ANN реально
+  обслуживает read-path, и что recall@fetch ≥ 0.95 при `fetch ∈ {100, 1000}`
+  против exact-скана. Задержка сборки делает состояние `Building`
+  детерминированным.
+- **Pins / NFR-4:** backfill-лиз ставится только когда ANN-сборка возможна
+  (`ranking = rrf`); `unpin` и истечение лизов запускают eviction; при полном
+  отсутствии вытесняемых строк пишется одно предупреждение (FR-9), а не по
+  одному на `put`.
+- **FR-9:** ошибка `ann.search` логируется отдельно от «insufficient
+  candidates»; warm не строится для `ranking = lexical`.
+- `DenseCache::invalidate` остаётся для удаления проекта; комментарий
+  приведён в соответствие (вызывающего пути в коде пока нет).
+
 ## 1. Problem
 
 Dense-канал RRF сейчас сканирует все векторы проекта точным косинусом:

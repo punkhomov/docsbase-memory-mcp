@@ -420,6 +420,88 @@ Windows CI зелёные; delta 0.2 закрыта.
 
 ---
 
+## Delta 0.3 tasks (2026-10-23)
+
+### T12 — Release panic strategy protects the fallback seam
+
+**Goal:** битый ANN не абортит шипнутый демон.
+
+**Files:** `Cargo.toml`, `src/hybrid/ann.rs`, `.github/workflows/ci.yml`.
+
+**Steps:**
+1. Убрать `panic = "abort"` из `[profile.release]`; замерить размер
+   (glibc-strip: 11.48 MB → 12.63 MB, +1.1 MiB; бюджет 40 MiB).
+2. Const-assert `cfg!(panic = "unwind")` в `ann.rs`: abort = ошибка сборки.
+3. CI (linux-hybrid): `cargo test --release ... ann_load_failure_falls_back_to_exact`.
+
+**Acceptance:** release-тест зелёный; `cargo build --release --config
+profile.release.panic="abort"` падает с внятным сообщением; NFR-9 соблюдён.
+
+### T13 — Building accounts the exact rows it keeps alive
+
+**Goal:** FR-7/NFR-4 — `max_bytes` покрывает весь резидентный набор и во время
+сборки.
+
+**Files:** `src/hybrid/dense.rs`.
+
+**Steps:**
+1. `BuildJob.building_bytes = graph estimate + exact rows`; `seek_ann` требует
+   `building_bytes <= max_bytes`; `BuildingAnn.bytes` = эта сумма.
+2. Тесты: сборка не допускается, когда сумма выходит за кап (проект → `Ready`);
+   `Building.bytes` равен сумме.
+
+**Acceptance:** оба теста зелёные; published `Ann` по-прежнему учитывает только
+граф.
+
+### T14 — Prove the ANN read path and high-fetch recall
+
+**Goal:** регрессия «ANN врёт или не используется» должна ломать CI.
+
+**Files:** `src/hybrid/dense.rs` (debug-хук задержки), `src/daemon/tools.rs`
+(debug-счётчик), `tests/hybrid_rank_ann.rs`, `tests/ann_recall.rs`.
+
+**Steps:**
+1. `set_test_build_delay` (debug-only) делает `Building` детерминированным.
+2. `ann_search_count()` (debug-only) считает ANN-ветку read-path.
+3. E2E: первый `get` = `Building`; поиск во время сборки не увеличивает
+   счётчик; после публикации — увеличивает; результаты детерминированы.
+4. Recall@fetch ≥ 0.95 для `fetch ∈ {100, 1000}` против `top_k`.
+
+**Acceptance:** тесты падают, если ANN-ветку обойти или вернуть неверных
+соседей.
+
+### T15 — Bound backfill leases and evict on release
+
+**Goal:** пины не отменяют бюджет кеша навсегда.
+
+**Files:** `src/hybrid/jobs.rs`, `src/vector_cache.rs`.
+
+**Steps:**
+1. `embed_project_chunks_with_limits_and_pin(..., pin_for_ann)`; daemon пинит
+   только при `enabled && ranking == rrf`.
+2. `unpin` вызывает `evict`; просроченные лизы ретраят eviction; при полном
+   отсутствии вытесняемых строк — одно предупреждение.
+3. Тест: все строки зализованы → бюджет превышен; `unpin` → бюджет восстановлен
+   без следующего `put`.
+
+**Acceptance:** тест зелёный, предупреждение не спамит на каждый `put`.
+
+### T16 — Warm only for RRF and keep search diagnostics honest
+
+**Goal:** не строить ANN для канала, который никто не читает; не терять ошибку
+поиска.
+
+**Files:** `src/daemon/server.rs`, `src/daemon/tools.rs`, `src/hybrid/dense.rs`.
+
+**Steps:**
+1. `refresh_ann_after_sync`: `enabled && ranking == rrf` (плюс embedding).
+2. `dense_candidates`: отдельные ветки для `Err(err)` и «insufficient
+   candidates».
+3. `DenseCache::invalidate`: комментарий = фактическое назначение.
+4. Тесты: RRF-проект публикует дамп после sync; lexical — нет.
+
+**Acceptance:** оба теста зелёные; `search_bench` baseline не изменён.
+
 ## Definition of done
 
 - `hnsw_rs 0.3.5` + `ouroboros` compile on MSRV 1.88 and all CI platforms;

@@ -260,3 +260,50 @@
   Remaining T11 gates: T1.5 (revert 13-day cooldown on 2026-10-23), actual
   Windows/macOS runtime CI, and the final spec status flip. T10 real RSS is
   an un-instrumented diagnostic, not a blocker.
+
+- Task T12: complete (2026-10-23). `[profile.release] panic = "abort"` removed:
+  the ANN fallback seam is `catch_unwind` around `hnsw_rs`, and abort turned a
+  corrupt-dump panic into a process abort in every shipped artifact. Added a
+  const-assert (`panic = "unwind"` is required) and a release-profile CI test
+  (`ann_load_failure_falls_back_to_exact`). Size evidence: 11,478,776 B →
+  12,626,328 B (+1.1 MiB, +10%) on a stripped glibc build; NFR-9 budget 40 MiB.
+  Verify: `cargo build --release --config 'profile.release.panic="abort"'`
+  fails with the guard message; release test passes.
+
+- Task T13: complete (2026-10-23). `BuildJob.building_bytes` = graph estimate +
+  exact rows retained by the build thread; `seek_ann` admits a build only when
+  that sum fits `max_bytes`, so an over-cap project stays exact `Ready` instead
+  of an unaccounted build (Delta 0.2 FR-7/NFR-4). Tests:
+  `build_is_skipped_when_exact_rows_and_graph_exceed_the_cap`,
+  `building_entry_accounts_exact_rows_it_keeps_alive`.
+
+- Task T14: complete (2026-10-23). Debug-only `set_test_build_delay` makes
+  `Building` deterministic; `ann_search_count()` counts ANN read-path hits.
+  `tests/hybrid_rank_ann.rs` now asserts: first `get` is `Building`, the
+  in-build search does not touch ANN, the published ANN serves the read path,
+  and answers are deterministic. `tests/ann_recall.rs` adds recall@fetch >=
+  0.95 against `top_k` for fetch in {100, 1000} (the final
+  `ef = max(64, fetch*4)` rule). The degenerate 600x64 e2e fixture was not used
+  for neighbour equality: its vectors are collinear to f32 precision, so the
+  exact test moved to the separated-cluster fixture.
+
+- Task T15: complete (2026-10-23). Backfill leases are only taken when a build
+  may follow (`enabled && ranking == rrf`); `unpin` runs eviction; expired
+  leases retry eviction in the same round. When every candidate is leased the
+  cache stays over budget and prints one warning per operation (not per put).
+  Test: `unpinning_reclaims_the_budget_without_waiting_for_the_next_put`.
+
+- Task T16: complete (2026-10-23). `refresh_ann_after_sync` gates on
+  `enabled && ranking == rrf`, so lexical projects no longer build a persisted
+  ANN nobody reads. `dense_candidates` logs `ann.search` failures separately
+  from insufficient candidates (FR-9). `DenseCache::invalidate` doc matches the
+  actual (reserved for project deletion) role. Tests:
+  `sync_refresh_warms_ann_for_rrf`, `sync_refresh_skips_ann_for_lexical_ranking`.
+
+- Delta 0.3 status (2026-10-23): T12–T16 complete; panel findings P0 (release
+  panic strategy), P1 (read-path evidence, byte accounting, unbound leases)
+  and the diagnostics/bookkeeping minors are closed. Verify: `cargo fmt
+  --check`; `RUSTUP_TOOLCHAIN=1.88.0 cargo clippy --all-targets -D warnings`;
+  full `cargo test --locked --features hybrid-remote`; `search_bench
+  metrics_match_baseline` (baseline unchanged). Still open (unchanged):
+  Windows/macOS runtime CI (OQ-4), 75k manual run, T1.5 cooldown revert.

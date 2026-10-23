@@ -15,6 +15,19 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
   Free routes may train on prompts and rotate monthly; paid pins stay
   available via explicit `docsbase models use`.
 
+### Fixed
+
+- ANN tier (spec `docs/specs/ann-index`, Delta 0.3): release builds no longer
+  use `panic = "abort"`, which had silently disabled the corrupt-dump → exact
+  fallback and aborted the daemon instead (compile-time guard added, release
+  CI test added; binary +1.1 MiB). `DenseCache.max_bytes` now counts the exact
+  rows a background build keeps alive, an over-cap build stays exact instead of
+  exceeding the resident cap, backfill leases are only taken when an ANN build
+  can follow, releasing a lease evicts, and a cache that is over budget while
+  every row is leased warns once instead of on every write. `search_docs` logs
+  ANN search errors separately from "insufficient candidates", and the daemon
+  no longer warms a persisted ANN for projects whose ranking is lexical.
+
 ### Performance
 
 - Dense channel gains a persisted HNSW ANN tier for large projects

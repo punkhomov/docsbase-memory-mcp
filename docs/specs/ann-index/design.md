@@ -347,8 +347,15 @@ struct DenseCacheLimits {
 - `DenseCache::warm(project_id, model_id, dim, key, hashes)` идемпотентен:
   один build на `(project, generation, model)`; результат публикуется только
   после `READY` и проверки, что generation/model всё ещё актуальны.
-- `DenseRows::Building` хранит только hashes/статус; `dense_candidates` идёт
-  через `top_k_iter` (exact streaming), без `DenseIndex.rows`.
+- `DenseRows::Building` хранит hashes, статус и **полный** учёт памяти:
+  оценка графа плюс exact-rows, которые остаются живы в треде сборки
+  (Delta 0.3). `enforce_byte_cap` видит эту сумму, поэтому сборка не может
+  вывести проект за `max_bytes`; `dense_candidates` идёт через `top_k_iter`
+  (exact streaming), без `DenseIndex.rows`.
+- Release-профиль не может включать `panic = "abort"`: `catch_unwind` вокруг
+  `hnsw_rs` — это и есть FR-5/SC-4 seam, а с abort паника парсера дампа
+  становится abort'ом процесса. Инвариант закреплён const-assert в
+  `src/hybrid/ann.rs` и release-тестом в CI (Delta 0.3).
 - `DenseRows::Failed { retry_at }` хранит hashes/статус; search стримит exact,
   retry запускает новый build после `retry_at` (не переиспользует старый
   `Building`).
@@ -359,7 +366,8 @@ struct DenseCacheLimits {
 - model/dim change → другой `AnnKey`.
 - backfill завершён → key-based invalidation + `warm`: stale on-disk indexes
   отвергаются по generation/digest/format, старый ANN не используется.
-  Явный `DenseCache::invalidate(project_id)` остаётся для удаления проекта.
+  Явный `DenseCache::invalidate(project_id)` остаётся для удаления проекта
+  (вызывающего пути в коде пока нет; backfill инвалидируется ключом).
 - format/hnsw version mismatch → rebuild.
 - corrupt/missing files → exact; daemon может rebuild.
 - старые generation-каталоги: keep last 2 **на model**, cleanup best-effort;
