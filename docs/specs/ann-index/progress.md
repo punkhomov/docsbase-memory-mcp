@@ -388,3 +388,11 @@
   `docs/supply-chain.md` records the closed exception instead of the open
   workaround. `hnsw_rs 0.3.5` stays pinned in `Cargo.lock`; no dependency
   change. Verify: `cargo test --locked --test smoke`, full suite, clippy/fmt.
+
+- CI fix (2026-10-23): the first PR run failed Windows on the new
+  `sync_refresh_warms_ann_for_rrf` test — the 20 s wait expired under the
+  parallel lib suite on a 2-core runner (both new server tests reported "over
+  60 seconds" during 5000-file indexing). The fixture is now 4200 documents
+  (still above `ANN_MIN_VECTORS = 4096`) and the waits are 180 s (warm),
+  120 s (publish poll), 5 s (lexical negative window), 60 s (cleanup). Linux
+  and macOS were already green.

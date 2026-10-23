@@ -1010,7 +1010,9 @@ mod tests {
         root: &std::path::Path,
         ranking: Option<&str>,
     ) -> (Db, Project) {
-        for i in 0..5000 {
+        // Just above ANN_MIN_VECTORS (4096): the fixture must admit an ANN
+        // build, and 5000 files per test is slow on 2-core Windows runners.
+        for i in 0..4200 {
             fs::write(
                 root.join(format!("d{i:05}.md")),
                 format!("# doc {i}\n\nbody {i}.\n"),
@@ -1067,12 +1069,14 @@ mod tests {
         shared.refresh_ann_after_sync(&project);
 
         assert!(
-            wait_for_ann_ready(cache.path(), project.id, Duration::from_secs(20)),
+            // Generous: the warm thread competes with the rest of the lib
+            // suite and Windows CI runners are slow.
+            wait_for_ann_ready(cache.path(), project.id, Duration::from_secs(180)),
             "warm must publish a persisted ANN for an RRF project"
         );
         // READY lands on disk just before the in-memory publish; poll for the
         // Ann state rather than racing the publish step.
-        let until = Instant::now() + Duration::from_secs(5);
+        let until = Instant::now() + Duration::from_secs(120);
         loop {
             match shared
                 .dense
@@ -1101,7 +1105,7 @@ mod tests {
         shared.refresh_ann_after_sync(&project);
 
         assert!(
-            !wait_for_ann_ready(cache.path(), project.id, Duration::from_secs(1)),
+            !wait_for_ann_ready(cache.path(), project.id, Duration::from_secs(5)),
             "lexical ranking must not build a dense ANN nobody reads"
         );
 
@@ -1112,7 +1116,7 @@ mod tests {
             .join(format!("projects/{}/ann/tmp-999999-dead", project.id));
         fs::create_dir_all(&stale).expect("stale tmp dir");
         shared.refresh_ann_after_sync(&project);
-        let until = Instant::now() + Duration::from_secs(5);
+        let until = Instant::now() + Duration::from_secs(60);
         while stale.exists() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }
