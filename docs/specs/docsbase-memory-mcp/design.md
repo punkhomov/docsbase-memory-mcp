@@ -549,7 +549,9 @@ tmp-каталогов (гонка с build), удаление текущего 
 в бинарь не входят; дефолтных моделей нет. Провайдер становится доступен только
 после явного `docsbase connect fastembed`, который ставит ONNX Runtime (не требует
 предустановленного рантайма) и пишет `[providers.fastembed]` в **глобальный** конфиг
-(`enable=true`, версия/путь рантайма). Модели скачиваются только явно
+(`enabled = true`, версия/путь рантайма). Дефолтных моделей в реестре нет; существующие
+дефолты OpenRouter не меняются, а для не-openrouter провайдера `model` обязателен.
+Модели скачиваются только явно
 (`docsbase models fetch <name>`) с HF по **pinned revision** с проверкой sha256;
 `models use` лишь выбирает модель и пишет `[hybrid.embedding]`/`[hybrid.reranker]`
 в проект (по умолчанию) или в глобальный конфиг (`--global`, обязателен вне проекта).
@@ -560,19 +562,26 @@ ORT-стратегия: `ort-load-dynamic`; `connect` качает закреп�
 x86_64 больше не публикуется, минимальная macOS 14.0) под платформу/арх, проверяет
 sha256 и кладёт в data-dir; на старте
 `ort::init_from(path)` до создания сессий (порядок резолва: `ORT_DYLIB_PATH` →
-data-dir → ошибка). Рантайм считается исполняемым кодом: explicit connect, pinned
+`providers.fastembed.runtime_path` → data-dir → ошибка; data-dir без записи провайдера
+не используется). `[providers]` валиден только в глобальном конфиге: проектный файл
+парсится отдельным типом без поля `providers` — это структурная защита, а не проверка
+после merge. Рантайм считается исполняемым кодом: explicit connect, pinned
 version + hash, запись в SECURITY. Бюджет 40 MiB (NFR-2) относится к бинарю;
 рантайм и модели — отдельные кэши вне бюджета (размеры фиксируются в CONFIG/docs).
-Зависимости (фича): `fastembed = "=7.1.1"` (cooldown 14 дней: 7.2+ слишком свежие;
-пересмотреть после 2026-11-06), `ort = "=2.0.0-rc.13"` (release candidate — риск
-зафиксирован), `ureq 3.4.x` + `sha2` + `flate2/tar/zip` для загрузки/распаковки
-рантайма, `tokenizers` с Oniguruma (C, прецедент — bundled sqlite3). Модели:
+Зависимости (фича, точные пины): `fastembed = { version = "=7.1.1",
+default-features = false }` (cooldown 14 дней; 7.2+ — после 2026-11-04/06; embedding
+ONNX грузится как `Vec<u8>` во всех версиях при MSRV 1.88: 7.5 всё ещё так, а
+`OnnxSource` есть только для rerank и требует ort rc.15/MSRV 1.92),
+`ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }`
+(release candidate — риск зафиксирован), `ureq = "=3.4.2"`, `sha2 = "=0.10.9"`,
+`flate2/tar/zip = "=9.0.0"` для загрузки/распаковки рантайма, `tokenizers` с
+Oniguruma (C, прецедент — bundled sqlite3). Модели:
 `bge-small-en-v1.5` (384, CLS, 133 MB), `multilingual-e5-small` int8 (384,
 Mean, 118 MB), rerank-кандидаты `jina-reranker-v1-turbo-en` int8 (38 MB, Apache-2.0,
 8K) и `bge-reranker-base` (1.11 GB);
-`jina-reranker-v2` отклонён (CC-BY-NC-4.0), `bge-reranker-base` (1.11 GB) — только
-опция. E5 требует `query: `/`passage: `, BGE — query-instruction; `Embedder`
-получает `embed_query`, `model_id` — `@p<prompt_version>` (FR-13).
+`jina-reranker-v2` отклонён (CC-BY-NC-4.0); ни одна модель не выбирается по умолчанию.
+E5 требует `query: `/`passage: `, BGE — query-instruction; `Embedder` получает
+`embed_query`, канонический `model_id` — `@p<prompt_version>` (FR-9/FR-10).
 Отклонено: бандлить ORT в релизные артефакты, авто-скачивание при первом поиске,
 дефолтная модель, обязательный локальный вес в v1, candle-only путь (нет rerank),
 новые пользовательские ключи сверх `[providers]`/`[hybrid]`.

@@ -1,228 +1,241 @@
 # hybrid-local Implementation Plan
 
 **Goal:** add an offline local `fastembed` provider (embedding + rerank) behind feature
-`hybrid-local`, with explicit `connect` (ORT) and `models fetch` provisioning and a
-machine-local provider registry.
+`hybrid-local`, with explicit `connect` (ORT) and `models fetch` provisioning, a
+machine-local provider registry, and no default models.
 **Architecture:** provisioning (`cli/connect`, `cli/models`, `hybrid/runtime`,
 `hybrid/models`) is separate from the runtime path (`hybrid/local` implements `Embedder`/
-`Reranker`); the default build links none of it.
-**Spec:** `docs/specs/hybrid-local/requirements.md`
+`Reranker` with role-aware prefixes); the default build links none of it.
+**Spec:** `docs/specs/hybrid-local/requirements.md` (rev 0.4)
 **Global constraints:**
 - Rust edition 2024, MSRV 1.88; fmt + clippy `--all-targets -D warnings`; no unwrap/expect/panic in `src/**`.
-- Default `cargo tree` has no `fastembed`, `ort`, `tokenizers`, `hf-hub`, `ureq`, `reqwest` (NFR-1).
-- New crates only per ADR-17, all optional behind `hybrid-local`.
-- No weights/runtime in the crate or binary; network only in `connect`/`fetch`.
-- `[providers]` only in the global config; `model_id` includes the pinned revision.
+- Default `cargo tree` has no `fastembed`, `ort`, `tokenizers`, `hf-hub`, `image`, `native-tls`, `ureq`, `reqwest` (NFR-1).
+- Exact pins: `fastembed =7.1.1` (default-features=false), `ort =2.0.0-rc.13` (load-dynamic), `ureq =3.4.2`, `sha2 =0.10.9`, `zip =9.0.0`, `flate2`, `tar`.
+- No weights/runtime in the binary; ORT 1.24.4; five targets (no macOS x64, macOS >= 14).
+- Network only in `connect`/`fetch`; `[providers]` only in the global config; canonical `model_id` includes revision + prompt version.
 **Review focus:**
-1. Silent network on search/index (must fail with an admission hint) — T3/T4.
-2. Partial model/runtime install used after a crash — T1/T2 (`*.part` + `.complete` + rename).
-3. Scope mistakes in `models use` (writing global when project was meant) — T6.
-3b. Missing query/passage prefixes silently degrading retrieval — T4 (FR-13).
-4. `[providers]` leaking into a committed project config — T3.
-5. Default build growth (feature leakage/deps) — T7 tree gate.
+1. Silent network on search/index → T3/T4 (admission, no fallback).
+2. Partial install used after a crash → T1/T2 (`*.part` + `.complete` + rename + lock).
+3. Missing query/passage prefixes silently degrading retrieval → T4 (FR-10).
+4. Write-A/read-B cache key (coverage/ANN vs embedder) → T1/T3 (single canonical function).
+5. Provider scope leaks (project `[providers]`, mixed providers, local-only `models use`) → T3/T6.
 
 ---
 
-## T1 — Model registry, cache layout, and fetch
+## T1 — Model registry, cache, fetch, canonical id
 
-**Goal:** a closed model registry and an explicit, verifiable, idempotent model fetch.
+**Goal:** a closed registry and an explicit, verifiable, idempotent fetch.
 **Files:**
 - Create: `src/hybrid/models.rs`
-- Modify: `Cargo.toml` (feature `hybrid-local`, optional `ureq`, `sha2`, `fd-lock` reuse)
+- Modify: `Cargo.toml` (feature `hybrid-local`, optional deps with exact pins)
 - Test: `src/hybrid/models.rs::tests`, `tests/hybrid_models.rs`
 **Interfaces:**
-- Produces: `ModelEntry`, `FileSpec`, `Task`, `Pooling`, `ModelSource`, `entry(&str)`,
-  `fetch(&ModelEntry, &dyn ModelSource) -> Result<PathBuf>`, `cached(&ModelEntry) -> bool`,
-  `cache_dir(name, revision) -> PathBuf`,
-  `model_id(entry, dim, normalize) -> String` (includes `@p<prompt_version>`).
-- Consumes: `Error`, `crate::paths` (cache dir), `fd-lock`.
+- Produces: `ModelEntry`, `FileSpec`, `Task`, `Pooling`, `ModelSource`, `entry`, `fetch`,
+  `cached`, `cache_dir`, `embedding_model_id(cfg)`.
+- Consumes: `Error`, `paths`, `fd-lock`, `sha2`.
 **Steps:**
-1. RED: `registry_entries_are_well_formed` — unique names, dim > 0, `onnx` + tokenizer
-   files listed with size/sha256, embedding entries have pooling, licenses non-empty,
-   E5 entries carry `query: `/`passage: ` prefixes, BGE carries the query instruction,
-   `prompt_version` is set.
-2. RED: `fetch_installs_all_files_and_completes_last` with a fake `ModelSource` — every
-   file written, `.complete` exists, second call downloads zero files.
-3. RED: `fetch_rejects_a_bad_hash` — fake source returns wrong bytes; assert error and no
-   directory usable (`cached == false`, no `.complete`).
-4. RED: `model_id_includes_revision_and_prompt` —
-   `fastembed/bge-small-en-v1.5@d384@l2@r<rev8>@p1`.
-5. Run: `cargo test --locked --features hybrid-local --lib hybrid::models` (fails).
-6. GREEN: implement registry type, cache layout, atomic write (`*.part` → fsync → rename),
-   `.complete` last, lock file, hash/size checks, `list_state`.
-7. Verify: same command passes; `cargo tree --locked` default unchanged.
-**Acceptance:** FR-5, FR-6, FR-7, NFR-3, NFR-5; SC-4.
+1. RED: registry well-formedness — unique names, dim > 0, `onnx` + 4 tokenizer files with
+   size/sha256, pooling, licenses, E5 `query: `/`passage: ` prefixes, BGE instruction,
+   `prompt_version`.
+2. RED: `fetch_installs_all_files_and_completes_last` (fake source) — `.complete` last,
+   second call downloads nothing.
+3. RED: `fetch_rejects_bad_hash_and_size` — nothing usable remains.
+4. RED: `cached_reverifies_hashes` — tampered file after install → not cached.
+5. RED: `model_id_includes_revision_and_prompt`.
+6. Run: `cargo test --locked --features hybrid-local --lib hybrid::models` (fails).
+7. GREEN: implement; manifest: `fastembed` default-features=false, direct `ort` load-dynamic.
+8. Verify: same command; `cargo tree --locked` default unchanged.
+**Acceptance:** FR-5, FR-6, FR-9, NFR-3, NFR-5; SC-4, SC-10.
 **Verify:** `cargo test --locked --features hybrid-local --lib hybrid::models` → ok.
 **Depends:** —
 
 ## T2 — ONNX Runtime installer and `connect`
 
-**Goal:** `docsbase connect` installs/checks the pinned runtime and registers providers.
+**Goal:** install/check ORT 1.24.4 and register providers; never select a model.
 **Files:**
 - Create: `src/hybrid/runtime.rs`, `src/cli/connect.rs`
-- Modify: `src/cli/mod.rs` (subcommand), `Cargo.toml` (`ureq`, `sha2`, `flate2`, `tar`, `zip`)
+- Modify: `src/cli/mod.rs`, `Cargo.toml` (`ureq`, `sha2`, `flate2`, `tar`, `zip`)
 - Test: `src/hybrid/runtime.rs::tests`, `tests/connect.rs`
 **Interfaces:**
-- Produces: `Target`, `RuntimeStatus`, `platform_target()`, `resolve(&ProvidersCfg)`,
-  `install(Target, &dyn RuntimeSource, force)`, `init(path)`, `connect::run(args)`.
-- Consumes: `Config::global*`, `providers` config, `models::fetch`.
+- Produces: `Target`, `RuntimeStatus`, `platform_target()`, `resolve`, `install`, `init`,
+  `connect::run(args)`.
+- Consumes: global config, `providers`, `models::fetch` (not via connect).
 **Steps:**
-1. RED: `targets_cover_five_platforms` — exactly linux-x64/aarch64, osx-arm64,
-   win-x64/arm64 (macOS x86_64 is not published); unknown target → admission; ORT
-   version pinned to 1.24.4, macOS floor 14.0.
-2. RED: `install_verifies_hash_and_is_atomic` — fake source with bad sha leaves nothing;
-   good source installs under `<data>/runtimes/onnxruntime/<ver>/<target>/`.
-3. RED: `connect_check_reports_missing_without_network` — `--check` never calls the source.
-4. RED: `connect_openrouter_reads_env_and_never_persists_the_key` — fake probe succeeds,
-   global config gets `[providers.openrouter]`, key absent from file.
-5. Run: `cargo test --locked --features hybrid-local --lib hybrid::runtime` (fails).
-6. GREEN: implement download/extract (tar.gz; zip on Windows), sha256, atomic install,
-   global config write, status table; `--force`/`--models`; `--local` rejected.
-7. Verify: `cargo test --locked --features hybrid-local --lib hybrid::runtime --test connect`.
-**Acceptance:** FR-2, FR-3, FR-4, FR-10, NFR-3, SC-2, SC-3.
-**Verify:** `cargo test --locked --features hybrid-local --lib hybrid::runtime --test connect` → ok.
-**Depends:** T1 (for `--models`).
+1. RED: `targets_cover_five_platforms` (linux x64/aarch64, osx-arm64, win-x64/arm64;
+   unknown → admission; macOS floor 14). ORT version is `1.24.4`.
+2. RED: `install_verifies_hash_and_is_atomic`; bad hash leaves nothing; `--force` replaces.
+3. RED: `resolve_requires_a_connected_provider_or_env_override` — data-dir runtime without
+   `[providers.fastembed]` is not used; `ORT_DYLIB_PATH` wins; `init_from` is first.
+4. RED: `connect_openrouter_reads_env_probes_and_never_persists_the_key`; offline probe →
+   admission.
+5. GREEN: download (size cap), extract, atomic install, global config write, status table;
+   `--check`, `--force`; `--local` rejected; no `--models` flag.
+6. Verify: `cargo test --locked --features hybrid-local --lib hybrid::runtime --test connect`.
+**Acceptance:** FR-2, FR-3, FR-4, FR-11, NFR-3; SC-2, SC-3.
+**Verify:** same command → ok.
+**Depends:** —
 
-## T3 — Provider registry in config and validation
+## T3 — Config: providers, project type, canonical id
 
-**Goal:** parse `[providers.*]` (global only), validate provider/model/dims before use.
+**Goal:** parse `[providers.*]` (global only) and validate stages before use.
 **Files:**
-- Modify: `src/config/mod.rs` (parse/validate), `src/hybrid/config.rs` (`from_config`),
-  `src/hybrid/mod.rs` (feature gating)
+- Modify: `src/config/mod.rs` (`GlobalFileConfig`, `ProjectFileConfig`), `src/hybrid/config.rs`,
+  `src/hybrid/mod.rs`, callers of `cache_model_id` (`src/hybrid/jobs.rs`,
+  `src/daemon/server.rs`)
 - Test: `tests/config.rs`, `src/hybrid/config.rs::tests`
 **Interfaces:**
-- Produces: `ProvidersCfg`, `providers::status(&Config)`, updated `from_config(cfg, caps)`
-  where `caps` carries `remote_on`/`local_on` instead of a single bool.
-- Consumes: registry (`models::entry`), feature flags.
+- Produces: `ProvidersCfg`, `providers::status`, `embedding_model_id`, updated
+  `from_config(cfg, caps)` with `remote_on`/`local_on`.
+- Consumes: registry, feature flags.
 **Steps:**
-1. RED: `providers_in_project_config_are_rejected`.
-2. RED: `fastembed_without_registry_entry_is_an_admission_error` (with hint text).
-3. RED: `fastembed_requires_model_and_matching_dimensions_and_l2`.
-4. RED: `global_defaults_are_overridden_by_project` (provider+model).
-5. GREEN: add config structs, precedence, validation; keep OpenRouter tests green by
-   migrating them to `[providers.openrouter]`.
+1. RED: `providers_in_project_config_are_a_parse_error` (separate type, not post-merge).
+2. RED: non-openrouter provider without `model` is admission (no inherited OpenRouter
+   default); `dimensions` must match the registry, `normalize=true`.
+3. RED: `coverage_and_ann_warm_use_the_canonical_id` — a fake fastembed stage reports 100%
+   coverage and the same id the embedder produces.
+4. RED: global defaults → project override; OpenRouter behaviour unchanged.
+5. GREEN: implement; replace all `cache_model_id` call sites with `embedding_model_id`.
 6. Verify: `cargo test --locked --test config --lib hybrid::config`.
-**Acceptance:** FR-1, FR-9, FR-12, NFR-6, SC-3, SC-5.
-**Verify:** `cargo test --locked --test config --lib hybrid::config` → ok.
-**Depends:** T1 (registry lookup).
+**Acceptance:** FR-1, FR-5, FR-9, FR-12, NFR-6; SC-3, SC-10.
+**Verify:** same command → ok.
+**Depends:** T1.
 
-## T4 — `FastEmbedEmbedder`
+## T4 — `FastEmbedEmbedder` and role-aware query embedding
 
-**Goal:** local embedding from fetched files, no network, one model per process.
+**Goal:** local embedding from fetched files, no network, correct prefixes.
 **Files:**
 - Create: `src/hybrid/local.rs`
-- Modify: `src/hybrid/mod.rs` (`#[cfg(feature = "hybrid-local")] pub mod local;`)
+- Modify: `src/hybrid/mod.rs`, **`src/daemon/tools.rs` (search calls `embed_query`)**,
+  `src/vector_cache.rs` (trait default)
 - Test: `src/hybrid/local.rs::tests`, `tests/hybrid_local.rs`
 **Interfaces:**
-- Produces: `local::embedder(&EmbeddingCfg, &ProvidersCfg) -> Result<Arc<dyn Embedder>>`.
-- Consumes: `runtime::resolve/init`, `models::cached`, `fastembed` user-defined API.
+- Produces: `local::embedder`, `Embedder::embed_query` (default = `embed`).
+- Consumes: `runtime::resolve/init`, `models::cached`, `fastembed`.
 **Steps:**
-1. RED: `embedder_without_runtime_fails_with_connect_hint` (no ORT needed).
+1. RED: `embedder_without_runtime_fails_with_connect_hint`.
 2. RED: `embedder_without_model_fails_with_fetch_hint`.
-2b. RED: `embed_query_applies_the_registry_query_prefix` and `embed_appends_passage_prefix`
-   — fake text capture in a test double; BGE gets the instruction on queries only, E5 gets
-   `query: `/`passage: `, models without prefixes stay unchanged (FR-13).
-3. RED: `embedder_model_id_matches_registry` (construct with a stub model dir and a fake
-   runtime path? if ORT absent, assert the error precedes construction).
-4. GREEN: build `UserDefinedEmbeddingModel` (onnx bytes, tokenizer files) with pooling and
-   quantization; `TextEmbedding::try_new_from_user_defined`; `OnceLock` per key; batch/thread
-   options; `blocking::enter` at call sites.
-5. Verify: `cargo test --locked --features hybrid-local --lib hybrid::local`.
-**Acceptance:** FR-9, FR-13, NFR-4, NFR-7, SC-6, SC-9.
-**Verify:** `cargo test --locked --features hybrid-local --lib hybrid::local` → ok.
+3. RED: `search_path_uses_embed_query` — a spy `Embedder` in `dense_candidates` records
+   `embed_query`; `embed_query_applies_registry_query_prefix` and
+   `embed_appends_passage_prefix` for BGE/E5; models without prefixes unchanged.
+4. GREEN: build `UserDefinedEmbeddingModel` (bytes + tokenizer files) with pooling,
+   `TextEmbedding::try_new_from_user_defined`, `OnceLock`, batch/thread options, prefixing.
+5. Verify: `cargo test --locked --features hybrid-local --lib hybrid::local --test hybrid_local`.
+**Acceptance:** FR-9, FR-10, NFR-4, NFR-7; SC-6, SC-9.
+**Verify:** same command → ok.
 **Depends:** T1, T3.
 
 ## T5 — `FastEmbedReranker`
 
-**Goal:** local cross-encoder rerank on the same provisioning path, using the model the
-project selected with `models use --rerank` (registry lists `jina-reranker-v1-turbo-en`
-int8, 38 MB, Apache-2.0, 8K; `bge-reranker-base` remains an option; no default).
+**Goal:** local cross-encoder rerank on the selected model (no default; `models use --rerank`).
 **Files:**
 - Modify: `src/hybrid/local.rs`
 - Test: `src/hybrid/local.rs::tests`
 **Interfaces:**
-- Produces: `local::reranker(&RerankerCfg, &ProvidersCfg) -> Result<Arc<dyn Reranker>>`.
-- Consumes: `runtime`, `models`, `fastembed::TextRerank`.
+- Produces: `local::reranker`; `Reranker` impl.
+- Consumes: runtime, models, `fastembed::TextRerank`.
 **Steps:**
 1. RED: `reranker_without_model_fails_with_fetch_hint`.
-1b. RED: `reranker_config_requires_an_explicit_model` — `provider = "fastembed"` with no
-   `model` (or no `[hybrid.reranker]` at all) is an admission error; there is no implicit
-   reranker.
-2. RED: `rerank_contract_returns_index_and_score_for_every_doc` (with a stub model, if ORT
-   is unavailable assert the contract test is `#[ignore]` and add a unit test of the
-   mapping/`top_n` logic).
-3. GREEN: `UserDefinedRerankingModel` + `RerankInitOptionsUserDefined`; reuse the model cache;
-   `top_n` clamp; errors → `Internal`.
-4. Verify: `cargo test --locked --features hybrid-local --lib hybrid::local`.
-**Acceptance:** FR-7, NFR-7, SC-6.
+2. RED: `reranker_config_requires_an_explicit_model` (no implicit reranker, no default).
+3. RED: `rerank_contract_returns_index_and_score_for_every_doc` and `top_n` clamp (mapping
+   logic unit-tested; live inference ignored).
+4. GREEN: `UserDefinedRerankingModel` (`OnnxSource::File`), `RerankInitOptionsUserDefined`;
+   shared model cache; errors → `Internal`.
+5. Verify: `cargo test --locked --features hybrid-local --lib hybrid::local`.
+**Acceptance:** FR-5, FR-9, FR-12, NFR-7; SC-6.
 **Verify:** same command → ok.
-**Depends:** T4 (shared runtime init/cache).
+**Depends:** T4.
 
-## T6 — `models use` scope and provider-aware validation
+## T6 — `models use` scope, per-stage providers, probe gating
 
-**Goal:** select models per project or as global defaults; never write `[providers]`.
+**Goal:** select models per project or as global defaults; work in a local-only build.
 **Files:**
-- Modify: `src/cli/models.rs` (scope flags, provider-aware validation, global write)
+- Modify: `src/cli/models.rs` (scope, per-stage provider flags, probe dispatch, global write)
 - Test: `tests/cli_models.rs`
 **Interfaces:**
-- Produces: `models use --provider … --local|--global`; `resolve_scope(root, flags)`.
-- Consumes: `Config::global`, project root discovery, registry.
+- Produces: `--local/--global`, `--embedding-provider`/`--rerank-provider`, `--provider`
+  shorthand; `resolve_scope`.
+- Consumes: `embedding_model_id`, registry, global config.
 **Steps:**
-1. RED: `inside_project_writes_local_by_default`; `--local` accepted; `--path` honoured.
-2. RED: `outside_project_requires_global`; `both_scope_flags_are_rejected`.
-3. RED: `fastembed_model_without_fetch_fails_with_hint`; dims inferred from registry;
-   wrong `--dims` rejected.
-4. RED: `global_write_preserves_providers_and_other_sections`.
-5. GREEN: implement scope resolution, validation, atomic write; keep the comment-loss note.
-6. Verify: `cargo test --locked --test cli_models --lib cli::models`.
-**Acceptance:** FR-8, SC-5.
-**Verify:** `cargo test --locked --test cli_models` → ok.
+1. RED: scope matrix (project default, `--local`, outside-project requires `--global`, both
+   flags error); global write preserves `[providers]` and unrelated sections.
+2. RED: `--provider` applies only to stages named in the invocation; untouched stages keep
+   their provider; mixed providers written per stage.
+3. RED: fastembed probe is offline and runs under `hybrid-local` only; OpenRouter probe runs
+   under `hybrid-remote`; `--features hybrid-local` alone can write config.
+4. RED: unfetched model → admission with `docsbase models fetch`; dims inferred for
+   fastembed, explicit for OpenRouter; wrong dims rejected.
+5. GREEN: implement; `--dry-run` prints the diff.
+6. Verify: `cargo test --locked --test cli_models --features hybrid-local`.
+**Acceptance:** FR-7, FR-8, FR-12; SC-5, SC-11.
+**Verify:** `cargo test --locked --test cli_models --features hybrid-local` → ok.
 **Depends:** T1, T3.
 
 ## T7 — Feature wiring, CI gates, docs
 
-**Goal:** the feature builds on 3 OS, the default build stays offline, docs complete.
+**Goal:** feature builds on 3 OS, default stays offline, docs and release story complete.
 **Files:**
 - Modify: `Cargo.toml`, `.github/workflows/ci.yml`, `docs/CONFIG.md`, `README.md`,
   `SECURITY.md`, `CHANGELOG.md`
 **Steps:**
-1. Add `hybrid-local` feature with all optional deps.
-2. CI: `linux-local` job (clippy+test with the feature, no network for tests); default
-   `linux` job adds the `cargo tree` gate for the forbidden crates.
-3. Docs: CONFIG (`[providers]`, scope, connect/fetch), README quickstart, SECURITY
-   (runtime as an external artifact), CHANGELOG.
-4. Verify: `cargo tree --locked | grep -E 'fastembed|ort|tokenizers|hf-hub|ureq|reqwest'`
-   is empty; `cargo check --features hybrid-local` on the three OS jobs.
+1. Add `hybrid-local` with the exact manifest from design §2.
+2. CI: `linux-local` job (clippy+test, no downloads); add
+   `cargo check --features hybrid-local --all-targets` to the existing `windows` and `macos`
+   jobs; default tree gate includes `fastembed|ort|tokenizers|hf-hub|image|native-tls|ureq|reqwest`.
+3. Docs: CONFIG (providers, scope, connect/fetch), README quickstart, SECURITY (runtime as
+   external executable artifact), CHANGELOG.
+4. Record in the ledger that `linux-local` must become a required check (human action) and
+   verify `release-static` + `dlopen` on Linux.
 **Acceptance:** NFR-1, SC-1, SC-8.
-**Verify:** tree gate empty; CI jobs green.
+**Verify:** tree gate empty; all jobs green.
 **Depends:** T1–T6.
 
-## T8 — Live verification and ledger
+## T8 — Live verification, budgets, ledger
 
-**Goal:** prove the real path once, record numbers.
+**Goal:** prove the real path once and measure.
 **Files:**
 - Create: `tests/hybrid_local_live.rs` (`#[ignore]`)
 - Modify: `docs/specs/hybrid-local/progress.md`
 **Steps:**
 1. Ignored test: `connect --check` (or `ORT_DYLIB_PATH`) → `models fetch bge-small-en-v1.5`
-   → embed 3 texts → `models fetch jina-reranker-v1-turbo-en` → rerank 3 docs; assert
-   dimensions, query-prefix presence in the embedder call, and score ordering.
-2. Run manually: `cargo test --release --features hybrid-local --test hybrid_local_live -- --ignored --nocapture`.
-3. Ledger: ORT version/sha, model sizes, fetch time, embed/rerank latency, RSS.
-**Acceptance:** SC-7.
-**Verify:** the command above passes and the ledger has the numbers.
+   → embed 3 texts (query prefix asserted) → `models fetch jina-reranker-v1-turbo-en` →
+   rerank 3 docs.
+2. Run release live test manually; record ORT version/sha, model sizes, fetch time,
+   embed/rerank latency, RSS against NFR-4 budgets (<=700 MB, p95 thresholds).
+3. Ledger entry.
+**Acceptance:** SC-7, NFR-4.
+**Verify:** the ignored command passes and the ledger has numbers.
 **Depends:** T2–T5.
+
+## T9 — Lifecycle: remove, uninstall, re-pin, observability
+
+**Goal:** no orphaned runtime/cache, no silent stale state.
+**Files:**
+- Modify: `src/cli/install.rs`, `src/cli/models.rs`, `src/hybrid/models.rs`,
+  `src/hybrid/runtime.rs`, `docs/CONFIG.md`
+**Steps:**
+1. `models remove` removes all cached revisions; refuses/warns when a daemon may hold the
+   model; `--force` overrides.
+2. `uninstall` removes `<data>/runtimes/onnxruntime` and the model cache entries owned by
+   docsbase.
+3. Re-pin: a revision change reports "vectors will be re-embedded, ANN invalidated"; `fetch`
+   does not silently switch revisions.
+4. `models list` shows provider state, selected `model_id`, cache size; free-space preflight
+   before fetch.
+5. Verify: unit tests for remove/uninstall manifest; `docsbase uninstall --dry-run` output.
+**Acceptance:** FR-7, FR-13; SC-11.
+**Verify:** `cargo test --locked --test cli_models --lib hybrid::models` → ok.
+**Depends:** T1, T2, T6.
 
 ---
 
 ## Task-list self-review
 
-- **Spec coverage:** FR-1→T3; FR-2/3/4/10→T2; FR-5/6/7→T1; FR-8→T6; FR-9→T3/T4;
-  FR-11→T2; FR-12→T3/T4/T5; FR-13→T4. NFR-1→T7; NFR-2→all; NFR-3→T1/T2; NFR-4/7→T4/T5;
+- **Spec coverage:** FR-1→T3; FR-2/3/4/11→T2; FR-5/6/9→T1/T3; FR-7/8→T6/T9;
+  FR-10→T4; FR-12→T3/T4/T5; FR-13→T9. NFR-1→T7; NFR-2→all; NFR-3→T1/T2; NFR-4→T4/T5/T8;
   NFR-5/6→T1/T2/T3; NFR-8→T7. SC-1→T7; SC-2/3→T2/T3; SC-4→T1; SC-5→T6; SC-6→T4/T5;
-  SC-7→T8; SC-8→T7. No uncovered requirement.
-- **Type consistency:** `ModelEntry`/`FileSpec`/`ModelSource` (T1) are consumed by T2/T3/T4;
-  `ProvidersCfg` (T3) is consumed by T2/T4/T5; `Target`/`RuntimeSource` (T2) by T8.
-- **Review focus:** network-on-search → T3/T4 tests; partial install → T1/T2; scope →
-  T6; providers-in-project → T3; default-build growth → T7.
-- **Proportion:** 8 tasks for ~6 modules; no task exceeds one session.
+  SC-7→T8; SC-8→T7; SC-9→T4; SC-10→T1/T3; SC-11→T6/T9. No uncovered requirement.
+- **Type consistency:** `ModelEntry`/`FileSpec`/`ModelSource` (T1) feed T3/T4/T5;
+  `ProvidersCfg`/`embedding_model_id` (T3) feed T2/T4/T5/T6; `Target`/`RuntimeSource` (T2)
+  feed T8.
+- **Review focus:** see header; each failure mode is pinned to a test in T1–T6.
+- **Proportion:** 9 tasks, ~6 modules; T9 is lifecycle, not gold-plating.

@@ -37,6 +37,8 @@ Ledger: одна запись на таск (что сделано, чем пр�
   - fastembed 7.1.1 loads embedding ONNX as `Vec<u8>` (no file source); 7.5 adds
     `OnnxSource` for embeddings and is cooldown-blocked until 2026-11-06. The int8
     model choice keeps the 7.1.1 peak acceptable; rerank already supports files.
+    (Corrected 2026-10-23 after source review: 7.5.0 still uses `Vec<u8>` for
+    embeddings; `OnnxSource` is rerank-only and 7.5 needs ort rc.15/MSRV 1.92.)
   - HF pins are `resolve/<commit-sha>/<path>`; the tree API exposes LFS `sha256` + size,
     which the registry will store (regular files: size + computed sha256).
 
@@ -46,3 +48,24 @@ Ledger: одна запись на таск (что сделано, чем пр�
   select them, with the same scope/validation rules. Config with
   `provider = "fastembed"` and no `model` is an admission error for both stages;
   `connect` never selects a model.
+
+- Spec review (2026-10-23, independent reviewer) → revision 0.4. Blockers fixed:
+  1. `fastembed` must be `default-features = false` and `ort` must be a direct
+     `load-dynamic` dependency; otherwise the build downloads/links ORT and pulls
+     hf-hub/image/native-tls (contradicting the offline default). Exact manifest is now in
+     design §2 and T1/T7, and the tree gate covers those crates.
+  2. The claim "7.5 adds file-based embedding loading" was false: 7.5.0 still stores
+     `onnx_file: Vec<u8>`, and it pins ort rc.15 (MSRV 1.92). The spec now budgets one
+     model copy in RSS instead of promising a future API.
+  3. `models use` was gated on `hybrid-remote` and hardcoded OpenRouter; a local-only build
+     could not write config. T6 now requires a per-provider probe (fastembed offline).
+  4. FR-10's `embed_query` had no call site; T4 now changes
+     `src/daemon/tools.rs::dense_candidates` and adds a spy test.
+  5. Two sources of the cache key (`cache_model_id` vs `Embedder::model_id`) would break
+     coverage/ANN warm; FR-9 now requires one canonical `embedding_model_id`, tested in T3.
+  Majors fixed: structural `ProjectFileConfig` (no `[providers]`), runtime resolution order
+  and `init_from` semantics, per-stage provider flags (`--embedding-provider`/
+  `--rerank-provider`), non-openrouter `model` required (OpenRouter defaults unchanged),
+  windows/macos feature checks + required-check note + static binary check, exact cooldown
+  pins, NFR-4 thread/budget wording. Added T9 (remove/uninstall/re-pin/observability) and
+  SC-10/SC-11; dropped `connect --models`, `DOCSBASE_MODEL_CACHE`, OQ-2/4/6.
