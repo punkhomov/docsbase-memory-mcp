@@ -185,3 +185,27 @@ Ledger: одна запись на таск (что сделано, чем пр�
   `coverage_and_ann_warm_use_the_canonical_id` использует fake-embedder с model_id из
   `embedding_model_id` и доказывает 100% coverage под каноническим ключом; ANN-warm
   принимает тот же ключ (равенство строк), полный прогон warm — T4.
+
+- Task 3 review round 1 (2026-10-23, `reviewer-muse`): spec compliance FAIL (2 Critical: from_config
+  не обновлён до `remote_on/local_on` и fastembed отвергался generic-сообщением; provider_status без
+  вызова → SC-3 hint не enforced. 3 Important: coverage-тест не звал ANN warm; byte-identical-тест
+  сравнивал с литералами, а не с legacy-функцией; read_project sniff `[providers` мимо
+  `[ providers.* ]`/inline-таблиц. 3 Minor: re-export фасада; silent fallback в embedding_model_id;
+  Broken никогда не возвращался; + reranker missing-model e2e).
+  Fix round (commit `…`): from_config(cfg, remote_on, local_on) с per-provider gating
+  (`feature_missing_remote/local`) и `validate_stage_shapes`; добавлен `src/hybrid/local.rs` (seam-стаб
+  T4/T5, `local::embedder/reranker` возвращают Internal до T4/T5); provisioning-гейт
+  `ensure_fastembed_provisioned` в `Config::validate_hybrid` (connect hint при отсутствии/runtime
+  Broken, fetch hint при нескачанном model — FR-12/SC-3/NFR-6); `provider_status` теперь возвращает
+  Broken для записанного, но отсутствующего runtime_path; embedding_model_id fallback логирует warning
+  (не молчит); read_project определяет `providers` через `toml::Value`-parse (любые написания);
+  byte-identical-тест сравнивает с `legacy_cache_model_id`; coverage-тест теперь реально зовёт
+  `DenseCache::warm` + `get` под каноническим ключом; e2e-тесты config: fastembed без provider →
+  connect hint, без fetch → fetch hint, reranker без model → Admission; убран дублирующий e2e
+  `fastembed_without_dims_uses_registry_dim` (покрыт unit «fastembed_resolution_requires_model_and_validates_dims»;
+  e2e требовал бы реального fetch multi-hundred-MB кэша для прохождения provisioning-гейта).
+  Ruling: `from_config` не принимает `ProvidersCfg` (brief: `from_config(cfg, caps)`), provisioning
+  проверяется на уровне `Config::validate_hybrid` — это точка открытия проекта (NFR-6); stage-конструкция
+  fastembed идёт через seam-стаб, который T4/T5 заменяют реальными embedder/reranker (с пробросом
+  providers при необходимости). Verify после фикса: lib hybrid::config 8 passed; test config 27 passed;
+  default suite green; hybrid-remote check чист; clippy -D warnings чист.

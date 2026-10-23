@@ -28,7 +28,11 @@ pub fn run(query: &str, limit: usize) -> anyhow::Result<()> {
     // daemon route: stages resolved up front (explicit admission on failure,
     // FR-14) and the same `search_docs_with` seam (FR-11/12).
     let config = Config::load(Some(&project.canonical_root))?;
-    let stages = crate::hybrid::from_config(&config.hybrid_cfg, cfg!(feature = "hybrid-remote"))?;
+    let stages = crate::hybrid::from_config(
+        &config.hybrid_cfg,
+        cfg!(feature = "hybrid-remote"),
+        cfg!(feature = "hybrid-local"),
+    )?;
     let window = config
         .hybrid_cfg
         .reranker

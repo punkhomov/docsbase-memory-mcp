@@ -63,7 +63,11 @@ pub fn embed_texts(cache_root: &Path, cfg: &HybridCfg, texts: &[String]) -> Resu
     if !cfg.enabled || cfg.embedding.is_none() || texts.is_empty() {
         return Ok(0);
     }
-    let stages = from_config(cfg, cfg!(feature = "hybrid-remote"))?;
+    let stages = from_config(
+        cfg,
+        cfg!(feature = "hybrid-remote"),
+        cfg!(feature = "hybrid-local"),
+    )?;
     let Some(embedder) = stages.embedder else {
         return Ok(0);
     };
@@ -109,7 +113,11 @@ pub fn embed_project_chunks(db: &Db, cfg: &HybridCfg, project_id: i64) -> Result
     if !cfg.enabled || cfg.embedding.is_none() {
         return Ok(0);
     }
-    let stages = from_config(cfg, cfg!(feature = "hybrid-remote"))?;
+    let stages = from_config(
+        cfg,
+        cfg!(feature = "hybrid-remote"),
+        cfg!(feature = "hybrid-local"),
+    )?;
     let Some(embedder) = stages.embedder else {
         return Ok(0);
     };

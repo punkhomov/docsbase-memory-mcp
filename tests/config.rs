@@ -466,20 +466,10 @@ fn fastembed_without_model_is_admission_not_default() {
     assert!(text.contains("model"), "{text}");
 }
 
-#[cfg(feature = "hybrid-local")]
-#[test]
-fn fastembed_without_dims_uses_registry_dim() {
-    let config_dir = TempDir::new().expect("tempdir");
-    write(
-        config_dir.path(),
-        "config.toml",
-        "[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\n",
-    );
-    let config = Config::load_from(config_dir.path(), None).expect("load");
-    let embedding = config.hybrid_cfg.embedding.expect("embedding stage");
-    assert_eq!(embedding.dimensions, 384, "registry dim");
-    assert!(embedding.normalize);
-}
+// `fastembed_without_dims_uses_registry_dim` lives in the unit tests of
+// `hybrid::config` (`fastembed_resolution_requires_model_and_validates_dims`):
+// an end-to-end variant would need a fully fetched (multi-hundred-MB) cache to
+// pass the provisioning gate, which unit resolution already covers.
 
 #[cfg(feature = "hybrid-local")]
 #[test]
@@ -492,4 +482,55 @@ fn fastembed_wrong_dims_rejected() {
     );
     let err = Config::load_from(config_dir.path(), None).expect_err("wrong dims");
     assert!(err.to_string().contains("admission refused"), "{err}");
+}
+
+#[cfg(feature = "hybrid-local")]
+#[test]
+fn fastembed_reranker_without_model_is_admission() {
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[hybrid.reranker]\nprovider = \"fastembed\"\n",
+    );
+    let err = Config::load_from(config_dir.path(), None).expect_err("model required");
+    let text = err.to_string();
+    assert!(text.contains("admission refused"), "{text}");
+    assert!(text.contains("model"), "{text}");
+}
+
+#[cfg(feature = "hybrid-local")]
+#[test]
+fn fastembed_without_provider_fails_with_connect_hint() {
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\n",
+    );
+    let err = Config::load_from(config_dir.path(), None).expect_err("provider missing");
+    let text = err.to_string();
+    assert!(text.contains("admission refused"), "{text}");
+    assert!(text.contains("connect fastembed"), "{text}");
+}
+
+#[cfg(feature = "hybrid-local")]
+#[test]
+fn fastembed_unfetched_model_fails_with_fetch_hint() {
+    let config_dir = TempDir::new().expect("tempdir");
+    let runtime = TempDir::new().expect("runtime");
+    let runtime_path = runtime.path().join("libonnxruntime.so");
+    std::fs::write(&runtime_path, b"not-a-real-runtime").expect("fake runtime");
+    write(
+        config_dir.path(),
+        "config.toml",
+        &format!(
+            "[providers.fastembed]\nenabled = true\nruntime = \"1.24.4\"\nruntime_path = \"{}\"\n\n[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\n",
+            runtime_path.display()
+        ),
+    );
+    let err = Config::load_from(config_dir.path(), None).expect_err("model unfetched");
+    let text = err.to_string();
+    assert!(text.contains("admission refused"), "{text}");
+    assert!(text.contains("models fetch bge-small-en-v1.5"), "{text}");
 }

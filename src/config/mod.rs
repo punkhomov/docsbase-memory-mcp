@@ -9,8 +9,8 @@ use serde::Deserialize;
 use crate::error::{Error, Result};
 use crate::hybrid::config::{
     CacheCfg, DEFAULT_RERANK_WINDOW, FastembedProvider, HybridCfg, MAX_RERANK_WINDOW,
-    MIN_RERANK_WINDOW, OpenrouterProvider, PROVIDER_OPENROUTER, ProvidersCfg, Ranking,
-    resolve_embedding, resolve_reranker,
+    MIN_RERANK_WINDOW, OpenrouterProvider, PROVIDER_FASTEMBED, PROVIDER_OPENROUTER, ProviderState,
+    ProvidersCfg, Ranking, provider_status, resolve_embedding, resolve_reranker,
 };
 
 pub mod paths;
@@ -420,11 +420,15 @@ impl Config {
         }
         if let Some(embedding) = &self.hybrid_cfg.embedding {
             // Provider allowlist and provider-aware defaults are enforced at
-            // resolution time (FR-5); here only the cross-stage sanity.
+            // resolution time (FR-5); here only the cross-stage sanity and
+            // provisioning.
             if embedding.dimensions == 0 {
                 return Err(Error::Admission {
                     message: "hybrid.embedding.dimensions must be > 0".to_owned(),
                 });
+            }
+            if embedding.provider == PROVIDER_FASTEMBED {
+                self.ensure_fastembed_provisioned(&embedding.model)?;
             }
         }
         if let Some(reranker) = &self.hybrid_cfg.reranker {
@@ -436,6 +440,55 @@ impl Config {
                     ),
                 });
             }
+            if reranker.provider == PROVIDER_FASTEMBED {
+                self.ensure_fastembed_provisioned(&reranker.model)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Provisioning gate for fastembed stages (FR-12, SC-3, NFR-6): a
+    /// project with a fastembed stage fails at open time with exactly one
+    /// corrective action — the connect hint when the runtime is missing, the
+    /// fetch hint when the model cache is incomplete.
+    fn ensure_fastembed_provisioned(&self, model: &str) -> Result<()> {
+        let status = provider_status(&self.providers, PROVIDER_FASTEMBED);
+        match status.state {
+            ProviderState::Connected => {}
+            ProviderState::Broken => {
+                return Err(Error::Admission {
+                    message: format!(
+                        "fastembed runtime is broken; re-run `docsbase connect {PROVIDER_FASTEMBED} --force`"
+                    ),
+                });
+            }
+            _ => {
+                let reason = status.reason.as_deref().unwrap_or("not connected");
+                return Err(Error::Admission {
+                    message: format!(
+                        "fastembed provider is not ready ({reason}); run `docsbase connect {PROVIDER_FASTEMBED}`"
+                    ),
+                });
+            }
+        }
+        #[cfg(feature = "hybrid-local")]
+        {
+            use crate::hybrid::models;
+            if let Ok(entry) = models::entry(model)
+                && !models::cached(entry)?
+            {
+                return Err(Error::Admission {
+                    message: format!(
+                        "fastembed model \"{model}\" is not fetched; run `docsbase models fetch {model}`"
+                    ),
+                });
+            }
+        }
+        #[cfg(not(feature = "hybrid-local"))]
+        {
+            // A non-local build never reaches here (resolution rejects
+            // fastembed), but the parameter must stay used.
+            let _ = model;
         }
         Ok(())
     }
@@ -481,10 +534,13 @@ fn read_project(path: &Path) -> Result<ProjectFileConfig> {
     match toml::from_str::<ProjectFileConfig>(&text) {
         Ok(project) => Ok(project),
         Err(parse_err) => {
-            let has_providers = text.lines().any(|line| {
-                let line = line.trim();
-                line.starts_with("[providers") || line.starts_with("providers =")
-            });
+            // Detect `[providers]` regardless of spelling (whitespace,
+            // inline tables) via a generic parse: if the document contains a
+            // top-level `providers` key, the failure is the structural
+            // FR-1 violation, not a generic syntax error.
+            let has_providers = toml::from_str::<toml::Value>(&text)
+                .ok()
+                .is_some_and(|value| value.get("providers").is_some());
             if has_providers {
                 Err(Error::Admission {
                     message: format!(

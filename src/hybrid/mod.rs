@@ -19,6 +19,8 @@ pub mod jobs;
 pub mod rrf;
 
 #[cfg(feature = "hybrid-local")]
+pub mod local;
+#[cfg(feature = "hybrid-local")]
 pub mod models;
 #[cfg(feature = "hybrid-remote")]
 pub mod openrouter;
@@ -29,7 +31,11 @@ use std::cell::Cell;
 
 use crate::error::Result;
 
-pub use config::{EmbeddingCfg, HybridCfg, HybridStages, Ranking, RerankerCfg, from_config};
+pub use config::{
+    EmbeddingCfg, FastembedProvider, HybridCfg, HybridStages, OpenrouterProvider,
+    PROVIDER_FASTEMBED, ProviderState, ProviderStatus, ProvidersCfg, Ranking, RerankerCfg,
+    embedding_model_id, from_config, provider_status, resolve_embedding, resolve_reranker,
+};
 
 /// Cross-encoder style reranking stage (FR-2, FR-11).
 ///

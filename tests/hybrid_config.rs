@@ -37,8 +37,12 @@ fn cache_key_carries_model_dim_and_postprocess() {
 
 #[test]
 fn disabled_hybrid_resolves_to_empty_stages() {
-    let stages = from_config(&HybridCfg::default(), cfg!(feature = "hybrid-remote"))
-        .expect("disabled hybrid must resolve");
+    let stages = from_config(
+        &HybridCfg::default(),
+        cfg!(feature = "hybrid-remote"),
+        cfg!(feature = "hybrid-local"),
+    )
+    .expect("disabled hybrid must resolve");
     assert!(stages.embedder.is_none());
     assert!(stages.reranker.is_none());
 }
@@ -47,8 +51,12 @@ fn disabled_hybrid_resolves_to_empty_stages() {
 fn feature_off_admission_is_explicit() {
     // `feature_on = false` models the offline build even when the feature is
     // compiled in; the always-off build takes the same path.
-    let error = from_config(&HybridCfg::enabled_with_defaults(), false)
-        .expect_err("feature-off + enabled must be an explicit admission error");
+    let error = from_config(
+        &HybridCfg::enabled_with_defaults(),
+        false,
+        cfg!(feature = "hybrid-local"),
+    )
+    .expect_err("feature-off + enabled must be an explicit admission error");
     let Error::Admission { message } = error else {
         panic!("expected Admission, got {error}");
     };
@@ -58,8 +66,12 @@ fn feature_off_admission_is_explicit() {
     );
 
     if !cfg!(feature = "hybrid-remote") {
-        let error = from_config(&HybridCfg::enabled_with_defaults(), true)
-            .expect_err("default build must reject enabled hybrid");
+        let error = from_config(
+            &HybridCfg::enabled_with_defaults(),
+            true,
+            cfg!(feature = "hybrid-local"),
+        )
+        .expect_err("default build must reject enabled hybrid");
         assert!(matches!(error, Error::Admission { .. }));
     }
 }
@@ -77,7 +89,8 @@ fn unknown_provider_is_rejected_before_any_network_setup() {
         ranking: Ranking::Lexical,
         cache: CacheCfg::default(),
     };
-    let error = from_config(&cfg, true).expect_err("provider must be validated");
+    let error = from_config(&cfg, true, cfg!(feature = "hybrid-local"))
+        .expect_err("provider must be validated");
     let Error::Admission { message } = error else {
         panic!("expected Admission");
     };
@@ -94,7 +107,7 @@ fn unknown_provider_is_rejected_before_any_network_setup() {
         cache: CacheCfg::default(),
     };
     assert!(matches!(
-        from_config(&cfg, true),
+        from_config(&cfg, true, cfg!(feature = "hybrid-local")),
         Err(Error::Admission { .. })
     ));
 }
@@ -113,7 +126,8 @@ fn rerank_window_bounds_are_enforced() {
             ranking: Ranking::Lexical,
             cache: CacheCfg::default(),
         };
-        let error = from_config(&cfg, true).expect_err("window must be bounded");
+        let error = from_config(&cfg, true, cfg!(feature = "hybrid-local"))
+            .expect_err("window must be bounded");
         let Error::Admission { message } = error else {
             panic!("expected Admission for window {window}");
         };
@@ -127,8 +141,12 @@ fn missing_key_is_an_admission_error() {
     if std::env::var_os("OPENROUTER_API_KEY").is_some() {
         return; // the developer environment has a key; CI covers the error path
     }
-    let error = from_config(&HybridCfg::enabled_with_defaults(), true)
-        .expect_err("missing key must fail admission");
+    let error = from_config(
+        &HybridCfg::enabled_with_defaults(),
+        true,
+        cfg!(feature = "hybrid-local"),
+    )
+    .expect_err("missing key must fail admission");
     let Error::Admission { message } = error else {
         panic!("expected Admission");
     };
@@ -167,7 +185,8 @@ fn rrf_without_the_embedding_stage_is_an_admission_error() {
         ranking: Ranking::Rrf,
         cache: CacheCfg::default(),
     };
-    let err = from_config(&cfg, true).expect_err("rrf without embedding");
+    let err =
+        from_config(&cfg, true, cfg!(feature = "hybrid-local")).expect_err("rrf without embedding");
     assert!(
         matches!(&err, Error::Admission { message } if message.contains("rrf")),
         "{err}"
@@ -184,7 +203,8 @@ fn rrf_keeps_the_configuration_error_across_feature_modes() {
         cache: CacheCfg::default(),
     };
     for feature_on in [false, true] {
-        let err = from_config(&cfg, feature_on).expect_err("rrf without embedding");
+        let err = from_config(&cfg, feature_on, cfg!(feature = "hybrid-local"))
+            .expect_err("rrf without embedding");
         assert!(
             matches!(&err, Error::Admission { message } if message.contains("rrf")),
             "feature_on={feature_on}: {err}"
@@ -201,6 +221,6 @@ fn enabled_without_stages_resolves_to_empty_stages_offline() {
         ranking: Ranking::Lexical,
         cache: CacheCfg::default(),
     };
-    let stages = from_config(&cfg, false).expect("no stages, nothing to resolve");
+    let stages = from_config(&cfg, false, false).expect("no stages, nothing to resolve");
     assert!(stages.embedder.is_none() && stages.reranker.is_none());
 }

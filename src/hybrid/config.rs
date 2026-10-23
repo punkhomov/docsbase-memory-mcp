@@ -221,13 +221,26 @@ pub fn provider_status(providers: &ProvidersCfg, name: &str) -> ProviderStatus {
                 state: ProviderState::NotConnected,
                 reason: Some(format!("run `docsbase connect {PROVIDER_FASTEMBED}`")),
             },
-            Some(provider) if provider.runtime_path.is_some() => ProviderStatus {
-                state: ProviderState::Connected,
-                reason: provider.runtime.clone(),
-            },
-            Some(_) => ProviderStatus {
-                state: ProviderState::NotConnected,
-                reason: Some("runtime not installed; run `docsbase connect fastembed`".to_owned()),
+            Some(provider) => match &provider.runtime_path {
+                // A recorded path that no longer exists is Broken, not
+                // Connected (FR-2).
+                Some(path) if !path.exists() => ProviderStatus {
+                    state: ProviderState::Broken,
+                    reason: Some(format!(
+                        "runtime library {} is missing; re-run `docsbase connect {PROVIDER_FASTEMBED} --force`",
+                        path.display()
+                    )),
+                },
+                Some(_) => ProviderStatus {
+                    state: ProviderState::Connected,
+                    reason: provider.runtime.clone(),
+                },
+                None => ProviderStatus {
+                    state: ProviderState::NotConnected,
+                    reason: Some(
+                        "runtime not installed; run `docsbase connect fastembed`".to_owned(),
+                    ),
+                },
             },
         },
         PROVIDER_OPENROUTER => match &providers.openrouter {
@@ -409,8 +422,10 @@ fn legacy_cache_model_id(cfg: &EmbeddingCfg) -> String {
 pub fn embedding_model_id(cfg: &EmbeddingCfg) -> String {
     #[cfg(feature = "hybrid-local")]
     if cfg.provider == PROVIDER_FASTEMBED {
-        // Resolution (FR-5) guarantees the entry exists before this runs; the
-        // fallback is unreachable by construction and only prevents a panic.
+        // Resolution (FR-5) guarantees the entry exists before this runs; if
+        // it somehow does not, surface it loudly instead of silently
+        // producing a legacy-shaped fastembed key without the revision/prompt
+        // components (FR-9).
         if let Some(id) = crate::hybrid::models::canonical_id_for(
             &cfg.model,
             cfg.dimensions as usize,
@@ -418,6 +433,10 @@ pub fn embedding_model_id(cfg: &EmbeddingCfg) -> String {
         ) {
             return id;
         }
+        eprintln!(
+            "warning: fastembed model {} is not in the registry; cache key falls back to the legacy format",
+            cfg.model
+        );
     }
     legacy_cache_model_id(cfg)
 }
@@ -453,7 +472,7 @@ impl std::fmt::Debug for HybridStages {
 /// # Errors
 /// Returns [`Error::Admission`] for a feature-off build, an unknown provider,
 /// an out-of-range window or a missing `OPENROUTER_API_KEY`.
-pub fn from_config(cfg: &HybridCfg, feature_on: bool) -> Result<HybridStages> {
+pub fn from_config(cfg: &HybridCfg, remote_on: bool, local_on: bool) -> Result<HybridStages> {
     if !cfg.enabled {
         return Ok(HybridStages::default());
     }
@@ -472,10 +491,31 @@ pub fn from_config(cfg: &HybridCfg, feature_on: bool) -> Result<HybridStages> {
             ..HybridStages::default()
         });
     }
-    if !feature_on || !cfg!(feature = "hybrid-remote") {
-        return Err(feature_missing());
+    // Per-provider feature gating: a stage may only demand the feature it
+    // needs (FR-3, FR-4, feature matrix rev 0.6).
+    let has_openrouter = cfg
+        .embedding
+        .as_ref()
+        .is_some_and(|s| s.provider == PROVIDER_OPENROUTER)
+        || cfg
+            .reranker
+            .as_ref()
+            .is_some_and(|s| s.provider == PROVIDER_OPENROUTER);
+    let has_fastembed = cfg
+        .embedding
+        .as_ref()
+        .is_some_and(|s| s.provider == PROVIDER_FASTEMBED)
+        || cfg
+            .reranker
+            .as_ref()
+            .is_some_and(|s| s.provider == PROVIDER_FASTEMBED);
+    if has_openrouter && (!remote_on || !cfg!(feature = "hybrid-remote")) {
+        return Err(feature_missing_remote());
     }
-    #[cfg_attr(not(feature = "hybrid-remote"), allow(unused_mut))]
+    if has_fastembed && (!local_on || !cfg!(feature = "hybrid-local")) {
+        return Err(feature_missing_local());
+    }
+    #[cfg_attr(not(feature = "hybrid-local"), allow(unused_mut))]
     let mut stages = HybridStages {
         ranking: cfg.ranking,
         ..HybridStages::default()
@@ -485,8 +525,52 @@ pub fn from_config(cfg: &HybridCfg, feature_on: bool) -> Result<HybridStages> {
             message: "hybrid.cache.max_bytes must be > 0".to_owned(),
         });
     }
+    validate_stage_shapes(cfg)?;
+    #[cfg(feature = "hybrid-remote")]
+    {
+        let client = std::sync::Arc::new(super::openrouter::OpenRouterClient::from_env()?);
+        if let Some(embedding) = &cfg.embedding
+            && embedding.provider == PROVIDER_OPENROUTER
+        {
+            stages.embedder = Some(std::sync::Arc::new(
+                super::openrouter::OpenRouterEmbedder::with_client(
+                    embedding.clone(),
+                    client.clone(),
+                ),
+            ));
+        }
+        if let Some(reranker) = &cfg.reranker
+            && reranker.provider == PROVIDER_OPENROUTER
+        {
+            stages.reranker = Some(std::sync::Arc::new(
+                super::openrouter::OpenRouterReranker::with_client(reranker.clone(), client),
+            ));
+        }
+    }
+    #[cfg(feature = "hybrid-local")]
+    {
+        if let Some(embedding) = &cfg.embedding
+            && embedding.provider == PROVIDER_FASTEMBED
+        {
+            stages.embedder = Some(super::local::embedder(embedding, &ProvidersCfg::default())?);
+        }
+        if let Some(reranker) = &cfg.reranker
+            && reranker.provider == PROVIDER_FASTEMBED
+        {
+            stages.reranker = Some(super::local::reranker(reranker, &ProvidersCfg::default())?);
+        }
+    }
+    Ok(stages)
+}
+
+fn validate_stage_shapes(cfg: &HybridCfg) -> Result<()> {
     if let Some(embedding) = &cfg.embedding {
-        ensure_openrouter(&embedding.provider)?;
+        match embedding.provider.as_str() {
+            PROVIDER_OPENROUTER | PROVIDER_FASTEMBED => {}
+            other => {
+                return Err(unknown_provider("hybrid.embedding", other));
+            }
+        }
         if embedding.dimensions == 0 {
             return Err(Error::Admission {
                 message: "hybrid.embedding.dimensions must be > 0".to_owned(),
@@ -494,7 +578,12 @@ pub fn from_config(cfg: &HybridCfg, feature_on: bool) -> Result<HybridStages> {
         }
     }
     if let Some(reranker) = &cfg.reranker {
-        ensure_openrouter(&reranker.provider)?;
+        match reranker.provider.as_str() {
+            PROVIDER_OPENROUTER | PROVIDER_FASTEMBED => {}
+            other => {
+                return Err(unknown_provider("hybrid.reranker", other));
+            }
+        }
         if !(MIN_RERANK_WINDOW..=MAX_RERANK_WINDOW).contains(&reranker.window) {
             return Err(Error::Admission {
                 message: format!(
@@ -504,41 +593,29 @@ pub fn from_config(cfg: &HybridCfg, feature_on: bool) -> Result<HybridStages> {
             });
         }
     }
-    #[cfg(feature = "hybrid-remote")]
-    {
-        let client = std::sync::Arc::new(super::openrouter::OpenRouterClient::from_env()?);
-        if let Some(embedding) = &cfg.embedding {
-            stages.embedder = Some(std::sync::Arc::new(
-                super::openrouter::OpenRouterEmbedder::with_client(
-                    embedding.clone(),
-                    client.clone(),
-                ),
-            ));
-        }
-        if let Some(reranker) = &cfg.reranker {
-            stages.reranker = Some(std::sync::Arc::new(
-                super::openrouter::OpenRouterReranker::with_client(reranker.clone(), client),
-            ));
-        }
-    }
-    Ok(stages)
+    Ok(())
 }
 
-fn ensure_openrouter(provider: &str) -> Result<()> {
-    if provider == PROVIDER_OPENROUTER {
-        return Ok(());
-    }
-    Err(Error::Admission {
-        message: format!(
-            "hybrid provider \"{provider}\" is not supported in iteration 1 (only \"{PROVIDER_OPENROUTER}\")"
-        ),
-    })
-}
-
-fn feature_missing() -> Error {
+fn unknown_provider(where_: &str, provider: &str) -> Error {
     Error::Admission {
-        message: "hybrid is enabled but this build lacks the `hybrid-remote` feature; \
+        message: format!(
+            "{where_}: unknown provider \"{provider}\" (supported: \"{PROVIDER_OPENROUTER}\", \"{PROVIDER_FASTEMBED}\")"
+        ),
+    }
+}
+
+fn feature_missing_remote() -> Error {
+    Error::Admission {
+        message: "hybrid is enabled with an OpenRouter stage but this build lacks the `hybrid-remote` feature; \
                   rebuild with --features hybrid-remote or set hybrid = false"
+            .to_owned(),
+    }
+}
+
+fn feature_missing_local() -> Error {
+    Error::Admission {
+        message: "hybrid is enabled with a fastembed stage but this build lacks the `hybrid-local` feature; \
+                  rebuild with --features hybrid-local or set hybrid = false"
             .to_owned(),
     }
 }
@@ -590,6 +667,10 @@ mod tests {
             dimensions: 2048,
             normalize: true,
         };
+        // The provider-aware formatter must never drift from the legacy
+        // format: compare against the legacy function itself and pin the
+        // exact bytes.
+        assert_eq!(embedding_model_id(&cfg), legacy_cache_model_id(&cfg));
         assert_eq!(
             embedding_model_id(&cfg),
             "openrouter/nvidia/nemotron-3-embed-1b:free@d2048@l2"
@@ -598,6 +679,7 @@ mod tests {
             normalize: false,
             ..cfg.clone()
         };
+        assert_eq!(embedding_model_id(&raw), legacy_cache_model_id(&raw));
         assert_eq!(
             embedding_model_id(&raw),
             "openrouter/nvidia/nemotron-3-embed-1b:free@d2048@raw"
@@ -681,6 +763,7 @@ mod tests {
     fn coverage_and_ann_warm_use_the_canonical_id() {
         use crate::daemon::registry;
         use crate::daemon::tools::run_project_index;
+        use crate::hybrid::dense::{AnnPolicy, DenseCache};
         use crate::hybrid::jobs::{coverage_with, embed_project_chunks_with};
         use crate::store::Db;
 
@@ -721,9 +804,17 @@ mod tests {
             after.cached, after.total,
             "100% coverage under the canonical key"
         );
-        // The ANN warm path receives the same canonical id (server.rs uses
-        // embedding_model_id; warm(key) == embedder.model_id()).
-        assert_eq!(model_id, embedder.model_id());
+        // The ANN warm path is driven with the same canonical id (server.rs
+        // uses embedding_model_id): warm the dense cache under the key and
+        // read it back — the rows carry the model id internally.
+        let dense = DenseCache::with_policy(AnnPolicy::BuildOrLoad, cache.path());
+        dense.warm(&db, project.id, &model_id).expect("ann warm");
+        // The dense read-back under the same key must resolve (the rows carry
+        // the canonical model id internally); a second warm is a no-op.
+        dense.get(&db, project.id, &model_id).expect("dense read");
+        dense
+            .warm(&db, project.id, &model_id)
+            .expect("warm idempotent");
     }
 
     #[cfg(feature = "hybrid-local")]
@@ -752,16 +843,19 @@ mod tests {
 
     #[test]
     fn provider_status_maps_states() {
-        use ProviderState::{Connected, NotConnected, Unknown};
+        use ProviderState::{Broken, Connected, NotConnected, Unknown};
         let none = ProvidersCfg::default();
         assert_eq!(provider_status(&none, PROVIDER_FASTEMBED).state, Unknown);
         assert_eq!(provider_status(&none, PROVIDER_OPENROUTER).state, Unknown);
 
+        let runtime_file = tempfile::TempDir::new().expect("tmp");
+        let runtime_path = runtime_file.path().join("libonnxruntime.so");
+        std::fs::write(&runtime_path, b"fake").expect("touch runtime");
         let connected_fastembed = ProvidersCfg {
             fastembed: Some(FastembedProvider {
                 enabled: true,
                 runtime: Some("1.24.4".to_owned()),
-                runtime_path: Some(PathBuf::from("/tmp/libonnxruntime.so")),
+                runtime_path: Some(runtime_path),
             }),
             openrouter: None,
         };
@@ -794,6 +888,18 @@ mod tests {
             provider_status(&no_runtime, PROVIDER_FASTEMBED).state,
             NotConnected
         );
+
+        // A recorded runtime path that vanished is Broken, not Connected
+        // (FR-2).
+        let broken = ProvidersCfg {
+            fastembed: Some(FastembedProvider {
+                enabled: true,
+                runtime: Some("1.24.4".to_owned()),
+                runtime_path: Some(PathBuf::from("/nonexistent/onnxruntime.so")),
+            }),
+            openrouter: None,
+        };
+        assert_eq!(provider_status(&broken, PROVIDER_FASTEMBED).state, Broken);
 
         let connected_openrouter = ProvidersCfg {
             fastembed: None,
