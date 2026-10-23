@@ -1,7 +1,7 @@
 # Technical Design: hybrid-local (итерация 4)
 
-**Status:** Draft, ревизия 0.6 · **Дата:** 2026-10-23
-**Spec:** `docs/specs/hybrid-local/requirements.md` (ревизия 0.6)
+**Status:** Draft, ревизия 0.7 · **Дата:** 2026-10-23
+**Spec:** `docs/specs/hybrid-local/requirements.md` (ревизия 0.7)
 **ADR:** ADR-17 (product design); ADR-12/13/14 (adjacent).
 
 ## 1. Overview
@@ -88,6 +88,15 @@ performs network I/O (FR-12, NFR-6).
 
 ```rust
 // hybrid/runtime.rs
+pub struct Target {
+    pub triple: &'static str,
+    pub archive_url: &'static str,
+    pub archive_sha256: &'static str,
+    pub archive_size: u64,
+    pub library_path: &'static str, // inside the archive: lib/libonnxruntime.so|.dylib,
+                                    // lib/onnxruntime.dll
+    pub library_size: u64,
+}
 pub enum ProviderState { Unknown, NotConnected, Connected, Broken }
 pub struct RuntimeStatus { pub state: ProviderState, pub version: Option<String>,
                            pub path: Option<PathBuf>, pub reason: Option<String> }
@@ -129,14 +138,18 @@ key source; `fetch` never leaves a directory without `.complete`; `resolve` neve
 ## 6. Data flow
 
 1. **connect fastembed** → detect target (five; macOS >= 14) → free-space preflight
-   (archive + extracted library) → download archive (size cap) →
-   verify sha256 → extract the shared library → temp → fsync → rename into
+   (`target.archive_size + target.library_size`) → download archive (size cap) →
+   verify sha256 → extract the single target library (`library_path`; Linux `.so`, macOS
+   `.dylib`, Windows `onnxruntime.dll`) → on macOS remove `com.apple.quarantine` if present,
+   verify `codesign --verify --strict`, and ad-hoc sign (`codesign --force --sign -`) only
+   when verification fails → temp → fsync → rename into
    `<data>/runtimes/onnxruntime/1.24.4/<target>/` → write `[providers.fastembed]` (global).
    `resolve` refuses a data-dir runtime without an enabled provider entry unless
    `ORT_DYLIB_PATH` is set; `init_from` is the first ORT call; failure is `Admission`
    (never let `ort::api()` panic). `connect openrouter` instead probes
    `GET /key` (0 model tokens) and writes the provider entry without the key.
-2. **models fetch** → registry entry → free-space preflight (>= 1.5x Σ `files[].size` +
+2. **models fetch** → registry entry → if `.complete` and all hashes verify, return the
+   path without taking the install lock → free-space preflight (>= 1.5x Σ `files[].size` +
    256 MiB) →
    per file: download to `*.part`, verify size+sha256 against the registry (per-file <= 2 GiB,
    model total <= 3 GiB), fsync, rename → `.complete` last. A lock serializes concurrent
@@ -162,7 +175,7 @@ key source; `fetch` never leaves a directory without `.complete`; `resolve` neve
 
 | Crate | Why | Notes |
 |---|---|---|
-| `fastembed = "=7.1.1"` | local embed/rerank, user-defined ONNX | Apache-2.0; `default-features = false`; embedding ONNX is `Vec<u8>` in every release at MSRV 1.88 (7.5 still; `OnnxSource` only for rerank; 7.5 needs ort rc.15/MSRV 1.92) |
+| `fastembed = "=7.1.1"` | local embed/rerank, user-defined ONNX | Apache-2.0; `default-features = false`; embedding ONNX is `Vec<u8>` in every release at MSRV 1.88 (7.5 still; `OnnxSource` only for rerank; 7.5.0 declares 1.88 but pins ort rc.15, whose MSRV is 1.92) |
 | `ort = "=2.0.0-rc.13"` | `load-dynamic` + `init_from` | rc risk accepted in ADR-17; targets ORT 1.24.4 (`api-24`) |
 | `ureq = "=3.4.2"` | blocking HTTPS for downloads | rustls; exact pin (3.4.3+ inside cooldown) |
 | `sha2 = "=0.10.9"` | sha256 verification | RustCrypto |
@@ -222,6 +235,7 @@ key source; `fetch` never leaves a directory without `.complete`; `resolve` neve
 | macOS 14 floor / no x64 macOS | older Intel users unsupported | explicit unsupported-target error |
 | `Vec<u8>` embedding load | one extra model copy in RSS | int8 models, T8 budget; no file path at MSRV 1.88 |
 | Platform loader | feature only tested on Linux | windows/macos `cargo check`; static binary live check |
+| macOS dylib quarantine/signature | downloaded runtime may fail `dlopen` | strip quarantine if present; `codesign --verify --strict`, ad-hoc sign only on failure; macOS live check in T8 |
 | Cooldown pins | `cargo update` picks too-new | exact pins; T1 asserts resolution |
 | TOML rewrite loses comments | annoyance | printed warning; `toml_edit` later |
 

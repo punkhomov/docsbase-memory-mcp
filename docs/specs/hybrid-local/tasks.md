@@ -6,7 +6,7 @@ machine-local provider registry, and no default models.
 **Architecture:** provisioning (`cli/connect`, `cli/models`, `hybrid/runtime`,
 `hybrid/models`) is separate from the runtime path (`hybrid/local` implements `Embedder`/
 `Reranker` with role-aware prefixes); the default build links none of it.
-**Spec:** `docs/specs/hybrid-local/requirements.md` (rev 0.6)
+**Spec:** `docs/specs/hybrid-local/requirements.md` (rev 0.7)
 **Global constraints:**
 - Rust edition 2024, MSRV 1.88; fmt + clippy `--all-targets -D warnings`; no unwrap/expect/panic in `src/**`.
 - Default `cargo tree` has no `fastembed`, `ort`, `tokenizers`, `hf-hub`, `image`, `native-tls`, `ureq`, `reqwest` (NFR-1).
@@ -37,15 +37,17 @@ machine-local provider registry, and no default models.
 - Consumes: `Error`, `paths`, `fd-lock`, `sha2`.
 **Steps:**
 1. RED: registry well-formedness — unique names, dim > 0, non-empty `files[]` (ONNX +
-   tokenizer/config files; the per-entry set comes from the row, not a fixed count), each
-   with size/sha256, pooling, licenses, E5 `query: `/`passage: ` prefixes, BGE instruction,
-   `prompt_version`.
+   exactly the four fastembed tokenizer files: `tokenizer.json`, `config.json`,
+   `special_tokens_map.json`, `tokenizer_config.json`; the set comes from the row, not a
+   count assertion), each with size/sha256, pooling, licenses, E5 `query: `/`passage: `
+   prefixes, BGE instruction, `prompt_version`.
 2. RED: `fetch_installs_all_files_and_completes_last` (fake source) — `.complete` last,
    second call downloads nothing.
 3. RED: `fetch_rejects_bad_hash_and_size` — hash/size mismatch is `Admission`, nothing
    usable remains; `fetch_rejects_file_over_cap` (per-file > 2 GiB, total > 3 GiB);
-   `fetch_force_after_hash_failure` retries and succeeds; `files[]` is the only authoritative
-   file set (`onnx`/`additional[]` are derived).
+   `fetch_force_after_hash_failure` retries and succeeds; `fetch_complete_takes_no_lock`
+   (a verified `.complete` revision is a no-op and does not take the exclusive install lock);
+   `files[]` is the only authoritative file set (`onnx`/`additional[]` are derived).
 4. RED: `cached_reverifies_hashes` — tampered file after install → not cached.
 5. RED: `canonical_id_includes_revision_and_prompt`.
 6. RED: CLI shape — `models fetch <name>` (with `--force`) and `models list` reach the
@@ -72,20 +74,26 @@ machine-local provider registry, and no default models.
 **Interfaces:**
 - Produces: `Target`, `RuntimeStatus { state, version, path, reason }`,
   `platform_target()`, `resolve`, `install`, `init`, `connect::run(args)`.
-- Consumes: `ProvidersCfg`/`providers::status` (T3), global config, `models::fetch` (not via
-  connect).
+- Consumes: `ProvidersCfg`/`providers::status` (T3), global config.
 **Steps:**
 1. RED: `targets_cover_five_platforms` (linux x64/aarch64, osx-arm64, win-x64/arm64;
-   unknown → admission; macOS floor 14). ORT version is `1.24.4`.
+   unknown → admission; macOS floor 14). ORT version is `1.24.4`. The table carries
+   `archive_url`, `archive_sha256`, `archive_size`, `library_path`, `library_size`; filling
+   it from the official Microsoft release is the OQ-1 T2 deliverable. Tests use a fake
+   `Target` until then.
 2. RED: `install_verifies_hash_and_is_atomic`; bad hash/size leaves nothing; `--force`
    replaces; `second_connect_downloads_nothing` (counting fake `RuntimeSource`); archive >
-   256 MiB or extracted library > 512 MiB → `Admission`.
+   256 MiB or extracted library > 512 MiB → `Admission`; preflight uses
+   `archive_size + library_size` and names required/available bytes; `install_selects_platform_library`
+   (`.so`/`.dylib`/`onnxruntime.dll`), and on macOS the quarantine/codesign command sequence
+   is constructed (not executed on Linux CI).
 3. RED: `resolve_requires_a_connected_provider_or_env_override` — data-dir runtime without
    `[providers.fastembed]` is not used; `ORT_DYLIB_PATH` wins; `init_from` is first.
 4. RED: `connect_openrouter_reads_env_probes_and_never_persists_the_key` — fake
    `Transport` returns `/key` JSON; offline/auth failure → `Admission`; zero token request
    (GET, no embeddings body).
-5. RED: `connect_rejects_local`; status table maps the four `ProviderState` values.
+5. RED: `connect_rejects_local`; status table maps the four `ProviderState` values;
+   `connect_check_reports_macos_signature_state` (valid/adhoc/missing) on macOS.
 6. GREEN: download (size cap + free-space preflight), extract, atomic install, global
    config write, status table; `--check`, `--force`; no `--models` flag. Gate the
    `openrouter` arm, `wire` and `openrouter` imports under `hybrid-remote`; the `connect`
@@ -200,7 +208,8 @@ machine-local provider registry, and no default models.
 3. RED: scope matrix (project default, `--local`, outside-project requires `--global`, both
    flags error); global write preserves `[providers]` and unrelated sections.
 4. RED: `--dims` exists only on `embed` and `--window` only on `rerank` (clap rejects the
-   wrong flag); dims inferred for fastembed, required for OpenRouter; wrong dims rejected.
+   wrong flag); dims inferred for fastembed, required for OpenRouter; wrong dims rejected;
+   `--path` overrides the project root and `--path --global` is an error.
 5. RED: provider inference from a registry name; unknown name without `--provider` → error;
    fastembed probe offline under `hybrid-local`; OpenRouter probe under `hybrid-remote` via a
    fake `Transport` (one embed of `docsbase probe` for the embed stage, one rerank of
@@ -262,7 +271,7 @@ machine-local provider registry, and no default models.
    T4/T5 shared guard, not a synthetic one), `remove_force_when_locked`,
    `remove_unlocked_succeeds`.
 2. `uninstall` removes `<data>/runtimes/onnxruntime` and the model cache entries owned by
-   docsbase.
+   docsbase (FR-13 scope).
 3. Re-pin: a revision change reports "vectors will be re-embedded, ANN invalidated"; `fetch`
    does not silently switch revisions.
 4. `models list` shows the four provider states, selected `model_id`, cache size;

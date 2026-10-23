@@ -38,7 +38,8 @@ Ledger: одна запись на таск (что сделано, чем пр�
     `OnnxSource` for embeddings and is cooldown-blocked until 2026-11-06. The int8
     model choice keeps the 7.1.1 peak acceptable; rerank already supports files.
     (Corrected 2026-10-23 after source review: 7.5.0 still uses `Vec<u8>` for
-    embeddings; `OnnxSource` is rerank-only and 7.5 needs ort rc.15/MSRV 1.92.)
+    embeddings; `OnnxSource` is rerank-only and 7.5 pins ort rc.15, whose MSRV is 1.92;
+    7.5.0 itself declares 1.88.)
   - HF pins are `resolve/<commit-sha>/<path>`; the tree API exposes LFS `sha256` + size,
     which the registry will store (regular files: size + computed sha256).
 
@@ -108,3 +109,14 @@ Ledger: одна запись на таск (что сделано, чем пр�
   table lists `fetch --force`/`remove --force`; "expected bytes" defined (Σ files[].size
   for fetch, archive + extracted for connect); `files[]` is authoritative; `models use`
   requires `--dims` for OpenRouter.
+
+- Full review 3 (2026-10-23, Mercury 3 via `inception/mercury-3:high`) → **NEEDS-REVISION**
+  (2 majors, 6 minors; T1 still startable) → rev 0.7. Majors fixed: connect preflight now
+  uses `target.archive_size + target.library_size` from the five-target table (OQ-1 is a T2
+  deliverable; tests use a fake Target), and macOS install strips quarantine if present,
+  verifies `codesign --verify --strict`, ad-hoc signs only on failure. Minors: uninstall
+  scope aligned (runtime + model caches), `--path` defined (error with `--global`), T2
+  Consumes clause cleaned, per-platform library file named, four tokenizer files pinned as
+  a registry invariant, OQ-1 marked as T2 deliverable, `models use` added to the feature
+  matrix, complete-fetch no-op lock rule, SC-5 probe gating. Mercury confirmed the BYO
+  fastembed/ort facts locally and that T1 has no blockers.

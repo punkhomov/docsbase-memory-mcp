@@ -1,6 +1,6 @@
 # SPECIFICATION: hybrid-local (итерация 4)
 
-**Status:** Draft, ревизия 0.6 · **Дата:** 2026-10-23
+**Status:** Draft, ревизия 0.7 · **Дата:** 2026-10-23
 **Constitution:** `docs/specs/constitution.md` (1.3.0)
 **Related:** `docs/specs/hybrid-providers/` (dense/RRF), `docs/specs/ann-index/` (ANN),
 ADR-12 (cache key), ADR-13 (local models behind a flag), ADR-14 (OpenRouter),
@@ -32,7 +32,7 @@ ADR-17 (this iteration).
 `fastembed` must be `default-features = false` with a direct `ort` `load-dynamic`
 dependency (otherwise the build links/downloads ORT and pulls hf-hub/image/native-tls);
 the "7.5 adds file-based embedding loading" claim was false (7.5 still uses `Vec<u8>`,
-`OnnxSource` is rerank-only, and 7.5 needs ort rc.15/MSRV 1.92); `models use` must work in
+`OnnxSource` is rerank-only, and 7.5 pins ort rc.15, whose MSRV is 1.92); `models use` must work in
 a `hybrid-local`-only build (per-provider probe); `embed_query` needs the
 `daemon::tools::dense_candidates` call site; and one canonical `embedding_model_id` must
 replace the `cache_model_id`/`Embedder::model_id` split. Also: structural
@@ -74,6 +74,19 @@ says bare `OnceLock`; the probe is a dedicated single-shot path (no retry wrappe
 `fetch --force`/`remove --force`; "expected bytes" is defined (Σ `files[].size` for fetch,
 archive + extracted library for connect); `files[]` is the authoritative registry file set;
 `models use` requires `--dims` for OpenRouter rather than silently defaulting it.
+
+**Delta 0.7 (2026-10-23, full review with Mercury 3):** verdict NEEDS-REVISION; two majors
+and six minors fixed. (M1) `connect` preflight now has a real operand: the five-target
+table carries `archive_size` and `library_size`, expected = their sum, and filling the table
+from the official Microsoft release is the OQ-1 T2 deliverable. (M2) macOS runtime install
+now strips `com.apple.quarantine` if present, verifies `codesign --verify --strict`, and
+ad-hoc signs only on failure; T2 tests the command sequence, T8 checks it live. Minors:
+`uninstall` scope aligned with T9 (runtime + model caches); `--path` defined (project root
+override, error with `--global`); T2's stale `models::fetch` Consumes clause removed; the
+per-platform extracted library file is named (`.so`/`.dylib`/`onnxruntime.dll`); the four
+fastembed tokenizer files are a registry invariant; OQ-1 is explicitly a T2 deliverable;
+`models use` is included in the feature matrix; a verified `.complete` fetch is a no-op and
+does not take the exclusive lock; SC-5 asserts provider-specific probe gating.
 
 ## 1. Problem
 
@@ -235,12 +248,16 @@ returns `(index, score)` pairs; without it, config validation fails.
   OpenRouter fills its documented defaults when they are absent, while for any
   non-openrouter provider a missing `model` is `Admission` (never inherits the OpenRouter
   default) and a missing `dimensions` is taken from the registry (an explicit value must
-  match). The same rule applies to `[hybrid.reranker].model`.
+  match). The same rule applies to `[hybrid.reranker].model`. Every embedding/rerank row
+  includes exactly the four fastembed tokenizer files in `files[]`: `tokenizer.json`,
+  `config.json`, `special_tokens_map.json`, `tokenizer_config.json`; a missing one is a
+  registry-invariant test failure, not a late inference error.
 - **FR-6 (must).** `models fetch <name>` downloads only registry files at the pinned
   revision, verifies size+sha256 and enforces per-file/archive size caps, installs
   atomically under a lock, writes `.complete` last, is idempotent, and re-verifies
-  file hashes when a cached model is opened (a modified cache is not trusted). Offline or
-  mismatch → error with no partial install.
+  file hashes when a cached model is opened (a modified cache is not trusted). A fetch of a
+  complete cached revision is a no-op and does **not** take the exclusive install lock;
+  only incomplete installs serialize. Offline or mismatch → error with no partial install.
 - **FR-7 (must).** `models list` reports registry entries, cached revisions, sizes and
   status; `models remove <name>` removes all cached revisions. A loaded model holds a
   shared lock on its cache directory; `remove` takes it exclusively and non-blocking, and
@@ -260,9 +277,10 @@ returns `(index, score)` pairs; without it, config validation fails.
   inferred); an unknown name requires `--provider` (OpenRouter has no catalog).
   Scope: inside a project it writes `.docsbase.toml` by default (`--local` optional);
   `--global` writes the global config (defaults for new projects) and is required outside a
-  project; both flags → error. Only the selected stage's table is written; the other stage
-  is untouched. Validation: provider connected, model cached (fetch hint), dims/window in
-  bounds. Probe per provider: OpenRouter under `hybrid-remote`, fastembed offline against
+  project; both flags → error. `--path <dir>` overrides the project root for this
+  invocation and is an error together with `--global`. Only the selected stage's table is
+  written; the other stage is untouched. Validation: provider connected, model cached
+  (fetch hint), dims/window in bounds. Probe per provider: OpenRouter under `hybrid-remote`, fastembed offline against
   the cached model; `models use` must work in a `hybrid-local`-only build.
 - **FR-9 (must).** `provider = "fastembed"` constructs `Embedder`/`Reranker`; a **single
   canonical model-id function** (not two) is used by the embedder, `coverage()` and the ANN
@@ -287,10 +305,11 @@ returns `(index, score)` pairs; without it, config validation fails.
   usable installed; inference/session failures after a successful load are `Internal`.
   No silent fallback to lexical/exact because of a local-provider failure.
 - **FR-13 (should).** Lifecycle integration: `docsbase uninstall` removes installed
-  runtimes; `fetch`/`connect` preflight free space (>= 1.5x expected bytes + 256 MiB) and
-  fail with `Admission` before downloading, where expected bytes are the sum of
-  `files[].size` for `fetch` and archive + extracted library for `connect`; the error names
-  required and available bytes; a revision bump (`model_id` change) reports the
+  runtimes **and the model cache entries owned by docsbase**; `fetch`/`connect` preflight
+  free space (>= 1.5x expected bytes + 256 MiB) and fail with `Admission` before
+  downloading, where expected bytes are the sum of `files[].size` for `fetch` and
+  `target.archive_size + target.library_size` for `connect` (both are constants in the
+  five-target table); the error names required and available bytes; a revision bump (`model_id` change) reports the
   re-embed/ANN-invalidate cost; `models list` shows provider state, selected model id and
   cache size (observability); provisioning under a running daemon notes that the daemon
   must reload/restart.
@@ -367,8 +386,9 @@ revision is part of the path so updates never mix vectors.
 | `docsbase models use rerank <model>` | `--provider`, `--window`, `--local`, `--global`, `--dry-run`, `--path` | `[hybrid.reranker]` written or printed |
 
 Feature matrix: `connect fastembed` and `models fetch/list/remove` need `hybrid-local`;
-`connect openrouter` needs `hybrid-remote`; both may be enabled together; the default build
-has none of them.
+`connect openrouter` needs `hybrid-remote`; `models use` is available under either feature
+and dispatches its probe per provider; both features may be enabled together; the default
+build has none of them.
 
 **Config files:** global `config.toml` (`[providers.*]`, optional `[hybrid.*]` defaults);
 project `.docsbase.toml` (`[hybrid.*]` only).
@@ -386,9 +406,10 @@ fastembed`), and never contain keys or file contents.
   rejects a file/archive over its size cap, and leaves no partial install when
   interrupted/offline.
 - **SC-5.** `models use embed|rerank <model>` is single-purpose: one stage per invocation,
-  purpose-specific options only, scope matrix (project default, `--local`, `--global`,
-  outside-project error, both-flags error), and it never rewrites `[providers]` or the
-  other stage.
+  purpose-specific options only (`--dims`/`--window`, `--path` without `--global`), scope
+  matrix (project default, `--local`, `--global`, outside-project error, both-flags error),
+  provider-specific probe (fastembed offline, OpenRouter single-shot under `hybrid-remote`),
+  and it never rewrites `[providers]` or the other stage.
 - **SC-6.** With runtime+model prepared, embedding and rerank run offline, `model_id`
   contains the revision, and cached vectors are reused after restart.
 - **SC-7.** The ignored live test (connect/fetch/embed/rerank on a real model) passes on a
@@ -410,7 +431,7 @@ fastembed`), and never contain keys or file contents.
 | Pinned HF revision + sha256 is enough provenance | What if HF rewrites LFS objects or a repo is deleted? | Revision is a commit sha; sha256 is in-code; `fetch` fails closed; registry update is a code change |
 | `[providers]` only in global config | What about a project checked into a repo with a provider entry? | Explicit validation error; machine capabilities are not repository state |
 | No default model | Is the UX acceptable? | `models use embed <model>` / `models use rerank <model>` is explicit; `connect` prints the exact snippet; defaults would hide re-embedding costs |
-| 14-day cooldown allows `fastembed 7.1.1` | What if 7.1.1 has a bug fixed in 7.2, or we need file-based embedding loading? | No file-based embedding path exists at MSRV 1.88 (7.5 still uses `Vec<u8>` and needs ort rc.15/MSRV 1.92); budget one model copy in RSS; upgrade is an MSRV task |
+| 14-day cooldown allows `fastembed 7.1.1` | What if 7.1.1 has a bug fixed in 7.2, or we need file-based embedding loading? | No file-based embedding path exists at MSRV 1.88 (7.5 still uses `Vec<u8>`; 7.5.0 itself declares 1.88 but pins ort rc.15, which requires 1.92); budget one model copy in RSS; upgrade is an MSRV task |
 | No weights in the binary | Does `fastembed` embed any model? | Only code; `UserDefinedEmbeddingModel` is built from fetched files |
 | BYO models are data, not code | Does `fastembed` only support its typed catalog? | Its built-in `EmbeddingModel`/`RerankerModel` enums are not used; both paths call `try_new_from_user_defined`. Any model with the standard ONNX contract (inputs `input_ids`/`attention_mask`[/`token_type_ids`], output `last_hidden_state` or `text_embeds`), HF `tokenizer.json` files, and Cls/Mean pooling is usable by adding a registry row (repo, revision, sha256, dim, pooling, prefixes); no source change. Exotic heads, custom pooling, sparse models, and non-ONNX repos are out of scope. |
 | `models use` can rewrite TOML without `toml_edit` | Are comments lost? | Known limitation, printed by the command; no new dependency in v1 |
@@ -423,8 +444,10 @@ MCP management tools, `docsbase serve` model endpoints, quantized-on-the-fly con
 
 ## 12. Open questions
 
-- **OQ-1.** Exact ORT 1.24.4 release URLs/sha256 for the five targets — resolved in T2
-  (official Microsoft release archives; macOS x86_64 is not published).
+- **OQ-1.** Exact ORT 1.24.4 release URLs/sha256, archive sizes and extracted library
+  sizes for the five targets — a **T2 deliverable** (official Microsoft release archives;
+  macOS x86_64 is not published). Until filled, preflight tests use a fake `Target`; SC-2/
+  SC-7 cannot be completed without it.
 - **OQ-3.** Live CI run cadence for a real model — default: manual/nightly, never per-PR.
 - **OQ-5.** Multilingual default: E5-small int8 (118 MB, prefixes) vs bge-small (English,
   133 MB). Proposed: list both; docs recommend E5 for RU/EN; no automatic default.

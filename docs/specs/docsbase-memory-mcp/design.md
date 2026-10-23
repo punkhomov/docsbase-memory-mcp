@@ -565,7 +565,9 @@ x86_64 больше не публикуется, минимальная macOS 14
 sha256 и кладёт в data-dir; на старте
 `ort::init_from(path)` до создания сессий (порядок резолва: `ORT_DYLIB_PATH` →
 `providers.fastembed.runtime_path` → data-dir → ошибка; data-dir без записи провайдера
-не используется). `[providers]` валиден только в глобальном конфиге: проектный файл
+не используется). На macOS скачанный dylib проверяется `codesign --verify --strict`;
+`com.apple.quarantine` снимается, если присутствует, а ad-hoc подпись (`codesign -s -`)
+применяется только при провале проверки. `[providers]` валиден только в глобальном конфиге: проектный файл
 парсится отдельным типом без поля `providers` — это структурная защита, а не проверка
 после merge. Рантайм считается исполняемым кодом: explicit connect, pinned
 version + hash, запись в SECURITY. Бюджет 40 MiB (NFR-2) относится к бинарю;
@@ -573,7 +575,8 @@ version + hash, запись в SECURITY. Бюджет 40 MiB (NFR-2) относ
 Зависимости (фича, точные пины): `fastembed = { version = "=7.1.1",
 default-features = false }` (cooldown 14 дней; 7.2+ — после 2026-11-04/06; embedding
 ONNX грузится как `Vec<u8>` во всех версиях при MSRV 1.88: 7.5 всё ещё так, а
-`OnnxSource` есть только для rerank и требует ort rc.15/MSRV 1.92),
+`OnnxSource` есть только для rerank; 7.5.0 сам объявляет 1.88, но пинит ort rc.15
+с MSRV 1.92),
 `ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }`
 (release candidate — риск зафиксирован), `ureq = "=3.4.2"`, `sha2 = "=0.10.9"`,
 `flate2 = "=1.1.10"`, `tar = "=0.4.46"`, `zip = "=8.6.0"` для загрузки/распаковки
