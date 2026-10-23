@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::vector_cache::Embedder;
 
-use super::config::{EmbeddingCfg, RerankerCfg, cache_model_id};
+use super::config::{EmbeddingCfg, RerankerCfg, embedding_model_id};
 use super::wire::{self, Transport, TransportResponse};
 use super::{Reranker, blocking};
 
@@ -327,7 +327,7 @@ impl OpenRouterEmbedder {
     /// Builds the stage with an explicit client (shared with the reranker).
     #[must_use]
     pub fn with_client(cfg: EmbeddingCfg, client: Arc<OpenRouterClient>) -> Self {
-        let model_id = cache_model_id(&cfg);
+        let model_id = embedding_model_id(&cfg);
         Self {
             client,
             cfg,

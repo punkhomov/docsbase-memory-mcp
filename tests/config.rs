@@ -346,3 +346,150 @@ fn hybrid_cache_budget_parsed_and_validated() {
         "{err:?}"
     );
 }
+
+#[test]
+fn providers_in_project_config_are_a_parse_error() {
+    let config_dir = TempDir::new().expect("tempdir");
+    let project = TempDir::new().expect("tempdir");
+    write(
+        project.path(),
+        ".docsbase.toml",
+        "[providers.fastembed]\nenabled = true\n",
+    );
+
+    let err = Config::load_from(config_dir.path(), Some(project.path())).expect_err("must reject");
+    let text = err.to_string();
+    assert!(text.contains("admission refused"), "{text}");
+    assert!(text.contains("providers"), "{text}");
+}
+
+#[test]
+fn global_providers_parse_and_expose() {
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[providers.fastembed]\nenabled = true\nruntime = \"1.24.4\"\nruntime_path = \"/tmp/libonnxruntime.so\"\n\n[providers.openrouter]\nenabled = true\n",
+    );
+
+    let config = Config::load_from(config_dir.path(), None).expect("load");
+    let fastembed = config.providers.fastembed.expect("fastembed entry");
+    assert!(fastembed.enabled);
+    assert_eq!(fastembed.runtime.as_deref(), Some("1.24.4"));
+    assert_eq!(
+        fastembed.runtime_path.as_deref(),
+        Some(std::path::Path::new("/tmp/libonnxruntime.so"))
+    );
+    assert!(
+        config
+            .providers
+            .openrouter
+            .expect("openrouter entry")
+            .enabled
+    );
+}
+
+#[test]
+fn unknown_provider_name_rejected_at_global() {
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[providers.wat]\nenabled = true\n",
+    );
+    let err = Config::load_from(config_dir.path(), None).expect_err("unknown provider");
+    assert!(err.to_string().contains("wat"), "{err}");
+}
+
+#[test]
+fn openrouter_absent_model_keeps_default() {
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[hybrid.embedding]\nprovider = \"openrouter\"\n",
+    );
+    let config = Config::load_from(config_dir.path(), None).expect("load");
+    let embedding = config.hybrid_cfg.embedding.expect("embedding stage");
+    assert_eq!(
+        embedding.model,
+        docsbase_memory::hybrid::config::DEFAULT_EMBEDDING_MODEL
+    );
+    assert_eq!(embedding.dimensions, 2048);
+}
+
+#[test]
+fn global_defaults_then_project_override() {
+    let config_dir = TempDir::new().expect("tempdir");
+    let project = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[providers.openrouter]\nenabled = true\n\n[hybrid.embedding]\nmodel = \"global/model\"\ndimensions = 512\n",
+    );
+    write(
+        project.path(),
+        ".docsbase.toml",
+        "[hybrid.embedding]\nmodel = \"project/model\"\ndimensions = 256\n",
+    );
+
+    let config = Config::load_from(config_dir.path(), Some(project.path())).expect("load");
+    let embedding = config.hybrid_cfg.embedding.expect("embedding stage");
+    assert_eq!(embedding.model, "project/model", "project wins");
+    assert_eq!(embedding.dimensions, 256);
+    // The project cannot smuggle providers; the global ones survive.
+    assert!(config.providers.openrouter.expect("openrouter").enabled);
+    let global_only = Config::load_from(config_dir.path(), None).expect("load");
+    let global_embedding = global_only.hybrid_cfg.embedding.expect("embedding stage");
+    assert_eq!(global_embedding.model, "global/model");
+    // Hybrid default enables stage defaults without a table.
+    write(config_dir.path(), "config.toml", "hybrid = true\n");
+    let config = Config::load_from(config_dir.path(), None).expect("load");
+    assert_eq!(
+        config.hybrid_cfg.embedding.expect("embedding").provider,
+        "openrouter"
+    );
+}
+
+#[cfg(feature = "hybrid-local")]
+#[test]
+fn fastembed_without_model_is_admission_not_default() {
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[hybrid.embedding]\nprovider = \"fastembed\"\n",
+    );
+    let err = Config::load_from(config_dir.path(), None).expect_err("model required");
+    let text = err.to_string();
+    assert!(text.contains("admission refused"), "{text}");
+    assert!(text.contains("model"), "{text}");
+}
+
+#[cfg(feature = "hybrid-local")]
+#[test]
+fn fastembed_without_dims_uses_registry_dim() {
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\n",
+    );
+    let config = Config::load_from(config_dir.path(), None).expect("load");
+    let embedding = config.hybrid_cfg.embedding.expect("embedding stage");
+    assert_eq!(embedding.dimensions, 384, "registry dim");
+    assert!(embedding.normalize);
+}
+
+#[cfg(feature = "hybrid-local")]
+#[test]
+fn fastembed_wrong_dims_rejected() {
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\ndimensions = 128\n",
+    );
+    let err = Config::load_from(config_dir.path(), None).expect_err("wrong dims");
+    assert!(err.to_string().contains("admission refused"), "{err}");
+}

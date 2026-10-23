@@ -518,7 +518,7 @@ fn write_project_toml(
 #[cfg_attr(not(feature = "hybrid-remote"), allow(dead_code))]
 fn print_summary(table: &toml::Value) {
     use crate::hybrid::EmbeddingCfg;
-    use crate::hybrid::config::cache_model_id;
+    use crate::hybrid::config::embedding_model_id;
 
     if let Some(stage) = table
         .get("hybrid")
@@ -533,7 +533,7 @@ fn print_summary(table: &toml::Value) {
             .get("model")
             .and_then(toml::Value::as_str)
             .unwrap_or_default();
-        let pin = cache_model_id(&EmbeddingCfg {
+        let pin = embedding_model_id(&EmbeddingCfg {
             provider: PROVIDER_OPENROUTER.to_owned(),
             model: model.to_owned(),
             dimensions: u32::try_from(dims).unwrap_or_default(),

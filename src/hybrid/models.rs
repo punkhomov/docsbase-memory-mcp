@@ -323,6 +323,16 @@ pub fn canonical_id(entry: &ModelEntry<'_>, dims: usize, normalize: bool) -> Str
     )
 }
 
+/// Canonical id for a registry name (FR-9); `None` for an unknown name. This
+/// is the lookup used by [`crate::hybrid::config::embedding_model_id`] so
+/// the formatter lives here exactly once.
+#[must_use]
+pub fn canonical_id_for(name: &str, dims: usize, normalize: bool) -> Option<String> {
+    entry(name)
+        .ok()
+        .map(|entry| canonical_id(entry, dims, normalize))
+}
+
 /// A source of model file bytes. Production uses [`HttpModelSource`]; tests
 /// use a fake. `path` is the registry-relative file path.
 pub trait ModelSource {

@@ -222,10 +222,12 @@ pub fn coverage(db: &Db, cfg: &HybridCfg, project_id: i64) -> Result<Option<Cove
         return Ok(None);
     };
     // Coverage needs only the cache key, not a provider client: reporting
-    // stays cheap and never builds runtimes per status call (NFR-1).
+    // stays cheap and never builds runtimes per status call (NFR-1). The
+    // canonical key (FR-9) keeps coverage aligned with the embedder and the
+    // ANN warm path (SC-10).
     coverage_for_key_with_limits(
         db,
-        &super::config::cache_model_id(embedding),
+        &super::config::embedding_model_id(embedding),
         project_id,
         cfg.cache.limits(),
     )

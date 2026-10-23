@@ -5,6 +5,7 @@
 //! the feature-off admission path and the cache-key composition are testable
 //! without the network feature (SC-3).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
@@ -14,6 +15,9 @@ use super::Reranker;
 
 /// The only provider accepted in iteration 1 (FR-3).
 pub const PROVIDER_OPENROUTER: &str = "openrouter";
+
+/// Local fastembed provider (ADR-17, spec hybrid-local).
+pub const PROVIDER_FASTEMBED: &str = "fastembed";
 
 /// Default embedding model (FR-33): the free Nemotron route. Pilot T11
 /// showed parity or better vs paid qwen-8b on the benchmark probe
@@ -150,10 +154,244 @@ impl Default for RerankerCfg {
     }
 }
 
-/// Content-addressed cache key of the embedding stage (FR-5):
-/// `openrouter/<model>@d<dim>@<l2|raw>`.
+/// Machine-local provider records from the **global** config only (FR-1):
+/// `[providers.fastembed]` / `[providers.openrouter]`. Project files have no
+/// `providers` field (structural), so machine capabilities are never
+/// committed to repositories.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProvidersCfg {
+    /// `fastembed` provider record (ADR-17).
+    pub fastembed: Option<FastembedProvider>,
+    /// `OpenRouter` provider record.
+    pub openrouter: Option<OpenrouterProvider>,
+}
+
+/// `[providers.fastembed]` record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FastembedProvider {
+    /// Provider prepared on this machine.
+    pub enabled: bool,
+    /// Installed ONNX Runtime version, when known.
+    pub runtime: Option<String>,
+    /// Explicit runtime library path override (FR-11 order).
+    pub runtime_path: Option<PathBuf>,
+}
+
+/// `[providers.openrouter]` record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenrouterProvider {
+    /// Key validated and recorded on this machine.
+    pub enabled: bool,
+}
+
+/// A provider's readiness state (FR-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderState {
+    /// No provider entry in the global config.
+    Unknown,
+    /// Entry exists but the provider is not prepared.
+    NotConnected,
+    /// Prepared (runtime/version recorded).
+    Connected,
+    /// Entry exists but is unusable (e.g. broken path).
+    Broken,
+}
+
+/// Provider readiness with a human reason (FR-2 status table).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderStatus {
+    /// Readiness state.
+    pub state: ProviderState,
+    /// One-line diagnostic for non-Connected states.
+    pub reason: Option<String>,
+}
+
+/// Readiness of one provider (FR-2). `fastembed` is `Connected` when the
+/// entry exists, is enabled and carries a runtime path (the runtime install
+/// itself is T2); `OpenRouter` is `Connected` when enabled.
 #[must_use]
-pub fn cache_model_id(cfg: &EmbeddingCfg) -> String {
+pub fn provider_status(providers: &ProvidersCfg, name: &str) -> ProviderStatus {
+    match name {
+        PROVIDER_FASTEMBED => match &providers.fastembed {
+            None => ProviderStatus {
+                state: ProviderState::Unknown,
+                reason: Some(format!("run `docsbase connect {PROVIDER_FASTEMBED}`")),
+            },
+            Some(provider) if !provider.enabled => ProviderStatus {
+                state: ProviderState::NotConnected,
+                reason: Some(format!("run `docsbase connect {PROVIDER_FASTEMBED}`")),
+            },
+            Some(provider) if provider.runtime_path.is_some() => ProviderStatus {
+                state: ProviderState::Connected,
+                reason: provider.runtime.clone(),
+            },
+            Some(_) => ProviderStatus {
+                state: ProviderState::NotConnected,
+                reason: Some("runtime not installed; run `docsbase connect fastembed`".to_owned()),
+            },
+        },
+        PROVIDER_OPENROUTER => match &providers.openrouter {
+            None => ProviderStatus {
+                state: ProviderState::Unknown,
+                reason: Some("run `docsbase connect openrouter`".to_owned()),
+            },
+            Some(provider) if provider.enabled => ProviderStatus {
+                state: ProviderState::Connected,
+                reason: None,
+            },
+            Some(_) => ProviderStatus {
+                state: ProviderState::NotConnected,
+                reason: Some("run `docsbase connect openrouter`".to_owned()),
+            },
+        },
+        _ => ProviderStatus {
+            state: ProviderState::Unknown,
+            reason: Some(format!("unknown provider \"{name}\"")),
+        },
+    }
+}
+
+/// Provider-aware resolution of the embedding stage (FR-5): `OpenRouter`
+/// fills its documented defaults when absent; `fastembed` requires an
+/// explicit `model`, takes dims from the registry when absent, rejects a
+/// mismatch, and requires `normalize = true` (FR-9).
+///
+/// # Errors
+/// Returns [`Error::Admission`] for an unknown provider, a missing fastembed
+/// model, a wrong non-registry dim, or `normalize = false` on fastembed.
+pub fn resolve_embedding(
+    provider: &str,
+    model: Option<String>,
+    dimensions: Option<u32>,
+    normalize: bool,
+) -> Result<EmbeddingCfg> {
+    match provider {
+        PROVIDER_OPENROUTER => Ok(EmbeddingCfg {
+            provider: provider.to_owned(),
+            model: model.unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL.to_owned()),
+            dimensions: dimensions.unwrap_or(DEFAULT_DIMENSIONS),
+            normalize,
+        }),
+        PROVIDER_FASTEMBED => {
+            #[cfg(feature = "hybrid-local")]
+            {
+                let model = model.ok_or_else(|| Error::Admission {
+                    message: "hybrid.embedding: provider \"fastembed\" requires an explicit `model` (registry name); run `docsbase models list`"
+                        .to_owned(),
+                })?;
+                if !normalize {
+                    return Err(Error::Admission {
+                        message:
+                            "hybrid.embedding: fastembed registry models require normalize = true"
+                                .to_owned(),
+                    });
+                }
+                let entry = crate::hybrid::models::entry(&model)?;
+                let dim = entry.dim.ok_or_else(|| Error::Admission {
+                    message: format!(
+                        "hybrid.embedding: \"{model}\" is a rerank model, not an embedding model"
+                    ),
+                })?;
+                let dim = u32::try_from(dim).map_err(|_| Error::Admission {
+                    message: format!(
+                        "hybrid.embedding: registry dim for \"{model}\" is out of range"
+                    ),
+                })?;
+                match dimensions {
+                    None => Ok(EmbeddingCfg {
+                        provider: provider.to_owned(),
+                        model,
+                        dimensions: dim,
+                        normalize: true,
+                    }),
+                    Some(given) if given == dim => Ok(EmbeddingCfg {
+                        provider: provider.to_owned(),
+                        model,
+                        dimensions: given,
+                        normalize: true,
+                    }),
+                    Some(given) => Err(Error::Admission {
+                        message: format!(
+                            "hybrid.embedding: dimensions {given} do not match the registry dimension {dim} for \"{model}\""
+                        ),
+                    }),
+                }
+            }
+            #[cfg(not(feature = "hybrid-local"))]
+            {
+                let _ = (model, dimensions, normalize);
+                Err(Error::Admission {
+                    message: format!(
+                        "hybrid.embedding: provider \"fastembed\" requires the `hybrid-local` build feature"
+                    ),
+                })
+            }
+        }
+        _ => Err(Error::Admission {
+            message: format!(
+                "hybrid.embedding: unknown provider \"{provider}\" (supported: \"{PROVIDER_OPENROUTER}\", \"{PROVIDER_FASTEMBED}\")"
+            ),
+        }),
+    }
+}
+
+/// Provider-aware resolution of the rerank stage (FR-5): `OpenRouter` fills
+/// its default model; `fastembed` requires an explicit registry model of the
+/// `Rerank` task.
+///
+/// # Errors
+/// Returns [`Error::Admission`] for an unknown provider, a missing fastembed
+/// model, or an embedding model selected for rerank.
+pub fn resolve_reranker(provider: &str, model: Option<String>, window: u32) -> Result<RerankerCfg> {
+    match provider {
+        PROVIDER_OPENROUTER => Ok(RerankerCfg {
+            provider: provider.to_owned(),
+            model: model.unwrap_or_else(|| DEFAULT_RERANK_MODEL.to_owned()),
+            window,
+        }),
+        PROVIDER_FASTEMBED => {
+            #[cfg(feature = "hybrid-local")]
+            {
+                let model = model.ok_or_else(|| Error::Admission {
+                    message: "hybrid.reranker: provider \"fastembed\" requires an explicit `model` (registry name); run `docsbase models list`"
+                        .to_owned(),
+                })?;
+                let entry = crate::hybrid::models::entry(&model)?;
+                if entry.task != crate::hybrid::models::Task::Rerank {
+                    return Err(Error::Admission {
+                        message: format!(
+                            "hybrid.reranker: \"{model}\" is an embedding model, not a rerank model"
+                        ),
+                    });
+                }
+                Ok(RerankerCfg {
+                    provider: provider.to_owned(),
+                    model,
+                    window,
+                })
+            }
+            #[cfg(not(feature = "hybrid-local"))]
+            {
+                let _ = (model, window);
+                Err(Error::Admission {
+                    message: format!(
+                        "hybrid.reranker: provider \"fastembed\" requires the `hybrid-local` build feature"
+                    ),
+                })
+            }
+        }
+        _ => Err(Error::Admission {
+            message: format!(
+                "hybrid.reranker: unknown provider \"{provider}\" (supported: \"{PROVIDER_OPENROUTER}\", \"{PROVIDER_FASTEMBED}\")"
+            ),
+        }),
+    }
+}
+
+/// Legacy `OpenRouter` cache key (FR-5): `openrouter/<model>@d<dim>@<l2|raw>`.
+/// Kept byte-identical so existing vector caches are not orphaned by the
+/// provider-aware formatter (T3, FR-9).
+fn legacy_cache_model_id(cfg: &EmbeddingCfg) -> String {
     let post = if cfg.normalize { "l2" } else { "raw" };
     format!(
         "{}/{model}@d{dim}@{post}",
@@ -161,6 +399,27 @@ pub fn cache_model_id(cfg: &EmbeddingCfg) -> String {
         model = cfg.model,
         dim = cfg.dimensions
     )
+}
+
+/// The single canonical cache key (FR-9, SC-10): `OpenRouter` keeps the
+/// legacy format byte-for-byte; `fastembed` uses `models::canonical_id`
+/// (one formatter). The embedder, `coverage()` and the ANN warm path all
+/// call this function.
+#[must_use]
+pub fn embedding_model_id(cfg: &EmbeddingCfg) -> String {
+    #[cfg(feature = "hybrid-local")]
+    if cfg.provider == PROVIDER_FASTEMBED {
+        // Resolution (FR-5) guarantees the entry exists before this runs; the
+        // fallback is unreachable by construction and only prevents a panic.
+        if let Some(id) = crate::hybrid::models::canonical_id_for(
+            &cfg.model,
+            cfg.dimensions as usize,
+            cfg.normalize,
+        ) {
+            return id;
+        }
+    }
+    legacy_cache_model_id(cfg)
 }
 
 /// Concrete stages handed to the index and search paths.
@@ -281,5 +540,268 @@ fn feature_missing() -> Error {
         message: "hybrid is enabled but this build lacks the `hybrid-remote` feature; \
                   rebuild with --features hybrid-remote or set hybrid = false"
             .to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_embedding_openrouter_fills_documented_defaults() {
+        let cfg = resolve_embedding(PROVIDER_OPENROUTER, None, None, true).expect("resolve");
+        assert_eq!(cfg.provider, PROVIDER_OPENROUTER);
+        assert_eq!(cfg.model, DEFAULT_EMBEDDING_MODEL);
+        assert_eq!(cfg.dimensions, DEFAULT_DIMENSIONS);
+        assert!(cfg.normalize);
+        // Explicit values win.
+        let explicit = resolve_embedding(
+            PROVIDER_OPENROUTER,
+            Some("org/model".to_owned()),
+            Some(1024),
+            false,
+        )
+        .expect("resolve");
+        assert_eq!(explicit.model, "org/model");
+        assert_eq!(explicit.dimensions, 1024);
+        assert!(!explicit.normalize);
+    }
+
+    #[test]
+    fn resolve_reranker_openrouter_fills_default_model() {
+        let cfg = resolve_reranker(PROVIDER_OPENROUTER, None, 30).expect("resolve");
+        assert_eq!(cfg.model, DEFAULT_RERANK_MODEL);
+        assert_eq!(cfg.window, 30);
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_providers() {
+        let err = resolve_embedding("no-such-provider", None, None, true).expect_err("unknown");
+        assert!(matches!(err, Error::Admission { .. }));
+        let err = resolve_reranker("no-such-provider", None, 30).expect_err("unknown");
+        assert!(matches!(err, Error::Admission { .. }));
+    }
+
+    #[test]
+    fn embedding_model_id_openrouter_is_byte_identical_to_legacy() {
+        let cfg = EmbeddingCfg {
+            provider: PROVIDER_OPENROUTER.to_owned(),
+            model: "nvidia/nemotron-3-embed-1b:free".to_owned(),
+            dimensions: 2048,
+            normalize: true,
+        };
+        assert_eq!(
+            embedding_model_id(&cfg),
+            "openrouter/nvidia/nemotron-3-embed-1b:free@d2048@l2"
+        );
+        let raw = EmbeddingCfg {
+            normalize: false,
+            ..cfg.clone()
+        };
+        assert_eq!(
+            embedding_model_id(&raw),
+            "openrouter/nvidia/nemotron-3-embed-1b:free@d2048@raw"
+        );
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn fastembed_resolution_requires_model_and_validates_dims() {
+        // Missing model → admission, never the OpenRouter default (FR-5).
+        let err = resolve_embedding(PROVIDER_FASTEMBED, None, None, true).expect_err("no model");
+        assert!(matches!(err, Error::Admission { .. }));
+        assert!(err.to_string().contains("model"));
+        // Missing dims → registry dim.
+        let cfg = resolve_embedding(
+            PROVIDER_FASTEMBED,
+            Some("multilingual-e5-small".to_owned()),
+            None,
+            true,
+        )
+        .expect("resolve");
+        assert_eq!(cfg.dimensions, 384);
+        // Wrong dims → admission.
+        let err = resolve_embedding(
+            PROVIDER_FASTEMBED,
+            Some("multilingual-e5-small".to_owned()),
+            Some(128),
+            true,
+        )
+        .expect_err("wrong dims");
+        assert!(matches!(err, Error::Admission { .. }));
+        // normalize = false → admission (FR-9).
+        let err = resolve_embedding(
+            PROVIDER_FASTEMBED,
+            Some("multilingual-e5-small".to_owned()),
+            None,
+            false,
+        )
+        .expect_err("normalize false");
+        assert!(matches!(err, Error::Admission { .. }));
+        // An embedding model for rerank → admission.
+        let err = resolve_reranker(
+            PROVIDER_FASTEMBED,
+            Some("multilingual-e5-small".to_owned()),
+            30,
+        )
+        .expect_err("embedding model for rerank");
+        assert!(matches!(err, Error::Admission { .. }));
+        // A rerank model resolves.
+        let rerank = resolve_reranker(
+            PROVIDER_FASTEMBED,
+            Some("jina-reranker-v1-turbo-en".to_owned()),
+            30,
+        )
+        .expect("resolve");
+        assert_eq!(rerank.window, 30);
+    }
+
+    /// Fake embedder whose model id comes from the canonical formatter — the
+    /// same source the real fastembed embedder will use (T4).
+    struct FakeFastembedEmbedder {
+        model_id: String,
+    }
+
+    impl crate::vector_cache::Embedder for FakeFastembedEmbedder {
+        fn model_id(&self) -> &str {
+            &self.model_id
+        }
+
+        #[allow(clippy::cast_precision_loss)] // test embedder, dimension width only
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|text| vec![text.len() as f32; 384])
+                .collect())
+        }
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn coverage_and_ann_warm_use_the_canonical_id() {
+        use crate::daemon::registry;
+        use crate::daemon::tools::run_project_index;
+        use crate::hybrid::jobs::{coverage_with, embed_project_chunks_with};
+        use crate::store::Db;
+
+        let cache = tempfile::TempDir::new().expect("cache");
+        let root = tempfile::TempDir::new().expect("root");
+        std::fs::write(root.path().join("a.md"), "# A\n\nwidgets here.\n").expect("doc");
+        let mut db = Db::open(cache.path()).expect("db");
+        let project =
+            registry::ensure_project(&mut db, &root.path().canonicalize().expect("canonical"))
+                .expect("project");
+        run_project_index(
+            &mut db,
+            cache.path(),
+            &project,
+            &crate::config::Config::default(),
+        )
+        .expect("index");
+
+        let cfg = EmbeddingCfg {
+            provider: PROVIDER_FASTEMBED.to_owned(),
+            model: "bge-small-en-v1.5".to_owned(),
+            dimensions: 384,
+            normalize: true,
+        };
+        let model_id = embedding_model_id(&cfg);
+        let embedder = FakeFastembedEmbedder {
+            model_id: model_id.clone(),
+        };
+        assert_eq!(embedder.model_id(), model_id, "same key as the formatter");
+
+        let before = coverage_with(&db, &embedder, project.id).expect("coverage before");
+        assert!(before.total > 0);
+        assert_eq!(before.cached, 0);
+        let backfilled = embed_project_chunks_with(&db, &embedder, project.id).expect("backfill");
+        assert!(backfilled >= before.total);
+        let after = coverage_with(&db, &embedder, project.id).expect("coverage after");
+        assert_eq!(
+            after.cached, after.total,
+            "100% coverage under the canonical key"
+        );
+        // The ANN warm path receives the same canonical id (server.rs uses
+        // embedding_model_id; warm(key) == embedder.model_id()).
+        assert_eq!(model_id, embedder.model_id());
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn embed_model_id_fastembed_matches_canonical_for_all_registry_rows() {
+        use crate::hybrid::models::{REGISTRY, Task, canonical_id};
+        for entry in REGISTRY {
+            if entry.task != Task::Embedding {
+                continue;
+            }
+            let dim = entry.dim.expect("embedding dim");
+            let cfg = EmbeddingCfg {
+                provider: PROVIDER_FASTEMBED.to_owned(),
+                model: entry.name.to_owned(),
+                dimensions: u32::try_from(dim).expect("dim fits"),
+                normalize: true,
+            };
+            assert_eq!(
+                embedding_model_id(&cfg),
+                canonical_id(entry, dim, true),
+                "single canonical formatter for {}",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn provider_status_maps_states() {
+        use ProviderState::{Connected, NotConnected, Unknown};
+        let none = ProvidersCfg::default();
+        assert_eq!(provider_status(&none, PROVIDER_FASTEMBED).state, Unknown);
+        assert_eq!(provider_status(&none, PROVIDER_OPENROUTER).state, Unknown);
+
+        let connected_fastembed = ProvidersCfg {
+            fastembed: Some(FastembedProvider {
+                enabled: true,
+                runtime: Some("1.24.4".to_owned()),
+                runtime_path: Some(PathBuf::from("/tmp/libonnxruntime.so")),
+            }),
+            openrouter: None,
+        };
+        let status = provider_status(&connected_fastembed, PROVIDER_FASTEMBED);
+        assert_eq!(status.state, Connected);
+        assert_eq!(status.reason.as_deref(), Some("1.24.4"));
+
+        let disabled = ProvidersCfg {
+            fastembed: Some(FastembedProvider {
+                enabled: false,
+                runtime: None,
+                runtime_path: None,
+            }),
+            openrouter: None,
+        };
+        assert_eq!(
+            provider_status(&disabled, PROVIDER_FASTEMBED).state,
+            NotConnected
+        );
+
+        let no_runtime = ProvidersCfg {
+            fastembed: Some(FastembedProvider {
+                enabled: true,
+                runtime: None,
+                runtime_path: None,
+            }),
+            openrouter: None,
+        };
+        assert_eq!(
+            provider_status(&no_runtime, PROVIDER_FASTEMBED).state,
+            NotConnected
+        );
+
+        let connected_openrouter = ProvidersCfg {
+            fastembed: None,
+            openrouter: Some(OpenrouterProvider { enabled: true }),
+        };
+        assert_eq!(
+            provider_status(&connected_openrouter, PROVIDER_OPENROUTER).state,
+            Connected
+        );
     }
 }

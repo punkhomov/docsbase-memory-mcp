@@ -164,3 +164,24 @@ Ledger: одна запись на таск (что сделано, чем пр�
   `Vec<u8>` по design §5, буфер транзиентный (только CLI-фаза fetch), бюджеты NFR-4
   касаются embed/rerank, а не fetch; пересмотреть при T8 live-замере RSS на
   `bge-reranker-base` (1.11 GB). Re-review: 3/3 ADDRESSED, new breakage none. T1 closed.
+
+- Task 3: complete (commits `f6c390c..`→ head of this session, tests: `cargo test
+  --locked --features hybrid-local --lib hybrid::config` → 8 passed; `--test config` →
+  25 passed; `cargo test --locked` default → green).
+  Реализовано: `ProvidersCfg`/`FastembedProvider`/`OpenrouterProvider`/`ProviderState`/
+  `provider_status`; structural `GlobalFileConfig` vs `ProjectFileConfig` (проект без
+  `providers` — `[providers]` в `.docsbase.toml` → Admission с подсказкой «move to
+  config.toml», не post-merge check); provider-aware resolution `resolve_embedding`/
+  `resolve_reranker` (FR-5): OpenRouter дефолты как раньше, fastembed требует `model`,
+  dims из registry, mismatch → Admission, `normalize=true` обязателен; `embedding_model_id`
+  — единый канонический ключ (FR-9/SC-10): OpenRouter = legacy формат byte-for-byte
+  (тест `embedding_model_id_openrouter_is_byte_identical_to_legacy`), fastembed =
+  `models::canonical_id` через новый `canonical_id_for` (один форматтер, cross-test по всем
+  registry-строкам); все call-site'ы `cache_model_id` заменены (jobs::coverage,
+  daemon/server ANN-warm, openrouter, cli/models). `Config.providers` добавлен.
+  Ruling: fallback в `embedding_model_id` на legacy-формат при невозможном lookup registry
+  недостижим по построению (resolution валидировал до), возврат `String` сохранён, чтобы не
+  менять контракты openrouter/coverage; в fallback нет паники (no expect). Ruling: тест
+  `coverage_and_ann_warm_use_the_canonical_id` использует fake-embedder с model_id из
+  `embedding_model_id` и доказывает 100% coverage под каноническим ключом; ANN-warm
+  принимает тот же ключ (равенство строк), полный прогон warm — T4.

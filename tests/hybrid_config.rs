@@ -8,7 +8,7 @@ use docsbase_memory::hybrid::blocking;
 #[cfg(feature = "hybrid-remote")]
 use docsbase_memory::hybrid::config::RerankerCfg;
 use docsbase_memory::hybrid::config::{
-    CacheCfg, EmbeddingCfg, HybridCfg, cache_model_id, from_config,
+    CacheCfg, EmbeddingCfg, HybridCfg, embedding_model_id, from_config,
 };
 
 #[test]
@@ -19,8 +19,10 @@ fn cache_key_carries_model_dim_and_postprocess() {
         normalize: true,
         ..EmbeddingCfg::default()
     };
+    // The fastembed arm is feature-gated; the OpenRouter arm must stay
+    // byte-identical to the legacy formatter (FR-9, T3).
     assert_eq!(
-        cache_model_id(&l2),
+        embedding_model_id(&l2),
         "openrouter/qwen/qwen3-embedding-8b@d1024@l2"
     );
     let raw = EmbeddingCfg {
@@ -28,7 +30,7 @@ fn cache_key_carries_model_dim_and_postprocess() {
         ..l2
     };
     assert_eq!(
-        cache_model_id(&raw),
+        embedding_model_id(&raw),
         "openrouter/qwen/qwen3-embedding-8b@d1024@raw"
     );
 }
