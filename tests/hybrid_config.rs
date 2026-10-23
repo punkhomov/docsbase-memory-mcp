@@ -224,3 +224,26 @@ fn enabled_without_stages_resolves_to_empty_stages_offline() {
     let stages = from_config(&cfg, false, false).expect("no stages, nothing to resolve");
     assert!(stages.embedder.is_none() && stages.reranker.is_none());
 }
+
+#[cfg(all(feature = "hybrid-local", feature = "hybrid-remote"))]
+#[test]
+fn fastembed_only_config_does_not_demand_openrouter_key() {
+    use docsbase_memory::hybrid::config::PROVIDER_FASTEMBED;
+    use docsbase_memory::hybrid::config::resolve_embedding;
+    let embedding = resolve_embedding(
+        PROVIDER_FASTEMBED,
+        Some("bge-small-en-v1.5".to_owned()),
+        None,
+        true,
+    )
+    .expect("resolve fastembed");
+    let cfg = HybridCfg {
+        enabled: true,
+        embedding: Some(embedding),
+        ..HybridCfg::default()
+    };
+    // No OPENROUTER_API_KEY in the environment: the fastembed-only config
+    // must fail on the local seam (stub, T4), never on the remote key.
+    let err = from_config(&cfg, true, true).expect_err("local stage");
+    assert!(!err.to_string().contains("OPENROUTER_API_KEY"), "{err}");
+}

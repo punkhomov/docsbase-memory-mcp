@@ -527,7 +527,10 @@ pub fn from_config(cfg: &HybridCfg, remote_on: bool, local_on: bool) -> Result<H
     }
     validate_stage_shapes(cfg)?;
     #[cfg(feature = "hybrid-remote")]
-    {
+    if has_openrouter {
+        // Build the client only when an OpenRouter stage is actually
+        // configured: a fastembed-only config must not demand
+        // `OPENROUTER_API_KEY` on a full-feature build (review P1).
         let client = std::sync::Arc::new(super::openrouter::OpenRouterClient::from_env()?);
         if let Some(embedding) = &cfg.embedding
             && embedding.provider == PROVIDER_OPENROUTER
