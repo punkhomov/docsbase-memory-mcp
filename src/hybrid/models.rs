@@ -28,9 +28,11 @@ pub const MAX_TOTAL_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 /// Free-space headroom added to the fetch preflight (FR-13).
 pub const PREFLIGHT_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Multiplier applied to the expected download before comparing with the
-/// available free space (FR-13).
-pub const PREFLIGHT_MULTIPLIER: f64 = 1.5;
+/// Preflight requirement (FR-13): 1.5x the expected bytes plus headroom,
+/// expressed as the integer fraction `3/2` (floor equals the float
+/// truncation for non-negative values).
+pub const PREFLIGHT_MULTIPLIER_NUMERATOR: u64 = 3;
+pub const PREFLIGHT_MULTIPLIER_DENOMINATOR: u64 = 2;
 
 /// What a registry model is used for (data model §7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,14 +357,6 @@ impl HttpModelSource {
     }
 }
 
-impl Default for HttpModelSource {
-    fn default() -> Self {
-        Self {
-            agent: ureq::Agent::config_builder().build().new_agent(),
-        }
-    }
-}
-
 impl ModelSource for HttpModelSource {
     fn fetch(&self, repo: &str, revision: &str, path: &str) -> Result<Vec<u8>> {
         let url = format!("https://huggingface.co/{repo}/resolve/{revision}/{path}");
@@ -471,9 +465,9 @@ pub fn expected_bytes(entry: &ModelEntry<'_>) -> u64 {
 fn preflight_check(expected: u64, available: u64) -> Result<()> {
     // 1.5x expected, in integer arithmetic (floor equals the float truncation
     // for non-negative values).
-    let required = expected
-        .saturating_add(expected / 2)
-        .saturating_add(PREFLIGHT_HEADROOM_BYTES);
+    let scaled =
+        expected.saturating_mul(PREFLIGHT_MULTIPLIER_NUMERATOR) / PREFLIGHT_MULTIPLIER_DENOMINATOR;
+    let required = scaled.saturating_add(PREFLIGHT_HEADROOM_BYTES);
     if available < required {
         return Err(Error::Admission {
             message: format!(
@@ -686,20 +680,17 @@ mod tests {
     /// declared size (truncated at the end), so size and sha256 are
     /// reproducible.
     struct FakeSource {
-        data: HashMap<String, Vec<u8>>,
+        specs: Vec<FileSpec>,
+        overrides: HashMap<String, Vec<u8>>,
         calls: Arc<AtomicUsize>,
         fail_all: bool,
     }
 
     impl FakeSource {
         fn new(entry: &ModelEntry<'_>) -> Self {
-            let data = entry
-                .files
-                .iter()
-                .map(|spec| (spec.path.to_owned(), fake_content(spec)))
-                .collect();
             Self {
-                data,
+                specs: entry.files.to_vec(),
+                overrides: HashMap::new(),
                 calls: Arc::new(AtomicUsize::new(0)),
                 fail_all: false,
             }
@@ -710,6 +701,9 @@ mod tests {
         }
     }
 
+    /// Deterministic content: `path` bytes repeated to the declared size
+    /// (truncated). Computed lazily so oversized cap-test entries never
+    /// allocate their declared bytes.
     fn fake_content(spec: &FileSpec) -> Vec<u8> {
         let size = usize::try_from(spec.size).unwrap_or(usize::MAX);
         let block = spec.path.as_bytes();
@@ -729,9 +723,13 @@ mod tests {
                     message: "fake transport failure".to_owned(),
                 });
             }
-            self.data
-                .get(path)
-                .cloned()
+            if let Some(data) = self.overrides.get(path) {
+                return Ok(data.clone());
+            }
+            self.specs
+                .iter()
+                .find(|spec| spec.path == path)
+                .map(fake_content)
                 .ok_or_else(|| Error::Admission {
                     message: format!("fake source has no file {path}"),
                 })
@@ -885,9 +883,9 @@ mod tests {
     #[test]
     fn preflight_reports_required_and_available() {
         let expected = expected_bytes(&fake_entry());
-        let required = expected
-            .saturating_add(expected / 2)
-            .saturating_add(PREFLIGHT_HEADROOM_BYTES);
+        let scaled = expected.saturating_mul(PREFLIGHT_MULTIPLIER_NUMERATOR)
+            / PREFLIGHT_MULTIPLIER_DENOMINATOR;
+        let required = scaled.saturating_add(PREFLIGHT_HEADROOM_BYTES);
         let err = preflight_check(expected, 1000).expect_err("preflight");
         match &err {
             Error::Admission { message } => {
@@ -945,7 +943,7 @@ mod tests {
         let mut source = FakeSource::new(&entry);
         // Corrupt one file: return the wrong size.
         source
-            .data
+            .overrides
             .insert("tokenizer.json".to_owned(), vec![0_u8; 100]);
         let err = fetch_into(&entry, &source, false, dir.path()).expect_err("bad size");
         assert!(matches!(err, Error::Admission { .. }));
@@ -962,7 +960,7 @@ mod tests {
         let dir2 = TempDir::new().expect("tmp");
         let mut source2 = FakeSource::new(&entry);
         source2
-            .data
+            .overrides
             .insert("tokenizer.json".to_owned(), vec![b'x'; 512]);
         let err = fetch_into(&entry, &source2, false, dir2.path()).expect_err("bad hash");
         assert!(matches!(err, Error::Admission { .. }));
@@ -981,6 +979,34 @@ mod tests {
         let source = FakeSource::new(&entry);
         let err = fetch_into(&entry, &source, false, dir.path()).expect_err("cap");
         assert!(matches!(err, Error::Admission { .. }));
+        assert!(
+            !dir.path().exists() || std::fs::read_dir(dir.path()).expect("dir").next().is_none()
+        );
+    }
+
+    #[test]
+    fn fetch_rejects_total_over_cap() {
+        let dir = TempDir::new().expect("tmp");
+        // Two files each under the per-file cap but summing past the 3 GiB
+        // total cap (NFR-3). The fake source is lazy, so nothing allocates
+        // the declared bytes.
+        let mut entry = fake_entry();
+        entry.files = &[
+            FileSpec {
+                path: "onnx/a.onnx",
+                size: MAX_TOTAL_BYTES / 2 + 1,
+                sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            },
+            FileSpec {
+                path: "onnx/b.onnx",
+                size: MAX_TOTAL_BYTES / 2 + 1,
+                sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            },
+        ];
+        let source = FakeSource::new(&entry);
+        let err = fetch_into(&entry, &source, false, dir.path()).expect_err("total cap");
+        assert!(matches!(err, Error::Admission { .. }));
+        assert_eq!(source.calls(), 0, "caps fail before any download");
         assert!(
             !dir.path().exists() || std::fs::read_dir(dir.path()).expect("dir").next().is_none()
         );
