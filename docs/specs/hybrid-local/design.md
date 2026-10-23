@@ -1,7 +1,7 @@
 # Technical Design: hybrid-local (итерация 4)
 
-**Status:** Draft, ревизия 0.5 · **Дата:** 2026-10-23
-**Spec:** `docs/specs/hybrid-local/requirements.md` (ревизия 0.5)
+**Status:** Draft, ревизия 0.6 · **Дата:** 2026-10-23
+**Spec:** `docs/specs/hybrid-local/requirements.md` (ревизия 0.6)
 **ADR:** ADR-17 (product design); ADR-12/13/14 (adjacent).
 
 ## 1. Overview
@@ -39,6 +39,10 @@ error with one action (FR-11…FR-13).
   `linux-x64`, `linux-aarch64`, `osx-arm64`, `win-x64`, `win-arm64` (no macOS x64,
   macOS >= 14).
 - Network only in `connect`/`fetch`; none on index/search paths (FR-12).
+- Feature matrix: `hybrid-local` provides `connect fastembed`, `models fetch/list/remove`,
+  `connect` status; `hybrid-remote` provides `connect openrouter`; both may be enabled
+  together. `connect openrouter` is `#[cfg(feature = "hybrid-remote")]`, so a local-only
+  build must still compile and pass its tests.
 - `[providers]` only in global config. The project file is parsed by a separate
   `ProjectFileConfig` **without** a `providers` field (structural); its other settings are
   unchanged.
@@ -74,7 +78,7 @@ performs network I/O (FR-12, NFR-6).
 | Component | Responsibility | Interface | Depends on |
 |---|---|---|---|
 | `hybrid::runtime` | target detection, download/extract/verify ORT, resolve path, `init_from` once | `platform_target()`, `resolve(&ProvidersCfg)`, `install(target, source, force)`, `init(path)` | `ureq`, `sha2`, `flate2`, `tar`, `zip`, `ort` |
-| `hybrid::models` | registry, cache layout, fetch/list/remove, hash re-verification, lock | `entry(name)`, `fetch(entry, source)`, `cached(entry)`, `cache_dir`, `embedding_model_id` | `ureq`, `sha2`, `fd-lock` |
+| `hybrid::models` | registry, cache layout, fetch/list/remove, hash re-verification, lock | `entry(name)`, `fetch(entry, source)`, `cached(entry)`, `cache_dir`, `canonical_id(entry, dims, normalize)` | `ureq`, `sha2`, `fd-lock` |
 | `hybrid::local` | `FastEmbedEmbedder` (+`embed_query`), `FastEmbedReranker`, one instance per key | `local::embedder(cfg, providers)`, `local::reranker(cfg, providers)` | `fastembed`, `ort`, `models`, `runtime` |
 | `cli::connect` | status, `connect openrouter/fastembed`, global config write | `connect::run(args)` | `runtime`, `models`, `config` |
 | `cli::models` | `use embed|rerank`, `fetch/list/remove`, scope, per-purpose options | `models::run(args)` | `models`, `config` |
@@ -94,20 +98,22 @@ pub fn init(path: &Path) -> Result<()>;                  // first ORT call, Once
 
 // hybrid/models.rs
 pub struct FileSpec { pub path: &'static str, pub size: u64, pub sha256: &'static str }
-pub struct ModelEntry { /* name, task, repo, revision, onnx, additional, dim, pooling,
-                           quantization, output_key, license, files,
+pub struct ModelEntry { /* name, task, repo, revision, dim, pooling, quantization,
+                           output_key, license, files (authoritative: ONNX + tokenizer),
                            query_prefix, passage_prefix, prompt_version */ }
 pub trait ModelSource { fn fetch(&self, repo: &str, revision: &str, path: &str) -> Result<Vec<u8>>; }
 pub fn entry(name: &str) -> Result<&'static ModelEntry>;
 pub fn cache_dir(name: &str, revision: &str) -> PathBuf;   // <cache>/<name>/<revision>
 pub fn fetch(entry: &ModelEntry, source: &dyn ModelSource) -> Result<PathBuf>;
 pub fn cached(entry: &ModelEntry) -> Result<bool>;          // .complete + re-verified hashes
+pub fn canonical_id(entry: &ModelEntry, dims: usize, normalize: bool) -> String;
 
 // instance cache key (NFR-4/NFR-7): one instance per key, never per config
 pub struct ModelCacheKey { pub model_id: String, pub max_length: usize,
                            pub intra_threads: Option<usize>, pub runtime: PathBuf }
 
-// config: ONE canonical key (FR-9)
+// config: ONE canonical key (FR-9). The fastembed arm MUST call
+// models::canonical_id; the OpenRouter arm keeps the legacy format byte-for-byte.
 pub fn embedding_model_id(cfg: &EmbeddingCfg) -> String;    // provider-dispatched
 
 // hybrid/local.rs
@@ -122,15 +128,16 @@ key source; `fetch` never leaves a directory without `.complete`; `resolve` neve
 
 ## 6. Data flow
 
-1. **connect fastembed** → detect target (five; macOS >= 14) → free-space preflight →
-   download archive (size cap) →
+1. **connect fastembed** → detect target (five; macOS >= 14) → free-space preflight
+   (archive + extracted library) → download archive (size cap) →
    verify sha256 → extract the shared library → temp → fsync → rename into
    `<data>/runtimes/onnxruntime/1.24.4/<target>/` → write `[providers.fastembed]` (global).
    `resolve` refuses a data-dir runtime without an enabled provider entry unless
    `ORT_DYLIB_PATH` is set; `init_from` is the first ORT call; failure is `Admission`
    (never let `ort::api()` panic). `connect openrouter` instead probes
    `GET /key` (0 model tokens) and writes the provider entry without the key.
-2. **models fetch** → registry entry → free-space preflight (>= 1.5x expected + 256 MiB) →
+2. **models fetch** → registry entry → free-space preflight (>= 1.5x Σ `files[].size` +
+   256 MiB) →
    per file: download to `*.part`, verify size+sha256 against the registry (per-file <= 2 GiB,
    model total <= 3 GiB), fsync, rename → `.complete` last. A lock serializes concurrent
    fetches. Opening a cached model re-verifies hashes.
@@ -139,10 +146,13 @@ key source; `fetch` never leaves a directory without `.complete`; `resolve` neve
    inferred from the registry or explicit `--provider` → validate provider connected, model
    cached (or `--dry-run`) → probe per provider (OpenRouter under `hybrid-remote`: one
    embedding of `docsbase probe` for the embed stage, one rerank of (`docsbase`, `probe`)
-   for the rerank stage; fastembed offline against the cached model) → write only that
-   stage's table atomically, leaving the other untouched.
+   for the rerank stage, via a **single-shot path that bypasses the retry wrapper**; 401/403
+   → `Admission` (`check key`), transport → `Admission` (retry); fastembed offline against
+   the cached model) → write only that stage's table atomically, leaving the other
+   untouched.
 4. **search/index** → `from_config` resolves the provider → `local::embedder`/`reranker` →
-   runtime `init_from` + `TextEmbedding::try_new_from_user_defined` (cached in `OnceLock`) →
+   runtime `init_from` + `TextEmbedding::try_new_from_user_defined` (cached in a
+   process-wide map keyed by `ModelCacheKey`) →
    search uses `embed_query` (query prefix), backfill uses `embed` (passage prefix) →
    vectors stored under the canonical id → ANN/RRF unchanged.
 5. **failure** → missing provider/runtime/model/dim → `Admission` with one action; no network
@@ -179,6 +189,7 @@ key source; `fetch` never leaves a directory without `.complete`; `resolve` neve
 | unsupported target / macOS < 14 | `Admission` | no local provider on this machine |
 | sha256/size mismatch (fetch) | `Admission` | retry or `--force`; nothing installed |
 | offline/transport (fetch, connect) | `Admission` | check network and retry |
+| 401/403 (openrouter probe) | `Admission` | check `OPENROUTER_API_KEY` |
 | free space below preflight | `Admission` | free space / choose another data dir |
 | inference failure | `Internal` | fail the stage; no fallback |
 | `[providers]` in project | `Admission` (parse error) | move to global config |
@@ -189,7 +200,8 @@ key source; `fetch` never leaves a directory without `.complete`; `resolve` neve
   provider/model validation; canonical id; registry invariants; fake `ModelSource` fetch and
   hash rejection; no network crates in the tree.
 - **Feature unit (`--features hybrid-local`):** constructors fail with admission without
-  runtime/model; `models use --global`; probe per provider (fastembed offline).
+  runtime/model; `models use --global`; fastembed probe offline. `connect openrouter` and
+  its fake-`Transport` test run under `hybrid-remote`; both features may be combined.
 - **Integration:** `connect --check`/`fetch` against a fake source; prefix roles through
   `dense_candidates` with a spy embedder.
 - **Live (`#[ignore]`):** real connect + fetch + embed + rerank; manual/nightly; ledger

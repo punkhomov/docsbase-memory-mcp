@@ -585,6 +585,9 @@ Mean, 118 MB), rerank-кандидаты `jina-reranker-v1-turbo-en` int8 (38 MB
 `jina-reranker-v2` отклонён (CC-BY-NC-4.0); ни одна модель не выбирается по умолчанию.
 E5 требует `query: `/`passage: `, BGE — query-instruction; `Embedder` получает
 `embed_query`, канонический `model_id` — `@p<prompt_version>` (FR-9/FR-10).
+Фичи: `hybrid-local` даёт `connect fastembed`/status и `models fetch|list|remove`;
+`hybrid-remote` — `connect openrouter`; обе совместимы, дефолтная сборка не содержит
+ни одной.
 Отклонено: бандлить ORT в релизные артефакты, авто-скачивание при первом поиске,
 дефолтная модель, обязательный локальный вес в v1, candle-only путь (нет rerank),
 новые пользовательские ключи сверх `[providers]`/`[hybrid]`.

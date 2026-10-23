@@ -1,6 +1,6 @@
 # SPECIFICATION: hybrid-local (итерация 4)
 
-**Status:** Draft, ревизия 0.5 · **Дата:** 2026-10-23
+**Status:** Draft, ревизия 0.6 · **Дата:** 2026-10-23
 **Constitution:** `docs/specs/constitution.md` (1.3.0)
 **Related:** `docs/specs/hybrid-providers/` (dense/RRF), `docs/specs/ann-index/` (ANN),
 ADR-12 (cache key), ADR-13 (local models behind a flag), ADR-14 (OpenRouter),
@@ -60,6 +60,20 @@ size caps (2 GiB/file, 3 GiB total, 256 MiB archive, 512 MiB extracted) and a
 `--force` semantics. Minors: exact pins for `flate2`/`tar`/`zip`, stale Delta 0.3 CLI line,
 registry file set instead of a fixed count, extra `connect` RED tests, and the
 `ProviderState`/`RuntimeStatus` mapping plus the corrected `intra_threads` note.
+
+**Delta 0.6 (2026-10-23, delta review of rev 0.5):** verdict READY; all 15 prior findings
+confirmed fixed. Three new P1s and four P2s fixed in the delta: (1) feature matrix is
+explicit — `connect openrouter` compiles under `hybrid-remote`, `connect fastembed`/status
+and `models fetch/list/remove` under `hybrid-local`, both may coexist; T2 verifies a
+local-only build separately. (2) `embedding_model_id`'s fastembed arm MUST call
+`models::canonical_id`, so T1 and T3 cannot grow two formatters; cross-test every registry
+entry. (3) the loaded embedder/reranker holds the shared `.lock` guard for its lifetime
+(T4/T5), so `models remove` can actually refuse; T9 depends on T4/T5. P2s: §6.4 no longer
+says bare `OnceLock`; the probe is a dedicated single-shot path (no retry wrapper;
+401/403 → Admission check-key, transport → Admission retry); the CLI table now lists
+`fetch --force`/`remove --force`; "expected bytes" is defined (Σ `files[].size` for fetch,
+archive + extracted library for connect); `files[]` is the authoritative registry file set;
+`models use` requires `--dims` for OpenRouter rather than silently defaulting it.
 
 ## 1. Problem
 
@@ -200,11 +214,15 @@ returns `(index, score)` pairs; without it, config validation fails.
 - **FR-3 (must).** `connect openrouter` reads `OPENROUTER_API_KEY` from the environment, probes
   `GET https://openrouter.ai/api/v1/key` with `Authorization: Bearer <key>` (validates the
   key and returns its limits; **0 model tokens**, no embeddings/rerank request), and
-  records `[providers.openrouter]`. Offline/HTTP/auth failure is `Admission` with a retry
-  action. The key is never stored or logged. The `models use` probe makes one request per
-  selected stage: an embedding of the fixed text `docsbase probe` for the embed stage and
-  a rerank of (`docsbase`, `probe`) for the rerank stage — no retries, no other calls; cost
-  is the provider's price for those few tokens.
+  records `[providers.openrouter]`. The probe uses a dedicated single-shot path (no retry
+  wrapper): 401/403 → `Admission` (`check OPENROUTER_API_KEY`); transport/offline →
+  `Admission` (retry). The key is never stored or logged. The `models use` probe makes one
+  request per selected stage: an embedding of the fixed text `docsbase probe` for the
+  embed stage and a rerank of (`docsbase`, `probe`) for the rerank stage — no retries, no
+  other calls; cost is the provider's price for those few tokens.
+  Feature matrix: `connect openrouter` is compiled under `hybrid-remote`; `connect
+  fastembed`, the plain `connect` status, and `models fetch/list/remove` under
+  `hybrid-local`; both features may be enabled together.
 - **FR-4 (must).** `connect fastembed` installs ONNX Runtime **1.24.4** for the current
   target (`linux-x64`, `linux-aarch64`, `osx-arm64`, `win-x64`, `win-arm64`;
   macOS >= 14), verifies sha256 and size, installs atomically, and records
@@ -235,7 +253,8 @@ returns `(index, score)` pairs; without it, config validation fails.
   The purpose subcommand is required; **one model per invocation**, and setting both stages
   in one call is impossible by CLI shape (no `--embedding`/`--rerank` mixing).
   Options are scoped to the purpose: `embed` takes `--dims` (optional for fastembed —
-  inferred from the registry and validated; required for OpenRouter), `rerank` takes
+  inferred from the registry and validated; required for OpenRouter and never defaulted by
+  `models use`), `rerank` takes
   `--window`; both take `--provider`, `--local`, `--global`, `--dry-run`, `--path`.
   `--provider` may be omitted only when the model name is a local registry entry (provider
   inferred); an unknown name requires `--provider` (OpenRouter has no catalog).
@@ -269,7 +288,9 @@ returns `(index, score)` pairs; without it, config validation fails.
   No silent fallback to lexical/exact because of a local-provider failure.
 - **FR-13 (should).** Lifecycle integration: `docsbase uninstall` removes installed
   runtimes; `fetch`/`connect` preflight free space (>= 1.5x expected bytes + 256 MiB) and
-  fail with `Admission` before downloading; a revision bump (`model_id` change) reports the
+  fail with `Admission` before downloading, where expected bytes are the sum of
+  `files[].size` for `fetch` and archive + extracted library for `connect`; the error names
+  required and available bytes; a revision bump (`model_id` change) reports the
   re-embed/ANN-invalidate cost; `models list` shows provider state, selected model id and
   cache size (observability); provisioning under a running daemon notes that the daemon
   must reload/restart.
@@ -314,9 +335,11 @@ returns `(index, score)` pairs; without it, config validation fails.
 | `runtime_path` | string? | optional override path |
 
 **Model registry entry (code):** `name`, `task` (`Embedding|Rerank`), `repo`,
-`revision` (HF commit sha), `onnx`, `additional[]`, `dim`, `pooling` (`Cls|Mean`, embedding
-only), `quantization`, `output_key`, `license`, `files[]` (`path`, `size`, `sha256`),
-`query_prefix`, `passage_prefix`, `prompt_version`.
+`revision` (HF commit sha), `dim`, `pooling` (`Cls|Mean`, embedding only), `quantization`,
+`output_key`, `license`, `files[]` (`path`, `size`, `sha256`; **authoritative** — includes
+the ONNX and tokenizer/config files), `query_prefix`, `passage_prefix`, `prompt_version`.
+`onnx`/`additional[]` are derived views for the fastembed constructors, not a second
+source.
 
 **Model cache:** `<cache>/<name>/<revision>/` with registry files plus `.complete`; a
 `.lock` file is held shared by a loaded model and exclusively by `models remove`; the
@@ -334,14 +357,18 @@ revision is part of the path so updates never mix vectors.
 
 | Command | Flags | Result |
 |---|---|---|
-| `docsbase connect` | — | status table |
+| `docsbase connect` | — | status table; `--local` rejected |
 | `docsbase connect openrouter` | — | env key validated; global provider entry written |
 | `docsbase connect fastembed` | `--check`, `--force` | runtime installed; provider entry written |
 | `docsbase models list` | — | registry + cached/missing |
-| `docsbase models fetch <name>` | — | pinned files installed |
-| `docsbase models remove <name>` | — | cache removed |
+| `docsbase models fetch <name>` | `--force` | pinned files installed; `--force` retries a hash failure |
+| `docsbase models remove <name>` | `--force` | cache removed; refuses while locked |
 | `docsbase models use embed <model>` | `--provider`, `--dims`, `--local`, `--global`, `--dry-run`, `--path` | `[hybrid.embedding]` written or printed |
 | `docsbase models use rerank <model>` | `--provider`, `--window`, `--local`, `--global`, `--dry-run`, `--path` | `[hybrid.reranker]` written or printed |
+
+Feature matrix: `connect fastembed` and `models fetch/list/remove` need `hybrid-local`;
+`connect openrouter` needs `hybrid-remote`; both may be enabled together; the default build
+has none of them.
 
 **Config files:** global `config.toml` (`[providers.*]`, optional `[hybrid.*]` defaults);
 project `.docsbase.toml` (`[hybrid.*]` only).

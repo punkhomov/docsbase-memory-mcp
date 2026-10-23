@@ -95,3 +95,16 @@ Ledger: одна запись на таск (что сделано, чем пр�
   `tar=0.4.46`, `zip=8.6.0` pins (9.0.0 is exactly on the 14-day boundary); stale Delta
   0.3 CLI line; registry file set instead of a fixed count; extra connect RED tests;
   ProviderState/RuntimeStatus mapping and the corrected intra_threads note.
+
+- Delta review (2026-10-23, `reviewer-muse`, `019ccc5..4bf8048`): **READY** — all 15 prior
+  findings confirmed FIXED, T1 unblocked. Three new P1s + four P2s fixed in rev 0.6:
+  explicit feature matrix (`connect openrouter` under `hybrid-remote`; `connect fastembed`/
+  status and `models fetch/list/remove` under `hybrid-local`; T2 verifies local-only
+  compile separately); `embedding_model_id`'s fastembed arm delegates to
+  `models::canonical_id` (one formatter) with a cross-test over all registry entries;
+  embedder/reranker retain the shared `.lock` guard for their lifetime (T4/T5), and T9
+  depends on them; §6.4 no longer says bare `OnceLock`; the probe is a single-shot path
+  (no retry wrapper; 401/403 → Admission check-key, transport → Admission retry); CLI
+  table lists `fetch --force`/`remove --force`; "expected bytes" defined (Σ files[].size
+  for fetch, archive + extracted for connect); `files[]` is authoritative; `models use`
+  requires `--dims` for OpenRouter.

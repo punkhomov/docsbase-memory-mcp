@@ -6,7 +6,7 @@ machine-local provider registry, and no default models.
 **Architecture:** provisioning (`cli/connect`, `cli/models`, `hybrid/runtime`,
 `hybrid/models`) is separate from the runtime path (`hybrid/local` implements `Embedder`/
 `Reranker` with role-aware prefixes); the default build links none of it.
-**Spec:** `docs/specs/hybrid-local/requirements.md` (rev 0.5)
+**Spec:** `docs/specs/hybrid-local/requirements.md` (rev 0.6)
 **Global constraints:**
 - Rust edition 2024, MSRV 1.88; fmt + clippy `--all-targets -D warnings`; no unwrap/expect/panic in `src/**`.
 - Default `cargo tree` has no `fastembed`, `ort`, `tokenizers`, `hf-hub`, `image`, `native-tls`, `ureq`, `reqwest` (NFR-1).
@@ -43,10 +43,14 @@ machine-local provider registry, and no default models.
 2. RED: `fetch_installs_all_files_and_completes_last` (fake source) — `.complete` last,
    second call downloads nothing.
 3. RED: `fetch_rejects_bad_hash_and_size` — hash/size mismatch is `Admission`, nothing
-   usable remains; `fetch_rejects_file_over_cap` (per-file > 2 GiB, total > 3 GiB).
+   usable remains; `fetch_rejects_file_over_cap` (per-file > 2 GiB, total > 3 GiB);
+   `fetch_force_after_hash_failure` retries and succeeds; `files[]` is the only authoritative
+   file set (`onnx`/`additional[]` are derived).
 4. RED: `cached_reverifies_hashes` — tampered file after install → not cached.
 5. RED: `canonical_id_includes_revision_and_prompt`.
-6. RED: CLI shape — `models fetch <name>` and `models list` reach the library functions.
+6. RED: CLI shape — `models fetch <name>` (with `--force`) and `models list` reach the
+   library functions; `fetch` preflights `1.5x Σ files[].size + 256 MiB` and names the
+   required/available bytes.
 7. Run: `cargo test --locked --features hybrid-local --lib hybrid::models --test cli_models`
    (fails).
 8. GREEN: implement; manifest: `fastembed` default-features=false, direct `ort` load-dynamic.
@@ -83,10 +87,16 @@ machine-local provider registry, and no default models.
    (GET, no embeddings body).
 5. RED: `connect_rejects_local`; status table maps the four `ProviderState` values.
 6. GREEN: download (size cap + free-space preflight), extract, atomic install, global
-   config write, status table; `--check`, `--force`; no `--models` flag.
-7. Verify: `cargo test --locked --features hybrid-local --lib hybrid::runtime --test connect`.
+   config write, status table; `--check`, `--force`; no `--models` flag. Gate the
+   `openrouter` arm, `wire` and `openrouter` imports under `hybrid-remote`; the `connect`
+   command itself compiles with either feature (its status shows the unavailable provider).
+7. Verify local-only compile and both-feature probe tests:
+   `cargo check --locked --features hybrid-local`;
+   `cargo test --locked --features hybrid-local --lib hybrid::runtime`;
+   `cargo test --locked --features hybrid-local,hybrid-remote --test connect`.
 **Acceptance:** FR-2, FR-3, FR-4, FR-11, NFR-3; SC-2, SC-3.
-**Verify:** same command → ok.
+**Verify:** the three commands above → ok; a local-only build must not reference
+`wire`/`openrouter`.
 **Depends:** T1, T3.
 
 ## T3 — Config: providers, project type, canonical id
@@ -112,8 +122,10 @@ machine-local provider registry, and no default models.
 4. RED: `coverage_and_ann_warm_use_the_canonical_id` — a fake fastembed stage reports 100%
    coverage and the same id the embedder produces.
 5. RED: global defaults → project override; OpenRouter behaviour unchanged.
-6. GREEN: implement; replace all `cache_model_id` call sites with `embedding_model_id`
-   (OpenRouter path delegates to the legacy format).
+6. GREEN: implement; the fastembed arm of `embedding_model_id` calls
+   `models::canonical_id` (one formatter, no second copy); replace all `cache_model_id`
+   call sites (OpenRouter path delegates to the legacy format); cross-test that both agree
+   on every registry entry.
 7. Verify: `cargo test --locked --test config --lib hybrid::config`.
 **Acceptance:** FR-1, FR-5, FR-9, FR-12, NFR-6; SC-3, SC-10.
 **Verify:** same command → ok.
@@ -139,7 +151,9 @@ machine-local provider registry, and no default models.
 4. GREEN: build `UserDefinedEmbeddingModel` (bytes + tokenizer files) with pooling,
    `TextEmbedding::try_new_from_user_defined`, a process-wide cache keyed by
    `ModelCacheKey { model_id, max_length, intra_threads, runtime }` (not a bare
-   `OnceLock`), batch/thread options, prefixing.
+   `OnceLock`), batch/thread options, prefixing. The instance retains a **shared `.lock`
+   guard** (`fd-lock` `try_read`) on `<cache>/<name>/<rev>/.lock` for its lifetime;
+   `loaded_model_holds_shared_lock` proves the holder side.
 5. Verify: `cargo test --locked --features hybrid-local --lib hybrid::local --test hybrid_local`.
 **Acceptance:** FR-9, FR-10, NFR-4, NFR-7; SC-6, SC-9.
 **Verify:** same command → ok.
@@ -160,7 +174,8 @@ machine-local provider registry, and no default models.
 3. RED: `rerank_contract_returns_index_and_score_for_every_doc` and `top_n` clamp (mapping
    logic unit-tested; live inference ignored).
 4. GREEN: `UserDefinedRerankingModel` (`OnnxSource::File`), `RerankInitOptionsUserDefined`;
-   the same keyed cache as T4; missing runtime/model → `Admission`, inference → `Internal`.
+   the same keyed cache and shared `.lock` guard as T4; missing runtime/model → `Admission`,
+   inference → `Internal`.
 5. Verify: `cargo test --locked --features hybrid-local --lib hybrid::local`.
 **Acceptance:** FR-5, FR-9, FR-12, NFR-7; SC-6.
 **Verify:** same command → ok.
@@ -189,7 +204,8 @@ machine-local provider registry, and no default models.
 5. RED: provider inference from a registry name; unknown name without `--provider` → error;
    fastembed probe offline under `hybrid-local`; OpenRouter probe under `hybrid-remote` via a
    fake `Transport` (one embed of `docsbase probe` for the embed stage, one rerank of
-   (`docsbase`, `probe`) for the rerank stage).
+   (`docsbase`, `probe`) for the rerank stage). The probe uses a dedicated single-shot path
+   (no retry wrapper): 401/403 → `Admission` (check key), transport → `Admission` (retry).
 6. GREEN: implement; `--dry-run` prints the diff; unfetched model → `models fetch` hint;
    `--global` writes only the stage key and preserves `[providers]`.
 7. Verify: `cargo test --locked --test cli_models --features hybrid-local`.
@@ -242,8 +258,9 @@ machine-local provider registry, and no default models.
 **Steps:**
 1. `models remove` (add the `Remove` variant + dispatch) takes the cache-directory `.lock`
    exclusively and non-blocking; if a loaded model holds it shared → `Admission`; `--force`
-   deletes anyway with a warning. Tests: `remove_refuses_when_locked`,
-   `remove_force_when_locked`, `remove_unlocked_succeeds`.
+   deletes anyway with a warning. Tests: `remove_refuses_when_locked` (with the real
+   T4/T5 shared guard, not a synthetic one), `remove_force_when_locked`,
+   `remove_unlocked_succeeds`.
 2. `uninstall` removes `<data>/runtimes/onnxruntime` and the model cache entries owned by
    docsbase.
 3. Re-pin: a revision change reports "vectors will be re-embedded, ANN invalidated"; `fetch`
@@ -254,7 +271,7 @@ machine-local provider registry, and no default models.
 5. Verify: unit tests for remove/uninstall manifest; `docsbase uninstall --dry-run` output.
 **Acceptance:** FR-7, FR-13; SC-11.
 **Verify:** `cargo test --locked --test cli_models --lib hybrid::models` → ok.
-**Depends:** T1, T2, T6.
+**Depends:** T1, T2, T4, T5, T6.
 
 ---
 
