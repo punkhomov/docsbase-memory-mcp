@@ -120,3 +120,12 @@ Ledger: одна запись на таск (что сделано, чем пр�
   a registry invariant, OQ-1 marked as T2 deliverable, `models use` added to the feature
   matrix, complete-fetch no-op lock rule, SC-5 probe gating. Mercury confirmed the BYO
   fastembed/ort facts locally and that T1 has no blockers.
+
+- Delta review 4 (2026-10-23, muse, `5e7c73e..7f792e7`): **NEEDS-REVISION** — all Mercury
+  findings FIXED; one new major + five minors fixed in rev 0.8. Major: a verified complete
+  `fetch` now holds the **shared** `.lock` while verifying (never the exclusive lock), so it
+  serializes with `remove`/`--force`; test renamed `fetch_complete_takes_shared_lock`.
+  Minors: product-design feature list includes `models use`; tokenizer rows require at
+  least the four files (presence, not count); FR-13 parenthetical separates connect vs
+  fetch size sources; T6 verifies both feature combinations; T8 records macOS signature
+  state and confirms `init_from`. T1 was and remains startable.

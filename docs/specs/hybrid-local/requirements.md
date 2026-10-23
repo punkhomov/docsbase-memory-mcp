@@ -1,6 +1,6 @@
 # SPECIFICATION: hybrid-local (итерация 4)
 
-**Status:** Draft, ревизия 0.7 · **Дата:** 2026-10-23
+**Status:** Draft, ревизия 0.8 · **Дата:** 2026-10-23
 **Constitution:** `docs/specs/constitution.md` (1.3.0)
 **Related:** `docs/specs/hybrid-providers/` (dense/RRF), `docs/specs/ann-index/` (ANN),
 ADR-12 (cache key), ADR-13 (local models behind a flag), ADR-14 (OpenRouter),
@@ -87,6 +87,17 @@ per-platform extracted library file is named (`.so`/`.dylib`/`onnxruntime.dll`);
 fastembed tokenizer files are a registry invariant; OQ-1 is explicitly a T2 deliverable;
 `models use` is included in the feature matrix; a verified `.complete` fetch is a no-op and
 does not take the exclusive lock; SC-5 asserts provider-specific probe gating.
+
+**Delta 0.8 (2026-10-23, muse delta review of rev 0.7):** NEEDS-REVISION; all Mercury
+findings confirmed FIXED, one new major + five minors fixed. (Major) a verified complete
+`fetch` now takes the **shared** `.lock` for verify-and-return (never the exclusive lock),
+so it serializes with `remove`/`--force`; test renamed `fetch_complete_takes_shared_lock`.
+Minors: product-design feature list now includes `models use`; tokenizer rows require **at
+least** the four files (presence test, not a count) so BYO rows may add files; FR-13's
+parenthetical distinguishes the five-target connect sizes from registry fetch sizes; T6
+verifies both `hybrid-local` and `hybrid-local,hybrid-remote` so the OpenRouter probe arm
+compiles; T8 records the macOS signature state and confirms `init_from` on a real macOS
+run.
 
 ## 1. Problem
 
@@ -249,15 +260,18 @@ returns `(index, score)` pairs; without it, config validation fails.
   non-openrouter provider a missing `model` is `Admission` (never inherits the OpenRouter
   default) and a missing `dimensions` is taken from the registry (an explicit value must
   match). The same rule applies to `[hybrid.reranker].model`. Every embedding/rerank row
-  includes exactly the four fastembed tokenizer files in `files[]`: `tokenizer.json`,
-  `config.json`, `special_tokens_map.json`, `tokenizer_config.json`; a missing one is a
-  registry-invariant test failure, not a late inference error.
+  includes **at least** the four fastembed tokenizer files in `files[]`: `tokenizer.json`,
+  `config.json`, `special_tokens_map.json`, `tokenizer_config.json`; rows may add files, but
+  a missing one is a registry-invariant test failure, not a late inference error.
 - **FR-6 (must).** `models fetch <name>` downloads only registry files at the pinned
   revision, verifies size+sha256 and enforces per-file/archive size caps, installs
   atomically under a lock, writes `.complete` last, is idempotent, and re-verifies
   file hashes when a cached model is opened (a modified cache is not trusted). A fetch of a
-  complete cached revision is a no-op and does **not** take the exclusive install lock;
-  only incomplete installs serialize. Offline or mismatch → error with no partial install.
+  complete cached revision takes the **shared** `.lock` (the same lock a loaded model
+  holds), verifies and returns; it never takes the exclusive lock. Only incomplete installs
+  take the exclusive install lock, so `remove`/`fetch --force` serialize against both a
+  loaded model and a concurrent verification. Offline or mismatch → error with no partial
+  install.
 - **FR-7 (must).** `models list` reports registry entries, cached revisions, sizes and
   status; `models remove <name>` removes all cached revisions. A loaded model holds a
   shared lock on its cache directory; `remove` takes it exclusively and non-blocking, and
@@ -308,8 +322,9 @@ returns `(index, score)` pairs; without it, config validation fails.
   runtimes **and the model cache entries owned by docsbase**; `fetch`/`connect` preflight
   free space (>= 1.5x expected bytes + 256 MiB) and fail with `Admission` before
   downloading, where expected bytes are the sum of `files[].size` for `fetch` and
-  `target.archive_size + target.library_size` for `connect` (both are constants in the
-  five-target table); the error names required and available bytes; a revision bump (`model_id` change) reports the
+  `target.archive_size + target.library_size` for `connect` (the two connect sizes are
+  constants in the five-target table; fetch sizes are registry constants); the error names
+  required and available bytes; a revision bump (`model_id` change) reports the
   re-embed/ANN-invalidate cost; `models list` shows provider state, selected model id and
   cache size (observability); provisioning under a running daemon notes that the daemon
   must reload/restart.

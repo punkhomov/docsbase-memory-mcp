@@ -6,7 +6,7 @@ machine-local provider registry, and no default models.
 **Architecture:** provisioning (`cli/connect`, `cli/models`, `hybrid/runtime`,
 `hybrid/models`) is separate from the runtime path (`hybrid/local` implements `Embedder`/
 `Reranker` with role-aware prefixes); the default build links none of it.
-**Spec:** `docs/specs/hybrid-local/requirements.md` (rev 0.7)
+**Spec:** `docs/specs/hybrid-local/requirements.md` (rev 0.8)
 **Global constraints:**
 - Rust edition 2024, MSRV 1.88; fmt + clippy `--all-targets -D warnings`; no unwrap/expect/panic in `src/**`.
 - Default `cargo tree` has no `fastembed`, `ort`, `tokenizers`, `hf-hub`, `image`, `native-tls`, `ureq`, `reqwest` (NFR-1).
@@ -37,16 +37,17 @@ machine-local provider registry, and no default models.
 - Consumes: `Error`, `paths`, `fd-lock`, `sha2`.
 **Steps:**
 1. RED: registry well-formedness — unique names, dim > 0, non-empty `files[]` (ONNX +
-   exactly the four fastembed tokenizer files: `tokenizer.json`, `config.json`,
-   `special_tokens_map.json`, `tokenizer_config.json`; the set comes from the row, not a
-   count assertion), each with size/sha256, pooling, licenses, E5 `query: `/`passage: `
+   **at least** the four fastembed tokenizer files: `tokenizer.json`, `config.json`,
+   `special_tokens_map.json`, `tokenizer_config.json`; rows may add files; the test checks
+   presence, not a count), each with size/sha256, pooling, licenses, E5 `query: `/`passage: `
    prefixes, BGE instruction, `prompt_version`.
 2. RED: `fetch_installs_all_files_and_completes_last` (fake source) — `.complete` last,
    second call downloads nothing.
 3. RED: `fetch_rejects_bad_hash_and_size` — hash/size mismatch is `Admission`, nothing
    usable remains; `fetch_rejects_file_over_cap` (per-file > 2 GiB, total > 3 GiB);
-   `fetch_force_after_hash_failure` retries and succeeds; `fetch_complete_takes_no_lock`
-   (a verified `.complete` revision is a no-op and does not take the exclusive install lock);
+   `fetch_force_after_hash_failure` retries and succeeds;
+   `fetch_complete_takes_shared_lock` (a verified `.complete` revision verifies under the
+   shared `.lock`, never the exclusive lock, so it serializes with `remove`/`--force`);
    `files[]` is the only authoritative file set (`onnx`/`additional[]` are derived).
 4. RED: `cached_reverifies_hashes` — tampered file after install → not cached.
 5. RED: `canonical_id_includes_revision_and_prompt`.
@@ -217,9 +218,12 @@ machine-local provider registry, and no default models.
    (no retry wrapper): 401/403 → `Admission` (check key), transport → `Admission` (retry).
 6. GREEN: implement; `--dry-run` prints the diff; unfetched model → `models fetch` hint;
    `--global` writes only the stage key and preserves `[providers]`.
-7. Verify: `cargo test --locked --test cli_models --features hybrid-local`.
+7. Verify:
+   `cargo test --locked --test cli_models --features hybrid-local`;
+   `cargo test --locked --test cli_models --features hybrid-local,hybrid-remote`
+   (the OpenRouter probe arm must compile and run under `hybrid-remote`).
 **Acceptance:** FR-7, FR-8, FR-12; SC-5, SC-11.
-**Verify:** `cargo test --locked --test cli_models --features hybrid-local` → ok.
+**Verify:** both commands above → ok.
 **Depends:** T1, T3.
 
 ## T7 — Feature wiring, CI gates, docs
@@ -250,7 +254,8 @@ machine-local provider registry, and no default models.
 **Steps:**
 1. Ignored test: `connect --check` (or `ORT_DYLIB_PATH`) → `models fetch bge-small-en-v1.5`
    → embed 3 texts (query prefix asserted) → `models fetch jina-reranker-v1-turbo-en` →
-   rerank 3 docs.
+   rerank 3 docs. On macOS also record `connect --check` signature state (valid/adhoc) and
+   confirm that the installed dylib loads (`init_from` succeeds).
 2. Run release live test manually; record ORT version/sha, model sizes, fetch time,
    embed/rerank latency, RSS against NFR-4 budgets (<=700 MB, p95 thresholds).
 3. Ledger entry.

@@ -1,7 +1,7 @@
 # Technical Design: hybrid-local (итерация 4)
 
-**Status:** Draft, ревизия 0.7 · **Дата:** 2026-10-23
-**Spec:** `docs/specs/hybrid-local/requirements.md` (ревизия 0.7)
+**Status:** Draft, ревизия 0.8 · **Дата:** 2026-10-23
+**Spec:** `docs/specs/hybrid-local/requirements.md` (ревизия 0.8)
 **ADR:** ADR-17 (product design); ADR-12/13/14 (adjacent).
 
 ## 1. Overview
@@ -148,9 +148,9 @@ key source; `fetch` never leaves a directory without `.complete`; `resolve` neve
    `ORT_DYLIB_PATH` is set; `init_from` is the first ORT call; failure is `Admission`
    (never let `ort::api()` panic). `connect openrouter` instead probes
    `GET /key` (0 model tokens) and writes the provider entry without the key.
-2. **models fetch** → registry entry → if `.complete` and all hashes verify, return the
-   path without taking the install lock → free-space preflight (>= 1.5x Σ `files[].size` +
-   256 MiB) →
+2. **models fetch** → registry entry → if `.complete` and all hashes verify, take the
+   **shared** `.lock`, verify and return (never the exclusive lock) → free-space preflight
+   (>= 1.5x Σ `files[].size` + 256 MiB) →
    per file: download to `*.part`, verify size+sha256 against the registry (per-file <= 2 GiB,
    model total <= 3 GiB), fsync, rename → `.complete` last. A lock serializes concurrent
    fetches. Opening a cached model re-verifies hashes.
