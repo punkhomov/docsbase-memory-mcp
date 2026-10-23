@@ -11,6 +11,7 @@ use tempfile::TempDir;
 
 use docsbase_memory::hybrid::ann::{ANN_MIN_VECTORS, AnnIndex};
 use docsbase_memory::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore};
+use docsbase_memory::hybrid::dense::top_k;
 use support::ann::{cluster_vectors, interleaved_rows};
 
 mod support;
@@ -50,6 +51,36 @@ fn build_search_recall_on_separated_clusters() {
         recall >= 0.99,
         "recall@10 on separated clusters too low: {recall}"
     );
+}
+
+#[test]
+fn high_fetch_recall_matches_the_exact_scan() {
+    let a = cluster_vectors(PER_CLUSTER, DIM, 4.0);
+    let b = cluster_vectors(PER_CLUSTER, DIM, -4.0);
+    let rows = interleaved_rows(&a, &b);
+    let ann = AnnIndex::build(&rows, DIM).expect("build");
+
+    // `ef_for` scales with fetch (max(64, fetch * 4), capped); Delta 0.2 made
+    // that rule final, so recall must hold at the top of the RRF window too.
+    for fetch in [100usize, 1000] {
+        let mut hit = 0usize;
+        let mut total = 0usize;
+        for vector in a.iter().take(20) {
+            let exact = top_k(vector.as_ref(), &rows, fetch).expect("exact scan");
+            let approx = ann.search(vector.as_ref(), fetch).expect("ann search");
+            assert_eq!(approx.len(), fetch);
+            hit += approx
+                .iter()
+                .filter(|(id, _)| exact.iter().any(|(exact_id, _)| exact_id == id))
+                .count();
+            total += fetch;
+        }
+        let recall = hit as f64 / total as f64;
+        assert!(
+            recall >= 0.95,
+            "recall@{fetch} against the exact scan too low: {recall:.3}"
+        );
+    }
 }
 
 #[test]

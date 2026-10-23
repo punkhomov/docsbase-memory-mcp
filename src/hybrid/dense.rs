@@ -316,7 +316,9 @@ struct BuildJob {
     rows: Vec<(u64, Arc<[f32]>)>,
     hashes: Arc<Vec<(u64, String)>>,
     key: AnnKey,
-    estimated: usize,
+    /// Graph estimate plus the exact rows the build thread keeps alive
+    /// (Delta 0.3; FR-7/NFR-4 count the whole resident working set).
+    building_bytes: u64,
     dim: usize,
     store_root: Option<PathBuf>,
 }
@@ -576,12 +578,15 @@ impl DenseCache {
                     && entry.model_id == model_id
                     && matches!(&entry.state, DenseRows::Failed(failed) if failed.retry_at > Instant::now()))
         };
+        let building_bytes = u64::try_from(estimated)
+            .unwrap_or(u64::MAX)
+            .saturating_add(exact_bytes);
         let seek_ann = self.policy != AnnPolicy::Disabled
             && self.store.is_some()
             && chunks.len() >= self.limits.min_vectors
             && full_coverage
             && !in_backoff
-            && u64::try_from(estimated).unwrap_or(u64::MAX) <= self.limits.max_bytes;
+            && building_bytes <= self.limits.max_bytes;
         if !seek_ann {
             if exact_bytes > self.limits.max_bytes {
                 return self.stash_too_large(project_id, generation, model_id, chunks);
@@ -613,7 +618,7 @@ impl DenseCache {
                 rows,
                 hashes,
                 key,
-                estimated,
+                building_bytes,
                 dim,
                 store_root,
             })
@@ -657,7 +662,7 @@ impl DenseCache {
     fn start_build(&self, job: BuildJob) -> DenseRows {
         let building = Arc::new(BuildingAnn {
             hashes: Arc::clone(&job.hashes),
-            bytes: job.estimated as u64,
+            bytes: job.building_bytes,
         });
         {
             let mut entries = self.lock_entries();
@@ -746,7 +751,10 @@ impl DenseCache {
     }
 
     /// Invalidates a project: drops the cached entry/digest and the on-disk
-    /// ANN tree (FR-4; backfill hook).
+    /// ANN tree (FR-4 lifecycle helper).
+    ///
+    /// Backfill staleness is handled by the `AnnKey` (generation/digest/model),
+    /// so this is reserved for project deletion; no caller exists yet.
     ///
     /// # Errors
     /// Filesystem failures while removing the ANN tree.
@@ -857,6 +865,29 @@ impl DenseCache {
     }
 }
 
+/// Test-only build delay in milliseconds (SC-11 coverage).
+#[cfg(debug_assertions)]
+static TEST_BUILD_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only hook: slows background builds so a test can prove that a search
+/// ran while the build was still in flight (SC-11). Absent in release builds.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn set_test_build_delay(ms: u64) {
+    TEST_BUILD_DELAY_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(debug_assertions)]
+fn test_build_delay() {
+    let ms = TEST_BUILD_DELAY_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn test_build_delay() {}
+
 /// Background build: builds, dumps, loads and publishes the `Ann` entry
 /// unless the project moved on meanwhile (design §8). Any panic from the
 /// underlying index is caught and treated like a build failure (FR-5).
@@ -870,6 +901,7 @@ fn build_in_background(
     dim: usize,
     store_root: PathBuf,
 ) {
+    test_build_delay();
     let vector_root = store_root.clone();
     let unpin_hashes = Arc::clone(&hashes);
     let result: Result<()> = catch_unwind(AssertUnwindSafe(|| {
@@ -930,6 +962,76 @@ fn build_in_background(
 mod tests {
     use super::*;
     use crate::vector_cache::Embedder;
+
+    fn dense_input(rows: Vec<(u64, Arc<[f32]>)>, dim: usize) -> DenseInput {
+        let chunks = rows.iter().map(|(id, _)| (*id, format!("h{id}"))).collect();
+        DenseInput {
+            chunks,
+            digest: "digest".to_owned(),
+            rows,
+            dim,
+            full_coverage: true,
+        }
+    }
+
+    fn wide_rows(count: usize, dim: usize) -> Vec<(u64, Arc<[f32]>)> {
+        (0..count)
+            .map(|id| {
+                (
+                    u64::try_from(id).expect("id"),
+                    Arc::from(vec![0.5_f32; dim]),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn build_is_skipped_when_exact_rows_and_graph_exceed_the_cap() {
+        let cache = tempfile::TempDir::new().expect("cache");
+        let dim = 2048;
+        let count = 100;
+        let estimated = u64::try_from(ann::ann_estimated_bytes(count, dim)).expect("estimate");
+        let exact = u64::try_from(count * dim * 4).expect("bytes");
+        let limits = DenseCacheLimits {
+            min_vectors: 1,
+            // The graph estimate alone fits; graph plus retained rows does not.
+            max_bytes: estimated + exact / 2,
+            ..DenseCacheLimits::default()
+        };
+        let dense = DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, cache.path(), limits);
+        let state =
+            dense.resolve_rows(1, 1, "model@d2048", dense_input(wide_rows(count, dim), dim));
+        assert!(
+            matches!(state, DenseRows::Ready(_)),
+            "a build that would exceed the resident cap must stay exact, got {state:?}"
+        );
+    }
+
+    #[test]
+    fn building_entry_accounts_exact_rows_it_keeps_alive() {
+        let cache = tempfile::TempDir::new().expect("cache");
+        let dim = 64;
+        let count = 64;
+        let estimated = u64::try_from(ann::ann_estimated_bytes(count, dim)).expect("estimate");
+        let exact = u64::try_from(count * dim * 4).expect("bytes");
+        let limits = DenseCacheLimits {
+            min_vectors: 1,
+            max_bytes: 4 * 1024 * 1024,
+            ..DenseCacheLimits::default()
+        };
+        let dense = DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, cache.path(), limits);
+        let state = dense.resolve_rows(1, 1, "model@d64", dense_input(wide_rows(count, dim), dim));
+        match state {
+            DenseRows::Building(building) => {
+                assert_eq!(
+                    building.bytes,
+                    estimated + exact,
+                    "Building must account the rows it keeps alive"
+                );
+            }
+            other => panic!("expected a background build, got {other:?}"),
+        }
+    }
 
     fn approx(actual: f32, expected: f32) {
         assert!(

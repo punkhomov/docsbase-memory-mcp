@@ -237,6 +237,43 @@ fn limits_are_enforced() {
 }
 
 #[test]
+fn unpinning_reclaims_the_budget_without_waiting_for_the_next_put() {
+    let dir = TempDir::new().expect("dir");
+    let limits = CacheLimits {
+        max_entries: 100,
+        max_bytes: 8,
+    };
+    let mut cache = VectorCache::open_with_limits(dir.path(), limits).expect("cache");
+    let hashes = ["a".to_owned(), "b".to_owned(), "c".to_owned()];
+    // Pin first, exactly like the backfill does: leases exist before the rows
+    // arrive, so growing the cache cannot evict them.
+    cache
+        .pin(1, "m", &hashes, std::time::Duration::from_secs(60))
+        .expect("pin");
+    for hash in &hashes {
+        cache.put("m", hash, &[1.0, 2.0]).expect("put");
+    }
+    // Every row is leased, so the byte budget cannot be enforced: the cache
+    // is knowingly over budget instead of evicting a pinned vector.
+    for hash in &hashes {
+        assert!(
+            cache.get("m", hash).expect("get").is_some(),
+            "leased rows stay resident while over budget"
+        );
+    }
+
+    cache.unpin(1, "m", &hashes).expect("unpin all");
+    let remaining = hashes
+        .iter()
+        .filter(|hash| cache.get("m", hash).expect("get").is_some())
+        .count();
+    assert_eq!(
+        remaining, 1,
+        "unpinning must run eviction and restore the byte budget"
+    );
+}
+
+#[test]
 fn pinned_vectors_survive_the_byte_cap_until_unpinned() {
     let dir = TempDir::new().expect("dir");
     let limits = CacheLimits {

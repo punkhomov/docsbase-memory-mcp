@@ -74,6 +74,8 @@ jobs:
         run: cargo clippy --locked --features hybrid-remote --all-targets -- -D warnings
       - name: Feature suite (fixtures only, no network)
         run: cargo test --locked --features hybrid-remote
+      - name: ANN fallback survives the release panic strategy (SC-4)
+        run: cargo test --release --locked --features hybrid-remote --test hybrid_ann ann_load_failure_falls_back_to_exact -- --exact
       - name: Default build stays offline (SC-4)
         run: |
           if cargo tree --locked -e normal | grep -q reqwest; then

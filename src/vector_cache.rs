@@ -59,6 +59,9 @@ pub struct VectorCache {
     conn: Connection,
     sequence: i64,
     limits: CacheLimits,
+    /// Emits the over-budget warning once per operation instead of once per
+    /// `put` (a 75k backfill must not print 75k warnings).
+    warned_over_budget: bool,
 }
 
 impl VectorCache {
@@ -113,6 +116,7 @@ impl VectorCache {
             conn,
             sequence,
             limits,
+            warned_over_budget: false,
         })
     }
 
@@ -234,7 +238,10 @@ impl VectorCache {
             .map_err(|err| Error::internal_with_source("unpin vector", err))?;
         }
         tx.commit()
-            .map_err(|err| Error::internal_with_source("commit unpins", err))
+            .map_err(|err| Error::internal_with_source("commit unpins", err))?;
+        // Releasing leases is the moment the cache becomes evictable again;
+        // without this the over-budget rows would survive until the next put.
+        self.evict()
     }
 
     /// Embeds `texts`, reusing cached vectors keyed by `(model, chunk_hash)`.
@@ -375,13 +382,17 @@ impl VectorCache {
             let count = u64::try_from(count).unwrap_or(u64::MAX);
             let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
             if count <= self.limits.max_entries && bytes <= self.limits.max_bytes {
+                self.warned_over_budget = false;
                 return Ok(());
             }
             let now = now_secs();
-            let _ = self.conn.execute(
-                "DELETE FROM vector_cache_leases WHERE expires_at <= ?1",
-                params![now],
-            );
+            let purged = self
+                .conn
+                .execute(
+                    "DELETE FROM vector_cache_leases WHERE expires_at <= ?1",
+                    params![now],
+                )
+                .map_err(|err| Error::internal_with_source("purge expired vector leases", err))?;
             let removed = self
                 .conn
                 .execute(
@@ -398,7 +409,24 @@ impl VectorCache {
                     params![now],
                 )
                 .map_err(|err| Error::internal_with_source("evict vector", err))?;
+            if removed > 0 {
+                self.warned_over_budget = false;
+            }
             if removed == 0 {
+                if purged > 0 {
+                    // Expired leases may have freed rows in this round; recheck
+                    // before giving up (Delta 0.3, FR-9 diagnostics).
+                    continue;
+                }
+                if !self.warned_over_budget {
+                    self.warned_over_budget = true;
+                    eprintln!(
+                        "warning: vector cache over budget with every candidate leased \
+                         ({bytes} > {} bytes, {count} > {} entries); keeping leased rows \
+                         until their leases are released or expire",
+                        self.limits.max_bytes, self.limits.max_entries
+                    );
+                }
                 return Ok(());
             }
         }

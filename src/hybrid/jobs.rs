@@ -15,6 +15,7 @@ use crate::store::repo;
 use crate::vector_cache::{CacheLimits, Embedder, VectorCache};
 
 use super::ann::ANN_MIN_VECTORS;
+use super::config::Ranking;
 use super::{HybridCfg, blocking, from_config};
 
 /// Backfill lease duration: covers a remote 75k backfill + ANN build/retry.
@@ -88,7 +89,13 @@ pub fn embed_project_chunks(db: &Db, cfg: &HybridCfg, project_id: i64) -> Result
     let Some(embedder) = stages.embedder else {
         return Ok(0);
     };
-    embed_project_chunks_with_limits(db, embedder.as_ref(), project_id, cfg.cache.limits())
+    embed_project_chunks_with_limits_and_pin(
+        db,
+        embedder.as_ref(),
+        project_id,
+        cfg.cache.limits(),
+        cfg.enabled && cfg.ranking == Ranking::Rrf,
+    )
 }
 
 /// [`embed_project_chunks`] with an explicit embedder (tests).
@@ -109,6 +116,24 @@ pub fn embed_project_chunks_with_limits(
     project_id: i64,
     limits: CacheLimits,
 ) -> Result<u64> {
+    embed_project_chunks_with_limits_and_pin(db, embedder, project_id, limits, true)
+}
+
+/// [`embed_project_chunks_with_limits`] with control over the backfill lease.
+///
+/// Pinning protects vectors from eviction while an ANN build may run, but it
+/// also suspends the cache byte budget until the TTL expires. Callers that
+/// never build (lexical ranking, `LoadOnly`) pass `pin_for_ann = false`.
+///
+/// # Errors
+/// Registry, cache and embedder failures.
+pub fn embed_project_chunks_with_limits_and_pin(
+    db: &Db,
+    embedder: &dyn Embedder,
+    project_id: i64,
+    limits: CacheLimits,
+    pin_for_ann: bool,
+) -> Result<u64> {
     let texts = repo::chunk_texts(db.connection(), project_id)?;
     if texts.is_empty() {
         return Ok(0);
@@ -122,22 +147,26 @@ pub fn embed_project_chunks_with_limits(
     let mut cache = VectorCache::open_with_limits(db.cache_root(), limits)?;
     // Lease the project's vectors for the ANN build; without this a
     // concurrent backfill can evict them and coverage never reaches 100%.
-    cache.pin(project_id, embedder.model_id(), &hashes, BACKFILL_PIN_TTL)?;
+    if pin_for_ann {
+        cache.pin(project_id, embedder.model_id(), &hashes, BACKFILL_PIN_TTL)?;
+    }
     let result = blocking::enter(|| cache.embed_missing(embedder, &texts));
     match result {
         Ok(vectors) => {
-            if hashes.len() >= ANN_MIN_VECTORS {
+            if pin_for_ann && hashes.len() >= ANN_MIN_VECTORS {
                 // The backfill may have taken close to the lease duration;
                 // restart it so the ANN build has the full window.
                 cache.pin(project_id, embedder.model_id(), &hashes, BACKFILL_PIN_TTL)?;
-            } else {
+            } else if pin_for_ann {
                 // No ANN tier will use these vectors; do not pin small caches.
                 cache.unpin(project_id, embedder.model_id(), &hashes)?;
             }
             Ok(vectors.len() as u64)
         }
         Err(err) => {
-            let _ = cache.unpin(project_id, embedder.model_id(), &hashes);
+            if pin_for_ann {
+                let _ = cache.unpin(project_id, embedder.model_id(), &hashes);
+            }
             Err(err)
         }
     }

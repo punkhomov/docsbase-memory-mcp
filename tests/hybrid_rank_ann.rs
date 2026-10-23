@@ -1,7 +1,8 @@
 //! End-to-end search through the `search_docs_with` seam with the ANN tier
-//! enabled (spec ann-index T4/T5): search stays correct during a background
-//! build (exact streaming, SC-11) and keeps using the persisted ANN once it
-//! is published.
+//! enabled (spec ann-index T4/T5, Delta 0.3): search must be proven exact
+//! while a background build is in flight (SC-11), the published ANN must
+//! actually serve the read path (counter, not just internal state), and its
+//! neighbours must match the exact scan on the same vectors (T14).
 
 #![allow(clippy::cast_precision_loss, clippy::field_reassign_with_default)]
 
@@ -11,10 +12,12 @@ use std::time::{Duration, Instant};
 
 use docsbase_memory::config::Config;
 use docsbase_memory::daemon::registry;
-use docsbase_memory::daemon::tools::{run_project_index, search_docs_with};
+use docsbase_memory::daemon::tools::{ann_search_count, run_project_index, search_docs_with};
 use docsbase_memory::error::Result;
 use docsbase_memory::hybrid::ann::AnnIndex;
-use docsbase_memory::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits, DenseRows};
+use docsbase_memory::hybrid::dense::{
+    AnnPolicy, DenseCache, DenseCacheLimits, DenseRows, set_test_build_delay,
+};
 use docsbase_memory::hybrid::jobs::embed_project_chunks_with;
 use docsbase_memory::hybrid::{HybridStages, Ranking};
 use docsbase_memory::store::Db;
@@ -95,7 +98,10 @@ fn wait_for_ann(dense: &DenseCache, db: &Db, project_id: i64) -> Arc<AnnIndex> {
 }
 
 #[test]
-fn search_is_correct_during_build_and_after_ann_publish() {
+fn search_runs_during_the_build_and_ann_serves_the_read_path() {
+    // Hold the background build open so the exact-fallback search below is
+    // guaranteed to run while the build is still in flight (SC-11).
+    set_test_build_delay(1_500);
     let (cache, db, project) = project_with_many_docs();
     let stored = embed_project_chunks_with(&db, &LengthEmbedder, project.id).expect("embed");
     assert!(
@@ -110,8 +116,12 @@ fn search_is_correct_during_build_and_after_ann_publish() {
     let first = dense
         .get(&db, project.id, LengthEmbedder.model_id())
         .expect("get");
-    let was_building = matches!(first, DenseRows::Building(_));
+    assert!(
+        matches!(first, DenseRows::Building(_)),
+        "the first lookup must start a background build, got {first:?}"
+    );
 
+    let before = ann_search_count();
     let value = search_docs_with(
         &stages(),
         &dense,
@@ -124,9 +134,10 @@ fn search_is_correct_during_build_and_after_ann_publish() {
     .expect("search during build");
     let during_build = search(&value);
     assert_eq!(during_build.len(), 10);
-    assert!(
-        !during_build.is_empty(),
-        "search during build must return exact results"
+    assert_eq!(
+        ann_search_count(),
+        before,
+        "search during the build must stream exact, not consult the ANN"
     );
     for pair in during_build.windows(2) {
         assert!(
@@ -136,6 +147,7 @@ fn search_is_correct_during_build_and_after_ann_publish() {
     }
 
     let _ann = wait_for_ann(&dense, &db, project.id);
+    let before = ann_search_count();
     let value = search_docs_with(
         &stages(),
         &dense,
@@ -147,6 +159,10 @@ fn search_is_correct_during_build_and_after_ann_publish() {
     )
     .expect("search after publish");
     let after_publish = search(&value);
+    assert!(
+        ann_search_count() > before,
+        "a published ANN must serve the read path"
+    );
     let repeat = search(
         &search_docs_with(
             &stages(),
@@ -163,12 +179,6 @@ fn search_is_correct_during_build_and_after_ann_publish() {
         after_publish, repeat,
         "persisted ANN answers deterministically"
     );
-    eprintln!(
-        "first get observed state: {}",
-        if was_building {
-            "Building"
-        } else {
-            "Ann/Ready"
-        }
-    );
+
+    set_test_build_delay(0);
 }

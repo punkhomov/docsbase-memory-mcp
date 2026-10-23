@@ -20,7 +20,7 @@ use crate::daemon::session::SessionRegistry;
 use crate::daemon::tools;
 use crate::error::{Error, Result};
 use crate::hybrid::HybridStages;
-use crate::hybrid::config::cache_model_id;
+use crate::hybrid::config::{Ranking, cache_model_id};
 use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits};
 use crate::hybrid::jobs as hybrid_jobs;
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
@@ -225,6 +225,12 @@ impl Shared {
         let Ok(config) = self.project_config(project) else {
             return;
         };
+        // Only a project whose dense channel is actually read needs an ANN:
+        // `rrf_active` gates `dense_candidates`, and the `hybrid = true`
+        // shorthand keeps `Ranking::Lexical` (Delta 0.3).
+        if !config.hybrid_cfg.enabled || config.hybrid_cfg.ranking != Ranking::Rrf {
+            return;
+        }
         let Some(embed_cfg) = config.hybrid_cfg.embedding.as_ref() else {
             return;
         };
@@ -986,7 +992,7 @@ mod tests {
 
     impl crate::vector_cache::Embedder for FakeEmbedder {
         fn model_id(&self) -> &'static str {
-            "fake/model@d3@l2"
+            "openrouter/model@d3@l2"
         }
 
         #[allow(clippy::cast_precision_loss)]
@@ -998,42 +1004,106 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sync_refresh_builds_ann_in_background() {
-        let cache = tempfile::TempDir::new().expect("cache");
-        let root = tempfile::TempDir::new().expect("root");
+    use crate::store::models::Project;
+
+    fn project_with_hybrid_config(
+        cache: &std::path::Path,
+        root: &std::path::Path,
+        ranking: Option<&str>,
+    ) -> (Db, Project) {
         for i in 0..5000 {
             fs::write(
-                root.path().join(format!("d{i:05}.md")),
+                root.join(format!("d{i:05}.md")),
                 format!("# doc {i}\n\nbody {i}.\n"),
             )
             .expect("write doc");
         }
+        let ranking = ranking.map_or(String::new(), |value| format!("ranking = \"{value}\"\n"));
         fs::write(
-            root.path().join(".docsbase.toml"),
-            "[hybrid]\nenabled = true\n[hybrid.embedding]\nprovider = \"fake\"\nmodel = \"model\"\ndimensions = 3\nnormalize = true\n",
+            root.join(".docsbase.toml"),
+            format!(
+                "[hybrid]\nenabled = true\n{ranking}[hybrid.embedding]\nprovider = \"openrouter\"\nmodel = \"model\"\ndimensions = 3\nnormalize = true\n"
+            ),
         )
         .expect("write config");
 
-        let mut db = Db::open(cache.path()).expect("db");
-        let canonical = root.path().canonicalize().expect("canonical");
+        let mut db = Db::open(cache).expect("db");
+        let canonical = root.canonicalize().expect("canonical");
         let project = registry::ensure_project(&mut db, &canonical).expect("project");
-        run_project_index(&mut db, cache.path(), &project, &Config::default()).expect("index");
+        run_project_index(&mut db, cache, &project, &Config::default()).expect("index");
         embed_project_chunks_with(&db, &FakeEmbedder, project.id).expect("embed");
+        (db, project)
+    }
+
+    /// A published ANN dump for `project_id` (a `READY` marker under the key
+    /// directory), found on disk without asking the dense cache for anything.
+    fn ann_ready(cache: &std::path::Path, project_id: i64) -> bool {
+        let Ok(keys) = fs::read_dir(cache.join(format!("projects/{project_id}/ann"))) else {
+            return false;
+        };
+        keys.filter_map(std::result::Result::ok)
+            .any(|key| key.path().join("READY").is_file())
+    }
+
+    fn wait_for_ann_ready(cache: &std::path::Path, project_id: i64, deadline: Duration) -> bool {
+        let until = Instant::now() + deadline;
+        loop {
+            if ann_ready(cache, project_id) {
+                return true;
+            }
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn sync_refresh_warms_ann_for_rrf() {
+        let cache = tempfile::TempDir::new().expect("cache");
+        let root = tempfile::TempDir::new().expect("root");
+        let (db, project) = project_with_hybrid_config(cache.path(), root.path(), Some("rrf"));
 
         let shared = Shared::open(cache.path()).expect("shared");
         shared.refresh_ann_after_sync(&project);
 
-        let deadline = Instant::now() + Duration::from_secs(10);
+        assert!(
+            wait_for_ann_ready(cache.path(), project.id, Duration::from_secs(20)),
+            "warm must publish a persisted ANN for an RRF project"
+        );
+        // READY lands on disk just before the in-memory publish; poll for the
+        // Ann state rather than racing the publish step.
+        let until = Instant::now() + Duration::from_secs(5);
         loop {
-            match shared.dense.get(&db, project.id, FakeEmbedder.model_id()) {
-                Ok(DenseRows::Ann(_)) => break,
-                _ if Instant::now() < deadline => {
+            match shared
+                .dense
+                .get(&db, project.id, FakeEmbedder.model_id())
+                .expect("get")
+            {
+                DenseRows::Ann(_) => break,
+                state if Instant::now() < until => {
+                    let _ = state;
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                other => panic!("no ann within timeout: {other:?}"),
+                state => panic!("warm did not publish an Ann entry: {state:?}"),
             }
         }
-        assert!(cache.path().join("projects/1/ann").is_dir());
+    }
+
+    #[test]
+    fn sync_refresh_skips_ann_for_lexical_ranking() {
+        let cache = tempfile::TempDir::new().expect("cache");
+        let root = tempfile::TempDir::new().expect("root");
+        // The `[hybrid]` table defaults to lexical ranking, exactly like the
+        // `hybrid = true` shorthand (Delta 0.3).
+        let (_db, project) = project_with_hybrid_config(cache.path(), root.path(), None);
+
+        let shared = Shared::open(cache.path()).expect("shared");
+        shared.refresh_ann_after_sync(&project);
+
+        assert!(
+            !wait_for_ann_ready(cache.path(), project.id, Duration::from_secs(1)),
+            "lexical ranking must not build a dense ANN nobody reads"
+        );
     }
 }

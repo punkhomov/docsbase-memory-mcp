@@ -15,6 +15,16 @@ use hnsw_rs::prelude::*;
 use crate::error::{Error, Result};
 use crate::hybrid::ann_store::{ANN_DEFAULT_EF_CONSTRUCTION, AnnKey, AnnSlot, AnnStore};
 
+// FR-5/SC-4 convert `hnsw_rs` panics into `Error::Internal` through
+// `catch_unwind`, which only works while unwinding is enabled. With
+// `panic = "abort"` every such panic would abort the process instead of
+// falling back to exact search, and the regression would be invisible in
+// dev/test builds. Reject the profile at compile time instead.
+const _: () = assert!(
+    cfg!(panic = "unwind"),
+    "panic = \"abort\" removes the ANN-to-exact fallback (FR-5/SC-4)"
+);
+
 /// Projects below this vector count always use exact `top_k` (OQ-3,
 /// provisional; calibrated in T6).
 pub const ANN_MIN_VECTORS: usize = 4096;
