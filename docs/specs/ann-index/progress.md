@@ -344,3 +344,29 @@
   --release --test hybrid_rank_ann --no-run`; arithmetic guard test. Known
   pre-existing flakes (not introduced here, not fixed): `tie_break_by_chunk_id`
   and `scores_are_one_minus_cosine` on 2–3 point graphs.
+
+- Task T20: complete (2026-10-23, second re-review). The lease gate counted
+  distinct hashes (`hashes.len()`) while build admission counts chunk rows
+  (`chunks.len()`), so a duplicate-heavy corpus near the ceiling took a
+  one-hour lease without a build. It now uses `texts.len()`. New debug-only
+  hooks `set_test_ann_max_bytes` (jobs) and `VectorCache::lease_count` let
+  `backfill_leases_only_when_the_build_can_be_admitted` pin the boundary: at
+  dim 3 a 4500-byte cap admits 4 distinct hashes but not 5 chunk rows, and the
+  lease probe inside `embed` observes 0 leases (old code: 4). Default-cap
+  control asserts a positive lease.
+
+- Task T21: complete (2026-10-23, second re-review). Publish now drops the
+  source rows and the built graph before `AnnIndex::load`, so the heap-reload
+  path cannot hold a third full copy at 75k x 2048. Build admission adds
+  `other_resident`, and `evict_oldest` prefers non-`Building` entries, so two
+  admitted builds cannot silently double the resident cap
+  (`second_build_is_not_admitted_while_the_first_occupies_the_cap`). Counter
+  and cleanup regressions are covered: an oversized `fetch` falls back without
+  counting (`hybrid_rank_ann`), and a lexical refresh removes a crashed
+  `tmp-*` dir (`sync_refresh_skips_ann_for_lexical_ranking`).
+
+- Delta 0.3.2 status (2026-10-23): second re-review round (two reviewers,
+  `7768870..97da889`) closed. Verify: lib 108; hybrid_jobs 5; hybrid_rank_ann
+  debug + release compile; fmt/clippy clean. Known pre-existing flakes remain
+  (`tie_break_by_chunk_id`, `scores_are_one_minus_cosine`) and are not fixed
+  here; the 75k peak is an accounting model, not an RSS measurement.

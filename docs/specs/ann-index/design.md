@@ -474,7 +474,7 @@ CI:
 
 ## 15. Decisions
 
-1. `ANN_MIN_VECTORS = 4096`, `max_bytes = 1 GiB`, `max_projects = 8`;
+1. `ANN_MIN_VECTORS = 4096`, `max_bytes = 1.5 GiB` (Delta 0.3.1), `max_projects = 8`;
    `ef_search = max(64, fetch * 4)` с cap (Delta 0.2, T6).
 2. `status` vs log: v1 — log-only; публичный контракт не меняется (T5).
 3. `ef_search` — dynamic formula выше; high-`fetch` recall проверяется T8/T10.

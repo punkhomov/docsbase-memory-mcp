@@ -548,6 +548,33 @@ profile.release.panic="abort"` падает с внятным сообщение
 **Acceptance:** `cargo test --release --test hybrid_rank_ann --no-run`
 компилируется; server-тесты зелёные; e2e-ассерт «served» честный.
 
+### T20 — Lease admission follows chunk rows
+
+**Goal:** лиз и сборка принимают решение по одному и тому же количеству.
+
+**Files:** `src/hybrid/jobs.rs`, `src/vector_cache.rs`, `tests/hybrid_jobs.rs`.
+
+**Steps:**
+1. `ann_build_admitted_for_model(texts.len(), ...)` вместо `hashes.len()`.
+2. Debug-only `set_test_ann_max_bytes` и `VectorCache::lease_count`.
+3. Регресс-тест с дублями: 5 строк / 4 хеша, кап 4500 → лиз не берётся;
+   дефолтный кап → берётся (lease probe внутри `embed`).
+
+**Acceptance:** тест падает, если вернуть `hashes.len()`.
+
+### T21 — Publish peak and concurrent builds
+
+**Goal:** кап остаётся честным при публикации и при двух сборках.
+
+**Files:** `src/hybrid/dense.rs`.
+
+**Steps:**
+1. `drop(ann); drop(rows);` перед `AnnIndex::load` (пик без третьей копии).
+2. Admission учитывает `other_resident`; эвикция предпочитает не-`Building`.
+3. Тест: второй build не допускается, пока первый занимает кап.
+
+**Acceptance:** тест зелёный; 75k-пик задокументирован как учётный, не RSS.
+
 ## Definition of done
 
 - `hnsw_rs 0.3.5` + `ouroboros` compile on MSRV 1.88 and all CI platforms;

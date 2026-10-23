@@ -26,7 +26,11 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
   can follow (including the resident-cap admission rule), releasing a lease
   evicts, and a cache that is over budget while every row is leased warns once
   instead of on every write. The default resident cap is 1.5 GiB so the
-  documented 75k×2048 corpus (1.22 GiB build peak) is still admitted. `search_docs` logs
+  documented 75k×2048 corpus (1.22 GiB build peak) is still admitted.
+  Backfill leases follow the chunk-row count the build admits (duplicate texts
+  no longer pin a corpus that can never build), a second background build is
+  not admitted while the first occupies the cap, and publish releases the
+  source rows and the built graph before loading the copy it publishes. `search_docs` logs
   ANN search errors separately from "insufficient candidates", and the daemon
   no longer warms a persisted ANN for projects whose ranking is lexical.
 
