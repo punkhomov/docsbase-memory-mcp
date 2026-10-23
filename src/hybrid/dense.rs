@@ -705,6 +705,19 @@ impl DenseCache {
             {
                 return entry.state.clone();
             }
+            // Re-check aggregate admission while holding the entries lock:
+            // two concurrent lookups must not both insert a reservation from a
+            // stale snapshot (Delta 0.3.2; the resolve_rows check is a fast
+            // path only). Falling back to exact keeps the cap honest.
+            let others = entries
+                .iter()
+                .filter(|(id, _)| **id != job.project_id)
+                .map(|(_, entry)| entry.bytes)
+                .sum::<u64>();
+            if job.building_bytes.saturating_add(others) > self.limits.max_bytes {
+                drop(entries);
+                return self.stash_ready(job.project_id, job.generation, &job.model_id, job.rows);
+            }
             let rows = Arc::from(job.rows);
             let hashes = Arc::clone(&job.hashes);
             let cache = Arc::new(self.snapshot());
@@ -1052,6 +1065,45 @@ mod tests {
         assert!(
             matches!(second, DenseRows::Ready(_)),
             "a second build must stay exact while the first occupies the cap, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn concurrent_lookups_admit_only_one_build() {
+        use std::sync::Barrier;
+
+        let cache = tempfile::TempDir::new().expect("cache");
+        let dim = 64;
+        let count = 64;
+        let per_build =
+            u64::try_from(ann::ann_estimated_bytes(count, dim) + count * dim * 4).expect("bytes");
+        let limits = DenseCacheLimits {
+            min_vectors: 1,
+            max_bytes: per_build + 1024,
+            ..DenseCacheLimits::default()
+        };
+        let dense = Arc::new(DenseCache::with_policy_limits(
+            AnnPolicy::BuildOrLoad,
+            cache.path(),
+            limits,
+        ));
+        let barrier = Arc::new(Barrier::new(2));
+        let spawn = |cache: DenseCache, project: i64, barrier: Arc<Barrier>| {
+            std::thread::spawn(move || {
+                barrier.wait();
+                cache.resolve_rows(project, 1, "m@d64", dense_input(wide_rows(count, dim), dim))
+            })
+        };
+        let first = spawn(dense.snapshot(), 1, Arc::clone(&barrier));
+        let second = spawn(dense.snapshot(), 2, barrier);
+        let states = [first.join().expect("join"), second.join().expect("join")];
+        let builds = states
+            .iter()
+            .filter(|state| matches!(state, DenseRows::Building(_)))
+            .count();
+        assert_eq!(
+            builds, 1,
+            "concurrent lookups must admit exactly one build under the cap, got {states:?}"
         );
     }
 

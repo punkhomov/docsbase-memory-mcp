@@ -370,3 +370,13 @@
   debug + release compile; fmt/clippy clean. Known pre-existing flakes remain
   (`tie_break_by_chunk_id`, `scores_are_one_minus_cosine`) and are not fixed
   here; the 75k peak is an accounting model, not an RSS measurement.
+
+- Task T21 follow-up (2026-10-23, verifier): the aggregate admission check in
+  `resolve_rows` was only a fast path — the lock was released before
+  `start_build` inserted, so two concurrent lookups could both reserve. The
+  re-check now happens inside the `start_build` entries lock and falls back to
+  exact (`Ready`) when the reservation does not fit; verifier claim C3 was
+  accepted as PARTIAL and is closed. Regression test
+  `concurrent_lookups_admit_only_one_build` (barrier, two threads) passes
+  repeatedly. Verifier claim C4 (design still said 1 GiB in the limits block)
+  also closed; `grep "1 GiB" docs/specs/ann-index/design.md` is empty.

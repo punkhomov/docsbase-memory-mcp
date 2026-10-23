@@ -330,7 +330,7 @@ pub enum AnnPolicy {
 ```rust
 struct DenseCacheLimits {
     max_vectors: usize,   // 1_000_000 — per-project
-    max_bytes: u64,       // 1 GiB — global resident cap (ANN + exact rows)
+    max_bytes: u64,       // 1.5 GiB — global resident cap (Delta 0.3.1/0.3.2)
     max_projects: usize,  // 8
     min_vectors: usize,   // ANN_MIN_VECTORS, internal/test only
 }
