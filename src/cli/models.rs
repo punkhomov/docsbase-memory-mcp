@@ -21,6 +21,23 @@ use crate::hybrid::config::{
 pub enum ModelsCommand {
     /// Set explicit embedding/rerank models for the current project.
     Use(UseArgs),
+    /// Fetch a pinned local model revision (`hybrid-local`).
+    #[cfg(feature = "hybrid-local")]
+    Fetch(FetchArgs),
+    /// List registry entries and their cache status (`hybrid-local`).
+    #[cfg(feature = "hybrid-local")]
+    List,
+}
+
+/// Arguments for `models fetch` (FR-6).
+#[cfg(feature = "hybrid-local")]
+#[derive(Debug, Args)]
+pub struct FetchArgs {
+    /// Registry name of the model to fetch.
+    pub name: String,
+    /// Re-download even when the cached revision verifies.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Explicit model selection; every model-affecting value is required from
@@ -47,6 +64,72 @@ pub struct UseArgs {
     /// Project directory (default: current directory).
     #[arg(long)]
     pub path: Option<PathBuf>,
+}
+
+/// Runs `models fetch <name>`: looks up the registry, downloads every pinned
+/// file with verification and installs atomically (FR-6). The only network
+/// step in the model lifecycle; search/index never call it.
+///
+/// # Errors
+/// Returns [`Error::Admission`] for unknown names, transport failures,
+/// hash/size mismatches, cap violations and preflight failures.
+#[cfg(feature = "hybrid-local")]
+pub fn fetch_cmd(args: &FetchArgs) -> anyhow::Result<()> {
+    use crate::hybrid::models;
+    let entry = models::entry(&args.name)?;
+    let source = models::HttpModelSource::new()?;
+    let dir = models::fetch(entry, &source, args.force)?;
+    println!(
+        "fetched {} (revision {}) -> {}",
+        entry.name,
+        entry.revision,
+        dir.display()
+    );
+    Ok(())
+}
+
+/// Runs `models list`: prints the registry with cache state and sizes
+/// (FR-7; the selected-model column arrives with `models use` in T6).
+///
+/// # Errors
+/// Returns an internal error when verifying a cached revision fails.
+#[cfg(feature = "hybrid-local")]
+pub fn list_cmd() -> anyhow::Result<()> {
+    use crate::hybrid::models;
+    for entry in models::REGISTRY {
+        let state = if models::cached(entry)? {
+            "fetched"
+        } else {
+            "missing"
+        };
+        println!(
+            "{}\t{}\t{}\t{state}",
+            entry.name,
+            task_label(entry.task),
+            human_bytes(entry.total_size())
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "hybrid-local")]
+fn task_label(task: crate::hybrid::models::Task) -> &'static str {
+    match task {
+        crate::hybrid::models::Task::Embedding => "embedding",
+        crate::hybrid::models::Task::Rerank => "rerank",
+    }
+}
+
+#[cfg(feature = "hybrid-local")]
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes;
+    let mut unit = 0;
+    while value >= 1024 && unit < UNITS.len() - 1 {
+        value /= 1024;
+        unit += 1;
+    }
+    format!("{value} {}", UNITS[unit])
 }
 
 /// Runs the `models use` command.

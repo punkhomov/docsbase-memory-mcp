@@ -132,6 +132,10 @@ pub fn run() -> anyhow::Result<()> {
         },
         Command::Models { command } => match command {
             models::ModelsCommand::Use(args) => models::run(&args),
+            #[cfg(feature = "hybrid-local")]
+            models::ModelsCommand::Fetch(args) => models::fetch_cmd(&args),
+            #[cfg(feature = "hybrid-local")]
+            models::ModelsCommand::List => models::list_cmd(),
         },
         Command::Install => install::install(),
         Command::Update {

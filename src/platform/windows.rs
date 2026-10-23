@@ -341,6 +341,44 @@ pub fn secure_executable(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Free bytes available on the filesystem holding `path` (Win32
+/// `GetDiskFreeSpaceExW`); used by the fetch/connect free-space preflight
+/// (FR-13).
+///
+/// # Errors
+/// Returns the raw IO error when the call fails.
+#[allow(unsafe_code)] // windows-sys FFI: SAFETY comments on each block
+pub fn available_space(path: &Path) -> io::Result<u64> {
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let wide = path_to_wide(path)?;
+    let mut free_bytes: u64 = 0;
+    // SAFETY: `free_bytes` points at a valid u64; the other two out-params
+    // are optional (NULL). The path buffer is NUL-terminated.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free_bytes,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(free_bytes)
+}
+
+/// Converts a path to a NUL-terminated UTF-16 buffer for Win32 calls.
+fn path_to_wide(path: &Path) -> io::Result<Vec<u16>> {
+    let mut wide: Vec<u16> = path.as_os_str().encode_utf16().collect();
+    wide.push(0);
+    if wide.len() > u32::MAX as usize {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path too long"));
+    }
+    Ok(wide)
+}
+
 /// Opens (creating if needed) an append-only diagnostics log (ADR-10); file
 /// privacy relies on the containing `%LOCALAPPDATA%` ACLs.
 ///

@@ -18,6 +18,8 @@ pub mod dense;
 pub mod jobs;
 pub mod rrf;
 
+#[cfg(feature = "hybrid-local")]
+pub mod models;
 #[cfg(feature = "hybrid-remote")]
 pub mod openrouter;
 #[cfg(feature = "hybrid-remote")]

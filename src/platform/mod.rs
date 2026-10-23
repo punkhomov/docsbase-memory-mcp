@@ -32,16 +32,21 @@ pub use windows::{
     connect_blocking, connect_probe, daemon_endpoint, exists, remove,
 };
 
-/// Private directory/file modes and logs (NFR-5).
+/// Private directory/file modes and logs (NFR-5); free-space probe for the
+/// fetch/connect preflight (FR-13).
 #[cfg(unix)]
 pub mod fs {
-    pub use super::unix::{open_private_log, secure_dir, secure_executable, secure_file};
+    pub use super::unix::{
+        available_space, open_private_log, secure_dir, secure_executable, secure_file,
+    };
 }
 /// Private-path policy on Windows is best-effort (ADR-10: `%LOCALAPPDATA%`
 /// ACLs; no chmod semantics).
 #[cfg(windows)]
 pub mod fs {
-    pub use super::windows::{open_private_log, secure_dir, secure_executable, secure_file};
+    pub use super::windows::{
+        available_space, open_private_log, secure_dir, secure_executable, secure_file,
+    };
 }
 
 /// Process liveness, counters and detach (Linux `/proc`; ADR-10 on Windows).

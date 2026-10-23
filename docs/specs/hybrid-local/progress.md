@@ -129,3 +129,25 @@ Ledger: одна запись на таск (что сделано, чем пр�
   least the four files (presence, not count); FR-13 parenthetical separates connect vs
   fetch size sources; T6 verifies both feature combinations; T8 records macOS signature
   state and confirms `init_from`. T1 was and remains startable.
+
+- Task 1: complete (commits `3e53690..`→ head of this session, tests: `cargo test --locked
+  --features hybrid-local --lib hybrid::models` → 15 passed; `--test cli_models` → 5 passed;
+  `--test hybrid_models` → 4 passed; `cargo test --locked` default → green, 0 of fastembed/
+  ort/tokenizers/hf-hub/image/native-tls/ureq/reqwest in the default tree).
+  Реализовано: `src/hybrid/models.rs` (registry: bge-small-en-v1.5, multilingual-e5-small,
+  jina-reranker-v1-turbo-en, bge-reranker-base с реальными pinned revisions/size/sha256 из
+  HF tree API; `entry`, `fetch`, `fetch_one`, `cached`, `cache_dir`, `canonical_id`,
+  `expected_bytes`, `HttpModelSource`; `.complete` last; shared-lock verify path vs exclusive
+  install lock; `--force`; caps 2 GiB/file + 3 GiB/model; preflight 1.5x+256 MiB с именами
+  required/available); `src/cli/models.rs` (+`Fetch`/`List`, fetch_cmd/list_cmd);
+  `src/cli/mod.rs` dispatch; `src/platform/{mod,unix,windows}.rs` (+`fs::available_space`);
+  `Cargo.toml` (feature `hybrid-local`, exact pins per design §2; `libc` direct для unix).
+  Cargo.lock сгенерирован под nightly с `min-publish-age=14d` (resolver не нашёл нарушений).
+  Ruling: `cache_dir` возвращает `PathBuf` (fallback на cwd при ошибке XDG), а не `Result` —
+  как в design §5; ошибка всё равно видна на первой FS-операции. Ruling: preflight считается
+  целочисленно (`expected + expected/2 + 256MiB`), эквивалентно 1.5x с truncation, без
+  float-кастов, clippy-pedantic clean. Minor (deferred): manifest warns `unused dependency`
+  fastembed/tar/zip (используются в T2/T4/T5); `cargo fmt` применён; `lista` CLI output
+  пока без колонки selected (T6). Управляющие константы `PREFLIGHT_MULTIPLIER`/
+  `PREFLIGHT_HEADROOM_BYTES`/`MAX_FILE_BYTES`/`MAX_TOTAL_BYTES` публичны для T2/T9.
+  Feature-тесты покрыты `#![cfg(feature = "hybrid-local")]` (как hybrid_openrouter.rs).
