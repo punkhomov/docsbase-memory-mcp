@@ -41,6 +41,12 @@ error with one action (FR-11…FR-13).
   unchanged.
 - Canonical model id (FR-9): `fastembed/<name>@d<dim>@<l2|raw>@r<rev8>@p<prompt_version>`,
   produced by **one** function used by the embedder, `coverage()` and ANN warm.
+- **The typed model enums are not used.** Both stages take the BYO path
+  (`UserDefinedEmbeddingModel` / `UserDefinedRerankingModel`); the ONNX contract is
+  `input_ids` + `attention_mask` (+ optional `token_type_ids`), output
+  `last_hidden_state`/`text_embeds`, pooling `Cls|Mean`, HF `tokenizer.json` set.
+  Adding a conforming model is a registry row, not new code (design §7, requirements
+  Assumptions).
 
 ## 3. Architecture
 
