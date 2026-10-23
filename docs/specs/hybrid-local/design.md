@@ -68,7 +68,7 @@ performs network I/O (FR-12, NFR-6).
 | `hybrid::models` | registry, cache layout, fetch/list/remove, hash re-verification, lock | `entry(name)`, `fetch(entry, source)`, `cached(entry)`, `cache_dir`, `embedding_model_id` | `ureq`, `sha2`, `fd-lock` |
 | `hybrid::local` | `FastEmbedEmbedder` (+`embed_query`), `FastEmbedReranker`, one instance per key | `local::embedder(cfg, providers)`, `local::reranker(cfg, providers)` | `fastembed`, `ort`, `models`, `runtime` |
 | `cli::connect` | status, `connect openrouter/fastembed`, global config write | `connect::run(args)` | `runtime`, `models`, `config` |
-| `cli::models` | `use/fetch/list/remove`, scope, per-stage provider validation | `models::run(args)` | `models`, `config` |
+| `cli::models` | `use embed|rerank`, `fetch/list/remove`, scope, per-purpose options | `models::run(args)` | `models`, `config` |
 | `config` | `[providers]`, `ProjectFileConfig`, precedence, canonical id | `Config::global`, `Config::for_project`, `providers::status`, `embedding_model_id` | — |
 
 ## 5. Module interfaces
@@ -116,10 +116,11 @@ key source; `fetch` never leaves a directory without `.complete`; `resolve` neve
 2. **models fetch** → registry entry → per file: download to `*.part`, verify size+sha256
    (size caps), fsync, rename → `.complete` last. A lock serializes concurrent fetches.
    Opening a cached model re-verifies hashes.
-3. **models use** → scope (project vs `--global`) → per-stage providers
-   (`--embedding-provider`/`--rerank-provider`; `--provider` only as a shorthand) → validate
-   provider connected, model cached (or `--dry-run`) → probe per provider (OpenRouter under
-   `hybrid-remote`; fastembed offline) → write `[hybrid]` atomically.
+3. **models use embed|rerank <model>** → purpose selects exactly one stage and its options
+   (`--dims` for embed, `--window` for rerank) → scope (project vs `--global`) → provider
+   inferred from the registry or explicit `--provider` → validate provider connected, model
+   cached (or `--dry-run`) → probe per provider (OpenRouter under `hybrid-remote`; fastembed
+   offline) → write only that stage's table atomically, leaving the other untouched.
 4. **search/index** → `from_config` resolves the provider → `local::embedder`/`reranker` →
    runtime `init_from` + `TextEmbedding::try_new_from_user_defined` (cached in `OnceLock`) →
    search uses `embed_query` (query prefix), backfill uses `embed` (passage prefix) →

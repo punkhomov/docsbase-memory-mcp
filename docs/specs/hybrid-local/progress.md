@@ -69,3 +69,11 @@ Ledger: одна запись на таск (что сделано, чем пр�
   windows/macos feature checks + required-check note + static binary check, exact cooldown
   pins, NFR-4 thread/budget wording. Added T9 (remove/uninstall/re-pin/observability) and
   SC-10/SC-11; dropped `connect --models`, `DOCSBASE_MODEL_CACHE`, OQ-2/4/6.
+
+- CLI UX change (2026-10-23, operator request): `models use` becomes purpose-first —
+  `models use embed <model>` / `models use rerank <model>`. One stage per invocation,
+  options scoped to the purpose (`--dims` only for embed, `--window` only for rerank),
+  only that stage is written, and setting both stages at once is impossible by CLI shape.
+  `--provider` is inferable from a registry name and required otherwise; mixed providers
+  are expressed by two separate invocations. FR-8/P3/SC-5, design data-flow, T6 and ADR-17
+  updated.

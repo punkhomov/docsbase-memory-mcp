@@ -18,7 +18,7 @@ machine-local provider registry, and no default models.
 2. Partial install used after a crash → T1/T2 (`*.part` + `.complete` + rename + lock).
 3. Missing query/passage prefixes silently degrading retrieval → T4 (FR-10).
 4. Write-A/read-B cache key (coverage/ANN vs embedder) → T1/T3 (single canonical function).
-5. Provider scope leaks (project `[providers]`, mixed providers, local-only `models use`) → T3/T6.
+5. Provider/scope leaks (project `[providers]`, local-only `models use`, wrong stage rewritten) → T3/T6.
 
 ---
 
@@ -145,27 +145,30 @@ machine-local provider registry, and no default models.
 **Verify:** same command → ok.
 **Depends:** T4.
 
-## T6 — `models use` scope, per-stage providers, probe gating
+## T6 — `models use embed|rerank`, scope, probe gating
 
-**Goal:** select models per project or as global defaults; work in a local-only build.
+**Goal:** purpose-first model selection (one stage per call) that works in a local-only build.
 **Files:**
-- Modify: `src/cli/models.rs` (scope, per-stage provider flags, probe dispatch, global write)
+- Modify: `src/cli/models.rs` (subcommands `embed`/`rerank`, scope, probe dispatch, global write)
 - Test: `tests/cli_models.rs`
 **Interfaces:**
-- Produces: `--local/--global`, `--embedding-provider`/`--rerank-provider`, `--provider`
-  shorthand; `resolve_scope`.
+- Produces: `models use embed <model> [--provider] [--dims] [--local|--global] [--dry-run] [--path]`;
+  `models use rerank <model> [--provider] [--window] [--local|--global] [--dry-run] [--path]`;
+  `resolve_scope`.
 - Consumes: `embedding_model_id`, registry, global config.
 **Steps:**
-1. RED: scope matrix (project default, `--local`, outside-project requires `--global`, both
+1. RED: `models use` without a purpose prints help and writes nothing; there is no way to
+   set embedding and rerank in one invocation (CLI shape test).
+2. RED: `use embed` writes only `[hybrid.embedding]`; `use rerank` writes only
+   `[hybrid.reranker]`; the untouched stage keeps its previous values.
+3. RED: scope matrix (project default, `--local`, outside-project requires `--global`, both
    flags error); global write preserves `[providers]` and unrelated sections.
-2. RED: `--provider` applies only to stages named in the invocation; untouched stages keep
-   their provider; mixed providers written per stage.
-3. RED: fastembed probe is offline and runs under `hybrid-local` only; OpenRouter probe runs
-   under `hybrid-remote`; `--features hybrid-local` alone can write config.
-4. RED: unfetched model → admission with `docsbase models fetch`; dims inferred for
-   fastembed, explicit for OpenRouter; wrong dims rejected.
-5. GREEN: implement; `--dry-run` prints the diff.
-6. Verify: `cargo test --locked --test cli_models --features hybrid-local`.
+4. RED: `--dims` exists only on `embed` and `--window` only on `rerank` (clap rejects the
+   wrong flag); dims inferred for fastembed, required for OpenRouter; wrong dims rejected.
+5. RED: provider inference from a registry name; unknown name without `--provider` → error;
+   fastembed probe offline under `hybrid-local`; OpenRouter probe under `hybrid-remote`.
+6. GREEN: implement; `--dry-run` prints the diff; unfetched model → `models fetch` hint.
+7. Verify: `cargo test --locked --test cli_models --features hybrid-local`.
 **Acceptance:** FR-7, FR-8, FR-12; SC-5, SC-11.
 **Verify:** `cargo test --locked --test cli_models --features hybrid-local` → ok.
 **Depends:** T1, T3.

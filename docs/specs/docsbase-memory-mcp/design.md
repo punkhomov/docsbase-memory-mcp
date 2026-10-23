@@ -553,8 +553,10 @@ tmp-каталогов (гонка с build), удаление текущего 
 дефолты OpenRouter не меняются, а для не-openrouter провайдера `model` обязателен.
 Модели скачиваются только явно
 (`docsbase models fetch <name>`) с HF по **pinned revision** с проверкой sha256;
-`models use` лишь выбирает модель и пишет `[hybrid.embedding]`/`[hybrid.reranker]`
-в проект (по умолчанию) или в глобальный конфиг (`--global`, обязателен вне проекта).
+`models use` purpose-first: `models use embed <model>` / `models use rerank <model>`,
+одна стадия за вызов (смешать нельзя), опции под назначение (`--dims` / `--window`);
+пишет только эту секцию в проект (по умолчанию) или в глобальный конфиг (`--global`,
+обязателен вне проекта).
 Сеть на index/search-путях запрещена: отсутствие рантайма/модели — admission-ошибка
 с подсказкой, без молчаливого fallback.
 ORT-стратегия: `ort-load-dynamic`; `connect` качает закреплённый ONNX Runtime

@@ -37,7 +37,7 @@ a `hybrid-local`-only build (per-provider probe); `embed_query` needs the
 `daemon::tools::dense_candidates` call site; and one canonical `embedding_model_id` must
 replace the `cache_model_id`/`Embedder::model_id` split. Also: structural
 `ProjectFileConfig` (no `[providers]` in projects), provider-entry-aware runtime
-resolution and `init_from` ordering, per-stage provider flags in `models use`,
+resolution and `init_from` ordering, purpose-first `models use embed|rerank`,
 non-openrouter `model` required (OpenRouter defaults unchanged), exact cooldown pins,
 platform CI coverage, and a new lifecycle requirement (remove/uninstall/re-pin/
 observability). FR-14 was renumbered to FR-13.
@@ -122,12 +122,17 @@ project (or for new projects with `--global`), so that provider choice is explic
 
 **Why this priority:** model choice changes `model_id`, invalidates the vector cache and
 ANN; it must be deliberate and scoped.
-**Independent test:** inside a project, `models use --provider fastembed --embedding …`
-writes `.docsbase.toml`; outside a project the same command fails unless `--global` is
-passed; `--global` writes the global config and leaves `[providers]` untouched.
+**Independent test:** inside a project, `docsbase models use embed bge-small-en-v1.5`
+writes `[hybrid.embedding]` in `.docsbase.toml` and leaves `[hybrid.reranker]` untouched;
+`docsbase models use rerank jina-reranker-v1-turbo-en --window 50` writes only that stage;
+outside a project both fail unless `--global` is passed.
 **Acceptance scenarios:**
-- Given a project directory, when `models use` runs without a scope flag, then
-  `.docsbase.toml` gets `[hybrid.embedding]`/`[hybrid.reranker]`.
+- Given a project directory, when `models use embed <model>` runs without a scope flag,
+  then `.docsbase.toml` gets `[hybrid.embedding]` only.
+- Given a project directory, when `models use rerank <model> --window 50` runs, then only
+  `[hybrid.reranker]` changes.
+- Given `models use` without a purpose, then it prints help and changes nothing.
+- Given a command that tries to set both purposes, then it is rejected by the CLI shape.
 - Given no project, when `models use` runs without `--global`, then it fails with a message
   explaining the required scope.
 - Given both `--local` and `--global`, then the command fails.
@@ -192,15 +197,21 @@ returns `(index, score)` pairs; without it, config validation fails.
 - **FR-7 (must).** `models list` reports registry entries, cached revisions, sizes and
   status; `models remove <name>` removes all cached revisions and refuses (or warns and
   requires `--force`) while a daemon/process may have the model loaded.
-- **FR-8 (must).** `models use` scope and provider rules: inside a project it writes
-  `.docsbase.toml` by default (`--local` optional); `--global` writes the global config
-  (defaults for new projects) and is required outside a project; both flags → error.
-  Provider flags: `--provider` is a shorthand only when both stages are set in this
-  invocation; `--embedding-provider` / `--rerank-provider` override per stage. Stages not
-  named in this invocation keep their existing provider. Validation: provider connected,
-  model cached (fetch hint), embedding dims from the registry (OpenRouter: explicit),
-  rerank window in bounds. Probe per provider: OpenRouter under `hybrid-remote`, fastembed
-  offline against the cached model; `models use` must work in a `hybrid-local`-only build.
+- **FR-8 (must).** `models use` is purpose-first and single-purpose per invocation:
+  `models use embed <model> [options]` or `models use rerank <model> [options]`.
+  The purpose subcommand is required; **one model per invocation**, and setting both stages
+  in one call is impossible by CLI shape (no `--embedding`/`--rerank` mixing).
+  Options are scoped to the purpose: `embed` takes `--dims` (optional for fastembed —
+  inferred from the registry and validated; required for OpenRouter), `rerank` takes
+  `--window`; both take `--provider`, `--local`, `--global`, `--dry-run`, `--path`.
+  `--provider` may be omitted only when the model name is a local registry entry (provider
+  inferred); an unknown name requires `--provider` (OpenRouter has no catalog).
+  Scope: inside a project it writes `.docsbase.toml` by default (`--local` optional);
+  `--global` writes the global config (defaults for new projects) and is required outside a
+  project; both flags → error. Only the selected stage's table is written; the other stage
+  is untouched. Validation: provider connected, model cached (fetch hint), dims/window in
+  bounds. Probe per provider: OpenRouter under `hybrid-remote`, fastembed offline against
+  the cached model; `models use` must work in a `hybrid-local`-only build.
 - **FR-9 (must).** `provider = "fastembed"` constructs `Embedder`/`Reranker`; a **single
   canonical model-id function** (not two) is used by the embedder, `coverage()` and the ANN
   warm path: `fastembed/<name>@d<dim>@<l2|raw>@r<rev8>@p<prompt_version>`. `normalize`
@@ -284,11 +295,12 @@ revision is part of the path so updates never mix vectors.
 |---|---|---|
 | `docsbase connect` | — | status table |
 | `docsbase connect openrouter` | — | env key validated; global provider entry written |
-| `docsbase connect fastembed` | `--check`, `--force`, `--models a,b` | runtime installed; provider entry written |
+| `docsbase connect fastembed` | `--check`, `--force` | runtime installed; provider entry written |
 | `docsbase models list` | — | registry + cached/missing |
 | `docsbase models fetch <name>` | — | pinned files installed |
 | `docsbase models remove <name>` | — | cache removed |
-| `docsbase models use` | `--provider`, `--embedding`, `--dims`, `--rerank`, `--window`, `--local`, `--global`, `--dry-run`, `--path` | config written or printed |
+| `docsbase models use embed <model>` | `--provider`, `--dims`, `--local`, `--global`, `--dry-run`, `--path` | `[hybrid.embedding]` written or printed |
+| `docsbase models use rerank <model>` | `--provider`, `--window`, `--local`, `--global`, `--dry-run`, `--path` | `[hybrid.reranker]` written or printed |
 
 **Config files:** global `config.toml` (`[providers.*]`, optional `[hybrid.*]` defaults);
 project `.docsbase.toml` (`[hybrid.*]` only).
@@ -304,8 +316,10 @@ fastembed`), and never contain keys or file contents.
 - **SC-3.** With no provider entry, a fastembed config fails with exactly the connect hint.
 - **SC-4.** `models fetch` installs all registry files, verifies hashes, is idempotent, and
   leaves no partial install when interrupted/offline.
-- **SC-5.** `models use` follows the scope matrix (project default, `--local`, `--global`,
-  outside-project error, both-flags error) and never rewrites `[providers]`.
+- **SC-5.** `models use embed|rerank <model>` is single-purpose: one stage per invocation,
+  purpose-specific options only, scope matrix (project default, `--local`, `--global`,
+  outside-project error, both-flags error), and it never rewrites `[providers]` or the
+  other stage.
 - **SC-6.** With runtime+model prepared, embedding and rerank run offline, `model_id`
   contains the revision, and cached vectors are reused after restart.
 - **SC-7.** The ignored live test (connect/fetch/embed/rerank on a real model) passes on a
@@ -345,5 +359,5 @@ MCP management tools, `docsbase serve` model endpoints, quantized-on-the-fly con
 - **OQ-5.** Multilingual default: E5-small int8 (118 MB, prefixes) vs bge-small (English,
   133 MB). Proposed: list both; docs recommend E5 for RU/EN; no automatic default.
 - **OQ-7.** Mixed providers per stage (fastembed embedding + OpenRouter rerank): allowed by
-  config and expressed with `--embedding-provider`/`--rerank-provider`; no default provider
-  is inferred for a stage not named in the invocation.
+  config and written with two separate invocations (`models use embed …`, then
+  `models use rerank …`); no command sets both stages at once.
