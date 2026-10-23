@@ -29,6 +29,11 @@ const _: () = assert!(
 /// provisional; calibrated in T6).
 pub const ANN_MIN_VECTORS: usize = 4096;
 
+/// Indexes at or below this size are built sequentially: the parallel insert
+/// is racy on tiny graphs (two points can lose a neighbour) and provides no
+/// benefit at this scale.
+const SEQUENTIAL_BUILD_MAX: usize = 64;
+
 /// Graph fan-out during construction (design §6).
 const M: usize = 16;
 
@@ -125,7 +130,15 @@ impl AnnIndex {
             ANN_DEFAULT_EF_CONSTRUCTION,
             DistCosine,
         );
-        hnsw.parallel_insert_slice(&items);
+        if items.len() <= SEQUENTIAL_BUILD_MAX {
+            // `parallel_insert_slice` races on tiny point sets (a two-point
+            // graph can lose a neighbour), and threads buy nothing here.
+            for item in &items {
+                hnsw.insert_slice(*item);
+            }
+        } else {
+            hnsw.parallel_insert_slice(&items);
+        }
         hnsw.set_searching_mode(true);
         Ok(Self {
             kind: Kind::Built(hnsw),

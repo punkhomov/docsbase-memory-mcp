@@ -513,3 +513,42 @@ fn cold_start_loads_persisted_ann_without_vectors_db() {
         "cold start must not open the vector cache"
     );
 }
+
+/// OQ-4 evidence: a generation directory must be removable after the mmap
+/// index that referenced it is dropped. Windows holds the mapping open until
+/// then, so this is the runtime half that `cargo check` cannot prove.
+#[test]
+fn cleanup_removes_a_generation_after_the_loaded_index_is_dropped() {
+    let cache = TempDir::new().expect("cache");
+    let store = AnnStore::new(cache.path().to_path_buf());
+    let dim = 8;
+    let rows: Vec<(u64, Arc<[f32]>)> = (0..64)
+        .map(|id| (id, Arc::from(vec![0.1_f32; dim])))
+        .collect();
+    let key_for = |generation: i64| AnnKey {
+        project_id: 1,
+        generation,
+        model_id: "test/model@d8".to_owned(),
+        dim,
+        chunk_count: rows.len(),
+        chunk_set_digest: format!("digest-{generation}"),
+        format_version: ANN_FORMAT_VERSION,
+    };
+
+    let mut dirs = Vec::new();
+    for generation in 1..=3 {
+        let ann = AnnIndex::build(&rows, dim).expect("build");
+        dirs.push(ann.dump(&store, &key_for(generation)).expect("dump").dir);
+    }
+
+    let slot = store.load(&key_for(1)).expect("load").expect("slot");
+    let loaded = AnnIndex::load(&slot).expect("load index");
+    drop(loaded);
+
+    store.cleanup(1).expect("cleanup");
+    assert!(
+        !dirs[0].exists(),
+        "the oldest generation must be removable after the loaded index is dropped"
+    );
+    assert!(dirs[2].exists(), "the newest generation is kept");
+}
