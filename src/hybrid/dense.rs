@@ -31,6 +31,23 @@ pub const DENSE_CACHE_MAX_VECTORS: usize = 1_000_000;
 /// Backoff after a failed background ANN build before retrying.
 const BUILD_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Whether a background ANN build for `count` vectors of width `dim` fits the
+/// resident cap: the graph estimate plus the exact rows the build thread keeps
+/// alive. Mirrors the admission check in [`DenseCache::resolve_rows`].
+#[must_use]
+pub fn ann_build_admitted(count: usize, dim: usize, max_bytes: u64) -> bool {
+    let exact = u64::try_from(count.saturating_mul(dim).saturating_mul(4)).unwrap_or(u64::MAX);
+    let estimated = u64::try_from(ann::ann_estimated_bytes(count, dim)).unwrap_or(u64::MAX);
+    estimated.saturating_add(exact) <= max_bytes
+}
+
+/// [`ann_build_admitted`] for a cache model id that encodes the width
+/// (`...@d2048@l2`). Returns `false` when the width is absent.
+#[must_use]
+pub fn ann_build_admitted_for_model(count: usize, model_id: &str, max_bytes: u64) -> bool {
+    model_dim(model_id).is_some_and(|dim| ann_build_admitted(count, dim, max_bytes))
+}
+
 /// Embedding width encoded in a cache model id (`...@d2048@l2`), when present.
 fn model_dim(model_id: &str) -> Option<usize> {
     let (_, after) = model_id.rsplit_once("@d")?;
@@ -270,7 +287,9 @@ pub enum AnnPolicy {
 pub struct DenseCacheLimits {
     /// Maximum vectors per project; above it the project streams exact.
     pub max_vectors: usize,
-    /// Maximum resident bytes across entries, including exact rows.
+    /// Maximum resident bytes across entries, including exact rows and the
+    /// transient graph+rows peak of an in-flight build. The default admits the
+    /// documented 75k x 2048 corpus (691 MB graph + 586 MB rows = 1.22 GiB).
     pub max_bytes: u64,
     /// Maximum cached projects; oldest entries are evicted (LRU).
     pub max_projects: usize,
@@ -289,7 +308,10 @@ impl Default for DenseCacheLimits {
     fn default() -> Self {
         Self {
             max_vectors: DENSE_CACHE_MAX_VECTORS,
-            max_bytes: 1024 * 1024 * 1024,
+            // 75k x 2048 needs 1.22 GiB while a background build keeps the
+            // exact rows alive; 1.5 GiB leaves headroom without changing the
+            // steady-state ANN model (691 MB, see NFR-4).
+            max_bytes: 1536 * 1024 * 1024,
             max_projects: 8,
             min_vectors: ANN_MIN_VECTORS,
             build_backoff: BUILD_BACKOFF,
@@ -586,7 +608,8 @@ impl DenseCache {
             && chunks.len() >= self.limits.min_vectors
             && full_coverage
             && !in_backoff
-            && building_bytes <= self.limits.max_bytes;
+            && building_bytes <= self.limits.max_bytes
+            && ann_build_admitted(chunks.len(), dim, self.limits.max_bytes);
         if !seek_ann {
             if exact_bytes > self.limits.max_bytes {
                 return self.stash_too_large(project_id, generation, model_id, chunks);
@@ -983,6 +1006,22 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn default_cap_admits_the_documented_target_corpus() {
+        let count = 75_000;
+        let dim = 2048;
+        let limits = DenseCacheLimits::default();
+        assert!(
+            ann_build_admitted(count, dim, limits.max_bytes),
+            "the default resident cap must admit a 75k x 2048 build (Delta 0.3.1)"
+        );
+        let steady = u64::try_from(ann::ann_estimated_bytes(count, dim)).expect("estimate");
+        assert!(
+            steady <= 1024 * 1024 * 1024,
+            "steady ANN must stay within the 1 GiB model, got {steady}"
+        );
     }
 
     #[test]

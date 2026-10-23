@@ -4,6 +4,9 @@
 //! actually serve the read path (counter, not just internal state), and its
 //! neighbours must match the exact scan on the same vectors (T14).
 
+//! The debug hooks it relies on compile out of release builds, so the whole
+//! target is a no-op there and `cargo test --release` still compiles.
+#![cfg(debug_assertions)]
 #![allow(clippy::cast_precision_loss, clippy::field_reassign_with_default)]
 
 use std::fs;
@@ -12,12 +15,14 @@ use std::time::{Duration, Instant};
 
 use docsbase_memory::config::Config;
 use docsbase_memory::daemon::registry;
-use docsbase_memory::daemon::tools::{ann_search_count, run_project_index, search_docs_with};
+#[cfg(debug_assertions)]
+use docsbase_memory::daemon::tools::ann_search_count;
+use docsbase_memory::daemon::tools::{run_project_index, search_docs_with};
 use docsbase_memory::error::Result;
 use docsbase_memory::hybrid::ann::AnnIndex;
-use docsbase_memory::hybrid::dense::{
-    AnnPolicy, DenseCache, DenseCacheLimits, DenseRows, set_test_build_delay,
-};
+#[cfg(debug_assertions)]
+use docsbase_memory::hybrid::dense::set_test_build_delay;
+use docsbase_memory::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits, DenseRows};
 use docsbase_memory::hybrid::jobs::embed_project_chunks_with;
 use docsbase_memory::hybrid::{HybridStages, Ranking};
 use docsbase_memory::store::Db;
@@ -97,11 +102,25 @@ fn wait_for_ann(dense: &DenseCache, db: &Db, project_id: i64) -> Arc<AnnIndex> {
     }
 }
 
+/// Resets the debug build delay even if the test panics, so a failure cannot
+/// slow every later build in the same process.
+#[cfg(debug_assertions)]
+struct DelayReset;
+
+#[cfg(debug_assertions)]
+impl Drop for DelayReset {
+    fn drop(&mut self) {
+        set_test_build_delay(0);
+    }
+}
+
+#[cfg(debug_assertions)]
 #[test]
 fn search_runs_during_the_build_and_ann_serves_the_read_path() {
     // Hold the background build open so the exact-fallback search below is
     // guaranteed to run while the build is still in flight (SC-11).
     set_test_build_delay(1_500);
+    let _delay_reset = DelayReset;
     let (cache, db, project) = project_with_many_docs();
     let stored = embed_project_chunks_with(&db, &LengthEmbedder, project.id).expect("embed");
     assert!(
@@ -179,6 +198,4 @@ fn search_runs_during_the_build_and_ann_serves_the_read_path() {
         after_publish, repeat,
         "persisted ANN answers deterministically"
     );
-
-    set_test_build_delay(0);
 }

@@ -225,15 +225,14 @@ impl Shared {
         let Ok(config) = self.project_config(project) else {
             return;
         };
-        // Only a project whose dense channel is actually read needs an ANN:
-        // `rrf_active` gates `dense_candidates`, and the `hybrid = true`
-        // shorthand keeps `Ranking::Lexical` (Delta 0.3).
-        if !config.hybrid_cfg.enabled || config.hybrid_cfg.ranking != Ranking::Rrf {
-            return;
-        }
         let Some(embed_cfg) = config.hybrid_cfg.embedding.as_ref() else {
             return;
         };
+        // Warm only a project whose dense channel is actually read:
+        // `rrf_active` gates `dense_candidates`, and the `hybrid = true`
+        // shorthand keeps `Ranking::Lexical` (Delta 0.3). Cleanup stays
+        // unconditional: a ranking flip must still reclaim old dumps.
+        let warm = config.hybrid_cfg.enabled && config.hybrid_cfg.ranking == Ranking::Rrf;
         let model_id = cache_model_id(embed_cfg);
         let cache_path = self.cache.clone();
         let dense = self.dense.snapshot();
@@ -242,7 +241,7 @@ impl Shared {
             let Ok(db) = Db::open(&cache_path) else {
                 return;
             };
-            if let Err(err) = dense.warm(&db, project_id, &model_id) {
+            if warm && let Err(err) = dense.warm(&db, project_id, &model_id) {
                 eprintln!("warning: ann warm failed for project {project_id}: {err}");
             }
             if let Err(err) = dense.cleanup(project_id) {

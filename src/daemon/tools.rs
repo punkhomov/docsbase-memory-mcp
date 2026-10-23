@@ -116,24 +116,24 @@ fn dense_candidates(
     let model_id = embedder.model_id();
     match dense.get(db, project.id, model_id)? {
         DenseRows::Ready(index) => dense::top_k(&vector, index.rows(), fetch),
-        DenseRows::Ann(ann) => {
-            #[cfg(debug_assertions)]
-            ANN_SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            match ann.search(&vector, fetch) {
-                Ok(hits) if hits.len() >= fetch => Ok(hits),
-                Ok(hits) => {
-                    eprintln!(
-                        "warning: ann returned {} candidates for fetch {fetch}; falling back to exact",
-                        hits.len()
-                    );
-                    stream_exact(db, model_id, project.id, &vector, fetch)
-                }
-                Err(err) => {
-                    eprintln!("warning: ann search failed: {err}; falling back to exact");
-                    stream_exact(db, model_id, project.id, &vector, fetch)
-                }
+        DenseRows::Ann(ann) => match ann.search(&vector, fetch) {
+            Ok(hits) if hits.len() >= fetch => {
+                #[cfg(debug_assertions)]
+                ANN_SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(hits)
             }
-        }
+            Ok(hits) => {
+                eprintln!(
+                    "warning: ann returned {} candidates for fetch {fetch}; falling back to exact",
+                    hits.len()
+                );
+                stream_exact(db, model_id, project.id, &vector, fetch)
+            }
+            Err(err) => {
+                eprintln!("warning: ann search failed: {err}; falling back to exact");
+                stream_exact(db, model_id, project.id, &vector, fetch)
+            }
+        },
         DenseRows::TooLarge(hashes) => stream_hashes(db, model_id, &hashes, &vector, fetch),
         DenseRows::Building(building) => {
             stream_hashes(db, model_id, &building.hashes, &vector, fetch)
@@ -142,7 +142,8 @@ fn dense_candidates(
     }
 }
 
-/// Debug-only counter: how many dense lookups were served from the ANN tier.
+/// Debug-only counter: how many dense lookups the ANN tier actually *served*
+/// (a consultation that fell back to exact is not counted).
 /// Integration tests use it to prove the read path took the ANN branch rather
 /// than silently falling back to exact (Delta 0.3).
 #[cfg(debug_assertions)]

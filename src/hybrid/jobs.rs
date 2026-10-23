@@ -16,6 +16,7 @@ use crate::vector_cache::{CacheLimits, Embedder, VectorCache};
 
 use super::ann::ANN_MIN_VECTORS;
 use super::config::Ranking;
+use super::dense::{DenseCacheLimits, ann_build_admitted_for_model};
 use super::{HybridCfg, blocking, from_config};
 
 /// Backfill lease duration: covers a remote 75k backfill + ANN build/retry.
@@ -123,7 +124,9 @@ pub fn embed_project_chunks_with_limits(
 ///
 /// Pinning protects vectors from eviction while an ANN build may run, but it
 /// also suspends the cache byte budget until the TTL expires. Callers that
-/// never build (lexical ranking, `LoadOnly`) pass `pin_for_ann = false`.
+/// cannot build (no RRF dense channel, or a corpus the resident cap cannot
+/// admit) pass `pin_for_ann = false`; `embed_project_chunks` derives this from
+/// the project config and the admission rule.
 ///
 /// # Errors
 /// Registry, cache and embedder failures.
@@ -144,6 +147,15 @@ pub fn embed_project_chunks_with_limits_and_pin(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
+    // Pin only when a build can actually follow: the resident cap must admit
+    // graph plus exact rows, otherwise the lease would suspend the cache budget
+    // for nothing (Delta 0.3.1).
+    let pin_for_ann = pin_for_ann
+        && ann_build_admitted_for_model(
+            hashes.len(),
+            embedder.model_id(),
+            DenseCacheLimits::default().max_bytes,
+        );
     let mut cache = VectorCache::open_with_limits(db.cache_root(), limits)?;
     // Lease the project's vectors for the ANN build; without this a
     // concurrent backfill can evict them and coverage never reaches 100%.
