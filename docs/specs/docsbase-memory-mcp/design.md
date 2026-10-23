@@ -576,7 +576,8 @@ ONNX грузится как `Vec<u8>` во всех версиях при MSRV 
 `OnnxSource` есть только для rerank и требует ort rc.15/MSRV 1.92),
 `ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }`
 (release candidate — риск зафиксирован), `ureq = "=3.4.2"`, `sha2 = "=0.10.9"`,
-`flate2/tar/zip = "=9.0.0"` для загрузки/распаковки рантайма, `tokenizers` с
+`flate2 = "=1.1.10"`, `tar = "=0.4.46"`, `zip = "=8.6.0"` для загрузки/распаковки
+рантайма (9.0.0 ровно на границе cooldown, поэтому 8.6.0), `tokenizers` с
 Oniguruma (C, прецедент — bundled sqlite3). Модели:
 `bge-small-en-v1.5` (384, CLS, 133 MB), `multilingual-e5-small` int8 (384,
 Mean, 118 MB), rerank-кандидаты `jina-reranker-v1-turbo-en` int8 (38 MB, Apache-2.0,

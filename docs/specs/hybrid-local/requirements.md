@@ -1,6 +1,6 @@
 # SPECIFICATION: hybrid-local (итерация 4)
 
-**Status:** Draft, ревизия 0.4 · **Дата:** 2026-10-23
+**Status:** Draft, ревизия 0.5 · **Дата:** 2026-10-23
 **Constitution:** `docs/specs/constitution.md` (1.3.0)
 **Related:** `docs/specs/hybrid-providers/` (dense/RRF), `docs/specs/ann-index/` (ANN),
 ADR-12 (cache key), ADR-13 (local models behind a flag), ADR-14 (OpenRouter),
@@ -15,7 +15,7 @@ ADR-17 (this iteration).
   `bge-reranker-base` **1.11 GB** (MIT); `jina-reranker-v1-turbo-en` int8 **38 MB**
   (Apache-2.0, 37.8M params, 8K tokens). The registry lists jina v1 turbo int8 as the
   supported reranker (bge remains an option); **nothing is selected by default** — the
-  reranker is chosen with `models use --provider fastembed --rerank <name>` exactly like
+  reranker is chosen with `models use rerank <name>` exactly like
   the embedder. `jina-reranker-v2` stays excluded (CC-BY-NC-4.0, verified).
 - **Role-aware prefixes are mandatory.** E5 requires `query: ` / `passage: ` prefixes;
   BGE v1.5 requires the query instruction `Represent this sentence for searching relevant
@@ -41,6 +41,25 @@ resolution and `init_from` ordering, purpose-first `models use embed|rerank`,
 non-openrouter `model` required (OpenRouter defaults unchanged), exact cooldown pins,
 platform CI coverage, and a new lifecycle requirement (remove/uninstall/re-pin/
 observability). FR-14 was renumbered to FR-13.
+
+**Delta 0.5 (2026-10-23, second independent spec review — muse):** five blockers and five
+majors fixed before T1. (1) P4's `model_id` now includes `@p<prompt_version>`, matching
+FR-9. (2) FR-5/T3 resolve `model`/`dimensions` per provider — OpenRouter keeps its defaults,
+fastembed requires `model` and derives/validates dims, so "missing model" is representable
+and is `Admission` rather than silently inheriting the OpenRouter default. (3) FR-1 is
+scoped to the project file: only the global `[providers.fastembed].runtime_path` participates
+in FR-11. (4) Fetch failures (offline/transport, hash/size, corrupted cache) are `Admission`
+with one action; only post-load inference/session failures are `Internal`. (5) Task order is
+T1→T3→T2 (T2 consumes the T3 schema), and CLI wiring for `connect`, `models fetch/list` and
+`models remove` is owned explicitly. Majors: T3 now includes `hybrid/openrouter.rs` and pins
+the legacy OpenRouter key byte-for-byte; one model instance per cache key (model id +
+`max_length` + `intra_threads` + runtime path); `connect openrouter` probes `GET /key`
+(0 tokens) and `models use` probes one embed + one rerank with a fake `Transport`; numeric
+size caps (2 GiB/file, 3 GiB total, 256 MiB archive, 512 MiB extracted) and a
+1.5x + 256 MiB free-space preflight; `models remove` uses a shared/exclusive `.lock` and
+`--force` semantics. Minors: exact pins for `flate2`/`tar`/`zip`, stale Delta 0.3 CLI line,
+registry file set instead of a fixed count, extra `connect` RED tests, and the
+`ProviderState`/`RuntimeStatus` mapping plus the corrected `intra_threads` note.
 
 ## 1. Problem
 
@@ -150,7 +169,8 @@ produces vectors, `search_docs` returns dense results, and no network syscall is
 asserts no fetch on the search path).
 **Acceptance scenarios:**
 - Given `provider = "fastembed"` with a fetched model, when the dense channel runs, then
-  `model_id` is `fastembed/<name>@d<dim>@l2@r<rev8>` and vectors are cached under it.
+  `model_id` is `fastembed/<name>@d<dim>@l2@r<rev8>@p<prompt_version>` and vectors are
+  cached under it; a prefix change bumps `prompt_version` and therefore the key (FR-9).
 - Given a missing model, when a project is opened, then it fails at open/search with an
   admission error (`docsbase models fetch …`).
 - Given `dimensions` that differ from the registry, when config is loaded, then it fails
@@ -173,12 +193,18 @@ returns `(index, score)` pairs; without it, config validation fails.
 - **FR-1 (must, structural).** The global config may contain `[providers.<name>]`; the
   project file is parsed by a **separate type without a `providers` field**, so
   `[providers]` in `.docsbase.toml` is a parse error mapped to `Admission` (not a
-  post-merge check). A committed `runtime_path` must never be able to load a library.
+  post-merge check). Only the **global** `[providers.fastembed].runtime_path` participates
+  in FR-11; a project file has no way to supply a library path.
 - **FR-2 (must).** `docsbase connect` with no arguments prints provider status
   (`Unknown | NotConnected | Connected{version} | Broken{reason}`).
-- **FR-3 (must).** `connect openrouter` reads `OPENROUTER_API_KEY` from the environment,
-  probes the provider (documented request and its token cost; offline → actionable
-  error), and records `[providers.openrouter]`; the key is never stored or logged.
+- **FR-3 (must).** `connect openrouter` reads `OPENROUTER_API_KEY` from the environment, probes
+  `GET https://openrouter.ai/api/v1/key` with `Authorization: Bearer <key>` (validates the
+  key and returns its limits; **0 model tokens**, no embeddings/rerank request), and
+  records `[providers.openrouter]`. Offline/HTTP/auth failure is `Admission` with a retry
+  action. The key is never stored or logged. The `models use` probe makes one request per
+  selected stage: an embedding of the fixed text `docsbase probe` for the embed stage and
+  a rerank of (`docsbase`, `probe`) for the rerank stage — no retries, no other calls; cost
+  is the provider's price for those few tokens.
 - **FR-4 (must).** `connect fastembed` installs ONNX Runtime **1.24.4** for the current
   target (`linux-x64`, `linux-aarch64`, `osx-arm64`, `win-x64`, `win-arm64`;
   macOS >= 14), verifies sha256 and size, installs atomically, and records
@@ -187,16 +213,23 @@ returns `(index, score)` pairs; without it, config validation fails.
 - **FR-5 (must).** A closed model registry (name, task, repo, pinned revision, files,
   dim, pooling, quantization, output key, license, prefixes, prompt version) exists in
   code. The registry selects nothing; OpenRouter's existing stage defaults are unchanged.
-  For any non-openrouter provider, `model` is **required** in the stage config — a missing
-  model is an admission error and must not inherit the OpenRouter default.
+  The file shape keeps `model` and `dimensions` optional; resolution is provider-aware:
+  OpenRouter fills its documented defaults when they are absent, while for any
+  non-openrouter provider a missing `model` is `Admission` (never inherits the OpenRouter
+  default) and a missing `dimensions` is taken from the registry (an explicit value must
+  match). The same rule applies to `[hybrid.reranker].model`.
 - **FR-6 (must).** `models fetch <name>` downloads only registry files at the pinned
   revision, verifies size+sha256 and enforces per-file/archive size caps, installs
   atomically under a lock, writes `.complete` last, is idempotent, and re-verifies
   file hashes when a cached model is opened (a modified cache is not trusted). Offline or
   mismatch → error with no partial install.
 - **FR-7 (must).** `models list` reports registry entries, cached revisions, sizes and
-  status; `models remove <name>` removes all cached revisions and refuses (or warns and
-  requires `--force`) while a daemon/process may have the model loaded.
+  status; `models remove <name>` removes all cached revisions. A loaded model holds a
+  shared lock on its cache directory; `remove` takes it exclusively and non-blocking, and
+  on conflict fails with `Admission` (action: stop the daemon or pass `--force`). `--force`
+  deletes anyway with a warning; a running process keeps its open handles and must be
+  restarted (on Windows the OS may still refuse to delete a mapped file — surface that
+  error).
 - **FR-8 (must).** `models use` is purpose-first and single-purpose per invocation:
   `models use embed <model> [options]` or `models use rerank <model> [options]`.
   The purpose subcommand is required; **one model per invocation**, and setting both stages
@@ -229,14 +262,17 @@ returns `(index, score)` pairs; without it, config validation fails.
   is an admission error (the implementation must not let `ort::api()` panic on an
   uninitialized library).
 - **FR-12 (must).** Error taxonomy: provisioning failures (missing provider/runtime/model,
-  dims mismatch, unsupported target, offline fetch) are `Admission` with exactly one
-  corrective action; a hash/size mismatch is an `Internal` fetch error that leaves nothing
-  installed; inference failures are `Internal`. No silent fallback to lexical/exact because
-  of a local-provider failure.
+  dims mismatch, unsupported target) are `Admission` with exactly one corrective action;
+  transport/offline, hash/size mismatch and a corrupted cache are `Admission` fetch errors
+  with exactly one action (retry, or `--force` after a hash failure) and leave nothing
+  usable installed; inference/session failures after a successful load are `Internal`.
+  No silent fallback to lexical/exact because of a local-provider failure.
 - **FR-13 (should).** Lifecycle integration: `docsbase uninstall` removes installed
-  runtimes; a revision bump (`model_id` change) reports the re-embed/ANN-invalidate cost;
-  `models list` shows provider state, selected model id and cache size (observability);
-  provisioning under a running daemon notes that the daemon must reload/restart.
+  runtimes; `fetch`/`connect` preflight free space (>= 1.5x expected bytes + 256 MiB) and
+  fail with `Admission` before downloading; a revision bump (`model_id` change) reports the
+  re-embed/ANN-invalidate cost; `models list` shows provider state, selected model id and
+  cache size (observability); provisioning under a running daemon notes that the daemon
+  must reload/restart.
 
 ## 6. Non-functional requirements (ISO 25010)
 
@@ -245,12 +281,15 @@ returns `(index, score)` pairs; without it, config validation fails.
 - **NFR-2 (maintainability).** MSRV 1.88, edition 2024, `cargo fmt --check`, clippy
   `--all-targets -D warnings`, no `unwrap`/`expect`/`panic!` in `src/**`.
 - **NFR-3 (security).** HTTPS with rustls; pinned revisions; sha256 for runtime and model
-  files; size caps; cache permissions 0700; the runtime is treated as executable code and
+  files; size caps (model file <= 2 GiB, model total <= 3 GiB, ORT archive <= 256 MiB,
+  extracted runtime <= 512 MiB); cache permissions 0700; the runtime is treated as executable code and
   is installed only by explicit `connect`; ONNX/tokenizer inputs are untrusted.
 - **NFR-4 (resource efficiency).** `max_length` default 512, configurable batch size;
-  `intra_threads` capped at `min(4, cores)`; inter-op threads via `session_config` only if
-  exposed (fastembed 7.1.1 exposes intra only). Model/runtime memory is excluded from
-  `DenseCache.max_bytes`; a model is loaded once per process. Target budgets verified in T8:
+  `intra_threads` capped at `min(4, cores)`; fastembed 7.1.1 exposes `intra_threads` plus a
+  raw `session_config` (no dedicated inter-op setter; inter-op stays at the ORT default).
+  Model/runtime memory is excluded from `DenseCache.max_bytes`; a model instance is loaded
+  once per **cache key** (canonical model id + `max_length` + `intra_threads` + runtime
+  path), not once per process and not once per config. Target budgets verified in T8:
   RSS ≤ 700 MB with e5-small int8 + jina int8, embed p95 ≤ 250 ms per 512-token chunk,
   rerank p95 ≤ 200 ms for 50 documents on the CI runner class.
 - **NFR-5 (reliability / idempotency).** `connect` and `fetch` can be repeated safely;
@@ -259,7 +298,7 @@ returns `(index, score)` pairs; without it, config validation fails.
 - **NFR-6 (startup failure).** A config that selects fastembed with a missing runtime or
   model fails when the project is opened/searched, not mid-backfill.
 - **NFR-7 (performance).** Local embed/rerank must not block async workers (`blocking::enter`
-  contract); one model instance per config key; no per-call model load.
+  contract); one model instance per cache key (same definition as NFR-4); no per-call model load.
 - **NFR-8 (artifact size).** The 40 MiB binary budget (NFR-2 of the product design) excludes
   runtime and model caches; their sizes are documented in `docs/CONFIG.md`.
 
@@ -279,11 +318,13 @@ returns `(index, score)` pairs; without it, config validation fails.
 only), `quantization`, `output_key`, `license`, `files[]` (`path`, `size`, `sha256`),
 `query_prefix`, `passage_prefix`, `prompt_version`.
 
-**Model cache:** `<cache>/<name>/<revision>/` with registry files plus `.complete`; the
+**Model cache:** `<cache>/<name>/<revision>/` with registry files plus `.complete`; a
+`.lock` file is held shared by a loaded model and exclusively by `models remove`; the
 revision is part of the path so updates never mix vectors.
 
-**Selection (project or global config):** `[hybrid.embedding]` (`provider`, `model`,
-`dimensions`, `normalize`) and `[hybrid.reranker]` (`provider`, `model`, `window`).
+**Selection (project or global config):** `[hybrid.embedding]` (`provider`, optional
+`model`/`dimensions`, `normalize`) and `[hybrid.reranker]` (`provider`, optional `model`,
+`window`); absent values are resolved per provider (FR-5).
 
 **Cache key:** `model_id = fastembed/<name>@d<dim>@<l2|raw>@r<rev8>@p<prompt_version>`.
 
@@ -314,8 +355,9 @@ fastembed`), and never contain keys or file contents.
 - **SC-2.** `connect fastembed` on a clean machine installs the pinned runtime with a
   matching sha256 and writes `[providers.fastembed]`; a second run does no download.
 - **SC-3.** With no provider entry, a fastembed config fails with exactly the connect hint.
-- **SC-4.** `models fetch` installs all registry files, verifies hashes, is idempotent, and
-  leaves no partial install when interrupted/offline.
+- **SC-4.** `models fetch` installs all registry files, verifies hashes, is idempotent,
+  rejects a file/archive over its size cap, and leaves no partial install when
+  interrupted/offline.
 - **SC-5.** `models use embed|rerank <model>` is single-purpose: one stage per invocation,
   purpose-specific options only, scope matrix (project default, `--local`, `--global`,
   outside-project error, both-flags error), and it never rewrites `[providers]` or the

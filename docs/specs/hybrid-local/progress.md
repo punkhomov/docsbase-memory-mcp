@@ -44,7 +44,7 @@ Ledger: одна запись на таск (что сделано, чем пр�
 
 - Correction (2026-10-23, review question): "default reranker" was a spec bug.
   There is no default model for either stage: the registry lists candidates and
-  `models use --provider fastembed --embedding …` / `--rerank …` is the only way to
+  `models use embed …` / `models use rerank …` is the only way to
   select them, with the same scope/validation rules. Config with
   `provider = "fastembed"` and no `model` is an admission error for both stages;
   `connect` never selects a model.
@@ -65,7 +65,8 @@ Ledger: одна запись на таск (что сделано, чем пр�
      coverage/ANN warm; FR-9 now requires one canonical `embedding_model_id`, tested in T3.
   Majors fixed: structural `ProjectFileConfig` (no `[providers]`), runtime resolution order
   and `init_from` semantics, per-stage provider flags (`--embedding-provider`/
-  `--rerank-provider`), non-openrouter `model` required (OpenRouter defaults unchanged),
+  `--rerank-provider`, later superseded by purpose-first `models use embed|rerank`),
+  non-openrouter `model` required (OpenRouter defaults unchanged),
   windows/macos feature checks + required-check note + static binary check, exact cooldown
   pins, NFR-4 thread/budget wording. Added T9 (remove/uninstall/re-pin/observability) and
   SC-10/SC-11; dropped `connect --models`, `DOCSBASE_MODEL_CACHE`, OQ-2/4/6.
@@ -77,3 +78,20 @@ Ledger: одна запись на таск (что сделано, чем пр�
   `--provider` is inferable from a registry name and required otherwise; mixed providers
   are expressed by two separate invocations. FR-8/P3/SC-5, design data-flow, T6 and ADR-17
   updated.
+
+- Spec review 2 (2026-10-23, `reviewer-muse`) → **NEEDS-REVISION**, 5 blockers + 5 majors
+  + 5 minors; revision 0.5. Blockers fixed: P4 model_id gained `@p<prompt_version>`;
+  provider-aware `model`/`dimensions` resolution (OpenRouter defaults only; fastembed
+  missing model = Admission, dims from registry); FR-1 scoped so only the global
+  `runtime_path` reaches FR-11; fetch failures (offline/transport/hash/size/corrupted
+  cache) are Admission with one action, inference stays Internal; execution order
+  T1→T3→T2 and explicit CLI wiring for connect/fetch/list/remove. Majors fixed:
+  `hybrid/openrouter.rs` added to T3 with a byte-identical legacy OpenRouter key test;
+  one model instance per `ModelCacheKey` (model id + max_length + intra_threads + runtime);
+  `connect openrouter` probes `GET /api/v1/key` (0 tokens) and `models use` probes one
+  embed + one rerank with a fake `Transport`; numeric caps (2 GiB/file, 3 GiB total,
+  256 MiB archive, 512 MiB extracted) and 1.5x+256 MiB free-space preflight;
+  `models remove` lock/`--force` semantics. Minors fixed: exact `flate2=1.1.10`,
+  `tar=0.4.46`, `zip=8.6.0` pins (9.0.0 is exactly on the 14-day boundary); stale Delta
+  0.3 CLI line; registry file set instead of a fixed count; extra connect RED tests;
+  ProviderState/RuntimeStatus mapping and the corrected intra_threads note.

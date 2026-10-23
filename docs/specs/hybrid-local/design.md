@@ -1,7 +1,7 @@
 # Technical Design: hybrid-local (итерация 4)
 
-**Status:** Draft, ревизия 0.4 · **Дата:** 2026-10-23
-**Spec:** `docs/specs/hybrid-local/requirements.md` (ревизия 0.4)
+**Status:** Draft, ревизия 0.5 · **Дата:** 2026-10-23
+**Spec:** `docs/specs/hybrid-local/requirements.md` (ревизия 0.5)
 **ADR:** ADR-17 (product design); ADR-12/13/14 (adjacent).
 
 ## 1. Overview
@@ -18,20 +18,23 @@ error with one action (FR-11…FR-13).
 - No `unwrap`/`expect`/`panic!` in `src/**`.
 - Default build: no `fastembed`, `ort`, `tokenizers`, `hf-hub`, `image`, `native-tls`,
   `ureq`, `reqwest` (NFR-1). The CI tree gate covers all of them.
-- Exact manifest (T1/T7):
+- Manifest (T1/T7; every version is older than the 14-day cutoff on 2026-10-09):
   ```toml
-  fastembed = { version = "=7.1.1", default-features = false, optional = true }
+  fastembed = { version = "=7.1.1", default-features = false, optional = true }  # 2026-10-07
   ort = { version = "=2.0.0-rc.13", default-features = false,
-          features = ["load-dynamic"], optional = true }
-  ureq = { version = "=3.4.2", default-features = false, features = ["rustls"], optional = true }
-  sha2 = { version = "=0.10.9", optional = true }
-  flate2 = { version = "1", optional = true }
-  tar = { version = "0.4", optional = true }
-  zip = { version = "=9.0.0", optional = true }
+          features = ["load-dynamic"], optional = true }                        # 2026-07-28
+  ureq = { version = "=3.4.2", default-features = false, features = ["rustls"], optional = true } # 2026-09-13
+  sha2 = { version = "=0.10.9", optional = true }                               # 2025-04-30
+  flate2 = { version = "=1.1.10", optional = true }                             # 2026-08-28
+  tar = { version = "=0.4.46", optional = true }                                # 2026-05-18
+  zip = { version = "=8.6.0", optional = true }                                 # 2026-04-25
   ```
   A direct `ort` dependency is required to enable `load-dynamic`/`init_from`; fastembed's
   defaults (`ort-download-binaries-native-tls`, `hf-hub-native-tls`, `image-models`) must
-  be off. Exact pins keep the 14-day cooldown policy (`docs/supply-chain.md`).
+  be off. `zip 9.0.0` is exactly on the 14-day boundary, so 8.6.0 is pinned instead; exact
+  pins keep the cooldown policy (`docs/supply-chain.md`). Transitives are resolved under the
+  nightly `min-publish-age`; `Cargo.lock` is generated with it, and any too-new transitive
+  is pinned to the newest allowed version (recorded in the ledger).
 - No weights/runtime in the crate or binary (NFR-8). ORT **1.24.4**; targets
   `linux-x64`, `linux-aarch64`, `osx-arm64`, `win-x64`, `win-arm64` (no macOS x64,
   macOS >= 14).
@@ -81,7 +84,9 @@ performs network I/O (FR-12, NFR-6).
 
 ```rust
 // hybrid/runtime.rs
-pub struct RuntimeStatus { pub version: Option<String>, pub path: Option<PathBuf>, pub broken: Option<String> }
+pub enum ProviderState { Unknown, NotConnected, Connected, Broken }
+pub struct RuntimeStatus { pub state: ProviderState, pub version: Option<String>,
+                           pub path: Option<PathBuf>, pub reason: Option<String> }
 pub fn platform_target() -> Result<Target>;              // five targets, else Admission
 pub fn resolve(cfg: &ProvidersCfg) -> Result<PathBuf>;   // ORT_DYLIB_PATH -> provider path -> data-dir
 pub fn install(target: Target, source: &dyn RuntimeSource, force: bool) -> Result<PathBuf>;
@@ -98,6 +103,10 @@ pub fn cache_dir(name: &str, revision: &str) -> PathBuf;   // <cache>/<name>/<re
 pub fn fetch(entry: &ModelEntry, source: &dyn ModelSource) -> Result<PathBuf>;
 pub fn cached(entry: &ModelEntry) -> Result<bool>;          // .complete + re-verified hashes
 
+// instance cache key (NFR-4/NFR-7): one instance per key, never per config
+pub struct ModelCacheKey { pub model_id: String, pub max_length: usize,
+                           pub intra_threads: Option<usize>, pub runtime: PathBuf }
+
 // config: ONE canonical key (FR-9)
 pub fn embedding_model_id(cfg: &EmbeddingCfg) -> String;    // provider-dispatched
 
@@ -113,20 +122,25 @@ key source; `fetch` never leaves a directory without `.complete`; `resolve` neve
 
 ## 6. Data flow
 
-1. **connect fastembed** → detect target (five; macOS >= 14) → download archive (size cap) →
+1. **connect fastembed** → detect target (five; macOS >= 14) → free-space preflight →
+   download archive (size cap) →
    verify sha256 → extract the shared library → temp → fsync → rename into
    `<data>/runtimes/onnxruntime/1.24.4/<target>/` → write `[providers.fastembed]` (global).
    `resolve` refuses a data-dir runtime without an enabled provider entry unless
    `ORT_DYLIB_PATH` is set; `init_from` is the first ORT call; failure is `Admission`
-   (never let `ort::api()` panic).
-2. **models fetch** → registry entry → per file: download to `*.part`, verify size+sha256
-   (size caps), fsync, rename → `.complete` last. A lock serializes concurrent fetches.
-   Opening a cached model re-verifies hashes.
+   (never let `ort::api()` panic). `connect openrouter` instead probes
+   `GET /key` (0 model tokens) and writes the provider entry without the key.
+2. **models fetch** → registry entry → free-space preflight (>= 1.5x expected + 256 MiB) →
+   per file: download to `*.part`, verify size+sha256 against the registry (per-file <= 2 GiB,
+   model total <= 3 GiB), fsync, rename → `.complete` last. A lock serializes concurrent
+   fetches. Opening a cached model re-verifies hashes.
 3. **models use embed|rerank <model>** → purpose selects exactly one stage and its options
    (`--dims` for embed, `--window` for rerank) → scope (project vs `--global`) → provider
    inferred from the registry or explicit `--provider` → validate provider connected, model
-   cached (or `--dry-run`) → probe per provider (OpenRouter under `hybrid-remote`; fastembed
-   offline) → write only that stage's table atomically, leaving the other untouched.
+   cached (or `--dry-run`) → probe per provider (OpenRouter under `hybrid-remote`: one
+   embedding of `docsbase probe` for the embed stage, one rerank of (`docsbase`, `probe`)
+   for the rerank stage; fastembed offline against the cached model) → write only that
+   stage's table atomically, leaving the other untouched.
 4. **search/index** → `from_config` resolves the provider → `local::embedder`/`reranker` →
    runtime `init_from` + `TextEmbedding::try_new_from_user_defined` (cached in `OnceLock`) →
    search uses `embed_query` (query prefix), backfill uses `embed` (passage prefix) →
@@ -142,8 +156,8 @@ key source; `fetch` never leaves a directory without `.complete`; `resolve` neve
 | `ort = "=2.0.0-rc.13"` | `load-dynamic` + `init_from` | rc risk accepted in ADR-17; targets ORT 1.24.4 (`api-24`) |
 | `ureq = "=3.4.2"` | blocking HTTPS for downloads | rustls; exact pin (3.4.3+ inside cooldown) |
 | `sha2 = "=0.10.9"` | sha256 verification | RustCrypto |
-| `flate2`, `tar` | extract ORT `.tgz` (Linux/macOS) | standard |
-| `zip = "=9.0.0"` | extract ORT `.zip` (Windows) | platform-scoped |
+| `flate2 = "=1.1.10"`, `tar = "=0.4.46"` | extract ORT `.tgz` (Linux/macOS) | exact pins (2026-08-28 / 2026-05-18) |
+| `zip = "=8.6.0"` | extract ORT `.zip` (Windows) | platform-scoped (9.0.0 is on the cooldown boundary) |
 | `tokenizers` (via fastembed) | tokenization | Oniguruma (C), same class as bundled sqlite3 |
 
 ## 8. Required / Forbidden stack
@@ -163,7 +177,9 @@ key source; `fetch` never leaves a directory without `.complete`; `resolve` neve
 | model not fetched / partial | `Admission` | `docsbase models fetch <name>` |
 | dims mismatch / normalize=false | `Admission` | fix `[hybrid.embedding]` |
 | unsupported target / macOS < 14 | `Admission` | no local provider on this machine |
-| sha256/size mismatch (fetch) | `Internal` | retry `--force`; nothing installed |
+| sha256/size mismatch (fetch) | `Admission` | retry or `--force`; nothing installed |
+| offline/transport (fetch, connect) | `Admission` | check network and retry |
+| free space below preflight | `Admission` | free space / choose another data dir |
 | inference failure | `Internal` | fail the stage; no fallback |
 | `[providers]` in project | `Admission` (parse error) | move to global config |
 
