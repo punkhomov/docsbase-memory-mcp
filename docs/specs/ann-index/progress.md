@@ -380,3 +380,11 @@
   `concurrent_lookups_admit_only_one_build` (barrier, two threads) passes
   repeatedly. Verifier claim C4 (design still said 1 GiB in the limits block)
   also closed; `grep "1 GiB" docs/specs/ann-index/design.md` is empty.
+
+- Task T1.5: complete (2026-10-23). The temporary 13-day `min-publish-age`
+  window for `hnsw_rs 0.3.5` is reverted: `.cargo/config.toml` carries the
+  policy default `14 days` again (2026-10-09 + 14 days = 2026-10-23, so 0.3.5
+  still resolves), `tests/smoke.rs` asserts the 14-day string, and
+  `docs/supply-chain.md` records the closed exception instead of the open
+  workaround. `hnsw_rs 0.3.5` stays pinned in `Cargo.lock`; no dependency
+  change. Verify: `cargo test --locked --test smoke`, full suite, clippy/fmt.

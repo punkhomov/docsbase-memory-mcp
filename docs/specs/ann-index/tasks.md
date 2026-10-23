@@ -7,8 +7,9 @@
 direct CLI только загружает.
 **Spec:** `docs/specs/ann-index/requirements.md` (0.2)
 **Design:** `docs/specs/ann-index/design.md` (0.2)
-**Status:** T1 complete; T2–T7 complete (2026-10-22); T1.5 deferred by human
-(13-day cooldown stays in effect until scheduled); T8 complete; T8–T10 complete; T11 close-out remains (T1.5 revert, Windows/macOS runtime CI, final status).
+**Status:** T1 complete; T2–T7 complete (2026-10-22); T1.5 complete (2026-10-23,
+14-day cooldown restored); T8–T10 complete; T12–T21 complete (Delta 0.3.x);
+T11 close-out remains (Windows/macOS runtime CI, final status).
 Числа T6 — core-`AnnIndex`, end-to-end подтверждает T10.
 
 **Global constraints:**
@@ -60,7 +61,7 @@ direct CLI только загружает.
 
 ---
 
-## T1.5 — Revert temporary 13-day cooldown (2026-10-23)
+## T1.5 — Revert temporary 13-day cooldown (2026-10-23) — complete
 
 **Goal:** вернуть supply-chain policy к 14 дням после того, как `hnsw_rs 0.3.5`
 зафиксирован в `Cargo.lock`; 0.3.5 при этом не откатывается.

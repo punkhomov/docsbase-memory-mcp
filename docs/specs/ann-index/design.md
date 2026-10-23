@@ -27,6 +27,7 @@ struct LoadedAnn {
 
 **Delta T1.1 (2026-10-22, ревью):** v1 — `hnsw_rs 0.3.5`,
 временный 13-дневный cooldown; dump чужой версии отвергается, не мигрируется.
+T1.5 (2026-10-23): cooldown возвращён к политике 14 дней, 0.3.5 остаётся запиненным.
 `parallel_insert` — дефолт, warm — фоновый, exact streaming во время сборки.
 Добавлены `usize`/`u64`, `set_searching_mode`, basename, env_logger size,
 `DistCosine`/recall-ef. ADR-15 recorded in product design; final version/format pin in T6.

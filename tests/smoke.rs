@@ -29,10 +29,10 @@ fn toolchain_pinned() {
 fn min_publish_age_configured() {
     let cfg = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/.cargo/config.toml"))
         .expect("read .cargo/config.toml");
-    // TEMPORARY 2026-10-22: 13 days to resolve hnsw_rs 0.3.5; revert on
-    // 2026-10-23 together with .cargo/config.toml.
+    // Policy default since ann-index T1.5 (2026-10-23): the temporary 13-day
+    // exception for hnsw_rs 0.3.5 is reverted; 0.3.5 stays pinned in the lock.
     assert!(
-        cfg.contains("global-min-publish-age = \"13 days\""),
+        cfg.contains("global-min-publish-age = \"14 days\""),
         "{cfg}"
     );
     assert!(cfg.contains("incompatible-publish-age = \"deny\""), "{cfg}");
