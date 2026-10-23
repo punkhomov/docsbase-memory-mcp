@@ -531,7 +531,7 @@ static/MSRV), `hnsw` (rust-cv; 2021, hamming-oriented), `hannoy`/LMDB (C).
 releases, кастомные `corenn-kernels` и нет mmap-истории в нашем сценарии.
 
 **ADR-16. Vector-cache capacity/pinning для ANN (spec `docs/specs/hybrid-providers`, DELTA-9).**
-Выбрано: `[hybrid.cache] max_bytes` (default 1 GiB) ограничивает
+Выбрано: `[hybrid.cache] max_bytes` (default 1 GiB; резидентный cap `DenseCacheLimits.max_bytes` — 1.5 GiB с Delta 0.3.1) ограничивает
 content-addressed `VectorCache`; ANN требует 100% coverage, поэтому дефолт
 256 MiB заменён. Backfill берёт per-project lease: уникальные хеши проекта
 пишутся в `vector_cache_leases` на 1 час, `evict` их не трогает; успешный ANN
@@ -541,6 +541,35 @@ kept). Отклонено: строить ANN по частичному покр
 отдельный vector store (дублирует source of truth), безусловное удаление
 tmp-каталогов (гонка с build), удаление текущего проекта при disk cleanup.
 Закрыто T11 2026-10-23: Windows/macOS runtime подтверждён CI, T1.5 снят, спека ann-index — Final.
+
+**ADR-17. Local embedding/rerank provider: `fastembed` + ONNX Runtime за фичей `hybrid-local` (spec `docs/specs/hybrid-local`).**
+Выбрано: третий провайдер hybrid-ступеней — локальный `fastembed` (Apache-2.0) за
+отдельной фичей `hybrid-local`; дефолтная сборка остаётся полностью офлайн (SC-8:
+в `cargo tree` нет `fastembed`/`ort`/`tokenizers`/`hf-hub`/`reqwest`). Веса моделей
+в бинарь не входят; дефолтных моделей нет. Провайдер становится доступен только
+после явного `docsbase connect fastembed`, который ставит ONNX Runtime (не требует
+предустановленного рантайма) и пишет `[providers.fastembed]` в **глобальный** конфиг
+(`enable=true`, версия/путь рантайма). Модели скачиваются только явно
+(`docsbase models fetch <name>`) с HF по **pinned revision** с проверкой sha256;
+`models use` лишь выбирает модель и пишет `[hybrid.embedding]`/`[hybrid.reranker]`
+в проект (по умолчанию) или в глобальный конфиг (`--global`, обязателен вне проекта).
+Сеть на index/search-путях запрещена: отсутствие рантайма/модели — admission-ошибка
+с подсказкой, без молчаливого fallback.
+ORT-стратегия: `ort-load-dynamic`; `connect` качает закреплённый ONNX Runtime
+(1.24.x, `api-24`) под платформу/арх, проверяет sha256 и кладёт в data-dir; на старте
+`ort::init_from(path)` до создания сессий (порядок резолва: `ORT_DYLIB_PATH` →
+data-dir → ошибка). Рантайм считается исполняемым кодом: explicit connect, pinned
+version + hash, запись в SECURITY. Бюджет 40 MiB (NFR-2) относится к бинарю;
+рантайм и модели — отдельные кэши вне бюджета (размеры фиксируются в CONFIG/docs).
+Зависимости (фича): `fastembed = "=7.1.1"` (cooldown 14 дней: 7.2+ слишком свежие;
+пересмотреть после 2026-11-06), `ort = "=2.0.0-rc.13"` (release candidate — риск
+зафиксирован), `ureq 3.4.x` + `sha2` + `flate2/tar/zip` для загрузки/распаковки
+рантайма, `tokenizers` с Oniguruma (C, прецедент — bundled sqlite3). Модели:
+`bge-small-en-v1.5` (384, CLS), `multilingual-e5-small` (384, Mean),
+`bge-reranker-base` (MIT); `jina-reranker-v2` отклонён (CC-BY-NC).
+Отклонено: бандлить ORT в релизные артефакты, авто-скачивание при первом поиске,
+дефолтная модель, обязательный локальный вес в v1, candle-only путь (нет rerank),
+новые пользовательские ключи сверх `[providers]`/`[hybrid]`.
 
 ## 13. Directory structure
 
