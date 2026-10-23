@@ -209,3 +209,10 @@ Ledger: одна запись на таск (что сделано, чем пр�
   fastembed идёт через seam-стаб, который T4/T5 заменяют реальными embedder/reranker (с пробросом
   providers при необходимости). Verify после фикса: lib hybrid::config 8 passed; test config 27 passed;
   default suite green; hybrid-remote check чист; clippy -D warnings чист.
+
+- Task 3 re-review (2026-10-23, `reviewer-muse`): verdict OK WITH NOTES — все 5 prior findings +
+  4 minors ADDRESSED; один новый P1 (fastembed-only конфиг на hybrid-remote-сборке требовал
+  `OPENROUTER_API_KEY`, т.к. `OpenRouterClient::from_env()` строился безусловно). Fix
+  (commit `e01608c`): client строится лениво только при `has_openrouter`; regression-тест
+  `fastembed_only_config_does_not_demand_openrouter_key` (hybrid-local,hybrid-remote). Re-review:
+  ADDRESSED, new breakage none. T3 closed.
