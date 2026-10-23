@@ -1071,12 +1071,12 @@ mod tests {
         assert!(
             // Generous: the warm thread competes with the rest of the lib
             // suite and Windows CI runners are slow.
-            wait_for_ann_ready(cache.path(), project.id, Duration::from_secs(180)),
+            wait_for_ann_ready(cache.path(), project.id, Duration::from_secs(300)),
             "warm must publish a persisted ANN for an RRF project"
         );
         // READY lands on disk just before the in-memory publish; poll for the
         // Ann state rather than racing the publish step.
-        let until = Instant::now() + Duration::from_secs(120);
+        let until = Instant::now() + Duration::from_secs(300);
         loop {
             match shared
                 .dense
@@ -1105,7 +1105,7 @@ mod tests {
         shared.refresh_ann_after_sync(&project);
 
         assert!(
-            !wait_for_ann_ready(cache.path(), project.id, Duration::from_secs(5)),
+            !wait_for_ann_ready(cache.path(), project.id, Duration::from_secs(30)),
             "lexical ranking must not build a dense ANN nobody reads"
         );
 
@@ -1116,7 +1116,7 @@ mod tests {
             .join(format!("projects/{}/ann/tmp-999999-dead", project.id));
         fs::create_dir_all(&stale).expect("stale tmp dir");
         shared.refresh_ann_after_sync(&project);
-        let until = Instant::now() + Duration::from_secs(60);
+        let until = Instant::now() + Duration::from_secs(300);
         while stale.exists() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }

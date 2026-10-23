@@ -396,3 +396,15 @@
   (still above `ANN_MIN_VECTORS = 4096`) and the waits are 180 s (warm),
   120 s (publish poll), 5 s (lexical negative window), 60 s (cleanup). Linux
   and macOS were already green.
+
+- CI hardening (2026-10-23, PR #49): the Windows run exposed that the new
+  server tests waited only 20 s for ANN publication while the lib suite and two
+  4200-file fixtures ran in parallel on a 2-core runner; waits are now 300 s
+  (publication, publish poll, cleanup), 30 s for the lexical negative window,
+  120 s for ANN waits in the integration targets. The macOS run then exposed a
+  pre-existing flake in `failed_build_retries_after_backoff`: `build_backoff`
+  was 10 ms against a 10 ms poll, so the `Failed` window was routinely missed
+  and `get` restarted the build; the backoff is 5 s (observable window) with a
+  60 s failed-wait. The Windows `ann_store` assertion compared a path substring
+  with `/`, which never matches `\`; it now normalises separators. All three
+  are test-only changes; lib 108, ann_store 16, hybrid_ann 15 green locally.

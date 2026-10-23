@@ -68,7 +68,7 @@ fn ready(dense: &DenseCache, db: &Db, project_id: i64, model: &str) -> Arc<Dense
 }
 
 fn wait_for_ann(dense: &DenseCache, db: &Db, project_id: i64, model: &str) -> Arc<AnnIndex> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         match dense.get(db, project_id, model).expect("get") {
             DenseRows::Ann(ann) => return ann,
@@ -82,7 +82,7 @@ fn wait_for_ann(dense: &DenseCache, db: &Db, project_id: i64, model: &str) -> Ar
 }
 
 fn wait_for_failed(dense: &DenseCache, db: &Db, project_id: i64, model: &str) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         match dense.get(db, project_id, model).expect("get") {
             DenseRows::Failed(_) => return,
@@ -459,7 +459,11 @@ fn failed_build_retries_after_backoff() {
     let blocker = cache.path().join("ann-store");
     fs::write(&blocker, b"block the ann tree").expect("blocker");
     let mut limits = limits_with_min_vectors(2);
-    limits.build_backoff = Duration::from_millis(10);
+    // The Failed window must be observable under a loaded CI runner: `get`
+    // starts a new build as soon as retry_at passes, so a millisecond-scale
+    // backoff races the poll and flakes. Five seconds is a wide window and
+    // still keeps the test fast.
+    limits.build_backoff = Duration::from_secs(5);
     let dense = DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, &blocker, limits);
 
     let first = dense

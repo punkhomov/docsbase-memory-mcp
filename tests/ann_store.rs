@@ -145,7 +145,9 @@ fn persist_dump_publishes_and_is_loadable() {
     let loaded = store.load(&k).expect("load").expect("slot");
     assert_eq!(loaded.meta, slot.meta);
     assert_eq!(loaded.dir, slot.dir);
-    assert!(slot.dir.to_string_lossy().contains("/projects/1/ann/"));
+    // Windows uses `\` as the separator; compare a normalized path.
+    let dir = slot.dir.to_string_lossy().replace('\\', "/");
+    assert!(dir.contains("/projects/1/ann/"), "{dir}");
 }
 
 #[test]

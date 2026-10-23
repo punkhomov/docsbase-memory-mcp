@@ -87,7 +87,7 @@ fn search(value: &Value) -> Vec<String> {
 }
 
 fn wait_for_ann(dense: &DenseCache, db: &Db, project_id: i64) -> Arc<AnnIndex> {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         match dense
             .get(db, project_id, LengthEmbedder.model_id())
