@@ -13,8 +13,10 @@ ADR-17 (this iteration).
 - **Model sizes are decisive.** `bge-small-en-v1.5` onnx 133 MB (MIT, 384/Cls);
   `multilingual-e5-small` fp32 470 MB / int8 118 MB (MIT, 384/Mean);
   `bge-reranker-base` **1.11 GB** (MIT); `jina-reranker-v1-turbo-en` int8 **38 MB**
-  (Apache-2.0, 37.8M params, 8K tokens). The default reranker becomes **jina v1 turbo
-  int8**; `jina-reranker-v2` stays excluded (CC-BY-NC-4.0, verified).
+  (Apache-2.0, 37.8M params, 8K tokens). The registry lists jina v1 turbo int8 as the
+  supported reranker (bge remains an option); **nothing is selected by default** — the
+  reranker is chosen with `models use --provider fastembed --rerank <name>` exactly like
+  the embedder. `jina-reranker-v2` stays excluded (CC-BY-NC-4.0, verified).
 - **Role-aware prefixes are mandatory.** E5 requires `query: ` / `passage: ` prefixes;
   BGE v1.5 requires the query instruction `Represent this sentence for searching relevant
   passages: ` on queries only. Embedding a query without its prefix silently degrades

@@ -568,7 +568,8 @@ version + hash, запись в SECURITY. Бюджет 40 MiB (NFR-2) относ
 зафиксирован), `ureq 3.4.x` + `sha2` + `flate2/tar/zip` для загрузки/распаковки
 рантайма, `tokenizers` с Oniguruma (C, прецедент — bundled sqlite3). Модели:
 `bge-small-en-v1.5` (384, CLS, 133 MB), `multilingual-e5-small` int8 (384,
-Mean, 118 MB), rerank `jina-reranker-v1-turbo-en` int8 (38 MB, Apache-2.0, 8K);
+Mean, 118 MB), rerank-кандидаты `jina-reranker-v1-turbo-en` int8 (38 MB, Apache-2.0,
+8K) и `bge-reranker-base` (1.11 GB);
 `jina-reranker-v2` отклонён (CC-BY-NC-4.0), `bge-reranker-base` (1.11 GB) — только
 опция. E5 требует `query: `/`passage: `, BGE — query-instruction; `Embedder`
 получает `embed_query`, `model_id` — `@p<prompt_version>` (FR-13).

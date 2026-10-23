@@ -188,8 +188,9 @@ Nothing above is linked into the default build (NFR-1).
    no defaults (FR-5).
 4. **`hf-hub`/fastembed built-in downloader**: rejected — hides network inside the stage and
    bypasses our revision/hash policy.
-5. **`bge-reranker-base` as default reranker**: rejected — 1.11 GB fp32 and 514-token
-   context; `jina-reranker-v1-turbo-en` int8 is 38 MB, Apache-2.0, 8K context (FR-5 set).
+5. **`bge-reranker-base` as the registry's only reranker**: rejected — 1.11 GB fp32 and
+   514-token context; `jina-reranker-v1-turbo-en` int8 is 38 MB, Apache-2.0, 8K context.
+   Neither is a default: both are selectable, and `models use --rerank` is required.
 5. **candle-only (pure Rust, qwen3)**: rejected for v1 — no rerank path, larger model set
    churn; may be a later provider.
 6. **Project-level `[providers]`**: rejected — machine capability cannot be committed.

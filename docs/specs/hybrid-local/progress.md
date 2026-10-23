@@ -39,3 +39,10 @@ Ledger: одна запись на таск (что сделано, чем пр�
     model choice keeps the 7.1.1 peak acceptable; rerank already supports files.
   - HF pins are `resolve/<commit-sha>/<path>`; the tree API exposes LFS `sha256` + size,
     which the registry will store (regular files: size + computed sha256).
+
+- Correction (2026-10-23, review question): "default reranker" was a spec bug.
+  There is no default model for either stage: the registry lists candidates and
+  `models use --provider fastembed --embedding …` / `--rerank …` is the only way to
+  select them, with the same scope/validation rules. Config with
+  `provider = "fastembed"` and no `model` is an admission error for both stages;
+  `connect` never selects a model.

@@ -134,8 +134,9 @@ machine-local provider registry.
 
 ## T5 — `FastEmbedReranker`
 
-**Goal:** local cross-encoder rerank on the same provisioning path; default model
-`jina-reranker-v1-turbo-en` int8 (38 MB, Apache-2.0, 8K), not the 1.11 GB bge-reranker-base.
+**Goal:** local cross-encoder rerank on the same provisioning path, using the model the
+project selected with `models use --rerank` (registry lists `jina-reranker-v1-turbo-en`
+int8, 38 MB, Apache-2.0, 8K; `bge-reranker-base` remains an option; no default).
 **Files:**
 - Modify: `src/hybrid/local.rs`
 - Test: `src/hybrid/local.rs::tests`
@@ -144,6 +145,9 @@ machine-local provider registry.
 - Consumes: `runtime`, `models`, `fastembed::TextRerank`.
 **Steps:**
 1. RED: `reranker_without_model_fails_with_fetch_hint`.
+1b. RED: `reranker_config_requires_an_explicit_model` — `provider = "fastembed"` with no
+   `model` (or no `[hybrid.reranker]` at all) is an admission error; there is no implicit
+   reranker.
 2. RED: `rerank_contract_returns_index_and_score_for_every_doc` (with a stub model, if ORT
    is unavailable assert the contract test is `#[ignore]` and add a unit test of the
    mapping/`top_n` logic).
