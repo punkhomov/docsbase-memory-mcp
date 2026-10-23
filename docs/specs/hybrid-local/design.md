@@ -1,211 +1,197 @@
 # Technical Design: hybrid-local (итерация 4)
 
-**Status:** Draft, ревизия 0.1 · **Дата:** 2026-10-23
-**Spec:** `docs/specs/hybrid-local/requirements.md` (ревизия 0.1)
-**ADR:** ADR-17 (product design), ADR-12/13/14 (смежные).
+**Status:** Draft, ревизия 0.2 · **Дата:** 2026-10-23
+**Spec:** `docs/specs/hybrid-local/requirements.md` (ревизия 0.2)
+**ADR:** ADR-17 (product design); ADR-12/13/14 (adjacent).
 
 ## 1. Overview
 
-Локальный провайдер `fastembed` добавляется как ещё одна реализация `Embedder`
-(`vector_cache.rs`) и `Reranker` (`hybrid/mod.rs`). Всё, что знает про модели,
-рантайм и сеть, живёт в двух новых модулях и в CLI; сами ступени получают
-готовые объекты и работают офлайн.
+Adds a third hybrid provider (`fastembed`) behind feature `hybrid-local`. The provider is
+an `Embedder` and a `Reranker` like OpenRouter, so search/RRF/ANN code does not change.
+Everything that touches the network or the filesystem lifecycle (runtime, model files) lives
+in new modules and CLI commands and is dead code in the default build. The provider becomes
+usable only after an explicit `connect` (runtime) and `fetch` (model) from the user; search
+never downloads anything (FR-3…FR-10, NFR-1, NFR-6).
+
+## 2. Global constraints
+
+- Rust edition 2024, MSRV 1.88; `cargo fmt --check`; clippy `--all-targets -D warnings`.
+- No `unwrap`/`expect`/`panic!` in `src/**`.
+- Default build: no `fastembed`, `ort`, `tokenizers`, `hf-hub`, `ureq`, `reqwest` (NFR-1).
+- New crates only per ADR-17: `fastembed = "=7.1.1"`, `ort = "=2.0.0-rc.13"`,
+  `ureq 3.4.x`, `sha2`, `flate2`, `tar`, `zip` — all optional, behind `hybrid-local`.
+- No model weights or runtime binaries inside the crate/binary (NFR-8).
+- Network only in `connect`/`fetch`; none on index/search paths (FR-12).
+- `[providers]` only in the global config; `.docsbase.toml` may contain only `[hybrid]`.
+- `model_id = fastembed/<name>@d<dim>@<l2|raw>@r<rev8>`; a revision change invalidates
+  the vector cache and the ANN key by construction.
+
+## 3. Architecture
+
+```mermaid
+flowchart LR
+  CLI[cli/connect + cli/models] --> RT[hybrid/runtime.rs]
+  CLI --> MS[hybrid/models.rs]
+  RT -->|download+sha256| FS[(data-dir runtime)]
+  MS -->|download+sha256| MC[(model cache)]
+  CFG[config: global providers + project hybrid] --> LC[hybrid/local.rs]
+  MC --> LC
+  FS -->|ORT_DYLIB_PATH / init_from| LC
+  LC -->|Embedder| VC[VectorCache / DenseCache]
+  LC -->|Reranker| HY[hybrid stages]
+```
+
+Two phases, strictly separated: **provisioning** (`connect`, `fetch`, `models use`) and
+**runtime** (open project, embed, rerank). The runtime phase may fail closed (admission) but
+never performs I/O to the network (FR-12, NFR-6).
+
+## 4. Components
+
+| Component | Responsibility | Public interface | Depends on |
+|---|---|---|---|
+| `hybrid::runtime` | platform detection, download/extract/verify ORT, resolve path, `init_from` once | `runtime::ensure(version, path)`, `runtime::resolve(cfg)`, `runtime::status()` | `ureq`, `sha2`, `flate2`, `tar`, `zip`, `ort` |
+| `hybrid::models` | registry, cache layout, `fetch/list/remove`, sha256, lock | `models::entry(name)`, `models::fetch(entry, source)`, `models::cache_state(entry)` | `ureq`, `sha2`, `fd-lock` |
+| `hybrid::local` | `FastEmbedEmbedder`, `FastEmbedReranker`, one-time model construction | `impl Embedder`, `impl Reranker`, `local::embedder(cfg)`, `local::reranker(cfg)` | `fastembed`, `ort`, `models`, `runtime` |
+| `cli::connect` | status table, `connect openrouter/fastembed`, global config write | `connect::run(args)` | `hybrid::runtime`, `hybrid::models`, `config` |
+| `cli::models` | existing `use` + `fetch/list/remove`, scope resolution | `models::run(args)` | `hybrid::models`, `config` |
+| `config` | `[providers]`, precedence, validation, scope | `Config::global`, `Config::for_project`, `providers::status` | — |
+
+Each component maps to requirements: runtime → FR-4/FR-10; models → FR-5/FR-6/FR-7;
+local → FR-9 (SC-6); cli → FR-2/FR-3/FR-8; config → FR-1 (NFR-5/6).
+
+## 5. Module interfaces
+
+```rust
+// hybrid/runtime.rs
+pub struct RuntimeStatus { pub version: Option<String>, pub path: Option<PathBuf>, pub broken: Option<String> }
+pub fn platform_target() -> Result<Target>;             // six supported targets, else Admission
+pub fn resolve(cfg: &ProvidersCfg) -> Result<PathBuf>;  // FR-10 order
+pub fn install(target: Target, source: &dyn RuntimeSource, force: bool) -> Result<PathBuf>;
+pub fn init(path: &Path) -> Result<()>;                 // ort::init_from(..).commit(), OnceLock
+
+// hybrid/models.rs
+pub struct FileSpec { pub path: &'static str, pub size: u64, pub sha256: &'static str }
+pub struct ModelEntry { /* name, task, repo, revision, onnx, additional, dim, pooling,
+                           quantization, output_key, license, files */ }
+pub trait ModelSource { fn fetch(&self, repo: &str, revision: &str, path: &str) -> Result<Vec<u8>>; }
+pub fn entry(name: &str) -> Result<&'static ModelEntry>;
+pub fn cache_dir(name: &str, revision: &str) -> PathBuf;   // <cache>/<name>/<revision>
+pub fn fetch(entry: &ModelEntry, source: &dyn ModelSource) -> Result<PathBuf>;
+pub fn cached(entry: &ModelEntry) -> bool;                 // .complete present + files exist
+
+// hybrid/local.rs
+pub fn embedder(cfg: &EmbeddingCfg, providers: &ProvidersCfg) -> Result<Arc<dyn Embedder>>;
+pub fn reranker(cfg: &RerankerCfg, providers: &ProvidersCfg) -> Result<Arc<dyn Reranker>>;
+// both: resolve runtime, require cached model, build TextEmbedding/TextRerank once (OnceLock)
+```
+
+Invariants: `init` runs before any `fastembed` constructor; `model_id` is derived only from
+the registry + dim + normalize + revision; `fetch` never leaves a directory without
+`.complete`; `resolve` never downloads.
+
+## 6. Data flow
+
+1. **connect fastembed** → detect target → download archive → verify sha256 → extract the
+   shared library → temp dir → fsync → rename into
+   `<data>/runtimes/onnxruntime/<version>/<target>/` → write `[providers.fastembed]`
+   (global) → print status.
+2. **models fetch** → registry entry → for each file: download to `*.part`, verify size and
+   sha256, fsync, rename → write `.complete` last. A lock file serializes concurrent fetches.
+3. **models use** → resolve scope (project vs `--global`) → validate provider connected,
+   model cached (or `--dry-run`) → write the `[hybrid]` table atomically, preserving other
+   sections (comments are not preserved; the command says so).
+4. **search/index** → `from_config` resolves the provider → `local::embedder`/`reranker` →
+   runtime `init_from` + `TextEmbedding::try_new_from_user_defined` (cached in `OnceLock`) →
+   vectors stored under `model_id` → ANN/RRF unchanged.
+5. **failure** → missing provider/runtime/model/dim → `Error::Admission` with one action;
+   no network attempt, no fallback.
+
+## 7. Dependencies + rationale
+
+| Crate | Why | Notes |
+|---|---|---|
+| `fastembed = "=7.1.1"` | local embed/rerank, user-defined ONNX models | Apache-2.0; 7.2+ blocked by the 14-day cooldown until 2026-11-06 |
+| `ort = "=2.0.0-rc.13"` | ONNX Runtime binding with `load-dynamic` and `init_from` | transitive via fastembed; rc risk accepted in ADR-17 |
+| `ureq 3.4.x` | blocking HTTPS for runtime/model downloads | matches `hf-hub`'s stack; rustls; no async runtime on CLI paths |
+| `sha2 0.10` | sha256 verification | RustCrypto, MIT/Apache |
+| `flate2`, `tar` | extract ORT `.tgz` (Linux/macOS) | standard, pure-Rust defaults |
+| `zip` | extract ORT `.zip` (Windows) | standard |
+| `tokenizers` (via fastembed) | tokenization | pulls Oniguruma (C), same class as bundled sqlite3 |
+
+Nothing above is linked into the default build (NFR-1).
+
+## 8. Required / Forbidden stack
+
+- **Required:** `ort-load-dynamic` + `ort::init_from`; pinned registry revisions; `sha2`
+  verification; `blocking::enter` around inference; `Error::Admission` for provisioning
+  errors.
+- **Forbidden:** `fastembed`'s built-in downloader (`TextInitOptions` with cache_dir),
+  `hf-hub` implicit downloads, `REQWEST`/`ureq` on search paths, defaults for model names,
+  bundling weights or ORT into the binary, writing `[providers]` into project config,
+  GPU execution providers.
+
+## 9. Error handling
+
+| Situation | Error | User-visible action |
+|---|---|---|
+| provider not connected | `Admission` | `docsbase connect fastembed` |
+| runtime missing/broken | `Admission` | same, or `ORT_DYLIB_PATH` / `--force` |
+| model not fetched / partial | `Admission` | `docsbase models fetch <name>` |
+| dims mismatch / normalize=false | `Admission` | fix `[hybrid.embedding]` |
+| sha256 mismatch | `Internal` (fetch) | retry `--force`; nothing installed |
+| ORT/tokenizer inference failure | `Internal` | no fallback; log detail, keep exact/lexical? no — fail closed for the stage |
+| `[providers]` in project | `Admission` | move to global config |
+
+## 10. Testing strategy
+
+- **Unit (offline, default build):** config parse/precedence/scope matrix, provider
+  validation, `model_id`, registry invariants, cache layout with a fake `ModelSource`,
+  runtime target selection and status with a fake source; no network.
+- **Feature unit (`--features hybrid-local`):** constructors with missing runtime/model
+  return admission (no ORT needed); `models use --global` writes global config.
+- **Integration:** `docsbase connect --check` and `models fetch` against a local fake HTTP
+  server (or `ModelSource` stub) — deterministic, no HF.
+- **Live (`#[ignore]`):** real connect + fetch + embed + rerank; manual/nightly, ledger
+  records versions/hashes/sizes/latency/RSS (T8).
+- **CI:** `linux-local` builds/tests the feature; default job asserts the tree gate.
+- **Not tested in CI:** actual model quality/recall (no weights), GPU paths (absent).
+
+## 11. Risks & trade-offs
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| `ort` rc API churn | build/behaviour changes on upgrade | exact pin `=2.0.0-rc.13`; upgrade is a task with live test |
+| ORT download supply chain | malicious/corrupt runtime | pinned URL+sha256, explicit connect, SECURITY note |
+| Model size / first-run UX | 100–300 MB per model | explicit fetch with size shown; `.complete` prevents partial use |
+| Oniguruma C build | platform build failures | CI matrix in T7; same toolchain as bundled sqlite3 |
+| TOML rewrite loses comments | user annoyance | printed warning; `toml_edit` considered for a later iteration |
+| Global provider config drift | a repo selects a provider not installed elsewhere | project files cannot contain `[providers]`; admission at open |
+| Two features (`local`+`remote`) | dependency duplication | Cargo feature unification; CI builds both together |
+
+## 12. Alternatives considered (ADR-style)
+
+1. **Bundle ORT in release artifacts** (build-time `download-binaries`): rejected — bigger
+   artifacts, per-platform packaging/signing, install-script complexity; `load-dynamic` +
+   `connect` keeps the binary small and the step explicit.
+2. **Auto-download runtime/model on first search**: rejected — violates "no silent network"
+   (ADR-13), makes search unpredictable and non-hermetic.
+3. **Default local model**: rejected — hides re-embedding cost and silently changes ranking;
+   no defaults (FR-5).
+4. **`hf-hub`/fastembed built-in downloader**: rejected — hides network inside the stage and
+   bypasses our revision/hash policy.
+5. **candle-only (pure Rust, qwen3)**: rejected for v1 — no rerank path, larger model set
+   churn; may be a later provider.
+6. **Project-level `[providers]`**: rejected — machine capability cannot be committed.
+7. **`toml_edit` for config writes**: deferred — no new dependency in v1; comments are a
+   known limitation.
+
+## 13. Directory structure
 
 ```
 src/hybrid/local.rs      # FastEmbedEmbedder / FastEmbedReranker (feature hybrid-local)
-src/hybrid/models.rs     # реестр моделей, cache layout, fetch (feature hybrid-local)
-src/hybrid/runtime.rs    # поиск/установка ONNX Runtime, ort::init_from (feature)
+src/hybrid/models.rs     # registry, cache layout, fetch/list/remove (feature)
+src/hybrid/runtime.rs    # ORT target table, install, resolve, init (feature)
 src/cli/connect.rs       # docsbase connect ...
-src/cli/models.rs        # + fetch/list/remove, --local/--global
-src/config/mod.rs        # [providers], scope/precedence, валидация
+src/cli/models.rs        # models use/fetch/list/remove + scope
+docs/specs/hybrid-local/ # this spec
 ```
-
-## 2. Config model
-
-### 2.1 Shape
-
-Глобальный конфиг (только он содержит провайдеров и может содержать дефолты):
-
-```toml
-[providers.fastembed]
-enabled = true
-runtime = "onnxruntime-1.24.0"     # версия, установленная connect
-# runtime_path = "/opt/.../libonnxruntime.so"   # необязательный override
-
-[providers.openrouter]
-enabled = true                     # ключ — только env (ADR-14)
-
-[hybrid]                           # дефолты для новых проектов (опционально)
-ranking = "rrf"
-[hybrid.embedding]
-provider = "fastembed"
-model = "bge-small-en-v1.5"
-dimensions = 384
-normalize = true
-```
-
-Проект (`.docsbase.toml`) содержит только `[hybrid]`; `[providers]` здесь —
-ошибка `Admission` («providers are machine-local; run docsbase connect …»).
-
-### 2.2 Precedence and validation
-
-- `Config::for_project` уже мержит global → project; добавляется валидация:
-  - `providers` запрещены в проектном файле;
-  - `hybrid.embedding.provider`/`hybrid.reranker.provider` обязаны быть
-    `enabled` в эффективных провайдерах; иначе `Admission` с подсказкой;
-  - `provider = "fastembed"` требует `model` (дефолта нет), `dimensions` =
-    реестровой ширине, `normalize = true`;
-  - `provider = "openrouter"` сохраняет текущие правила (ключ, feature).
-- Порядок: built-in default → global config → project config → CLI overrides.
-
-### 2.3 Scope resolution (`models use`)
-
-- `--local` и `--global` взаимоисключающие.
-- Внутри проекта (есть `.docsbase.toml` или `--path` указывает на проект):
-  по умолчанию локально; `--local` — явное подтверждение.
-- Вне проекта: только `--global`, иначе `Admission`.
-- Запись атомарная (temp+rename), существующие секции сохраняются; известное
-  ограничение v1 — комментарии не сохраняются (как в текущем `models use`).
-
-## 3. Provider registry and `connect`
-
-- `providers::status(config)` → `Unknown | NotConnected | Connected{version} |
-  Broken{reason}`; используется `connect` без аргументов и валидацией конфига.
-- `connect openrouter`:
-  1. читает `OPENROUTER_API_KEY` из env (флаг не нужен, ключ не пишется);
-  2. проверяет запросом к `/models` (feature `hybrid-remote`);
-  3. пишет `[providers.openrouter] enabled = true` в **глобальный** конфиг.
-- `connect fastembed`:
-  1. определяет платформу/арх (`linux-x64`, `linux-aarch64`, `osx-arm64`,
-     `osx-x64`, `win-x64`, `win-arm64`);
-  2. качает закреплённый архив ORT 1.24.x из официального релиза, проверяет
-     sha256 из встроенной таблицы, распаковывает только shared library;
-  3. атомарно ставит в `<data>/runtimes/onnxruntime/<version>/<platform>/`;
-  4. пишет `[providers.fastembed] enabled/runtime` в глобальный конфиг.
-  `--check` — только статус; `--force` — переустановка; `--models` — затем
-  `models fetch` для перечисленных имён.
-- `connect` не меняет модельный выбор и не пишет в проект.
-
-## 4. Runtime resolution
-
-- Порядок: `ORT_DYLIB_PATH` (если задан и существует) → `runtime_path` из
-  конфига → `<data>/runtimes/onnxruntime/<version>/<platform>/libonnxruntime.*`
-  → `Admission` с подсказкой `docsbase connect fastembed`.
-- `ort::init_from(path).commit()` вызывается один раз на процесс
-  (`OnceLock`), **до** создания `TextEmbedding`/`TextRerank`. `commit()`
-  идемпотентен по `try_insert_with`, повторная инициализация не перезаписывает.
-- Имя библиотеки по платформам: `libonnxruntime.so` (Linux),
-  `libonnxruntime.dylib` (macOS), `onnxruntime.dll` (Windows); Windows DLL
-  резолвится рядом с загруженным файлом.
-
-## 5. Model registry and fetch
-
-### 5.1 Registry entry
-
-```rust
-struct ModelEntry {
-    name: &'static str,            // "bge-small-en-v1.5"
-    task: Task,                    // Embedding | Rerank
-    repo: &'static str,            // "BAAI/bge-small-en-v1.5"
-    revision: &'static str,        // HF commit sha (pinned)
-    onnx: &'static str,            // "onnx/model.onnx"
-    additional: &'static [&'static str],
-    dim: usize,
-    pooling: Option<Pooling>,      // Cls/Mean for embeddings
-    quantization: QuantizationMode,
-    output_key: Option<&'static str>,
-    license: &'static str,
-    files: &'static [FileSpec],    // path + size + sha256
-}
-```
-
-Стартовый набор: `bge-small-en-v1.5` (384/Cls), `multilingual-e5-small`
-(384/Mean), `bge-reranker-base` (rerank). `jina-reranker-v2` не включается
-(CC-BY-NC).
-
-### 5.2 Cache layout
-
-```
-<model cache>/                      # DOCSBASE_MODEL_CACHE или <data>/models
-  <name>/<revision>/
-    model.onnx                      # + additional files
-    tokenizer.json
-    config.json
-    special_tokens_map.json
-    tokenizer_config.json
-    .complete                       # маркер: все файлы проверены
-```
-
-- Скачивание: `https://huggingface.co/<repo>/resolve/<revision>/<path>`,
-  `ureq` (rustls), поток в `*.part`, sha256 по таблице, `fsync`, rename.
-- Лок от параллельных fetch: lock-файл `<name>/.lock` (`fd-lock` уже в deps).
-- `.complete` пишется последним; отсутствие маркера = модель не готова.
-- `remove` удаляет каталог целиком; `list` показывает размер/статус.
-
-## 6. Embedder / reranker
-
-- `FastEmbedEmbedder::new(entry, options)`:
-  1. ensure runtime (init_from);
-  2. читает файлы из кэша (после `models fetch`), строит
-     `UserDefinedEmbeddingModel::new(onnx_bytes, TokenizerFiles {..})`
-     `.with_pooling(entry.pooling)` (и `.with_quantization`, если задана);
-  3. `TextEmbedding::try_new_from_user_defined(model, InitOptionsUserDefined)`
-     с `max_length`, `intra_threads`, `batch_size`;
-  4. `Embedder::model_id()` = `fastembed/<name>@d<dim>@l2@r<rev8>`.
-- `FastEmbedReranker`: `UserDefinedRerankingModel` + `TextRerank`; `rerank`
-  возвращает `(index, score)`, `top_n` = переданный.
-- Модель создаётся один раз на процесс (`Arc`, `OnceLock` на конфиг-ключ);
-  вызовы — внутри `blocking::enter`; потоки ограничены `min(4, cores)`.
-- Ошибки ORT/токенизатора → `Error::Internal`; отсутствие файлов → `Admission`
-  с подсказкой `docsbase models fetch`.
-
-## 7. CLI
-
-| Команда | Поведение |
-|---|---|
-| `docsbase connect` | статус всех провайдеров |
-| `docsbase connect openrouter` | env key → probe → global `[providers.openrouter]` |
-| `docsbase connect fastembed [--check\|--force\|--models a,b]` | runtime (+models) → global `[providers.fastembed]` |
-| `docsbase models list` | реестр + cached/missing |
-| `docsbase models fetch <name>` | явная загрузка pinned файлов |
-| `docsbase models remove <name>` | удаление кэша |
-| `docsbase models use … [--local\|--global]` | выбор модели, project/global |
-
-## 8. Errors
-
-Все пользовательские ошибки — `Error::Admission` с одним действием:
-- «provider `fastembed` is not connected — run `docsbase connect fastembed`»;
-- «model `bge-small-en-v1.5` is not fetched — run `docsbase models fetch bge-small-en-v1.5`»;
-- «dimensions 1024 do not match model `bge-small-en-v1.5` (384)»;
-- «providers are machine-local; edit the global config / run connect».
-
-## 9. Tests and CI
-
-- Offline (default build): парсинг `[providers]`, запрет в проекте, scope
-  `--local/--global`, валидация provider/model/dims, `model_id`, CLI dry-run,
-  отсутствие сетевых крейтов в `cargo tree`.
-- Feature build (`hybrid-local`): сборка на 3 ОС, unit-тесты реестра/кэша с
-  fake-`ModelSource`, статус connect с fake-runtime, `models use --global`.
-- Живые тесты `#[ignore]`: `connect --check` + `models fetch` + embed/rerank на
-  реальной модели; запуск manual/nightly, не per-PR.
-- CI: новый job `linux-local` (сборка+тесты без сети), гейт дерева в `linux`.
-
-## 10. Security
-
-- Рантайм — исполняемый код: explicit `connect`, pinned version+sha256, запись
-  в `docs/specs/security`/SECURITY.md; отказ от загрузки без подтверждения.
-- Модели — данные, но парсятся ORT/токенизатором: pinned revision, sha256,
-  size caps, права кэша 0700.
-- Ключи не пишутся на диск; `connect openrouter` читает env и не логирует ключ.
-
-## 11. Acceptance mapping
-
-| Требование | Задачи |
-|---|---|
-| FR-1, FR-2, FR-5 | T2, T3 |
-| FR-3, FR-4 | T1 |
-| FR-6 | T4 |
-| FR-7 | T5 |
-| FR-8, NFR-1 | T3, T7 |
-| FR-9, NFR-6 | T1–T5 (ошибки), T6 |
-| SC-1…SC-8 | T1–T8 |

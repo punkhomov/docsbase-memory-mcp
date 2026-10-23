@@ -1,135 +1,272 @@
-# SPECIFICATION: hybrid-local (итерация 4 hybrid-providers)
+# SPECIFICATION: hybrid-local (итерация 4)
 
-**Status:** Draft, ревизия 0.1 · **Дата:** 2026-10-23
+**Status:** Draft, ревизия 0.2 · **Дата:** 2026-10-23
 **Constitution:** `docs/specs/constitution.md` (1.3.0)
-**Связано:** `docs/specs/hybrid-providers/` (dense + RRF), `docs/specs/ann-index/`
-(ANN), ADR-12 (`(model_id, chunk_hash)`), ADR-13 (локальные модели за флагом),
-ADR-14 (OpenRouter), ADR-17 (эта итерация).
+**Related:** `docs/specs/hybrid-providers/` (dense/RRF), `docs/specs/ann-index/` (ANN),
+ADR-12 (cache key), ADR-13 (local models behind a flag), ADR-14 (OpenRouter),
+ADR-17 (this iteration).
 
 ## 1. Problem
 
-Hybrid-ступени сейчас умеют единственный провайдер — OpenRouter (feature
-`hybrid-remote`). Проекты без сети/ключей и с требованиями приватности не могут
-использовать dense/rerank: `provider = "openrouter"` требует `OPENROUTER_API_KEY`
-и сетевой доступ на index/backfill/search. Нужен локальный провайдер, который
-работает офлайн после явной подготовки, не ломает дефолтную сборку и не тащит
-веса в бинарь.
+Hybrid retrieval supports one provider, OpenRouter (`hybrid-remote`), which needs an API
+key and network access on index/backfill/search. Projects with privacy requirements or
+without network cannot use dense retrieval or rerank at all, and there is no way to run the
+whole hybrid pipeline offline. The build already has an extension point (`Embedder`,
+`Reranker`) but no local implementation, no runtime/model lifecycle, and no configuration
+model for "this machine has provider X".
 
 ## 2. Goals / Non-goals
 
 Goals:
-- **G1.** Провайдер `fastembed` для embedding и rerank за фичей `hybrid-local`;
-  контракты `Embedder`/`Reranker` и ключ `model_id` не меняются.
-- **G2.** Дефолтная сборка остаётся офлайн: нет `fastembed`/`ort`/`tokenizers`/
-  `hf-hub`/`reqwest` в `cargo tree`.
-- **G3.** Никакой сети на index/search: рантайм и модели готовятся только
-  `docsbase connect` / `docsbase models fetch`; иначе — admission-ошибка.
-- **G4.** Общая модель конфигурации: `[providers.*]` — только глобальный конфиг;
-  `[hybrid.*]` — проект (по умолчанию) или глобальный (`--global`) как дефолт
-  для новых проектов.
-- **G5.** Воспроизводимость: pinned revision моделей, sha256 рантайма и файлов,
-  атомарная установка, идемпотентные команды.
+- **G1.** A local `fastembed` provider for embedding and rerank behind feature
+  `hybrid-local`; existing `Embedder`/`Reranker` contracts unchanged.
+- **G2.** The default build stays fully offline (no `fastembed`, `ort`, `tokenizers`,
+  `hf-hub`, `ureq`, `reqwest` in `cargo tree`).
+- **G3.** No network on index/search paths: runtime and models are prepared only by explicit
+  `docsbase connect` / `docsbase models fetch`.
+- **G4.** One configuration model for providers and models: `[providers.*]` is machine-local
+  (global config only); model selection is project-local by default, or global defaults for
+  new projects.
+- **G5.** Reproducibility: pinned model revisions, sha256 for runtime and model files,
+  atomic/idempotent installation.
 
 Non-goals:
-- GPU/CUDA/Metal/DirectML, image-модели, fine-tuning, авто-обновление моделей.
-- MCP-инструменты для connect/fetch (CLI достаточно).
-- Модели по умолчанию и любое авто-скачивание.
-- Изменение MCP/CLI контрактов `search_docs`, `docsbase search`, ANN.
+- GPU/CUDA/Metal/DirectML, image models, fine-tuning, model auto-update.
+- MCP tools for connect/fetch (CLI only).
+- Default models or any automatic download.
+- Changes to `search_docs`, MCP schemas, ANN contracts, or ranking.
 
-## 3. Functional requirements
+## 3. Users / Actors
 
-- **FR-1 (провайдерский реестр).** `[providers.<name>]` допускается только в
-  глобальном конфиге (`~/.config/docsbase/config.toml`); поле `enabled = true`
-  означает «провайдер подготовлен на этой машине». Для `fastembed` дополнительно
-  хранятся `runtime` (версия) и необязательный `runtime_path`; для `openrouter`
-  ключ не хранится (env-only, ADR-14). Появление `[providers]` в проектном
-  `.docsbase.toml` — ошибка валидации.
-- **FR-2 (`connect`).** `docsbase connect` без аргументов печатает статус
-  провайдеров. `connect openrouter` берёт `OPENROUTER_API_KEY` из окружения,
-  проверяет его запросом к API и записывает `[providers.openrouter] enabled=true`;
-  ключ не сохраняется. `connect fastembed` скачивает закреплённый ONNX Runtime
-  под текущую платформу/арх, проверяет sha256, атомарно устанавливает в data-dir
-  и записывает `[providers.fastembed]`. `--check` — только проверка,
-  `--force` — переустановка, `--models a,b` — дополнительно `models fetch`.
-  `--local` для connect запрещён (провайдеры машинные).
-- **FR-3 (реестр моделей).** В коде — закрытый реестр: имя, HF repo, pinned
-  revision (commit sha), файлы (`onnx/model.onnx`, `tokenizer.json`,
-  `config.json`, `special_tokens_map.json`, `tokenizer_config.json`,
-  `additional_files`), `dim`, pooling (`Cls`/`Mean`), quantization, `output_key`,
-  license. Дефолтной модели нет: `[hybrid.embedding].model` обязателен при
-  `provider = "fastembed"`.
-- **FR-4 (`models fetch/list/remove`).** `fetch <name>` скачивает только файлы
-  реестра по pinned revision, проверяет размер и sha256, ставит атомарно
-  (temp+rename) под локом, идемпотентен; `list` показывает реестр и состояние
-  кэша; `remove` удаляет модель. Офлайн/недоступность HF — ошибка с подсказкой.
-  Встроенный загрузчик `fastembed` не используется: сеть только явная.
-- **FR-5 (`models use` и scope).** `models use --provider <p> --embedding <m>
-  [--dims N] [--rerank <m>] [--window N] [--local|--global] [--dry-run]
-  [--path <dir>]`. Внутри проекта по умолчанию пишется `.docsbase.toml`;
-  `--local` допустим только внутри проекта; `--global` пишет глобальный конфиг
-  (дефолт для новых проектов) и обязателен вне проекта; оба флага — ошибка.
-  Команда валидирует провайдер (connected), модель (реестр/кэш), `dimensions`
-  (для fastembed — из реестра, для OpenRouter — обязателен), окно rerank.
-- **FR-6 (embedding).** `provider = "fastembed"` создаёт `Embedder`; `model_id =
-  fastembed/<name>@d<dim>@<l2|raw>@r<rev8>`, `normalize` обязателен `true` для
-  реестровых моделей (иначе admission). Модель загружается один раз на процесс.
-- **FR-7 (rerank).** `provider = "fastembed"` создаёт `Reranker`; `top_n =
-  documents.len()`, окно — те же bounds; ошибки — `Error::Internal`, без fallback.
-- **FR-8 (фича и сборка).** `hybrid-local` независима от `hybrid-remote`;
-  комбинация фич допустима. ORT грузится `ort-load-dynamic`; на старте
-  `ort::init_from(path)` до первой сессии; порядок резолва: `ORT_DYLIB_PATH` →
-  data-dir → ошибка. Веса в бинарь не входят.
-- **FR-9 (ошибки).** Отсутствие провайдера, рантайма, модели, битой модели или
-  несовпадение `dimensions` — `Error::Admission` с точной подсказкой
-  (`docsbase connect …` / `docsbase models fetch …`). Никакого молчаливого
-  перехода на lexical/exact из-за локального провайдера.
+- **Developer (local machine)** — wants semantic search offline, runs `connect` and
+  `models fetch` once, then edits project config.
+- **Operator/CI** — prepares a machine reproducibly (`connect --check`, `models fetch`),
+  must be able to run without interactive prompts.
+- **Coding agent (MCP client)** — consumes `search_docs`; never triggers downloads and must
+  get an actionable error if the provider is not prepared.
+- **Maintainer** — needs a dependency/artifact story that does not grow the default build.
 
-## 4. Non-functional requirements
+## 4. Prioritized user stories
 
-- **NFR-1 (offline default).** `cargo tree` дефолтной сборки не содержит
-  `fastembed`, `ort`, `tokenizers`, `hf-hub`, `ureq`, `reqwest`; CI-гейт.
-- **NFR-2 (MSRV/quality).** Rust 1.88, `fmt`, clippy `--all-targets -D warnings`;
-  без `unwrap`/`expect`/`panic!` в `src/**`.
-- **NFR-3 (безопасность).** HTTPS+rustls, pinned revision, sha256, size caps,
-  права кэша; рантайм — исполняемый код, поэтому только explicit connect;
-  ONNX/токенизаторы считаются недоверенным вводом (ORT парсит, код не грузим).
-- **NFR-4 (ресурсы).** Модель и рантайм не учитываются в `DenseCache.max_bytes`;
-  `max_length` (default 512), batch size и intra/inter threads конфигурируемы,
-  потоки не превышают доступные ядра; модель не грузится дважды.
-- **NFR-5 (идемпотентность).** `connect`/`fetch` можно повторять; повторный
-  вызов не качает заново и не ломает кэш; параллельные процессы — лок.
-- **NFR-6 (время старта).** Конфиг с `provider = "fastembed"` и отсутствующей
-  моделью падает на открытии проекта/поиске, а не в середине backfill.
+### P1 — Prepare the local provider on this machine
+As a developer, I want `docsbase connect fastembed` to install the ONNX Runtime and
+register the provider, so that local models can run without a preinstalled runtime.
 
-## 5. Success criteria
+**Why this priority:** nothing else works without the runtime; it is the setup gate.
+**Independent test:** on a clean data dir, `connect fastembed` writes
+`[providers.fastembed]` to the global config and the runtime file exists; a second run
+changes nothing.
+**Acceptance scenarios:**
+- Given no runtime and network access, when `connect fastembed` runs, then the pinned
+  runtime is downloaded, its sha256 matches, and the provider is `Connected`.
+- Given an already installed runtime, when `connect fastembed` runs again, then it is a
+  no-op (no download).
+- Given a corrupted download, when sha256 does not match, then nothing is installed and the
+  command fails with an actionable error.
 
-- **SC-1.** Дефолтная сборка зелёная, гейт NFR-1 проходит; `hybrid-local`
-  собирается и проходит clippy на Linux/macOS/Windows.
-- **SC-2.** `connect fastembed` на чистой машине ставит runtime (sha256), пишет
-  `[providers.fastembed]` в глобальный конфиг; повторный вызов — no-op.
-- **SC-3.** `connect fastembed --check` без сети и без рантайма даёт понятный
-  статус; без `connect` конфиг с fastembed падает admission-ошибкой.
-- **SC-4.** `models fetch` скачивает pinned файлы, проверяет хеши, идемпотентен;
-  офлайн — ошибка без частично установленной модели.
-- **SC-5.** `models use` пишет проект или global по scope-правилам, не трогая
-  `[providers]`; вне проекта без `--global` — ошибка.
-- **SC-6.** Embedding+rerank через fastembed дают те же контракты, что OpenRouter:
-  `model_id` участвует в кэше, `dimensions`/`normalize` валидируются, rerank
-  меняет порядок и scores.
-- **SC-7.** Живой тест (ignored) на реальной модели: `connect` + `fetch` + embed
-  + rerank проходят; офлайн-тесты не ходят в сеть.
-- **SC-8.** Документация: ADR-17, spec, `docs/CONFIG.md`, README, SECURITY
-  (рантайм как внешний артефакт), CHANGELOG.
+### P2 — Fetch a model explicitly
+As a developer, I want `docsbase models fetch bge-small-en-v1.5` to download a pinned model,
+so that later searches are offline and reproducible.
 
-## 6. Open questions
+**Why this priority:** separates the only network step from search, and keeps the build and
+runtime free of weights.
+**Independent test:** after `fetch`, the model directory has every registry file and a
+`.complete` marker; repeating `fetch` downloads nothing.
+**Acceptance scenarios:**
+- Given network access, when `fetch <name>` runs, then all pinned files are downloaded,
+  size/sha256 verified, and the cache is marked complete.
+- Given no network, when `fetch <name>` runs and the model is absent, then it fails with an
+  error that names the missing model and does not leave a partial install.
+- Given a partially downloaded model, when search runs, then it fails with "run models
+  fetch" (never uses partial files).
 
-- **OQ-1.** Точные sha256/URLы ORT 1.24.x по 6 платформам — фиксируются при T2.
-- **OQ-2.** Начальный набор моделей (bge-small / e5-small / bge-reranker-base) —
-  расширяется без изменения контрактов.
-- **OQ-3.** Нужен ли `connect --models` как шорткат `fetch` (сейчас `should`).
-- **OQ-4.** Живой CI-прогон модели: manual/nightly после T7, не per-PR.
+### P3 — Select the model for a project or as a global default
+As a developer, I want `models use` to switch the embedding/rerank model for the current
+project (or for new projects with `--global`), so that provider choice is explicit.
 
-## 7. Out of scope
+**Why this priority:** model choice changes `model_id`, invalidates the vector cache and
+ANN; it must be deliberate and scoped.
+**Independent test:** inside a project, `models use --provider fastembed --embedding …`
+writes `.docsbase.toml`; outside a project the same command fails unless `--global` is
+passed; `--global` writes the global config and leaves `[providers]` untouched.
+**Acceptance scenarios:**
+- Given a project directory, when `models use` runs without a scope flag, then
+  `.docsbase.toml` gets `[hybrid.embedding]`/`[hybrid.reranker]`.
+- Given no project, when `models use` runs without `--global`, then it fails with a message
+  explaining the required scope.
+- Given both `--local` and `--global`, then the command fails.
+- Given `--provider fastembed` and an unfetched model, then it fails and names
+  `docsbase models fetch`.
 
-GPU-провайдеры, квантизация на лету, кэш эмбеддингов между моделями, `docsbase
-serve --models`, MCP-тулы управления моделями.
+### P4 — Offline embedding for index/backfill/search
+As a developer, I want search and backfill to embed locally without network, so that
+private corpora never leave the machine.
+
+**Why this priority:** this is the product value; everything else enables it.
+**Independent test:** with the model fetched and network disabled, indexing a project
+produces vectors, `search_docs` returns dense results, and no network syscall is attempted
+(the existing offline test suite stays green for the default build; a feature-gated test
+asserts no fetch on the search path).
+**Acceptance scenarios:**
+- Given `provider = "fastembed"` with a fetched model, when the dense channel runs, then
+  `model_id` is `fastembed/<name>@d<dim>@l2@r<rev8>` and vectors are cached under it.
+- Given a missing model, when a project is opened, then it fails at open/search with an
+  admission error (`docsbase models fetch …`).
+- Given `dimensions` that differ from the registry, when config is loaded, then it fails
+  before any embedding.
+
+### P5 — Local rerank
+As a developer, I want the reranker to run locally, so that the whole hybrid pipeline is
+offline.
+
+**Why this priority:** completes the pipeline; rerank is optional (window bounded).
+**Independent test:** a fetched reranker changes the order of candidate documents and
+returns `(index, score)` pairs; without it, config validation fails.
+**Acceptance scenarios:**
+- Given `[hybrid.reranker] provider = "fastembed"` and a fetched model, when rerank runs,
+  then every candidate receives a score and the order matches scores.
+- Given an unfetched reranker, when the project opens, then it fails with the fetch hint.
+
+## 5. Functional requirements
+
+- **FR-1 (must).** `[providers.<name>]` is accepted only in the global config; a project
+  `.docsbase.toml` containing `[providers]` is a validation error. `enabled = true` means
+  "prepared on this machine".
+- **FR-2 (must).** `docsbase connect` with no arguments prints provider status
+  (`Unknown | NotConnected | Connected{version} | Broken{reason}`).
+- **FR-3 (must).** `connect openrouter` reads `OPENROUTER_API_KEY` from the environment,
+  validates it against the provider, and records `[providers.openrouter]`; the key is never
+  stored or logged.
+- **FR-4 (must).** `connect fastembed` installs the pinned ONNX Runtime for the current
+  platform/arch (sha256-verified, atomic), records `[providers.fastembed]`, supports
+  `--check`, `--force`, `--models`; `--local` is rejected.
+- **FR-5 (must).** A closed model registry (name, HF repo, pinned revision, files, dim,
+  pooling, quantization, output key, license) exists in code; no default model is chosen.
+- **FR-6 (must).** `models fetch <name>` downloads only registry files at the pinned
+  revision, verifies size+sha256, installs atomically under a lock, writes `.complete`
+  last, and is idempotent; offline is an error without partial install.
+- **FR-7 (must).** `models list` and `models remove` report/delete the model cache.
+- **FR-8 (must).** `models use` takes `--provider`, `--embedding`, optional `--dims`,
+  optional `--rerank`/`--window`, `--local|--global`, `--dry-run`, `--path`; validates
+  provider connectivity, model presence (fetch hint), and dimensions; writes the project
+  config by default, the global config with `--global`, and errors when outside a project
+  without `--global` or when both scope flags are present.
+- **FR-9 (must).** `provider = "fastembed"` constructs `Embedder`/`Reranker`; `model_id`
+  includes provider, model, dim, normalization and the first 8 chars of the model revision;
+  `normalize` must be true for registry models.
+- **FR-10 (must).** Runtime resolution order: `ORT_DYLIB_PATH` → configured runtime path →
+  docsbase data-dir → admission error naming `docsbase connect fastembed`. Initialization
+  happens before any ONNX session.
+- **FR-11 (should).** `connect fastembed --models a,b` fetches the named models after the
+  runtime is ready.
+- **FR-12 (must).** A missing provider/runtime/model/dimension mismatch is an
+  `Error::Admission` with exactly one corrective action; no silent fallback to lexical or
+  exact because of a local-provider failure.
+
+## 6. Non-functional requirements (ISO 25010)
+
+- **NFR-1 (portability / offline default).** The default `cargo tree` contains none of
+  `fastembed`, `ort`, `tokenizers`, `hf-hub`, `ureq`, `reqwest`; a CI gate asserts this.
+- **NFR-2 (maintainability).** MSRV 1.88, edition 2024, `cargo fmt --check`, clippy
+  `--all-targets -D warnings`, no `unwrap`/`expect`/`panic!` in `src/**`.
+- **NFR-3 (security).** HTTPS with rustls; pinned revisions; sha256 for runtime and model
+  files; size caps; cache permissions 0700; the runtime is treated as executable code and
+  is installed only by explicit `connect`; ONNX/tokenizer inputs are untrusted.
+- **NFR-4 (resource efficiency).** `max_length` default 512, configurable batch size and
+  intra/inter threads capped at `min(4, cores)`; model/runtime memory is excluded from
+  `DenseCache.max_bytes`; a model is loaded once per process.
+- **NFR-5 (reliability / idempotency).** `connect` and `fetch` can be repeated safely;
+  concurrent fetches are serialized by a lock; an interrupted install leaves no usable
+  partial state (`.complete` last, temp+rename).
+- **NFR-6 (startup failure).** A config that selects fastembed with a missing runtime or
+  model fails when the project is opened/searched, not mid-backfill.
+- **NFR-7 (performance).** Local embed/rerank must not block async workers (`blocking::enter`
+  contract); one model instance per config key; no per-call model load.
+- **NFR-8 (artifact size).** The 40 MiB binary budget (NFR-9 of the product design) excludes
+  runtime and model caches; their sizes are documented in `docs/CONFIG.md`.
+
+## 7. Data model
+
+**Provider entry (global config):**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | table key | `fastembed`, `openrouter` |
+| `enabled` | bool | provider prepared on this machine |
+| `runtime` | string? | `fastembed`: installed ONNX Runtime version |
+| `runtime_path` | string? | optional override path |
+
+**Model registry entry (code):** `name`, `task` (`Embedding|Rerank`), `repo`,
+`revision` (HF commit sha), `onnx`, `additional[]`, `dim`, `pooling` (`Cls|Mean`, embedding
+only), `quantization`, `output_key`, `license`, `files[]` (`path`, `size`, `sha256`).
+
+**Model cache:** `<cache>/<name>/<revision>/` with registry files plus `.complete`; the
+revision is part of the path so updates never mix vectors.
+
+**Selection (project or global config):** `[hybrid.embedding]` (`provider`, `model`,
+`dimensions`, `normalize`) and `[hybrid.reranker]` (`provider`, `model`, `window`).
+
+**Cache key:** `model_id = fastembed/<name>@d<dim>@<l2|raw>@r<rev8>`.
+
+## 8. Interfaces
+
+**CLI**
+
+| Command | Flags | Result |
+|---|---|---|
+| `docsbase connect` | — | status table |
+| `docsbase connect openrouter` | — | env key validated; global provider entry written |
+| `docsbase connect fastembed` | `--check`, `--force`, `--models a,b` | runtime installed; provider entry written |
+| `docsbase models list` | — | registry + cached/missing |
+| `docsbase models fetch <name>` | — | pinned files installed |
+| `docsbase models remove <name>` | — | cache removed |
+| `docsbase models use` | `--provider`, `--embedding`, `--dims`, `--rerank`, `--window`, `--local`, `--global`, `--dry-run`, `--path` | config written or printed |
+
+**Config files:** global `config.toml` (`[providers.*]`, optional `[hybrid.*]` defaults);
+project `.docsbase.toml` (`[hybrid.*]` only).
+
+**Errors:** admission errors carry `provider`, `model`, `action` (e.g. `docsbase connect
+fastembed`), and never contain keys or file contents.
+
+## 9. Measurable success criteria
+
+- **SC-1.** Default build: `cargo tree` gate passes; `cargo test` green.
+- **SC-2.** `connect fastembed` on a clean machine installs the pinned runtime with a
+  matching sha256 and writes `[providers.fastembed]`; a second run does no download.
+- **SC-3.** With no provider entry, a fastembed config fails with exactly the connect hint.
+- **SC-4.** `models fetch` installs all registry files, verifies hashes, is idempotent, and
+  leaves no partial install when interrupted/offline.
+- **SC-5.** `models use` follows the scope matrix (project default, `--local`, `--global`,
+  outside-project error, both-flags error) and never rewrites `[providers]`.
+- **SC-6.** With runtime+model prepared, embedding and rerank run offline, `model_id`
+  contains the revision, and cached vectors are reused after restart.
+- **SC-7.** The ignored live test (connect/fetch/embed/rerank on a real model) passes on a
+  machine with network, and the ledger records versions, hashes, sizes, latency and RSS.
+- **SC-8.** Docs updated: ADR-17, this spec, `docs/CONFIG.md`, README, SECURITY, CHANGELOG.
+
+## 10. Assumptions & challenges
+
+| Assumption | Adversarial question | Resolution |
+|---|---|---|
+| ORT can be downloaded per platform and loaded with `ort-load-dynamic` | What if `ort` rc.13 changes the dynamic-loading API or the prebuilt is unavailable? | Pin `ort = rc.13`; runtime version pinned; a live test + `--check`; fallback path `ORT_DYLIB_PATH`; revisit when 7.5.0 passes cooldown |
+| Pinned HF revision + sha256 is enough provenance | What if HF rewrites LFS objects or a repo is deleted? | Revision is a commit sha; sha256 is in-code; `fetch` fails closed; registry update is a code change |
+| `[providers]` only in global config | What about a project checked into a repo with a provider entry? | Explicit validation error; machine capabilities are not repository state |
+| No default model | Is the UX acceptable? | `models use --provider fastembed --embedding …` is explicit; `connect` prints the exact snippet; defaults would hide re-embedding costs |
+| 14-day cooldown allows `fastembed 7.1.1` | What if 7.1.1 has a bug fixed in 7.2? | Pin is temporary; revisit after 2026-11-06; ADR records the trade-off |
+| No weights in the binary | Does `fastembed` embed any model? | Only code; `UserDefinedEmbeddingModel` is built from fetched files |
+| `models use` can rewrite TOML without `toml_edit` | Are comments lost? | Known limitation, printed by the command; no new dependency in v1 |
+| Oniguruma (C) builds on all CI targets | Windows/macOS toolchains? | Already build bundled sqlite3; CI matrix proves it in T7 |
+
+## 11. Out of scope
+
+GPU backends, image embeddings, model auto-update, model sharing between machines,
+MCP management tools, `docsbase serve` model endpoints, quantized-on-the-fly conversion.
+
+## 12. Open questions
+
+- **OQ-1.** Exact ORT 1.24.x release URLs/sha256 for six targets — resolved in T2; default:
+  official Microsoft release archives.
+- **OQ-2.** Whether `connect --models` is worth keeping beyond convenience — default:
+  keep as a thin wrapper around `fetch`.
+- **OQ-3.** Live CI run cadence for a real model — default: manual/nightly, never per-PR.
+- **OQ-4.** Cache location override name — default: `DOCSBASE_MODEL_CACHE`.
