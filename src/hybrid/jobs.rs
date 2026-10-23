@@ -22,6 +22,29 @@ use super::{HybridCfg, blocking, from_config};
 /// Backfill lease duration: covers a remote 75k backfill + ANN build/retry.
 const BACKFILL_PIN_TTL: Duration = Duration::from_secs(3_600);
 
+/// Debug-only override of the resident ANN cap used by the lease gate, so a
+/// test can exercise the admission boundary without a 92k-chunk corpus.
+#[cfg(debug_assertions)]
+static TEST_ANN_MAX_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only hook; `0` restores the default cap. Absent in release builds.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn set_test_ann_max_bytes(max_bytes: u64) {
+    TEST_ANN_MAX_BYTES.store(max_bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn ann_max_bytes() -> u64 {
+    #[cfg(debug_assertions)]
+    {
+        let override_bytes = TEST_ANN_MAX_BYTES.load(std::sync::atomic::Ordering::Relaxed);
+        if override_bytes > 0 {
+            return override_bytes;
+        }
+    }
+    DenseCacheLimits::default().max_bytes
+}
+
 /// Coverage of one project under the configured embedding model (FR-15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Coverage {
@@ -152,9 +175,11 @@ pub fn embed_project_chunks_with_limits_and_pin(
     // for nothing (Delta 0.3.1).
     let pin_for_ann = pin_for_ann
         && ann_build_admitted_for_model(
-            hashes.len(),
+            // Chunk rows, not distinct hashes: `resolve_rows` admits by
+            // `chunks.len()`, and duplicate texts still produce one row each.
+            texts.len(),
             embedder.model_id(),
-            DenseCacheLimits::default().max_bytes,
+            ann_max_bytes(),
         );
     let mut cache = VectorCache::open_with_limits(db.cache_root(), limits)?;
     // Lease the project's vectors for the ANN build; without this a

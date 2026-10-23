@@ -593,12 +593,20 @@ impl DenseCache {
             .and_then(|bytes| u64::try_from(bytes).ok())
             .unwrap_or(u64::MAX);
         let estimated = ann::ann_estimated_bytes(rows.len(), dim);
-        let in_backoff = {
+        let (in_backoff, other_resident) = {
             let entries = self.lock_entries();
-            matches!(entries.get(&project_id), Some(entry)
+            let in_backoff = matches!(entries.get(&project_id), Some(entry)
                 if entry.generation == generation
                     && entry.model_id == model_id
-                    && matches!(&entry.state, DenseRows::Failed(failed) if failed.retry_at > Instant::now()))
+                    && matches!(&entry.state, DenseRows::Failed(failed) if failed.retry_at > Instant::now()));
+            // A build reservation must fit next to the projects already
+            // resident, otherwise two admitted corpora would double the cap.
+            let other = entries
+                .iter()
+                .filter(|(id, _)| **id != project_id)
+                .map(|(_, entry)| entry.bytes)
+                .sum::<u64>();
+            (in_backoff, other)
         };
         let building_bytes = u64::try_from(estimated)
             .unwrap_or(u64::MAX)
@@ -609,6 +617,7 @@ impl DenseCache {
             && full_coverage
             && !in_backoff
             && building_bytes <= self.limits.max_bytes
+            && building_bytes.saturating_add(other_resident) <= self.limits.max_bytes
             && ann_build_admitted(chunks.len(), dim, self.limits.max_bytes);
         if !seek_ann {
             if exact_bytes > self.limits.max_bytes {
@@ -844,11 +853,18 @@ impl DenseCache {
 
     /// Drops the least-recently-used entry (optionally skipping `keep`).
     fn evict_oldest(&self, entries: &mut HashMap<i64, Entry>, keep: Option<i64>) -> Option<i64> {
-        let oldest = entries
-            .iter()
-            .filter(|(id, _)| Some(**id) != keep)
-            .min_by_key(|(_, entry)| entry.last_used)
-            .map(|(id, _)| *id)?;
+        let pick = |only_idle: bool| {
+            entries
+                .iter()
+                .filter(|(id, _)| Some(**id) != keep)
+                // Prefer entries whose memory is actually reclaimable: an
+                // in-flight build keeps its rows and graph alive after the
+                // entry is gone (Delta 0.3.2).
+                .filter(|(_, entry)| !only_idle || !matches!(entry.state, DenseRows::Building(_)))
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(id, _)| *id)
+        };
+        let oldest = pick(true).or_else(|| pick(false))?;
         if let Some(entry) = entries.get(&oldest) {
             self.digests
                 .lock()
@@ -931,6 +947,12 @@ fn build_in_background(
         let ann = AnnIndex::build(&rows, dim)?;
         let store = AnnStore::new(store_root);
         let slot = ann.dump(&store, &key)?;
+        // Publish must not hold the source rows, the built graph and the loaded
+        // copy at once: on the heap-reload path that would add a third full
+        // copy (~1.86 GiB at 75k x 2048) on top of the admitted peak.
+        let published_bytes = ann.estimated_bytes() as u64;
+        drop(ann);
+        drop(rows);
         let loaded = AnnIndex::load(&slot)?;
         let mut entries = cache.lock_entries();
         if let Some(entry) = entries.get_mut(&project_id)
@@ -938,7 +960,7 @@ fn build_in_background(
             && entry.model_id == key.model_id
         {
             entry.state = DenseRows::Ann(Arc::new(loaded));
-            entry.bytes = ann.estimated_bytes() as u64;
+            entry.bytes = published_bytes;
             entry.last_used = cache.tick();
         }
         cache.enforce_byte_cap(&mut entries, project_id);
@@ -1006,6 +1028,31 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn second_build_is_not_admitted_while_the_first_occupies_the_cap() {
+        let cache = tempfile::TempDir::new().expect("cache");
+        let dim = 64;
+        let count = 64;
+        let per_build =
+            u64::try_from(ann::ann_estimated_bytes(count, dim) + count * dim * 4).expect("bytes");
+        let limits = DenseCacheLimits {
+            min_vectors: 1,
+            // Room for exactly one build reservation, none for two.
+            max_bytes: per_build + 1024,
+            ..DenseCacheLimits::default()
+        };
+        let dense = DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, cache.path(), limits);
+
+        let first = dense.resolve_rows(1, 1, "m@d64", dense_input(wide_rows(count, dim), dim));
+        assert!(matches!(first, DenseRows::Building(_)));
+
+        let second = dense.resolve_rows(2, 1, "m@d64", dense_input(wide_rows(count, dim), dim));
+        assert!(
+            matches!(second, DenseRows::Ready(_)),
+            "a second build must stay exact while the first occupies the cap, got {second:?}"
+        );
     }
 
     #[test]

@@ -198,4 +198,24 @@ fn search_runs_during_the_build_and_ann_serves_the_read_path() {
         after_publish, repeat,
         "persisted ANN answers deterministically"
     );
+
+    // Asking for more candidates than the index holds makes the ANN answer
+    // insufficient: the request falls back to exact and must not count as an
+    // ANN-served lookup (Delta 0.3.2).
+    let before = ann_search_count();
+    search_docs_with(
+        &stages(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 10 }),
+        1_000,
+    )
+    .expect("search with an oversized fetch");
+    assert_eq!(
+        ann_search_count(),
+        before,
+        "a fallback answer must not count as an ANN-served lookup"
+    );
 }

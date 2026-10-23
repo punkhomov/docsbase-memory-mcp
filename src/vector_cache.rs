@@ -244,6 +244,24 @@ impl VectorCache {
         self.evict()
     }
 
+    /// Debug-only: rows currently protected by a lease for `model_id`.
+    ///
+    /// # Errors
+    /// `SQLite` failures.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn lease_count(&self, model_id: &str) -> Result<u64> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM vector_cache_leases WHERE model_id = ?1",
+                params![model_id],
+                |row| row.get(0),
+            )
+            .map_err(|err| Error::internal_with_source("count vector leases", err))?;
+        Ok(u64::try_from(count).unwrap_or(u64::MAX))
+    }
+
     /// Embeds `texts`, reusing cached vectors keyed by `(model, chunk_hash)`.
     ///
     /// # Errors
