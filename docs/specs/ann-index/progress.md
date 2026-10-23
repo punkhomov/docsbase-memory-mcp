@@ -408,3 +408,24 @@
   60 s failed-wait. The Windows `ann_store` assertion compared a path substring
   with `/`, which never matches `\`; it now normalises separators. All three
   are test-only changes; lib 108, ann_store 16, hybrid_ann 15 green locally.
+
+- Task T11: complete (2026-10-23). Delta 0.2 close-out finished and the spec is
+  **Final** (rev 0.3). Evidence: CI run 39950585856 at 68aa6c3 — docs 6s,
+  linux 8m18s, linux-hybrid 10m11s, macos 3m54s, windows 19m43s (functional
+  suites; Windows exercises writable sync, mmap load and the 8k end-to-end
+  run). OQ-2/OQ-3/OQ-4 texts refreshed (14-day policy restored, 1.5 GiB cap and
+  one admission rule, Windows/macOS runtime closed). New OQ-4 evidence test
+  `hybrid_ann::cleanup_removes_a_generation_after_the_loaded_index_is_dropped`
+  removes a generation after the loaded mmap index is dropped. CHANGELOG now
+  carries the T10 end-to-end numbers next to the core benchmark, and
+  `docs/CONFIG.md` explains that ANN admission is bounded by the fixed 1.5 GiB
+  resident cap, not by `hybrid.cache.max_bytes`. Fresh whole-branch reviewer
+  (merge-gate scope) found only doc blockers; all fixed in this commit.
+  Note: the daemon warm fixture is 4200 documents, not 5000 (`server.rs`).
+
+- Flake fix (2026-10-23, T11): `tie_break_by_chunk_id` and
+  `scores_are_one_minus_cosine` occasionally lost a neighbour on 2–3 point
+  graphs because `hnsw_rs::parallel_insert_slice` races at that size. Indexes
+  with ≤ `SEQUENTIAL_BUILD_MAX` (64) points now use sequential `insert_slice`;
+  larger builds keep `parallel_insert_slice`. `ann_recall` passed 20/20 full
+  runs afterwards, and the tie-break contract test is the regression guard.

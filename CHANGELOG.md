@@ -41,7 +41,10 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
   builds in the background, direct CLI never builds. Core `AnnIndex`
   benchmark at 75k×2048: p95 ~5 ms on synthetic separated clusters; the
   end-to-end `DenseCache`/`VectorCache`/`search_docs` path is covered by an
-  8k×256 CI run and a passing 75k×2048 manual run (ann-index T10).
+  8k×256 CI run and a manual 75k×2048 run (ann-index T10: p50 1.46 ms, p95
+  2.88 ms over 20 searches, peak process RSS 1995.6 MiB including the
+  in-process build). The 1.5 GiB resident cap is an accounting model
+  (graph 691 MB + exact rows 586 MB), not an RSS clamp.
 
 ## [0.1.0-alpha.4] — 2026-10-14
 

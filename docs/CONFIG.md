@@ -64,6 +64,12 @@ max_bytes = 1073741824             # vector-cache budget; ANN needs full coverag
 working set keeps `embed_coverage` under 100% and therefore disables ANN
 (ann-index FR-6 / hybrid-providers DELTA-9).
 
+ANN admission is separate and **not configurable**: a background build is
+admitted only when `graph + exact rows` fits the resident cap
+`DenseCacheLimits.max_bytes` (1.5 GiB default, which covers the 75k×2048 peak
+of ~1.22 GiB). Raising `hybrid.cache.max_bytes` does not admit a larger corpus;
+past roughly 92k chunks at `d2048` the project stays on the exact path.
+
 Default pins are free OpenRouter routes: they may train on prompts and the
 roster rotates monthly. Paid pins (e.g. `qwen/qwen3-embedding-8b`,
 `cohere/rerank-v3.5`) are one explicit `docsbase models use` away and stay

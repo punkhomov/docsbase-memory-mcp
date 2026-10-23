@@ -518,13 +518,11 @@ exact streaming; `set_searching_mode(true)` после вставки. Ошиб�
 даёт exact fallback, не ошибку поиска. Ограничения: byte/vector/project caps,
 LRU, `TooLarge` streaming; `env_logger` — normal-зависимость
 `hnsw_rs`; размер release-бинаря после реализации — 12 MiB (бюджет 40 MiB).
-Версия/cooldown: `0.3.5` опубликован 2026-10-09; на 2026-10-22 он моложе
-14 дней. Временно (2026-10-22 → 23) используется **глобальный** 13-дневный
-`min-publish-age`, потому что Cargo 1.101 nightly поддерживает только
-global/per-registry policy и не имеет декларативного per-package allowlist;
-`CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow` тоже действует на весь resolve.
-T1.5 возвращает `14 days` 2026-10-23 (по решению человека отложен);
-`0.3.5` остаётся в `Cargo.lock`.
+Версия/cooldown: `0.3.5` опубликован 2026-10-09; на 2026-10-22 он был
+моложе 14 дней, поэтому временно (2026-10-22 → 23) действовал **глобальный**
+13-дневный `min-publish-age` (Cargo 1.101 nightly не имеет декларативного
+per-package allowlist). T1.5 завершил исключение 2026-10-23: действует
+политика `14 days`, `0.3.5` остаётся в `Cargo.lock`.
 Отклонено: `instant-distance` (archived 2026-07-23, no persistence),
 `self_cell` (lifetime/`&mut`), `sqlite-vector-rs`/`usearch` (C++/FFI, Arrow,
 static/MSRV), `hnsw` (rust-cv; 2021, hamming-oriented), `hannoy`/LMDB (C).
@@ -542,7 +540,7 @@ build снимает lease после `READY`, failed build оставляет �
 kept). Отклонено: строить ANN по частичному покрытию (тихий recall-риск),
 отдельный vector store (дублирует source of truth), безусловное удаление
 tmp-каталогов (гонка с build), удаление текущего проекта при disk cleanup.
-Остаток: Windows/macOS runtime CI, T1.5 cooldown revert.
+Закрыто T11 2026-10-23: Windows/macOS runtime подтверждён CI, T1.5 снят, спека ann-index — Final.
 
 ## 13. Directory structure
 

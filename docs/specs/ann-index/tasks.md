@@ -9,7 +9,7 @@ direct CLI только загружает.
 **Design:** `docs/specs/ann-index/design.md` (0.2)
 **Status:** T1 complete; T2–T7 complete (2026-10-22); T1.5 complete (2026-10-23,
 14-day cooldown restored); T8–T10 complete; T12–T21 complete (Delta 0.3.x);
-T11 close-out remains (Windows/macOS runtime CI, final status).
+T11 complete (2026-10-23: Windows/macOS runtime CI green, spec Final).
 Числа T6 — core-`AnnIndex`, end-to-end подтверждает T10.
 
 **Global constraints:**
@@ -395,7 +395,7 @@ RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_bench
 
 ---
 
-## T11 — Delta 0.2 close-out + merge gate
+## T11 — Delta 0.2 close-out + merge gate — complete (2026-10-23)
 
 **Goal:** привести спеку/доки/CHANGELOG к фактическому состоянию после T8–T10
 и проверить merge gate.
@@ -416,6 +416,14 @@ RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_bench
 
 **Acceptance:** docs не противоречат коду; T1.5 выполнен; targeted suite и
 Windows CI зелёные; delta 0.2 закрыта.
+
+**Done (2026-10-23):** CI run 39950585856 at 68aa6c3 — docs/linux/
+linux-hybrid/macos/windows green (windows 19m43s, macos 3m54s); OQ-4 closed
+with the runtime suites plus
+`cleanup_removes_a_generation_after_the_loaded_index_is_dropped`; OQ-2/OQ-3
+texts refreshed (14 days, 1.5 GiB); CHANGELOG carries core vs end-to-end
+numbers; fresh whole-branch review completed and its doc blockers fixed;
+requirements/design status = Final, rev 0.3.
 
 **Depends:** T8–T10, hybrid-providers T13, T1.5.
 

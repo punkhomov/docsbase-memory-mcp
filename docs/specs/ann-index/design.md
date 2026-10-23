@@ -1,7 +1,7 @@
 # Technical Design: ann-index (итерация 3 hybrid-providers)
 
-**Status:** Draft, ревизия 0.2 · **Дата:** 2026-10-22
-**Spec:** `docs/specs/ann-index/requirements.md` (ревизия 0.2)
+**Status:** Final, ревизия 0.3 · **Дата:** 2026-10-23
+**Spec:** `docs/specs/ann-index/requirements.md` (ревизия 0.3, Final)
 **Связано:** `docs/specs/hybrid-providers/design.md` (dense + RRF), ADR-12,
 ADR-14; **ADR-15** — ANN-зависимость и формат.
 
@@ -110,10 +110,10 @@ Persistence — обязательная часть v1, потому что от
 - `hnsw` (rust-cv) — последний релиз 2021; отклонён.
 - `hannoy`/LMDB — C-зависимость и лишний слой; отклонён.
 
-`hnsw_rs 0.3.5` (2026-10-09) на 2026-10-22 моложе 14 дней. Для v1
-используется временный **глобальный** 13-дневный cooldown (2026-10-22 → 23),
-затем 14 дней возвращаются шагом T1.5; 0.3.5 остаётся зафиксированным в
-`Cargo.lock`. Это workaround: Cargo 1.101 nightly поддерживает только
+`hnsw_rs 0.3.5` (2026-10-09) на 2026-10-22 был моложе 14 дней; временный
+**глобальный** 13-дневный cooldown (2026-10-22 → 23) снят шагом T1.5
+(2026-10-23): политика `14 days` восстановлена, 0.3.5 остаётся
+зафиксированным в `Cargo.lock`. Это workaround: Cargo 1.101 nightly поддерживает только
 global/per-registry `min-publish-age`, per-package декларативного allowlist
 нет; env-override `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow` действует
 на весь resolve.
@@ -144,7 +144,7 @@ DenseCache
 | `hybrid::ann_store` | пути, `AnnKey`, `AnnMeta`, atomic write, validation, cleanup |
 | `hybrid::dense` | `DenseRows::Ann`, limits, LRU, `TooLarge` hash cache |
 | `daemon::tools` | `dense_candidates` match; exact fallback |
-| `daemon::server` | build/load policy, warm after sync/backfill, invalidate |
+| `daemon::server` | build/load policy, warm after sync (rrf-only), cleanup always |
 | `cli::search` | `LoadOnly` для direct mode |
 
 ### 4.2 `AnnKey`
@@ -266,6 +266,11 @@ sync/backfill, **в фоне**. Пока HNSW строится, поиск ид�
 `VectorCache` (без `DenseIndex.rows`), чтобы не блокироваться и не держать
 rows + новый HNSW одновременно. `docsbase search` direct — `LoadOnly`.
 
+- Индексы размером ≤ 64 строятся последовательным `insert_slice`:
+  `parallel_insert` на крошечных графах теряет соседей (2-точечный граф может
+  вернуть один из двух), а на таком размере параллелизм не даёт выигрыша.
+  Большие индексы строятся `parallel_insert_slice` как раньше.
+
 ## 7. Search
 
 ```rust
@@ -384,11 +389,13 @@ struct DenseCacheLimits {
 ## 10. Direct CLI / daemon
 
 - Daemon: `AnnPolicy::BuildOrLoad`; после `run_sync_job`/backfill —
-  `DenseCache::warm(project, model)` **в фоне**. Пока build не завершён,
-  `search_docs` идёт exact; ошибка build логируется, проект не становится
-  error.
-- Cleanup после warm запускается только с guard-ом (mtime/active-set) и не
-  удаляет `tmp-*` строящегося индекса.
+  `DenseCache::warm(project, model)` **в фоне**, только когда
+  `enabled && ranking == Rrf` (Delta 0.3): для lexical-проекта dense-канал
+  никто не читает. Пока build не завершён, `search_docs` идёт exact; ошибка
+  build логируется, проект не становится error.
+- Cleanup (`cleanup`/`cleanup_disk`) выполняется **всегда** для проекта с
+  embedding-стадией, вне warm-гейта: смена rrf→lexical не должна оставлять
+  старые дампы навсегда. Он не удаляет `tmp-*` строящегося индекса.
 - `docsbase search` direct: `AnnPolicy::LoadOnly`; если persisted ANN нет —
   exact. Это защищает одноразовый процесс от build latency.
 - Если daemon запущен, CLI идёт через него и получает ANN.
@@ -424,7 +431,8 @@ Unit:
 - `ann_failed_build_retries_after_backoff` (не вечный `Building`).
 - `ann_cold_start_does_not_scan_vectors` (persisted ANN без `VectorCache`).
 - `ann_byte_cap_streams_exact_rows` (`TooLarge`, не `Ready`).
-- `ann_windows_sync_uses_write_handle` (runtime, Windows CI).
+- `cleanup_removes_a_generation_after_the_loaded_index_is_dropped`
+  (OQ-4: удаление generation-каталога после drop mmap-индекса; Windows CI).
 - `ann_cleanup_skips_active_tmp` (delayed build + cleanup).
 - `ann_high_fetch_recall` (`limit=100/1000`, dynamic ef).
 
@@ -481,8 +489,9 @@ CI:
 3. `ef_search` — dynamic formula выше; high-`fetch` recall проверяется T8/T10.
 4. Детерминизм `parallel_insert`: seed API нет; побайтовая идентичность не
    обещается, детерминизм запросов обязателен (T6).
-5. 0.3.5 finalization — закрыто T6; T1.5 остаётся merge gate для cooldown.
-6. Windows runtime — открыто до T9 (OQ-4).
+5. 0.3.5 finalization — закрыто T6; T1.5 завершён 2026-10-23 (14 days).
+6. Windows/macOS runtime — закрыто T11 по CI 39950585856 (OQ-4), включая
+   cleanup после drop mmap-индекса.
 7. `VectorCache` capacity/pinning — `hybrid-providers` DELTA-9, задача T13.
 
 ## 16. References

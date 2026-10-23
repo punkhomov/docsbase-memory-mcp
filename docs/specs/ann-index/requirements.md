@@ -1,6 +1,6 @@
 # SPECIFICATION: ann-index (итерация 3 hybrid-providers)
 
-**Status:** Draft, ревизия 0.2 · **Дата:** 2026-10-22
+**Status:** Final, ревизия 0.3 · **Дата:** 2026-10-23
 **Constitution:** `docs/specs/constitution.md` (1.3.0)
 **Связано:** `docs/specs/hybrid-providers/` (dense + RRF), ADR-12
 (`(model_id, chunk_hash)` кэш), ADR-14 (OpenRouter), ADR-15 (ANN).
@@ -119,6 +119,15 @@ cleanup, счётчик) не имели тестов, падающих при �
 `.cargo/config.toml` восстановлены `14 days` (политика), `hnsw_rs 0.3.5`
 остаётся запиненным в `Cargo.lock`; smoke-тест и `docs/supply-chain.md`
 обновлены. Упоминания 13 дней выше — исторический контекст Delta T1.1.
+
+**Delta T11 (2026-10-23, close-out):** спека переведена в **Final** после
+зелёного merge-gate: T1.5 закрыт (14 days), OQ-4 закрыт прогоном CI
+39950585856 (windows 19m43s, macos 3m54s — функциональные наборы), T8–T10 и
+T12–T21 закрыты, fresh whole-branch review выполнен и его doc-блокеры
+устранены (OQ-2/OQ-3/OQ-4, cap 1.5 GiB, warm/cleanup, CHANGELOG core vs
+end-to-end). Числа T10: end-to-end 75k×2048 p50 1.46 / p95 2.88 ms, peak
+process RSS 1995.6 MiB (включая сборку) — это диагностика, не RSS-кламп;
+1.5 GiB — модель учёта (graph + exact rows).
 
 ## 1. Problem
 
@@ -307,19 +316,27 @@ Non-goals:
   `self_cell` не подходит из-за `&mut HnswIo` и инвариантного `Hnsw`;
   `hnswlib-rs` остаётся запасным вариантом, если `ouroboros` упрётся в
   платформу/CI.
-- **OQ-2 (закрыт T6, 2026-10-22).** v1 — `hnsw_rs 0.3.5`; fallback-версии
-  нет. Dump чужой версии/формата не мигрируем; пересобираем. ADR-15 recorded
-  in product design. Для 0.3.5 временно используется **глобальный** cooldown
-  13 дней (2026-10-22 → 23), потому что Cargo 1.101 nightly не умеет
-  per-package декларативные исключения. T1.5 — обязательный merge gate:
-  вернуть `14 days`; 0.3.5 остаётся в `Cargo.lock`.
-- **OQ-3 (закрыт Delta 0.2, 2026-10-22).** `ANN_MIN_VECTORS = 4096`,
-  `DenseCacheLimits.max_bytes = 1 GiB` (глобальный резидентный cap),
-  `max_projects = 8`; `ef_search = max(64, fetch * 4)` с cap. `min_vectors`
-  остаётся тестовым/внутренним, не публичным контрактом.
-- **OQ-4 (открыт до T9).** Windows runtime, включая writable sync dump/meta и
-  удаление generation-каталогов после drop `HnswIo`; `cargo check` не
-  считается доказательством.
+- **OQ-2 (закрыт T6, 2026-10-22; T1.5 завершён 2026-10-23).** v1 —
+  `hnsw_rs 0.3.5`; fallback-версии нет. Dump чужой версии/формата не
+  мигрируем; пересобираем. ADR-15 записан в product design. Временный
+  13-дневный cooldown снят: `.cargo/config.toml` снова содержит политику
+  `14 days`, smoke это проверяет, `0.3.5` остаётся в `Cargo.lock`
+  (2026-10-09 + 14 дней = 2026-10-23).
+- **OQ-3 (закрыт Delta 0.2, 2026-10-22; уточнён Delta 0.3.1).**
+  `ANN_MIN_VECTORS = 4096`, `DenseCacheLimits.max_bytes = 1.5 GiB` (глобальный
+  резидентный cap; покрывает пик сборки graph 691 MB + exact rows 586 MB на
+  75k×2048, steady-state ANN остаётся 691 MB), `max_projects = 8`;
+  `ef_search = max(64, fetch * 4)` с cap. Сборка и backfill-лиз используют
+  одно правило `ann_build_admitted` (admission по строкам чанков).
+  `min_vectors` остаётся тестовым/внутренним, не публичным контрактом.
+- **OQ-4 (закрыт T11, 2026-10-23).** Windows/macOS runtime подтверждён CI
+  (run 39950585856, коммит 68aa6c3): `windows` — функциональный набор
+  `cargo test --locked` зелёный (19m43s), включая writable sync dump/meta
+  (`ann_store::persist_dump*`, `sync_dump_files`), mmap-load и
+  `ann_e2e_8k_x_256`; `macos` — тот же набор на aarch64 (3m54s).
+  Удаление generation-каталога после drop загруженного индекса покрыто
+  `hybrid_ann::cleanup_removes_a_generation_after_the_loaded_index_is_dropped`
+  (ммap держится до drop). `cargo check` доказательством не считался.
 - **OQ-5 (решено 2026-10-22).** Прогрев — после sync/backfill, в фоне;
   до `READY` поиск идёт exact streaming, без блокировки.
 - **OQ-6 (закрыт T5, 2026-10-22).** v1 — log-only диагностика; публичный
