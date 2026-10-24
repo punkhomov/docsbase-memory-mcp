@@ -80,14 +80,27 @@ pub fn embedder(cfg: &EmbeddingCfg, providers: &ProvidersCfg) -> Result<Arc<dyn 
         intra_threads: Some(capped_intra_threads()),
         runtime,
     };
-    load_embedder(entry, key)
+    load_embedder(entry, &key)
 }
 
 /// Process-wide embedder cache keyed by [`ModelCacheKey`] (one instance per
 /// key; never per config/call, NFR-4/NFR-7). The lock is held only for the
 /// lookup and the final insert — model construction happens outside it so
 /// concurrent loads of the same key serialize on the work, not on the map.
-fn load_embedder(entry: &ModelEntry<'_>, key: ModelCacheKey) -> Result<Arc<dyn Embedder>> {
+fn load_embedder(entry: &ModelEntry<'_>, key: &ModelCacheKey) -> Result<Arc<dyn Embedder>> {
+    get_or_load_embedder(key.clone(), || {
+        FastEmbedEmbedder::load(entry, key).map(|embedder| Arc::new(embedder) as Arc<dyn Embedder>)
+    })
+}
+
+/// Core process-wide per-key instance cache: returns the existing instance
+/// for `key`, or constructs one with `load` and registers it. Public inside
+/// the crate so tests can exercise the exact dedup contract without real
+/// weights (one instance per key, NFR-4/NFR-7).
+pub(crate) fn get_or_load_embedder(
+    key: ModelCacheKey,
+    load: impl FnOnce() -> Result<Arc<dyn Embedder>>,
+) -> Result<Arc<dyn Embedder>> {
     use std::collections::HashMap;
     use std::sync::OnceLock;
 
@@ -101,8 +114,7 @@ fn load_embedder(entry: &ModelEntry<'_>, key: ModelCacheKey) -> Result<Arc<dyn E
             return Ok(Arc::clone(existing));
         }
     }
-    let embedder = FastEmbedEmbedder::load(entry, &key)?;
-    let shared: Arc<dyn Embedder> = Arc::new(embedder);
+    let shared = load()?;
     let mut map = map
         .lock()
         .map_err(|poison| Error::internal(format!("embedder cache lock poisoned: {poison}")))?;
