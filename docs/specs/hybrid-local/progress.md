@@ -301,3 +301,11 @@ Ledger: одна запись на таск (что сделано, чем пр�
   `.docsbase.toml` (детерминированно тестируется; bootstrap нового проекта — через --global).
   Ruling: probe не требует реальной сети в тестах — fake Transport на уровне unit (как
   probe_openrouter_key в T2); CLI integration тесты используют --dry-run и error-пути.
+
+  T6 review fix (commit `0306ab4`): re-review ADDRESSED ×3 (hints → new CLI;
+  project-write roundtrip test; probe payloads == design strings `docsbase probe` /
+  (`docsbase`,`probe`), asserted via body-recording fake transport) + minors (trim,
+  provider whitelist upfront, without_env, shared `cli::test_env::ENV_LOCK` across
+  connect/models). Tests: lib 27 (both features) / 21 (hybrid-local), cli_models 15/15,
+  default green, clippy clean default+features. Ruling: env mutation во всех CLI unit
+  тестах сериализуется общим lock'ом (иначе параллельные tests race'ят).
