@@ -5,7 +5,8 @@
 //! deduplicates instances per cache key, holds a shared `.lock` guard on the
 //! model cache for its lifetime (so `models remove` refuses while loaded),
 //! and applies role-aware registry prefixes (`embed_query` vs `embed`).
-//! The reranker lands in T5; this module keeps a stub for it.
+//! The reranker (T5) uses the same cache-key/lock discipline with
+//! `UserDefinedRerankingModel` + `OnnxSource::File`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -94,30 +95,26 @@ fn load_embedder(entry: &ModelEntry<'_>, key: &ModelCacheKey) -> Result<Arc<dyn 
 }
 
 /// Core process-wide per-key instance cache: returns the existing instance
-/// for `key`, or constructs one with `load` and registers it. Public inside
-/// the crate so tests can exercise the exact dedup contract without real
-/// weights (one instance per key, NFR-4/NFR-7).
-pub(crate) fn get_or_load_embedder(
+/// for `key`, or constructs one with `load` and registers it. The single
+/// generic implementation behind both the embedder and reranker maps (one
+/// instance per key, NFR-4/NFR-7); the map itself is provided per-kind.
+fn get_or_load_by_key<T: ?Sized>(
     key: ModelCacheKey,
-    load: impl FnOnce() -> Result<Arc<dyn Embedder>>,
-) -> Result<Arc<dyn Embedder>> {
-    use std::collections::HashMap;
-    use std::sync::OnceLock;
-
-    static INSTANCES: OnceLock<Mutex<HashMap<ModelCacheKey, Arc<dyn Embedder>>>> = OnceLock::new();
-    let map = INSTANCES.get_or_init(|| Mutex::new(HashMap::new()));
+    instances: &'static Mutex<std::collections::HashMap<ModelCacheKey, Arc<T>>>,
+    load: impl FnOnce() -> Result<Arc<T>>,
+) -> Result<Arc<T>> {
     {
-        let map = map
+        let map = instances
             .lock()
-            .map_err(|poison| Error::internal(format!("embedder cache lock poisoned: {poison}")))?;
+            .map_err(|poison| Error::internal(format!("instance cache lock poisoned: {poison}")))?;
         if let Some(existing) = map.get(&key) {
             return Ok(Arc::clone(existing));
         }
     }
     let shared = load()?;
-    let mut map = map
+    let mut map = instances
         .lock()
-        .map_err(|poison| Error::internal(format!("embedder cache lock poisoned: {poison}")))?;
+        .map_err(|poison| Error::internal(format!("instance cache lock poisoned: {poison}")))?;
     // Re-check: another thread may have inserted the same key while we were
     // loading; keep the shared instance already registered.
     if let Some(existing) = map.get(&key) {
@@ -125,6 +122,24 @@ pub(crate) fn get_or_load_embedder(
     }
     map.insert(key, Arc::clone(&shared));
     Ok(shared)
+}
+
+/// Embedder instance map (process-wide).
+fn embedder_instances()
+-> &'static Mutex<std::collections::HashMap<ModelCacheKey, Arc<dyn Embedder>>> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static INSTANCES: OnceLock<Mutex<HashMap<ModelCacheKey, Arc<dyn Embedder>>>> = OnceLock::new();
+    INSTANCES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Public test seam for the embedder dedup contract (drives the production
+/// map; see `instant_cache_deduplicates_per_key`).
+pub(crate) fn get_or_load_embedder(
+    key: ModelCacheKey,
+    load: impl FnOnce() -> Result<Arc<dyn Embedder>>,
+) -> Result<Arc<dyn Embedder>> {
+    get_or_load_by_key(key, embedder_instances(), load)
 }
 
 /// Local `fastembed` embedder (T4). Holds the loaded model under a `Mutex`
@@ -241,10 +256,6 @@ impl Embedder for FastEmbedEmbedder {
     }
 }
 
-/// Builds the local rerank stage. Not yet implemented (T5).
-///
-/// # Errors
-/// Returns [`Error::Internal`] until T5 lands the fastembed reranker.
 /// Builds the local rerank stage (T5, FR-5/9/12): provisioning first
 /// (runtime → connect hint, model → fetch hint), then one instance per cache
 /// key. A rerank model requires an explicit registry row — there is no
@@ -272,6 +283,10 @@ pub fn reranker(cfg: &RerankerCfg, providers: &ProvidersCfg) -> Result<Arc<dyn R
             ),
         });
     }
+    // The reranker key mirrors the embedder's canonical shape minus the
+    // vector-affecting components (scores are never cached; the revision is
+    // build-static, so `@r<rev8>` adds nothing today). Kept as the canonical
+    // `model_id` for the dedup contract (NFR-4).
     let key = ModelCacheKey {
         model_id: format!("fastembed/{}", cfg.model),
         max_length: DEFAULT_MAX_LENGTH,
@@ -283,34 +298,21 @@ pub fn reranker(cfg: &RerankerCfg, providers: &ProvidersCfg) -> Result<Arc<dyn R
     })
 }
 
-/// Process-wide reranker cache keyed by [`ModelCacheKey`] (mirror of the
-/// embedder map; one instance per key, NFR-4/NFR-7).
+/// Reranker instance map (process-wide).
+fn reranker_instances()
+-> &'static Mutex<std::collections::HashMap<ModelCacheKey, Arc<dyn Reranker>>> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static INSTANCES: OnceLock<Mutex<HashMap<ModelCacheKey, Arc<dyn Reranker>>>> = OnceLock::new();
+    INSTANCES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Public test seam for the reranker dedup contract.
 pub(crate) fn get_or_load_reranker(
     key: ModelCacheKey,
     load: impl FnOnce() -> Result<Arc<dyn Reranker>>,
 ) -> Result<Arc<dyn Reranker>> {
-    use std::collections::HashMap;
-    use std::sync::OnceLock;
-
-    static INSTANCES: OnceLock<Mutex<HashMap<ModelCacheKey, Arc<dyn Reranker>>>> = OnceLock::new();
-    let map = INSTANCES.get_or_init(|| Mutex::new(HashMap::new()));
-    {
-        let map = map
-            .lock()
-            .map_err(|poison| Error::internal(format!("reranker cache lock poisoned: {poison}")))?;
-        if let Some(existing) = map.get(&key) {
-            return Ok(Arc::clone(existing));
-        }
-    }
-    let shared = load()?;
-    let mut map = map
-        .lock()
-        .map_err(|poison| Error::internal(format!("reranker cache lock poisoned: {poison}")))?;
-    if let Some(existing) = map.get(&key) {
-        return Ok(Arc::clone(existing));
-    }
-    map.insert(key, Arc::clone(&shared));
-    Ok(shared)
+    get_or_load_by_key(key, reranker_instances(), load)
 }
 
 /// Local `fastembed` cross-encoder reranker (T5). Uses the BYO path with
@@ -376,11 +378,15 @@ impl Reranker for FastEmbedReranker {
 /// Maps fastembed results to the `(index, score)` contract, best first, and
 /// clamps to `top_n`. Pure and unit-tested (live inference is T8).
 fn rerank_scores(results: &[fastembed::RerankResult], top_n: usize) -> Vec<(usize, f32)> {
-    results
+    let mut scores: Vec<(usize, f32)> = results
         .iter()
         .map(|result| (result.index, result.score))
-        .take(top_n)
-        .collect()
+        .collect();
+    // fastembed already sorts descending, but the mapping contract is ours:
+    // sort defensively so an upstream reorder can never invert rankings.
+    scores.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scores.truncate(top_n);
+    scores
 }
 
 /// Reads the four tokenizer files from the cache directory into fastembed's
@@ -677,20 +683,21 @@ mod tests {
             score,
             index,
         };
-        // 5 docs, best-first already sorted by fastembed.
+        // Deliberately unsorted: the contract, not fastembed's order, must
+        // determine the output.
         let results = vec![
+            make(2, 1.0),
             make(3, 9.0),
+            make(1, 4.0),
             make(0, 7.5),
             make(4, 6.0),
-            make(1, 4.0),
-            make(2, 1.0),
         ];
         let scores = rerank_scores(&results, 10);
         assert_eq!(scores.len(), 5, "every doc gets an index+score");
-        for (position, (index, score)) in scores.iter().enumerate() {
-            assert_eq!(*index, results[position].index);
-            assert!((score - results[position].score).abs() < f32::EPSILON);
-        }
+        assert_eq!(
+            scores,
+            vec![(3, 9.0), (0, 7.5), (4, 6.0), (1, 4.0), (2, 1.0)]
+        );
         // Order must be best-first.
         assert!(scores.windows(2).all(|w| w[0].1 >= w[1].1));
         // top_n clamps.
@@ -701,6 +708,43 @@ mod tests {
         assert!((capped[0].1 - 9.0).abs() < f32::EPSILON);
         // top_n larger than docs returns everything.
         assert_eq!(rerank_scores(&results, 100).len(), 5);
+    }
+
+    #[test]
+    fn reranker_cache_deduplicates_per_key() {
+        // Same contract as the embedder map: same key → same `Arc` and the
+        // loader is never invoked twice; a different key loads anew.
+        let key_a = ModelCacheKey {
+            model_id: "fastembed/jina-reranker-v1-turbo-en".to_owned(),
+            max_length: 512,
+            intra_threads: Some(4),
+            runtime: PathBuf::from("/tmp/libonnxruntime.so"),
+        };
+        let key_b = ModelCacheKey {
+            model_id: "fastembed/bge-reranker-base".to_owned(),
+            ..key_a.clone()
+        };
+        let make = |_id: String| -> Arc<dyn Reranker> {
+            struct Fake;
+            impl Reranker for Fake {
+                fn rerank(&self, _: &str, _: &[String], _: usize) -> Result<Vec<(usize, f32)>> {
+                    Err(Error::internal("not used"))
+                }
+            }
+            Arc::new(Fake)
+        };
+        let first =
+            get_or_load_reranker(key_a.clone(), || Ok(make(key_a.model_id.clone()))).expect("load");
+        // Same key must not invoke the loader again (panic-guard).
+        let second = get_or_load_reranker(key_a.clone(), || panic!("same key must not load twice"))
+            .expect("cached");
+        assert!(Arc::ptr_eq(&first, &second), "same key shares the instance");
+        let other =
+            get_or_load_reranker(key_b.clone(), || Ok(make(key_b.model_id.clone()))).expect("load");
+        assert!(
+            !Arc::ptr_eq(&first, &other),
+            "different key is a different instance"
+        );
     }
 
     #[test]
