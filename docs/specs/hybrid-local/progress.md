@@ -310,8 +310,8 @@ Ledger: одна запись на таск (что сделано, чем пр�
   default green, clippy clean default+features. Ruling: env mutation во всех CLI unit
   тестах сериализуется общим lock'ом (иначе параллельные tests race'ят).
 
-- Task 7: complete (commits `b786557..`→ head, Verify: tree gate default empty для всех 9
-  запрещённых crates; `cargo build --release --locked --features hybrid-local` ok (бинарник
+- Task 7: complete (commits `b786557..`→ head, Verify: tree gate default empty для всех 8
+  запрещённых crates (fastembed|ort|tokenizers|hf-hub|image|native-tls|ureq|reqwest); `cargo build --release --locked --features hybrid-local` ok (бинарник
   ~17 MiB < 40 MiB бюджета, NFR-8), без missing link-time libs (ORT грузится через dlopen).
   CI: добавлен `linux-local` job (clippy -D warnings + `cargo test --features hybrid-local`,
   полностью offline, без download'ов); в `windows`/`macos` добавлен `cargo check --features

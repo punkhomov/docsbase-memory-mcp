@@ -134,7 +134,7 @@ ignores = ["drafts/**", "*.tmp.md"]
 [providers.fastembed]
 enabled = true
 # runtime_path = "/opt/onnxruntime/lib/libonnxruntime.so"
-
+```
 
 Project `.docsbase.toml` (layered on top of global):
 
