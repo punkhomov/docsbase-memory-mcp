@@ -228,8 +228,11 @@ pub fn runtime_status(providers: &ProvidersCfg) -> RuntimeStatus {
                 .map(library_path)
                 .filter(|path| path.exists())
         });
+    // A connected provider requires an actually existing library: short-
+    // circuit only when the resolved path exists (a recorded runtime_path
+    // that vanished must stay Broken, matching provider_status/resolve).
     let has_entry = providers.fastembed.as_ref().is_some_and(|p| p.enabled);
-    if has_entry && path.is_some() {
+    if has_entry && path.as_ref().is_some_and(|path| path.exists()) {
         return RuntimeStatus {
             state: "Connected",
             version: providers
@@ -1149,6 +1152,60 @@ mod tests {
         assert!(matches!(err, Error::Admission { .. }));
         let ok = select_target("x86_64-unknown-linux-gnu").expect("known");
         assert_eq!(ok.triple, "x86_64-unknown-linux-gnu");
+    }
+
+    #[test]
+    fn runtime_status_reports_broken_for_vanished_runtime_path() {
+        use crate::hybrid::config::FastembedProvider;
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let missing = dir.path().join("libonnxruntime.so"); // never created
+        let providers = ProvidersCfg {
+            fastembed: Some(FastembedProvider {
+                enabled: true,
+                runtime: Some(ORT_VERSION.to_owned()),
+                runtime_path: Some(missing),
+            }),
+            openrouter: None,
+        };
+        let status = runtime_status(&providers);
+        assert_eq!(status.state, "Broken", "vanished runtime path is Broken");
+        assert!(status.reason.is_some());
+    }
+
+    #[test]
+    #[allow(unsafe_code)] // test-only env mutation, isolated to this test
+    fn runtime_status_reports_connected_when_data_dir_install_exists() {
+        use crate::hybrid::config::FastembedProvider;
+        let _guard = runtime_test_guard();
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let old_data = std::env::var_os("DOCSBASE_DATA_DIR");
+        // SAFETY: test-only; restored below.
+        unsafe {
+            std::env::set_var("DOCSBASE_DATA_DIR", dir.path());
+        }
+        let target = platform_target().expect("host target");
+        let installed = library_path(target);
+        std::fs::create_dir_all(installed.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&installed, b"fake").expect("touch");
+        let providers = ProvidersCfg {
+            fastembed: Some(FastembedProvider {
+                enabled: true,
+                runtime: None,
+                runtime_path: None,
+            }),
+            openrouter: None,
+        };
+        let status = runtime_status(&providers);
+        assert_eq!(status.state, "Connected");
+        assert_eq!(status.path.as_ref(), Some(&installed));
+        match old_data {
+            Some(value) => unsafe {
+                std::env::set_var("DOCSBASE_DATA_DIR", value);
+            },
+            None => unsafe {
+                std::env::remove_var("DOCSBASE_DATA_DIR");
+            },
+        }
     }
 
     #[test]
