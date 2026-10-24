@@ -116,56 +116,8 @@ fn state_label(state: ProviderState) -> &'static str {
 fn connect_openrouter() -> anyhow::Result<()> {
     #[cfg(feature = "hybrid-remote")]
     {
-        use crate::hybrid::openrouter::BASE_URL;
-        use crate::hybrid::wire::Transport;
-
-        let key = std::env::var("OPENROUTER_API_KEY").map_err(|_| Error::Admission {
-            message:
-                "OPENROUTER_API_KEY is not set; export it before `docsbase connect openrouter`"
-                    .to_owned(),
-        })?;
-        if key.trim().is_empty() {
-            return Err(Error::Admission {
-                message: "OPENROUTER_API_KEY is empty".to_owned(),
-            }
-            .into());
-        }
-        // The probe is a dedicated single-shot path: no retry wrapper
-        // (FR-3). 401/403 → check the key; transport → retry.
         let transport = crate::hybrid::openrouter::ReqwestTransport::new()?;
-        let headers = vec![("Authorization".to_owned(), format!("Bearer {key}"))];
-        let response = transport
-            .get_json(&format!("{BASE_URL}/key"), &headers)
-            .map_err(|err| Error::Admission {
-                message: format!(
-                    "key probe failed: {}; check the network and retry",
-                    err.inner_message()
-                ),
-            })?;
-        match response.status {
-            200 => {}
-            401 | 403 => {
-                return Err(Error::Admission {
-                    message: format!(
-                        "OPENROUTER_API_KEY was rejected (HTTP {}); check the key",
-                        response.status
-                    ),
-                }
-                .into());
-            }
-            other => {
-                return Err(Error::Admission {
-                    message: format!("key probe returned HTTP {other}; retry"),
-                }
-                .into());
-            }
-        }
-        write_global_provider(
-            PROVIDER_OPENROUTER,
-            &[("enabled", toml::Value::Boolean(true))],
-        )?;
-        println!("openrouter provider connected (key validated; never stored)");
-        Ok(())
+        probe_openrouter_key(&transport)
     }
     #[cfg(not(feature = "hybrid-remote"))]
     {
@@ -177,6 +129,62 @@ fn connect_openrouter() -> anyhow::Result<()> {
     }
 }
 
+/// Performs the key probe over an injected [`Transport`] — the single-shot
+/// path (no retry wrapper, FR-3) — and writes the provider entry on success.
+/// The key is never stored or logged (FR-3).
+///
+/// # Errors
+/// Returns [`Error::Admission`] for a missing/empty key, 401/403 (check the
+/// key), transport failures (retry) or any other status.
+#[cfg(feature = "hybrid-remote")]
+fn probe_openrouter_key(transport: &dyn crate::hybrid::wire::Transport) -> anyhow::Result<()> {
+    use crate::hybrid::openrouter::BASE_URL;
+
+    let key = std::env::var("OPENROUTER_API_KEY").map_err(|_| Error::Admission {
+        message: "OPENROUTER_API_KEY is not set; export it before `docsbase connect openrouter`"
+            .to_owned(),
+    })?;
+    if key.trim().is_empty() {
+        return Err(Error::Admission {
+            message: "OPENROUTER_API_KEY is empty".to_owned(),
+        }
+        .into());
+    }
+    let headers = vec![("Authorization".to_owned(), format!("Bearer {key}"))];
+    let response = transport
+        .get_json(&format!("{BASE_URL}/key"), &headers)
+        .map_err(|err| Error::Admission {
+            message: format!(
+                "key probe failed: {}; check the network and retry",
+                err.inner_message()
+            ),
+        })?;
+    match response.status {
+        200 => {}
+        401 | 403 => {
+            return Err(Error::Admission {
+                message: format!(
+                    "OPENROUTER_API_KEY was rejected (HTTP {}); check the key",
+                    response.status
+                ),
+            }
+            .into());
+        }
+        other => {
+            return Err(Error::Admission {
+                message: format!("key probe returned HTTP {other}; retry"),
+            }
+            .into());
+        }
+    }
+    write_global_provider(
+        PROVIDER_OPENROUTER,
+        &[("enabled", toml::Value::Boolean(true))],
+    )?;
+    println!("openrouter provider connected (key validated; never stored)");
+    Ok(())
+}
+
 /// Installs the pinned ONNX Runtime and records `[providers.fastembed]`
 /// (FR-4).
 #[cfg(feature = "hybrid-local")]
@@ -184,34 +192,47 @@ fn connect_fastembed(args: &FastembedArgs) -> anyhow::Result<()> {
     use crate::hybrid::runtime::{self, HttpRuntimeSource, ORT_VERSION};
 
     let target = runtime::platform_target()?;
-    let installed = runtime::library_path(target);
 
+    // `--check` reports the runtime state; macOS additionally reports the
+    // signature state (valid/adhoc/missing) — brief T2 step 5.
     if args.check && !args.force {
-        if installed.exists() {
-            // Confirm the file is loadable enough for reporting: size check.
-            let metadata = std::fs::metadata(&installed)
+        let config = crate::config::Config::global()?;
+        let status = runtime::runtime_status(&config.providers);
+        println!(
+            "fastembed runtime: state={} version={} path={} reason={}",
+            status.state,
+            status.version.as_deref().unwrap_or("-"),
+            status
+                .path
+                .as_ref()
+                .map_or_else(|| "-".to_owned(), |path| path.display().to_string()),
+            status.reason.as_deref().unwrap_or("-")
+        );
+        if let Some(path) = &status.path {
+            let metadata = std::fs::metadata(path)
                 .map_err(|err| Error::internal_with_source("stat runtime library", err))?;
             if metadata.len() != target.library_size {
                 return Err(Error::Admission {
                     message: format!(
                         "runtime library {} has size mismatch ({} vs expected {}); re-run `docsbase connect fastembed --force`",
-                        installed.display(),
+                        path.display(),
                         metadata.len(),
                         target.library_size
                     ),
                 }
                 .into());
             }
+            #[cfg(target_os = "macos")]
+            println!("macOS signature state: {}", macos_signature_state(path));
             println!(
-                "fastembed runtime {ORT_VERSION} installed: {} ({})",
-                installed.display(),
-                metadata.len()
+                "fastembed runtime {ORT_VERSION} installed: {}",
+                path.display()
             );
-            return Ok(());
+        } else {
+            println!(
+                "fastembed runtime {ORT_VERSION} is not installed; run `docsbase connect fastembed`"
+            );
         }
-        println!(
-            "fastembed runtime {ORT_VERSION} is not installed; run `docsbase connect fastembed`"
-        );
         return Ok(());
     }
 
@@ -234,6 +255,28 @@ fn connect_fastembed(args: &FastembedArgs) -> anyhow::Result<()> {
         target.archive_sha256
     );
     Ok(())
+}
+
+/// Reports the macOS code-signature state of an installed runtime library:
+/// `valid`, `adhoc`, or `missing` (when codesign cannot read it).
+#[cfg(target_os = "macos")]
+fn macos_signature_state(path: &std::path::Path) -> &'static str {
+    use std::process::Command;
+    let output = Command::new("codesign")
+        .args(["--verify", "--strict", path.to_str().unwrap_or_default()])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => "valid",
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("ad hoc") || stderr.contains("not signed") {
+                "adhoc"
+            } else {
+                "missing"
+            }
+        }
+        Err(_) => "missing",
+    }
 }
 
 /// Writes or merges one `[providers.<name>]` table into the global config
@@ -287,7 +330,192 @@ fn write_global_provider(name: &str, fields: &[(&str, toml::Value)]) -> Result<(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    /// Serializes tests that mutate the process-global `DOCSBASE_CONFIG_DIR`
+    /// / `OPENROUTER_API_KEY` (parallel tests would race on the env).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().expect("env lock")
+    }
+
+    /// Fake transport that records the requested URL and replays a scripted
+    /// response (single-shot key probe).
+    #[cfg(feature = "hybrid-remote")]
+    struct FakeKeyTransport {
+        calls: std::sync::Mutex<Vec<String>>,
+        status: u16,
+        transport_error: bool,
+    }
+
+    #[cfg(feature = "hybrid-remote")]
+    impl crate::hybrid::wire::Transport for FakeKeyTransport {
+        fn post_json(
+            &self,
+            _url: &str,
+            _headers: &[(String, String)],
+            _body: &str,
+        ) -> Result<crate::hybrid::wire::TransportResponse> {
+            Err(Error::internal("not used in the key probe"))
+        }
+
+        fn get_json(
+            &self,
+            url: &str,
+            _headers: &[(String, String)],
+        ) -> Result<crate::hybrid::wire::TransportResponse> {
+            self.calls.lock().expect("calls").push(url.to_owned());
+            if self.transport_error {
+                return Err(Error::internal("connection reset"));
+            }
+            Ok(crate::hybrid::wire::TransportResponse {
+                status: self.status,
+                body: "{}".to_owned(),
+                retry_after: None,
+            })
+        }
+    }
+
+    #[cfg(feature = "hybrid-remote")]
+    #[test]
+    #[allow(unsafe_code)] // test-only env mutation, serialized by env_guard
+    fn openrouter_probe_gets_key_and_never_persists_it() {
+        let _guard = env_guard();
+        // Isolated config dir; the probe writes the provider entry.
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let old = std::env::var_os("DOCSBASE_CONFIG_DIR");
+        let old_key = std::env::var_os("OPENROUTER_API_KEY");
+        unsafe {
+            std::env::set_var("DOCSBASE_CONFIG_DIR", dir.path());
+            std::env::set_var("OPENROUTER_API_KEY", "test-key-secret");
+        }
+        let transport = FakeKeyTransport {
+            calls: std::sync::Mutex::new(Vec::new()),
+            status: 200,
+            transport_error: false,
+        };
+        probe_openrouter_key(&transport).expect("probe ok");
+        // GET to the key endpoint, zero model tokens.
+        let calls = transport.calls.lock().expect("calls");
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].ends_with("/key"),
+            "{} is the key endpoint",
+            calls[0]
+        );
+        drop(calls);
+        // Provider entry written, key never persisted.
+        let path = dir.path().join("config.toml");
+        let text = std::fs::read_to_string(&path).expect("config written");
+        assert!(text.contains("providers"), "{text}");
+        assert!(text.contains("openrouter"), "{text}");
+        assert!(
+            !text.contains("test-key-secret"),
+            "key must never be stored: {text}"
+        );
+        assert!(!text.contains("Bearer"), "{text}");
+        match old {
+            Some(value) => unsafe {
+                std::env::set_var("DOCSBASE_CONFIG_DIR", value);
+            },
+            None => unsafe {
+                std::env::remove_var("DOCSBASE_CONFIG_DIR");
+            },
+        }
+        match old_key {
+            Some(value) => unsafe {
+                std::env::set_var("OPENROUTER_API_KEY", value);
+            },
+            None => unsafe {
+                std::env::remove_var("OPENROUTER_API_KEY");
+            },
+        }
+    }
+
+    #[cfg(feature = "hybrid-remote")]
+    #[test]
+    #[allow(unsafe_code)] // test-only env mutation, serialized by env_guard
+    fn openrouter_probe_401_is_admission_and_writes_nothing() {
+        let _guard = env_guard();
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let old = std::env::var_os("DOCSBASE_CONFIG_DIR");
+        let old_key = std::env::var_os("OPENROUTER_API_KEY");
+        unsafe {
+            std::env::set_var("DOCSBASE_CONFIG_DIR", dir.path());
+            std::env::set_var("OPENROUTER_API_KEY", "bad-key");
+        }
+        let transport = FakeKeyTransport {
+            calls: std::sync::Mutex::new(Vec::new()),
+            status: 401,
+            transport_error: false,
+        };
+        let err = probe_openrouter_key(&transport).expect_err("401 rejected");
+        assert!(matches!(err, anyhow::Error { .. }));
+        let text = format!("{err}");
+        assert!(text.contains("OPENROUTER_API_KEY"), "{text}");
+        assert!(
+            !dir.path().join("config.toml").exists(),
+            "nothing written on 401"
+        );
+        match old {
+            Some(value) => unsafe {
+                std::env::set_var("DOCSBASE_CONFIG_DIR", value);
+            },
+            None => unsafe {
+                std::env::remove_var("DOCSBASE_CONFIG_DIR");
+            },
+        }
+        match old_key {
+            Some(value) => unsafe {
+                std::env::set_var("OPENROUTER_API_KEY", value);
+            },
+            None => unsafe {
+                std::env::remove_var("OPENROUTER_API_KEY");
+            },
+        }
+    }
+
+    #[cfg(feature = "hybrid-remote")]
+    #[test]
+    #[allow(unsafe_code)] // test-only env mutation, serialized by env_guard
+    fn openrouter_probe_transport_error_is_admission_retry() {
+        let _guard = env_guard();
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let old = std::env::var_os("DOCSBASE_CONFIG_DIR");
+        let old_key = std::env::var_os("OPENROUTER_API_KEY");
+        unsafe {
+            std::env::set_var("DOCSBASE_CONFIG_DIR", dir.path());
+            std::env::set_var("OPENROUTER_API_KEY", "some-key");
+        }
+        let transport = FakeKeyTransport {
+            calls: std::sync::Mutex::new(Vec::new()),
+            status: 200,
+            transport_error: true,
+        };
+        let err = probe_openrouter_key(&transport).expect_err("transport fails");
+        let text = format!("{err}");
+        assert!(text.contains("retry"), "{text}");
+        assert!(!dir.path().join("config.toml").exists());
+        match old {
+            Some(value) => unsafe {
+                std::env::set_var("DOCSBASE_CONFIG_DIR", value);
+            },
+            None => unsafe {
+                std::env::remove_var("DOCSBASE_CONFIG_DIR");
+            },
+        }
+        match old_key {
+            Some(value) => unsafe {
+                std::env::set_var("OPENROUTER_API_KEY", value);
+            },
+            None => unsafe {
+                std::env::remove_var("OPENROUTER_API_KEY");
+            },
+        }
+    }
 
     #[test]
     fn state_labels_cover_all_provider_states() {
@@ -302,8 +530,9 @@ mod tests {
     }
 
     #[test]
-    #[allow(unsafe_code)] // test-only env mutation, isolated to this test
+    #[allow(unsafe_code)] // test-only env mutation, serialized by env_guard
     fn provider_write_preserves_unrelated_sections() {
+        let _guard = env_guard();
         let dir = tempfile::TempDir::new().expect("tmp");
         let old = std::env::var_os("DOCSBASE_CONFIG_DIR");
         unsafe {
