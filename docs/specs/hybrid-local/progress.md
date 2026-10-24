@@ -253,3 +253,19 @@ Ledger: одна запись на таск (что сделано, чем пр�
   DOCSBASE_DATA_DIR-изоляция, без общего guard'а с ENV_LOCK domain'ом); macOS-функции
   (macos_fixup_commands, macos_major_version) неисполнимы на Linux CI по природе (покрыт состав/
   разбор). T2 closed.
+
+- Task 4: complete (commits `89de00a..`→ head, tests: `cargo test --locked --features
+  hybrid-local --lib hybrid::local` → 4 passed; `--test hybrid_local` → 3 passed; default suite
+  green; clippy -D warnings чист; default tree gate 0).
+  Реализовано: `Embedder::embed_query` default = embed([text]) (vector_cache.rs); real
+  `FastEmbedEmbedder` (local.rs): provisioning order runtime→model с connect/fetch hints,
+  `ModelCacheKey` process-wide map (canonical id + max_length 512 + intra_threads min(4,cores) +
+  runtime path), `runtime::init` перед fastembed-конструктором, BYO загрузка
+  (`UserDefinedEmbeddingModel` + `TextEmbedding::try_new_from_user_defined` + pooling/quantization/
+  output_key из registry), shared `.lock` guard на lifetime инстанса (fd-lock try_read),
+  prefix-роли (embed_query=query_prefix, embed=passage_prefix); `dense_candidates` теперь зовёт
+  `embed_query` (spy-тест `dense_search_path_uses_embed_query` доказывает роль). Ruling: fallback
+  между реальным inference и тестами невозможен offline — prefix-контракт тестируется на registry-
+  строках; live-inference в T8. Ruling: `FastEmbedEmbedder` хранит `Mutex<TextEmbedding>` (fastembed
+  embed требует &mut self); процесс-wide кэш по ключу гарантирует один инстанс на ключ.
+  Отложено: T5 (reranker stub остаётся).
