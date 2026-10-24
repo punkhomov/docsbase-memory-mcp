@@ -3430,6 +3430,14 @@ pub mod live_transport {
             }
             Ok(response)
         }
+
+        fn get_json(
+            &self,
+            url: &str,
+            headers: &[(String, String)],
+        ) -> docsbase_memory::error::Result<TransportResponse> {
+            self.inner.get_json(url, headers)
+        }
     }
 }
 

@@ -118,6 +118,10 @@ impl Transport for MockTransport {
             retry_after: retry_after.map(std::time::Duration::from_secs),
         })
     }
+
+    fn get_json(&self, url: &str, headers: &[(String, String)]) -> Result<TransportResponse> {
+        self.post_json(url, headers, "")
+    }
 }
 
 fn make_client(mock: &MockTransport) -> OpenRouterClient {
@@ -419,6 +423,10 @@ impl Transport for FailingTransport {
     ) -> Result<TransportResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(Error::internal("connection reset"))
+    }
+
+    fn get_json(&self, url: &str, headers: &[(String, String)]) -> Result<TransportResponse> {
+        self.post_json(url, headers, "")
     }
 }
 

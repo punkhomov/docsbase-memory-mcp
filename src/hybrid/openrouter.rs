@@ -463,4 +463,34 @@ impl Transport for ReqwestTransport {
         };
         self.block_on(future)
     }
+
+    fn get_json(&self, url: &str, headers: &[(String, String)]) -> Result<TransportResponse> {
+        let future = async {
+            let mut request = self.http.get(url);
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|err| Error::internal_with_source("OpenRouter request failed", err))?;
+            let status = response.status().as_u16();
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .map(Duration::from_secs);
+            let body = response
+                .text()
+                .await
+                .map_err(|err| Error::internal_with_source("read OpenRouter response", err))?;
+            Ok(TransportResponse {
+                status,
+                body,
+                retry_after,
+            })
+        };
+        self.block_on(future)
+    }
 }
