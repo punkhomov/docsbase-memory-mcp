@@ -1,5 +1,16 @@
 //! CLI entry points (FR-30).
 
+/// Shared test seam for CLI unit-test modules: environment mutation
+/// (`DOCSBASE_CONFIG_DIR`, `OPENROUTER_API_KEY`, …) must be serialized
+/// across all modules that read it concurrently, or parallel `cargo test`
+/// runs race each other. Keep this one lock for every env-touching test.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::Mutex;
+
+    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
+}
+
 pub mod connect;
 pub mod index;
 pub mod install;

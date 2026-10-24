@@ -364,7 +364,15 @@ fn resolve_provider(
         }
     }
     if let Some(provider) = explicit {
-        return Ok(provider.to_owned());
+        return match provider {
+            PROVIDER_FASTEMBED | PROVIDER_OPENROUTER => Ok(provider.to_owned()),
+            other => Err(Error::Admission {
+                message: format!(
+                    "unknown provider \"{other}\"; want {PROVIDER_FASTEMBED} or {PROVIDER_OPENROUTER}"
+                ),
+            }
+            .into()),
+        };
     }
     Err(Error::Admission {
         message: format!(
@@ -381,8 +389,9 @@ fn resolve_provider(
 /// Admission for unknown models, wrong-task rows, dims mismatch with the
 /// registry, and missing dims for non-fastembed providers.
 fn resolve_embed_stage(args: &EmbedArgs) -> anyhow::Result<(String, u32)> {
-    let provider = resolve_provider(Segment::Embedding, &args.model, args.provider.as_deref())?;
-    let dims = resolve_dims(&args.model, &provider, args.dims)?;
+    let model = args.model.trim();
+    let provider = resolve_provider(Segment::Embedding, model, args.provider.as_deref())?;
+    let dims = resolve_dims(model, &provider, args.dims)?;
     Ok((provider, dims))
 }
 
@@ -391,7 +400,8 @@ fn resolve_embed_stage(args: &EmbedArgs) -> anyhow::Result<(String, u32)> {
 /// # Errors
 /// Admission for unknown models, wrong-task rows and out-of-range windows.
 fn resolve_rerank_stage(args: &RerankArgs) -> anyhow::Result<(String, u32)> {
-    let provider = resolve_provider(Segment::Rerank, &args.model, args.provider.as_deref())?;
+    let model = args.model.trim();
+    let provider = resolve_provider(Segment::Rerank, model, args.provider.as_deref())?;
     let window = resolve_window(args.window)?;
     Ok((provider, window))
 }
@@ -502,9 +512,8 @@ fn validate_hybrid_table(hybrid: &toml::map::Map<String, toml::Value>) -> anyhow
             .unwrap_or_default();
         if model.trim().is_empty() {
             return Err(Error::Admission {
-                message:
-                    "existing hybrid.embedding.model is blank (pass --embedding --dims to fix)"
-                        .to_owned(),
+                message: "existing hybrid.embedding.model is blank (run `docsbase models use embed <model>` to fix)"
+                    .to_owned(),
             }
             .into());
         }
@@ -514,7 +523,7 @@ fn validate_hybrid_table(hybrid: &toml::map::Map<String, toml::Value>) -> anyhow
             .unwrap_or(0);
         if dims <= 0 {
             return Err(Error::Admission {
-                message: "existing hybrid.embedding.dimensions must be positive (pass --embedding --dims to fix)"
+                message: "existing hybrid.embedding.dimensions must be positive (run `docsbase models use embed <model>` to fix)"
                     .to_owned(),
             }
             .into());
@@ -527,7 +536,7 @@ fn validate_hybrid_table(hybrid: &toml::map::Map<String, toml::Value>) -> anyhow
             .unwrap_or_default();
         if model.trim().is_empty() {
             return Err(Error::Admission {
-                message: "existing hybrid.reranker.model is blank (pass --rerank to fix)"
+                message: "existing hybrid.reranker.model is blank (run `docsbase models use rerank <model>` to fix)"
                     .to_owned(),
             }
             .into());
@@ -649,7 +658,8 @@ fn probe_fastembed_offline(_model: &str) -> anyhow::Result<()> {
 }
 
 /// Single-shot `OpenRouter` probe (FR-8): one embed of `docsbase probe`, one
-/// rerank of (`docsbase`, `probe`) — each exactly one POST, no retry
+/// rerank of (`docsbase`, `probe`) — each exactly one POST (the fixture
+/// payloads below are asserted by the fake-transport tests), no retry
 /// wrapper. 401/403 → `Admission` (`check key`); transport failures →
 /// `Admission` (retry).
 ///
@@ -699,7 +709,7 @@ fn probe_openrouter_embed(
     let url = format!("{BASE_URL}/embeddings");
     let request = serde_json::json!({
         "model": model,
-        "input": ["probe"],
+        "input": ["docsbase probe"],
         "dimensions": dims,
         "input_type": "document",
     });
@@ -741,8 +751,8 @@ fn probe_openrouter_rerank(
     let url = format!("{BASE_URL}/rerank");
     let request = serde_json::json!({
         "model": model,
-        "query": "probe",
-        "documents": ["alpha", "beta"],
+        "query": "docsbase",
+        "documents": ["probe"],
         "top_n": 2,
     });
     let body = serde_json::to_string(&request)
@@ -924,13 +934,14 @@ fn print_summary(table: &toml::Value) {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
+    #[cfg(feature = "hybrid-remote")]
     use std::sync::Mutex;
 
     use super::*;
     #[cfg(feature = "hybrid-remote")]
     use crate::hybrid::wire::{Transport, TransportResponse};
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::cli::test_env::ENV_LOCK;
 
     #[allow(unsafe_code)] // env mutation is confined to this locked section
     fn with_env<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V, f: impl FnOnce()) {
@@ -948,6 +959,25 @@ mod tests {
             match prev {
                 Some(v) => std::env::set_var(key.as_ref(), v),
                 None => std::env::remove_var(key.as_ref()),
+            }
+        }
+    }
+
+    /// Like [`with_env`] but guarantees the variable is absent for `f`
+    /// (the missing-key probe must test the truly-unset case).
+    #[cfg_attr(not(feature = "hybrid-remote"), allow(dead_code))]
+    #[allow(unsafe_code)]
+    fn without_env<K: AsRef<OsStr>>(key: K, f: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let prev = std::env::var_os(key.as_ref());
+        unsafe {
+            std::env::remove_var(key.as_ref());
+        }
+        f();
+        // SAFETY: same single-threaded critical section as above.
+        unsafe {
+            if let Some(v) = prev {
+                std::env::set_var(key.as_ref(), v);
             }
         }
     }
@@ -1224,7 +1254,7 @@ mod tests {
             rerank_stage("openrouter", "m/r", 20),
         )
         .expect_err("stale preserved dims");
-        assert!(err.to_string().contains("--dims"), "{err}");
+        assert!(err.to_string().contains("models use embed"), "{err}");
 
         let bogus_ranking = parse("[hybrid]\nranking = \"bogus\"\n");
         let err = merge_stage(
@@ -1248,6 +1278,60 @@ mod tests {
     }
 
     // ---------- writes ----------
+
+    #[test]
+    fn project_write_roundtrip_keeps_unrelated_keys_and_other_stage() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let path = dir.path().join(".docsbase.toml");
+        std::fs::write(
+            &path,
+            "max_file_size = 1\n[hybrid]\nranking = \"rrf\"\n[hybrid.reranker]\nprovider = \"openrouter\"\nmodel = \"old/r\"\nwindow = 20\n",
+        )
+        .expect("seed");
+        let existing = read_project_toml(&path).expect("read").expect("some");
+        // Default project scope: write only the embedding stage.
+        let table = merge_stage(
+            Some(&existing),
+            "embedding",
+            embedding_stage("openrouter", "new/e", 256),
+        )
+        .expect("merge");
+        write_project_toml(&path, Some(&existing), &table).expect("write");
+        let reloaded: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).expect("read back")).expect("reparse");
+        assert_eq!(
+            reloaded
+                .get("max_file_size")
+                .and_then(toml::Value::as_integer),
+            Some(1),
+            "unrelated keys survive"
+        );
+        let hybrid = reloaded.get("hybrid").expect("hybrid table");
+        assert_eq!(
+            hybrid.get("ranking").and_then(toml::Value::as_str),
+            Some("rrf")
+        );
+        let embedding = hybrid.get("embedding").expect("embedding written");
+        assert_eq!(
+            embedding.get("model").and_then(toml::Value::as_str),
+            Some("new/e")
+        );
+        assert_eq!(
+            embedding
+                .get("dimensions")
+                .and_then(toml::Value::as_integer),
+            Some(256)
+        );
+        let reranker = hybrid.get("reranker").expect("reranker untouched");
+        assert_eq!(
+            reranker.get("model").and_then(toml::Value::as_str),
+            Some("old/r")
+        );
+        assert_eq!(
+            reranker.get("window").and_then(toml::Value::as_integer),
+            Some(20)
+        );
+    }
 
     #[test]
     fn global_write_preserves_providers_and_unrelated_sections() {
@@ -1346,7 +1430,7 @@ mod tests {
         rerank_status: u16,
         rerank_body: String,
         fail_transport: bool,
-        calls: Mutex<Vec<String>>,
+        calls: Mutex<Vec<(String, String)>>,
     }
 
     #[cfg(feature = "hybrid-remote")]
@@ -1355,9 +1439,12 @@ mod tests {
             &self,
             url: &str,
             _headers: &[(String, String)],
-            _body: &str,
+            body: &str,
         ) -> crate::error::Result<TransportResponse> {
-            self.calls.lock().expect("calls").push(url.to_owned());
+            self.calls
+                .lock()
+                .expect("calls")
+                .push((url.to_owned(), body.to_owned()));
             if self.fail_transport {
                 return Err(Error::internal("connection reset"));
             }
@@ -1406,7 +1493,14 @@ mod tests {
                 window: None,
             };
             probe_openrouter_singleshot_with(&fake, &spec).expect("probe ok");
-            assert_eq!(fake.calls.lock().expect("calls").len(), 1, "one embed call");
+            let calls = fake.calls.lock().expect("calls");
+            assert_eq!(calls.len(), 1, "one embed call");
+            let (url, body) = &calls[0];
+            assert!(url.contains("/embeddings"), "{url}");
+            let payload: serde_json::Value = serde_json::from_str(body).expect("json");
+            assert_eq!(payload["model"], "m/e");
+            assert_eq!(payload["input"][0], "docsbase probe");
+            assert_eq!(payload["dimensions"], 128);
         });
     }
 
@@ -1438,6 +1532,19 @@ mod tests {
         });
         let calls = fake.calls.lock().expect("calls");
         assert_eq!(calls.len(), 2, "one embed + one rerank");
+        let (embed_url, embed_body) = &calls[0];
+        assert!(embed_url.contains("/embeddings"), "{embed_url}");
+        let embed_payload: serde_json::Value = serde_json::from_str(embed_body).expect("json");
+        assert_eq!(embed_payload["model"], "m/e");
+        assert_eq!(embed_payload["input"][0], "docsbase probe");
+        assert_eq!(embed_payload["dimensions"], 128);
+        let (rerank_url, rerank_body) = &calls[1];
+        assert!(rerank_url.contains("/rerank"), "{rerank_url}");
+        let rerank_payload: serde_json::Value = serde_json::from_str(rerank_body).expect("json");
+        assert_eq!(rerank_payload["model"], "m/e");
+        assert_eq!(rerank_payload["query"], "docsbase");
+        assert_eq!(rerank_payload["documents"][0], "probe");
+        assert_eq!(rerank_payload["top_n"], 2);
     }
 
     #[cfg(feature = "hybrid-remote")]
@@ -1519,9 +1626,8 @@ mod tests {
             fail_transport: false,
             calls: Mutex::new(Vec::new()),
         };
-        // No OPENROUTER_API_KEY set: with_env would restore whatever existed;
-        // ensure it is absent first.
-        with_env("OPENROUTER_API_KEY", "", || {
+        // No OPENROUTER_API_KEY present (removed, not emptied).
+        without_env("OPENROUTER_API_KEY", || {
             let spec = ProbeSpec {
                 provider: PROVIDER_OPENROUTER.to_owned(),
                 model: "m/e".to_owned(),

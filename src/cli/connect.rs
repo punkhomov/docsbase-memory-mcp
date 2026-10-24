@@ -334,16 +334,12 @@ fn write_global_provider(name: &str, fields: &[(&str, toml::Value)]) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
 
-    /// Serializes tests that mutate the process-global `DOCSBASE_CONFIG_DIR`
-    /// / `OPENROUTER_API_KEY` (parallel tests would race on the env).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
+    /// Shared with every other CLI unit-test module (`cli::test_env`);
+    /// env mutation must be serialized process-wide.
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().expect("env lock")
+        crate::cli::test_env::ENV_LOCK.lock().expect("env lock")
     }
 
     /// Fake transport that records the requested URL and replays a scripted
