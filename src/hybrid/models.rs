@@ -10,9 +10,13 @@
 //! module is compiled only under `hybrid-local`, so the default build links
 //! none of it (NFR-1).
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use fd_lock::RwLock;
 use sha2::Digest;
@@ -416,6 +420,91 @@ fn open_lock(dir: &Path) -> Result<std::fs::File> {
 /// with the exact size and sha256 (FR-6, NFR-3). Returns `false` (not an
 /// error) when a file is missing or mismatched; IO failures are errors.
 fn verify_hashes(entry: &ModelEntry<'_>, dir: &Path) -> Result<bool> {
+    // Memoized (panel C9): repeated `cached_in` calls in one process (e.g.
+    // config load + stage construction, or fetch fast-path + embedder load)
+    // must not re-hash multi-hundred-MiB files. The memo key is the file
+    // signature (per-file size + mtime, plus the `.complete` mtime), so any
+    // external mutation or reinstall invalidates it — correctness is
+    // preserved, only stat calls replace hashing on the hot repeat path.
+    let stamp = verify_stamp(entry, dir)?;
+    let memo = VERIFY_MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let map = memo
+            .lock()
+            .map_err(|poison| Error::internal(format!("verify memo lock poisoned: {poison}")))?;
+        if let Some((verdict, cached_stamp)) = map.get(dir) {
+            if *cached_stamp == stamp {
+                return Ok(*verdict);
+            }
+        }
+    }
+    let verdict = verify_hashes_full(entry, dir)?;
+    let mut map = memo
+        .lock()
+        .map_err(|poison| Error::internal(format!("verify memo lock poisoned: {poison}")))?;
+    map.insert(dir.to_path_buf(), (verdict, stamp));
+    Ok(verdict)
+}
+
+/// File signature used by the verification memo: presence + size + mtime of
+/// every registry file and of the `.complete` marker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VerifyStamp {
+    complete: Option<std::time::SystemTime>,
+    files: Vec<(String, Option<(u64, std::time::SystemTime)>)>,
+}
+
+fn verify_stamp(entry: &ModelEntry<'_>, dir: &Path) -> Result<VerifyStamp> {
+    let mut files = Vec::with_capacity(entry.files.len());
+    for spec in entry.files {
+        let stamp = match std::fs::metadata(dir.join(spec.path)) {
+            Ok(metadata) => {
+                let modified = metadata.modified().map_err(|err| {
+                    Error::internal_with_source(
+                        format!("mtime {}", dir.join(spec.path).display()),
+                        err,
+                    )
+                })?;
+                Some((metadata.len(), modified))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => {
+                return Err(Error::internal_with_source(
+                    format!("stat {}", dir.join(spec.path).display()),
+                    err,
+                ));
+            }
+        };
+        files.push((spec.path.to_owned(), stamp));
+    }
+    let complete = match std::fs::metadata(dir.join(".complete")) {
+        Ok(metadata) => {
+            let modified = metadata.modified().map_err(|err| {
+                Error::internal_with_source(
+                    format!("mtime {}", dir.join(".complete").display()),
+                    err,
+                )
+            })?;
+            Some(modified)
+        }
+        Err(_) => None,
+    };
+    Ok(VerifyStamp { complete, files })
+}
+
+static VERIFY_MEMO: OnceLock<Mutex<HashMap<PathBuf, (bool, VerifyStamp)>>> = OnceLock::new();
+
+/// Number of full sha256 verification passes (test-only counter for the C9
+/// memo regression).
+#[cfg(test)]
+static HASH_PASSES: AtomicUsize = AtomicUsize::new(0);
+
+/// The actual sha256 pass (see `verify_hashes` for the memo/wrapper).
+fn verify_hashes_full(entry: &ModelEntry<'_>, dir: &Path) -> Result<bool> {
+    #[cfg(test)]
+    {
+        HASH_PASSES.fetch_add(1, Ordering::Relaxed);
+    }
     for spec in entry.files {
         let path = dir.join(spec.path);
         let metadata = match std::fs::metadata(&path) {
@@ -1110,6 +1199,34 @@ mod tests {
         std::fs::write(dir.path().join(".complete"), b"").expect("marker");
         std::fs::write(dir.path().join("tokenizer.json"), b"tampered").expect("tamper");
         assert!(!cached_in(&entry, dir.path()).expect("tampered cache not trusted"));
+    }
+
+    #[test]
+    fn cached_memoizes_verified_hashes_within_process() {
+        // C9: repeated `cached_in` calls in one process must not re-hash;
+        // tampering (even same-size) must still be detected via the
+        // file-signature invalidation.
+        let dir = TempDir::new().expect("tmp");
+        let entry = fake_entry();
+        let source = FakeSource::new(&entry);
+        fetch_into(&entry, &source, false, dir.path()).expect("fetch");
+        // Relative check around the second call only: the process-global
+        // counter may be bumped by sibling hashing tests in parallel, so an
+        // absolute delta is not stable; a memo hit must add zero passes
+        // between two consecutive local calls.
+        assert!(cached_in(&entry, dir.path()).expect("cached"));
+        let after_first = HASH_PASSES.load(Ordering::Relaxed);
+        assert!(cached_in(&entry, dir.path()).expect("cached memo"));
+        assert_eq!(
+            HASH_PASSES.load(Ordering::Relaxed),
+            after_first,
+            "memoized second check adds no hash pass"
+        );
+        // Same-size tamper: signature changes (mtime), so re-verification
+        // runs and detects the mismatch.
+        std::fs::write(dir.path().join("tokenizer.json"), vec![0_u8; 512])
+            .expect("same-size tamper");
+        assert!(!cached_in(&entry, dir.path()).expect("tampered not cached"));
     }
 
     #[test]
