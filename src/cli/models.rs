@@ -454,9 +454,12 @@ pub fn run(args: &UseArgs) -> anyhow::Result<()> {
         }
     }
     if args.dry_run {
+        // Preview the full merged file exactly as the write would produce it
+        // (unrelated keys preserved; panel C12).
+        let preview = preview_merged(existing.as_ref(), &table);
         println!(
             "{}",
-            toml::to_string(&table)
+            toml::to_string(&preview)
                 .map_err(|err| Error::internal_with_source("render hybrid config", err))?
         );
         return Ok(());
@@ -736,6 +739,26 @@ fn merge_stage(
     let mut root = toml::map::Map::new();
     root.insert("hybrid".to_owned(), toml::Value::Table(hybrid));
     Ok(toml::Value::Table(root))
+}
+
+/// The merged file root the write path would persist: the existing root
+/// with its `hybrid` table replaced by the resolved one. When no file
+/// exists yet, the resolved table is the whole preview.
+fn preview_merged(existing: Option<&toml::Value>, table: &toml::Value) -> toml::Value {
+    match existing {
+        Some(root) => {
+            let mut merged = root.clone();
+            if let Some(map) = merged.as_table_mut() {
+                let hybrid = table
+                    .get("hybrid")
+                    .cloned()
+                    .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+                map.insert("hybrid".to_owned(), hybrid);
+            }
+            merged
+        }
+        None => table.clone(),
+    }
 }
 
 /// Validates the merged `hybrid` table: flag arguments were checked on the

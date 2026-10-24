@@ -248,6 +248,31 @@ fn models_use_dims_only_on_embed() {
 }
 
 #[test]
+fn models_use_dry_run_previews_full_merged_file() {
+    // C12: `--dry-run` must render the file as it would be written,
+    // preserving unrelated keys from the existing project file.
+    let env = Env::new();
+    let dir = tempfile::TempDir::new().expect("tmp");
+    std::fs::write(
+        dir.path().join(".docsbase.toml"),
+        "other = 42\n\n[unrelated]\nkey = \"kept\"\n",
+    )
+    .expect("seed");
+    let output = env
+        .cmd()
+        .current_dir(dir.path())
+        .args(["models", "use", "embed", "bge-small-en-v1.5", "--dry-run"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("other = 42"), "{stdout}");
+    assert!(stdout.contains("key = \"kept\""), "{stdout}");
+    assert!(stdout.contains("bge-small-en-v1.5"), "{stdout}");
+}
+
+#[test]
 fn models_use_conflicting_provider_for_registry_model_errors() {
     // C7: a registry model implies fastembed; an explicit conflicting
     // `--provider` must error, not be silently overridden.
