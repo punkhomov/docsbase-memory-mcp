@@ -309,3 +309,16 @@ Ledger: одна запись на таск (что сделано, чем пр�
   connect/models). Tests: lib 27 (both features) / 21 (hybrid-local), cli_models 15/15,
   default green, clippy clean default+features. Ruling: env mutation во всех CLI unit
   тестах сериализуется общим lock'ом (иначе параллельные tests race'ят).
+
+- Task 7: complete (commits `b786557..`→ head, Verify: tree gate default empty для всех 9
+  запрещённых crates; `cargo build --release --locked --features hybrid-local` ok (бинарник
+  ~17 MiB < 40 MiB бюджета, NFR-8), без missing link-time libs (ORT грузится через dlopen).
+  CI: добавлен `linux-local` job (clippy -D warnings + `cargo test --features hybrid-local`,
+  полностью offline, без download'ов); в `windows`/`macos` добавлен `cargo check --features
+  hybrid-local --all-targets`; default tree gate расширен до списка `fastembed|ort|tokenizers|
+  hf-hub|image|native-tls|ureq|reqwest` (NFR-1). Docs: CONFIG.md (providers только в global,
+  scope, connect/fetch, models use embed|rerank, канонические id), README quickstart (local
+  embeddings ветка), SECURITY.md (ORT как внешний executable artifact + pinned sha256, ключ
+  never stored), CHANGELOG (Added: hybrid-local). Ruling: `linux-local` должен стать required
+  check — действие человека (записано; merging остаётся человеческим). Ruling: release-static +
+  dlopen проверено компиляцией release с features (запуск live нагрузки — T8).

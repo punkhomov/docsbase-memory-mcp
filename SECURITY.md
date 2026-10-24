@@ -9,10 +9,23 @@
 
 This is a local-first tool by default: no network calls at runtime, no
 accounts, no telemetry. The attack surface that matters is local: daemon
-socket/pipe, file containment, install manifest handling. Optional hybrid
-search stages (phase 2, per-project/per-request opt-in) send document
-chunks/queries to the configured embedding provider and require API-key
-handling; they are covered by a dedicated security review before shipping.
+socket/pipe, file containment, install manifest handling.
+
+Optional hybrid search stages (per-project/per-request opt-in):
+
+- `hybrid-remote` (OpenRouter) sends document chunks/queries to the
+  configured embedding provider and requires API-key handling. The key is
+  read from the environment only, never stored or logged.
+- `hybrid-local` (fastembed) **downloads external artifacts** during
+  provisioning only: the ONNX Runtime shared library is fetched from the
+  pinned GitHub release with a code-pinned `sha256` and size, and registry
+  models are fetched from pinned Hugging Face revisions with per-file
+  `sha256` verification. After provisioning, searches run fully offline;
+  the runtime is an external executable artifact (native code), so treat
+  the install directory with the same care as any downloaded binary —
+  verify the release checksums (we do, and we fail closed on mismatch).
+
+Both stages are covered by a dedicated security review before shipping.
 
 ## Reporting a vulnerability
 

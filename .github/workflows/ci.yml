@@ -76,13 +76,30 @@ jobs:
         run: cargo test --locked --features hybrid-remote
       - name: ANN fallback survives the release panic strategy (SC-4)
         run: cargo test --release --locked --features hybrid-remote --test hybrid_ann ann_load_failure_falls_back_to_exact -- --exact
-      - name: Default build stays offline (SC-4)
+      - name: Default build stays offline (NFR-1, SC-1)
         run: |
-          if cargo tree --locked -e normal | grep -q reqwest; then
-            echo "::error::reqwest leaked into the default build"
+          if cargo tree --locked -e normal | grep -wE 'fastembed|ort|tokenizers|hf-hub|image|native-tls|ureq|reqwest'; then
+            echo "::error::forbidden crate leaked into the default build (NFR-1)"
             exit 1
           fi
-          echo "default build has no reqwest"
+          echo "default build has no network/ML crates"
+
+  linux-local:
+    # hybrid-local feature build: clippy + full suite, fully offline (no
+    # model downloads, no network). Must become a required check (human
+    # action; recorded in docs/specs/hybrid-local/progress.md).
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Feature lints (hybrid-local)
+        run: cargo clippy --locked --features hybrid-local --all-targets -- -D warnings
+      - name: Feature suite (offline; no model downloads)
+        run: cargo test --locked --features hybrid-local
 
   windows:
     runs-on: windows-latest
@@ -97,6 +114,8 @@ jobs:
         run: |
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
+      - name: hybrid-local compiles (check-only, no downloads)
+        run: cargo check --locked --features hybrid-local --all-targets
       - name: Functional suite (daemon + CLI + MCP, ADR-10)
         run: cargo test --locked
 
@@ -118,5 +137,7 @@ jobs:
         run: |
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
+      - name: hybrid-local compiles (check-only, no downloads)
+        run: cargo check --locked --features hybrid-local --all-targets
       - name: Functional suite (macOS, aarch64)
         run: cargo test --locked
