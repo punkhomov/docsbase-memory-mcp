@@ -374,3 +374,9 @@ Ledger: одна запись на таск (что сделано, чем пр�
   fetch (bge-reranker-base 1.11 GB buffered, unmeasured); runtime::init OnceLock first-load
   poison (принято, T2 ruling). Verify: default suite green; both-features suite green; clippy
   чист default/hybrid-local/both; fmt --check; tree gate pass.
+
+- Converged: final review re-check ADDRESSED (P0 from_config threading verified on all 4
+  production paths + jobs helpers; P2s done; no new breakage). Вердикт: READY FOR HUMAN
+  MERGE. Остаётся человеческими действиями: merge PR (main protected), добавить `linux-local`
+  как required GitHub check, live-cadence OQ-3, при желании — ревизия streaming-fetch на
+  bge-reranker-base (1.11 GB). Общий diff: 47 файлов, +10.5k/−0.6k, 43 коммита.
