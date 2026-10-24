@@ -357,6 +357,39 @@ fn models_use_fastembed_without_runtime_gives_connect_hint() {
 }
 
 #[test]
+fn index_admits_unfetched_fastembed_with_real_provider_record() {
+    // AC3 wiring regression (review panel C5): a real product entry point
+    // (`docsbase index`) must thread the real `ProvidersCfg` into
+    // `from_config`. The discriminator: with a provider record whose
+    // `runtime_path` dangles, the resolve-stage admission names the runtime
+    // and the `--force` remediation — a `ProvidersCfg::default()` would
+    // instead report "provider is not connected".
+    let env = Env::new();
+    let proj = TempDir::new().expect("proj");
+    std::fs::write(
+        proj.path().join(".docsbase.toml"),
+        "[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\n",
+    )
+    .expect("project file");
+    std::fs::write(
+        env.config.path().join("config.toml"),
+        "[providers.fastembed]\nenabled = true\nruntime = \"1.24.4\"\nruntime_path = \"/nonexistent/libonnxruntime.so\"\n",
+    )
+    .expect("global config");
+    let output = env
+        .cmd()
+        .args(["index", proj.path().to_str().expect("utf8")])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("fastembed runtime"), "{stderr}");
+    assert!(stderr.contains("--force"), "{stderr}");
+    assert!(!stderr.contains("is not connected"), "{stderr}");
+}
+
+#[test]
 fn models_remove_unknown_name_is_admission() {
     let env = Env::new();
     let output = env
