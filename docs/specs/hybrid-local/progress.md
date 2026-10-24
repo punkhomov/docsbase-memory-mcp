@@ -354,3 +354,10 @@ Ledger: одна запись на таск (что сделано, чем пр�
   изолируют DOCSBASE_CACHE_DIR (реальный кэш после T8 ломал fetch-hint тесты). Verify: default
   suite green; both-features suite green; clippy -D warnings чист default/hybrid-local/both;
   fmt --check; tree gate pass.
+
+  T9 residual fix (commit `38fbf8b`): re-review ADDRESSED — stale-only model root
+  (pinned revision absent) теперь удаляется без lock acquisition (невозможно держать lock на
+  отсутствующей revision dir; `Box::leak`-паттерн как в take_shared_lock); тест
+  remove_stale_only_revisions_succeeds. Verify: cli::models 28 (hybrid-local) / 33 (both);
+  cli_models 18; config 27; hybrid_local 3; install 15; default suite green; clippy чист
+  default/hybrid-local/both; fmt --check.
