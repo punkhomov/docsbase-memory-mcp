@@ -322,3 +322,6 @@ Ledger: одна запись на таск (что сделано, чем пр�
   never stored), CHANGELOG (Added: hybrid-local). Ruling: `linux-local` должен стать required
   check — действие человека (записано; merging остаётся человеческим). Ruling: release-static +
   dlopen проверено компиляцией release с features (запуск live нагрузки — T8).
+
+- Task 8: complete (test `tests/hybrid_local_live.rs`, `#[ignore]`; live run PASSED on
+  2026-10-24). Numbers: ORT 1.24.4 tgz 8_155_822 B sha256 `3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747` (table confirmed), lib so.1.24.4 22_159_232 B. Fetch: jina-reranker-v1-turbo-en fresh 38_295_104 B в ~3.0s; bge cached-check 62ms (совежий fetch не замерен — provisioning, не бюджет). Embed (release, N=3): 10.3ms суммарно, ~3.4ms/text, query 2.3ms (бюджет 250ms/512-token chunk — ok). Rerank 3 docs: 3.4ms (< 200ms/50 docs — ok). Peak RSS 329 MiB (< 700 MiB — ok). Примечание: connect download из GitHub в этой песочнице блокируется TLS-прокси (UnknownIssuer для rustls) — ORT установлен вручную (curl + sha256-проверка совпала с таблицей); сам download-путь connect покрыт offline-тестами T2 на fake source. macOS signature state не применимо (Linux); `init_from` успешен (inference работал). Ruling: live-прогон — ручной/ночной; test не входит в CI.
