@@ -18,9 +18,12 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
   size caps), and purpose-first `docsbase models use embed|rerank <model>`
   (project/global scope matrix, provider inference from the registry,
   offline probes). Canonical local model id
-  `fastembed/<name>@d<dim>@<l2|raw>@r<rev8>@p<prompt_version>`. The default
-  build stays fully offline (NFR-1); no weights or runtime are shipped in
-  the binary.
+  `fastembed/<name>@d<dim>@<l2|raw>@r<rev8>@p<prompt_version>`. `docsbase
+  models remove <name>` removes all cached revisions (refuses while a model
+  is loaded; `--force` deletes anyway). `docsbase uninstall --dry-run`
+  lists the ONNX Runtime install and model cache before any deletion. The
+  default build stays fully offline (NFR-1); no weights or runtime are
+  shipped in the binary.
 
 ### Changed
 

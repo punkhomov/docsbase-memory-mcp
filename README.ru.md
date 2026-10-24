@@ -63,6 +63,26 @@ $env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punk
 
 Полное прохождение: [`docs/QUICKSTART.md`](docs/QUICKSTART.md) (EN).
 
+### Опционально: локальные эмбеддинги (fastembed, `hybrid-local`)
+
+Соберите с feature, установите ONNX Runtime, скачайте закреплённые модели и
+укажите стадии (все шаги provisioning офлайн-безопасны и идемпотентны):
+
+```sh
+cargo build --release --features hybrid-local
+# 1. Установка закреплённого ONNX Runtime (скачивается один раз; `--check` показывает состояние)
+docsbase connect fastembed
+# 2. Скачивание модели из реестра (revision + sha256 закреплены в коде)
+docsbase models fetch bge-small-en-v1.5
+docsbase models fetch jina-reranker-v1-turbo-en
+# 3. Указание стадий (dims берутся из реестра для fastembed)
+docsbase models use embed bge-small-en-v1.5
+docsbase models use rerank jina-reranker-v1-turbo-en
+```
+
+`models use` проверяет файл проекта; вне проекта передайте `--global`. Всё
+перечисленное работает полностью офлайн после явных шагов fetch.
+
 ## Установка
 
 Поддерживаются: **Linux x86_64**, **Windows x64** и **macOS (Apple

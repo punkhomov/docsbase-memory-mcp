@@ -361,3 +361,16 @@ Ledger: одна запись на таск (что сделано, чем пр�
   remove_stale_only_revisions_succeeds. Verify: cli::models 28 (hybrid-local) / 33 (both);
   cli_models 18; config 27; hybrid_local 3; install 15; default suite green; clippy чист
   default/hybrid-local/both; fmt --check.
+
+- Final convergence review (P0 fix): `from_config` теперь принимает `&ProvidersCfg` и передаёт
+  его обоим fastembed arms (раньше `ProvidersCfg::default()` — connect-provisioned runtime был
+  недостижим во всех 4 продуктовых путях: cli/index, cli/search, daemon/server, hybrid/jobs;
+  P4/SC-6/FR-11). Threading: jobs::embed_texts/embed_project_chunks получают providers;
+  callers (index/job.rs, daemon/tools.rs, tests) обновлены. Regression-тест
+  `from_config_fastembed_uses_real_provider_config` (runtime через runtime_path, cache isolated
+  → fetch hint, НЕ "not connected"). P2s: CHANGELOG += `models remove`/uninstall --dry-run;
+  README.ru зеркалит EN quickstart (connect/fetch/use); embedding_model_id fallback больше не
+  шумит в stderr (doc: unreachable через validated config, FR-9). Revisit open: streaming
+  fetch (bge-reranker-base 1.11 GB buffered, unmeasured); runtime::init OnceLock first-load
+  poison (принято, T2 ruling). Verify: default suite green; both-features suite green; clippy
+  чист default/hybrid-local/both; fmt --check; tree gate pass.

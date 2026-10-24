@@ -420,10 +420,12 @@ fn legacy_cache_model_id(cfg: &EmbeddingCfg) -> String {
 pub fn embedding_model_id(cfg: &EmbeddingCfg) -> String {
     #[cfg(feature = "hybrid-local")]
     if cfg.provider == PROVIDER_FASTEMBED {
-        // Resolution (FR-5) guarantees the entry exists before this runs; if
-        // it somehow does not, surface it loudly instead of silently
-        // producing a legacy-shaped fastembed key without the revision/prompt
-        // components (FR-9).
+        // Resolution (FR-5) guarantees the entry exists before this runs
+        // (`resolve_embedding` rejects unknown models), so the fallback
+        // below is unreachable through validated config; it exists only to
+        // keep this pure formatter infallible. It must NOT be used for new
+        // fastembed keys (a legacy-shaped key would drop the revision/prompt
+        // components and could collide across revisions, FR-9).
         if let Some(id) = crate::hybrid::models::canonical_id_for(
             &cfg.model,
             cfg.dimensions as usize,
@@ -431,10 +433,6 @@ pub fn embedding_model_id(cfg: &EmbeddingCfg) -> String {
         ) {
             return id;
         }
-        eprintln!(
-            "warning: fastembed model {} is not in the registry; cache key falls back to the legacy format",
-            cfg.model
-        );
     }
     legacy_cache_model_id(cfg)
 }
@@ -470,7 +468,13 @@ impl std::fmt::Debug for HybridStages {
 /// # Errors
 /// Returns [`Error::Admission`] for a feature-off build, an unknown provider,
 /// an out-of-range window or a missing `OPENROUTER_API_KEY`.
-pub fn from_config(cfg: &HybridCfg, remote_on: bool, local_on: bool) -> Result<HybridStages> {
+#[cfg_attr(not(feature = "hybrid-local"), allow(unused_variables))]
+pub fn from_config(
+    cfg: &HybridCfg,
+    providers: &ProvidersCfg,
+    remote_on: bool,
+    local_on: bool,
+) -> Result<HybridStages> {
     if !cfg.enabled {
         return Ok(HybridStages::default());
     }
@@ -553,12 +557,12 @@ pub fn from_config(cfg: &HybridCfg, remote_on: bool, local_on: bool) -> Result<H
         if let Some(embedding) = &cfg.embedding
             && embedding.provider == PROVIDER_FASTEMBED
         {
-            stages.embedder = Some(super::local::embedder(embedding, &ProvidersCfg::default())?);
+            stages.embedder = Some(super::local::embedder(embedding, providers)?);
         }
         if let Some(reranker) = &cfg.reranker
             && reranker.provider == PROVIDER_FASTEMBED
         {
-            stages.reranker = Some(super::local::reranker(reranker, &ProvidersCfg::default())?);
+            stages.reranker = Some(super::local::reranker(reranker, providers)?);
         }
     }
     Ok(stages)

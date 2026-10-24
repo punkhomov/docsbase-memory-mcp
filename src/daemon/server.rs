@@ -126,6 +126,7 @@ impl Shared {
         let config = self.project_config(project)?;
         let stages = Arc::new(crate::hybrid::from_config(
             &config.hybrid_cfg,
+            &config.providers,
             cfg!(feature = "hybrid-remote"),
             cfg!(feature = "hybrid-local"),
         )?);

@@ -8,7 +8,7 @@ use docsbase_memory::hybrid::blocking;
 #[cfg(feature = "hybrid-remote")]
 use docsbase_memory::hybrid::config::RerankerCfg;
 use docsbase_memory::hybrid::config::{
-    CacheCfg, EmbeddingCfg, HybridCfg, embedding_model_id, from_config,
+    CacheCfg, EmbeddingCfg, HybridCfg, ProvidersCfg, embedding_model_id, from_config,
 };
 
 #[test]
@@ -39,6 +39,7 @@ fn cache_key_carries_model_dim_and_postprocess() {
 fn disabled_hybrid_resolves_to_empty_stages() {
     let stages = from_config(
         &HybridCfg::default(),
+        &ProvidersCfg::default(),
         cfg!(feature = "hybrid-remote"),
         cfg!(feature = "hybrid-local"),
     )
@@ -53,6 +54,7 @@ fn feature_off_admission_is_explicit() {
     // compiled in; the always-off build takes the same path.
     let error = from_config(
         &HybridCfg::enabled_with_defaults(),
+        &ProvidersCfg::default(),
         false,
         cfg!(feature = "hybrid-local"),
     )
@@ -68,6 +70,7 @@ fn feature_off_admission_is_explicit() {
     if !cfg!(feature = "hybrid-remote") {
         let error = from_config(
             &HybridCfg::enabled_with_defaults(),
+            &ProvidersCfg::default(),
             true,
             cfg!(feature = "hybrid-local"),
         )
@@ -89,8 +92,13 @@ fn unknown_provider_is_rejected_before_any_network_setup() {
         ranking: Ranking::Lexical,
         cache: CacheCfg::default(),
     };
-    let error = from_config(&cfg, true, cfg!(feature = "hybrid-local"))
-        .expect_err("provider must be validated");
+    let error = from_config(
+        &cfg,
+        &ProvidersCfg::default(),
+        true,
+        cfg!(feature = "hybrid-local"),
+    )
+    .expect_err("provider must be validated");
     let Error::Admission { message } = error else {
         panic!("expected Admission");
     };
@@ -107,7 +115,12 @@ fn unknown_provider_is_rejected_before_any_network_setup() {
         cache: CacheCfg::default(),
     };
     assert!(matches!(
-        from_config(&cfg, true, cfg!(feature = "hybrid-local")),
+        from_config(
+            &cfg,
+            &ProvidersCfg::default(),
+            true,
+            cfg!(feature = "hybrid-local")
+        ),
         Err(Error::Admission { .. })
     ));
 }
@@ -126,8 +139,13 @@ fn rerank_window_bounds_are_enforced() {
             ranking: Ranking::Lexical,
             cache: CacheCfg::default(),
         };
-        let error = from_config(&cfg, true, cfg!(feature = "hybrid-local"))
-            .expect_err("window must be bounded");
+        let error = from_config(
+            &cfg,
+            &ProvidersCfg::default(),
+            true,
+            cfg!(feature = "hybrid-local"),
+        )
+        .expect_err("window must be bounded");
         let Error::Admission { message } = error else {
             panic!("expected Admission for window {window}");
         };
@@ -143,6 +161,7 @@ fn missing_key_is_an_admission_error() {
     }
     let error = from_config(
         &HybridCfg::enabled_with_defaults(),
+        &ProvidersCfg::default(),
         true,
         cfg!(feature = "hybrid-local"),
     )
@@ -185,8 +204,13 @@ fn rrf_without_the_embedding_stage_is_an_admission_error() {
         ranking: Ranking::Rrf,
         cache: CacheCfg::default(),
     };
-    let err =
-        from_config(&cfg, true, cfg!(feature = "hybrid-local")).expect_err("rrf without embedding");
+    let err = from_config(
+        &cfg,
+        &ProvidersCfg::default(),
+        true,
+        cfg!(feature = "hybrid-local"),
+    )
+    .expect_err("rrf without embedding");
     assert!(
         matches!(&err, Error::Admission { message } if message.contains("rrf")),
         "{err}"
@@ -203,8 +227,13 @@ fn rrf_keeps_the_configuration_error_across_feature_modes() {
         cache: CacheCfg::default(),
     };
     for feature_on in [false, true] {
-        let err = from_config(&cfg, feature_on, cfg!(feature = "hybrid-local"))
-            .expect_err("rrf without embedding");
+        let err = from_config(
+            &cfg,
+            &ProvidersCfg::default(),
+            feature_on,
+            cfg!(feature = "hybrid-local"),
+        )
+        .expect_err("rrf without embedding");
         assert!(
             matches!(&err, Error::Admission { message } if message.contains("rrf")),
             "feature_on={feature_on}: {err}"
@@ -221,7 +250,8 @@ fn enabled_without_stages_resolves_to_empty_stages_offline() {
         ranking: Ranking::Lexical,
         cache: CacheCfg::default(),
     };
-    let stages = from_config(&cfg, false, false).expect("no stages, nothing to resolve");
+    let stages = from_config(&cfg, &ProvidersCfg::default(), false, false)
+        .expect("no stages, nothing to resolve");
     assert!(stages.embedder.is_none() && stages.reranker.is_none());
 }
 
@@ -244,6 +274,62 @@ fn fastembed_only_config_does_not_demand_openrouter_key() {
     };
     // No OPENROUTER_API_KEY in the environment: the fastembed-only config
     // must fail on the local seam (stub, T4), never on the remote key.
-    let err = from_config(&cfg, true, true).expect_err("local stage");
+    let err = from_config(&cfg, &ProvidersCfg::default(), true, true).expect_err("local stage");
     assert!(!err.to_string().contains("OPENROUTER_API_KEY"), "{err}");
+}
+
+#[cfg(feature = "hybrid-local")]
+#[test]
+#[allow(unsafe_code)] // env isolation under the local lock
+fn from_config_fastembed_uses_real_provider_config() {
+    use docsbase_memory::hybrid::config::{FastembedProvider, ProviderState};
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // Runtime present via runtime_path; model cache isolated & empty → the
+    // stage must fail with the FETCH hint, never "not connected" (P0: the
+    // connect-provisioned provider must actually be honored).
+    let cache = tempfile::TempDir::new().expect("cache");
+    let runtime = tempfile::TempDir::new().expect("runtime");
+    let runtime_path = runtime.path().join("libonnxruntime.so");
+    std::fs::write(&runtime_path, b"fake").expect("touch");
+    let providers = ProvidersCfg {
+        fastembed: Some(FastembedProvider {
+            enabled: true,
+            runtime: Some("1.24.4".to_owned()),
+            runtime_path: Some(runtime_path),
+        }),
+        openrouter: None,
+    };
+    let cfg = HybridCfg {
+        enabled: true,
+        embedding: Some(EmbeddingCfg {
+            provider: docsbase_memory::hybrid::config::PROVIDER_FASTEMBED.to_owned(),
+            model: "bge-small-en-v1.5".to_owned(),
+            dimensions: 384,
+            normalize: true,
+        }),
+        ..HybridCfg::default()
+    };
+
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let prev = std::env::var_os("DOCSBASE_CACHE_DIR");
+    // SAFETY: single-threaded under the local lock.
+    unsafe {
+        std::env::set_var("DOCSBASE_CACHE_DIR", cache.path());
+    }
+    let result = from_config(&cfg, &providers, false, true);
+    // SAFETY: same locked section.
+    unsafe {
+        match prev {
+            Some(value) => std::env::set_var("DOCSBASE_CACHE_DIR", value),
+            None => std::env::remove_var("DOCSBASE_CACHE_DIR"),
+        }
+    }
+    let err = result.expect_err("fastembed stage must fail on missing model");
+    let text = err.to_string();
+    assert!(text.contains("models fetch"), "{text}");
+    assert!(!text.contains("not connected"), "{text}");
+    let _ = ProviderState::Unknown; // keep import used for future state checks
 }

@@ -36,6 +36,7 @@ pub fn run(path: Option<&Path>) -> anyhow::Result<()> {
     // start, not after the index commit already happened.
     crate::hybrid::from_config(
         &config.hybrid_cfg,
+        &config.providers,
         cfg!(feature = "hybrid-remote"),
         cfg!(feature = "hybrid-local"),
     )?;

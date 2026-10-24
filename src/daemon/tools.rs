@@ -694,7 +694,7 @@ pub fn run_sync_job_in(
     // completes the coverage a previous offline period left behind (FR-15);
     // cached chunks cost nothing, so this is a no-op once covered.
     let outcome = run_project_index(db, cache, project, config).and_then(|stats| {
-        hybrid_jobs::embed_project_chunks(db, &config.hybrid_cfg, project.id)?;
+        hybrid_jobs::embed_project_chunks(db, &config.hybrid_cfg, &config.providers, project.id)?;
         Ok(stats)
     });
     let (state, stats_json) = match &outcome {

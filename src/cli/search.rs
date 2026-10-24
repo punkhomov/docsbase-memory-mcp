@@ -30,6 +30,7 @@ pub fn run(query: &str, limit: usize) -> anyhow::Result<()> {
     let config = Config::load(Some(&project.canonical_root))?;
     let stages = crate::hybrid::from_config(
         &config.hybrid_cfg,
+        &config.providers,
         cfg!(feature = "hybrid-remote"),
         cfg!(feature = "hybrid-local"),
     )?;
