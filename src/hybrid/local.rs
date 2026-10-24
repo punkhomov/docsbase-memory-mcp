@@ -444,39 +444,38 @@ mod tests {
 
     #[test]
     fn instant_cache_deduplicates_per_key() {
-        use std::collections::HashMap;
-        use std::sync::OnceLock;
-
-        static MAP: OnceLock<Mutex<HashMap<String, Arc<dyn Embedder>>>> = OnceLock::new();
-        let map = MAP.get_or_init(|| Mutex::new(HashMap::new()));
-        let make = |id: &str| -> Arc<dyn Embedder> {
-            struct Fake(&'static str);
+        // Drive the production map (`get_or_load_embedder` + `INSTANCES`)
+        // with fake embedders — no real weights needed (NFR-4/NFR-7).
+        let key_a = ModelCacheKey {
+            model_id: "fastembed/x@d384@l2@raaaaaaaa@p1".to_owned(),
+            max_length: 512,
+            intra_threads: Some(4),
+            runtime: PathBuf::from("/tmp/libonnxruntime.so"),
+        };
+        let key_b = ModelCacheKey {
+            model_id: "fastembed/y@d384@l2@raaaaaaaa@p1".to_owned(),
+            ..key_a.clone()
+        };
+        let make = |id: String| -> Arc<dyn Embedder> {
+            struct Fake(String);
             impl Embedder for Fake {
-                fn model_id(&self) -> &'static str {
-                    self.0
+                fn model_id(&self) -> &str {
+                    &self.0
                 }
                 fn embed(&self, _: &[String]) -> Result<Vec<Vec<f32>>> {
                     Err(Error::internal("not used"))
                 }
             }
-            Arc::new(Fake(Box::leak(id.to_owned().into_boxed_str())))
+            Arc::new(Fake(id))
         };
-        let key = "fastembed/x@d384@l2@raaaaaaaa@p1".to_owned();
-        {
-            let mut map = map.lock().expect("lock");
-            map.insert(key.clone(), make(&key));
-        }
-        // Same key → same instance (Arc::ptr_eq); different key → new.
-        let first = {
-            let map = map.lock().expect("lock");
-            map.get(&key).expect("present").clone()
-        };
-        let second = {
-            let map = map.lock().expect("lock");
-            map.get(&key).expect("present").clone()
-        };
+        let first =
+            get_or_load_embedder(key_a.clone(), || Ok(make(key_a.model_id.clone()))).expect("load");
+        // Same key must not invoke the loader again (panic-guard).
+        let second = get_or_load_embedder(key_a.clone(), || panic!("same key must not load twice"))
+            .expect("cached");
         assert!(Arc::ptr_eq(&first, &second), "same key shares the instance");
-        let other = make("fastembed/y@d384@l2@raaaaaaaa@p1");
+        let other =
+            get_or_load_embedder(key_b.clone(), || Ok(make(key_b.model_id.clone()))).expect("load");
         assert!(
             !Arc::ptr_eq(&first, &other),
             "different key is a different instance"
