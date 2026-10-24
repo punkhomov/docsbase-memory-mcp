@@ -94,6 +94,13 @@ fn load_embedder(entry: &ModelEntry<'_>, key: &ModelCacheKey) -> Result<Arc<dyn 
     })
 }
 
+/// Serializes model construction (cold path only, C11): without it, two
+/// cold same-key callers could both run `load()` (two ORT sessions, two
+/// shared-lock attempts) and the re-check would only discard the loser.
+/// The lock is never held while the instance maps are locked, so there is
+/// no lock-order cycle with `embedder_instances`/`reranker_instances`.
+static LOAD_LOCK: Mutex<()> = Mutex::new(());
+
 /// Core process-wide per-key instance cache: returns the existing instance
 /// for `key`, or constructs one with `load` and registers it. The single
 /// generic implementation behind both the embedder and reranker maps (one
@@ -111,15 +118,23 @@ fn get_or_load_by_key<T: ?Sized>(
             return Ok(Arc::clone(existing));
         }
     }
+    // Serialize construction; re-check after acquiring so a waiter reuses
+    // the instance the winner registered.
+    let _construction_guard = LOAD_LOCK
+        .lock()
+        .map_err(|poison| Error::internal(format!("instance load lock poisoned: {poison}")))?;
+    {
+        let map = instances
+            .lock()
+            .map_err(|poison| Error::internal(format!("instance cache lock poisoned: {poison}")))?;
+        if let Some(existing) = map.get(&key) {
+            return Ok(Arc::clone(existing));
+        }
+    }
     let shared = load()?;
     let mut map = instances
         .lock()
         .map_err(|poison| Error::internal(format!("instance cache lock poisoned: {poison}")))?;
-    // Re-check: another thread may have inserted the same key while we were
-    // loading; keep the shared instance already registered.
-    if let Some(existing) = map.get(&key) {
-        return Ok(Arc::clone(existing));
-    }
     map.insert(key, Arc::clone(&shared));
     Ok(shared)
 }
@@ -706,6 +721,64 @@ mod tests {
             !Arc::ptr_eq(&first, &other),
             "different key is a different instance"
         );
+    }
+
+    #[test]
+    fn concurrent_same_key_cold_loads_construct_once() {
+        // C11: cold same-key callers must not construct duplicates; exactly
+        // one loader invocation across 8 overlapping threads, all sharing
+        // the same instance.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::sync::{Arc as StdArc, Barrier};
+        use std::time::Duration;
+        static LOADS: AtomicUsize = AtomicUsize::new(0);
+        let key = ModelCacheKey {
+            model_id: "fastembed/cc@d384@l2@raaaaaaaa@p1".to_owned(),
+            max_length: 512,
+            intra_threads: Some(4),
+            runtime: PathBuf::from("/tmp/libonnxruntime.so"),
+        };
+        let make = |id: String| -> Arc<dyn Embedder> {
+            struct Fake(String);
+            impl Embedder for Fake {
+                fn model_id(&self) -> &str {
+                    &self.0
+                }
+                fn embed(&self, _: &[String]) -> Result<Vec<Vec<f32>>> {
+                    Err(Error::internal("not used"))
+                }
+            }
+            Arc::new(Fake(id))
+        };
+        let start = StdArc::new(Barrier::new(8));
+        let (tx, rx) = mpsc::channel();
+        for _ in 0..8 {
+            let key = key.clone();
+            let start = StdArc::clone(&start);
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                let inst = get_or_load_embedder(key.clone(), || {
+                    LOADS.fetch_add(1, Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_millis(20));
+                    Ok(make(key.model_id.clone()))
+                })
+                .expect("load");
+                let _ = tx.send(inst);
+            });
+        }
+        drop(tx);
+        let instances: Vec<_> = rx.iter().collect();
+        assert_eq!(instances.len(), 8, "all threads got an instance");
+        assert_eq!(
+            LOADS.load(Ordering::Relaxed),
+            1,
+            "exactly one construction for concurrent same-key loads"
+        );
+        for inst in &instances {
+            assert!(Arc::ptr_eq(&instances[0], inst), "shared instance");
+        }
     }
 
     #[test]
