@@ -586,6 +586,18 @@ fn resolve_provider(
                 }
                 .into());
             }
+            // A registry model is always fastembed; an explicit conflicting
+            // `--provider` is an error, not a silent override (panel C7).
+            if let Some(provider) = explicit {
+                if provider != PROVIDER_FASTEMBED {
+                    return Err(Error::Admission {
+                        message: format!(
+                            "\"{model}\" is a local registry model ({PROVIDER_FASTEMBED}); --provider {provider} conflicts — remove it"
+                        ),
+                    }
+                    .into());
+                }
+            }
             return Ok(PROVIDER_FASTEMBED.to_owned());
         }
     }

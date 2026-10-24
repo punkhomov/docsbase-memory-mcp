@@ -248,6 +248,34 @@ fn models_use_dims_only_on_embed() {
 }
 
 #[test]
+fn models_use_conflicting_provider_for_registry_model_errors() {
+    // C7: a registry model implies fastembed; an explicit conflicting
+    // `--provider` must error, not be silently overridden.
+    let env = Env::new();
+    let dir = tempfile::TempDir::new().expect("tmp");
+    std::fs::write(dir.path().join(".docsbase.toml"), "[hybrid]\n").expect("seed");
+    let output = env
+        .cmd()
+        .current_dir(dir.path())
+        .args([
+            "models",
+            "use",
+            "embed",
+            "bge-small-en-v1.5",
+            "--provider",
+            "openrouter",
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("conflicts"), "{stderr}");
+    assert!(stderr.contains("remove it"), "{stderr}");
+}
+
+#[test]
 fn models_use_unknown_model_requires_provider() {
     let env = Env::new();
     let dir = tempfile::TempDir::new().expect("tmp");
