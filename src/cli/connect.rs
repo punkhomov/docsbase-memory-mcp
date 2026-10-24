@@ -37,7 +37,7 @@ pub enum ConnectProvider {
 #[cfg(feature = "hybrid-local")]
 #[derive(Debug, Args)]
 pub struct FastembedArgs {
-    /// Only report the runtime state; install if missing.
+    /// Only report the runtime state (does not install).
     #[arg(long)]
     pub check: bool,
     /// Re-download and replace the runtime even when installed.
@@ -209,8 +209,15 @@ fn connect_fastembed(args: &FastembedArgs) -> anyhow::Result<()> {
             status.reason.as_deref().unwrap_or("-")
         );
         if let Some(path) = &status.path {
-            let metadata = std::fs::metadata(path)
-                .map_err(|err| Error::internal_with_source("stat runtime library", err))?;
+            // A vanished path is a Broken state, not an internal error
+            // (diagnostic commands must not fail with Internal; panel C8).
+            let Ok(metadata) = std::fs::metadata(path) else {
+                println!(
+                    "fastembed runtime {} is missing; re-run `docsbase connect fastembed --force`",
+                    path.display()
+                );
+                return Ok(());
+            };
             if metadata.len() != target.library_size {
                 return Err(Error::Admission {
                     message: format!(

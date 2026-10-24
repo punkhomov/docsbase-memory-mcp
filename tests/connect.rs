@@ -78,6 +78,29 @@ fn connect_fastembed_check_reports_missing_without_download() {
 }
 
 #[test]
+fn connect_fastembed_check_with_vanished_runtime_path_is_broken_not_internal() {
+    // C8: a dangling recorded runtime_path must be reported as Broken state
+    // (exit 0), never an internal stat error.
+    let env = Env::new();
+    std::fs::write(
+        env.config.path().join("config.toml"),
+        "[providers.fastembed]\nenabled = true\nruntime = \"1.24.4\"\nruntime_path = \"/nonexistent/libonnxruntime.so\"\n",
+    )
+    .expect("global config");
+    let output = env
+        .cmd()
+        .args(["connect", "fastembed", "--check"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("is missing"), "{stdout}");
+    assert!(!stderr.contains("internal error"), "{stderr}");
+}
+
+#[test]
 fn unsupported_provider_name_is_clap_error() {
     let env = Env::new();
     env.cmd()
