@@ -766,7 +766,7 @@ mod tests {
         // does not cascade into unrelated tests that merely serialize on it.
         RUNTIME_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Test-only RAII: points `DOCSBASE_DATA_DIR` at a fresh temporary
@@ -781,6 +781,7 @@ mod tests {
     }
 
     impl TestDataDir {
+        #[allow(unsafe_code)] // test-only env mutation, restored in Drop
         fn new() -> Self {
             let dir = tempfile::TempDir::new().expect("tmp");
             let old = std::env::var_os("DOCSBASE_DATA_DIR");
@@ -794,8 +795,9 @@ mod tests {
     }
 
     impl Drop for TestDataDir {
+        // SAFETY: test-only env mutation; restores the pre-test value.
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
-            // SAFETY: test-only env mutation; restores the pre-test value.
             match &self.old {
                 Some(value) => unsafe {
                     std::env::set_var("DOCSBASE_DATA_DIR", value);
