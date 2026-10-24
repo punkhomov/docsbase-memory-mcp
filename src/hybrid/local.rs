@@ -245,10 +245,32 @@ impl Embedder for FastEmbedEmbedder {
     }
 
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        texts
+        // Batch (panel C10): one mutex acquisition and one fastembed session
+        // run per `DEFAULT_BATCH_SIZE` chunk instead of one per text.
+        let prefixed: Vec<String> = texts
             .iter()
-            .map(|text| self.embed_text(text, false))
-            .collect()
+            .map(|text| apply_role_prefix(text, &self.entry, false))
+            .collect();
+        let mut model = self
+            .model
+            .lock()
+            .map_err(|poison| Error::internal(format!("embedder lock poisoned: {poison}")))?;
+        let mut out = Vec::with_capacity(prefixed.len());
+        for range in batch_chunks(prefixed.len()) {
+            let chunk = &prefixed[range];
+            let vectors = model
+                .embed(chunk, Some(DEFAULT_BATCH_SIZE))
+                .map_err(|err| Error::internal(format!("fastembed inference failed: {err}")))?;
+            if vectors.len() != chunk.len() {
+                return Err(Error::internal(format!(
+                    "fastembed returned {} vectors for {} inputs",
+                    vectors.len(),
+                    chunk.len()
+                )));
+            }
+            out.extend(vectors);
+        }
+        Ok(out)
     }
 
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
@@ -404,6 +426,16 @@ fn tokenizer_files(cache_dir: &Path, entry: &ModelEntry<'_>) -> Result<fastembed
     })
 }
 
+/// Splits `len` items into `DEFAULT_BATCH_SIZE`-sized index ranges (panel
+/// C10). Pure and unit-tested; `FastEmbedEmbedder::embed` runs one session
+/// call per range.
+fn batch_chunks(len: usize) -> Vec<std::ops::Range<usize>> {
+    (0..len)
+        .step_by(DEFAULT_BATCH_SIZE)
+        .map(|start| start..(start + DEFAULT_BATCH_SIZE).min(len))
+        .collect()
+}
+
 /// Applies the registry role prefix (FR-10): queries get `query_prefix`,
 /// passages get `passage_prefix`. Pure and unit-tested (SC-9) — inference
 /// itself is live-verified in T8.
@@ -493,6 +525,29 @@ fn clone_entry(entry: &ModelEntry<'_>) -> ModelEntry<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_chunks_covers_exact_and_partial_tails() {
+        assert_eq!(batch_chunks(0), Vec::<std::ops::Range<usize>>::new());
+        let one = batch_chunks(1);
+        assert_eq!(one, vec![0..1]);
+        let full = batch_chunks(DEFAULT_BATCH_SIZE);
+        assert_eq!(full, vec![0..DEFAULT_BATCH_SIZE]);
+        let mixed = batch_chunks(DEFAULT_BATCH_SIZE + 7);
+        assert_eq!(
+            mixed,
+            vec![
+                0..DEFAULT_BATCH_SIZE,
+                DEFAULT_BATCH_SIZE..DEFAULT_BATCH_SIZE + 7
+            ]
+        );
+        // Coverage: concatenated ranges cover [0, len) exactly once.
+        let len = 3 * DEFAULT_BATCH_SIZE + 3;
+        let ranges = batch_chunks(len);
+        let covered: usize = ranges.iter().map(std::iter::ExactSizeIterator::len).sum();
+        assert_eq!(covered, len);
+        assert!(ranges.iter().all(|range| range.len() <= DEFAULT_BATCH_SIZE));
+    }
 
     #[test]
     fn embedder_without_runtime_fails_with_connect_hint() {
