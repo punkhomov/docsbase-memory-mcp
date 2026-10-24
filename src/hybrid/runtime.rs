@@ -762,7 +762,49 @@ mod tests {
     static RUNTIME_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn runtime_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        RUNTIME_TEST_LOCK.lock().expect("runtime test lock")
+        // Tolerate a poisoned lock (a panicked sibling test) so one failure
+        // does not cascade into unrelated tests that merely serialize on it.
+        RUNTIME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Test-only RAII: points `DOCSBASE_DATA_DIR` at a fresh temporary
+    /// directory for the lifetime of the test and restores the previous
+    /// value (or unsets it) on drop. Combined with `runtime_test_guard()`,
+    /// every runtime-root touch is both serialized and sandboxed away from
+    /// the real data directory — a sibling test can never `remove_dir_all`
+    /// on a real installed ONNX Runtime (review panel P0).
+    struct TestDataDir {
+        old: Option<std::ffi::OsString>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl TestDataDir {
+        fn new() -> Self {
+            let dir = tempfile::TempDir::new().expect("tmp");
+            let old = std::env::var_os("DOCSBASE_DATA_DIR");
+            // SAFETY: test-only env mutation; restored in Drop. Serialized
+            // by `runtime_test_guard()` so no sibling test observes it.
+            unsafe {
+                std::env::set_var("DOCSBASE_DATA_DIR", dir.path());
+            }
+            TestDataDir { old, _dir: dir }
+        }
+    }
+
+    impl Drop for TestDataDir {
+        fn drop(&mut self) {
+            // SAFETY: test-only env mutation; restores the pre-test value.
+            match &self.old {
+                Some(value) => unsafe {
+                    std::env::set_var("DOCSBASE_DATA_DIR", value);
+                },
+                None => unsafe {
+                    std::env::remove_var("DOCSBASE_DATA_DIR");
+                },
+            }
+        }
     }
 
     /// Fake source that serves a real tar.gz containing the wanted library
@@ -878,6 +920,7 @@ mod tests {
     #[test]
     fn install_verifies_hash_and_is_atomic() {
         let _guard = runtime_test_guard();
+        let _data = TestDataDir::new();
         // Pretend to be on the first supported target for the test.
         let target = fake_target();
         let source = FakeSource::new(target);
@@ -904,6 +947,7 @@ mod tests {
     #[test]
     fn install_failure_leaves_nothing() {
         let _guard = runtime_test_guard();
+        let _data = TestDataDir::new();
         let target = fake_target();
         let mut source = FakeSource::new(target);
         source.corrupt = true;
@@ -979,6 +1023,7 @@ mod tests {
     #[test]
     fn bad_hash_rejected() {
         let _guard = runtime_test_guard();
+        let _data = TestDataDir::new();
         let target = fake_target();
         let dir = runtime_root();
         let _ = std::fs::remove_dir_all(&dir);
@@ -988,9 +1033,11 @@ mod tests {
     }
 
     #[test]
-    #[allow(unsafe_code)] // test-only env mutation for ORT_DYLIB_PATH / DOCSBASE_DATA_DIR
+    #[allow(unsafe_code)] // test-only env mutation for ORT_DYLIB_PATH
     fn resolve_requires_a_connected_provider_or_env_override() {
         use crate::hybrid::config::FastembedProvider;
+        let _guard = runtime_test_guard();
+        let _data = TestDataDir::new();
         // No provider, no env → admission.
         let none = ProvidersCfg::default();
         let err = resolve(&none).expect_err("no provider");
@@ -1025,13 +1072,8 @@ mod tests {
         assert_eq!(resolved, fake_lib);
 
         // Enabled entry without a runtime_path falls back to the data-dir
-        // install (FR-11 order: env → runtime_path → data-dir → admission).
-        let dir2 = tempfile::TempDir::new().expect("tmp");
-        let old_data = std::env::var_os("DOCSBASE_DATA_DIR");
-        // SAFETY: test-only; restored below.
-        unsafe {
-            std::env::set_var("DOCSBASE_DATA_DIR", dir2.path());
-        }
+        // install (FR-11 order: env → runtime_path → data-dir → admission);
+        // `TestDataDir` sandboxes the data-dir to a temp root.
         let target = platform_target().expect("host target");
         let data_dir_install = library_path(target);
         std::fs::create_dir_all(data_dir_install.parent().expect("parent")).expect("mkdir");
@@ -1046,15 +1088,6 @@ mod tests {
         };
         let resolved = resolve(&no_path).expect("data-dir fallback");
         assert_eq!(resolved, data_dir_install);
-        // SAFETY: restore.
-        match old_data {
-            Some(value) => unsafe {
-                std::env::set_var("DOCSBASE_DATA_DIR", value);
-            },
-            None => unsafe {
-                std::env::remove_var("DOCSBASE_DATA_DIR");
-            },
-        }
 
         // Broken path → admission.
         let broken = ProvidersCfg {
@@ -1092,6 +1125,7 @@ mod tests {
     #[test]
     fn install_selects_platform_library_from_zip() {
         let _guard = runtime_test_guard();
+        let _data = TestDataDir::new();
         let target = fake_zip_target();
         let source = FakeZipSource { target };
         let dir = runtime_root();
@@ -1106,6 +1140,7 @@ mod tests {
     #[test]
     fn install_rejects_caps_before_download() {
         let _guard = runtime_test_guard();
+        let _data = TestDataDir::new();
         let dir = runtime_root();
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1177,12 +1212,7 @@ mod tests {
     fn runtime_status_reports_connected_when_data_dir_install_exists() {
         use crate::hybrid::config::FastembedProvider;
         let _guard = runtime_test_guard();
-        let dir = tempfile::TempDir::new().expect("tmp");
-        let old_data = std::env::var_os("DOCSBASE_DATA_DIR");
-        // SAFETY: test-only; restored below.
-        unsafe {
-            std::env::set_var("DOCSBASE_DATA_DIR", dir.path());
-        }
+        let _data = TestDataDir::new();
         let target = platform_target().expect("host target");
         let installed = library_path(target);
         std::fs::create_dir_all(installed.parent().expect("parent")).expect("mkdir");
@@ -1198,14 +1228,6 @@ mod tests {
         let status = runtime_status(&providers);
         assert_eq!(status.state, "Connected");
         assert_eq!(status.path.as_ref(), Some(&installed));
-        match old_data {
-            Some(value) => unsafe {
-                std::env::set_var("DOCSBASE_DATA_DIR", value);
-            },
-            None => unsafe {
-                std::env::remove_var("DOCSBASE_DATA_DIR");
-            },
-        }
     }
 
     #[test]
