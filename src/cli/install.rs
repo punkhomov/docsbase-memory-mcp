@@ -100,6 +100,46 @@ pub(crate) fn install_from(
 ///
 /// # Errors
 /// Fails when the manifest cannot be read or a removal fails.
+/// Removes the hybrid-local owned artifacts (FR-13) once the caller holds
+/// the admission lease (or is in dry-run/no-op mode). Prints the outcome.
+fn remove_hybrid_artifacts(
+    yes: bool,
+    dry_run: bool,
+    runtime_dir: &Path,
+    models_cache: Option<&Path>,
+) -> anyhow::Result<()> {
+    if !yes || dry_run {
+        if dry_run {
+            println!("[dry-run] nothing was deleted");
+        }
+        return Ok(());
+    }
+    let mut removed = false;
+    if runtime_dir.is_dir() {
+        fs::remove_dir_all(runtime_dir)
+            .with_context(|| format!("remove {}", runtime_dir.display()))?;
+        removed = true;
+    }
+    if let Some(models_cache) = models_cache
+        && models_cache.is_dir()
+    {
+        fs::remove_dir_all(models_cache)
+            .with_context(|| format!("remove {}", models_cache.display()))?;
+        removed = true;
+    }
+    if removed {
+        println!("removed hybrid-local artifacts (runtime + model cache)");
+    }
+    Ok(())
+}
+
+/// Removes every owned artifact; without `yes` (or with `dry_run`) it only
+/// prints them and the indexed projects (FR-1). Also covers the hybrid-local
+/// artifacts owned by docsbase (FR-13): the ONNX Runtime install and the
+/// model cache.
+///
+/// # Errors
+/// Fails when the manifest cannot be read or a removal fails.
 pub fn uninstall(yes: bool, dry_run: bool) -> anyhow::Result<()> {
     let data = paths::data_dir()?;
     let data = if data.exists() {
@@ -125,17 +165,15 @@ pub fn uninstall(yes: bool, dry_run: bool) -> anyhow::Result<()> {
         // Still offer/perform hybrid-local artifact cleanup (FR-13):
         // runtimes + model cache are owned even without a launcher manifest.
         if yes && !dry_run {
-            if runtime_dir.is_dir() {
-                fs::remove_dir_all(&runtime_dir)
-                    .with_context(|| format!("remove {}", runtime_dir.display()))?;
+            // Same daemon-stop + admission-lease discipline as the manifest
+            // path (a running process may hold model locks / mapped files).
+            let cache_root = paths::cache_dir()?;
+            if !cache_root.exists() {
+                fs::create_dir_all(&cache_root)
+                    .with_context(|| format!("create {}", cache_root.display()))?;
             }
-            if let Some(models_cache) = &models_cache
-                && models_cache.is_dir()
-            {
-                fs::remove_dir_all(models_cache)
-                    .with_context(|| format!("remove {}", models_cache.display()))?;
-            }
-            println!("removed hybrid-local artifacts (runtime + model cache)");
+            let _lease = acquire_after_stop(&cache_root)?;
+            remove_hybrid_artifacts(yes, dry_run, &runtime_dir, models_cache.as_deref())?;
         } else if dry_run {
             println!("[dry-run] nothing was deleted");
         }
@@ -180,16 +218,7 @@ pub fn uninstall(yes: bool, dry_run: bool) -> anyhow::Result<()> {
 
     let _lease = acquire_after_stop(&manifest.cache_root)?;
     // hybrid-local owned artifacts (FR-13): runtime install + model cache.
-    if runtime_dir.is_dir() {
-        fs::remove_dir_all(&runtime_dir)
-            .with_context(|| format!("remove {}", runtime_dir.display()))?;
-    }
-    if let Some(models_cache) = &models_cache
-        && models_cache.is_dir()
-    {
-        fs::remove_dir_all(models_cache)
-            .with_context(|| format!("remove {}", models_cache.display()))?;
-    }
+    remove_hybrid_artifacts(yes, dry_run, &runtime_dir, models_cache.as_deref())?;
     // The launcher is only removed while it is still our binary (byte-equal to
     // the owned copy), checked before the owned copy disappears: a tampered
     // manifest must not turn uninstall into arbitrary deletion.

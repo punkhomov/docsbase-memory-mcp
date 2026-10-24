@@ -516,6 +516,7 @@ fn fastembed_without_provider_fails_with_connect_hint() {
 
 #[cfg(feature = "hybrid-local")]
 #[test]
+#[allow(unsafe_code)] // env isolation mirrors the shared CLI test pattern
 fn fastembed_unfetched_model_fails_with_fetch_hint() {
     let config_dir = TempDir::new().expect("tempdir");
     let runtime = TempDir::new().expect("runtime");
@@ -529,7 +530,24 @@ fn fastembed_unfetched_model_fails_with_fetch_hint() {
             runtime_path.display()
         ),
     );
-    let err = Config::load_from(config_dir.path(), None).expect_err("model unfetched");
+    // Isolate the model cache: the real user cache may already contain a
+    // fetched copy (live T8 runs), which would pass validation instead of
+    // failing with the fetch hint.
+    let cache = TempDir::new().expect("cache");
+    let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
+    // SAFETY: single-threaded test section; restored immediately after.
+    unsafe {
+        std::env::set_var("DOCSBASE_CACHE_DIR", cache.path());
+    }
+    let result = Config::load_from(config_dir.path(), None);
+    // SAFETY: same single-threaded section as above.
+    unsafe {
+        match prev_cache {
+            Some(value) => std::env::set_var("DOCSBASE_CACHE_DIR", value),
+            None => std::env::remove_var("DOCSBASE_CACHE_DIR"),
+        }
+    }
+    let err = result.expect_err("model unfetched");
     let text = err.to_string();
     assert!(text.contains("admission refused"), "{text}");
     assert!(text.contains("models fetch bge-small-en-v1.5"), "{text}");

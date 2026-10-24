@@ -344,3 +344,13 @@ Ledger: одна запись на таск (что сделано, чем пр�
   build-static в registry; смена ревизии = код-изменение registry (перезапрос явный). Ruling:
   uninstall без manifest'а всё равно чистит hybrid-local artifacts (они owned независимо от
   launcher).
+
+  T9 review fix (commit → head): Important — remove_cmd теперь удаляет ВСЕ cached revision'ы
+  модели (`<cache>/models/<name>` целиком), gate на model_root (а не на pinned revision dir);
+  тест remove_deletes_all_cached_revisions_including_stale. Minors — repin_embedding_note
+  возвращает Option<String> (pure) + unit-тесты (change/first/silent); no-manifest uninstall
+  теперь берёт admission lease (acquire_after_stop) перед удалением runtime/models
+  (remove_hybrid_artifacts helper, без дублирования); tests/config.rs + hybrid_local.rs
+  изолируют DOCSBASE_CACHE_DIR (реальный кэш после T8 ломал fetch-hint тесты). Verify: default
+  suite green; both-features suite green; clippy -D warnings чист default/hybrid-local/both;
+  fmt --check; tree gate pass.

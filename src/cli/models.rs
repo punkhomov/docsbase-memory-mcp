@@ -202,8 +202,17 @@ pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
     use crate::hybrid::models;
 
     let entry = models::entry(&args.name)?;
-    let dir = models::cache_dir(entry.name, entry.revision);
-    if !dir.exists() {
+    // Every cached revision is removed (FR-7), including stale revisions
+    // from an older registry pin and partial installs: gate on the model's
+    // directory, not on the currently pinned revision directory.
+    let pinned_dir = models::cache_dir(entry.name, entry.revision);
+    let model_root = match pinned_dir.parent() {
+        Some(parent) => parent.to_path_buf(),
+        None => {
+            return Err(Error::internal("cache path has no parent").into());
+        }
+    };
+    if !model_root.exists() {
         return Err(Error::Admission {
             message: format!(
                 "model \"{}\" is not fetched (nothing to remove); run `docsbase models fetch {}`",
@@ -213,9 +222,10 @@ pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
         .into());
     }
 
-    // Exclusive, non-blocking lock on the cache dir; a loaded embedder/
-    // reranker holds the same file shared for its lifetime (T4/T5).
-    let lock_path = dir.join(".lock");
+    // Exclusive, non-blocking lock on the currently pinned revision's
+    // `.lock`; a loaded embedder/reranker holds the same file shared for
+    // its lifetime (T4/T5).
+    let lock_path = pinned_dir.join(".lock");
     let file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -245,14 +255,11 @@ pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
 
     // Keep the guard alive while deleting (Linux/macOS tolerate it; on
     // Windows the OS may refuse to delete an open/mapped file — surface it).
-    std::fs::remove_dir_all(&dir)
-        .map_err(|err| Error::internal_with_source(format!("remove {}", dir.display()), err))?;
+    std::fs::remove_dir_all(&model_root).map_err(|err| {
+        Error::internal_with_source(format!("remove {}", model_root.display()), err)
+    })?;
     drop(guard);
-    // Prune the now-empty per-model parent directory.
-    if let Some(parent) = dir.parent() {
-        let _ = std::fs::remove_dir(parent);
-    }
-    println!("removed {} (revision {})", entry.name, entry.revision);
+    println!("removed {} (all cached revisions)", entry.name);
     Ok(())
 }
 
@@ -422,7 +429,9 @@ pub fn run(args: &UseArgs) -> anyhow::Result<()> {
         eprintln!("{note}");
     }
     if stage_key == "embedding" {
-        repin_embedding_note(existing.as_ref(), &table);
+        if let Some(note) = repin_embedding_note(existing.as_ref(), &table) {
+            eprintln!("{note}");
+        }
     }
     if args.dry_run {
         println!(
@@ -768,7 +777,11 @@ fn validate_hybrid_table(hybrid: &toml::map::Map<String, toml::Value>) -> anyhow
 /// keyed by the old id and must be re-embedded; the ANN tier is invalidated
 /// for the project. Printed on the write path (and dry-run) before any
 /// probe.
-fn repin_embedding_note(existing: Option<&toml::Value>, table: &toml::Value) {
+/// Re-pin note (FR-13): when the embedding pin changes, existing vectors are
+/// keyed by the old id and must be re-embedded; the ANN tier is invalidated
+/// for the project. Pure: returns the note text (printed on the write path
+/// and dry-run before any probe). `None` when nothing changed.
+fn repin_embedding_note(existing: Option<&toml::Value>, table: &toml::Value) -> Option<String> {
     let old = existing.and_then(|root| {
         root.get("hybrid")
             .and_then(toml::Value::as_table)
@@ -797,15 +810,13 @@ fn repin_embedding_note(existing: Option<&toml::Value>, table: &toml::Value) {
         Some(crate::hybrid::config::embedding_model_id(&cfg))
     };
     match (old.and_then(pin_of), new.and_then(pin_of)) {
-        (Some(old_pin), Some(new_pin)) if old_pin != new_pin => {
-            eprintln!(
-                "note: embedding pin changed from {old_pin} to {new_pin}; existing vectors will be re-embedded and the ANN tier invalidated"
-            );
-        }
+        (Some(old_pin), Some(new_pin)) if old_pin != new_pin => Some(format!(
+            "note: embedding pin changed from {old_pin} to {new_pin}; existing vectors will be re-embedded and the ANN tier invalidated"
+        )),
         (None, Some(_)) => {
-            eprintln!("note: first embedding pin; backfill will index vectors");
+            Some("note: first embedding pin; backfill will index vectors".to_owned())
         }
-        _ => {}
+        _ => None,
     }
 }
 
@@ -1905,6 +1916,38 @@ mod tests {
         });
     }
 
+    #[test]
+    fn repin_embedding_note_on_change_and_first_pin() {
+        let existing = parse(
+            "[hybrid]\n[hybrid.embedding]\nprovider = \"openrouter\"\nmodel = \"m/e\"\ndimensions = 128\nnormalize = true\n",
+        );
+        let changed = merge_stage(
+            Some(&existing),
+            "embedding",
+            embedding_stage("openrouter", "m/e", 256),
+        )
+        .expect("merge");
+        let note = repin_embedding_note(Some(&existing), &changed).expect("pin changed");
+        assert!(note.contains("re-embedded"), "{note}");
+        assert!(note.contains("ANN"), "{note}");
+
+        let same = merge_stage(
+            Some(&existing),
+            "embedding",
+            embedding_stage("openrouter", "m/e", 128),
+        )
+        .expect("merge");
+        assert!(
+            repin_embedding_note(Some(&existing), &same).is_none(),
+            "same pin silent"
+        );
+
+        let first = merge_stage(None, "embedding", embedding_stage("openrouter", "m/e", 128))
+            .expect("merge");
+        let note = repin_embedding_note(None, &first).expect("first pin");
+        assert!(note.contains("backfill"), "{note}");
+    }
+
     // ---------- models remove (FR-7) ----------
 
     #[cfg(feature = "hybrid-local")]
@@ -1925,6 +1968,26 @@ mod tests {
         std::fs::create_dir_all(&model_dir).expect("create model dir");
         std::fs::write(model_dir.join("model.onnx"), b"fake").expect("file");
         model_dir
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn remove_deletes_all_cached_revisions_including_stale() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let pinned = seed_model_cache(dir.path(), "bge-small-en-v1.5");
+        // A stale revision from an older registry pin (must also go).
+        let stale = pinned.parent().expect("parent").join("oldrev");
+        std::fs::create_dir_all(&stale).expect("create stale rev");
+        std::fs::write(stale.join("model.onnx"), b"x").expect("file");
+        with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
+            remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect("remove");
+        });
+        assert!(!pinned.exists(), "pinned revision removed");
+        assert!(!stale.exists(), "stale revision removed too");
+        assert!(
+            !pinned.parent().expect("parent").exists(),
+            "model dir removed"
+        );
     }
 
     #[cfg(feature = "hybrid-local")]
