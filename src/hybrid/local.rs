@@ -245,10 +245,142 @@ impl Embedder for FastEmbedEmbedder {
 ///
 /// # Errors
 /// Returns [`Error::Internal`] until T5 lands the fastembed reranker.
-pub fn reranker(_cfg: &RerankerCfg, _providers: &ProvidersCfg) -> Result<Arc<dyn Reranker>> {
-    Err(Error::internal(
-        "the fastembed reranker is not yet implemented (spec task T5)",
-    ))
+/// Builds the local rerank stage (T5, FR-5/9/12): provisioning first
+/// (runtime → connect hint, model → fetch hint), then one instance per cache
+/// key. A rerank model requires an explicit registry row — there is no
+/// implicit/default reranker (FR-5).
+///
+/// # Errors
+/// Returns [`Error::Admission`] for missing runtime/model (with exactly one
+/// corrective action) and [`Error::Internal`] for post-load session failures.
+pub fn reranker(cfg: &RerankerCfg, providers: &ProvidersCfg) -> Result<Arc<dyn Reranker>> {
+    let entry = models::entry(&cfg.model)?;
+    if entry.task != Task::Rerank {
+        return Err(Error::Admission {
+            message: format!(
+                "hybrid.reranker: \"{}\" is an embedding model, not a rerank model; pick a rerank model from `docsbase models list`",
+                cfg.model
+            ),
+        });
+    }
+    let runtime = super::runtime::resolve(providers)?;
+    if !models::cached(entry)? {
+        return Err(Error::Admission {
+            message: format!(
+                "fastembed model \"{}\" is not fetched; run `docsbase models fetch {}`",
+                cfg.model, cfg.model
+            ),
+        });
+    }
+    let key = ModelCacheKey {
+        model_id: format!("fastembed/{}", cfg.model),
+        max_length: DEFAULT_MAX_LENGTH,
+        intra_threads: Some(capped_intra_threads()),
+        runtime,
+    };
+    get_or_load_reranker(key.clone(), || {
+        FastEmbedReranker::load(entry, &key).map(|reranker| Arc::new(reranker) as Arc<dyn Reranker>)
+    })
+}
+
+/// Process-wide reranker cache keyed by [`ModelCacheKey`] (mirror of the
+/// embedder map; one instance per key, NFR-4/NFR-7).
+pub(crate) fn get_or_load_reranker(
+    key: ModelCacheKey,
+    load: impl FnOnce() -> Result<Arc<dyn Reranker>>,
+) -> Result<Arc<dyn Reranker>> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+
+    static INSTANCES: OnceLock<Mutex<HashMap<ModelCacheKey, Arc<dyn Reranker>>>> = OnceLock::new();
+    let map = INSTANCES.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let map = map
+            .lock()
+            .map_err(|poison| Error::internal(format!("reranker cache lock poisoned: {poison}")))?;
+        if let Some(existing) = map.get(&key) {
+            return Ok(Arc::clone(existing));
+        }
+    }
+    let shared = load()?;
+    let mut map = map
+        .lock()
+        .map_err(|poison| Error::internal(format!("reranker cache lock poisoned: {poison}")))?;
+    if let Some(existing) = map.get(&key) {
+        return Ok(Arc::clone(existing));
+    }
+    map.insert(key, Arc::clone(&shared));
+    Ok(shared)
+}
+
+/// Local `fastembed` cross-encoder reranker (T5). Uses the BYO path with
+/// `OnnxSource::File` (no full-model byte buffer) and holds the shared
+/// model-cache `.lock` guard for its lifetime.
+pub struct FastEmbedReranker {
+    model: Mutex<fastembed::TextRerank>,
+    _lock_guard: Option<RwLockReadGuard<'static, std::fs::File>>,
+}
+
+impl FastEmbedReranker {
+    /// Loads the rerank model from the verified cache.
+    ///
+    /// # Errors
+    /// Admission before load (runtime/model); `Internal` after a successful
+    /// load when session/tokenizer construction fails.
+    fn load(entry: &ModelEntry<'_>, key: &ModelCacheKey) -> Result<Self> {
+        super::runtime::init(&key.runtime)?;
+        let cache_dir = models::cache_dir(entry.name, entry.revision);
+        let lock_guard = take_shared_lock(&cache_dir)?;
+
+        let onnx_path = entry
+            .files
+            .iter()
+            .find(|spec| spec.path.starts_with("onnx/"))
+            .map(|spec| cache_dir.join(spec.path))
+            .ok_or_else(|| {
+                Error::internal(format!("registry row {} has no onnx file", entry.name))
+            })?;
+        let tokenizer_files = tokenizer_files(&cache_dir, entry)?;
+        let model = fastembed::UserDefinedRerankingModel::new(
+            fastembed::OnnxSource::File(onnx_path),
+            tokenizer_files,
+        );
+        let options = fastembed::RerankInitOptionsUserDefined::new()
+            .with_max_length(key.max_length)
+            .with_intra_threads(key.intra_threads.unwrap_or(1));
+        let model =
+            fastembed::TextRerank::try_new_from_user_defined(model, options).map_err(|err| {
+                Error::internal(format!("failed to load the fastembed reranker: {err}"))
+            })?;
+        Ok(Self {
+            model: Mutex::new(model),
+            _lock_guard: lock_guard,
+        })
+    }
+}
+
+impl Reranker for FastEmbedReranker {
+    fn rerank(&self, query: &str, docs: &[String], top_n: usize) -> Result<Vec<(usize, f32)>> {
+        let mut model = self
+            .model
+            .lock()
+            .map_err(|poison| Error::internal(format!("reranker lock poisoned: {poison}")))?;
+        let docs_ref: Vec<&str> = docs.iter().map(String::as_str).collect();
+        let results = model
+            .rerank(query, &docs_ref, false, Some(DEFAULT_BATCH_SIZE))
+            .map_err(|err| Error::internal(format!("fastembed rerank inference failed: {err}")))?;
+        Ok(rerank_scores(&results, top_n))
+    }
+}
+
+/// Maps fastembed results to the `(index, score)` contract, best first, and
+/// clamps to `top_n`. Pure and unit-tested (live inference is T8).
+fn rerank_scores(results: &[fastembed::RerankResult], top_n: usize) -> Vec<(usize, f32)> {
+    results
+        .iter()
+        .map(|result| (result.index, result.score))
+        .take(top_n)
+        .collect()
 }
 
 /// Reads the four tokenizer files from the cache directory into fastembed's
@@ -480,6 +612,95 @@ mod tests {
             !Arc::ptr_eq(&first, &other),
             "different key is a different instance"
         );
+    }
+
+    #[test]
+    fn reranker_without_runtime_fails_with_connect_hint() {
+        let cfg = RerankerCfg {
+            provider: super::super::config::PROVIDER_FASTEMBED.to_owned(),
+            model: "jina-reranker-v1-turbo-en".to_owned(),
+            window: 50,
+        };
+        let providers = ProvidersCfg::default();
+        let Err(err) = reranker(&cfg, &providers) else {
+            panic!("expected admission without a runtime");
+        };
+        assert!(matches!(err, Error::Admission { .. }));
+        assert!(err.to_string().contains("connect fastembed"), "{err}");
+    }
+
+    #[test]
+    fn reranker_without_model_fails_with_fetch_hint() {
+        let cfg = RerankerCfg {
+            provider: super::super::config::PROVIDER_FASTEMBED.to_owned(),
+            model: "jina-reranker-v1-turbo-en".to_owned(),
+            window: 50,
+        };
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let runtime_path = dir.path().join("libonnxruntime.so");
+        std::fs::write(&runtime_path, b"fake").expect("touch");
+        let providers = ProvidersCfg {
+            fastembed: Some(super::super::config::FastembedProvider {
+                enabled: true,
+                runtime: Some("1.24.4".to_owned()),
+                runtime_path: Some(runtime_path),
+            }),
+            openrouter: None,
+        };
+        let Err(err) = reranker(&cfg, &providers) else {
+            panic!("expected admission without a fetched model");
+        };
+        assert!(matches!(err, Error::Admission { .. }));
+        assert!(err.to_string().contains("models fetch"), "{err}");
+    }
+
+    #[test]
+    fn reranker_rejects_embedding_model_rows() {
+        let cfg = RerankerCfg {
+            provider: super::super::config::PROVIDER_FASTEMBED.to_owned(),
+            model: "bge-small-en-v1.5".to_owned(),
+            window: 50,
+        };
+        let providers = ProvidersCfg::default();
+        let Err(err) = reranker(&cfg, &providers) else {
+            panic!("expected admission for an embedding model selected for rerank");
+        };
+        assert!(matches!(err, Error::Admission { .. }));
+        assert!(err.to_string().contains("rerank model"), "{err}");
+    }
+
+    #[test]
+    fn rerank_contract_returns_index_and_score_for_every_doc() {
+        use fastembed::RerankResult;
+        let make = |index: usize, score: f32| RerankResult {
+            document: None,
+            score,
+            index,
+        };
+        // 5 docs, best-first already sorted by fastembed.
+        let results = vec![
+            make(3, 9.0),
+            make(0, 7.5),
+            make(4, 6.0),
+            make(1, 4.0),
+            make(2, 1.0),
+        ];
+        let scores = rerank_scores(&results, 10);
+        assert_eq!(scores.len(), 5, "every doc gets an index+score");
+        for (position, (index, score)) in scores.iter().enumerate() {
+            assert_eq!(*index, results[position].index);
+            assert!((score - results[position].score).abs() < f32::EPSILON);
+        }
+        // Order must be best-first.
+        assert!(scores.windows(2).all(|w| w[0].1 >= w[1].1));
+        // top_n clamps.
+        let capped = rerank_scores(&results, 2);
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped[0].0, 3);
+        assert_eq!(capped[1].0, 0);
+        assert!((capped[0].1 - 9.0).abs() < f32::EPSILON);
+        // top_n larger than docs returns everything.
+        assert_eq!(rerank_scores(&results, 100).len(), 5);
     }
 
     #[test]

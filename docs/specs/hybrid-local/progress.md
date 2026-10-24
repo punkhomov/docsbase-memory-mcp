@@ -269,3 +269,17 @@ Ledger: одна запись на таск (что сделано, чем пр�
   строках; live-inference в T8. Ruling: `FastEmbedEmbedder` хранит `Mutex<TextEmbedding>` (fastembed
   embed требует &mut self); процесс-wide кэш по ключу гарантирует один инстанс на ключ.
   Отложено: T5 (reranker stub остаётся).
+
+- Task 5: complete (commits `2d0c8c5..`→ head, tests: `cargo test --locked --features
+  hybrid-local --lib hybrid::local` → 11 passed (вкл. reranker_without_runtime/without_model/
+  rejects_embedding_model_rows/rerank_contract); `--test hybrid_local` → 3 passed; default suite
+  green; clippy -D warnings чист).
+  Реализовано: `FastEmbedReranker` (local.rs): `reranker(cfg, providers)` с provisioning order
+  runtime→model (connect/fetch hints), task-валидация (embedding-модель для rerank → Admission с
+  action), `UserDefinedRerankingModel` + `OnnxSource::File` (без полного буфера модели) +
+  `RerankInitOptionsUserDefined`; process-wide кэш по ModelCacheKey (`get_or_load_reranker`,
+  mirror embedder); shared `.lock` guard на lifetime; `rerank_scores` — чистый mapping
+  (index,score) best-first + top_n clamp (unit-покрыт). Ruling: key reranker'а — `fastembed/<name>`
+  (без @d/@r/@p, т.к. scoring не кэшируется — YAGNI, трайт Reranker без model_id). Ruling:
+  fastembed возвращает все scores отсортированными; clamp у нас, чтобы контракт `top_n` был у
+  вызывающего.

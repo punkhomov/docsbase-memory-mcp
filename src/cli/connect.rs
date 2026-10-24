@@ -281,6 +281,10 @@ fn macos_signature_state(path: &std::path::Path) -> &'static str {
 
 /// Writes or merges one `[providers.<name>]` table into the global config
 /// (`config.toml`), preserving every other section (FR-1).
+#[cfg_attr(
+    not(any(feature = "hybrid-local", feature = "hybrid-remote")),
+    allow(dead_code)
+)]
 fn write_global_provider(name: &str, fields: &[(&str, toml::Value)]) -> Result<()> {
     let config_dir = crate::config::paths::config_dir()?;
     crate::platform::fs::secure_dir(&config_dir).map_err(|err| {
