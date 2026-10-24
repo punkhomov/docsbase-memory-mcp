@@ -239,3 +239,17 @@ Ledger: одна запись на таск (что сделано, чем пр�
   stale-таблица падает на install, а не молчит. Ruling: тесты runtime изолированы `Mutex`-guard'ом
   (общий real runtime_root, параллельные тесты конфликтовали). Minor (deferred): streaming download
   (T1 deferred) касается и runtime-архива (74MB win-x64) — пересмотреть при T8.
+
+- Task 2 review rounds (2026-10-23, `reviewer-muse`): вердикт FAIL → fix `fccf2e0`
+  (RuntimeStatus; data-dir fallback; openrouter probe на инжектируемом Transport + тесты
+  200/401/transport; --check статус + macOS signature state; lock-ошибки; macOS floor; caps/zip/
+  unknown/floor тесты; ENV_LOCK) → re-review: 1 Important NOT ADDRESSED (dead data-dir fallback —
+  status-гейт убивал arm) + minor sysctl/weak asserts/guards → fix `5bd9058` (resolve без
+  provider_status-гейта, живые data-dir fallback + тест; `kern.osproductversion` + fail-closed;
+  runtime_status Connected при data-dir; точные state_labels) → re-review: новый P1 — runtime_status
+  маскировал Broken как Connected (ранний return без existence-проверки) → fix `059aad1`
+  (existence-гейт + 2 regression-теста) → final re-review: ADDRESSED, new breakage none.
+  Minor (deferred): тесты runtime используют реальный `runtime_root()` (только
+  DOCSBASE_DATA_DIR-изоляция, без общего guard'а с ENV_LOCK domain'ом); macOS-функции
+  (macos_fixup_commands, macos_major_version) неисполнимы на Linux CI по природе (покрыт состав/
+  разбор). T2 closed.
