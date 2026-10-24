@@ -24,6 +24,8 @@ pub mod local;
 pub mod models;
 #[cfg(feature = "hybrid-remote")]
 pub mod openrouter;
+#[cfg(feature = "hybrid-local")]
+pub mod runtime;
 #[cfg(feature = "hybrid-remote")]
 pub mod wire;
 

@@ -1,5 +1,6 @@
 //! CLI entry points (FR-30).
 
+pub mod connect;
 pub mod index;
 pub mod install;
 pub mod models;
@@ -80,6 +81,12 @@ pub enum Command {
         #[command(subcommand)]
         command: models::ModelsCommand,
     },
+    /// Prepare providers on this machine (status, openrouter, fastembed).
+    Connect {
+        /// Provider subcommand.
+        #[command(subcommand)]
+        provider: Option<connect::ConnectProvider>,
+    },
     /// Install (or update) the binary and register owned artifacts.
     Install,
     /// Update the installed binary from a GitHub release (network).
@@ -137,6 +144,7 @@ pub fn run() -> anyhow::Result<()> {
             #[cfg(feature = "hybrid-local")]
             models::ModelsCommand::List => models::list_cmd(),
         },
+        Command::Connect { provider } => connect::run(&connect::ConnectArgs { provider }),
         Command::Install => install::install(),
         Command::Update {
             check,

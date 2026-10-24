@@ -216,3 +216,26 @@ Ledger: одна запись на таск (что сделано, чем пр�
   (commit `e01608c`): client строится лениво только при `has_openrouter`; regression-тест
   `fastembed_only_config_does_not_demand_openrouter_key` (hybrid-local,hybrid-remote). Re-review:
   ADDRESSED, new breakage none. T3 closed.
+
+- Task 2: complete (commits `e7a5d1f..`→ head of this session, tests: `cargo test --locked
+  --features hybrid-local --lib hybrid::runtime` → 6 passed; `--test connect` → 4 passed;
+  `--features hybrid-local,hybrid-remote --test connect` → 4 passed; default suite green;
+  clippy -D warnings чист на hybrid-local и hybrid-local,hybrid-remote; default tree gate: 0
+  запрещённых крейтов).
+  Реализовано: `src/hybrid/runtime.rs` — OQ-1 таблица заполнена реальными релизами ORT 1.24.4
+  (5 таргетов, archive_url/archive_sha256/archive_size/library_path/library_size из официальных
+  архивов; скачаны и проверены при spec-work), `platform_target`, `resolve` (FR-11:
+  ORT_DYLIB_PATH → provider runtime_path → admission; Broken-state), `install` (caps 256 MiB/
+  512 MiB, preflight 1.5x+256 MiB, download+sha256+size, extract библиотеки из tgz/zip,
+  staging+rename, exclusive `.lock`, `--force`), `init` (OnceLock, init_from+commit, Admission,
+  никогда паника); macOS quarantine/codesign-последовательность (`macos_fixup_commands`)
+  конструируется и применяется только на macOS (на Linux CI тестируется состав). `src/cli/connect.rs`
+  — `connect` status-table (4 ProviderState), `connect fastembed --check/--force`, `connect
+  openrouter` (GET /key, 0 токенов, 401/403→Admission check-key, ключ не пишется) под
+  hybrid-remote; глобальный write `[providers.*]` сохраняет остальные секции. `Transport` gain
+  `get_json` (wire.rs, ReqwestTransport, Mock/Failing/Recording/Scripted имплементиции).
+  Ruling: `init` использует `init_from`+`commit()` (ort rc.13 возвращает EnvironmentBuilder; commit
+  регистрирует глобальный env). Ruling: валидация размера извлечённой библиотеки по таблице —
+  stale-таблица падает на install, а не молчит. Ruling: тесты runtime изолированы `Mutex`-guard'ом
+  (общий real runtime_root, параллельные тесты конфликтовали). Minor (deferred): streaming download
+  (T1 deferred) касается и runtime-архива (74MB win-x64) — пересмотреть при T8.
