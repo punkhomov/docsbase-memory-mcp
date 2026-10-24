@@ -11,6 +11,57 @@ use docsbase_memory::hybrid::config::{
     CacheCfg, EmbeddingCfg, HybridCfg, ProvidersCfg, embedding_model_id, from_config,
 };
 
+#[cfg(feature = "hybrid-local")]
+#[test]
+#[allow(unsafe_code)] // env isolation mirrors the shared CLI test pattern
+fn jobs_embed_texts_threads_real_providers() {
+    // C5 sibling guard: `hybrid::jobs::embed_texts` (used by the daemon
+    // job pipeline) must thread the real `ProvidersCfg`; a dangling
+    // runtime_path surfaces the resolve-stage admission (--force hint),
+    // never "is not connected" (which would indicate a `default()`).
+    use docsbase_memory::hybrid::config::FastembedProvider;
+    use docsbase_memory::hybrid::jobs;
+    let cache = tempfile::TempDir::new().expect("cache");
+    let cfg = HybridCfg {
+        enabled: true,
+        embedding: Some(EmbeddingCfg {
+            provider: "fastembed".to_owned(),
+            model: "bge-small-en-v1.5".to_owned(),
+            ..EmbeddingCfg::default()
+        }),
+        ..HybridCfg::default()
+    };
+    let providers = ProvidersCfg {
+        fastembed: Some(FastembedProvider {
+            enabled: true,
+            runtime: Some("1.24.4".to_owned()),
+            runtime_path: Some("/nonexistent/libonnxruntime.so".into()),
+        }),
+        openrouter: None,
+    };
+    let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
+    // SAFETY: single-threaded test section; restored immediately after.
+    unsafe {
+        std::env::set_var("DOCSBASE_CACHE_DIR", cache.path());
+    }
+    let result = jobs::embed_texts(cache.path(), &cfg, &providers, &["hello".to_owned()]);
+    // SAFETY: same single-threaded section as above.
+    unsafe {
+        match prev_cache {
+            Some(value) => std::env::set_var("DOCSBASE_CACHE_DIR", value),
+            None => std::env::remove_var("DOCSBASE_CACHE_DIR"),
+        }
+    }
+    let err = match result {
+        Ok(_) => panic!("expected admission, got embeddings"),
+        Err(e) => e,
+    };
+    let text = err.to_string();
+    assert!(text.contains("fastembed runtime"), "{text}");
+    assert!(text.contains("--force"), "{text}");
+    assert!(!text.contains("is not connected"), "{text}");
+}
+
 #[test]
 fn cache_key_carries_model_dim_and_postprocess() {
     let l2 = EmbeddingCfg {
