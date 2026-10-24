@@ -298,8 +298,20 @@ fn write_global_provider(name: &str, fields: &[(&str, toml::Value)]) -> Result<(
         Error::internal_with_source(format!("create {}", config_dir.display()), err)
     })?;
     let path = config_dir.join("config.toml");
+    // Cross-process serialization with `models use --global` (C13).
+    crate::config::paths::with_config_write_lock(&path, || {
+        write_global_provider_locked(name, fields, &path).map_err(|err| anyhow::anyhow!("{err}"))
+    })
+    .map_err(|err| Error::internal(err.to_string()))
+}
 
-    let mut root: toml::Value = match std::fs::read_to_string(&path) {
+/// The read-modify-write body, run under the config-write lock.
+fn write_global_provider_locked(
+    name: &str,
+    fields: &[(&str, toml::Value)],
+    path: &std::path::Path,
+) -> Result<()> {
+    let mut root: toml::Value = match std::fs::read_to_string(path) {
         Ok(raw) => toml::from_str(&raw)
             .map_err(|err| Error::internal_with_source(format!("parse {}", path.display()), err))?,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -334,7 +346,7 @@ fn write_global_provider(name: &str, fields: &[(&str, toml::Value)]) -> Result<(
         .map_err(|err| Error::internal_with_source(format!("write {}", tmp.display()), err))?;
     crate::platform::fs::secure_file(&tmp)
         .map_err(|err| Error::internal_with_source(format!("secure {}", tmp.display()), err))?;
-    std::fs::rename(&tmp, &path)
+    std::fs::rename(&tmp, path)
         .map_err(|err| Error::internal_with_source(format!("publish {}", path.display()), err))?;
     Ok(())
 }

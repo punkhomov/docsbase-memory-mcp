@@ -1153,7 +1153,10 @@ fn write_global_toml(existing: Option<&toml::Value>, table: &toml::Value) -> any
             Error::internal_with_source(format!("create {}", parent.display()), err)
         })?;
     }
-    write_project_toml(&path, existing, table)
+    // Cross-process serialization with `connect`'s provider writes (C13).
+    crate::config::paths::with_config_write_lock(&path, || {
+        write_project_toml(&path, existing, table)
+    })
 }
 
 /// Merges the resolved `hybrid` table into a config file, preserving
