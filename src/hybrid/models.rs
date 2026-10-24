@@ -12,6 +12,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use fd_lock::RwLock;
 use sha2::Digest;
@@ -27,6 +28,9 @@ pub const MAX_TOTAL_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 
 /// Free-space headroom added to the fetch preflight (FR-13).
 pub const PREFLIGHT_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Serial number for unique staging/backup dir names (see `fetch_into`).
+static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Preflight requirement (FR-13): 1.5x the expected bytes plus headroom,
 /// expressed as the integer fraction `3/2` (floor equals the float
@@ -566,16 +570,6 @@ fn write_complete(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Best-effort removal of a partial/corrupt install.
-fn cleanup_dir(dir: &Path) {
-    if let Err(err) = std::fs::remove_dir_all(dir) {
-        eprintln!(
-            "warning: failed to clean partial model install {}: {err}",
-            dir.display()
-        );
-    }
-}
-
 /// The full install path: caps, preflight, per-file fetch, `.complete` last.
 /// On any failure the revision directory is removed so nothing usable remains
 /// (FR-6, P2).
@@ -610,6 +604,11 @@ fn install_all(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) -> 
 /// Fetches `entry` into `dir`: a verified complete revision verifies under
 /// the **shared** lock and returns without downloading; anything else takes
 /// the exclusive install lock (FR-6). `force` always reinstalls.
+///
+/// The install itself runs in a sibling staging directory and is promoted by
+/// rename only after every file verified. A failed fetch (including a failed
+/// `--force` refetch) therefore never destroys a pre-existing verified
+/// cache — the reviewer finding C6 fix.
 pub(crate) fn fetch_into(
     entry: &ModelEntry<'_>,
     source: &dyn ModelSource,
@@ -636,11 +635,67 @@ pub(crate) fn fetch_into(
     if !force && complete.exists() && verify_hashes(entry, dir)? {
         return Ok(());
     }
-    let result = install_all(entry, source, dir);
-    if result.is_err() {
-        cleanup_dir(dir);
+
+    let parent = dir
+        .parent()
+        .ok_or_else(|| Error::internal(format!("cache path has no parent: {}", dir.display())))?;
+    // Unique staging/backup names per fetch: parallel fetches (or parallel
+    // tests) must never share a `.staging-*` sibling.
+    let tag = format!(
+        "{}-{}",
+        entry.revision_short(),
+        STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let staging = parent.join(format!(".staging-{tag}"));
+    // Remove any stale staging dir from a crashed earlier attempt.
+    if staging.exists() {
+        let _ = std::fs::remove_dir_all(&staging);
     }
-    result
+    // Create the staging dir before the preflight (free-space checks need a
+    // real path to stat); `install_all` re-secures it harmlessly.
+    platform::fs::secure_dir(&staging).map_err(|err| {
+        Error::internal_with_source(format!("create staging dir {}", staging.display()), err)
+    })?;
+
+    let result = install_all(entry, source, &staging);
+    match result {
+        Ok(()) => {
+            // Promote the staging dir; move the previous dir aside first.
+            // Note: a crash after this first rename leaves `dir` absent until
+            // the publish rename completes — the best-effort restore below
+            // covers the publish-rename failure path, not a hard kill.
+            let backup = parent.join(format!(".old-{tag}"));
+            if dir.exists() {
+                if backup.exists() {
+                    let _ = std::fs::remove_dir_all(&backup);
+                }
+                std::fs::rename(dir, &backup).map_err(|err| {
+                    Error::internal_with_source(format!("stash old cache {}", dir.display()), err)
+                })?;
+            }
+            if let Err(err) = std::fs::rename(&staging, dir) {
+                // Try to restore the old cache before surfacing the error.
+                if dir.exists() {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+                if backup.exists() {
+                    let _ = std::fs::rename(&backup, dir);
+                }
+                return Err(Error::internal_with_source(
+                    format!("publish cache {}", dir.display()),
+                    err,
+                ));
+            }
+            // Best-effort drop of the superseded cache.
+            let _ = std::fs::remove_dir_all(&backup);
+            Ok(())
+        }
+        Err(err) => {
+            // Keep the previous cache untouched; drop only the staging dir.
+            let _ = std::fs::remove_dir_all(&staging);
+            Err(err)
+        }
+    }
 }
 
 /// Fetches a model into the cache (public entry point used by the CLI).
@@ -961,10 +1016,9 @@ mod tests {
             !dir.path().join(".complete").exists(),
             "no .complete after failure"
         );
-        assert!(
-            !dir.path().exists() || std::fs::read_dir(dir.path()).expect("dir").next().is_none(),
-            "nothing usable remains"
-        );
+        // Staging installs leave at most the `.lock` control file (never
+        // `.part`/`.staging-*`/files).
+        assert_clean_failure_dir(dir.path());
 
         // Hash mismatch: same size, different content.
         let dir2 = TempDir::new().expect("tmp");
@@ -975,6 +1029,7 @@ mod tests {
         let err = fetch_into(&entry, &source2, false, dir2.path()).expect_err("bad hash");
         assert!(matches!(err, Error::Admission { .. }));
         assert!(!dir2.path().join(".complete").exists());
+        assert_clean_failure_dir(dir2.path());
     }
 
     #[test]
@@ -989,9 +1044,7 @@ mod tests {
         let source = FakeSource::new(&entry);
         let err = fetch_into(&entry, &source, false, dir.path()).expect_err("cap");
         assert!(matches!(err, Error::Admission { .. }));
-        assert!(
-            !dir.path().exists() || std::fs::read_dir(dir.path()).expect("dir").next().is_none()
-        );
+        assert_clean_failure_dir(dir.path());
     }
 
     #[test]
@@ -1017,9 +1070,7 @@ mod tests {
         let err = fetch_into(&entry, &source, false, dir.path()).expect_err("total cap");
         assert!(matches!(err, Error::Admission { .. }));
         assert_eq!(source.calls(), 0, "caps fail before any download");
-        assert!(
-            !dir.path().exists() || std::fs::read_dir(dir.path()).expect("dir").next().is_none()
-        );
+        assert_clean_failure_dir(dir.path());
     }
 
     #[test]
@@ -1130,9 +1181,63 @@ mod tests {
         source.fail_all = true;
         let err = fetch_into(&entry, &source, false, dir.path()).expect_err("transport");
         assert!(matches!(err, Error::Admission { .. }));
+        assert_clean_failure_dir(dir.path());
+    }
+
+    /// Asserts a failed fetch leaves at most the `.lock` control file
+    /// (staging installs leave no files/`.part`/`.staging-*`).
+    fn assert_clean_failure_dir(dir: &Path) {
+        if !dir.exists() {
+            return;
+        }
+        for entry in std::fs::read_dir(dir).expect("dir") {
+            let name = entry.expect("entry").file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                name == ".lock",
+                "unexpected leftover {name} after failed fetch in {}",
+                dir.display()
+            );
+        }
+    }
+
+    #[test]
+    fn force_refetch_failure_preserves_verified_cache() {
+        // C6: a failed `--force` refetch must not wipe the previously
+        // verified cache (the old behavior removed the whole revision dir).
+        let root = TempDir::new().expect("tmp");
+        let entry = fake_entry();
+        let dir = root.path().join("rev");
+        let source = FakeSource::new(&entry);
+        fetch_into(&entry, &source, false, &dir).expect("fetch");
+        assert!(cached_in(&entry, &dir).expect("cached"));
+
+        let mut failing = FakeSource::new(&entry);
+        failing.fail_all = true;
+        let err = fetch_into(&entry, &failing, true, &dir).expect_err("force refetch");
+        assert!(matches!(err, Error::Admission { .. }));
+        // The pre-existing verified cache is intact.
+        assert!(cached_in(&entry, &dir).expect("cache preserved"));
+        assert!(dir.join(".complete").exists());
+        for spec in entry.files {
+            assert_eq!(
+                std::fs::metadata(dir.join(spec.path)).expect("file").len(),
+                spec.size,
+                "{} intact after failed force refetch",
+                spec.path
+            );
+        }
+        // No staging/backup leftovers.
+        let leftovers: Vec<_> = std::fs::read_dir(root.path())
+            .expect("read dir")
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
         assert!(
-            !dir.path().exists() || std::fs::read_dir(dir.path()).expect("dir").next().is_none(),
-            "no partial install remains"
+            !leftovers
+                .iter()
+                .any(|name| name.contains(".staging-") || name.contains(".old-")),
+            "no staging/backup dirs: {leftovers:?}"
         );
     }
 
