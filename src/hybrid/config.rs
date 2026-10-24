@@ -334,9 +334,8 @@ pub fn resolve_embedding(
             {
                 let _ = (model, dimensions, normalize);
                 Err(Error::Admission {
-                    message: format!(
-                        "hybrid.embedding: provider \"fastembed\" requires the `hybrid-local` build feature"
-                    ),
+                    message: "hybrid.embedding: provider \"fastembed\" requires the `hybrid-local` build feature"
+                        .to_owned(),
                 })
             }
         }
@@ -387,9 +386,8 @@ pub fn resolve_reranker(provider: &str, model: Option<String>, window: u32) -> R
             {
                 let _ = (model, window);
                 Err(Error::Admission {
-                    message: format!(
-                        "hybrid.reranker: provider \"fastembed\" requires the `hybrid-local` build feature"
-                    ),
+                    message: "hybrid.reranker: provider \"fastembed\" requires the `hybrid-local` build feature"
+                        .to_owned(),
                 })
             }
         }
@@ -743,6 +741,7 @@ mod tests {
 
     /// Fake embedder whose model id comes from the canonical formatter — the
     /// same source the real fastembed embedder will use (T4).
+    #[cfg_attr(not(feature = "hybrid-local"), allow(dead_code))]
     struct FakeFastembedEmbedder {
         model_id: String,
     }

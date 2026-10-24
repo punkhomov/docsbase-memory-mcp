@@ -94,3 +94,264 @@ fn models_without_purpose_prints_help() {
     let env = Env::new();
     env.cmd().args(["models"]).assert().failure();
 }
+
+#[test]
+fn models_use_without_purpose_fails() {
+    let env = Env::new();
+    let dir = tempfile::TempDir::new().expect("tmp");
+    std::fs::write(dir.path().join(".docsbase.toml"), "[hybrid]\n").expect("seed");
+    env.cmd()
+        .current_dir(dir.path())
+        .args(["models", "use"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn models_use_embed_dry_run_prints_table_without_writing() {
+    let env = Env::new();
+    let dir = tempfile::TempDir::new().expect("tmp");
+    std::fs::write(dir.path().join(".docsbase.toml"), "[hybrid]\n").expect("seed");
+    let output = env
+        .cmd()
+        .current_dir(dir.path())
+        .args([
+            "models",
+            "use",
+            "embed",
+            "bge-small-en-v1.5",
+            "--provider",
+            "fastembed",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[hybrid]"), "{stdout}");
+    assert!(stdout.contains("bge-small-en-v1.5"), "{stdout}");
+    assert!(stdout.contains("384"), "{stdout} registry dims inferred");
+    // Nothing written: seeded project file is untouched.
+    let project_file = std::fs::read_to_string(dir.path().join(".docsbase.toml")).expect("read");
+    assert_eq!(project_file, "[hybrid]\n");
+}
+
+#[test]
+fn models_use_outside_project_requires_global() {
+    let env = Env::new();
+    let dir = tempfile::TempDir::new().expect("tmp"); // no .docsbase.toml
+    let output = env
+        .cmd()
+        .current_dir(dir.path())
+        .args([
+            "models",
+            "use",
+            "embed",
+            "m/e",
+            "--provider",
+            "openrouter",
+            "--dims",
+            "128",
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--global"), "{stderr}");
+}
+
+#[test]
+fn models_use_both_scope_flags_error() {
+    let env = Env::new();
+    let dir = tempfile::TempDir::new().expect("tmp");
+    std::fs::write(dir.path().join(".docsbase.toml"), "[hybrid]\n").expect("seed");
+    env.cmd()
+        .current_dir(dir.path())
+        .args([
+            "models",
+            "use",
+            "embed",
+            "m/e",
+            "--provider",
+            "openrouter",
+            "--dims",
+            "128",
+            "--local",
+            "--global",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn models_use_path_with_global_errors() {
+    let env = Env::new();
+    let dir = tempfile::TempDir::new().expect("tmp");
+    env.cmd()
+        .args([
+            "models",
+            "use",
+            "embed",
+            "m/e",
+            "--provider",
+            "openrouter",
+            "--dims",
+            "128",
+            "--global",
+            "--path",
+        ])
+        .arg(dir.path())
+        .assert()
+        .failure();
+}
+
+#[test]
+fn models_use_dims_only_on_embed() {
+    let env = Env::new();
+    let dir = tempfile::TempDir::new().expect("tmp");
+    std::fs::write(dir.path().join(".docsbase.toml"), "[hybrid]\n").expect("seed");
+    // --dims is illegal on rerank.
+    env.cmd()
+        .current_dir(dir.path())
+        .args([
+            "models",
+            "use",
+            "rerank",
+            "jina-reranker-v1-turbo-en",
+            "--provider",
+            "fastembed",
+            "--dims",
+            "128",
+            "--dry-run",
+        ])
+        .assert()
+        .failure();
+    // --window is illegal on embed.
+    env.cmd()
+        .current_dir(dir.path())
+        .args([
+            "models",
+            "use",
+            "embed",
+            "bge-small-en-v1.5",
+            "--provider",
+            "fastembed",
+            "--window",
+            "20",
+            "--dry-run",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn models_use_unknown_model_requires_provider() {
+    let env = Env::new();
+    let dir = tempfile::TempDir::new().expect("tmp");
+    std::fs::write(dir.path().join(".docsbase.toml"), "[hybrid]\n").expect("seed");
+    let output = env
+        .cmd()
+        .current_dir(dir.path())
+        .args([
+            "models",
+            "use",
+            "embed",
+            "some/model",
+            "--dims",
+            "128",
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--provider"), "{stderr}");
+}
+
+#[test]
+fn models_use_openrouter_requires_dims() {
+    let env = Env::new();
+    let dir = tempfile::TempDir::new().expect("tmp");
+    std::fs::write(dir.path().join(".docsbase.toml"), "[hybrid]\n").expect("seed");
+    let output = env
+        .cmd()
+        .current_dir(dir.path())
+        .args([
+            "models",
+            "use",
+            "embed",
+            "some/model",
+            "--provider",
+            "openrouter",
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--dims"), "{stderr}");
+}
+
+#[test]
+fn models_use_fastembed_unfetched_model_gives_fetch_hint() {
+    let env = Env::new();
+    let dir = tempfile::TempDir::new().expect("tmp");
+    std::fs::write(dir.path().join(".docsbase.toml"), "[hybrid]\n").expect("seed");
+    // Configure the runtime so probe reaches the model-cache check.
+    let runtime = env.cache.path().join("libonnxruntime.so");
+    std::fs::write(&runtime, b"fake").expect("touch");
+    std::fs::write(
+        env.config.path().join("config.toml"),
+        format!(
+            "[providers.fastembed]\nenabled = true\nruntime_path = \"{}\"\n",
+            runtime.display()
+        ),
+    )
+    .expect("global config");
+    let output = env
+        .cmd()
+        .current_dir(dir.path())
+        .args([
+            "models",
+            "use",
+            "embed",
+            "bge-small-en-v1.5",
+            "--provider",
+            "fastembed",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("models fetch"), "{stderr}");
+}
+
+#[test]
+fn models_use_fastembed_without_runtime_gives_connect_hint() {
+    let env = Env::new();
+    let dir = tempfile::TempDir::new().expect("tmp");
+    std::fs::write(dir.path().join(".docsbase.toml"), "[hybrid]\n").expect("seed");
+    let output = env
+        .cmd()
+        .current_dir(dir.path())
+        .args([
+            "models",
+            "use",
+            "embed",
+            "bge-small-en-v1.5",
+            "--provider",
+            "fastembed",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("connect fastembed"), "{stderr}");
+}

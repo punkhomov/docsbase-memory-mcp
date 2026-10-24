@@ -20,7 +20,7 @@ pub const BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// App attribution headers (FR-9; values are OQ-2, finalized here).
 const HTTP_REFERER: &str = "https://github.com/punkhomov/docsbase-memory-mcp";
-const X_TITLE: &str = "docsbase-memory-mcp";
+pub(crate) const X_TITLE: &str = "docsbase-memory-mcp";
 
 /// Input type for chunk (document) embeddings; query side would use
 /// `search_query` when a dense stage arrives (iteration 2).

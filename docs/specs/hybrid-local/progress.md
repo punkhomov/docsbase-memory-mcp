@@ -283,3 +283,21 @@ Ledger: одна запись на таск (что сделано, чем пр�
   (без @d/@r/@p, т.к. scoring не кэшируется — YAGNI, трайт Reranker без model_id). Ruling:
   fastembed возвращает все scores отсортированными; clamp у нас, чтобы контракт `top_n` был у
   вызывающего.
+
+- Task 6: complete (commits `570051b..`→ head, tests: `cargo test --locked --test
+  cli_models --features hybrid-local` → 15 passed; `--features hybrid-local,hybrid-remote` →
+  15 passed; lib `cli::models` unit → 20 (hybrid-local) / 26 (both); default suite green;
+  clippy -D warnings чист (default + features); fmt --check).
+  Реализовано: purpose-first `models use embed|rerank <model>` (clap subcommands, общие
+  `--local/--global/--dry-run/--path` как global args); scope matrix (project = наличие
+  `.docsbase.toml`; вне проекта --global обязателен; both flags error; --path+--global error);
+  provider inference из registry (task-match, иначе --provider); dims из registry для fastembed
+  (--dims optional, mismatch → Admission), --dims обязателен для OpenRouter; window bounds;
+  merge только выбранной стадии (другая не трогается, ranking сохраняется); probe gating:
+  fastembed offline (runtime::resolve → connect hint; models::cached → fetch hint), OpenRouter
+  single-shot через injected Transport (401/403 → check key, transport → retry, wrong shape →
+  Internal); global write сохраняет [providers] и прочие секции (atomically, create_dir_all);
+  print_summary provider-aware. Ruling: "project" определён как директория с
+  `.docsbase.toml` (детерминированно тестируется; bootstrap нового проекта — через --global).
+  Ruling: probe не требует реальной сети в тестах — fake Transport на уровне unit (как
+  probe_openrouter_key в T2); CLI integration тесты используют --dry-run и error-пути.
