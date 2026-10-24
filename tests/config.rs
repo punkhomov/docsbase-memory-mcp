@@ -502,13 +502,22 @@ fn fastembed_reranker_without_model_is_admission() {
 #[cfg(feature = "hybrid-local")]
 #[test]
 fn fastembed_without_provider_fails_with_connect_hint() {
+    // Provisioning is enforced at stage construction, not at config load
+    // (review panel C3): load succeeds, `embedder()` surfaces the hint.
     let config_dir = TempDir::new().expect("tempdir");
     write(
         config_dir.path(),
         "config.toml",
         "[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\n",
     );
-    let err = Config::load_from(config_dir.path(), None).expect_err("provider missing");
+    let config = Config::load_from(config_dir.path(), None).expect("load ok");
+    let err = match docsbase_memory::hybrid::local::embedder(
+        config.hybrid_cfg.embedding.as_ref().expect("embedding"),
+        &config.providers,
+    ) {
+        Ok(_) => panic!("expected admission, got an embedder"),
+        Err(e) => e,
+    };
     let text = err.to_string();
     assert!(text.contains("admission refused"), "{text}");
     assert!(text.contains("connect fastembed"), "{text}");
@@ -531,15 +540,24 @@ fn fastembed_unfetched_model_fails_with_fetch_hint() {
         ),
     );
     // Isolate the model cache: the real user cache may already contain a
-    // fetched copy (live T8 runs), which would pass validation instead of
-    // failing with the fetch hint.
+    // fetched copy (live T8 runs), which would pass the cached check
+    // instead of failing with the fetch hint.
     let cache = TempDir::new().expect("cache");
     let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
     // SAFETY: single-threaded test section; restored immediately after.
     unsafe {
         std::env::set_var("DOCSBASE_CACHE_DIR", cache.path());
     }
-    let result = Config::load_from(config_dir.path(), None);
+    let config = Config::load_from(config_dir.path(), None).expect("load ok");
+    // Keep the cache isolation alive across the embedder call (see C3:
+    // provisioning surfaces at construction); then restore.
+    let err = match docsbase_memory::hybrid::local::embedder(
+        config.hybrid_cfg.embedding.as_ref().expect("embedding"),
+        &config.providers,
+    ) {
+        Ok(_) => panic!("expected admission, got an embedder"),
+        Err(e) => e,
+    };
     // SAFETY: same single-threaded section as above.
     unsafe {
         match prev_cache {
@@ -547,8 +565,57 @@ fn fastembed_unfetched_model_fails_with_fetch_hint() {
             None => std::env::remove_var("DOCSBASE_CACHE_DIR"),
         }
     }
-    let err = result.expect_err("model unfetched");
     let text = err.to_string();
     assert!(text.contains("admission refused"), "{text}");
     assert!(text.contains("models fetch bge-small-en-v1.5"), "{text}");
+}
+
+#[cfg(feature = "hybrid-local")]
+#[test]
+#[allow(unsafe_code)] // env isolation mirrors the shared CLI test pattern
+fn fastembed_env_runtime_override_reaches_model_check() {
+    // C4: a valid ORT_DYLIB_PATH must be honored even with no provider
+    // record — resolution succeeds via the env override, so the only
+    // remaining admission is the fetch hint (never "provider is not ready").
+    let config_dir = TempDir::new().expect("tempdir");
+    let runtime = TempDir::new().expect("runtime");
+    let runtime_path = runtime.path().join("libonnxruntime.so");
+    std::fs::write(&runtime_path, b"not-a-real-runtime").expect("fake runtime");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\n",
+    );
+    let config = Config::load_from(config_dir.path(), None).expect("load ok");
+    let cache = TempDir::new().expect("cache");
+    let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
+    let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
+    // SAFETY: single-threaded test section; restored immediately after.
+    unsafe {
+        std::env::set_var("DOCSBASE_CACHE_DIR", cache.path());
+        std::env::set_var("ORT_DYLIB_PATH", &runtime_path);
+    }
+    let result = docsbase_memory::hybrid::local::embedder(
+        config.hybrid_cfg.embedding.as_ref().expect("embedding"),
+        &config.providers,
+    );
+    // SAFETY: same single-threaded section as above.
+    unsafe {
+        match prev_cache {
+            Some(value) => std::env::set_var("DOCSBASE_CACHE_DIR", value),
+            None => std::env::remove_var("DOCSBASE_CACHE_DIR"),
+        }
+        match prev_ort {
+            Some(value) => std::env::set_var("ORT_DYLIB_PATH", value),
+            None => std::env::remove_var("ORT_DYLIB_PATH"),
+        }
+    }
+    let err = match result {
+        Ok(_) => panic!("expected admission, got an embedder"),
+        Err(e) => e,
+    };
+    let text = err.to_string();
+    assert!(text.contains("admission refused"), "{text}");
+    assert!(text.contains("models fetch bge-small-en-v1.5"), "{text}");
+    assert!(!text.contains("is not ready"), "{text}");
 }
