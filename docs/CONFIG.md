@@ -90,6 +90,11 @@ models fetch <name>`.
 Models are pinned purpose-first, one stage per call: `docsbase models use
 embed <model> [--provider P] [--dims N] [--local|--global]` and `docsbase
 models use rerank <model> [--provider P] [--window N] [--local|--global]`.
+`docsbase models list` shows provider states, the selected pins and per-model
+cache sizes. `docsbase models remove <name>` removes every cached revision of
+a model and refuses while the model is loaded (pass `--force` to delete
+anyway). `docsbase uninstall --dry-run` lists the owned artifacts — including
+the ONNX Runtime install and the model cache (FR-13) — before any deletion.
 Scope: inside a project the project `.docsbase.toml` is written by default
 (`--local` optional); `--global` writes the machine config and is required
 outside a project; `--path` overrides the project root. `--dry-run` prints

@@ -436,8 +436,11 @@ fn read_cache_file(path: &Path, entry: &ModelEntry<'_>) -> Result<Vec<u8>> {
 }
 
 /// Takes a shared read lock on the model cache directory's `.lock` (fd-lock
-/// `try_read`); the guard is retained by the instance for its lifetime.
-fn take_shared_lock(dir: &Path) -> Result<Option<RwLockReadGuard<'static, std::fs::File>>> {
+/// `try_read`); the guard is retained by the instance for its lifetime
+/// (and is what `models remove` probes exclusively, FR-7).
+pub(crate) fn take_shared_lock(
+    dir: &Path,
+) -> Result<Option<RwLockReadGuard<'static, std::fs::File>>> {
     let path = dir.join(".lock");
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -507,6 +510,36 @@ mod tests {
         assert!(err.to_string().contains("connect fastembed"), "{err}");
     }
 
+    /// Isolates the process env (cache + config dirs) for tests that assume
+    /// an empty model cache; serialized with every other env-touching test
+    /// through the shared CLI lock.
+    #[allow(unsafe_code)] // env mutation is confined to the locked section
+    fn with_isolated_empty_cache<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = crate::cli::test_env::ENV_LOCK.lock().expect("env lock");
+        let cache = tempfile::TempDir::new().expect("tmp");
+        let config = tempfile::TempDir::new().expect("tmp");
+        let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
+        let prev_config = std::env::var_os("DOCSBASE_CONFIG_DIR");
+        // SAFETY: single-threaded under the shared env lock.
+        unsafe {
+            std::env::set_var("DOCSBASE_CACHE_DIR", cache.path());
+            std::env::set_var("DOCSBASE_CONFIG_DIR", config.path());
+        }
+        let out = f();
+        // SAFETY: same critical section.
+        unsafe {
+            match prev_cache {
+                Some(value) => std::env::set_var("DOCSBASE_CACHE_DIR", value),
+                None => std::env::remove_var("DOCSBASE_CACHE_DIR"),
+            }
+            match prev_config {
+                Some(value) => std::env::set_var("DOCSBASE_CONFIG_DIR", value),
+                None => std::env::remove_var("DOCSBASE_CONFIG_DIR"),
+            }
+        }
+        out
+    }
+
     #[test]
     fn embedder_without_model_fails_with_fetch_hint() {
         let cfg = EmbeddingCfg {
@@ -526,7 +559,7 @@ mod tests {
             }),
             openrouter: None,
         };
-        let Err(err) = embedder(&cfg, &providers) else {
+        let Err(err) = with_isolated_empty_cache(|| embedder(&cfg, &providers)) else {
             panic!("expected admission without a fetched model");
         };
         assert!(matches!(err, Error::Admission { .. }));
@@ -653,7 +686,7 @@ mod tests {
             }),
             openrouter: None,
         };
-        let Err(err) = reranker(&cfg, &providers) else {
+        let Err(err) = with_isolated_empty_cache(|| reranker(&cfg, &providers)) else {
             panic!("expected admission without a fetched model");
         };
         assert!(matches!(err, Error::Admission { .. }));

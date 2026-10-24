@@ -660,3 +660,43 @@ fn install_manifest_is_private() {
         & 0o777;
     assert_eq!(mode, 0o600, "install.json must be owner-only");
 }
+
+/// `uninstall --dry-run` must list the hybrid-local owned artifacts (runtime
+/// + model cache) and delete nothing (FR-13, T9).
+#[test]
+fn uninstall_dry_run_lists_hybrid_artifacts_without_deleting() {
+    let env = Env::new(&[]);
+    // Hybrid-local artifacts (owned by docsbase, no launcher manifest needed).
+    let runtime_dir = env
+        .data()
+        .join("runtimes")
+        .join("onnxruntime")
+        .join("1.24.4")
+        .join("x86_64-unknown-linux-gnu");
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+    std::fs::write(runtime_dir.join("libonnxruntime.so.1.24.4"), b"fake").expect("lib");
+    let model_cache = env.cache().join("models").join("bge-small-en-v1.5");
+    std::fs::create_dir_all(&model_cache).expect("model dir");
+    std::fs::write(model_cache.join("model.onnx"), b"fake").expect("file");
+
+    let output = env
+        .cmd()
+        .args(["uninstall", "--dry-run"])
+        .output()
+        .expect("run uninstall --dry-run");
+    assert!(
+        output.status.success(),
+        "dry-run must succeed: {:?}",
+        output.status
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("hybrid-local artifacts"), "{stdout}");
+    assert!(stdout.contains("runtime:"), "{stdout}");
+    assert!(stdout.contains("model cache:"), "{stdout}");
+    assert!(stdout.contains("[dry-run] nothing was deleted"), "{stdout}");
+    assert!(
+        runtime_dir.join("libonnxruntime.so.1.24.4").exists(),
+        "runtime kept"
+    );
+    assert!(model_cache.join("model.onnx").exists(), "model cache kept");
+}

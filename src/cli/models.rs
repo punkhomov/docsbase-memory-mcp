@@ -9,6 +9,8 @@
 //! `OpenRouter` single-shot (no retry wrapper). Unknown models, unsupported
 //! widths and unreachable providers fail here — never later at index time.
 
+#[cfg(feature = "hybrid-local")]
+use std::path::Path;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
@@ -30,6 +32,9 @@ pub enum ModelsCommand {
     /// List registry entries and their cache status (`hybrid-local`).
     #[cfg(feature = "hybrid-local")]
     List,
+    /// Remove all cached revisions of a model (`hybrid-local`, FR-7).
+    #[cfg(feature = "hybrid-local")]
+    Remove(RemoveArgs),
 }
 
 /// Arguments for `models fetch` (FR-6).
@@ -39,6 +44,17 @@ pub struct FetchArgs {
     /// Registry name of the model to fetch.
     pub name: String,
     /// Re-download even when the cached revision verifies.
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// Arguments for `models remove` (FR-7).
+#[cfg(feature = "hybrid-local")]
+#[derive(Debug, Args)]
+pub struct RemoveArgs {
+    /// Registry name of the model to remove.
+    pub name: String,
+    /// Delete even while a loaded instance holds the shared cache lock.
     #[arg(long)]
     pub force: bool,
 }
@@ -132,20 +148,198 @@ pub fn fetch_cmd(args: &FetchArgs) -> anyhow::Result<()> {
 #[cfg(feature = "hybrid-local")]
 pub fn list_cmd() -> anyhow::Result<()> {
     use crate::hybrid::models;
+
+    // Provider states (FR-11) and the selected pins (FR-9) come from the
+    // merged config (global + project).
+    let global = crate::config::Config::global()?;
+    let (embed_pin, rerank_pin) = selected_pins();
+    let fastembed_state =
+        crate::hybrid::config::provider_status(&global.providers, PROVIDER_FASTEMBED);
+    let openrouter_state =
+        crate::hybrid::config::provider_status(&global.providers, PROVIDER_OPENROUTER);
+    println!(
+        "providers:\tfastembed={}\topenrouter={}",
+        state_label(fastembed_state.state),
+        state_label(openrouter_state.state)
+    );
+    println!(
+        "selected:\tembed={}\trerank={}",
+        embed_pin.as_deref().unwrap_or("-"),
+        rerank_pin.as_deref().unwrap_or("-")
+    );
     for entry in models::REGISTRY {
         let state = if models::cached(entry)? {
             "fetched"
         } else {
             "missing"
         };
+        let cached_bytes = if state == "fetched" {
+            dir_size(&models::cache_dir(entry.name, entry.revision))
+        } else {
+            0
+        };
         println!(
-            "{}\t{}\t{}\t{state}",
+            "{}\t{}\t{}\t{state}\t{} on disk",
             entry.name,
             task_label(entry.task),
-            human_bytes(entry.total_size())
+            human_bytes(entry.total_size()),
+            human_bytes(cached_bytes)
         );
     }
     Ok(())
+}
+
+/// Runs `models remove <name>`: removes every cached revision of the model
+/// (FR-7). Refuses while a loaded instance holds the shared cache lock,
+/// unless `--force` is given (then it deletes anyway with a warning; a
+/// running process keeps its open handles — on Windows the OS may still
+/// refuse to delete a mapped file, which surfaces here).
+///
+/// # Errors
+/// Admission for unknown names, missing caches, or a live shared lock.
+#[cfg(feature = "hybrid-local")]
+pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
+    use crate::hybrid::models;
+
+    let entry = models::entry(&args.name)?;
+    let dir = models::cache_dir(entry.name, entry.revision);
+    if !dir.exists() {
+        return Err(Error::Admission {
+            message: format!(
+                "model \"{}\" is not fetched (nothing to remove); run `docsbase models fetch {}`",
+                entry.name, entry.name
+            ),
+        }
+        .into());
+    }
+
+    // Exclusive, non-blocking lock on the cache dir; a loaded embedder/
+    // reranker holds the same file shared for its lifetime (T4/T5).
+    let lock_path = dir.join(".lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|err| Error::internal_with_source(format!("open {}", lock_path.display()), err))?;
+    let mut lock = fd_lock::RwLock::new(file);
+    let guard = match lock.try_write() {
+        Ok(guard) => Some(guard),
+        Err(_) if args.force => {
+            eprintln!(
+                "warning: {} is loaded/in use (shared lock held); --force deletes anyway",
+                entry.name
+            );
+            None
+        }
+        Err(_) => {
+            return Err(Error::Admission {
+                message: format!(
+                    "model \"{}\" is loaded/in use; stop the daemon (or pass --force) then retry",
+                    entry.name
+                ),
+            }
+            .into());
+        }
+    };
+
+    // Keep the guard alive while deleting (Linux/macOS tolerate it; on
+    // Windows the OS may refuse to delete an open/mapped file — surface it).
+    std::fs::remove_dir_all(&dir)
+        .map_err(|err| Error::internal_with_source(format!("remove {}", dir.display()), err))?;
+    drop(guard);
+    // Prune the now-empty per-model parent directory.
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
+    println!("removed {} (revision {})", entry.name, entry.revision);
+    Ok(())
+}
+
+/// Depth-first byte count of a directory (cache sizes for `models list`).
+#[cfg(feature = "hybrid-local")]
+fn dir_size(dir: &Path) -> u64 {
+    let mut total = 0;
+    if let Ok(read) = std::fs::read_dir(dir) {
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                total += dir_size(&path);
+            } else if let Ok(metadata) = std::fs::metadata(&path) {
+                total += metadata.len();
+            }
+        }
+    }
+    total
+}
+
+/// Provider state label for `models list`.
+#[cfg(feature = "hybrid-local")]
+fn state_label(state: crate::hybrid::config::ProviderState) -> &'static str {
+    use crate::hybrid::config::ProviderState;
+    match state {
+        ProviderState::Unknown => "unknown",
+        ProviderState::NotConnected => "not-connected",
+        ProviderState::Connected => "connected",
+        ProviderState::Broken => "broken",
+    }
+}
+
+/// Selected hybrid pins from the merged config (global + project), FR-9.
+#[cfg(feature = "hybrid-local")]
+fn selected_pins() -> (Option<String>, Option<String>) {
+    use crate::hybrid::EmbeddingCfg;
+    use crate::hybrid::config::embedding_model_id;
+
+    let mut embed = None;
+    let mut rerank = None;
+    let mut collect = |root: &toml::Value| {
+        let Some(hybrid) = root.get("hybrid").and_then(toml::Value::as_table) else {
+            return;
+        };
+        if let Some(stage) = hybrid.get("embedding").and_then(toml::Value::as_table) {
+            let (Some(provider), Some(model), Some(dims)) = (
+                stage.get("provider").and_then(toml::Value::as_str),
+                stage.get("model").and_then(toml::Value::as_str),
+                stage.get("dimensions").and_then(toml::Value::as_integer),
+            ) else {
+                return;
+            };
+            let normalize = stage
+                .get("normalize")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(true);
+            embed = Some(embedding_model_id(&EmbeddingCfg {
+                provider: provider.to_owned(),
+                model: model.to_owned(),
+                dimensions: u32::try_from(dims).unwrap_or_default(),
+                normalize,
+            }));
+        }
+        if let Some(stage) = hybrid.get("reranker").and_then(toml::Value::as_table) {
+            let (Some(provider), Some(model)) = (
+                stage.get("provider").and_then(toml::Value::as_str),
+                stage.get("model").and_then(toml::Value::as_str),
+            ) else {
+                return;
+            };
+            let window = stage
+                .get("window")
+                .and_then(toml::Value::as_integer)
+                .unwrap_or(i64::from(DEFAULT_RERANK_WINDOW));
+            let window = u32::try_from(window).unwrap_or(DEFAULT_RERANK_WINDOW);
+            rerank = Some(format!("{provider}/{model}@w{window}"));
+        }
+    };
+    if let Ok(Some(root)) = read_global_toml() {
+        collect(&root);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(Some(root)) = read_project_toml(&cwd.join(".docsbase.toml")) {
+            collect(&root);
+        }
+    }
+    (embed, rerank)
 }
 
 #[cfg(feature = "hybrid-local")]
@@ -226,6 +420,9 @@ pub fn run(args: &UseArgs) -> anyhow::Result<()> {
     let table = merge_stage(existing.as_ref(), stage_key, stage)?;
     if let Some(note) = free_route_note(&table) {
         eprintln!("{note}");
+    }
+    if stage_key == "embedding" {
+        repin_embedding_note(existing.as_ref(), &table);
     }
     if args.dry_run {
         println!(
@@ -567,6 +764,51 @@ fn validate_hybrid_table(hybrid: &toml::map::Map<String, toml::Value>) -> anyhow
     Ok(())
 }
 
+/// Re-pin note (FR-13): when the embedding pin changes, existing vectors are
+/// keyed by the old id and must be re-embedded; the ANN tier is invalidated
+/// for the project. Printed on the write path (and dry-run) before any
+/// probe.
+fn repin_embedding_note(existing: Option<&toml::Value>, table: &toml::Value) {
+    let old = existing.and_then(|root| {
+        root.get("hybrid")
+            .and_then(toml::Value::as_table)
+            .and_then(|hybrid| hybrid.get("embedding"))
+            .and_then(toml::Value::as_table)
+    });
+    let new = table
+        .get("hybrid")
+        .and_then(toml::Value::as_table)
+        .and_then(|hybrid| hybrid.get("embedding"))
+        .and_then(toml::Value::as_table);
+    let pin_of = |stage: &toml::map::Map<String, toml::Value>| -> Option<String> {
+        let provider = stage.get("provider").and_then(toml::Value::as_str)?;
+        let model = stage.get("model").and_then(toml::Value::as_str)?;
+        let dims = stage.get("dimensions").and_then(toml::Value::as_integer)?;
+        let normalize = stage
+            .get("normalize")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(true);
+        let cfg = crate::hybrid::EmbeddingCfg {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            dimensions: u32::try_from(dims).ok()?,
+            normalize,
+        };
+        Some(crate::hybrid::config::embedding_model_id(&cfg))
+    };
+    match (old.and_then(pin_of), new.and_then(pin_of)) {
+        (Some(old_pin), Some(new_pin)) if old_pin != new_pin => {
+            eprintln!(
+                "note: embedding pin changed from {old_pin} to {new_pin}; existing vectors will be re-embedded and the ANN tier invalidated"
+            );
+        }
+        (None, Some(_)) => {
+            eprintln!("note: first embedding pin; backfill will index vectors");
+        }
+        _ => {}
+    }
+}
+
 /// One-line privacy note for free-tier routes (FR-33): hybrid itself is an
 /// explicit opt-in, but the free-vs-paid distinction is stated once, on both
 /// dry-run and write paths. Pure for unit tests.
@@ -593,7 +835,8 @@ fn free_route_note(table: &toml::Value) -> Option<String> {
 }
 /// What the probe validates for a resolved stage.
 #[cfg_attr(
-    not(any(feature = "hybrid-local", feature = "hybrid-remote")),
+    // `dims`/`window` are only read by the OpenRouter probe (hybrid-remote).
+    not(feature = "hybrid-remote"),
     allow(dead_code)
 )]
 struct ProbeSpec {
@@ -945,20 +1188,34 @@ mod tests {
 
     #[allow(unsafe_code)] // env mutation is confined to this locked section
     fn with_env<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V, f: impl FnOnce()) {
+        with_envs(&[(key, value)], f);
+    }
+
+    /// Like [`with_env`] but sets several variables atomically under the
+    /// shared env lock (nested `with_env` calls would deadlock).
+    #[allow(unsafe_code)] // env mutation is confined to this locked section
+    fn with_envs<K: AsRef<OsStr>, V: AsRef<OsStr>>(pairs: &[(K, V)], f: impl FnOnce()) {
         let _guard = ENV_LOCK.lock().expect("env lock");
         // std::env::{set_var,remove_var} are unsafe in edition 2024.
         // SAFETY: env vars are only mutated inside this lock, and the test
         // process runs a single thread at this point (no concurrent access).
-        let prev = std::env::var_os(key.as_ref());
+        let prev: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> = pairs
+            .iter()
+            .map(|(key, _)| (key.as_ref().to_os_string(), std::env::var_os(key.as_ref())))
+            .collect();
         unsafe {
-            std::env::set_var(key.as_ref(), value);
+            for (key, value) in pairs {
+                std::env::set_var(key.as_ref(), value);
+            }
         }
         f();
         // SAFETY: same single-threaded critical section as above.
         unsafe {
-            match prev {
-                Some(v) => std::env::set_var(key.as_ref(), v),
-                None => std::env::remove_var(key.as_ref()),
+            for (key, old) in prev {
+                match old {
+                    Some(value) => std::env::set_var(&key, value),
+                    None => std::env::remove_var(&key),
+                }
             }
         }
     }
@@ -1415,10 +1672,19 @@ mod tests {
             ),
         )
         .expect("seed");
-        with_env("DOCSBASE_CONFIG_DIR", dir.path(), || {
-            let err = probe_fastembed_offline("bge-small-en-v1.5").expect_err("not fetched");
-            assert!(err.to_string().contains("models fetch"), "{err}");
-        });
+        // Isolate both the config dir AND the model cache: the real user
+        // cache may already contain a fetched copy (live T8 runs).
+        let cache = tempfile::TempDir::new().expect("tmp");
+        with_envs(
+            &[
+                ("DOCSBASE_CONFIG_DIR", dir.path()),
+                ("DOCSBASE_CACHE_DIR", cache.path()),
+            ],
+            || {
+                let err = probe_fastembed_offline("bge-small-en-v1.5").expect_err("not fetched");
+                assert!(err.to_string().contains("models fetch"), "{err}");
+            },
+        );
     }
 
     // ---------- OpenRouter single-shot probe (FR-8, SC-5) ----------
@@ -1636,6 +1902,83 @@ mod tests {
             };
             let err = probe_openrouter_singleshot_with(&fake, &spec).expect_err("no key");
             assert!(err.to_string().contains("OPENROUTER_API_KEY"), "{err}");
+        });
+    }
+
+    // ---------- models remove (FR-7) ----------
+
+    #[cfg(feature = "hybrid-local")]
+    fn remove_args(name: &str, force: bool) -> RemoveArgs {
+        RemoveArgs {
+            name: name.to_owned(),
+            force,
+        }
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    fn seed_model_cache(root: &Path, name: &str) -> PathBuf {
+        // Use the registry's real pinned revision (remove keys on it).
+        let revision = crate::hybrid::models::entry(name)
+            .expect("registry")
+            .revision;
+        let model_dir = root.join("models").join(name).join(revision);
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        std::fs::write(model_dir.join("model.onnx"), b"fake").expect("file");
+        model_dir
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn remove_unlocked_succeeds() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let model_dir = seed_model_cache(dir.path(), "bge-small-en-v1.5");
+        with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
+            remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect("remove");
+        });
+        assert!(!model_dir.exists(), "model cache removed");
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn remove_refuses_when_locked_then_succeeds_after_drop() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let model_dir = seed_model_cache(dir.path(), "bge-small-en-v1.5");
+        with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
+            // The exact shared guard T4/T5 instances hold for their lifetime.
+            let guard = crate::hybrid::local::take_shared_lock(&model_dir)
+                .expect("shared lock")
+                .expect("some");
+            let err = remove_cmd(&remove_args("bge-small-en-v1.5", false))
+                .expect_err("refused while loaded");
+            assert!(err.to_string().contains("in use"), "{err}");
+            drop(guard);
+            remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect("remove after drop");
+        });
+        assert!(!model_dir.exists(), "removed after guard drop");
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn remove_force_when_locked() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let model_dir = seed_model_cache(dir.path(), "bge-small-en-v1.5");
+        with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
+            let _guard = crate::hybrid::local::take_shared_lock(&model_dir)
+                .expect("shared lock")
+                .expect("some");
+            remove_cmd(&remove_args("bge-small-en-v1.5", true)).expect("force remove");
+        });
+        assert!(!model_dir.exists(), "force removal deletes anyway");
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn remove_not_fetched_is_admission() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
+            let err =
+                remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect_err("not fetched");
+            assert!(err.to_string().contains("not fetched"), "{err}");
         });
     }
 }

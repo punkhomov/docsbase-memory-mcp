@@ -9,6 +9,37 @@ use docsbase_memory::hybrid::config::{PROVIDER_FASTEMBED, ProvidersCfg, embeddin
 use docsbase_memory::hybrid::local::{ModelCacheKey, embedder as local_embedder};
 use tempfile::TempDir;
 
+/// Integration-test env isolation: the real user cache may already contain a
+/// fetched model (e.g. after a live T8 run), which would break the
+/// "without model → fetch hint" provisioning tests. Serialized across tests
+/// in this binary.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[allow(unsafe_code)] // env mutation is confined to the locked section
+fn with_isolated_empty_cache<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let cache = TempDir::new().expect("cache");
+    let config = TempDir::new().expect("config");
+    let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
+    let prev_config = std::env::var_os("DOCSBASE_CONFIG_DIR");
+    unsafe {
+        std::env::set_var("DOCSBASE_CACHE_DIR", cache.path());
+        std::env::set_var("DOCSBASE_CONFIG_DIR", config.path());
+    }
+    let out = f();
+    unsafe {
+        match prev_cache {
+            Some(value) => std::env::set_var("DOCSBASE_CACHE_DIR", value),
+            None => std::env::remove_var("DOCSBASE_CACHE_DIR"),
+        }
+        match prev_config {
+            Some(value) => std::env::set_var("DOCSBASE_CONFIG_DIR", value),
+            None => std::env::remove_var("DOCSBASE_CONFIG_DIR"),
+        }
+    }
+    out
+}
+
 #[test]
 fn embedder_without_runtime_is_connect_hint() {
     let cfg = docsbase_memory::hybrid::config::EmbeddingCfg {
@@ -44,7 +75,7 @@ fn embedder_without_model_is_fetch_hint() {
         }),
         openrouter: None,
     };
-    let Err(err) = local_embedder(&cfg, &providers) else {
+    let Err(err) = with_isolated_empty_cache(|| local_embedder(&cfg, &providers)) else {
         panic!("expected admission without a fetched model");
     };
     assert!(matches!(err, Error::Admission { .. }));

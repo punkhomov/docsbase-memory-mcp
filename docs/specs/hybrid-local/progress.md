@@ -325,3 +325,22 @@ Ledger: одна запись на таск (что сделано, чем пр�
 
 - Task 8: complete (test `tests/hybrid_local_live.rs`, `#[ignore]`; live run PASSED on
   2026-10-24). Numbers: ORT 1.24.4 tgz 8_155_822 B sha256 `3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747` (table confirmed), lib so.1.24.4 22_159_232 B. Fetch: jina-reranker-v1-turbo-en fresh 38_295_104 B в ~3.0s; bge cached-check 62ms (совежий fetch не замерен — provisioning, не бюджет). Embed (release, N=3): 10.3ms суммарно, ~3.4ms/text, query 2.3ms (бюджет 250ms/512-token chunk — ok). Rerank 3 docs: 3.4ms (< 200ms/50 docs — ok). Peak RSS 329 MiB (< 700 MiB — ok). Примечание: connect download из GitHub в этой песочнице блокируется TLS-прокси (UnknownIssuer для rustls) — ORT установлен вручную (curl + sha256-проверка совпала с таблицей); сам download-путь connect покрыт offline-тестами T2 на fake source. macOS signature state не применимо (Linux); `init_from` успешен (inference работал). Ruling: live-прогон — ручной/ночной; test не входит в CI.
+
+- Task 9: complete (commits → head, Verify: `cargo test --locked --test cli_models
+  --features hybrid-local` → 18 passed; `--test install` → 15 passed (вкл.
+  uninstall_dry_run_lists_hybrid_artifacts_without_deleting); lib cli::models 31 (both) /
+  25 (hybrid-local); hybrid::local 12 + hybrid_local 3; default suite green; clippy -D warnings
+  чист (default/hybrid-local/both); fmt --check).
+  Реализовано: `models remove <name>` (FR-7): exclusive non-blocking `.lock` через
+  fd-lock try_write; shared guard from T4/T5 (take_shared_lock → pub(crate)) → Admission
+  "in use"; `--force` удаляет с warning'ом; единицы-тесты с реальным shared guard'ом
+  (remove_refuses_when_locked_then_succeeds_after_drop / remove_force_when_locked /
+  remove_unlocked_succeeds / remove_not_fetched_is_admission). `uninstall --dry-run` + `--yes`
+  удаляет `<data>/runtimes/onnxruntime` и `<cache>/models` (FR-13) даже без launcher manifest.
+  Re-pin: `models use embed` печатает note при смене pin'а (re-embed + ANN invalidated) и при
+  первом pin'е. `models list`: provider states (fastembed/openrouter), selected pins (canonical
+  id), per-model cache size. Fetch/connect preflight уже существовал (1.5x+256MiB, fail
+  before download с проверенными числами). Ruling: fetch не молча меняет revision — revision
+  build-static в registry; смена ревизии = код-изменение registry (перезапрос явный). Ruling:
+  uninstall без manifest'а всё равно чистит hybrid-local artifacts (они owned независимо от
+  launcher).

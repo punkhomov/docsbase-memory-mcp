@@ -355,3 +355,50 @@ fn models_use_fastembed_without_runtime_gives_connect_hint() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("connect fastembed"), "{stderr}");
 }
+
+#[test]
+fn models_remove_unknown_name_is_admission() {
+    let env = Env::new();
+    let output = env
+        .cmd()
+        .args(["models", "remove", "no-such-model"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert!(stderr_of(&output).contains("no-such-model"));
+}
+
+#[test]
+fn models_remove_not_fetched_is_admission() {
+    let env = Env::new();
+    let output = env
+        .cmd()
+        .args(["models", "remove", "bge-small-en-v1.5"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("not fetched"), "{stderr}");
+}
+
+#[test]
+fn models_remove_unlocked_succeeds() {
+    let env = Env::new();
+    // Fabricate a cached model dir (revision = registry pin) + .lock file.
+    let revision = "ea104dacec62c0de699686887e3f920caeb4f3e3";
+    let model_dir = env
+        .cache
+        .path()
+        .join("models")
+        .join("bge-small-en-v1.5")
+        .join(revision);
+    std::fs::create_dir_all(&model_dir).expect("model dir");
+    std::fs::write(model_dir.join("model.onnx"), b"fake").expect("file");
+    env.cmd()
+        .args(["models", "remove", "bge-small-en-v1.5"])
+        .assert()
+        .success();
+    assert!(!model_dir.exists(), "cache dir removed");
+}

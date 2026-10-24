@@ -93,23 +93,52 @@ pub(crate) fn install_from(
     Ok((target, data))
 }
 
-/// Removes every owned artifact; without `yes` it only prints them and the
-/// indexed projects (FR-1).
+/// Removes every owned artifact; without `yes` (or with `dry_run`) it only
+/// prints them and the indexed projects (FR-1). Also covers the hybrid-local
+/// artifacts owned by docsbase (FR-13): the ONNX Runtime install and the
+/// model cache.
 ///
 /// # Errors
 /// Fails when the manifest cannot be read or a removal fails.
-pub fn uninstall(yes: bool) -> anyhow::Result<()> {
+pub fn uninstall(yes: bool, dry_run: bool) -> anyhow::Result<()> {
     let data = paths::data_dir()?;
     let data = if data.exists() {
         data.canonicalize().context("canonicalize data dir")?
     } else {
         data
     };
+
+    // hybrid-local owned artifacts exist independent of the launcher manifest.
+    let runtime_dir = data.join("runtimes").join("onnxruntime");
+    let models_cache = paths::cache_dir().ok().map(|cache| cache.join("models"));
+    println!("hybrid-local artifacts:");
+    println!("  runtime: {}", runtime_dir.display());
+    if let Some(models_cache) = &models_cache {
+        println!("  model cache: {}", models_cache.display());
+    }
+
     let Some(manifest) = read_manifest(&data)? else {
         println!(
             "docsbase is not installed (no {}/{MANIFEST})",
             data.display()
         );
+        // Still offer/perform hybrid-local artifact cleanup (FR-13):
+        // runtimes + model cache are owned even without a launcher manifest.
+        if yes && !dry_run {
+            if runtime_dir.is_dir() {
+                fs::remove_dir_all(&runtime_dir)
+                    .with_context(|| format!("remove {}", runtime_dir.display()))?;
+            }
+            if let Some(models_cache) = &models_cache
+                && models_cache.is_dir()
+            {
+                fs::remove_dir_all(models_cache)
+                    .with_context(|| format!("remove {}", models_cache.display()))?;
+            }
+            println!("removed hybrid-local artifacts (runtime + model cache)");
+        } else if dry_run {
+            println!("[dry-run] nothing was deleted");
+        }
         return Ok(());
     };
 
@@ -140,12 +169,27 @@ pub fn uninstall(yes: bool) -> anyhow::Result<()> {
         println!("  {line}");
     }
 
-    if !yes {
-        println!("re-run `docsbase uninstall --yes` to delete these artifacts");
+    if !yes || dry_run {
+        if dry_run {
+            println!("[dry-run] nothing was deleted");
+        } else {
+            println!("re-run `docsbase uninstall --yes` to delete these artifacts");
+        }
         return Ok(());
     }
 
     let _lease = acquire_after_stop(&manifest.cache_root)?;
+    // hybrid-local owned artifacts (FR-13): runtime install + model cache.
+    if runtime_dir.is_dir() {
+        fs::remove_dir_all(&runtime_dir)
+            .with_context(|| format!("remove {}", runtime_dir.display()))?;
+    }
+    if let Some(models_cache) = &models_cache
+        && models_cache.is_dir()
+    {
+        fs::remove_dir_all(models_cache)
+            .with_context(|| format!("remove {}", models_cache.display()))?;
+    }
     // The launcher is only removed while it is still our binary (byte-equal to
     // the owned copy), checked before the owned copy disappears: a tampered
     // manifest must not turn uninstall into arbitrary deletion.
