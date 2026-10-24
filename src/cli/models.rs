@@ -224,33 +224,45 @@ pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
 
     // Exclusive, non-blocking lock on the currently pinned revision's
     // `.lock`; a loaded embedder/reranker holds the same file shared for
-    // its lifetime (T4/T5).
-    let lock_path = pinned_dir.join(".lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|err| Error::internal_with_source(format!("open {}", lock_path.display()), err))?;
-    let mut lock = fd_lock::RwLock::new(file);
-    let guard = match lock.try_write() {
-        Ok(guard) => Some(guard),
-        Err(_) if args.force => {
-            eprintln!(
-                "warning: {} is loaded/in use (shared lock held); --force deletes anyway",
-                entry.name
-            );
-            None
-        }
-        Err(_) => {
-            return Err(Error::Admission {
-                message: format!(
-                    "model \"{}\" is loaded/in use; stop the daemon (or pass --force) then retry",
+    // its lifetime (T4/T5). When the pinned revision dir is absent (e.g.
+    // a registry bump after which only stale revisions remain), nothing can
+    // hold a lock on it, so skip acquisition and remove the stale dirs.
+    let guard = if pinned_dir.exists() {
+        let lock_path = pinned_dir.join(".lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|err| {
+                Error::internal_with_source(format!("open {}", lock_path.display()), err)
+            })?;
+        // Leaked `'static` lock, same pattern as `take_shared_lock`;
+        // removal happens once per process invocation, so the leak is
+        // bounded and deliberate (matches the shared-lock design).
+        let lock: &'static mut fd_lock::RwLock<std::fs::File> =
+            Box::leak(Box::new(fd_lock::RwLock::new(file)));
+        match lock.try_write() {
+            Ok(guard) => Some(guard),
+            Err(_) if args.force => {
+                eprintln!(
+                    "warning: {} is loaded/in use (shared lock held); --force deletes anyway",
                     entry.name
-                ),
+                );
+                None
             }
-            .into());
+            Err(_) => {
+                return Err(Error::Admission {
+                    message: format!(
+                        "model \"{}\" is loaded/in use; stop the daemon (or pass --force) then retry",
+                        entry.name
+                    ),
+                }
+                .into());
+            }
         }
+    } else {
+        None
     };
 
     // Keep the guard alive while deleting (Linux/macOS tolerate it; on
@@ -1986,6 +1998,27 @@ mod tests {
         assert!(!stale.exists(), "stale revision removed too");
         assert!(
             !pinned.parent().expect("parent").exists(),
+            "model dir removed"
+        );
+    }
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn remove_stale_only_revisions_succeeds() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        // Registry bump: pinned revision absent, only a stale one remains.
+        let stale = dir
+            .path()
+            .join("models")
+            .join("bge-small-en-v1.5")
+            .join("oldrev");
+        std::fs::create_dir_all(&stale).expect("create stale rev");
+        std::fs::write(stale.join("model.onnx"), b"x").expect("file");
+        with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
+            remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect("remove stale-only");
+        });
+        assert!(!stale.exists(), "stale revision removed");
+        assert!(
+            !stale.parent().expect("parent").exists(),
             "model dir removed"
         );
     }
