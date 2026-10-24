@@ -140,8 +140,8 @@ pub fn fetch_cmd(args: &FetchArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Runs `models list`: prints the registry with cache state and sizes
-/// (FR-7; the selected-model column arrives with `models use` in T6).
+/// Runs `models list`: prints the registry with cache state, sizes, the
+/// provider states and the currently selected pins (FR-7).
 ///
 /// # Errors
 /// Returns an internal error when verifying a cached revision fails.

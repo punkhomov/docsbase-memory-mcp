@@ -112,7 +112,9 @@ impl CacheCfg {
 /// Embedding stage configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingCfg {
-    /// Provider name; only `openrouter` is accepted (FR-3).
+    /// Provider name: `fastembed` (hybrid-local) or `openrouter`
+    /// (hybrid-remote) — allowed sets are feature-gated at resolution
+    /// (FR-3, FR-5).
     pub provider: String,
     /// Model id as the provider knows it.
     pub model: String,
@@ -136,7 +138,9 @@ impl Default for EmbeddingCfg {
 /// Rerank stage configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RerankerCfg {
-    /// Provider name; only `openrouter` is accepted (FR-3).
+    /// Provider name: `fastembed` (hybrid-local) or `openrouter`
+    /// (hybrid-remote) — allowed sets are feature-gated at resolution
+    /// (FR-3, FR-5).
     pub provider: String,
     /// Model id as the provider knows it.
     pub model: String,

@@ -93,13 +93,6 @@ pub(crate) fn install_from(
     Ok((target, data))
 }
 
-/// Removes every owned artifact; without `yes` (or with `dry_run`) it only
-/// prints them and the indexed projects (FR-1). Also covers the hybrid-local
-/// artifacts owned by docsbase (FR-13): the ONNX Runtime install and the
-/// model cache.
-///
-/// # Errors
-/// Fails when the manifest cannot be read or a removal fails.
 /// Removes the hybrid-local owned artifacts (FR-13) once the caller holds
 /// the admission lease (or is in dry-run/no-op mode). Prints the outcome.
 fn remove_hybrid_artifacts(
