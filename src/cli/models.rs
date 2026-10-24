@@ -222,55 +222,63 @@ pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
         .into());
     }
 
-    // Exclusive, non-blocking lock on the currently pinned revision's
-    // `.lock`; a loaded embedder/reranker holds the same file shared for
-    // its lifetime (T4/T5). When the pinned revision dir is absent (e.g.
-    // a registry bump after which only stale revisions remain), nothing can
-    // hold a lock on it, so skip acquisition and remove the stale dirs.
-    let guard = if pinned_dir.exists() {
-        let lock_path = pinned_dir.join(".lock");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|err| {
-                Error::internal_with_source(format!("open {}", lock_path.display()), err)
-            })?;
-        // Leaked `'static` lock, same pattern as `take_shared_lock`;
-        // removal happens once per process invocation, so the leak is
-        // bounded and deliberate (matches the shared-lock design).
-        let lock: &'static mut fd_lock::RwLock<std::fs::File> =
-            Box::leak(Box::new(fd_lock::RwLock::new(file)));
-        match lock.try_write() {
-            Ok(guard) => Some(guard),
-            Err(_) if args.force => {
-                eprintln!(
-                    "warning: {} is loaded/in use (shared lock held); --force deletes anyway",
-                    entry.name
-                );
-                None
+    // Exclusive, non-blocking locks on every cached revision's `.lock`
+    // (the deletion removes the whole model root): a loaded embedder /
+    // reranker holds its own revision's `.lock` shared for its lifetime
+    // (T4/T5), so stale revisions from an older registry pin must be
+    // probed too. When no revision dir exists, nothing can hold a lock.
+    let mut guards = Vec::new();
+    let mut contended = false;
+    if let Ok(entries) = std::fs::read_dir(&model_root) {
+        for entry in entries.flatten() {
+            let rev_dir = entry.path();
+            if !rev_dir.is_dir() {
+                continue;
             }
-            Err(_) => {
-                return Err(Error::Admission {
-                    message: format!(
-                        "model \"{}\" is loaded/in use; stop the daemon (or pass --force) then retry",
-                        entry.name
-                    ),
+            let lock_path = rev_dir.join(".lock");
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .map_err(|err| {
+                    Error::internal_with_source(format!("open {}", lock_path.display()), err)
+                })?;
+            // Leaked `'static` lock, same pattern as `take_shared_lock`;
+            // removal happens once per process invocation, so the leak is
+            // bounded and deliberate (matches the shared-lock design).
+            let lock: &'static mut fd_lock::RwLock<std::fs::File> =
+                Box::leak(Box::new(fd_lock::RwLock::new(file)));
+            match lock.try_write() {
+                Ok(guard) => guards.push(guard),
+                Err(_) => {
+                    contended = true;
                 }
-                .into());
             }
         }
-    } else {
-        None
-    };
+    }
+    if contended && !args.force {
+        return Err(Error::Admission {
+            message: format!(
+                "model \"{}\" is loaded/in use; stop the daemon (or pass --force) then retry",
+                entry.name
+            ),
+        }
+        .into());
+    }
+    if contended {
+        eprintln!(
+            "warning: {} is loaded/in use (shared lock held); --force deletes anyway",
+            entry.name
+        );
+    }
 
-    // Keep the guard alive while deleting (Linux/macOS tolerate it; on
+    // Keep the guards alive while deleting (Linux/macOS tolerate it; on
     // Windows the OS may refuse to delete an open/mapped file — surface it).
     std::fs::remove_dir_all(&model_root).map_err(|err| {
         Error::internal_with_source(format!("remove {}", model_root.display()), err)
     })?;
-    drop(guard);
+    drop(guards);
     println!("removed {} (all cached revisions)", entry.name);
     Ok(())
 }
@@ -2065,6 +2073,48 @@ mod tests {
             remove_cmd(&remove_args("bge-small-en-v1.5", true)).expect("force remove");
         });
         assert!(!model_dir.exists(), "force removal deletes anyway");
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn remove_refuses_when_stale_revision_locked() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let model_dir = seed_model_cache(dir.path(), "bge-small-en-v1.5");
+        // A stale revision from an older registry pin, currently loaded.
+        let stale = model_dir.parent().expect("parent").join("oldrev");
+        std::fs::create_dir_all(&stale).expect("create stale rev");
+        std::fs::write(stale.join("model.onnx"), b"x").expect("file");
+        with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
+            let guard = crate::hybrid::local::take_shared_lock(&stale)
+                .expect("shared lock")
+                .expect("some");
+            let err = remove_cmd(&remove_args("bge-small-en-v1.5", false))
+                .expect_err("refused while stale revision loaded");
+            assert!(err.to_string().contains("in use"), "{err}");
+            drop(guard);
+            remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect("remove after drop");
+        });
+        assert!(!model_dir.exists(), "removed after guard drop");
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn remove_force_when_stale_revision_locked() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let model_dir = seed_model_cache(dir.path(), "bge-small-en-v1.5");
+        let stale = model_dir.parent().expect("parent").join("oldrev");
+        std::fs::create_dir_all(&stale).expect("create stale rev");
+        std::fs::write(stale.join("model.onnx"), b"x").expect("file");
+        with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
+            let _guard = crate::hybrid::local::take_shared_lock(&stale)
+                .expect("shared lock")
+                .expect("some");
+            remove_cmd(&remove_args("bge-small-en-v1.5", true)).expect("force remove");
+        });
+        assert!(
+            !model_dir.exists(),
+            "force removal deletes stale-locked rev anyway"
+        );
     }
 
     #[cfg(feature = "hybrid-local")]
