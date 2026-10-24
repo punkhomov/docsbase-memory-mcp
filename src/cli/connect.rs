@@ -519,14 +519,10 @@ mod tests {
 
     #[test]
     fn state_labels_cover_all_provider_states() {
-        for state in [
-            ProviderState::Unknown,
-            ProviderState::NotConnected,
-            ProviderState::Connected,
-            ProviderState::Broken,
-        ] {
-            assert!(!state_label(state).is_empty());
-        }
+        assert_eq!(state_label(ProviderState::Unknown), "Unknown");
+        assert_eq!(state_label(ProviderState::NotConnected), "NotConnected");
+        assert_eq!(state_label(ProviderState::Connected), "Connected");
+        assert_eq!(state_label(ProviderState::Broken), "Broken");
     }
 
     #[test]
@@ -567,11 +563,15 @@ mod tests {
     }
 
     #[test]
-    fn status_heading_includes_four_states() {
-        // The table prints a header; just ensure the module compiles and the
-        // status fn is reachable.
-        let config = crate::config::Config::global().expect("global");
-        let _ = provider_status(&config.providers, PROVIDER_FASTEMBED);
-        let _ = provider_status(&config.providers, PROVIDER_OPENROUTER);
+    fn provider_status_returns_all_four_states_for_unknown_provider() {
+        let providers = crate::hybrid::config::ProvidersCfg::default();
+        assert_eq!(
+            provider_status(&providers, PROVIDER_FASTEMBED).state,
+            ProviderState::Unknown
+        );
+        assert_eq!(
+            provider_status(&providers, PROVIDER_OPENROUTER).state,
+            ProviderState::Unknown
+        );
     }
 }

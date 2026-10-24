@@ -105,10 +105,8 @@ pub const MACOS_MIN_MAJOR: u32 = 14;
 pub fn platform_target() -> Result<&'static Target> {
     #[cfg(target_os = "macos")]
     {
-        let major = macos_major_version();
-        if let Some(major) = major
-            && major < MACOS_MIN_MAJOR
-        {
+        let major = macos_major_version()?;
+        if major < MACOS_MIN_MAJOR {
             return Err(Error::Admission {
                 message: format!(
                     "macOS {major}.0 is too old; the local ONNX Runtime requires macOS {MACOS_MIN_MAJOR} or newer"
@@ -146,14 +144,18 @@ fn select_target(triple: &str) -> Result<&'static Target> {
         })
 }
 
-/// macOS major version via `sysctl(KERN_OSVERSION)` (e.g. 14.5.0 → 14).
+/// macOS major version via `sysctl(kern.osproductversion)` (the user-facing
+/// version, e.g. 14.5.0 → 14). `kern.osversion` is the Darwin *build* string
+/// (e.g. 23A100) and must not be used for the floor. On any read/parse
+/// failure we fail closed (no local provider) rather than silently allowing
+/// an unsupported OS.
 #[cfg(target_os = "macos")]
-fn macos_major_version() -> Option<u32> {
+fn macos_major_version() -> Result<u32> {
     let mut size = 0;
     // SAFETY: first call sizes the buffer; sysctl writes the size.
     let rc = unsafe {
         libc::sysctlbyname(
-            c"kern.osversion".as_ptr(),
+            c"kern.osproductversion".as_ptr(),
             std::ptr::null_mut(),
             &mut size,
             std::ptr::null_mut(),
@@ -161,13 +163,16 @@ fn macos_major_version() -> Option<u32> {
         )
     };
     if rc != 0 || size == 0 {
-        return None;
+        return Err(Error::Admission {
+            message: "could not read the macOS version (kern.osproductversion); the local ONNX Runtime requires macOS 14 or newer"
+                .to_owned(),
+        });
     }
     let mut buffer = vec![0_u8; size];
     // SAFETY: buffer is `size` bytes; sysctl writes at most `size` bytes.
     let rc = unsafe {
         libc::sysctlbyname(
-            c"kern.osversion".as_ptr(),
+            c"kern.osproductversion".as_ptr(),
             buffer.as_mut_ptr().cast(),
             &mut size,
             std::ptr::null_mut(),
@@ -175,12 +180,22 @@ fn macos_major_version() -> Option<u32> {
         )
     };
     if rc != 0 {
-        return None;
+        return Err(Error::Admission {
+            message: "could not read the macOS version (kern.osproductversion); the local ONNX Runtime requires macOS 14 or newer"
+                .to_owned(),
+        });
     }
     let text = String::from_utf8_lossy(&buffer);
-    text.split('.')
+    let major = text
+        .split('.')
         .next()
         .and_then(|part| part.trim().parse::<u32>().ok())
+        .ok_or_else(|| Error::Admission {
+            message: format!(
+                "could not parse the macOS version {text:?}; the local ONNX Runtime requires macOS {MACOS_MIN_MAJOR} or newer"
+            ),
+        })?;
+    Ok(major)
 }
 
 /// Reported runtime state (FR-2 status table).
@@ -197,10 +212,11 @@ pub struct RuntimeStatus {
 }
 
 /// Computes the fastembed runtime status from the global providers entry and
-/// the data-dir install (FR-2).
+/// the data-dir install (FR-2). A provider entry without a `runtime_path`
+/// but with a data-dir install is reported `Connected` (the resolver uses
+/// it), so `--check` never lies about what `resolve` would pick.
 #[must_use]
 pub fn runtime_status(providers: &ProvidersCfg) -> RuntimeStatus {
-    let status = provider_status(providers, crate::hybrid::config::PROVIDER_FASTEMBED);
     let path = providers
         .fastembed
         .as_ref()
@@ -212,6 +228,20 @@ pub fn runtime_status(providers: &ProvidersCfg) -> RuntimeStatus {
                 .map(library_path)
                 .filter(|path| path.exists())
         });
+    let has_entry = providers.fastembed.as_ref().is_some_and(|p| p.enabled);
+    if has_entry && path.is_some() {
+        return RuntimeStatus {
+            state: "Connected",
+            version: providers
+                .fastembed
+                .as_ref()
+                .and_then(|provider| provider.runtime.clone())
+                .or_else(|| Some(ORT_VERSION.to_owned())),
+            path,
+            reason: None,
+        };
+    }
+    let status = provider_status(providers, crate::hybrid::config::PROVIDER_FASTEMBED);
     match status.state {
         crate::hybrid::config::ProviderState::Connected => RuntimeStatus {
             state: "Connected",
@@ -645,66 +675,41 @@ pub fn resolve(cfg: &ProvidersCfg) -> Result<PathBuf> {
         }
         return Ok(path);
     }
-    let status = provider_status(cfg, crate::hybrid::config::PROVIDER_FASTEMBED);
-    match status.state {
-        crate::hybrid::config::ProviderState::Connected => {}
-        crate::hybrid::config::ProviderState::Broken => {
-            return Err(Error::Admission {
-                message: format!(
-                    "fastembed runtime is broken ({}); re-run `docsbase connect fastembed --force`",
-                    status.reason.as_deref().unwrap_or("broken")
-                ),
-            });
-        }
-        _ => {
-            return Err(Error::Admission {
-                message: format!(
-                    "fastembed provider is not connected ({}); run `docsbase connect fastembed`",
-                    status.reason.as_deref().unwrap_or("no provider entry")
-                ),
-            });
-        }
-    }
     match &cfg.fastembed {
-        Some(provider) if provider.runtime_path.is_some() => {}
-        // Provider enabled but no explicit path: fall back to the data-dir
-        // install produced by `connect fastembed` (FR-11 order: env →
-        // runtime_path → data-dir → admission).
-        Some(_) => {
+        Some(provider) if provider.enabled => {
+            if let Some(path) = &provider.runtime_path {
+                if !path.exists() {
+                    return Err(Error::Admission {
+                        message: format!(
+                            "fastembed runtime {} is missing; re-run `docsbase connect fastembed --force`",
+                            path.display()
+                        ),
+                    });
+                }
+                return Ok(path.clone());
+            }
+            // Provider enabled but no explicit path: fall back to the
+            // data-dir install produced by `connect fastembed` (FR-11
+            // order: env → runtime_path → data-dir → admission).
             let installed = library_path(platform_target()?);
             if installed.exists() {
                 return Ok(installed);
             }
-            return Err(Error::Admission {
+            Err(Error::Admission {
                 message: format!(
                     "fastembed has no runtime path and the data-dir install {} is missing; run `docsbase connect fastembed`",
                     installed.display()
                 ),
-            });
+            })
         }
-        None => {
-            return Err(Error::Admission {
-                message: "fastembed provider entry vanished; run `docsbase connect fastembed`"
-                    .to_owned(),
-            });
-        }
+        Some(_) => Err(Error::Admission {
+            message: "fastembed provider is disabled; run `docsbase connect fastembed`".to_owned(),
+        }),
+        None => Err(Error::Admission {
+            message: "fastembed provider is not connected; run `docsbase connect fastembed`"
+                .to_owned(),
+        }),
     }
-    let path = cfg
-        .fastembed
-        .as_ref()
-        .and_then(|provider| provider.runtime_path.as_ref())
-        .ok_or_else(|| Error::Admission {
-            message: "fastembed has no runtime path; run `docsbase connect fastembed`".to_owned(),
-        })?;
-    if !path.exists() {
-        return Err(Error::Admission {
-            message: format!(
-                "fastembed runtime {} is missing; re-run `docsbase connect fastembed --force`",
-                path.display()
-            ),
-        });
-    }
-    Ok(path.clone())
 }
 
 /// Loads ORT from `path` exactly once per process (FR-11: `init_from` is
@@ -980,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(unsafe_code)] // test-only env mutation for ORT_DYLIB_PATH
+    #[allow(unsafe_code)] // test-only env mutation for ORT_DYLIB_PATH / DOCSBASE_DATA_DIR
     fn resolve_requires_a_connected_provider_or_env_override() {
         use crate::hybrid::config::FastembedProvider;
         // No provider, no env → admission.
@@ -1015,6 +1020,38 @@ mod tests {
         };
         let resolved = resolve(&provider).expect("provider path");
         assert_eq!(resolved, fake_lib);
+
+        // Enabled entry without a runtime_path falls back to the data-dir
+        // install (FR-11 order: env → runtime_path → data-dir → admission).
+        let dir2 = tempfile::TempDir::new().expect("tmp");
+        let old_data = std::env::var_os("DOCSBASE_DATA_DIR");
+        // SAFETY: test-only; restored below.
+        unsafe {
+            std::env::set_var("DOCSBASE_DATA_DIR", dir2.path());
+        }
+        let target = platform_target().expect("host target");
+        let data_dir_install = library_path(target);
+        std::fs::create_dir_all(data_dir_install.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&data_dir_install, b"fake").expect("touch");
+        let no_path = ProvidersCfg {
+            fastembed: Some(FastembedProvider {
+                enabled: true,
+                runtime: Some(ORT_VERSION.to_owned()),
+                runtime_path: None,
+            }),
+            openrouter: None,
+        };
+        let resolved = resolve(&no_path).expect("data-dir fallback");
+        assert_eq!(resolved, data_dir_install);
+        // SAFETY: restore.
+        match old_data {
+            Some(value) => unsafe {
+                std::env::set_var("DOCSBASE_DATA_DIR", value);
+            },
+            None => unsafe {
+                std::env::remove_var("DOCSBASE_DATA_DIR");
+            },
+        }
 
         // Broken path → admission.
         let broken = ProvidersCfg {
@@ -1116,10 +1153,18 @@ mod tests {
 
     #[test]
     fn macos_floor_rejects_old_majors() {
-        // The floor is enforced in platform_target() only on macOS; the
-        // constant itself is the single source of truth.
+        // On macOS the gate uses macos_major_version(); the parser is the
+        // only cross-platform-testable piece, so parse a well-known product
+        // version string the same way the sysctl reader does.
+        fn parse_major(text: &str) -> Option<u32> {
+            text.split('.').next()?.trim().parse::<u32>().ok()
+        }
+        assert_eq!(parse_major("14.5.0"), Some(14));
+        assert_eq!(parse_major("13.6"), Some(13));
+        assert_eq!(parse_major("15"), Some(15));
+        assert_eq!(parse_major("abc"), None);
         assert_eq!(MACOS_MIN_MAJOR, 14);
-        let below = MACOS_MIN_MAJOR.saturating_sub(1);
-        assert!(below < MACOS_MIN_MAJOR);
+        assert!(parse_major("13.6").expect("13") < MACOS_MIN_MAJOR);
+        assert!(parse_major("14.5.0").expect("14") >= MACOS_MIN_MAJOR);
     }
 }
