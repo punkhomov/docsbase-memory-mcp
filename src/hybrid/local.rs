@@ -496,12 +496,34 @@ pub(crate) fn take_shared_lock(
         .parent()
         .ok_or_else(|| Error::internal(format!("cache path has no parent: {}", dir.display())))?;
     let path = root.join(".lock");
-    let file = std::fs::OpenOptions::new()
+    let file = match std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
         .open(&path)
-        .map_err(|err| Error::internal_with_source(format!("open {}", path.display()), err))?;
+    {
+        Ok(file) => file,
+        // The model root vanished between the provisioning check and here
+        // (a concurrent `models remove`, or never fetched): surface the
+        // fetch hint instead of an Internal error (round-2 M5).
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let name = root.file_name().map_or_else(
+                || dir.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            return Err(Error::Admission {
+                message: format!(
+                    "fastembed model \"{name}\" is not fetched; run `docsbase models fetch {name}`"
+                ),
+            });
+        }
+        Err(err) => {
+            return Err(Error::internal_with_source(
+                format!("open {}", path.display()),
+                err,
+            ));
+        }
+    };
     let lock: &'static mut fd_lock::RwLock<std::fs::File> =
         Box::leak(Box::new(fd_lock::RwLock::new(file)));
     match lock.try_read() {
@@ -692,6 +714,26 @@ mod tests {
             exclusive.try_write().is_ok(),
             "exclusive lock available after the shared guard drops"
         );
+    }
+
+    #[test]
+    fn take_shared_lock_on_vanished_root_is_fetch_hint() {
+        // Round-2 M5: the cached() check and the shared-lock acquisition
+        // are not atomic; if the model root vanished in between, ta
+        // shared lock must fail with the fetch hint, never Internal.
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let root = dir.path().join("models").join("bge-small-en-v1.5");
+        let rev = root.join("rev");
+        // No model directory exists at all.
+        let err = take_shared_lock(&rev).expect_err("vanished root");
+        assert!(matches!(err, Error::Admission { .. }));
+        assert!(
+            err.to_string().contains("models fetch bge-small-en-v1.5"),
+            "{err}"
+        );
+        // Existing root: succeeds.
+        std::fs::create_dir_all(&root).expect("root");
+        assert!(take_shared_lock(&rev).expect("lock").is_some());
     }
 
     #[test]
