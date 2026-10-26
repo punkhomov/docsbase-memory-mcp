@@ -915,6 +915,16 @@ pub(crate) fn fetch_into(
     Ok(installed)
 }
 
+/// Sibling staging dir name for one fetch (`<cache>/models/.staging-<name>-<rev8>-<seq>`).
+fn staging_name(entry: &ModelEntry<'_>, tag: &str) -> String {
+    format!(".staging-{}-{tag}", entry.name)
+}
+
+/// Sibling backup dir name for one fetch (`.old-<name>-<rev8>-<seq>`).
+fn backup_name(entry: &ModelEntry<'_>, tag: &str) -> String {
+    format!(".old-{}-{tag}", entry.name)
+}
+
 /// Performs the exclusive install: stage into a sibling dir, verify every
 /// file, then promote by rename. On failure the previous verified cache is
 /// preserved (round-1 C6). Runs only under the exclusive lock.
@@ -938,10 +948,26 @@ fn install_staged(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) 
         entry.revision_short(),
         STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
     );
-    let staging = parent.join(format!(".staging-{}-{tag}", entry.name));
-    // Remove any stale staging dir from a crashed earlier attempt.
-    if staging.exists() {
-        let _ = std::fs::remove_dir_all(&staging);
+    let staging = parent.join(staging_name(entry, &tag));
+    let backup = parent.join(backup_name(entry, &tag));
+    // Sweep stale staging/backup siblings for THIS model from crashed
+    // earlier attempts. Names embed a per-call tag, so an orphan can never
+    // match the current names — the sweep below is the only recovery. It
+    // runs under the exclusive model-root lock (no live same-name fetch
+    // can exist here) and touches only this model's prefix (round-5 F2).
+    if let Ok(read) = std::fs::read_dir(parent) {
+        let prefix_staging = format!(".staging-{}-", entry.name);
+        let prefix_old = format!(".old-{}-", entry.name);
+        for dirent in read.flatten() {
+            let Some(name) = dirent.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let orphan = (name.starts_with(&prefix_staging) && name != staging_name(entry, &tag))
+                || (name.starts_with(&prefix_old) && name != backup_name(entry, &tag));
+            if orphan {
+                let _ = std::fs::remove_dir_all(dirent.path());
+            }
+        }
     }
     // Create the staging dir before the preflight (free-space checks need a
     // real path to stat); `install_all` re-secures it harmlessly.
@@ -956,7 +982,6 @@ fn install_staged(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) 
             // Note: a crash after this first rename leaves `dir` absent until
             // the publish rename completes — the best-effort restore below
             // covers the publish-rename failure path, not a hard kill.
-            let backup = parent.join(format!(".old-{}-{tag}", entry.name));
             if dir.exists() {
                 if backup.exists() {
                     let _ = std::fs::remove_dir_all(&backup);
@@ -1513,6 +1538,38 @@ mod tests {
             fetch_into(&entry, &source, true, &dir).expect("force refetch"),
             "--force always reinstalls"
         );
+    }
+
+    #[test]
+    fn fetch_sweeps_stale_staging_and_backup_siblings() {
+        // Round-5 F2: orphaned `.staging-*`/`.old-*` siblings from crashes
+        // are invisible to every tool surface; the next exclusive install
+        // for the same model must sweep them (names embed a per-call tag,
+        // so they can never match the current fetch's names). The
+        // verified-complete fast path takes no exclusive lock and must NOT
+        // sweep.
+        let tmp = TempDir::new().expect("tmp");
+        let entry = fake_entry();
+        let dir = fake_cache_dir(tmp.path());
+        // Siblings live under `<cache>/models` (one level above the model
+        // root): `dir` = models/<name>/<rev>.
+        let parent = dir.parent().and_then(Path::parent).expect("models dir");
+        std::fs::create_dir_all(parent).expect("models dir");
+        let stale_staging = parent.join(format!(".staging-{}-01234567-99", entry.name));
+        let stale_backup = parent.join(format!(".old-{}-01234567-98", entry.name));
+        std::fs::create_dir_all(&stale_staging).expect("stale staging");
+        std::fs::create_dir_all(&stale_backup).expect("stale backup");
+
+        let source = FakeSource::new(&entry);
+        fetch_into(&entry, &source, false, &dir).expect("fetch");
+        assert!(!stale_staging.exists(), "stale staging swept");
+        assert!(!stale_backup.exists(), "stale backup swept");
+
+        // Fast path: no exclusive lock, no sweep.
+        let stale_fast = parent.join(format!(".staging-{}-01234567-97", entry.name));
+        std::fs::create_dir_all(&stale_fast).expect("stale fast");
+        fetch_into(&entry, &source, false, &dir).expect("fast fetch");
+        assert!(stale_fast.exists(), "fast path leaves stale staging alone");
     }
 
     #[test]
