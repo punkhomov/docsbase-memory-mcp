@@ -382,9 +382,14 @@ impl FastEmbedReranker {
             .ok_or_else(|| {
                 Error::internal(format!("registry row {} has no onnx file", entry.name))
             })?;
+        // Verify the exact byte by fed to ORT (round-4 C4): a `File`-backed
+        // source would let fastembed re-open the path unverified. Memory
+        // source mirrors the embedder path and costs one extra buffer while
+        // the session builds (the buffer drops after construction).
+        let onnx = read_cache_file(&cache_dir, &onnx_path, entry)?;
         let tokenizer_files = tokenizer_files(&cache_dir, entry)?;
         let model = fastembed::UserDefinedRerankingModel::new(
-            fastembed::OnnxSource::File(onnx_path),
+            fastembed::OnnxSource::Memory(onnx),
             tokenizer_files,
         );
         let options = fastembed::RerankInitOptionsUserDefined::new()
