@@ -164,4 +164,48 @@ mod tests {
             "no sibling lock file in the project root"
         );
     }
+
+    #[test]
+    fn config_write_lock_wrapper_routes_locks_to_data_dir() {
+        // Re-exec ourselves in a child with a sandboxed `DOCSBASE_DATA_DIR`
+        // so env mutation cannot race parallel tests (round-4 C1: the real
+        // wrapper must route locks to `<data>/locks`, never next to the
+        // target — the `..._in` variant above cannot pin that).
+        if std::env::var_os("DOCSBASE_DATA_DIR").is_none() {
+            let exe = std::env::current_exe().expect("current exe");
+            let tmp = tempfile::TempDir::new().expect("tmp");
+            let status = std::process::Command::new(exe)
+                .arg("--exact")
+                .arg("config::paths::tests::config_write_lock_wrapper_routes_locks_to_data_dir")
+                .env("DOCSBASE_DATA_DIR", tmp.path())
+                .status()
+                .expect("spawn child");
+            assert!(status.success(), "child verification failed");
+            return;
+        }
+
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let path = project.join(".docsbase.toml");
+        with_config_write_lock(&path, || Ok(())).expect("wrapper write");
+        assert!(
+            !project.join(".docsbase.toml.lock").exists(),
+            "no sibling lock file in the project root"
+        );
+        // The lock landed in our own data dir, not beside the target.
+        let data = crate::config::paths::data_dir().expect("data dir");
+        let lock_dir = data.join("locks");
+        assert!(
+            lock_dir.is_dir(),
+            "locks dir exists: {}",
+            lock_dir.display()
+        );
+        let count = std::fs::read_dir(&lock_dir)
+            .expect("read locks")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "lock"))
+            .count();
+        assert_eq!(count, 1, "exactly one lock file in {}", lock_dir.display());
+    }
 }
