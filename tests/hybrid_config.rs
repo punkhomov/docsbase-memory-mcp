@@ -2,6 +2,7 @@
 //! contract (FR-3, FR-5, FR-13, FR-14, I3). Ungated: runs in the default
 //! offline build and in `--features hybrid-remote` (SC-3, SC-4).
 
+#[cfg(feature = "hybrid-local")]
 use std::sync::Mutex;
 
 use docsbase_memory::error::Error;
@@ -338,7 +339,10 @@ fn fastembed_only_config_does_not_demand_openrouter_key() {
 /// Module-wide lock serializing every env-mutating test in this binary
 /// (round-2 M3): was a function-local static on
 /// `from_config_fastembed_uses_real_provider_config`, which did not cover
-/// `jobs_embed_texts_threads_real_providers`.
+/// `jobs_embed_texts_threads_real_providers`. Gated: both users are
+/// `hybrid-local`-only, so the static must not survive in the default
+/// build (round-3 P0 — default-feature clippy was red).
+#[cfg(feature = "hybrid-local")]
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(feature = "hybrid-local")]
