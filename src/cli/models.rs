@@ -222,7 +222,19 @@ pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
             return Err(Error::internal("cache path has no parent").into());
         }
     };
-    if !model_root.exists() {
+    // Sibling staging/backup containers for this model (round-5 F2):
+    // killed fetches / force refetches leave orphans next to the root; a
+    // remove is the only other reclaim surface. If the root is gone but
+    // orphans remain, still clean them (round-5 deepseek F5).
+    let parent = match model_root.parent() {
+        Some(parent) => parent.to_path_buf(),
+        None => return Err(Error::internal("cache path has no parent").into()),
+    };
+    let staging_container = parent.join(".staging").join(entry.name);
+    let backup_container = parent.join(".old").join(entry.name);
+    let root_exists = model_root.exists();
+    let orphan_exists = staging_container.exists() || backup_container.exists();
+    if !root_exists && !orphan_exists {
         return Err(Error::Admission {
             message: format!(
                 "model \"{}\" is not fetched (nothing to remove); run `docsbase models fetch {}`",
@@ -234,53 +246,60 @@ pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
 
     // Exclusive, non-blocking probe of the model-root `.lock` (the lock
     // lives at the root, shared by loaded instances for their lifetime and
-    // held exclusively by an in-flight fetch — including its `.staging-*`
+    // held exclusively by an in-flight fetch — including its staging
     // phase, round-2 D2/D3). Contention → Admission unless `--force`.
-    let lock_path = model_root.join(".lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|err| Error::internal_with_source(format!("open {}", lock_path.display()), err))?;
-    // Leaked `'static` lock, same pattern as `take_shared_lock`;
-    // removal happens once per process invocation, so the leak is
-    // bounded and deliberate (matches the shared-lock design).
-    let lock: &'static mut fd_lock::RwLock<std::fs::File> =
-        Box::leak(Box::new(fd_lock::RwLock::new(file)));
-    let guard = match lock.try_write() {
-        Ok(guard) => Some(guard),
-        Err(_) if args.force => {
-            eprintln!(
-                "warning: {} is loaded/in use (shared lock held); --force deletes anyway",
-                entry.name
-            );
-            None
-        }
-        Err(_) => {
-            return Err(Error::Admission {
-                message: format!(
-                    "model \"{}\" is loaded/in use; stop the daemon (or pass --force) then retry",
+    // A missing root means no live same-name fetch can exist (fetch
+    // creates the root before locking), so no probe is needed then.
+    let guard = if root_exists {
+        let lock_path = model_root.join(".lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|err| {
+                Error::internal_with_source(format!("open {}", lock_path.display()), err)
+            })?;
+        // Leaked `'static` lock, same pattern as `take_shared_lock`;
+        // removal happens once per process invocation, so the leak is
+        // bounded and deliberate (matches the shared-lock design).
+        let lock: &'static mut fd_lock::RwLock<std::fs::File> =
+            Box::leak(Box::new(fd_lock::RwLock::new(file)));
+        match lock.try_write() {
+            Ok(guard) => Some(guard),
+            Err(_) if args.force => {
+                eprintln!(
+                    "warning: {} is loaded/in use (shared lock held); --force deletes anyway",
                     entry.name
-                ),
+                );
+                None
             }
-            .into());
+            Err(_) => {
+                return Err(Error::Admission {
+                    message: format!(
+                        "model \"{}\" is loaded/in use; stop the daemon (or pass --force) then retry",
+                        entry.name
+                    ),
+                }
+                .into());
+            }
         }
+    } else {
+        None
     };
 
     // Keep the guard alive while deleting (Linux/macOS tolerate it; on
     // Windows the OS may refuse to delete an open/mapped file — surface it).
-    std::fs::remove_dir_all(&model_root).map_err(|err| {
-        Error::internal_with_source(format!("remove {}", model_root.display()), err)
-    })?;
-    // Best-effort sweep of this model's sibling staging/backup containers
-    // (round-5 F2): killed fetches / force refetches leave orphans next to
-    // the root; remove is the only other reclaim surface.
-    if let Some(parent) = model_root.parent() {
-        for kind in [".staging", ".old"] {
-            let container = parent.join(kind).join(entry.name);
-            let _ = std::fs::remove_dir_all(&container);
-        }
+    // Containers are swept BEFORE the root is deleted: the lock inode
+    // lives inside the root, so deleting the root first would unlink it
+    // and let a concurrent fetch win a fresh lock before the sweep
+    // (round-5 deepseek F1).
+    let _ = std::fs::remove_dir_all(&staging_container);
+    let _ = std::fs::remove_dir_all(&backup_container);
+    if root_exists {
+        std::fs::remove_dir_all(&model_root).map_err(|err| {
+            Error::internal_with_source(format!("remove {}", model_root.display()), err)
+        })?;
     }
     drop(guard);
     println!("removed {} (all cached revisions)", entry.name);
@@ -2186,6 +2205,56 @@ mod tests {
 
     #[cfg(feature = "hybrid-local")]
     #[test]
+    fn remove_sweeps_staging_backup_containers_but_not_prefix_collisions() {
+        // Round-5 F2/deepseek F2: remove must reclaim orphaned sibling
+        // containers (exact name) and leave prefix-colliding models alone.
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let model_dir = seed_model_cache(dir.path(), "bge-small-en-v1.5");
+        // Containers live under `<cache>/models` (one level above the
+        // model root).
+        let parent = model_dir
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("models dir");
+        let staging_c = parent.join(".staging").join("bge-small-en-v1.5");
+        let backup_c = parent.join(".old").join("bge-small-en-v1.5");
+        let collision = parent
+            .join(".staging")
+            .join("bge-small-en-v1.5-extra")
+            .join("live-1");
+        std::fs::create_dir_all(staging_c.join("stale-1")).expect("staging orphan");
+        std::fs::create_dir_all(backup_c.join("stale-2")).expect("backup orphan");
+        std::fs::create_dir_all(&collision).expect("collision");
+        with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
+            remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect("remove");
+        });
+        assert!(!model_dir.exists(), "root removed");
+        assert!(!staging_c.exists(), "staging container swept");
+        assert!(!backup_c.exists(), "backup container swept");
+        assert!(collision.exists(), "prefix-colliding container survives");
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn remove_cleans_orphan_containers_without_root() {
+        // Round-5 deepseek F5: root gone but containers remain (killed
+        // remove) — remove must still reclaim them instead of "not
+        // fetched".
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let parent = dir.path().join("models");
+        let staging_c = parent.join(".staging").join("bge-small-en-v1.5");
+        let backup_c = parent.join(".old").join("bge-small-en-v1.5");
+        std::fs::create_dir_all(staging_c.join("stale-1")).expect("staging orphan");
+        std::fs::create_dir_all(backup_c.join("stale-2")).expect("backup orphan");
+        with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
+            remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect("cleanup");
+        });
+        assert!(!staging_c.exists(), "staging container cleaned");
+        assert!(!backup_c.exists(), "backup container cleaned");
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
     fn remove_deletes_all_cached_revisions_including_stale() {
         let dir = tempfile::TempDir::new().expect("tmp");
         let pinned = seed_model_cache(dir.path(), "bge-small-en-v1.5");
@@ -2268,7 +2337,8 @@ mod tests {
     #[cfg(feature = "hybrid-local")]
     #[test]
     fn remove_refuses_when_fetch_inflight_on_staging() {
-        // Round-2 D3: a first fetch installs into `.staging-*` while
+        // Round-2 D3: a first fetch installs into a sibling staging
+        // container while
         // holding the model-root lock exclusively; a concurrent remove must
         // be refused (never delete the in-flight download) even though no
         // revision dir exists yet.

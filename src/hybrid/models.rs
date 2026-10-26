@@ -934,6 +934,32 @@ fn remove_tree_and_container(path: &Path, container: &Path) {
     let _ = std::fs::remove_dir_all(container);
 }
 
+/// Empties a model's staging container. Staging never holds a good copy,
+/// so under the exclusive lock ANY tag is stale — this also reclaims an
+/// orphan whose tag collides with a fresh process's first tag (per-process
+/// sequence restarts at 0, round-5 deepseek F3).
+fn sweep_staging_container(container: &Path) {
+    if let Ok(read) = std::fs::read_dir(container) {
+        for dirent in read.flatten() {
+            let _ = std::fs::remove_dir_all(dirent.path());
+        }
+    }
+}
+
+/// Removes every tag from a model's backup container except `keep_tag`.
+/// The backup container may hold the ONLY copy of a superseded cache
+/// (crash between stash and publish rename), so it is never emptied
+/// wholesale (round-5 deepseek F3/F4).
+fn sweep_backup_container_except(container: &Path, keep_tag: &str) {
+    if let Ok(read) = std::fs::read_dir(container) {
+        for dirent in read.flatten() {
+            if dirent.file_name() != std::ffi::OsStr::new(keep_tag) {
+                let _ = std::fs::remove_dir_all(dirent.path());
+            }
+        }
+    }
+}
+
 /// Performs the exclusive install: stage into a sibling dir, verify every
 /// file, then promote by rename. On failure the previous verified cache is
 /// preserved (round-1 C6). Runs only under the exclusive lock.
@@ -942,7 +968,10 @@ fn install_staged(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) 
     // `<cache>/models`), not inside it (round-3 deepseek-4): a concurrent
     // `models remove` deletes the root subtree; a staging dir inside it
     // would be deleted mid-download and the root lock inode unlinked while
-    // we hold it. Sibling staging is immune, and promote into a vanished
+    // we hold it. Sibling staging is immune to a concurrent remove as long
+    // as both sides serialize on the same root lock — remove sweeps its
+    // containers only while holding that lock, and does so BEFORE
+    // unlinking the root (round-5 deepseek F1). Promote into a vanished
     // root fails cleanly (never a false "fetched" report).
     let parent = dir.parent().and_then(Path::parent).ok_or_else(|| {
         Error::internal(format!("cache path has no grandparent: {}", dir.display()))
@@ -969,20 +998,12 @@ fn install_staged(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) 
     std::fs::create_dir_all(&backup_root).map_err(|err| {
         Error::internal_with_source(format!("create {}", backup_root.display()), err)
     })?;
-    // Sweep stale tags for THIS model from crashed earlier attempts. Tags
-    // embed a per-call sequence, so an orphan can never match the current
-    // tag — the sweep below is the only recovery. It runs under the
-    // exclusive model-root lock (no live same-name fetch can exist here)
-    // and touches only this model's containers (round-5 F2).
-    for (container_root, current) in [(&staging_root, &tag), (&backup_root, &tag)] {
-        if let Ok(read) = std::fs::read_dir(container_root) {
-            for dirent in read.flatten() {
-                if dirent.file_name() != std::ffi::OsStr::new(current) {
-                    let _ = std::fs::remove_dir_all(dirent.path());
-                }
-            }
-        }
-    }
+    // Sweep stale tags for THIS model from crashed earlier attempts. It
+    // runs under the exclusive model-root lock (no live same-name fetch
+    // can exist here) and touches only this model's containers
+    // (round-5 F2).
+    sweep_staging_container(&staging_root);
+    sweep_backup_container_except(&backup_root, &tag);
     // Create the staging dir before the preflight (free-space checks need a
     // real path to stat); `install_all` re-secures it harmlessly.
     platform::fs::secure_dir(&staging).map_err(|err| {
@@ -1408,7 +1429,7 @@ mod tests {
             "no .complete after failure"
         );
         // Staging installs leave at most the `.lock` control file (never
-        // `.part`/`.staging-*`/files).
+        // `.part`/staging files).
         assert_clean_failure_dir(&dir);
 
         // Hash mismatch: same size, different content.
@@ -1534,6 +1555,37 @@ mod tests {
         // runs and detects the mismatch.
         std::fs::write(dir.join("tokenizer.json"), vec![0_u8; 512]).expect("same-size tamper");
         assert!(!cached_in(&entry, &dir).expect("tampered not cached"));
+    }
+
+    #[test]
+    fn sweep_helpers_empty_staging_and_keep_current_backup() {
+        // Round-5 deepseek F3: the staging sweep must reclaim even an
+        // orphan whose tag equals a fresh process's first tag (sequence
+        // restarts at 0), and the backup sweep must keep the current tag
+        // (it may be the only surviving old-cache copy).
+        let tmp = TempDir::new().expect("tmp");
+        let entry = fake_entry();
+        let parent = tmp.path();
+        let staging_root = staging_root(parent, &entry);
+        let backup_root = backup_root(parent, &entry);
+        let orphan_colliding = staging_root.join("01234567-0");
+        let orphan_other = staging_root.join("01234567-9");
+        let backup_current = backup_root.join("01234567-0");
+        let backup_older = backup_root.join("01234567-8");
+        for path in [
+            &orphan_colliding,
+            &orphan_other,
+            &backup_current,
+            &backup_older,
+        ] {
+            std::fs::create_dir_all(path).expect("seed");
+        }
+        sweep_staging_container(&staging_root);
+        sweep_backup_container_except(&backup_root, "01234567-0");
+        assert!(!orphan_colliding.exists(), "colliding orphan swept");
+        assert!(!orphan_other.exists(), "other orphan swept");
+        assert!(backup_current.exists(), "current backup tag kept");
+        assert!(!backup_older.exists(), "older backup tag swept");
     }
 
     #[test]
@@ -1706,7 +1758,7 @@ mod tests {
     }
 
     /// Asserts a failed fetch leaves at most the `.lock` control file
-    /// (staging installs leave no files/`.part`/`.staging-*`).
+    /// (staging installs leave no files/`.part`).
     fn assert_clean_failure_dir(dir: &Path) {
         if !dir.exists() {
             return;
