@@ -168,7 +168,9 @@ pub fn list_cmd() -> anyhow::Result<()> {
         rerank_pin.as_deref().unwrap_or("-")
     );
     for entry in models::REGISTRY {
-        let state = if models::cached(entry)? {
+        // Shallow per-file size check (no full hashing per invocation;
+        // round-3 deepseek-7).
+        let state = if models::cached_shallow(entry)? {
             "fetched"
         } else {
             "missing"

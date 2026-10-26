@@ -438,9 +438,10 @@ impl ModelSource for HttpModelSource {
 /// in-dir lock would be unlinked and a new inode would replace it — loaded
 /// instances would hold a guard on a dead inode and `models remove`/fetch
 /// would probe a fresh uncontended one (round-2 D2/D3). A root-level lock
-/// is stable across promotes and also covers `.staging-*`/`.old-*`
-/// children (an in-flight first fetch is therefore protected from a
-/// concurrent remove).
+/// is stable across promotes and is held exclusively for the whole install
+/// (staging + promote; staging/backup live as siblings under `<cache>/models`,
+/// round-3 deepseek-4), so a concurrent remove is refused while a fetch is
+/// in flight.
 fn open_lock(dir: &Path) -> Result<std::fs::File> {
     let root = dir
         .parent()
@@ -1505,9 +1506,12 @@ mod tests {
                 spec.path
             );
         }
-        // No staging/backup leftovers.
-        let leftovers: Vec<_> = std::fs::read_dir(root.path())
-            .expect("read dir")
+        // No staging/backup leftovers: they live as SIBLINGS under
+        // `<cache>/models` (round-3 deepseek-4), so scan that directory,
+        // not the revision dir or the cache root.
+        let models_dir = root.path().join("models");
+        let leftovers: Vec<_> = std::fs::read_dir(&models_dir)
+            .expect("read models dir")
             .filter_map(std::result::Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
@@ -1515,7 +1519,7 @@ mod tests {
             !leftovers
                 .iter()
                 .any(|name| name.contains(".staging-") || name.contains(".old-")),
-            "no staging/backup dirs: {leftovers:?}"
+            "no sibling staging/backup dirs: {leftovers:?}"
         );
     }
 
