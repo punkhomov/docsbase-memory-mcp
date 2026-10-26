@@ -191,6 +191,17 @@ fn probe_openrouter_key(transport: &dyn crate::hybrid::wire::Transport) -> anyho
 fn connect_fastembed(args: &FastembedArgs) -> anyhow::Result<()> {
     use crate::hybrid::runtime::{self, HttpRuntimeSource, ORT_VERSION};
 
+    // `--check` reports state; `--force` reinstalls. Together they are
+    // contradictory — reject loudly instead of silently installing
+    // (round-2 U4), matching the scope-flag conflict handling.
+    if args.check && args.force {
+        return Err(Error::Admission {
+            message: "`--check` and `--force` are mutually exclusive; use `--force` alone to reinstall, or `--check` alone to report state"
+                .to_owned(),
+        }
+        .into());
+    }
+
     let target = runtime::platform_target()?;
 
     // `--check` reports the runtime state; macOS additionally reports the

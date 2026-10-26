@@ -78,6 +78,26 @@ fn connect_fastembed_check_reports_missing_without_download() {
 }
 
 #[test]
+fn connect_fastembed_check_and_force_are_mutually_exclusive() {
+    // Round-2 U4: `--check --force` must error, not silently install.
+    let env = Env::new();
+    let output = env
+        .cmd()
+        .args(["connect", "fastembed", "--check", "--force"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("mutually exclusive"), "{stderr}");
+    // Nothing was installed/downloaded and no runtime dir appears.
+    assert!(
+        !env.data.path().join("runtimes").exists(),
+        "no install happened"
+    );
+}
+
+#[test]
 fn connect_fastembed_check_with_vanished_runtime_path_is_broken_not_internal() {
     // C8: a dangling recorded runtime_path must be reported as Broken state
     // (exit 0), never an internal stat error.
