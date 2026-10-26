@@ -273,6 +273,15 @@ pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
     std::fs::remove_dir_all(&model_root).map_err(|err| {
         Error::internal_with_source(format!("remove {}", model_root.display()), err)
     })?;
+    // Best-effort sweep of this model's sibling staging/backup containers
+    // (round-5 F2): killed fetches / force refetches leave orphans next to
+    // the root; remove is the only other reclaim surface.
+    if let Some(parent) = model_root.parent() {
+        for kind in [".staging", ".old"] {
+            let container = parent.join(kind).join(entry.name);
+            let _ = std::fs::remove_dir_all(&container);
+        }
+    }
     drop(guard);
     println!("removed {} (all cached revisions)", entry.name);
     Ok(())
