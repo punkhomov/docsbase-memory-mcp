@@ -301,6 +301,71 @@ fn models_use_conflicting_provider_for_registry_model_errors() {
 }
 
 #[test]
+fn models_use_preserved_stage_provider_and_normalize_are_validated() {
+    // Round-3 deepseek-5: PRESERVED stages (a different stage key is being
+    // written) must fail at `models use` if their provider is unknown or a
+    // fastembed stage has normalize=false — the merged table is validated
+    // as a whole.
+    let env = Env::new();
+    let dir = tempfile::TempDir::new().expect("tmp");
+    // Unknown provider in the preserved embedding stage → refused when we
+    // pin the reranker.
+    std::fs::write(
+        dir.path().join(".docsbase.toml"),
+        "[hybrid.embedding]\nprovider = \"typo\"\nmodel = \"m/e\"\ndimensions = 128\nnormalize = true\n",
+    )
+    .expect("seed");
+    let output = env
+        .cmd()
+        .current_dir(dir.path())
+        .args([
+            "models",
+            "use",
+            "rerank",
+            "jina-reranker-v1-turbo-en",
+            "--provider",
+            "fastembed",
+            "--window",
+            "50",
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("provider"), "{stderr}");
+
+    // fastembed + normalize=false in the preserved embedding stage →
+    // refused when we pin the reranker.
+    std::fs::write(
+        dir.path().join(".docsbase.toml"),
+        "[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\ndimensions = 384\nnormalize = false\n",
+    )
+    .expect("seed normalize");
+    let output = env
+        .cmd()
+        .current_dir(dir.path())
+        .args([
+            "models",
+            "use",
+            "rerank",
+            "jina-reranker-v1-turbo-en",
+            "--provider",
+            "fastembed",
+            "--window",
+            "50",
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("normalize"), "{stderr}");
+}
+
+#[test]
 fn models_use_unknown_model_requires_provider() {
     let env = Env::new();
     let dir = tempfile::TempDir::new().expect("tmp");

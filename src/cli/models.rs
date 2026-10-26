@@ -792,9 +792,28 @@ fn preview_merged(existing: Option<&toml::Value>, table: &toml::Value) -> toml::
 
 /// Validates the merged `hybrid` table: flag arguments were checked on the
 /// way in, but preserved stages pass through untouched — a stale window,
-/// zero dims, blank model id or unknown ranking must fail here with a fix
-/// hint, not later at index time.
+/// zero dims, blank model id, unknown provider or fastembed normalize=false
+/// must fail here with a fix hint, not later at index time.
 fn validate_hybrid_table(hybrid: &toml::map::Map<String, toml::Value>) -> anyhow::Result<()> {
+    validate_embedding_stage(hybrid)?;
+    validate_reranker_stage(hybrid)?;
+    if let Some(ranking) = hybrid.get("ranking").and_then(toml::Value::as_str) {
+        if ranking != "lexical" && ranking != "rrf" {
+            return Err(Error::Admission {
+                message: format!(
+                    "existing hybrid.ranking {ranking:?} is unknown (want \"lexical\" or \"rrf\"); edit .docsbase.toml"
+                ),
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Validates the preserved (or newly merged) embedding stage: provider
+/// allowlist and the fastembed `normalize=true` contract (round-3
+/// deepseek-5).
+fn validate_embedding_stage(hybrid: &toml::map::Map<String, toml::Value>) -> anyhow::Result<()> {
     if let Some(stage) = hybrid.get("embedding").and_then(toml::Value::as_table) {
         let model = stage
             .get("model")
@@ -818,7 +837,45 @@ fn validate_hybrid_table(hybrid: &toml::map::Map<String, toml::Value>) -> anyhow
             }
             .into());
         }
+        let provider = stage.get("provider").and_then(toml::Value::as_str);
+        match provider {
+            Some(PROVIDER_FASTEMBED) => {
+                if !stage
+                    .get("normalize")
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(true)
+                {
+                    return Err(Error::Admission {
+                        message: "existing hybrid.embedding.normalize must be true for fastembed (run `docsbase models use embed <model>` to fix)"
+                            .to_owned(),
+                    }
+                    .into());
+                }
+            }
+            Some(PROVIDER_OPENROUTER) => {}
+            Some(other) => {
+                return Err(Error::Admission {
+                    message: format!(
+                        "existing hybrid.embedding.provider {other:?} is unknown (want {PROVIDER_FASTEMBED} or {PROVIDER_OPENROUTER}; run `docsbase models use embed <model>` to fix)"
+                    ),
+                }
+                .into());
+            }
+            None => {
+                return Err(Error::Admission {
+                    message: "existing hybrid.embedding.provider is missing (run `docsbase models use embed <model>` to fix)"
+                        .to_owned(),
+                }
+                .into());
+            }
+        }
     }
+    Ok(())
+}
+
+/// Validates the preserved (or newly merged) reranker stage: provider
+/// allowlist (round-3 deepseek-5).
+fn validate_reranker_stage(hybrid: &toml::map::Map<String, toml::Value>) -> anyhow::Result<()> {
     if let Some(stage) = hybrid.get("reranker").and_then(toml::Value::as_table) {
         let model = stage
             .get("model")
@@ -831,6 +888,25 @@ fn validate_hybrid_table(hybrid: &toml::map::Map<String, toml::Value>) -> anyhow
             }
             .into());
         }
+        let provider = stage.get("provider").and_then(toml::Value::as_str);
+        match provider {
+            Some(PROVIDER_FASTEMBED | PROVIDER_OPENROUTER) => {}
+            Some(other) => {
+                return Err(Error::Admission {
+                    message: format!(
+                        "existing hybrid.reranker.provider {other:?} is unknown (want {PROVIDER_FASTEMBED} or {PROVIDER_OPENROUTER}; run `docsbase models use rerank <model>` to fix)"
+                    ),
+                }
+                .into());
+            }
+            None => {
+                return Err(Error::Admission {
+                    message: "existing hybrid.reranker.provider is missing (run `docsbase models use rerank <model>` to fix)"
+                        .to_owned(),
+                }
+                .into());
+            }
+        }
         if let Some(window) = stage.get("window").and_then(toml::Value::as_integer) {
             let valid = u32::try_from(window)
                 .is_ok_and(|value| (MIN_RERANK_WINDOW..=MAX_RERANK_WINDOW).contains(&value));
@@ -842,16 +918,6 @@ fn validate_hybrid_table(hybrid: &toml::map::Map<String, toml::Value>) -> anyhow
                 }
                 .into());
             }
-        }
-    }
-    if let Some(ranking) = hybrid.get("ranking").and_then(toml::Value::as_str) {
-        if ranking != "lexical" && ranking != "rrf" {
-            return Err(Error::Admission {
-                message: format!(
-                    "existing hybrid.ranking {ranking:?} is unknown (want \"lexical\" or \"rrf\"); edit .docsbase.toml"
-                ),
-            }
-            .into());
         }
     }
     Ok(())

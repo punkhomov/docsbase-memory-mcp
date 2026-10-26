@@ -773,13 +773,23 @@ pub(crate) fn fetch_into(
             ),
         });
     };
+
     if !force && complete.exists() && verify_hashes(entry, dir)? {
         return Ok(());
     }
 
-    let parent = dir
-        .parent()
-        .ok_or_else(|| Error::internal(format!("cache path has no parent: {}", dir.display())))?;
+    // Staging/backup live as SIBLINGS of the model root (under
+    // `<cache>/models`), not inside it (round-3 deepseek-4): a concurrent
+    // `models remove` deletes the root subtree; a staging dir inside it
+    // would be deleted mid-download and the root lock inode unlinked while
+    // we hold it. Sibling staging is immune, and promote into a vanished
+    // root fails cleanly (never a false "fetched" report).
+    let parent = dir.parent().and_then(Path::parent).ok_or_else(|| {
+        Error::internal(format!("cache path has no grandparent: {}", dir.display()))
+    })?;
+    platform::fs::secure_dir(parent).map_err(|err| {
+        Error::internal_with_source(format!("create models dir {}", parent.display()), err)
+    })?;
     // Unique staging/backup names per fetch: parallel fetches (or parallel
     // tests) must never share a `.staging-*` sibling.
     let tag = format!(
@@ -787,7 +797,7 @@ pub(crate) fn fetch_into(
         entry.revision_short(),
         STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
     );
-    let staging = parent.join(format!(".staging-{tag}"));
+    let staging = parent.join(format!(".staging-{}-{tag}", entry.name));
     // Remove any stale staging dir from a crashed earlier attempt.
     if staging.exists() {
         let _ = std::fs::remove_dir_all(&staging);
@@ -805,7 +815,7 @@ pub(crate) fn fetch_into(
             // Note: a crash after this first rename leaves `dir` absent until
             // the publish rename completes — the best-effort restore below
             // covers the publish-rename failure path, not a hard kill.
-            let backup = parent.join(format!(".old-{tag}"));
+            let backup = parent.join(format!(".old-{}-{tag}", entry.name));
             if dir.exists() {
                 if backup.exists() {
                     let _ = std::fs::remove_dir_all(&backup);
@@ -860,6 +870,36 @@ pub fn fetch(entry: &ModelEntry<'_>, source: &dyn ModelSource, force: bool) -> R
 pub fn cached(entry: &ModelEntry<'_>) -> Result<bool> {
     let dir = cache_dir(entry.name, entry.revision);
     cached_in(entry, &dir)
+}
+
+/// Shallow presence check for reporting commands (`models list`, rounds-3
+/// deepseek-7): `.complete` marker + per-file sizes only — no sha256 passes
+/// (a one-shot CLI would otherwise re-hash multi-GiB models on every
+/// invocation). The full hash stays on the trust/load path (NFR-3).
+///
+/// # Errors
+/// [`Error::Internal`] when a file cannot be stat'ed for a non-NotFound
+/// reason.
+pub fn cached_shallow(entry: &ModelEntry<'_>) -> Result<bool> {
+    let dir = cache_dir(entry.name, entry.revision);
+    if !dir.join(".complete").exists() {
+        return Ok(false);
+    }
+    for spec in entry.files {
+        let path = dir.join(spec.path);
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.len() == spec.size => {}
+            Ok(_) => return Ok(false),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => {
+                return Err(Error::internal_with_source(
+                    format!("stat {}", path.display()),
+                    err,
+                ));
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Same as [`cached`] against an explicit directory (test seam).
@@ -1445,7 +1485,7 @@ mod tests {
         // verified cache (the old behavior removed the whole revision dir).
         let root = TempDir::new().expect("tmp");
         let entry = fake_entry();
-        let dir = root.path().join("rev");
+        let dir = fake_cache_dir(root.path());
         let source = FakeSource::new(&entry);
         fetch_into(&entry, &source, false, &dir).expect("fetch");
         assert!(cached_in(&entry, &dir).expect("cached"));
