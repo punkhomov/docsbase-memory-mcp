@@ -440,11 +440,15 @@ pub fn run(args: &UseArgs) -> anyhow::Result<()> {
         }
     };
 
+    // The pre-lock snapshot is only for advisory output (notes, dry-run
+    // preview). The real read-merge-write re-runs under the inter-process
+    // lock, so two concurrent `models use` writers cannot lost-update each
+    // other's stages (panel round-2 P1).
     let existing = match &scope {
         Scope::Project(root) => read_project_toml(&root.join(".docsbase.toml"))?,
         Scope::Global => read_global_toml()?,
     };
-    let table = merge_stage(existing.as_ref(), stage_key, stage)?;
+    let table = merge_stage(existing.as_ref(), stage_key, stage.clone())?;
     if let Some(note) = free_route_note(&table) {
         eprintln!("{note}");
     }
@@ -467,13 +471,53 @@ pub fn run(args: &UseArgs) -> anyhow::Result<()> {
 
     probe_stage(&probe)?;
 
-    if let Scope::Project(root) = &scope {
-        write_project_toml(&root.join(".docsbase.toml"), existing.as_ref(), &table)?;
-    } else {
-        write_global_toml(existing.as_ref(), &table)?;
-    }
-    print_summary(&table);
+    let path = match &scope {
+        Scope::Project(root) => root.join(".docsbase.toml"),
+        Scope::Global => global_config_file()?,
+    };
+    // Read-merge-write under `with_config_write_lock` (C13): `stage` is
+    // re-merged against the file state observed under the lock, so two
+    // concurrent `models use` writers cannot lost-update each other.
+    let finalized = apply_stage_locked(&path, stage_key, stage)?;
+    print_summary(&finalized);
     Ok(())
+}
+
+/// Applies one stage to a config file under the inter-process write lock:
+/// re-reads the current file inside the lock, merges, writes, returns the
+/// merged table (panel round-2 P1: read-merge-write must be atomic).
+fn apply_stage_locked(
+    path: &std::path::Path,
+    stage_key: &str,
+    stage: toml::map::Map<String, toml::Value>,
+) -> anyhow::Result<toml::Value> {
+    crate::config::paths::with_config_write_lock(path, || {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                Error::internal_with_source(format!("create {}", parent.display()), err)
+            })?;
+        }
+        let current = read_config_table(path)?;
+        let table = merge_stage(current.as_ref(), stage_key, stage)?;
+        write_project_toml(path, current.as_ref(), &table)?;
+        Ok(table)
+    })
+}
+
+/// Reads a config file as an untyped table by path (project or global).
+fn read_config_table(path: &std::path::Path) -> anyhow::Result<Option<toml::Value>> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => {
+            let value: toml::Value = toml::from_str(&raw).map_err(|err| {
+                Error::internal_with_source(format!("parse {}", path.display()), err)
+            })?;
+            Ok(Some(value))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => {
+            Err(Error::internal_with_source(format!("read {}", path.display()), err).into())
+        }
+    }
 }
 
 /// Reads the project file as an untyped table; missing file means "no
@@ -1146,6 +1190,7 @@ fn global_config_file() -> anyhow::Result<PathBuf> {
 /// Writes the merged table into the global config, preserving every other
 /// section including `[providers]` (FR-1: providers live only in global).
 /// Creates the config directory on first use.
+#[cfg(test)]
 fn write_global_toml(existing: Option<&toml::Value>, table: &toml::Value) -> anyhow::Result<()> {
     let path = global_config_file()?;
     if let Some(parent) = path.parent() {
@@ -1656,6 +1701,51 @@ mod tests {
         assert_eq!(
             reranker.get("window").and_then(toml::Value::as_integer),
             Some(20)
+        );
+    }
+
+    #[test]
+    fn concurrent_global_writers_both_survive() {
+        // Round-2 P1 regression: a slow writer holding the config lock must
+        // not cause a second writer to drop its stage. Writer A takes its
+        // snapshot, writes `embedding`, then deliberately holds the lock;
+        // writer B starts after A's snapshot (so its own stale snapshot
+        // misses `embedding`) and must re-read under the lock — the final
+        // file keeps both stages. (Old code: B wrote from its pre-lock
+        // snapshot and erased A's stage.)
+        use std::time::Duration;
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let path = dir.path().join("config.toml");
+        let path_a = path.clone();
+        let writer_a = std::thread::spawn(move || {
+            crate::config::paths::with_config_write_lock(&path_a, || {
+                let current = read_config_table(&path_a)?;
+                let table = merge_stage(
+                    current.as_ref(),
+                    "embedding",
+                    embedding_stage("fastembed", "bge", 384),
+                )?;
+                write_project_toml(&path_a, current.as_ref(), &table)?;
+                // Hold the lock so B (below) must wait and re-read.
+                std::thread::sleep(Duration::from_millis(400));
+                Ok(())
+            })
+            .expect("writer A");
+        });
+        // Start B after A's snapshot, while A holds the lock.
+        std::thread::sleep(Duration::from_millis(50));
+        apply_stage_locked(&path, "reranker", rerank_stage("fastembed", "jina", 50))
+            .expect("writer B");
+        writer_a.join().expect("join A");
+        let reloaded = parse(&std::fs::read_to_string(&path).expect("read back"));
+        let hybrid = reloaded.get("hybrid").expect("hybrid table");
+        assert!(
+            hybrid.get("embedding").is_some(),
+            "embedding stage survives: {reloaded:?}"
+        );
+        assert!(
+            hybrid.get("reranker").is_some(),
+            "reranker stage survives: {reloaded:?}"
         );
     }
 
