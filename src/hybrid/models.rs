@@ -42,15 +42,16 @@ const EXCLUSIVE_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::fro
 
 /// Acquires the exclusive install lock with bounded try-retries. Returns
 /// `None` when the budget is exhausted (a loaded instance holds the lock
-/// shared for its lifetime). Each attempt uses a fresh leaked `'static`
-/// lock (same pattern as `take_shared_lock`/`remove_cmd`); failed attempts
-/// leak one fd+Box each — bounded and deliberate.
+/// shared for its lifetime). The lock file is opened and leaked exactly
+/// once per call — retries re-attempt `try_write` on the SAME lock, so
+/// contention leaks one fd+Box at most (round-4 C2; same `'static` leak
+/// pattern as `take_shared_lock`/`remove_cmd`).
 fn acquire_exclusive_lock(
     dir: &Path,
 ) -> Result<Option<fd_lock::RwLockWriteGuard<'static, std::fs::File>>> {
+    let file = open_lock(dir)?;
+    let lock: &'static mut RwLock<std::fs::File> = Box::leak(Box::new(RwLock::new(file)));
     for _ in 0..EXCLUSIVE_LOCK_RETRIES {
-        let file = open_lock(dir)?;
-        let lock: &'static mut RwLock<std::fs::File> = Box::leak(Box::new(RwLock::new(file)));
         if let Ok(guard) = lock.try_write() {
             return Ok(Some(guard));
         }
