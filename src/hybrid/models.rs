@@ -48,7 +48,7 @@ const EXCLUSIVE_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::fro
 /// pattern as `take_shared_lock`/`remove_cmd`).
 fn acquire_exclusive_lock(
     dir: &Path,
-) -> Result<Option<fd_lock::RwLockWriteGuard<'static, std::fs::File>>> {
+) -> Result<Option<fd_lock::RwLockWriteGuard<'_, std::fs::File>>> {
     let file = open_lock(dir)?;
     let lock: &'static mut RwLock<std::fs::File> = Box::leak(Box::new(RwLock::new(file)));
     for _ in 0..EXCLUSIVE_LOCK_RETRIES {
