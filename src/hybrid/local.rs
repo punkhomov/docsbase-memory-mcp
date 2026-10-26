@@ -482,13 +482,18 @@ fn read_cache_file(path: &Path, entry: &ModelEntry<'_>) -> Result<Vec<u8>> {
     })
 }
 
-/// Takes a shared read lock on the model cache directory's `.lock` (fd-lock
+/// Takes a shared read lock on the model root's `.lock` (fd-lock
 /// `try_read`); the guard is retained by the instance for its lifetime
-/// (and is what `models remove` probes exclusively, FR-7).
+/// (and is what `models remove` probes exclusively, FR-7). The lock lives
+/// at the model root, NOT inside the revision dir, so it survives a fetch
+/// promote (round-2 D2).
 pub(crate) fn take_shared_lock(
     dir: &Path,
 ) -> Result<Option<RwLockReadGuard<'static, std::fs::File>>> {
-    let path = dir.join(".lock");
+    let root = dir
+        .parent()
+        .ok_or_else(|| Error::internal(format!("cache path has no parent: {}", dir.display())))?;
+    let path = root.join(".lock");
     let file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -659,12 +664,16 @@ mod tests {
         // alive, the exclusive lock is refused; after dropping it, exclusive
         // acquisition succeeds. This is the holder side of the FR-7/T9
         // contract (models remove refuses while a model is loaded).
-        let dir = tempfile::TempDir::new().expect("tmp");
-        let lock_path = dir.path().join(".lock");
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        // Realistic layout: the lock lives at the model root, not inside
+        // the revision dir (round-2 D2).
+        let root = tmp.path().join("models").join("fake-model");
+        std::fs::create_dir_all(&root).expect("root");
+        let rev = root.join("rev");
+        std::fs::create_dir_all(&rev).expect("rev");
+        let lock_path = root.join(".lock");
         let _ = std::fs::write(&lock_path, b"");
-        let guard = take_shared_lock(dir.path())
-            .expect("shared lock")
-            .expect("some");
+        let guard = take_shared_lock(&rev).expect("shared lock").expect("some");
         let exclusive_file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)

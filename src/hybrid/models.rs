@@ -432,8 +432,20 @@ impl ModelSource for HttpModelSource {
 }
 
 /// Opens (creating if needed) the `.lock` file of a model cache directory.
+/// Opens the model-root lock file `<model_root>/.lock` for `dir` (a
+/// revision dir). The lock lives at the model root, NOT inside the revision
+/// dir: a successful promote renames the revision dir away (C6), so an
+/// in-dir lock would be unlinked and a new inode would replace it — loaded
+/// instances would hold a guard on a dead inode and `models remove`/fetch
+/// would probe a fresh uncontended one (round-2 D2/D3). A root-level lock
+/// is stable across promotes and also covers `.staging-*`/`.old-*`
+/// children (an in-flight first fetch is therefore protected from a
+/// concurrent remove).
 fn open_lock(dir: &Path) -> Result<std::fs::File> {
-    let path = dir.join(".lock");
+    let root = dir
+        .parent()
+        .ok_or_else(|| Error::internal(format!("cache path has no parent: {}", dir.display())))?;
+    let path = root.join(".lock");
     std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -739,11 +751,18 @@ pub(crate) fn fetch_into(
             return Ok(());
         }
     }
-    // The exclusive install path: make sure the cache directory exists before
-    // the lock (the lock file lives inside it).
-    platform::fs::secure_dir(dir).map_err(|err| {
-        Error::internal_with_source(format!("create cache dir {}", dir.display()), err)
-    })?;
+    // The exclusive install path: make sure the model root exists before
+    // the lock (the lock file lives at the root, stable across promotes).
+    // Only secure a root we create ourselves; an existing root (e.g. a
+    // test TempDir) must not be chmodded.
+    let root = dir
+        .parent()
+        .ok_or_else(|| Error::internal(format!("cache path has no parent: {}", dir.display())))?;
+    if !root.exists() {
+        platform::fs::secure_dir(root).map_err(|err| {
+            Error::internal_with_source(format!("create model root {}", root.display()), err)
+        })?;
+    }
     // Bounded try-retry (see `EXCLUSIVE_LOCK_RETRIES`): never block
     // silently on a process-lifetime shared holder (round-2 P1b).
     let Some(_guard) = acquire_exclusive_lock(dir)? else {
@@ -924,6 +943,14 @@ mod tests {
     }
 
     /// A tiny synthetic entry (two files) with sizes small enough for tests.
+    /// Builds `<tmp>/models/<name>/<rev>` — a realistic cache location whose
+    /// parent is the model root (locks resolve to the model root, so the lock
+    /// file never lands on a system directory like `/tmp`).
+    fn fake_cache_dir(tmp: &Path) -> PathBuf {
+        let entry = fake_entry();
+        tmp.join("models").join(entry.name).join(entry.revision)
+    }
+
     fn fake_entry() -> ModelEntry<'static> {
         // Content is fixed by `fake_content` (path bytes repeated to `size`);
         // these sha256 values were computed for the exact sizes below.
@@ -1092,12 +1119,13 @@ mod tests {
 
     #[test]
     fn fetch_installs_all_files_and_completes_last() {
-        let dir = TempDir::new().expect("tmp");
+        let tmp = TempDir::new().expect("tmp");
+        let dir = fake_cache_dir(tmp.path());
         let entry = fake_entry();
         let source = FakeSource::new(&entry);
-        fetch_into(&entry, &source, false, dir.path()).expect("fetch");
+        fetch_into(&entry, &source, false, &dir).expect("fetch");
         for spec in entry.files {
-            let path = dir.path().join(spec.path);
+            let path = dir.join(spec.path);
             assert_eq!(
                 std::fs::metadata(&path).expect("file").len(),
                 spec.size,
@@ -1105,17 +1133,14 @@ mod tests {
                 spec.path
             );
         }
-        assert!(
-            dir.path().join(".complete").exists(),
-            ".complete written last"
-        );
+        assert!(dir.join(".complete").exists(), ".complete written last");
         // `.complete` is written after the files: it must survive a failed
         // re-fetch only when the files verify.
         let source2 = FakeSource::new(&entry);
-        fetch_into(&entry, &source2, false, dir.path()).expect("second fetch");
+        fetch_into(&entry, &source2, false, &dir).expect("second fetch");
         assert_eq!(source2.calls(), 0, "second fetch downloads nothing");
         // No `.part` files remain.
-        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
             .expect("read dir")
             .filter_map(std::result::Result::ok)
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".part"))
@@ -1125,38 +1150,41 @@ mod tests {
 
     #[test]
     fn fetch_rejects_bad_hash_and_size() {
-        let dir = TempDir::new().expect("tmp");
+        let tmp = TempDir::new().expect("tmp");
+        let dir = fake_cache_dir(tmp.path());
         let entry = fake_entry();
         let mut source = FakeSource::new(&entry);
         // Corrupt one file: return the wrong size.
         source
             .overrides
             .insert("tokenizer.json".to_owned(), vec![0_u8; 100]);
-        let err = fetch_into(&entry, &source, false, dir.path()).expect_err("bad size");
+        let err = fetch_into(&entry, &source, false, &dir).expect_err("bad size");
         assert!(matches!(err, Error::Admission { .. }));
         assert!(
-            !dir.path().join(".complete").exists(),
+            !dir.join(".complete").exists(),
             "no .complete after failure"
         );
         // Staging installs leave at most the `.lock` control file (never
         // `.part`/`.staging-*`/files).
-        assert_clean_failure_dir(dir.path());
+        assert_clean_failure_dir(&dir);
 
         // Hash mismatch: same size, different content.
-        let dir2 = TempDir::new().expect("tmp");
+        let tmp2 = TempDir::new().expect("tmp");
+        let dir2 = fake_cache_dir(tmp2.path());
         let mut source2 = FakeSource::new(&entry);
         source2
             .overrides
             .insert("tokenizer.json".to_owned(), vec![b'x'; 512]);
-        let err = fetch_into(&entry, &source2, false, dir2.path()).expect_err("bad hash");
+        let err = fetch_into(&entry, &source2, false, &dir2).expect_err("bad hash");
         assert!(matches!(err, Error::Admission { .. }));
-        assert!(!dir2.path().join(".complete").exists());
-        assert_clean_failure_dir(dir2.path());
+        assert!(!dir2.join(".complete").exists());
+        assert_clean_failure_dir(&dir2);
     }
 
     #[test]
     fn fetch_rejects_file_over_cap() {
-        let dir = TempDir::new().expect("tmp");
+        let tmp = TempDir::new().expect("tmp");
+        let dir = fake_cache_dir(tmp.path());
         let mut entry = fake_entry();
         entry.files = &[FileSpec {
             path: "onnx/huge.onnx",
@@ -1164,14 +1192,15 @@ mod tests {
             sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         }];
         let source = FakeSource::new(&entry);
-        let err = fetch_into(&entry, &source, false, dir.path()).expect_err("cap");
+        let err = fetch_into(&entry, &source, false, &dir).expect_err("cap");
         assert!(matches!(err, Error::Admission { .. }));
-        assert_clean_failure_dir(dir.path());
+        assert_clean_failure_dir(&dir);
     }
 
     #[test]
     fn fetch_rejects_total_over_cap() {
-        let dir = TempDir::new().expect("tmp");
+        let tmp = TempDir::new().expect("tmp");
+        let dir = fake_cache_dir(tmp.path());
         // Two files each under the per-file cap but summing past the 3 GiB
         // total cap (NFR-3). The fake source is lazy, so nothing allocates
         // the declared bytes.
@@ -1189,49 +1218,51 @@ mod tests {
             },
         ];
         let source = FakeSource::new(&entry);
-        let err = fetch_into(&entry, &source, false, dir.path()).expect_err("total cap");
+        let err = fetch_into(&entry, &source, false, &dir).expect_err("total cap");
         assert!(matches!(err, Error::Admission { .. }));
         assert_eq!(source.calls(), 0, "caps fail before any download");
-        assert_clean_failure_dir(dir.path());
+        assert_clean_failure_dir(&dir);
     }
 
     #[test]
     fn fetch_force_after_hash_failure() {
-        let dir = TempDir::new().expect("tmp");
+        let tmp = TempDir::new().expect("tmp");
+        let dir = fake_cache_dir(tmp.path());
         let entry = fake_entry();
         let source = FakeSource::new(&entry);
-        fetch_into(&entry, &source, false, dir.path()).expect("fetch");
+        fetch_into(&entry, &source, false, &dir).expect("fetch");
         // Tamper with a file.
-        let tampered = dir.path().join("tokenizer.json");
+        let tampered = dir.join("tokenizer.json");
         std::fs::write(&tampered, b"tampered").expect("tamper");
         assert!(
-            !verify_hashes(&entry, dir.path()).expect("verify"),
+            !verify_hashes(&entry, &dir).expect("verify"),
             "tampered file fails verification"
         );
         // `--force` reinstalls and succeeds.
         let force_source = FakeSource::new(&entry);
-        fetch_into(&entry, &force_source, true, dir.path()).expect("force refetch");
+        fetch_into(&entry, &force_source, true, &dir).expect("force refetch");
         assert!(
-            verify_hashes(&entry, dir.path()).expect("verify"),
+            verify_hashes(&entry, &dir).expect("verify"),
             "files restored after force"
         );
-        assert!(dir.path().join(".complete").exists());
+        assert!(dir.join(".complete").exists());
     }
 
     #[test]
     fn cached_reverifies_hashes() {
-        let dir = TempDir::new().expect("tmp");
+        let tmp = TempDir::new().expect("tmp");
+        let dir = fake_cache_dir(tmp.path());
         let entry = fake_entry();
         let source = FakeSource::new(&entry);
-        fetch_into(&entry, &source, false, dir.path()).expect("fetch");
-        assert!(cached_in(&entry, dir.path()).expect("cached"));
+        fetch_into(&entry, &source, false, &dir).expect("fetch");
+        assert!(cached_in(&entry, &dir).expect("cached"));
         // Missing marker → not cached.
-        std::fs::remove_file(dir.path().join(".complete")).expect("remove marker");
-        assert!(!cached_in(&entry, dir.path()).expect("not cached without marker"));
+        std::fs::remove_file(dir.join(".complete")).expect("remove marker");
+        assert!(!cached_in(&entry, &dir).expect("not cached without marker"));
         // Restore marker, tamper with a registered file → not trusted.
-        std::fs::write(dir.path().join(".complete"), b"").expect("marker");
-        std::fs::write(dir.path().join("tokenizer.json"), b"tampered").expect("tamper");
-        assert!(!cached_in(&entry, dir.path()).expect("tampered cache not trusted"));
+        std::fs::write(dir.join(".complete"), b"").expect("marker");
+        std::fs::write(dir.join("tokenizer.json"), b"tampered").expect("tamper");
+        assert!(!cached_in(&entry, &dir).expect("tampered cache not trusted"));
     }
 
     #[test]
@@ -1239,17 +1270,18 @@ mod tests {
         // C9: repeated `cached_in` calls in one process must not re-hash;
         // tampering (even same-size) must still be detected via the
         // file-signature invalidation.
-        let dir = TempDir::new().expect("tmp");
+        let tmp = TempDir::new().expect("tmp");
+        let dir = fake_cache_dir(tmp.path());
         let entry = fake_entry();
         let source = FakeSource::new(&entry);
-        fetch_into(&entry, &source, false, dir.path()).expect("fetch");
+        fetch_into(&entry, &source, false, &dir).expect("fetch");
         // Relative check around the second call only: the process-global
         // counter may be bumped by sibling hashing tests in parallel, so an
         // absolute delta is not stable; a memo hit must add zero passes
         // between two consecutive local calls.
-        assert!(cached_in(&entry, dir.path()).expect("cached"));
+        assert!(cached_in(&entry, &dir).expect("cached"));
         let after_first = HASH_PASSES.load(Ordering::Relaxed);
-        assert!(cached_in(&entry, dir.path()).expect("cached memo"));
+        assert!(cached_in(&entry, &dir).expect("cached memo"));
         assert_eq!(
             HASH_PASSES.load(Ordering::Relaxed),
             after_first,
@@ -1257,32 +1289,32 @@ mod tests {
         );
         // Same-size tamper: signature changes (mtime), so re-verification
         // runs and detects the mismatch.
-        std::fs::write(dir.path().join("tokenizer.json"), vec![0_u8; 512])
-            .expect("same-size tamper");
-        assert!(!cached_in(&entry, dir.path()).expect("tampered not cached"));
+        std::fs::write(dir.join("tokenizer.json"), vec![0_u8; 512]).expect("same-size tamper");
+        assert!(!cached_in(&entry, &dir).expect("tampered not cached"));
     }
 
     #[test]
     fn fetch_complete_takes_shared_lock() {
-        let dir = TempDir::new().expect("tmp");
+        let tmp = TempDir::new().expect("tmp");
+        let dir = fake_cache_dir(tmp.path());
         let entry = fake_entry();
         let source = FakeSource::new(&entry);
-        fetch_into(&entry, &source, false, dir.path()).expect("fetch");
+        fetch_into(&entry, &source, false, &dir).expect("fetch");
 
         // A loaded model holds the shared lock; a complete fetch must verify
         // and return under the shared lock (never require the exclusive one).
-        let lock_file = open_lock(dir.path()).expect("lock");
+        let lock_file = open_lock(&dir).expect("lock");
         let lock = RwLock::new(lock_file);
         let _shared = lock.try_read().expect("shared lock acquired");
 
         let counting = FakeSource::new(&entry);
         let before = counting.calls();
-        fetch_into(&entry, &counting, false, dir.path()).expect("complete fetch under shared lock");
+        fetch_into(&entry, &counting, false, &dir).expect("complete fetch under shared lock");
         assert_eq!(counting.calls(), before, "no downloads on complete fetch");
 
         // While the shared guard is held, the exclusive lock (as `models
         // remove` would take it) must be refused.
-        let mut exclusive = RwLock::new(open_lock(dir.path()).expect("lock"));
+        let mut exclusive = RwLock::new(open_lock(&dir).expect("lock"));
         assert!(
             exclusive.try_write().is_err(),
             "exclusive lock refused while a shared holder lives"
@@ -1294,15 +1326,16 @@ mod tests {
         // Round-2 P1b: the exclusive install lock must never block silently
         // on a loaded instance's process-lifetime shared guard — bounded
         // retries then Admission.
-        let dir = TempDir::new().expect("tmp");
+        let tmp = TempDir::new().expect("tmp");
+        let dir = fake_cache_dir(tmp.path());
         let entry = fake_entry();
         let source = FakeSource::new(&entry);
-        fetch_into(&entry, &source, false, dir.path()).expect("fetch");
-        let lock_file = open_lock(dir.path()).expect("lock");
+        fetch_into(&entry, &source, false, &dir).expect("fetch");
+        let lock_file = open_lock(&dir).expect("lock");
         let lock = RwLock::new(lock_file);
         let _shared = lock.try_read().expect("shared lock acquired");
         let started = std::time::Instant::now();
-        let err = fetch_into(&entry, &source, true, dir.path()).expect_err("bounded refusal");
+        let err = fetch_into(&entry, &source, true, &dir).expect_err("bounded refusal");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(2),
             "refused promptly, not hung"
@@ -1313,18 +1346,19 @@ mod tests {
 
     #[test]
     fn fetch_waits_for_exclusive_holder_then_returns() {
-        let dir = TempDir::new().expect("tmp");
+        let tmp = TempDir::new().expect("tmp");
+        let dir = fake_cache_dir(tmp.path());
         let entry = fake_entry();
         let source = FakeSource::new(&entry);
-        fetch_into(&entry, &source, false, dir.path()).expect("fetch");
+        fetch_into(&entry, &source, false, &dir).expect("fetch");
 
         // Hold the exclusive lock (simulating `models remove`) and make sure
         // a fetch thread politely waits on the shared lock instead of failing
         // or forcing through.
-        let mut exclusive = RwLock::new(open_lock(dir.path()).expect("lock"));
+        let mut exclusive = RwLock::new(open_lock(&dir).expect("lock"));
         let exclusive_guard = exclusive.try_write().expect("exclusive held");
 
-        let dir_path = dir.path().to_path_buf();
+        let dir_path = dir.clone();
         let entry = fake_entry();
         let counting = FakeSource::new(&entry);
         let (tx, rx) = mpsc::channel();
@@ -1347,13 +1381,14 @@ mod tests {
 
     #[test]
     fn fetch_failure_leaves_no_partial() {
-        let dir = TempDir::new().expect("tmp");
+        let tmp = TempDir::new().expect("tmp");
+        let dir = fake_cache_dir(tmp.path());
         let entry = fake_entry();
         let mut source = FakeSource::new(&entry);
         source.fail_all = true;
-        let err = fetch_into(&entry, &source, false, dir.path()).expect_err("transport");
+        let err = fetch_into(&entry, &source, false, &dir).expect_err("transport");
         assert!(matches!(err, Error::Admission { .. }));
-        assert_clean_failure_dir(dir.path());
+        assert_clean_failure_dir(&dir);
     }
 
     /// Asserts a failed fetch leaves at most the `.lock` control file
@@ -1371,6 +1406,37 @@ mod tests {
                 dir.display()
             );
         }
+    }
+
+    #[test]
+    fn loaded_instance_blocked_remove_probe_across_refetch() {
+        // Round-2 D2: the lock lives at the model root, so a successful
+        // (unloaded) refetch does not change the lock file's identity; a
+        // loaded instance's shared guard must keep blocking the remove-style
+        // exclusive probe before AND after a refetch.
+        let tmp = TempDir::new().expect("tmp");
+        let dir = fake_cache_dir(tmp.path());
+        let entry = fake_entry();
+        let source = FakeSource::new(&entry);
+        fetch_into(&entry, &source, false, &dir).expect("fetch");
+
+        let shared = RwLock::new(open_lock(&dir).expect("lock"));
+        let shared_guard = shared.try_read().expect("shared lock acquired");
+        let mut exclusive = RwLock::new(open_lock(&dir).expect("lock"));
+        assert!(
+            exclusive.try_write().is_err(),
+            "remove probe refused while loaded"
+        );
+        drop(shared_guard);
+
+        // Unloaded refetch succeeds and the lock file is unchanged in
+        // identity (same root path), so a fresh exclusive probe works.
+        fetch_into(&entry, &source, true, &dir).expect("refetch");
+        let mut exclusive2 = RwLock::new(open_lock(&dir).expect("lock"));
+        assert!(
+            exclusive2.try_write().is_ok(),
+            "exclusive available after refetch"
+        );
     }
 
     #[test]

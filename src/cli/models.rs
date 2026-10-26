@@ -222,63 +222,48 @@ pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
         .into());
     }
 
-    // Exclusive, non-blocking locks on every cached revision's `.lock`
-    // (the deletion removes the whole model root): a loaded embedder /
-    // reranker holds its own revision's `.lock` shared for its lifetime
-    // (T4/T5), so stale revisions from an older registry pin must be
-    // probed too. When no revision dir exists, nothing can hold a lock.
-    let mut guards = Vec::new();
-    let mut contended = false;
-    if let Ok(entries) = std::fs::read_dir(&model_root) {
-        for entry in entries.flatten() {
-            let rev_dir = entry.path();
-            if !rev_dir.is_dir() {
-                continue;
-            }
-            let lock_path = rev_dir.join(".lock");
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .open(&lock_path)
-                .map_err(|err| {
-                    Error::internal_with_source(format!("open {}", lock_path.display()), err)
-                })?;
-            // Leaked `'static` lock, same pattern as `take_shared_lock`;
-            // removal happens once per process invocation, so the leak is
-            // bounded and deliberate (matches the shared-lock design).
-            let lock: &'static mut fd_lock::RwLock<std::fs::File> =
-                Box::leak(Box::new(fd_lock::RwLock::new(file)));
-            match lock.try_write() {
-                Ok(guard) => guards.push(guard),
-                Err(_) => {
-                    contended = true;
-                }
-            }
-        }
-    }
-    if contended && !args.force {
-        return Err(Error::Admission {
-            message: format!(
-                "model \"{}\" is loaded/in use; stop the daemon (or pass --force) then retry",
+    // Exclusive, non-blocking probe of the model-root `.lock` (the lock
+    // lives at the root, shared by loaded instances for their lifetime and
+    // held exclusively by an in-flight fetch — including its `.staging-*`
+    // phase, round-2 D2/D3). Contention → Admission unless `--force`.
+    let lock_path = model_root.join(".lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|err| Error::internal_with_source(format!("open {}", lock_path.display()), err))?;
+    // Leaked `'static` lock, same pattern as `take_shared_lock`;
+    // removal happens once per process invocation, so the leak is
+    // bounded and deliberate (matches the shared-lock design).
+    let lock: &'static mut fd_lock::RwLock<std::fs::File> =
+        Box::leak(Box::new(fd_lock::RwLock::new(file)));
+    let guard = match lock.try_write() {
+        Ok(guard) => Some(guard),
+        Err(_) if args.force => {
+            eprintln!(
+                "warning: {} is loaded/in use (shared lock held); --force deletes anyway",
                 entry.name
-            ),
+            );
+            None
         }
-        .into());
-    }
-    if contended {
-        eprintln!(
-            "warning: {} is loaded/in use (shared lock held); --force deletes anyway",
-            entry.name
-        );
-    }
+        Err(_) => {
+            return Err(Error::Admission {
+                message: format!(
+                    "model \"{}\" is loaded/in use; stop the daemon (or pass --force) then retry",
+                    entry.name
+                ),
+            }
+            .into());
+        }
+    };
 
-    // Keep the guards alive while deleting (Linux/macOS tolerate it; on
+    // Keep the guard alive while deleting (Linux/macOS tolerate it; on
     // Windows the OS may refuse to delete an open/mapped file — surface it).
     std::fs::remove_dir_all(&model_root).map_err(|err| {
         Error::internal_with_source(format!("remove {}", model_root.display()), err)
     })?;
-    drop(guards);
+    drop(guard);
     println!("removed {} (all cached revisions)", entry.name);
     Ok(())
 }
@@ -2201,6 +2186,33 @@ mod tests {
             remove_cmd(&remove_args("bge-small-en-v1.5", true)).expect("force remove");
         });
         assert!(!model_dir.exists(), "force removal deletes anyway");
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn remove_refuses_when_fetch_inflight_on_staging() {
+        // Round-2 D3: a first fetch installs into `.staging-*` while
+        // holding the model-root lock exclusively; a concurrent remove must
+        // be refused (never delete the in-flight download) even though no
+        // revision dir exists yet.
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let model_dir = dir.path().join("models").join("bge-small-en-v1.5");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
+            let lock_path = model_dir.join(".lock");
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .expect("lock open");
+            let lock: &'static mut fd_lock::RwLock<std::fs::File> =
+                Box::leak(Box::new(fd_lock::RwLock::new(file)));
+            let _in_flight = lock.try_write().expect("fetch holds exclusive");
+            let err = remove_cmd(&remove_args("bge-small-en-v1.5", false))
+                .expect_err("refused while fetch in flight");
+            assert!(err.to_string().contains("in use"), "{err}");
+        });
     }
 
     #[cfg(feature = "hybrid-local")]
