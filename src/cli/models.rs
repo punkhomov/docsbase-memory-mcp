@@ -129,6 +129,7 @@ pub struct RerankArgs {
 pub fn fetch_cmd(args: &FetchArgs) -> anyhow::Result<()> {
     use crate::hybrid::models;
     let entry = models::entry(&args.name)?;
+    let before = models::cached_shallow(entry)?;
     let source = models::HttpModelSource::new()?;
     let dir = models::fetch(entry, &source, args.force)?;
     println!(
@@ -137,10 +138,10 @@ pub fn fetch_cmd(args: &FetchArgs) -> anyhow::Result<()> {
         entry.revision,
         dir.display()
     );
-    // A running daemon caches loaded instances per stage; after a revision
-    // bump refetch it keeps serving the old revision until restarted
-    // (round-3 muse-3).
-    if args.force {
+    // A running daemon caches loaded instances per stage; whenever the
+    // on-disk revision changed (or `--force` reinstalled), it keeps
+    // serving the old instance until restarted (round-3 muse-3).
+    if !before || args.force {
         println!("note: restart a running detached daemon to pick up the new revision");
     }
     Ok(())

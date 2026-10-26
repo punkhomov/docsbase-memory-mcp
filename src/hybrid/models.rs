@@ -11,7 +11,7 @@
 //! none of it (NFR-1).
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -370,12 +370,32 @@ pub fn canonical_id_for(name: &str, dims: usize, normalize: bool) -> Option<Stri
 /// A source of model file bytes. Production uses [`HttpModelSource`]; tests
 /// use a fake. `path` is the registry-relative file path.
 pub trait ModelSource {
-    /// Downloads one file and returns its bytes.
+    /// Downloads one file and returns its bytes (small-file/test path).
     ///
     /// # Errors
     /// Returns [`Error::Admission`] for transport/hash-class failures; the
     /// caller applies the per-file cap.
     fn fetch(&self, repo: &str, revision: &str, path: &str) -> Result<Vec<u8>>;
+
+    /// Streams one file into `sink` (large-file path; round-3
+    /// mimo-4/muse-1: no whole-file RAM buffer). The default materializes
+    /// via [`fetch`]; [`HttpModelSource`] overrides this to stream with an
+    /// in-flight per-file cap.
+    ///
+    /// # Errors
+    /// Same as [`fetch`]; sink write failures are [`Error::Admission`].
+    fn fetch_to(
+        &self,
+        repo: &str,
+        revision: &str,
+        path: &str,
+        sink: &mut dyn std::io::Write,
+    ) -> Result<()> {
+        let bytes = self.fetch(repo, revision, path)?;
+        sink.write_all(&bytes).map_err(|err| Error::Admission {
+            message: format!("write download for {path}: {err}"),
+        })
+    }
 }
 
 /// The production source: blocking HTTPS via `ureq` (rustls). Used only by
@@ -428,6 +448,47 @@ impl ModelSource for HttpModelSource {
             });
         }
         Ok(body)
+    }
+
+    fn fetch_to(
+        &self,
+        repo: &str,
+        revision: &str,
+        path: &str,
+        sink: &mut dyn std::io::Write,
+    ) -> Result<()> {
+        let url = format!("https://huggingface.co/{repo}/resolve/{revision}/{path}");
+        let response = self.agent.get(&url).call().map_err(|err| {
+            let detail = match &err {
+                ureq::Error::StatusCode(code) => format!("HTTP {code}"),
+                _ => "transport error".to_owned(),
+            };
+            Error::Admission {
+                message: format!("{detail} fetching {url}: {err}; check the network and retry"),
+            }
+        })?;
+        let mut reader = response.into_body().into_reader().take(MAX_FILE_BYTES + 1);
+        let mut buffer = vec![0_u8; 64 * 1024];
+        let mut total: u64 = 0;
+        loop {
+            let read = reader.read(&mut buffer).map_err(|err| Error::Admission {
+                message: format!("failed reading {url}: {err}"),
+            })?;
+            if read == 0 {
+                break;
+            }
+            total += read as u64;
+            if total > MAX_FILE_BYTES {
+                return Err(Error::Admission {
+                    message: format!("{url} exceeds the per-file cap of {MAX_FILE_BYTES} bytes"),
+                });
+            }
+            sink.write_all(&buffer[..read])
+                .map_err(|err| Error::Admission {
+                    message: format!("write download for {url}: {err}"),
+                })?;
+        }
+        Ok(())
     }
 }
 
@@ -631,9 +692,11 @@ fn preflight_free_space(entry: &ModelEntry<'_>, dir: &Path) -> Result<()> {
     preflight_check(expected_bytes(entry), available)
 }
 
-/// Installs one file: download to `*.part`, verify size + sha256, fsync,
-/// then atomically rename into place. On any mismatch the partial file is
-/// removed and an [`Error::Admission`] is returned.
+/// Installs one file: stream the download to `*.part` while counting bytes
+/// and hashing (round-3 mimo-4/muse-1: no whole-file RAM buffer), verify
+/// size + sha256, fsync, then atomically rename into place. On any
+/// mismatch the partial file is removed and an [`Error::Admission`] is
+/// returned.
 fn fetch_one(
     entry: &ModelEntry<'_>,
     source: &dyn ModelSource,
@@ -647,10 +710,25 @@ fn fetch_one(
     std::fs::create_dir_all(parent)
         .map_err(|err| Error::internal_with_source(format!("create {}", parent.display()), err))?;
 
-    let data = source.fetch(entry.repo, entry.revision, spec.path)?;
-    let byte_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
+    // Suffix via OsString push (lossy `display()` would mangle non-UTF-8
+    // cache roots; round-3 mimo-3).
+    let mut os_part = target.as_os_str().to_os_string();
+    os_part.push(".part");
+    let part = PathBuf::from(os_part);
+    let mut file = std::fs::File::create(&part)
+        .map_err(|err| Error::internal_with_source(format!("create {}", part.display()), err))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut byte_len: u64 = 0;
+    {
+        let mut sink = HashCountSink {
+            file: &mut file,
+            hasher: &mut hasher,
+            count: &mut byte_len,
+        };
+        source.fetch_to(entry.repo, entry.revision, spec.path, &mut sink)?;
+    }
     if byte_len != spec.size {
-        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_file(&part);
         return Err(Error::Admission {
             message: format!(
                 "{}: size mismatch (registry {}, downloaded {}); re-run `docsbase models fetch {}`",
@@ -658,9 +736,9 @@ fn fetch_one(
             ),
         });
     }
-    let digest = hex(&sha2::Sha256::digest(&data));
+    let digest = hex(&hasher.finalize());
     if digest != spec.sha256 {
-        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_file(&part);
         return Err(Error::Admission {
             message: format!(
                 "{}: sha256 mismatch (download corrupted); re-run with `--force`",
@@ -668,18 +746,33 @@ fn fetch_one(
             ),
         });
     }
-
-    let part = PathBuf::from(format!("{}.part", target.display()));
-    let mut file = std::fs::File::create(&part)
-        .map_err(|err| Error::internal_with_source(format!("create {}", part.display()), err))?;
-    file.write_all(&data)
-        .map_err(|err| Error::internal_with_source(format!("write {}", part.display()), err))?;
     file.sync_all()
         .map_err(|err| Error::internal_with_source(format!("fsync {}", part.display()), err))?;
     drop(file);
     std::fs::rename(&part, &target)
         .map_err(|err| Error::internal_with_source(format!("publish {}", target.display()), err))?;
     Ok(())
+}
+
+/// Write sink that forwards to a file while feeding a running sha256 and
+/// byte counter (streaming fetch verification).
+struct HashCountSink<'a> {
+    file: &'a mut std::fs::File,
+    hasher: &'a mut sha2::Sha256,
+    count: &'a mut u64,
+}
+
+impl std::io::Write for HashCountSink<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf).inspect(|&written| {
+            self.hasher.update(&buf[..written]);
+            *self.count += written as u64;
+        })
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
 }
 
 /// Writes the `.complete` marker atomically (temp + rename). It is written
