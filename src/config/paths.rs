@@ -125,22 +125,10 @@ fn with_config_write_lock_in<T>(
 fn config_lock_path(lock_dir: &Path, target: &Path) -> PathBuf {
     const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    // `OsStr` -> bytes: Unix exposes raw bytes; elsewhere the UTF-8/wide
-    // representation of the same `Path` is used consistently for that
-    // platform, which is all that is required (same path, same bytes).
-    #[cfg(unix)]
-    let bytes = {
-        use std::os::unix::ffi::OsStrExt;
-        target.as_os_str().as_bytes().to_vec()
-    };
-    #[cfg(not(unix))]
-    let bytes = target
-        .as_os_str()
-        .to_string_lossy()
-        .into_owned()
-        .into_bytes();
+    // Path bytes come from the OS seam (ADR-9): raw bytes on Unix, the
+    // lossy UTF-8 form elsewhere — consistent for any single installation.
     let mut hash = FNV_OFFSET_BASIS;
-    for byte in bytes {
+    for byte in crate::platform::paths::as_bytes(target) {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(FNV_PRIME);
     }
