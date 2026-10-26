@@ -6,7 +6,8 @@
 //! model cache for its lifetime (so `models remove` refuses while loaded),
 //! and applies role-aware registry prefixes (`embed_query` vs `embed`).
 //! The reranker (T5) uses the same cache-key/lock discipline with
-//! `UserDefinedRerankingModel` + `OnnxSource::File`.
+//! `UserDefinedRerankingModel` + `OnnxSource::Memory` (verified load-time
+//! bytes, round-4 C4).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -356,8 +357,8 @@ pub(crate) fn get_or_load_reranker(
 }
 
 /// Local `fastembed` cross-encoder reranker (T5). Uses the BYO path with
-/// `OnnxSource::File` (no full-model byte buffer) and holds the shared
-/// model-cache `.lock` guard for its lifetime.
+/// `OnnxSource::Memory` (load-time verified bytes, round-4 C4) and holds
+/// the shared model-cache `.lock` guard for its lifetime.
 pub struct FastEmbedReranker {
     model: Mutex<fastembed::TextRerank>,
     _lock_guard: RwLockReadGuard<'static, std::fs::File>,
