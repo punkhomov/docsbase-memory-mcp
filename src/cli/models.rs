@@ -859,12 +859,8 @@ fn validate_hybrid_table(hybrid: &toml::map::Map<String, toml::Value>) -> anyhow
 
 /// Re-pin note (FR-13): when the embedding pin changes, existing vectors are
 /// keyed by the old id and must be re-embedded; the ANN tier is invalidated
-/// for the project. Printed on the write path (and dry-run) before any
-/// probe.
-/// Re-pin note (FR-13): when the embedding pin changes, existing vectors are
-/// keyed by the old id and must be re-embedded; the ANN tier is invalidated
 /// for the project. Pure: returns the note text (printed on the write path
-/// and dry-run before any probe). `None` when nothing changed.
+/// and dry-run before any probe); `None` when nothing changed.
 fn repin_embedding_note(existing: Option<&toml::Value>, table: &toml::Value) -> Option<String> {
     let old = existing.and_then(|root| {
         root.get("hybrid")
