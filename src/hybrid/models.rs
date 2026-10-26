@@ -603,16 +603,36 @@ fn verify_stamp(entry: &ModelEntry<'_>, dir: &Path) -> Result<VerifyStamp> {
 
 static VERIFY_MEMO: OnceLock<Mutex<HashMap<PathBuf, (bool, VerifyStamp)>>> = OnceLock::new();
 
-/// Number of full sha256 verification passes (test-only counter for the C9
-/// memo regression).
+/// Number of full sha256 verification passes per cache dir (test-only
+/// counter for the C9 memo regression; keyed by `dir` so parallel sibling
+/// tests — each with its own `TempDir` — cannot race the relative delta,
+/// round-5 F1).
 #[cfg(test)]
-static HASH_PASSES: AtomicUsize = AtomicUsize::new(0);
+static HASH_PASSES: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+
+#[cfg(test)]
+fn hash_passes_bump(dir: &Path) {
+    let map = HASH_PASSES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("hash passes lock");
+    *guard.entry(dir.to_path_buf()).or_insert(0) += 1;
+}
+
+#[cfg(test)]
+fn hash_passes(dir: &Path) -> usize {
+    HASH_PASSES.get().map_or(0, |map| {
+        map.lock()
+            .expect("hash passes lock")
+            .get(dir)
+            .copied()
+            .unwrap_or(0)
+    })
+}
 
 /// The actual sha256 pass (see `verify_hashes` for the memo/wrapper).
 fn verify_hashes_full(entry: &ModelEntry<'_>, dir: &Path) -> Result<bool> {
     #[cfg(test)]
     {
-        HASH_PASSES.fetch_add(1, Ordering::Relaxed);
+        hash_passes_bump(dir);
     }
     for spec in entry.files {
         let path = dir.join(spec.path);
@@ -1152,7 +1172,6 @@ pub(crate) mod test_support {
 mod tests {
     use std::collections::HashSet;
     use std::path::Path;
-    use std::sync::atomic::Ordering;
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -1453,15 +1472,15 @@ mod tests {
         let entry = fake_entry();
         let source = FakeSource::new(&entry);
         fetch_into(&entry, &source, false, &dir).expect("fetch");
-        // Relative check around the second call only: the process-global
-        // counter may be bumped by sibling hashing tests in parallel, so an
-        // absolute delta is not stable; a memo hit must add zero passes
-        // between two consecutive local calls.
+        // Relative check around the second call only, per cache dir (the
+        // counter is keyed by `dir`, so sibling tests with their own
+        // TempDirs cannot race it — round-5 F1); a memo hit must add zero
+        // passes between two consecutive local calls.
         assert!(cached_in(&entry, &dir).expect("cached"));
-        let after_first = HASH_PASSES.load(Ordering::Relaxed);
+        let after_first = hash_passes(&dir);
         assert!(cached_in(&entry, &dir).expect("cached memo"));
         assert_eq!(
-            HASH_PASSES.load(Ordering::Relaxed),
+            hash_passes(&dir),
             after_first,
             "memoized second check adds no hash pass"
         );
