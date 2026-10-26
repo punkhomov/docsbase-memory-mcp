@@ -116,15 +116,35 @@ fn with_config_write_lock_in<T>(
     ))
 }
 
-/// Deterministic lock-file name for `target` inside `lock_dir`: a stable
-/// `SipHash` id over the target path (std `DefaultHasher`, fixed keys —
-/// deterministic across processes; only used for file naming).
+/// Deterministic lock-file name for `target` inside `lock_dir`: FNV-1a over
+/// the raw path bytes. The algorithm is pinned HERE (not `DefaultHasher`,
+/// whose output std may change between releases) so two docsbase binaries
+/// built on different toolchains — the daemon and a freshly installed CLI
+/// during an upgrade — always contest the SAME lock file. Only used for
+/// file naming, so a hash collision merely adds harmless serialization.
 fn config_lock_path(lock_dir: &Path, target: &Path) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    target.as_os_str().hash(&mut hasher);
-    lock_dir.join(format!("{:016x}.lock", hasher.finish()))
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    // `OsStr` -> bytes: Unix exposes raw bytes; elsewhere the UTF-8/wide
+    // representation of the same `Path` is used consistently for that
+    // platform, which is all that is required (same path, same bytes).
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        target.as_os_str().as_bytes().to_vec()
+    };
+    #[cfg(not(unix))]
+    let bytes = target
+        .as_os_str()
+        .to_string_lossy()
+        .into_owned()
+        .into_bytes();
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    lock_dir.join(format!("{hash:016x}.lock"))
 }
 
 #[cfg(test)]
@@ -162,6 +182,25 @@ mod tests {
         assert!(
             !project.join(".docsbase.toml.lock").exists(),
             "no sibling lock file in the project root"
+        );
+    }
+
+    #[test]
+    fn config_lock_path_is_stable_and_distinct() {
+        // Round-5 F3: the id must not depend on std's `DefaultHasher`
+        // algorithm (which may change between releases — two docsbase
+        // binaries on different toolchains would then stop excluding each
+        // other). Pinned by construction, and stable across calls.
+        let dir = Path::new("/locks");
+        let a = config_lock_path(dir, Path::new("/project/.docsbase.toml"));
+        let a2 = config_lock_path(dir, Path::new("/project/.docsbase.toml"));
+        let b = config_lock_path(dir, Path::new("/project/.docsbase2.toml"));
+        assert_eq!(a, a2, "same target path yields the same lock file");
+        assert_ne!(a, b, "different targets get different lock files");
+        assert_eq!(
+            a.file_name().and_then(|name| name.to_str()).map(str::len),
+            Some(21),
+            "16 hex digits + .lock"
         );
     }
 
