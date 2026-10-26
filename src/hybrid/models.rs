@@ -995,9 +995,9 @@ fn install_staged(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) 
     std::fs::create_dir_all(&staging_root).map_err(|err| {
         Error::internal_with_source(format!("create {}", staging_root.display()), err)
     })?;
-    std::fs::create_dir_all(&backup_root).map_err(|err| {
-        Error::internal_with_source(format!("create {}", backup_root.display()), err)
-    })?;
+    // The backup container is created lazily, only when a superseded cache
+    // is actually stashed, so a failed download leaves no empty shell
+    // behind (round-5 F4).
     // Sweep stale tags for THIS model from crashed earlier attempts. It
     // runs under the exclusive model-root lock (no live same-name fetch
     // can exist here) and touches only this model's containers
@@ -1021,9 +1021,18 @@ fn install_staged(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) 
                 if backup.exists() {
                     let _ = std::fs::remove_dir_all(&backup);
                 }
-                std::fs::rename(dir, &backup).map_err(|err| {
-                    Error::internal_with_source(format!("stash old cache {}", dir.display()), err)
+                std::fs::create_dir_all(&backup_root).map_err(|err| {
+                    Error::internal_with_source(format!("create {}", backup_root.display()), err)
                 })?;
+                if let Err(err) = std::fs::rename(dir, &backup) {
+                    // The old cache is still in place; drop the verified
+                    // staging copy and its container (round-5 F4).
+                    remove_tree_and_container(&staging, &staging_root);
+                    return Err(Error::internal_with_source(
+                        format!("stash old cache {}", dir.display()),
+                        err,
+                    ));
+                }
             }
             if let Err(err) = std::fs::rename(&staging, dir) {
                 // Try to restore the old cache before surfacing the error.
@@ -1033,9 +1042,14 @@ fn install_staged(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) 
                 if backup.exists() {
                     let _ = std::fs::rename(&backup, dir);
                 }
-                // Drop the verified staging (and its container) — round-5
-                // deepseek-1/F2: never leave a stranded copy.
+                // Drop the verified staging copy and its container; the
+                // backup container is removed only when the restore above
+                // consumed it — otherwise it holds the only old-cache copy
+                // (round-5 F4).
                 remove_tree_and_container(&staging, &staging_root);
+                if !backup.exists() {
+                    let _ = std::fs::remove_dir_all(&backup_root);
+                }
                 return Err(Error::internal_with_source(
                     format!("publish cache {}", dir.display()),
                     err,
@@ -1049,9 +1063,10 @@ fn install_staged(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) 
         }
         Err(err) => {
             // Keep the previous cache untouched; drop only the staging dir
-            // (and its container) and the now-empty backup container.
+            // and its container. The backup container is left alone: it may
+            // hold the only old-cache copy left by an interrupted promote
+            // (round-5 F4).
             remove_tree_and_container(&staging, &staging_root);
-            remove_tree_and_container(&backup, &backup_root);
             Err(err)
         }
     }
@@ -1617,8 +1632,9 @@ mod tests {
     fn fetch_sweeps_stale_staging_and_backup_siblings() {
         // Round-5 F2: orphaned staging/backup tags from crashes are
         // invisible to every tool surface; the next exclusive install for
-        // the same model must sweep them (tags embed a per-call sequence,
-        // so they can never match the current fetch's tag). The
+        // the same model must sweep them (a per-process tag can even
+        // repeat across processes, which is why staging is emptied
+        // wholesale). The
         // verified-complete fast path takes no exclusive lock and must NOT
         // sweep. Containers are keyed by the EXACT model name: an install
         // of a prefix-named model must never touch another model's

@@ -248,44 +248,51 @@ pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
     // lives at the root, shared by loaded instances for their lifetime and
     // held exclusively by an in-flight fetch — including its staging
     // phase, round-2 D2/D3). Contention → Admission unless `--force`.
-    // A missing root means no live same-name fetch can exist (fetch
-    // creates the root before locking), so no probe is needed then.
-    let guard = if root_exists {
-        let lock_path = model_root.join(".lock");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|err| {
-                Error::internal_with_source(format!("open {}", lock_path.display()), err)
-            })?;
-        // Leaked `'static` lock, same pattern as `take_shared_lock`;
-        // removal happens once per process invocation, so the leak is
-        // bounded and deliberate (matches the shared-lock design).
-        let lock: &'static mut fd_lock::RwLock<std::fs::File> =
-            Box::leak(Box::new(fd_lock::RwLock::new(file)));
-        match lock.try_write() {
-            Ok(guard) => Some(guard),
-            Err(_) if args.force => {
-                eprintln!(
-                    "warning: {} is loaded/in use (shared lock held); --force deletes anyway",
-                    entry.name
-                );
-                None
-            }
-            Err(_) => {
-                return Err(Error::Admission {
-                    message: format!(
-                        "model \"{}\" is loaded/in use; stop the daemon (or pass --force) then retry",
-                        entry.name
-                    ),
-                }
-                .into());
-            }
+    //
+    // The root is created (if absent) BEFORE locking even on the
+    // orphan-only path: an existence snapshot is not a lock, so a fetch
+    // starting between the snapshot and the sweep could otherwise have its
+    // live staging deleted (round-5 F5). Creating the root here makes both
+    // sides contend on the same inode, exactly like a fetch does.
+    if !model_root.exists() {
+        std::fs::create_dir_all(&model_root).map_err(|err| {
+            Error::internal_with_source(format!("create {}", model_root.display()), err)
+        })?;
+    }
+    let lock_path = model_root.join(".lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|err| Error::internal_with_source(format!("open {}", lock_path.display()), err))?;
+    // Leaked `'static` lock, same pattern as `take_shared_lock`;
+    // removal happens once per process invocation, so the leak is
+    // bounded and deliberate (matches the shared-lock design).
+    let lock: &'static mut fd_lock::RwLock<std::fs::File> =
+        Box::leak(Box::new(fd_lock::RwLock::new(file)));
+    let guard = match lock.try_write() {
+        Ok(guard) => Some(guard),
+        Err(_) if args.force => {
+            eprintln!(
+                "warning: {} is loaded/in use (shared lock held); --force deletes anyway",
+                entry.name
+            );
+            None
         }
-    } else {
-        None
+        Err(_) => {
+            // Leave no empty root behind when the removal is refused.
+            if !root_exists {
+                let _ = std::fs::remove_dir_all(&model_root);
+            }
+            return Err(Error::Admission {
+                message: format!(
+                    "model \"{}\" is loaded/in use; stop the daemon (or pass --force) then retry",
+                    entry.name
+                ),
+            }
+            .into());
+        }
     };
 
     // Keep the guard alive while deleting (Linux/macOS tolerate it; on
@@ -296,11 +303,9 @@ pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
     // (round-5 deepseek F1).
     let _ = std::fs::remove_dir_all(&staging_container);
     let _ = std::fs::remove_dir_all(&backup_container);
-    if root_exists {
-        std::fs::remove_dir_all(&model_root).map_err(|err| {
-            Error::internal_with_source(format!("remove {}", model_root.display()), err)
-        })?;
-    }
+    std::fs::remove_dir_all(&model_root).map_err(|err| {
+        Error::internal_with_source(format!("remove {}", model_root.display()), err)
+    })?;
     drop(guard);
     println!("removed {} (all cached revisions)", entry.name);
     Ok(())
@@ -2338,10 +2343,9 @@ mod tests {
     #[test]
     fn remove_refuses_when_fetch_inflight_on_staging() {
         // Round-2 D3: a first fetch installs into a sibling staging
-        // container while
-        // holding the model-root lock exclusively; a concurrent remove must
-        // be refused (never delete the in-flight download) even though no
-        // revision dir exists yet.
+        // container while holding the model-root lock exclusively; a
+        // concurrent remove must be refused (never delete the in-flight
+        // download) even though no revision dir exists yet.
         let dir = tempfile::TempDir::new().expect("tmp");
         let model_dir = dir.path().join("models").join("bge-small-en-v1.5");
         std::fs::create_dir_all(&model_dir).expect("create model dir");
