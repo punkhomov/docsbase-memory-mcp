@@ -649,11 +649,34 @@ pub fn install(target: &Target, source: &dyn RuntimeSource, force: bool) -> Resu
         ),
     )?;
 
-    let _ = std::fs::remove_dir_all(&final_dir);
-    std::fs::rename(&staging, &final_dir).map_err(|err| {
-        Error::internal_with_source(format!("publish {}", final_dir.display()), err)
-    })?;
+    promote_runtime(&root, target, &staging, &final_dir)?;
     Ok(installed)
+}
+
+/// Stashes any previous runtime aside and promotes `staging` into
+/// `final_dir`; on a publish failure the previous runtime is restored
+/// (round-2 U2). A hard kill between the two renames leaves no runtime —
+/// inherent to rename pairs; the restore below covers the rename-failure
+/// path.
+fn promote_runtime(root: &Path, target: &Target, staging: &Path, final_dir: &Path) -> Result<()> {
+    let backup = root.join(format!(".old-{}", target.triple));
+    if final_dir.exists() {
+        let _ = std::fs::remove_dir_all(&backup);
+        std::fs::rename(final_dir, &backup).map_err(|err| {
+            Error::internal_with_source(format!("stash old runtime {}", final_dir.display()), err)
+        })?;
+    }
+    if let Err(err) = std::fs::rename(staging, final_dir) {
+        if backup.exists() {
+            let _ = std::fs::rename(&backup, final_dir);
+        }
+        return Err(Error::internal_with_source(
+            format!("publish {}", final_dir.display()),
+            err,
+        ));
+    }
+    let _ = std::fs::remove_dir_all(&backup);
+    Ok(())
 }
 
 /// Runtime resolution (FR-11): `ORT_DYLIB_PATH` → connected provider
@@ -917,6 +940,49 @@ mod tests {
         }
         // No macOS x64.
         assert!(!TARGETS.iter().any(|t| t.triple.contains("x86_64-apple")));
+    }
+
+    #[test]
+    fn promote_runtime_restores_previous_on_publish_failure() {
+        // Round-2 U2: when the publish rename fails, the previous runtime
+        // must be restored. Missing staging source → rename fails → old
+        // final_dir restored, backup cleaned.
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let target = fake_target();
+        let root = tmp.path().to_path_buf();
+        let final_dir = root.join(target.triple);
+        let staging = root.join(format!(".staging-{}", target.triple));
+        let installed = final_dir.join(target.library_path);
+        std::fs::create_dir_all(installed.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&installed, b"old-lib").expect("old lib");
+
+        let err = promote_runtime(&root, &target, &staging, &final_dir)
+            .expect_err("publish fails: staging missing");
+        assert!(err.to_string().contains("publish"), "{err}");
+        assert_eq!(
+            std::fs::read(&installed).expect("read"),
+            b"old-lib",
+            "previous runtime restored"
+        );
+        assert!(
+            !root.join(format!(".old-{}", target.triple)).exists(),
+            "backup cleaned"
+        );
+
+        // Success path: staging present → promoted; backup removed.
+        std::fs::create_dir_all(staging.join(target.library_path).parent().expect("parent"))
+            .expect("staging dirs");
+        std::fs::write(staging.join(target.library_path), b"new-lib").expect("new lib");
+        promote_runtime(&root, &target, &staging, &final_dir).expect("promote");
+        assert_eq!(
+            std::fs::read(&installed).expect("read"),
+            b"new-lib",
+            "new runtime promoted"
+        );
+        assert!(
+            !root.join(format!(".old-{}", target.triple)).exists(),
+            "backup cleaned"
+        );
     }
 
     #[test]
