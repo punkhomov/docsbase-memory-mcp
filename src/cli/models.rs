@@ -281,10 +281,9 @@ pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
             None
         }
         Err(_) => {
-            // Leave no empty root behind when the removal is refused.
-            if !root_exists {
-                let _ = std::fs::remove_dir_all(&model_root);
-            }
+            // Never delete the root here: `root_exists` is only a snapshot,
+            // so the lock winner may have created/opened this very root, and
+            // unlinking it would unlink its live lock (round-5 F5).
             return Err(Error::Admission {
                 message: format!(
                     "model \"{}\" is loaded/in use; stop the daemon (or pass --force) then retry",
@@ -2256,6 +2255,13 @@ mod tests {
         });
         assert!(!staging_c.exists(), "staging container cleaned");
         assert!(!backup_c.exists(), "backup container cleaned");
+        // The root remove_cmd had to create in order to take the lock is
+        // gone again — otherwise the orphan-only path would leave an empty
+        // model root behind (round-5 F5).
+        assert!(
+            !parent.join("bge-small-en-v1.5").exists(),
+            "temporary root removed"
+        );
     }
 
     #[cfg(feature = "hybrid-local")]

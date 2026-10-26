@@ -1006,9 +1006,15 @@ fn install_staged(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) 
     sweep_backup_container_except(&backup_root, &tag);
     // Create the staging dir before the preflight (free-space checks need a
     // real path to stat); `install_all` re-secures it harmlessly.
-    platform::fs::secure_dir(&staging).map_err(|err| {
-        Error::internal_with_source(format!("create staging dir {}", staging.display()), err)
-    })?;
+    if let Err(err) = platform::fs::secure_dir(&staging) {
+        // Drop the staging tree + container so a failed create leaves no
+        // shell behind (round-5 F4 follow-up).
+        remove_tree_and_container(&staging, &staging_root);
+        return Err(Error::internal_with_source(
+            format!("create staging dir {}", staging.display()),
+            err,
+        ));
+    }
 
     let result = install_all(entry, source, &staging);
     match result {
@@ -1026,8 +1032,10 @@ fn install_staged(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) 
                 })?;
                 if let Err(err) = std::fs::rename(dir, &backup) {
                     // The old cache is still in place; drop the verified
-                    // staging copy and its container (round-5 F4).
+                    // staging copy, its container and the backup container
+                    // this attempt just created (round-5 F4).
                     remove_tree_and_container(&staging, &staging_root);
+                    let _ = std::fs::remove_dir_all(&backup_root);
                     return Err(Error::internal_with_source(
                         format!("stash old cache {}", dir.display()),
                         err,
