@@ -1319,8 +1319,20 @@ fn write_project_toml(
     let rendered =
         toml::to_string(&root).map_err(|err| Error::internal_with_source("render config", err))?;
     let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, rendered)
+    // Temp + fsync + rename, like every other atomic publish in the feature
+    // (round-5 deepseek: a plain `write` can leave a truncated config after
+    // a power loss even though the rename itself is atomic).
+    let file = std::fs::File::create(&tmp)
+        .map_err(|err| Error::internal_with_source(format!("create {}", tmp.display()), err))?;
+    let mut writer = std::io::BufWriter::new(&file);
+    std::io::Write::write_all(&mut writer, rendered.as_bytes())
         .map_err(|err| Error::internal_with_source(format!("write {}", tmp.display()), err))?;
+    std::io::Write::flush(&mut writer)
+        .map_err(|err| Error::internal_with_source(format!("flush {}", tmp.display()), err))?;
+    drop(writer);
+    file.sync_all()
+        .map_err(|err| Error::internal_with_source(format!("fsync {}", tmp.display()), err))?;
+    drop(file);
     std::fs::rename(&tmp, path)
         .map_err(|err| Error::internal_with_source(format!("publish {}", path.display()), err))?;
     Ok(())

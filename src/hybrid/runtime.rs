@@ -526,12 +526,11 @@ fn apply_macos_fixups(path: &Path) -> Result<()> {
             .map_err(|err| Error::Admission {
                 message: format!("failed to run {program} on the runtime library: {err}"),
             })?;
-        // The quarantine strip and the ad-hoc sign may legitimately fail on
-        // already-clean files; only the final verify must pass. The sequence
-        // is best-effort: verify is last.
-        if !status.success() && program != "codesign" {
-            // xattr -d fails when the attribute is absent — that is fine.
-        }
+        // `xattr -d` legitimately fails when the quarantine attribute is
+        // absent and `codesign` runs again below, so a non-zero status here
+        // is not an error: the sequence is best-effort and the final
+        // `codesign --verify` (with an ad-hoc sign fallback) is the gate.
+        let _ = (program, status.success());
     }
     // Final verification must pass; otherwise the library is not usable.
     let verify = std::process::Command::new("codesign")

@@ -177,3 +177,14 @@ docsbase config   # effective values for the current directory (JSON)
   (`docsbase daemon stop` first).
 - Daemon reads the global config once at start; project config is read when
   the project is opened.
+- Provisioning changes need a daemon restart: `docsbase connect fastembed`
+  (runtime library) and `docsbase models fetch <name>` (a revision that
+  actually landed on disk) both print a restart note, because a running
+  daemon keeps the ORT library and its loaded model instances until it is
+  restarted.
+- Local inference memory: the embedder holds one ORT session per cache key
+  (~model size, int8 rows are the small case referred to by NFR-4). The
+  reranker additionally holds the ONNX bytes in RAM while its session is
+  built (`OnnxSource::Memory`, which is what makes load-time sha256
+  verification possible), so a 1.1 GiB fp32 reranker such as
+  `bge-reranker-base` peaks at roughly twice its file size during load.

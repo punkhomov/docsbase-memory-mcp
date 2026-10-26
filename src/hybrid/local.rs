@@ -198,9 +198,8 @@ impl FastEmbedEmbedder {
         // (FR-11). `init` is idempotent per process.
         super::runtime::init(&key.runtime)?;
 
-        let dir = models::cache_dir(entry.name, entry.revision);
-        let lock_guard = take_shared_lock(&dir)?;
         let cache_dir = models::cache_dir(entry.name, entry.revision);
+        let lock_guard = take_shared_lock(&cache_dir)?;
 
         let onnx_path = entry
             .files
