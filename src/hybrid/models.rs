@@ -1032,30 +1032,26 @@ pub(crate) fn cached_in(entry: &ModelEntry<'_>, dir: &Path) -> Result<bool> {
     verify_hashes(entry, dir)
 }
 
+/// Shared test helpers for the model registry/cache (used by both the
+/// `models` unit tests and `local` load-path tests, round-4 C4). Compiled
+/// only under `#[cfg(test)]`.
 #[cfg(test)]
-mod tests {
-    use std::collections::{HashMap, HashSet};
-    use std::path::Path;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, mpsc};
-    use std::time::Duration;
-
-    use tempfile::TempDir;
-
+pub(crate) mod test_support {
     use super::*;
+    use std::sync::Arc;
 
     /// Deterministic fake source: per path it returns `path` repeated to the
     /// declared size (truncated at the end), so size and sha256 are
     /// reproducible.
-    struct FakeSource {
-        specs: Vec<FileSpec>,
-        overrides: HashMap<String, Vec<u8>>,
-        calls: Arc<AtomicUsize>,
-        fail_all: bool,
+    pub struct FakeSource {
+        pub specs: Vec<FileSpec>,
+        pub overrides: HashMap<String, Vec<u8>>,
+        pub calls: Arc<AtomicUsize>,
+        pub fail_all: bool,
     }
 
     impl FakeSource {
-        fn new(entry: &ModelEntry<'_>) -> Self {
+        pub fn new(entry: &ModelEntry<'_>) -> Self {
             Self {
                 specs: entry.files.to_vec(),
                 overrides: HashMap::new(),
@@ -1064,7 +1060,7 @@ mod tests {
             }
         }
 
-        fn calls(&self) -> usize {
+        pub fn calls(&self) -> usize {
             self.calls.load(Ordering::Relaxed)
         }
     }
@@ -1072,7 +1068,7 @@ mod tests {
     /// Deterministic content: `path` bytes repeated to the declared size
     /// (truncated). Computed lazily so oversized cap-test entries never
     /// allocate their declared bytes.
-    fn fake_content(spec: &FileSpec) -> Vec<u8> {
+    pub fn fake_content(spec: &FileSpec) -> Vec<u8> {
         let size = usize::try_from(spec.size).unwrap_or(usize::MAX);
         let block = spec.path.as_bytes();
         let mut content = Vec::with_capacity(size);
@@ -1108,12 +1104,12 @@ mod tests {
     /// Builds `<tmp>/models/<name>/<rev>` — a realistic cache location whose
     /// parent is the model root (locks resolve to the model root, so the lock
     /// file never lands on a system directory like `/tmp`).
-    fn fake_cache_dir(tmp: &Path) -> PathBuf {
+    pub fn fake_cache_dir(tmp: &Path) -> PathBuf {
         let entry = fake_entry();
         tmp.join("models").join(entry.name).join(entry.revision)
     }
 
-    fn fake_entry() -> ModelEntry<'static> {
+    pub fn fake_entry() -> ModelEntry<'static> {
         // Content is fixed by `fake_content` (path bytes repeated to `size`);
         // these sha256 values were computed for the exact sizes below.
         let files: &[FileSpec] = &[
@@ -1144,6 +1140,20 @@ mod tests {
             files,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::path::Path;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use tempfile::TempDir;
+
+    use super::test_support::*;
+    use super::*;
 
     #[test]
     fn registry_well_formed() {

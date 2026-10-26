@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use fd_lock::RwLockReadGuard;
+use sha2::Digest;
 
 use crate::error::{Error, Result};
 use crate::hybrid::models::{self, ModelEntry, Pooling, Task};
@@ -196,7 +197,7 @@ impl FastEmbedEmbedder {
             .ok_or_else(|| {
                 Error::internal(format!("registry row {} has no onnx file", entry.name))
             })?;
-        let onnx = read_cache_file(&onnx_path, entry)?;
+        let onnx = read_cache_file(&cache_dir, &onnx_path, entry)?;
         let tokenizer_files = tokenizer_files(&cache_dir, entry)?;
 
         let pooling = match entry.pooling {
@@ -433,7 +434,7 @@ fn rerank_scores(results: &[fastembed::RerankResult], top_n: usize) -> Vec<(usiz
 fn tokenizer_files(cache_dir: &Path, entry: &ModelEntry<'_>) -> Result<fastembed::TokenizerFiles> {
     let read = |name: &str| -> Result<Vec<u8>> {
         let path = cache_dir.join(name);
-        read_cache_file(&path, entry)
+        read_cache_file(cache_dir, &path, entry)
     };
     Ok(fastembed::TokenizerFiles {
         tokenizer_file: read("tokenizer.json")?,
@@ -469,11 +470,15 @@ fn apply_role_prefix(text: &str, entry: &ModelEntry<'_>, is_query: bool) -> Stri
     }
 }
 
-/// Reads one model cache file. A missing/tampered file after `cached()`
-/// verified is a corrupted-cache condition → `Admission` with the fetch
-/// action (FR-12), never a silent internal error.
-fn read_cache_file(path: &Path, entry: &ModelEntry<'_>) -> Result<Vec<u8>> {
-    std::fs::read(path).map_err(|err| Error::Admission {
+/// Reads one model cache file and verifies it against the registry spec
+/// (exact size + sha256, round-4 C4). The `cached()` gate and its
+/// size+mtime memo are advisory for availability; the bytes actually fed
+/// to ORT/tokenizer must be the pinned ones — a same-size tamper (or a
+/// check→read TOCTOU) can otherwise load unverified content. Mismatch is
+/// a corrupted-cache condition → `Admission` with the fetch action
+/// (FR-12), never a silent internal error.
+fn read_cache_file(cache_dir: &Path, path: &Path, entry: &ModelEntry<'_>) -> Result<Vec<u8>> {
+    let bytes = std::fs::read(path).map_err(|err| Error::Admission {
         message: format!(
             "fastembed model \"{}\" cache file {} is unreadable ({}); re-run `docsbase models fetch {}`",
             entry.name,
@@ -481,7 +486,53 @@ fn read_cache_file(path: &Path, entry: &ModelEntry<'_>) -> Result<Vec<u8>> {
             err,
             entry.name
         ),
-    })
+    })?;
+    let spec = entry
+        .files
+        .iter()
+        .find(|spec| cache_dir.join(spec.path) == path)
+        .ok_or_else(|| {
+            Error::internal(format!(
+                "registry row {} has no file spec for {}",
+                entry.name,
+                path.display()
+            ))
+        })?;
+    if bytes.len() as u64 != spec.size {
+        return Err(Error::Admission {
+            message: format!(
+                "fastembed model \"{}\" cache file {} has size {} (registry says {}); re-run `docsbase models fetch {}`",
+                entry.name,
+                path.display(),
+                bytes.len(),
+                spec.size,
+                entry.name
+            ),
+        });
+    }
+    let digest = hex_bytes(&sha2::Sha256::digest(&bytes));
+    if digest != spec.sha256 {
+        return Err(Error::Admission {
+            message: format!(
+                "fastembed model \"{}\" cache file {} is corrupted (sha256 mismatch); re-run `docsbase models fetch {} --force`",
+                entry.name,
+                path.display(),
+                entry.name
+            ),
+        });
+    }
+    Ok(bytes)
+}
+
+/// Formats bytes as lower-case hex.
+fn hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        // `write!` on a String is infallible.
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// Takes a shared read lock on the model root's `.lock` (fd-lock
@@ -568,6 +619,37 @@ fn clone_entry(entry: &ModelEntry<'_>) -> ModelEntry<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hybrid::models::test_support::{FakeSource, fake_cache_dir, fake_entry};
+
+    #[test]
+    fn read_cache_file_accepts_verified_bytes() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let entry = fake_entry();
+        let dir = fake_cache_dir(tmp.path());
+        let source = FakeSource::new(&entry);
+        crate::hybrid::models::fetch_into(&entry, &source, false, &dir).expect("fetch");
+        let onnx = dir.join("onnx/model.onnx");
+        let bytes = read_cache_file(&dir, &onnx, &entry).expect("verified read");
+        assert_eq!(bytes.len() as u64, 4096);
+    }
+
+    #[test]
+    fn read_cache_file_rejects_tampered_same_size_bytes() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let entry = fake_entry();
+        let dir = fake_cache_dir(tmp.path());
+        let source = FakeSource::new(&entry);
+        crate::hybrid::models::fetch_into(&entry, &source, false, &dir).expect("fetch");
+        let onnx = dir.join("onnx/model.onnx");
+        // Same-size content tamper: the memo/size gate cannot see it, the
+        // load-time sha256 must (round-4 C4).
+        let mut tampered = std::fs::read(&onnx).expect("read");
+        tampered[0] ^= 0xff;
+        std::fs::write(&onnx, &tampered).expect("tamper");
+        let err = read_cache_file(&dir, &onnx, &entry).expect_err("tamper");
+        assert!(matches!(err, Error::Admission { .. }), "{err:?}");
+        assert!(err.to_string().contains("--force"), "{err}");
+    }
 
     #[test]
     fn batch_chunks_covers_exact_and_partial_tails() {
