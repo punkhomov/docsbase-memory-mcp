@@ -836,8 +836,10 @@ fn install_all(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) -> 
 }
 
 /// Fetches `entry` into `dir`: a verified complete revision verifies under
-/// the **shared** lock and returns without downloading; anything else takes
-/// the exclusive install lock (FR-6). `force` always reinstalls.
+/// the **shared** lock and returns without downloading (`false`); anything
+/// else takes the exclusive install lock (FR-6) and returns `true` once a
+/// new revision is on disk (round-4 C5 — the CLI prints the daemon-restart
+/// note only on a real install). `force` always reinstalls (→ `true`).
 ///
 /// The install itself runs in a sibling staging directory and is promoted by
 /// rename only after every file verified. A failed fetch (including a failed
@@ -848,14 +850,14 @@ pub(crate) fn fetch_into(
     source: &dyn ModelSource,
     force: bool,
     dir: &Path,
-) -> Result<()> {
+) -> Result<bool> {
     let complete = dir.join(".complete");
     if !force && complete.exists() {
         let file = open_lock(dir)?;
         let lock = RwLock::new(file);
         let _guard = lock.read();
         if verify_hashes(entry, dir)? {
-            return Ok(());
+            return Ok(false);
         }
     }
     // The exclusive install path: make sure the model root exists before
@@ -890,10 +892,7 @@ pub(crate) fn fetch_into(
             ),
         });
     };
-    // `installed` distinguishes a real install from a fast path; the CLI
-    // uses it for the daemon-restart note (round-4 C5).
-    let _ = installed;
-    Ok(())
+    Ok(installed)
 }
 
 /// Performs the exclusive install: stage into a sibling dir, verify every
@@ -972,15 +971,22 @@ fn install_staged(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) 
 }
 
 /// Fetches a model into the cache (public entry point used by the CLI).
+/// Returns `(dir, installed)` where `installed` is true when a revision was
+/// actually placed on disk (staging → promote), false when the verified
+/// complete revision was already present (round-4 C5).
 ///
 /// # Errors
 /// Returns [`Error::Admission`] for unknown entries, transport failures,
 /// hash/size mismatches, cap violations and preflight failures; the cache is
 /// left without a usable partial install.
-pub fn fetch(entry: &ModelEntry<'_>, source: &dyn ModelSource, force: bool) -> Result<PathBuf> {
+pub fn fetch(
+    entry: &ModelEntry<'_>,
+    source: &dyn ModelSource,
+    force: bool,
+) -> Result<(PathBuf, bool)> {
     let dir = cache_dir(entry.name, entry.revision);
-    fetch_into(entry, source, force, &dir)?;
-    Ok(dir)
+    let installed = fetch_into(entry, source, force, &dir)?;
+    Ok((dir, installed))
 }
 
 /// Whether a revision is cached and fully verified. `false` covers both a
@@ -1463,6 +1469,31 @@ mod tests {
         // runs and detects the mismatch.
         std::fs::write(dir.join("tokenizer.json"), vec![0_u8; 512]).expect("same-size tamper");
         assert!(!cached_in(&entry, &dir).expect("tampered not cached"));
+    }
+
+    #[test]
+    fn fetch_reports_installed_only_on_real_install() {
+        // Round-4 C5: `fetch`/`fetch_into` report whether a revision was
+        // actually placed on disk — true on a fresh install and on a
+        // `--force` reinstall, false when the verified complete revision is
+        // already present (the CLI uses this for the daemon-restart note).
+        let tmp = TempDir::new().expect("tmp");
+        let dir = fake_cache_dir(tmp.path());
+        let entry = fake_entry();
+        let source = FakeSource::new(&entry);
+
+        assert!(
+            fetch_into(&entry, &source, false, &dir).expect("first fetch"),
+            "fresh install reports installed"
+        );
+        assert!(
+            !fetch_into(&entry, &source, false, &dir).expect("second fetch"),
+            "verified-complete fast path reports not installed"
+        );
+        assert!(
+            fetch_into(&entry, &source, true, &dir).expect("force refetch"),
+            "--force always reinstalls"
+        );
     }
 
     #[test]

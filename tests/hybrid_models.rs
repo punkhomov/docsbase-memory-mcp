@@ -130,14 +130,22 @@ fn fetch_and_cached_pipeline_with_env() {
     let source = FakeSource::for_entry(&entry);
     assert!(!cached(&entry).expect("not cached yet"));
 
-    let installed = fetch(&entry, &source, false).expect("fetch");
+    let (installed, installed_flag) = fetch(&entry, &source, false).expect("fetch");
     assert_eq!(installed, cache_dir(entry.name, entry.revision));
+    assert!(
+        installed_flag,
+        "fresh install reports installed (round-4 C5)"
+    );
     assert!(installed.join(".complete").exists());
     assert!(cached(&entry).expect("cached after fetch"));
 
     // Second fetch is a no-op and downloads nothing.
     let source2 = FakeSource::for_entry(&entry);
-    fetch(&entry, &source2, false).expect("second fetch");
+    let (_, fast_flag) = fetch(&entry, &source2, false).expect("second fetch");
+    assert!(
+        !fast_flag,
+        "verified-complete fast path reports not installed"
+    );
     assert_eq!(source2.calls(), 0, "complete fetch downloads nothing");
 
     // Tampering is detected by `cached`.

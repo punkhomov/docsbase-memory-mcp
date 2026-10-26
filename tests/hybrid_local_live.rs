@@ -57,11 +57,11 @@ fn live_fetch_embed_rerank() {
     let source = HttpModelSource::new().expect("model source");
     let bge = models::entry("bge-small-en-v1.5").expect("bge registry");
     let fetch_start = Instant::now();
-    let bge_dir = models::fetch(bge, &source, false).expect("fetch bge");
+    let (bge_dir, _installed) = models::fetch(bge, &source, false).expect("fetch bge");
     let fetch_bge = fetch_start.elapsed();
     let jina = models::entry("jina-reranker-v1-turbo-en").expect("jina registry");
     let fetch_start = Instant::now();
-    let jina_dir = models::fetch(jina, &source, false).expect("fetch jina");
+    let (jina_dir, _installed) = models::fetch(jina, &source, false).expect("fetch jina");
     let fetch_jina = fetch_start.elapsed();
     println!(
         "fetched {} -> {} ({fetch_bge:?})",
