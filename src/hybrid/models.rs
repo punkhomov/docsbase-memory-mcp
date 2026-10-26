@@ -779,7 +779,11 @@ impl std::io::Write for HashCountSink<'_> {
 /// strictly after every registry file exists (FR-6).
 fn write_complete(dir: &Path) -> Result<()> {
     let complete = dir.join(".complete");
-    let tmp = PathBuf::from(format!("{}.tmp", complete.display()));
+    // OsString suffix (round-3 mimo-3): lossy display() would mangle
+    // non-UTF-8 cache roots.
+    let mut os_tmp = complete.as_os_str().to_os_string();
+    os_tmp.push(".tmp");
+    let tmp = PathBuf::from(os_tmp);
     let file = std::fs::File::create(&tmp)
         .map_err(|err| Error::internal_with_source(format!("create {}", tmp.display()), err))?;
     file.sync_all()

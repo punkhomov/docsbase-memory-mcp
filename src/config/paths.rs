@@ -76,7 +76,11 @@ pub(crate) fn with_config_write_lock<T>(
     path: &Path,
     f: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    // OsString suffix (round-3 mimo-3): lossy display() would mangle
+    // non-UTF-8 config paths.
+    let mut os_lock = path.as_os_str().to_os_string();
+    os_lock.push(".lock");
+    let lock_path = PathBuf::from(os_lock);
     let file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -105,7 +109,11 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tmp");
         let path = dir.path().join("config.toml");
         // Another writer (simulated) holds the exclusive lock.
-        let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+        // OsString suffix (round-3 mimo-3): lossy display() would mangle
+        // non-UTF-8 config paths.
+        let mut os_lock = path.as_os_str().to_os_string();
+        os_lock.push(".lock");
+        let lock_path = PathBuf::from(os_lock);
         let file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
