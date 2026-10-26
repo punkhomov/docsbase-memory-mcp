@@ -33,6 +33,32 @@ pub const MAX_TOTAL_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 /// Free-space headroom added to the fetch preflight (FR-13).
 pub const PREFLIGHT_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Bounded retries for the exclusive install lock (round-2 P1b): an
+/// embedder/reranker holds the revision `.lock` shared for its process
+/// lifetime, so a plain blocking `write()` would hang the admin CLI
+/// forever; mirror `with_config_write_lock`'s bounded try-retry.
+const EXCLUSIVE_LOCK_RETRIES: u32 = 50;
+const EXCLUSIVE_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Acquires the exclusive install lock with bounded try-retries. Returns
+/// `None` when the budget is exhausted (a loaded instance holds the lock
+/// shared for its lifetime). Each attempt uses a fresh leaked `'static`
+/// lock (same pattern as `take_shared_lock`/`remove_cmd`); failed attempts
+/// leak one fd+Box each — bounded and deliberate.
+fn acquire_exclusive_lock(
+    dir: &Path,
+) -> Result<Option<fd_lock::RwLockWriteGuard<'static, std::fs::File>>> {
+    for _ in 0..EXCLUSIVE_LOCK_RETRIES {
+        let file = open_lock(dir)?;
+        let lock: &'static mut RwLock<std::fs::File> = Box::leak(Box::new(RwLock::new(file)));
+        if let Ok(guard) = lock.try_write() {
+            return Ok(Some(guard));
+        }
+        std::thread::sleep(EXCLUSIVE_LOCK_RETRY_DELAY);
+    }
+    Ok(None)
+}
+
 /// Serial number for unique staging/backup dir names (see `fetch_into`).
 static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -718,9 +744,16 @@ pub(crate) fn fetch_into(
     platform::fs::secure_dir(dir).map_err(|err| {
         Error::internal_with_source(format!("create cache dir {}", dir.display()), err)
     })?;
-    let file = open_lock(dir)?;
-    let mut lock = RwLock::new(file);
-    let _guard = lock.write();
+    // Bounded try-retry (see `EXCLUSIVE_LOCK_RETRIES`): never block
+    // silently on a process-lifetime shared holder (round-2 P1b).
+    let Some(_guard) = acquire_exclusive_lock(dir)? else {
+        return Err(Error::Admission {
+            message: format!(
+                "model \"{}\" is loaded/in use; stop the daemon (or retry) then re-run `docsbase models fetch {}`",
+                entry.name, entry.name
+            ),
+        });
+    };
     if !force && complete.exists() && verify_hashes(entry, dir)? {
         return Ok(());
     }
@@ -1254,6 +1287,28 @@ mod tests {
             exclusive.try_write().is_err(),
             "exclusive lock refused while a shared holder lives"
         );
+    }
+
+    #[test]
+    fn fetch_force_refuses_boundedly_when_shared_lock_held() {
+        // Round-2 P1b: the exclusive install lock must never block silently
+        // on a loaded instance's process-lifetime shared guard — bounded
+        // retries then Admission.
+        let dir = TempDir::new().expect("tmp");
+        let entry = fake_entry();
+        let source = FakeSource::new(&entry);
+        fetch_into(&entry, &source, false, dir.path()).expect("fetch");
+        let lock_file = open_lock(dir.path()).expect("lock");
+        let lock = RwLock::new(lock_file);
+        let _shared = lock.try_read().expect("shared lock acquired");
+        let started = std::time::Instant::now();
+        let err = fetch_into(&entry, &source, true, dir.path()).expect_err("bounded refusal");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "refused promptly, not hung"
+        );
+        assert!(matches!(err, Error::Admission { .. }));
+        assert!(err.to_string().contains("in use"), "{err}");
     }
 
     #[test]
