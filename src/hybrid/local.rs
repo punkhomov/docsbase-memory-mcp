@@ -77,13 +77,25 @@ pub fn embedder(cfg: &EmbeddingCfg, providers: &ProvidersCfg) -> Result<Arc<dyn 
             ),
         });
     }
-    let key = ModelCacheKey {
+    let key = cache_key(cfg, runtime);
+    load_embedder(entry, &key)
+}
+
+/// Builds the process-wide cache key for an embedding config — the single
+/// source of truth for the dedup contract (NFR-4/NFR-7): the canonical
+/// `model_id` (provider, model, dims, normalize, revision, prompt version),
+/// the bounded max length, the capped intra-op threads and the resolved
+/// runtime path. A config-only change that must invalidate cached vectors
+/// has to change one of these (round-5 deepseek: this used to be inlined in
+/// `embedder` and was therefore untestable without a real runtime).
+#[must_use]
+pub fn cache_key(cfg: &EmbeddingCfg, runtime: PathBuf) -> ModelCacheKey {
+    ModelCacheKey {
         model_id: super::config::embedding_model_id(cfg),
         max_length: DEFAULT_MAX_LENGTH,
         intra_threads: Some(capped_intra_threads()),
         runtime,
-    };
-    load_embedder(entry, &key)
+    }
 }
 
 /// Process-wide embedder cache keyed by [`ModelCacheKey`] (one instance per
@@ -644,6 +656,46 @@ mod tests {
         let err = read_cache_file(&dir, &onnx, &entry).expect_err("tamper");
         assert!(matches!(err, Error::Admission { .. }), "{err:?}");
         assert!(err.to_string().contains("--force"), "{err}");
+    }
+
+    #[test]
+    fn cache_key_uses_canonical_id_and_bounded_limits() {
+        // Round-5 deepseek: the dedup contract (NFR-4/NFR-7) must be pinned
+        // through the PRODUCTION constructor, not a hand-built literal —
+        // `embedder` builds its key with this function.
+        let cfg = crate::hybrid::EmbeddingCfg {
+            provider: super::super::config::PROVIDER_FASTEMBED.to_owned(),
+            model: "multilingual-e5-small".to_owned(),
+            dimensions: 384,
+            normalize: true,
+        };
+        let runtime = PathBuf::from("/tmp/libonnxruntime.so");
+        let key = cache_key(&cfg, runtime.clone());
+        assert_eq!(
+            key.model_id,
+            super::super::config::embedding_model_id(&cfg),
+            "key carries the canonical id"
+        );
+        assert!(key.model_id.contains("@r761b726d"), "{} ", key.model_id);
+        assert_eq!(key.max_length, DEFAULT_MAX_LENGTH, "bounded max length");
+        assert_eq!(
+            key.intra_threads,
+            Some(capped_intra_threads()),
+            "capped threads"
+        );
+        assert!(key.intra_threads.unwrap_or(0) <= 4, "never above the cap");
+        assert_eq!(key.runtime, runtime, "runtime path is part of the key");
+
+        // Dedup contract: same config + runtime = same key (one instance);
+        // a normalize flip changes the key (different vectors).
+        assert_eq!(cache_key(&cfg, runtime.clone()), key, "same key dedups");
+        let mut raw = cfg.clone();
+        raw.normalize = false;
+        assert_ne!(
+            cache_key(&raw, runtime).model_id,
+            key.model_id,
+            "normalize change must invalidate"
+        );
     }
 
     #[test]

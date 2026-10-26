@@ -6,7 +6,7 @@
 
 use docsbase_memory::error::Error;
 use docsbase_memory::hybrid::config::{PROVIDER_FASTEMBED, ProvidersCfg, embedding_model_id};
-use docsbase_memory::hybrid::local::{ModelCacheKey, embedder as local_embedder};
+use docsbase_memory::hybrid::local::embedder as local_embedder;
 use tempfile::TempDir;
 
 /// Integration-test env isolation: the real user cache may already contain a
@@ -83,7 +83,12 @@ fn embedder_without_model_is_fetch_hint() {
 }
 
 #[test]
-fn cache_key_shape_matches_canonical_formatter() {
+fn canonical_model_id_pins_revision_and_prompt() {
+    // The canonical id is what invalidates cached vectors: it must carry the
+    // provider, model, dims, normalize flag, the pinned revision and the
+    // prompt version (FR-9). The cache KEY built from it is covered by the
+    // `local::cache_key` unit test — that one exercises the production
+    // constructor instead of re-building a literal (round-5 deepseek).
     let cfg = docsbase_memory::hybrid::config::EmbeddingCfg {
         provider: PROVIDER_FASTEMBED.to_owned(),
         model: "multilingual-e5-small".to_owned(),
@@ -92,13 +97,6 @@ fn cache_key_shape_matches_canonical_formatter() {
     };
     let id = embedding_model_id(&cfg);
     assert_eq!(id, "fastembed/multilingual-e5-small@d384@l2@r761b726d@p1");
-    // The embedder cache key carries the canonical id, a bounded max length,
-    // capped threads and a runtime path — the dedup contract (NFR-4/7).
-    let key = ModelCacheKey {
-        model_id: id.clone(),
-        max_length: 512,
-        intra_threads: Some(4),
-        runtime: std::path::PathBuf::from("/tmp/libonnxruntime.so"),
-    };
-    assert_eq!(key.model_id, id);
+    assert!(id.contains("@r761b726d"), "revision pinned: {id}");
+    assert!(id.ends_with("@p1"), "prompt version pinned: {id}");
 }
