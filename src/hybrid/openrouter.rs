@@ -22,9 +22,12 @@ pub const BASE_URL: &str = "https://openrouter.ai/api/v1";
 const HTTP_REFERER: &str = "https://github.com/punkhomov/docsbase-memory-mcp";
 pub(crate) const X_TITLE: &str = "docsbase-memory-mcp";
 
-/// Input type for chunk (document) embeddings; query side would use
-/// `search_query` when a dense stage arrives (iteration 2).
+/// Input type for chunk (document) embeddings.
 const INPUT_TYPE_DOCUMENT: &str = "search_document";
+
+/// Input type for query embeddings (FR-10 role-aware path; `embed_query`
+/// uses this so the provider embeds queries as queries, not documents).
+const INPUT_TYPE_QUERY: &str = "search_query";
 
 /// API key that never leaks through `Debug` (FR-4, I2).
 #[derive(Clone)]
@@ -113,6 +116,23 @@ impl OpenRouterClient {
         normalize: bool,
         texts: &[String],
     ) -> Result<Vec<Vec<f32>>> {
+        self.embed_texts_with_type(model, dimensions, normalize, texts, INPUT_TYPE_DOCUMENT)
+    }
+
+    /// Like [`embed_texts`], but with an explicit `input_type` (the query
+    /// role uses `search_query` — FR-10).
+    ///
+    /// # Errors
+    /// Same as [`embed_texts`] (provider/transport failures; wrong count or
+    /// inconsistent dimensions → [`Error::Internal`]).
+    pub fn embed_texts_with_type(
+        &self,
+        model: &str,
+        dimensions: u32,
+        normalize: bool,
+        texts: &[String],
+        input_type: &str,
+    ) -> Result<Vec<Vec<f32>>> {
         ensure_context()?;
         let url = format!("{}/embeddings", self.base_url);
         let mut vectors = Vec::with_capacity(texts.len());
@@ -122,7 +142,7 @@ impl OpenRouterClient {
                 model,
                 input: batch,
                 dimensions,
-                input_type: INPUT_TYPE_DOCUMENT,
+                input_type,
             };
             let body = serde_json::to_string(&request)
                 .map_err(|err| Error::internal_with_source("encode embeddings request", err))?;
@@ -357,6 +377,19 @@ impl Embedder for OpenRouterEmbedder {
             self.cfg.normalize,
             texts,
         )
+    }
+
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        let mut vectors = self.client.embed_texts_with_type(
+            &self.cfg.model,
+            self.cfg.dimensions,
+            self.cfg.normalize,
+            &[text.to_owned()],
+            INPUT_TYPE_QUERY,
+        )?;
+        vectors
+            .pop()
+            .ok_or_else(|| Error::internal("embed returned no vector for one input"))
     }
 }
 

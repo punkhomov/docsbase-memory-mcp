@@ -744,29 +744,30 @@ pub fn resolve(cfg: &ProvidersCfg) -> Result<PathBuf> {
 /// # Errors
 /// Returns [`Error::Admission`] when the library cannot be loaded.
 pub fn init(path: &Path) -> Result<()> {
-    static INIT: OnceLock<Result<()>> = OnceLock::new();
-    let result = INIT.get_or_init(|| {
-        // `init_from` returns an EnvironmentBuilder; `commit()` registers the
-        // global environment (ort 2.0.0-rc.13). Load failure must surface as
-        // an admission error — `ort::api()` must never panic on an
-        // uninitialized library (FR-11).
-        match ort::init_from(path) {
-            Ok(env) => {
-                env.commit();
-                Ok(())
-            }
-            Err(err) => Err(Error::Admission {
-                message: format!(
-                    "failed to load the ONNX Runtime from {}: {err}",
-                    path.display()
-                ),
-            }),
+    // Only SUCCESS is memoized (round-3 muse-2): a transient first-load
+    // failure (briefly absent/corrupt dylib, later fixed by `connect
+    // fastembed --force`) must be retryable without a daemon restart. A
+    // failed `init_from` is re-attempted on every call; `ort::commit` is
+    // idempotent per process after a success, so re-committing is safe.
+    static INIT: OnceLock<()> = OnceLock::new();
+    if INIT.get().is_some() {
+        return Ok(());
+    }
+    // `init_from` returns an EnvironmentBuilder; `commit()` registers the
+    // global environment (ort 2.0.0-rc.13). Load failure must surface as
+    // an admission error — `ort::api()` must never panic on an
+    // uninitialized library (FR-11).
+    match ort::init_from(path) {
+        Ok(env) => {
+            env.commit();
+            let _ = INIT.set(());
+            Ok(())
         }
-    });
-    match result {
-        Ok(()) => Ok(()),
         Err(err) => Err(Error::Admission {
-            message: err.inner_message(),
+            message: format!(
+                "failed to load the ONNX Runtime from {}: {err}",
+                path.display()
+            ),
         }),
     }
 }

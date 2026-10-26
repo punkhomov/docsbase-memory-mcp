@@ -331,6 +331,32 @@ fn base_url_outside_the_allowlist_is_rejected() {
 }
 
 #[test]
+fn embed_query_uses_search_query_input_type() {
+    // Round-3 deepseek-2: the OpenRouter adapter's role-aware query path
+    // must send `input_type: "search_query"` (not `search_document`).
+    let mock = MockTransport::default();
+    let one_vector = serde_json::json!({
+        "data": [{"index": 0, "embedding": vec![0.1_f32; 1024]}]
+    });
+    mock.push(200, &one_vector.to_string(), None);
+    let client = make_client(&mock);
+    let cfg = EmbeddingCfg {
+        provider: "openrouter".to_owned(),
+        model: "qwen/qwen3-embedding-8b".to_owned(),
+        dimensions: 1024,
+        normalize: true,
+    };
+    let embedder = OpenRouterEmbedder::with_client(cfg, Arc::new(client));
+    blocking::enter(|| Ok(embedder.embed_query("query text").expect("embed_query")))
+        .expect("blocking context");
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 1, "one call");
+    let body: Value = serde_json::from_str(&calls[0].1).expect("body json");
+    assert_eq!(body["input_type"], "search_query", "{body}");
+    assert_eq!(body["input"], serde_json::json!(["query text"]), "{body}");
+}
+
+#[test]
 fn embedder_adapter_reports_the_cache_key() {
     let cfg = EmbeddingCfg::default();
     let mock = MockTransport::default();

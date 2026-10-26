@@ -137,6 +137,12 @@ pub fn fetch_cmd(args: &FetchArgs) -> anyhow::Result<()> {
         entry.revision,
         dir.display()
     );
+    // A running daemon caches loaded instances per stage; after a revision
+    // bump refetch it keeps serving the old revision until restarted
+    // (round-3 muse-3).
+    if args.force {
+        println!("note: restart a running detached daemon to pick up the new revision");
+    }
     Ok(())
 }
 
