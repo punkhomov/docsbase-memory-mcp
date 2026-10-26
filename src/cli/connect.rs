@@ -69,7 +69,7 @@ pub fn run(args: &ConnectArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Status table over the four providers (FR-2).
+/// Status table over the configured providers (FR-2).
 fn print_status() -> Result<()> {
     let config = crate::config::Config::global()?;
     let providers = &config.providers;

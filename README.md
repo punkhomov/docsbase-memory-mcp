@@ -24,9 +24,9 @@ Runtime, fully offline after provisioning) or **remote** (`hybrid-remote`:
 OpenRouter, requires `OPENROUTER_API_KEY`) — are opt-in per project/request
 with RRF fusion over the cached vectors via `ranking = "rrf"`. The default
 build stays fully offline and never falls back silently (see
-[`docs/CONFIG.md`](docs/CONFIG.md)). Modern model pins are free OpenRouter
-routes; paid pins via `docsbase models use` (see the hybrid section in
-`docs/CONFIG.md`).
+[`docs/CONFIG.md`](docs/CONFIG.md)). Default remote pins are free OpenRouter
+routes: they may train on prompts and the roster rotates monthly. Paid pins
+via `docsbase models use` (see the hybrid section in `docs/CONFIG.md`).
 
 Supported platforms: **Linux x86_64** (static binary), **Windows x64**
 (`.exe`) and **macOS 12+ on Apple Silicon**. Intel Macs are out of scope

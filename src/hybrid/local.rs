@@ -166,9 +166,9 @@ pub struct FastEmbedEmbedder {
     entry: ModelEntry<'static>,
     model_id: String,
     model: Mutex<fastembed::TextEmbedding>,
-    /// Shared `.lock` guard on `<cache>/<name>/<revision>/.lock`, held for
-    /// the instance lifetime (FR-7, T9 remove refuses while loaded).
-    _lock_guard: Option<RwLockReadGuard<'static, std::fs::File>>,
+    /// Shared `.lock` guard on `<cache>/<name>/.lock`, held for the
+    /// instance lifetime (FR-7, T9 remove refuses while loaded).
+    _lock_guard: RwLockReadGuard<'static, std::fs::File>,
 }
 
 impl FastEmbedEmbedder {
@@ -359,7 +359,7 @@ pub(crate) fn get_or_load_reranker(
 /// model-cache `.lock` guard for its lifetime.
 pub struct FastEmbedReranker {
     model: Mutex<fastembed::TextRerank>,
-    _lock_guard: Option<RwLockReadGuard<'static, std::fs::File>>,
+    _lock_guard: RwLockReadGuard<'static, std::fs::File>,
 }
 
 impl FastEmbedReranker {
@@ -489,9 +489,7 @@ fn read_cache_file(path: &Path, entry: &ModelEntry<'_>) -> Result<Vec<u8>> {
 /// (and is what `models remove` probes exclusively, FR-7). The lock lives
 /// at the model root, NOT inside the revision dir, so it survives a fetch
 /// promote (round-2 D2).
-pub(crate) fn take_shared_lock(
-    dir: &Path,
-) -> Result<Option<RwLockReadGuard<'static, std::fs::File>>> {
+pub(crate) fn take_shared_lock(dir: &Path) -> Result<RwLockReadGuard<'static, std::fs::File>> {
     let root = dir
         .parent()
         .ok_or_else(|| Error::internal(format!("cache path has no parent: {}", dir.display())))?;
@@ -527,13 +525,14 @@ pub(crate) fn take_shared_lock(
     let lock: &'static mut fd_lock::RwLock<std::fs::File> =
         Box::leak(Box::new(fd_lock::RwLock::new(file)));
     match lock.try_read() {
-        Ok(guard) => Ok(Some(guard)),
+        Ok(guard) => Ok(guard),
         Err(_) => {
-            // The lock file is only held exclusively by `models remove`; a
-            // concurrent remove means the model cannot be loaded safely.
+            // The exclusive holder may be a concurrent `models remove` or an
+            // in-flight `models fetch` (round-2 D2/D3); neither means the
+            // model can be loaded safely right now.
             Err(Error::Admission {
                 message: format!(
-                    "the model cache {} is locked for removal; stop the daemon and retry",
+                    "the model cache {} is busy (fetch in progress or removal); retry",
                     dir.display()
                 ),
             })
@@ -697,7 +696,7 @@ mod tests {
         std::fs::create_dir_all(&rev).expect("rev");
         let lock_path = root.join(".lock");
         let _ = std::fs::write(&lock_path, b"");
-        let guard = take_shared_lock(&rev).expect("shared lock").expect("some");
+        let guard = take_shared_lock(&rev).expect("shared lock");
         let exclusive_file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -733,7 +732,7 @@ mod tests {
         );
         // Existing root: succeeds.
         std::fs::create_dir_all(&root).expect("root");
-        assert!(take_shared_lock(&rev).expect("lock").is_some());
+        let _guard = take_shared_lock(&rev).expect("lock");
     }
 
     #[test]

@@ -2158,9 +2158,7 @@ mod tests {
         let model_dir = seed_model_cache(dir.path(), "bge-small-en-v1.5");
         with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
             // The exact shared guard T4/T5 instances hold for their lifetime.
-            let guard = crate::hybrid::local::take_shared_lock(&model_dir)
-                .expect("shared lock")
-                .expect("some");
+            let guard = crate::hybrid::local::take_shared_lock(&model_dir).expect("shared lock");
             let err = remove_cmd(&remove_args("bge-small-en-v1.5", false))
                 .expect_err("refused while loaded");
             assert!(err.to_string().contains("in use"), "{err}");
@@ -2176,9 +2174,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tmp");
         let model_dir = seed_model_cache(dir.path(), "bge-small-en-v1.5");
         with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
-            let _guard = crate::hybrid::local::take_shared_lock(&model_dir)
-                .expect("shared lock")
-                .expect("some");
+            let _guard = crate::hybrid::local::take_shared_lock(&model_dir).expect("shared lock");
             remove_cmd(&remove_args("bge-small-en-v1.5", true)).expect("force remove");
         });
         assert!(!model_dir.exists(), "force removal deletes anyway");
@@ -2221,9 +2217,7 @@ mod tests {
         std::fs::create_dir_all(&stale).expect("create stale rev");
         std::fs::write(stale.join("model.onnx"), b"x").expect("file");
         with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
-            let guard = crate::hybrid::local::take_shared_lock(&stale)
-                .expect("shared lock")
-                .expect("some");
+            let guard = crate::hybrid::local::take_shared_lock(&stale).expect("shared lock");
             let err = remove_cmd(&remove_args("bge-small-en-v1.5", false))
                 .expect_err("refused while stale revision loaded");
             assert!(err.to_string().contains("in use"), "{err}");
@@ -2242,9 +2236,7 @@ mod tests {
         std::fs::create_dir_all(&stale).expect("create stale rev");
         std::fs::write(stale.join("model.onnx"), b"x").expect("file");
         with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
-            let _guard = crate::hybrid::local::take_shared_lock(&stale)
-                .expect("shared lock")
-                .expect("some");
+            let _guard = crate::hybrid::local::take_shared_lock(&stale).expect("shared lock");
             remove_cmd(&remove_args("bge-small-en-v1.5", true)).expect("force remove");
         });
         assert!(
