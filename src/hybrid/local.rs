@@ -119,10 +119,12 @@ fn get_or_load_by_key<T: ?Sized>(
         }
     }
     // Serialize construction; re-check after acquiring so a waiter reuses
-    // the instance the winner registered.
+    // the instance the winner registered. `LOAD_LOCK` guards no protected
+    // data, so a poisoned lock (a panicking loader) is meaningless — reuse
+    // it rather than failing every later construction (round-2 D4).
     let _construction_guard = LOAD_LOCK
         .lock()
-        .map_err(|poison| Error::internal(format!("instance load lock poisoned: {poison}")))?;
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     {
         let map = instances
             .lock()
@@ -788,6 +790,45 @@ mod tests {
         for inst in &instances {
             assert!(Arc::ptr_eq(&instances[0], inst), "shared instance");
         }
+    }
+
+    #[test]
+    fn poisoned_load_lock_recovers_for_later_keys() {
+        // Round-2 D4: a panicking loader poisons LOAD_LOCK; later
+        // constructions must still succeed (poison is meaningless for a
+        // lock that guards no data).
+        let key_p = ModelCacheKey {
+            model_id: "fastembed/p@d384@l2@raaaaaaaa@p1".to_owned(),
+            max_length: 512,
+            intra_threads: Some(4),
+            runtime: PathBuf::from("/tmp/libonnxruntime.so"),
+        };
+        let _ = std::panic::catch_unwind(|| {
+            let _ = get_or_load_embedder(key_p.clone(), || -> Result<Arc<dyn Embedder>> {
+                panic!("loader boom (test)");
+            });
+        });
+        let key_q = ModelCacheKey {
+            model_id: "fastembed/q@d384@l2@raaaaaaaa@p1".to_owned(),
+            ..key_p.clone()
+        };
+        let make = |id: String| -> Arc<dyn Embedder> {
+            struct Fake(String);
+            impl Embedder for Fake {
+                fn model_id(&self) -> &str {
+                    &self.0
+                }
+                fn embed(&self, _: &[String]) -> Result<Vec<Vec<f32>>> {
+                    Err(Error::internal("not used"))
+                }
+            }
+            Arc::new(Fake(id))
+        };
+        let inst = get_or_load_embedder(key_q.clone(), || Ok(make(key_q.model_id.clone())))
+            .expect("later load works after poison");
+        let again =
+            get_or_load_embedder(key_q.clone(), || panic!("must be cached")).expect("cached");
+        assert!(Arc::ptr_eq(&inst, &again));
     }
 
     #[test]
