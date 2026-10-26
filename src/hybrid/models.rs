@@ -46,14 +46,22 @@ const EXCLUSIVE_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::fro
 /// once per call — retries re-attempt `try_write` on the SAME lock, so
 /// contention leaks one fd+Box at most (round-4 C2; same `'static` leak
 /// pattern as `take_shared_lock`/`remove_cmd`).
-fn acquire_exclusive_lock(
-    dir: &Path,
-) -> Result<Option<fd_lock::RwLockWriteGuard<'_, std::fs::File>>> {
+/// Runs `body` under the exclusive install lock with bounded try-retries
+/// (round-2 P1b): an embedder/reranker holds the lock shared for its
+/// process lifetime, so a blocking `write()` would hang the admin CLI
+/// forever. The lock file is opened and leaked exactly once per call, and
+/// the retry loop holds the guard only inside the success arm (it never
+/// escapes the loop, so the borrow checker can shrink its region — a
+/// returned `'static` guard cannot be reborrowed across iterations).
+///
+/// Returns `None` when the budget is exhausted (a loaded instance holds
+/// the lock shared).
+fn with_exclusive_lock<T>(dir: &Path, body: impl FnOnce() -> Result<T>) -> Result<Option<T>> {
     let file = open_lock(dir)?;
     let lock: &'static mut RwLock<std::fs::File> = Box::leak(Box::new(RwLock::new(file)));
     for _ in 0..EXCLUSIVE_LOCK_RETRIES {
-        if let Ok(guard) = lock.try_write() {
-            return Ok(Some(guard));
+        if let Ok(_guard) = lock.try_write() {
+            return Ok(Some(body()?));
         }
         std::thread::sleep(EXCLUSIVE_LOCK_RETRY_DELAY);
     }
@@ -863,8 +871,18 @@ pub(crate) fn fetch_into(
         })?;
     }
     // Bounded try-retry (see `EXCLUSIVE_LOCK_RETRIES`): never block
-    // silently on a process-lifetime shared holder (round-2 P1b).
-    let Some(_guard) = acquire_exclusive_lock(dir)? else {
+    // silently on a process-lifetime shared holder (round-2 P1b); the lock
+    // file is opened once and the guard never escapes the retry loop
+    // (round-4 C2). The body returns whether an install actually ran
+    // (staging → promote) vs. a verified-complete fast path.
+    let Some(installed) = with_exclusive_lock(dir, || {
+        if !force && complete.exists() && verify_hashes(entry, dir)? {
+            return Ok(false);
+        }
+        install_staged(entry, source, dir)?;
+        Ok(true)
+    })?
+    else {
         return Err(Error::Admission {
             message: format!(
                 "model \"{}\" is loaded/in use; stop the daemon (or retry) then re-run `docsbase models fetch {}`",
@@ -872,11 +890,16 @@ pub(crate) fn fetch_into(
             ),
         });
     };
+    // `installed` distinguishes a real install from a fast path; the CLI
+    // uses it for the daemon-restart note (round-4 C5).
+    let _ = installed;
+    Ok(())
+}
 
-    if !force && complete.exists() && verify_hashes(entry, dir)? {
-        return Ok(());
-    }
-
+/// Performs the exclusive install: stage into a sibling dir, verify every
+/// file, then promote by rename. On failure the previous verified cache is
+/// preserved (round-1 C6). Runs only under the exclusive lock.
+fn install_staged(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) -> Result<()> {
     // Staging/backup live as SIBLINGS of the model root (under
     // `<cache>/models`), not inside it (round-3 deepseek-4): a concurrent
     // `models remove` deletes the root subtree; a staging dir inside it
