@@ -138,11 +138,12 @@ pub fn fetch_cmd(args: &FetchArgs) -> anyhow::Result<()> {
         dir.display()
     );
     // A running daemon caches loaded instances per stage; whenever a
-    // revision was actually placed on disk (staging → promote, or
-    // `--force` reinstall), it keeps serving the old instance until
-    // restarted (round-3 muse-3 / round-4 C5). A verified-complete fast
-    // path changes nothing on disk, so no note.
-    if installed || args.force {
+    // revision was actually placed on disk (staging → promote), it keeps
+    // serving the old instance until restarted (round-3 muse-3 / round-4
+    // C5). A verified-complete fast path changes nothing on disk, so no
+    // note. `--force` always installs, so `installed` alone is the whole
+    // condition (round-5 muse).
+    if installed {
         println!("note: restart a running detached daemon to pick up the new revision");
     }
     Ok(())

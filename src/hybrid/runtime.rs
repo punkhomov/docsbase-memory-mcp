@@ -385,13 +385,7 @@ fn preflight_free_space(target: &Target, dir: &Path) -> Result<()> {
 
 /// Hex sha256 helper (same code as `models`; kept local to avoid coupling).
 fn sha256_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let digest = sha2::Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    crate::hybrid::models::hex(&sha2::Sha256::digest(bytes))
 }
 
 /// Extracts the single library file (`target.library_path`) from an archive

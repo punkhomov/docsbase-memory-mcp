@@ -272,6 +272,11 @@ fn connect_fastembed(args: &FastembedArgs) -> anyhow::Result<()> {
         installed.display(),
         target.archive_sha256
     );
+    // FR-13: a running daemon keeps the previously loaded ORT library
+    // mapped (and its cached model instances) until restarted; say so
+    // whenever this call actually (re)installed the runtime — the same
+    // note `models fetch` prints (round-5 deepseek).
+    println!("note: restart a running detached daemon to pick up the runtime");
     Ok(())
 }
 

@@ -674,8 +674,10 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex(&hasher.finalize()))
 }
 
-/// Formats bytes as lower-case hex.
-fn hex(bytes: &[u8]) -> String {
+/// Formats bytes as lower-case hex. Shared with `local` and `runtime` (a
+/// divergence between the producer and the comparator would silently turn
+/// every verification into a mismatch — round-5 deepseek).
+pub(crate) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

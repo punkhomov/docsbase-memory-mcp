@@ -516,7 +516,7 @@ fn read_cache_file(cache_dir: &Path, path: &Path, entry: &ModelEntry<'_>) -> Res
             ),
         });
     }
-    let digest = hex_bytes(&sha2::Sha256::digest(&bytes));
+    let digest = models::hex(&sha2::Sha256::digest(&bytes));
     if digest != spec.sha256 {
         return Err(Error::Admission {
             message: format!(
@@ -528,17 +528,6 @@ fn read_cache_file(cache_dir: &Path, path: &Path, entry: &ModelEntry<'_>) -> Res
         });
     }
     Ok(bytes)
-}
-
-/// Formats bytes as lower-case hex.
-fn hex_bytes(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        // `write!` on a String is infallible.
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 /// Takes a shared read lock on the model root's `.lock` (fd-lock
