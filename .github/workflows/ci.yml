@@ -100,6 +100,10 @@ jobs:
         run: cargo clippy --locked --features hybrid-local --all-targets -- -D warnings
       - name: Feature suite (offline; no model downloads)
         run: cargo test --locked --features hybrid-local
+      - name: Combined-feature suite (hybrid-local + hybrid-remote; offline)
+        run: cargo test --locked --features hybrid-local,hybrid-remote
+      - name: Combined-feature lints (hybrid-local + hybrid-remote)
+        run: cargo clippy --locked --features hybrid-local,hybrid-remote --all-targets -- -D warnings
 
   windows:
     runs-on: windows-latest

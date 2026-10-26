@@ -2,6 +2,8 @@
 //! contract (FR-3, FR-5, FR-13, FR-14, I3). Ungated: runs in the default
 //! offline build and in `--features hybrid-remote` (SC-3, SC-4).
 
+use std::sync::Mutex;
+
 use docsbase_memory::error::Error;
 use docsbase_memory::hybrid::Ranking;
 use docsbase_memory::hybrid::blocking;
@@ -40,18 +42,22 @@ fn jobs_embed_texts_threads_real_providers() {
         openrouter: None,
     };
     let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
-    // SAFETY: single-threaded test section; restored immediately after.
+    let env_guard = ENV_LOCK.lock().expect("env lock");
+    // SAFETY: single-threaded under the shared module lock; restored
+    // immediately after (round-2 M3: sibling env-mutating tests are
+    // serialized through the same lock).
     unsafe {
         std::env::set_var("DOCSBASE_CACHE_DIR", cache.path());
     }
     let result = jobs::embed_texts(cache.path(), &cfg, &providers, &["hello".to_owned()]);
-    // SAFETY: same single-threaded section as above.
+    // SAFETY: same locked section as above.
     unsafe {
         match prev_cache {
             Some(value) => std::env::set_var("DOCSBASE_CACHE_DIR", value),
             None => std::env::remove_var("DOCSBASE_CACHE_DIR"),
         }
     }
+    drop(env_guard);
     let err = match result {
         Ok(_) => panic!("expected admission, got embeddings"),
         Err(e) => e,
@@ -329,14 +335,17 @@ fn fastembed_only_config_does_not_demand_openrouter_key() {
     assert!(!err.to_string().contains("OPENROUTER_API_KEY"), "{err}");
 }
 
+/// Module-wide lock serializing every env-mutating test in this binary
+/// (round-2 M3): was a function-local static on
+/// `from_config_fastembed_uses_real_provider_config`, which did not cover
+/// `jobs_embed_texts_threads_real_providers`.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(feature = "hybrid-local")]
 #[test]
 #[allow(unsafe_code)] // env isolation under the local lock
 fn from_config_fastembed_uses_real_provider_config() {
     use docsbase_memory::hybrid::config::{FastembedProvider, ProviderState};
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // Runtime present via runtime_path; model cache isolated & empty → the
     // stage must fail with the FETCH hint, never "not connected" (P0: the
@@ -364,7 +373,7 @@ fn from_config_fastembed_uses_real_provider_config() {
         ..HybridCfg::default()
     };
 
-    let _guard = ENV_LOCK.lock().expect("env lock");
+    let _env_guard = ENV_LOCK.lock().expect("env lock");
     let prev = std::env::var_os("DOCSBASE_CACHE_DIR");
     // SAFETY: single-threaded under the local lock.
     unsafe {
