@@ -1925,12 +1925,14 @@ mod tests {
         let runtime = dir.path().join("libonnxruntime.so");
         std::fs::write(&runtime, b"fake").expect("touch");
         let config = dir.path().join("config.toml");
+        // TOML basic strings treat `\` as an escape: a raw Windows path
+        // (`C:\Users\...`) makes the file unparsable ("too few unicode value
+        // digits", CI run 40895556715). Forward slashes keep the path valid
+        // for both TOML and the Windows filesystem.
+        let runtime_toml = runtime.to_string_lossy().replace('\\', "/");
         std::fs::write(
             &config,
-            format!(
-                "[providers.fastembed]\nenabled = true\nruntime_path = \"{}\"\n",
-                runtime.display()
-            ),
+            format!("[providers.fastembed]\nenabled = true\nruntime_path = \"{runtime_toml}\"\n"),
         )
         .expect("seed");
         // Isolate both the config dir AND the model cache: the real user

@@ -105,6 +105,18 @@ cargo test --locked --features hybrid-local --lib
 существующего файла, права и удаление деревьев проверяются на реальной ФС
 той ОС, где они будут работать у пользователя.
 
+Лейн окупился в первом же прогоне (run 40895556715): упали 3 теста, каждый —
+из тех классов, что на Linux не видны.
+
+| Тест | Что было не так на платформе |
+|---|---|
+| `cli::models::tests::fastembed_probe_uncached_model_gives_fetch_hint` | тест писал Windows-путь `C:\Users\...` в TOML basic string → «too few unicode value digits» |
+| `hybrid::runtime::tests::promote_runtime_cleans_staging_when_stash_fails` | файл-заглушка на месте бэкапа блокировала `rename` только на Unix: `fs::rename` на Windows = `MoveFileExW` + REPLACE_EXISTING, он заменяет файл каталогом |
+| `hybrid::models::tests::fetch_force_refuses_boundedly_when_shared_lock_held` | жёсткая граница 2 s против номинального бюджета ретраев 1 s: на macOS-раннере `sleep(20ms)` в 200 параллельных тестах раздувается вдвое |
+
+Только компиляции (`check --all-targets`) любой из них не ловит —
+именно поэтому здесь нужен запуск, а не типизация.
+
 ## Кэши: у каждой джобы свой — это осознанно
 
 `Swatinem/rust-cache` включает имя джобы в ключ, поэтому у нас лежат
