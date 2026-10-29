@@ -885,7 +885,12 @@ mod tests {
         // Round-6 deepseek: an entry with no `runtime_path` resolves to the
         // data-dir install. `provider_status` used to report `NotConnected`
         // for that documented shape while `--check`/`resolve` found the
-        // library — `docsbase connect` then printed a wrong remedy.
+        // library — `docsbase connect` then printed a wrong remedy. Both
+        // branches are asserted explicitly on a sandboxed data dir so the
+        // test is host-independent.
+        use crate::hybrid::runtime::test_env::{TestDataDir, runtime_test_guard};
+        let _guard = runtime_test_guard();
+        let data = TestDataDir::new();
         let providers = ProvidersCfg {
             fastembed: Some(FastembedProvider {
                 enabled: true,
@@ -894,29 +899,52 @@ mod tests {
             }),
             openrouter: None,
         };
-        let status = provider_status(&providers, PROVIDER_FASTEMBED);
-        let data_dir = data_dir_library();
-        if let Some(path) = data_dir {
-            assert_eq!(status.state, ProviderState::Connected, "{status:?}");
-            assert_eq!(
-                status.reason.as_deref(),
-                Some(path.display().to_string().as_str())
-            );
-        } else {
-            assert_eq!(status.state, ProviderState::NotConnected, "{status:?}");
-            assert!(
-                status
-                    .reason
-                    .as_deref()
-                    .is_some_and(|reason| reason.contains("connect fastembed")),
-                "{status:?}"
-            );
-        }
+
+        // Empty data dir: nothing to fall back to.
+        let empty = provider_status(&providers, PROVIDER_FASTEMBED);
+        assert_eq!(empty.state, ProviderState::NotConnected, "{empty:?}");
+        assert!(
+            empty
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("connect fastembed")),
+            "{empty:?}"
+        );
+
+        // With a data-dir install the same entry is Connected and names the
+        // path the resolver would pick.
+        let lib =
+            crate::hybrid::runtime::test_env::data_dir_library_slot().expect("target resolved");
+        std::fs::create_dir_all(lib.parent().expect("library parent")).expect("create install dir");
+        std::fs::write(&lib, b"fake").expect("write library");
+        assert_eq!(
+            crate::hybrid::runtime::data_dir_library_path(),
+            Some(lib.clone()),
+            "the resolver now sees the fake install"
+        );
+
+        let connected = provider_status(&providers, PROVIDER_FASTEMBED);
+        assert_eq!(connected.state, ProviderState::Connected, "{connected:?}");
+        assert_eq!(
+            connected.reason.as_deref(),
+            Some(lib.display().to_string().as_str())
+        );
+        drop(data);
     }
 
     #[test]
     fn provider_status_maps_states() {
         use ProviderState::{Broken, Connected, NotConnected, Unknown};
+        // The no-`runtime_path` case consults the data-dir install, so
+        // sandbox `DOCSBASE_DATA_DIR` (empty ⇒ NotConnected) and serialize
+        // on the runtime test lock — otherwise the assertion depends on the
+        // host machine (round-6 deepseek).
+        // Only the `hybrid-local` build consults the data dir, so the
+        // sandbox (and its lock) exist only there.
+        #[cfg(feature = "hybrid-local")]
+        let _guard = crate::hybrid::runtime::test_env::runtime_test_guard();
+        #[cfg(feature = "hybrid-local")]
+        let _data = crate::hybrid::runtime::test_env::TestDataDir::new();
         let none = ProvidersCfg::default();
         assert_eq!(provider_status(&none, PROVIDER_FASTEMBED).state, Unknown);
         assert_eq!(provider_status(&none, PROVIDER_OPENROUTER).state, Unknown);

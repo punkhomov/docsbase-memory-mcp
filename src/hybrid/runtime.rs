@@ -677,9 +677,16 @@ fn promote_runtime(root: &Path, target: &Target, staging: &Path, final_dir: &Pat
     let backup = root.join(format!(".old-{}", target.triple));
     if final_dir.exists() {
         let _ = std::fs::remove_dir_all(&backup);
-        std::fs::rename(final_dir, &backup).map_err(|err| {
-            Error::internal_with_source(format!("stash old runtime {}", final_dir.display()), err)
-        })?;
+        if let Err(err) = std::fs::rename(final_dir, &backup) {
+            // The previous runtime stays in place; drop the staging copy so
+            // a failed `--force` (e.g. a loaded library blocking the rename)
+            // leaves nothing behind (round-6 deepseek).
+            let _ = std::fs::remove_dir_all(staging);
+            return Err(Error::internal_with_source(
+                format!("stash old runtime {}", final_dir.display()),
+                err,
+            ));
+        }
     }
     if let Err(err) = std::fs::rename(staging, final_dir) {
         if backup.exists() {
@@ -790,22 +797,20 @@ pub fn init(path: &Path) -> Result<()> {
     }
 }
 
+/// Test-only sandbox shared by the runtime and config unit tests: one lock
+/// serializes every env-touching test, and `TestDataDir` points
+/// `DOCSBASE_DATA_DIR` at a fresh temp dir so the real install is never
+/// observed or deleted (round-6 deepseek: the config status tests read the
+/// same env, so they must take the same lock).
 #[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-    use std::io::Write as _;
-    use std::sync::Arc;
+pub(crate) mod test_env {
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::*;
-
-    /// Serializes tests that create/remove the shared runtime root.
+    /// Serializes tests that touch the data dir / runtime root.
     static RUNTIME_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    fn runtime_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        // Tolerate a poisoned lock (a panicked sibling test) so one failure
-        // does not cascade into unrelated tests that merely serialize on it.
+    /// Poison-tolerant guard (a panicked sibling must not cascade).
+    pub(crate) fn runtime_test_guard() -> std::sync::MutexGuard<'static, ()> {
         RUNTIME_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -817,14 +822,14 @@ mod tests {
     /// every runtime-root touch is both serialized and sandboxed away from
     /// the real data directory — a sibling test can never `remove_dir_all`
     /// on a real installed ONNX Runtime (review panel P0).
-    struct TestDataDir {
+    pub(crate) struct TestDataDir {
         old: Option<std::ffi::OsString>,
         _dir: tempfile::TempDir,
     }
 
     impl TestDataDir {
         #[allow(unsafe_code)] // test-only env mutation, restored in Drop
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let dir = tempfile::TempDir::new().expect("tmp");
             let old = std::env::var_os("DOCSBASE_DATA_DIR");
             // SAFETY: test-only env mutation; restored in Drop. Serialized
@@ -834,6 +839,12 @@ mod tests {
             }
             TestDataDir { old, _dir: dir }
         }
+    }
+
+    /// Path where a data-dir install would live, whether or not it exists
+    /// (lets a test seed a fake install for the status surfaces).
+    pub(crate) fn data_dir_library_slot() -> Option<std::path::PathBuf> {
+        super::platform_target().ok().map(super::library_path)
     }
 
     impl Drop for TestDataDir {
@@ -850,6 +861,17 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::io::Write as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::test_env::{TestDataDir, runtime_test_guard};
+    use super::*;
 
     /// Fake source that serves a real tar.gz containing the wanted library
     /// with the right size. Produced from the target table itself.

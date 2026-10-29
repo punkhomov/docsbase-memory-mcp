@@ -512,6 +512,10 @@ fn fastembed_reranker_without_model_is_admission() {
 fn fastembed_without_provider_fails_with_connect_hint() {
     // Provisioning is enforced at stage construction, not at config load
     // (review panel C3): load succeeds, `embedder()` surfaces the hint.
+    // Reads DOCSBASE_CACHE_DIR / ORT_DYLIB_PATH via the stage constructor, so
+    // it must serialize against the mutating tests (round-6 deepseek: an
+    // unlocked reader saw another test's env and flipped the hint).
+    let _env_guard = ENV_LOCK.lock().expect("env lock");
     let config_dir = TempDir::new().expect("tempdir");
     write(
         config_dir.path(),
