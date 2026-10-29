@@ -210,22 +210,41 @@ pub struct ProviderStatus {
     pub reason: Option<String>,
 }
 
+/// Data-dir ORT install path when one exists. Only the `hybrid-local` build
+/// can install a runtime, so the default build has nothing to resolve.
+#[cfg(feature = "hybrid-local")]
+fn data_dir_library() -> Option<std::path::PathBuf> {
+    crate::hybrid::runtime::data_dir_library_path()
+}
+
+#[cfg(not(feature = "hybrid-local"))]
+fn data_dir_library() -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Readiness of one provider (FR-2). `fastembed` is `Connected` when the
-/// entry exists, is enabled and carries a runtime path (the runtime install
-/// itself is T2); `OpenRouter` is `Connected` when enabled.
+/// entry exists, is enabled and a runtime library actually resolves — the
+/// recorded `runtime_path` or, when absent, the data-dir install that
+/// `runtime::resolve` would pick (FR-2/deepseek round-6: reporting a
+/// working data-dir install as `NotConnected` printed a wrong remedy).
+/// `OpenRouter` is `Connected` when enabled.
 #[must_use]
 pub fn provider_status(providers: &ProvidersCfg, name: &str) -> ProviderStatus {
     match name {
-        PROVIDER_FASTEMBED => match &providers.fastembed {
-            None => ProviderStatus {
-                state: ProviderState::Unknown,
-                reason: Some(format!("run `docsbase connect {PROVIDER_FASTEMBED}`")),
-            },
-            Some(provider) if !provider.enabled => ProviderStatus {
-                state: ProviderState::NotConnected,
-                reason: Some(format!("run `docsbase connect {PROVIDER_FASTEMBED}`")),
-            },
-            Some(provider) => match &provider.runtime_path {
+        PROVIDER_FASTEMBED => {
+            let Some(provider) = providers.fastembed.as_ref() else {
+                return ProviderStatus {
+                    state: ProviderState::Unknown,
+                    reason: Some(format!("run `docsbase connect {PROVIDER_FASTEMBED}`")),
+                };
+            };
+            if !provider.enabled {
+                return ProviderStatus {
+                    state: ProviderState::NotConnected,
+                    reason: Some(format!("run `docsbase connect {PROVIDER_FASTEMBED}`")),
+                };
+            }
+            match &provider.runtime_path {
                 // A recorded path that no longer exists is Broken, not
                 // Connected (FR-2).
                 Some(path) if !path.exists() => ProviderStatus {
@@ -239,14 +258,23 @@ pub fn provider_status(providers: &ProvidersCfg, name: &str) -> ProviderStatus {
                     state: ProviderState::Connected,
                     reason: provider.runtime.clone(),
                 },
-                None => ProviderStatus {
-                    state: ProviderState::NotConnected,
-                    reason: Some(
-                        "runtime not installed; run `docsbase connect fastembed`".to_owned(),
-                    ),
+                // No recorded path: the resolver falls back to the data-dir
+                // install, so report exactly what it would find (no
+                // recursion into `runtime_status`, which calls back here).
+                None => match data_dir_library() {
+                    Some(path) => ProviderStatus {
+                        state: ProviderState::Connected,
+                        reason: Some(path.display().to_string()),
+                    },
+                    None => ProviderStatus {
+                        state: ProviderState::NotConnected,
+                        reason: Some(
+                            "runtime not installed; run `docsbase connect fastembed`".to_owned(),
+                        ),
+                    },
                 },
-            },
-        },
+            }
+        }
         PROVIDER_OPENROUTER => match &providers.openrouter {
             None => ProviderStatus {
                 state: ProviderState::Unknown,
@@ -847,6 +875,41 @@ mod tests {
                 canonical_id(entry, dim, true),
                 "single canonical formatter for {}",
                 entry.name
+            );
+        }
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn provider_status_without_runtime_path_matches_data_dir_install() {
+        // Round-6 deepseek: an entry with no `runtime_path` resolves to the
+        // data-dir install. `provider_status` used to report `NotConnected`
+        // for that documented shape while `--check`/`resolve` found the
+        // library — `docsbase connect` then printed a wrong remedy.
+        let providers = ProvidersCfg {
+            fastembed: Some(FastembedProvider {
+                enabled: true,
+                runtime: Some("1.24.4".to_owned()),
+                runtime_path: None,
+            }),
+            openrouter: None,
+        };
+        let status = provider_status(&providers, PROVIDER_FASTEMBED);
+        let data_dir = data_dir_library();
+        if let Some(path) = data_dir {
+            assert_eq!(status.state, ProviderState::Connected, "{status:?}");
+            assert_eq!(
+                status.reason.as_deref(),
+                Some(path.display().to_string().as_str())
+            );
+        } else {
+            assert_eq!(status.state, ProviderState::NotConnected, "{status:?}");
+            assert!(
+                status
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("connect fastembed")),
+                "{status:?}"
             );
         }
     }

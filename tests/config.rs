@@ -8,6 +8,14 @@ fn write(dir: &Path, name: &str, body: &str) {
     fs::write(dir.join(name), body).expect("write fixture");
 }
 
+/// Serializes the env-mutating tests in this binary (round-6 deepseek-2):
+/// the harness runs tests on parallel threads, so an unlocked `set_var`
+/// both races a sibling's `getenv` (UB) and lets one test restore the real
+/// user cache under another's feet — which hides the asserted `models
+/// fetch` hint on a machine where a live run already fetched the model.
+#[cfg(feature = "hybrid-local")]
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn defaults_when_missing() {
     let config_dir = TempDir::new().expect("tempdir");
@@ -542,9 +550,10 @@ fn fastembed_unfetched_model_fails_with_fetch_hint() {
     // Isolate the model cache: the real user cache may already contain a
     // fetched copy (live T8 runs), which would pass the cached check
     // instead of failing with the fetch hint.
+    let _env_guard = ENV_LOCK.lock().expect("env lock");
     let cache = TempDir::new().expect("cache");
     let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
-    // SAFETY: single-threaded test section; restored immediately after.
+    // SAFETY: env mutation serialized by ENV_LOCK; restored below.
     unsafe {
         std::env::set_var("DOCSBASE_CACHE_DIR", cache.path());
     }
@@ -558,7 +567,7 @@ fn fastembed_unfetched_model_fails_with_fetch_hint() {
         Ok(_) => panic!("expected admission, got an embedder"),
         Err(e) => e,
     };
-    // SAFETY: same single-threaded section as above.
+    // SAFETY: same locked section as above.
     unsafe {
         match prev_cache {
             Some(value) => std::env::set_var("DOCSBASE_CACHE_DIR", value),
@@ -587,10 +596,11 @@ fn fastembed_env_runtime_override_reaches_model_check() {
         "[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\n",
     );
     let config = Config::load_from(config_dir.path(), None).expect("load ok");
+    let _env_guard = ENV_LOCK.lock().expect("env lock");
     let cache = TempDir::new().expect("cache");
     let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
     let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
-    // SAFETY: single-threaded test section; restored immediately after.
+    // SAFETY: env mutation serialized by ENV_LOCK; restored below.
     unsafe {
         std::env::set_var("DOCSBASE_CACHE_DIR", cache.path());
         std::env::set_var("ORT_DYLIB_PATH", &runtime_path);
@@ -599,7 +609,7 @@ fn fastembed_env_runtime_override_reaches_model_check() {
         config.hybrid_cfg.embedding.as_ref().expect("embedding"),
         &config.providers,
     );
-    // SAFETY: same single-threaded section as above.
+    // SAFETY: same locked section as above.
     unsafe {
         match prev_cache {
             Some(value) => std::env::set_var("DOCSBASE_CACHE_DIR", value),

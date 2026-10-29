@@ -211,6 +211,19 @@ pub struct RuntimeStatus {
     pub reason: Option<String>,
 }
 
+/// Path of the data-dir ORT install when one exists. This is the fallback
+/// the resolver uses when no `runtime_path` is recorded; it is also what
+/// `config::provider_status` reports for such an entry, so both surfaces
+/// agree (round-6 deepseek). Deliberately provider-free to avoid a
+/// `provider_status` ↔ `runtime_status` cycle.
+#[must_use]
+pub fn data_dir_library_path() -> Option<PathBuf> {
+    platform_target()
+        .ok()
+        .map(library_path)
+        .filter(|path| path.exists())
+}
+
 /// Computes the fastembed runtime status from the global providers entry and
 /// the data-dir install (FR-2). A provider entry without a `runtime_path`
 /// but with a data-dir install is reported `Connected` (the resolver uses
@@ -222,12 +235,7 @@ pub fn runtime_status(providers: &ProvidersCfg) -> RuntimeStatus {
         .as_ref()
         .and_then(|provider| provider.runtime_path.as_ref())
         .cloned()
-        .or_else(|| {
-            platform_target()
-                .ok()
-                .map(library_path)
-                .filter(|path| path.exists())
-        });
+        .or_else(data_dir_library_path);
     // A connected provider requires an actually existing library: short-
     // circuit only when the resolved path exists (a recorded runtime_path
     // that vanished must stay Broken, matching provider_status/resolve).
@@ -383,7 +391,8 @@ fn preflight_free_space(target: &Target, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Hex sha256 helper (same code as `models`; kept local to avoid coupling).
+/// Hex sha256 of `bytes`; delegates to the single formatter in `models` so
+/// the producer and the comparator can never diverge.
 fn sha256_hex(bytes: &[u8]) -> String {
     crate::hybrid::models::hex(&sha2::Sha256::digest(bytes))
 }
@@ -566,7 +575,11 @@ fn apply_macos_fixups(path: &Path) -> Result<()> {
 /// # Errors
 /// [`Error::Admission`] for caps, preflight, download, hash or extraction
 /// failures; [`Error::Internal`] for IO failures.
-pub fn install(target: &Target, source: &dyn RuntimeSource, force: bool) -> Result<PathBuf> {
+pub fn install(
+    target: &Target,
+    source: &dyn RuntimeSource,
+    force: bool,
+) -> Result<(PathBuf, bool)> {
     // Caps and preflight first (no download before they pass).
     if target.archive_size > MAX_ARCHIVE_BYTES {
         return Err(Error::Admission {
@@ -606,7 +619,9 @@ pub fn install(target: &Target, source: &dyn RuntimeSource, force: bool) -> Resu
     let final_dir = root.join(target.triple);
     let installed = library_path(target);
     if !force && installed.exists() {
-        return Ok(installed);
+        // Nothing was written: the caller must not tell the user to restart
+        // the daemon (round-6 mimo/muse/deepseek).
+        return Ok((installed, false));
     }
 
     let archive_bytes = source.download(target.archive_url)?;
@@ -632,18 +647,25 @@ pub fn install(target: &Target, source: &dyn RuntimeSource, force: bool) -> Resu
     std::fs::create_dir_all(&staging).map_err(|err| {
         Error::internal_with_source(format!("create staging {}", staging.display()), err)
     })?;
-    extract_library(target, &archive_bytes, &staging)?;
+    if let Err(err) = extract_library(target, &archive_bytes, &staging) {
+        // Never leave a half-extracted staging tree behind (round-6 mimo).
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(err);
+    }
     #[cfg(target_os = "macos")]
-    apply_macos_fixups(
+    if let Err(err) = apply_macos_fixups(
         &staging.join(
             Path::new(target.library_path)
                 .file_name()
                 .unwrap_or_default(),
         ),
-    )?;
+    ) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(err);
+    }
 
     promote_runtime(&root, target, &staging, &final_dir)?;
-    Ok(installed)
+    Ok((installed, true))
 }
 
 /// Stashes any previous runtime aside and promotes `staging` into
@@ -663,6 +685,9 @@ fn promote_runtime(root: &Path, target: &Target, staging: &Path, final_dir: &Pat
         if backup.exists() {
             let _ = std::fs::rename(&backup, final_dir);
         }
+        // Drop the staging copy we just extracted (round-6 mimo: the
+        // publish-failure arm used to strand a fully extracted runtime).
+        let _ = std::fs::remove_dir_all(staging);
         return Err(Error::internal_with_source(
             format!("publish {}", final_dir.display()),
             err,
@@ -989,13 +1014,19 @@ mod tests {
         let dir = runtime_root();
         let _ = std::fs::remove_dir_all(&dir);
         let installed = install(&target, &source, false).expect("install");
+        let (installed, reinstalled) = installed;
+        assert!(reinstalled, "fresh install reports installed");
         assert!(installed.exists(), "library installed");
         let size = std::fs::metadata(&installed).expect("metadata").len();
         assert_eq!(size, target.library_size);
 
-        // Second connect downloads nothing.
+        // Second connect downloads nothing and reports "not installed", so
+        // `connect` does not ask for a daemon restart on a no-op
+        // (round-6 mimo/muse/deepseek).
         let source2 = FakeSource::new(target);
-        install(&target, &source2, false).expect("second install");
+        let (again, reinstalled2) = install(&target, &source2, false).expect("second install");
+        assert_eq!(again, installed, "same library path");
+        assert!(!reinstalled2, "no-op connect reports not installed");
         assert_eq!(source2.calls(), 0, "second connect downloads nothing");
 
         // --force re-downloads.
@@ -1193,6 +1224,8 @@ mod tests {
         let dir = runtime_root();
         let _ = std::fs::remove_dir_all(&dir);
         let installed = install(&target, &source, false).expect("zip install");
+        let (installed, reinstalled) = installed;
+        assert!(reinstalled, "fresh install reports installed");
         assert!(installed.exists(), "dll installed");
         let size = std::fs::metadata(&installed).expect("metadata").len();
         assert_eq!(size, target.library_size);
