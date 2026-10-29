@@ -275,10 +275,18 @@ fn connect_fastembed(args: &FastembedArgs) -> anyhow::Result<()> {
     // mapped (and its cached model instances) until restarted; say so only
     // when this call actually (re)installed the runtime — a no-op
     // `connect` must not ask for a restart (round-6 mimo/muse/deepseek).
-    if reinstalled {
-        println!("note: restart a running detached daemon to pick up the runtime");
+    if let Some(note) = restart_note(reinstalled) {
+        println!("{note}");
     }
     Ok(())
+}
+
+/// FR-13 note for a `connect fastembed` run: present only when the runtime
+/// was actually (re)installed (round-7 deepseek: the decision is a pure
+/// predicate so both branches are unit-testable without a network install).
+#[cfg(feature = "hybrid-local")]
+fn restart_note(reinstalled: bool) -> Option<&'static str> {
+    reinstalled.then_some("note: restart a running detached daemon to pick up the runtime")
 }
 
 /// Reports the macOS code-signature state of an installed runtime library:
@@ -370,6 +378,19 @@ fn write_global_provider_locked(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn restart_note_only_after_a_real_install() {
+        // Round-7 deepseek: both halves of the FR-13 decision are pinned —
+        // a no-op connect stays quiet, a real (re)install asks for the
+        // restart.
+        assert_eq!(super::restart_note(false), None);
+        assert_eq!(
+            super::restart_note(true),
+            Some("note: restart a running detached daemon to pick up the runtime")
+        );
+    }
+
     use super::*;
 
     /// Shared with every other CLI unit-test module (`cli::test_env`);

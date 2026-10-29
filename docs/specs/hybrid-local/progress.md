@@ -448,3 +448,4 @@ Ledger: одна запись на таск (что сделано, чем пр�
 - C5 (P3, no e2e note test): `connect_fastembed_noop_does_not_ask_for_a_restart` seeds the data-dir install so `install` takes the fast path, then asserts the CLI reports the install and prints NO restart note (test count for `tests/connect.rs` is now 7).
 - C6 (P3): `data_dir_library_path` is now `pub(crate)`.
 - OQ-3 resolved by human ruling: live run is manual only; no workflow was created for `hybrid_local_live`.
+- Fix round-7 C5 residual (deepseek P3): the FR-13 decision is now a pure `restart_note(reinstalled)` predicate (cfg-gated with `connect_fastembed`), unit-tested on BOTH branches — the note's positive path is no longer unasserted.
