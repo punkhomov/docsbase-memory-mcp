@@ -509,13 +509,23 @@ fn fastembed_reranker_without_model_is_admission() {
 
 #[cfg(feature = "hybrid-local")]
 #[test]
+#[allow(unsafe_code)] // env isolation under ENV_LOCK, restored in-test
 fn fastembed_without_provider_fails_with_connect_hint() {
     // Provisioning is enforced at stage construction, not at config load
     // (review panel C3): load succeeds, `embedder()` surfaces the hint.
     // Reads DOCSBASE_CACHE_DIR / ORT_DYLIB_PATH via the stage constructor, so
-    // it must serialize against the mutating tests (round-6 deepseek: an
-    // unlocked reader saw another test's env and flipped the hint).
+    // it must serialize against the mutating tests AND isolate itself from
+    // the host environment: an exported `ORT_DYLIB_PATH` would resolve and
+    // turn the expected connect hint into a load error (round-6 deepseek).
     let _env_guard = ENV_LOCK.lock().expect("env lock");
+    let cache = TempDir::new().expect("cache");
+    let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
+    let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
+    // SAFETY: env mutation serialized by ENV_LOCK; restored below.
+    unsafe {
+        std::env::set_var("DOCSBASE_CACHE_DIR", cache.path());
+        std::env::remove_var("ORT_DYLIB_PATH");
+    }
     let config_dir = TempDir::new().expect("tempdir");
     write(
         config_dir.path(),
@@ -523,10 +533,22 @@ fn fastembed_without_provider_fails_with_connect_hint() {
         "[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\n",
     );
     let config = Config::load_from(config_dir.path(), None).expect("load ok");
-    let err = match docsbase_memory::hybrid::local::embedder(
+    let result = docsbase_memory::hybrid::local::embedder(
         config.hybrid_cfg.embedding.as_ref().expect("embedding"),
         &config.providers,
-    ) {
+    );
+    // SAFETY: same locked section as above.
+    unsafe {
+        match prev_cache {
+            Some(value) => std::env::set_var("DOCSBASE_CACHE_DIR", value),
+            None => std::env::remove_var("DOCSBASE_CACHE_DIR"),
+        }
+        match prev_ort {
+            Some(value) => std::env::set_var("ORT_DYLIB_PATH", value),
+            None => std::env::remove_var("ORT_DYLIB_PATH"),
+        }
+    }
+    let err = match result {
         Ok(_) => panic!("expected admission, got an embedder"),
         Err(e) => e,
     };

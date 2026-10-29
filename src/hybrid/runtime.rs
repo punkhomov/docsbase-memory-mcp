@@ -1027,6 +1027,38 @@ mod tests {
     }
 
     #[test]
+    fn promote_runtime_cleans_staging_when_stash_fails() {
+        // Round-6 deepseek: if the old runtime cannot be stashed (a loaded
+        // library blocking the rename on Windows), the extracted staging
+        // tree must not be left behind.
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let target = fake_target();
+        let root = tmp.path().to_path_buf();
+        let final_dir = root.join(target.triple);
+        let staging = root.join(format!(".staging-{}", target.triple));
+        let backup = root.join(format!(".old-{}", target.triple));
+        let installed = final_dir.join(target.library_path);
+        std::fs::create_dir_all(installed.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&installed, b"old-lib").expect("old lib");
+        std::fs::create_dir_all(staging.join(target.library_path).parent().expect("parent"))
+            .expect("staging dirs");
+        std::fs::write(staging.join(target.library_path), b"new-lib").expect("new lib");
+        // A regular file where the backup directory should go makes the
+        // stash rename fail after the staging copy already exists.
+        std::fs::write(&backup, b"not-a-dir").expect("blocking backup file");
+
+        let err = promote_runtime(&root, &target, &staging, &final_dir)
+            .expect_err("stash fails: backup is a file");
+        assert!(err.to_string().contains("stash old runtime"), "{err}");
+        assert!(!staging.exists(), "staging tree removed on stash failure");
+        assert_eq!(
+            std::fs::read(&installed).expect("read"),
+            b"old-lib",
+            "previous runtime untouched"
+        );
+    }
+
+    #[test]
     fn install_verifies_hash_and_is_atomic() {
         let _guard = runtime_test_guard();
         let _data = TestDataDir::new();

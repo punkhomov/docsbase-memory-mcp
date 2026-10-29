@@ -198,6 +198,13 @@ mod tests {
         // so env mutation cannot race parallel tests (round-4 C1: the real
         // wrapper must route locks to `<data>/locks`, never next to the
         // target — the `..._in` variant above cannot pin that).
+        //
+        // The guard matters in the `hybrid-local` build, where runtime tests
+        // mutate the same variable through `TestDataDir`: without it this
+        // test can enter the re-exec branch with no override and then read a
+        // sandbox value at the assert (round-6 deepseek).
+        #[cfg(feature = "hybrid-local")]
+        let _env_guard = crate::hybrid::runtime::test_env::runtime_test_guard();
         if std::env::var_os("DOCSBASE_DATA_DIR").is_none() {
             let exe = std::env::current_exe().expect("current exe");
             let tmp = tempfile::TempDir::new().expect("tmp");
