@@ -49,6 +49,9 @@ applies `baseline_p95 × 1.5 × DOCSBASE_BENCH_LATENCY_SLACK + 5 ms` (CI sets th
 factor to 3, locally it is 1.0) with the absolute 500 ms ceiling unscaled —
 see `docs/specs/search-benchmark/requirements.md` FR-22, Delta 2026-10-29.
 
+CI lanes, cache and timing decisions are documented in `docs/ci.md` (why not
+one all-features artifact, why not a 2^n x OS matrix, why per-job caches).
+
 Search-benchmark gate policy (DELTA-3): the gate test
 (`metrics_match_baseline`) runs inside the required `linux` CI job — a red
 gate is a red `linux` check, which branch protection blocks from merging.

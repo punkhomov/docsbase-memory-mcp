@@ -20,6 +20,10 @@ A malicious or compromised crate version can enter the build through:
 1. **Direct dependencies** — versions we declare in `Cargo.toml` / workflows.
 2. **Transitive dependencies** — versions the resolver picks into `Cargo.lock`.
 3. **Build actions** — third-party GitHub Actions pinned in workflows.
+   Current set: `actions/checkout@v7`, `dtolnay/rust-toolchain@1.88.0`,
+   `Swatinem/rust-cache@v2`, `taiki-e/install-action@v2` (installs `cargo
+   hack` for the feature-powerset compile matrix, see `docs/ci.md`), plus the
+   repo-local `./.github/actions/new-commits`.
 4. **Stale tooling** — a resolver that silently ignores our policy keys.
 
 `Cargo.lock` records versions and checksums but **no publish dates**, so the

@@ -27,6 +27,12 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ### Changed
 
+- CI lanes rebalanced (`docs/ci.md`): the combo feature build is now the single
+  runtime lane for provider features, the feature axis is covered by
+  `cargo hack --feature-powerset --depth 2`, macOS/Windows additionally execute
+  the hermetic `--features hybrid-local --lib` suite, and the release ANN
+  (SC-4) check moved to `nightly`. Offline latency budgets are host-relative
+  (`baseline_p95 × 1.5 × DOCSBASE_BENCH_LATENCY_SLACK + 5 ms`, CI factor 3).
 - Hybrid default model pins are free OpenRouter routes
   (`nvidia/nemotron-3-embed-1b:free` @2048, `nvidia/llama-nemotron-rerank-vl-1b-v2:free`).
   Free routes may train on prompts and rotate monthly; paid pins stay
@@ -34,6 +40,12 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ### Fixed
 
+- Windows/macOS CI portability of the `hybrid-local` code: the macOS signature
+  helper is gated on the feature (dead-code lint in the default build),
+  `OsStrExt::encode_wide` replaces the non-existent `OsStr::encode_utf16`, and
+  the Win32 `GetDiskFreeSpaceExW` call passes a raw pointer (clippy
+  `borrow_as_ptr`). `config_runtime::watcher_uses_reopened_config` gets a
+  platform deadline (60 s on Windows) instead of a fixed 15 s.
 - ANN tier (spec `docs/specs/ann-index`, Delta 0.3): release builds no longer
   use `panic = "abort"`, which had silently disabled the corrupt-dump → exact
   fallback and aborted the daemon instead (compile-time guard added, release
