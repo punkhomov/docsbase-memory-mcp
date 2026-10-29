@@ -463,7 +463,7 @@ MCP management tools, `docsbase serve` model endpoints, quantized-on-the-fly con
   sizes for the five targets — a **T2 deliverable** (official Microsoft release archives;
   macOS x86_64 is not published). Until filled, preflight tests use a fake `Target`; SC-2/
   SC-7 cannot be completed without it.
-- **OQ-3.** Live CI run cadence for a real model — default: manual/nightly, never per-PR.
+- **OQ-3.** Live CI run cadence for a real model — **resolved 2026-10-26 by human ruling: manual only.** `tests/hybrid_local_live.rs` stays `#[ignore]` and keeps NO workflow of its own (a scheduled workflow was considered and explicitly declined); SC-7 evidence is the recorded live run in `progress.md` (T8). Never per-PR.
 - **OQ-5.** Multilingual default: E5-small int8 (118 MB, prefixes) vs bge-small (English,
   133 MB). Proposed: list both; docs recommend E5 for RU/EN; no automatic default.
 - **OQ-7.** Mixed providers per stage (fastembed embedding + OpenRouter rerank): allowed by

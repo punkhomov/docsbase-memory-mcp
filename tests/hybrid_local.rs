@@ -17,14 +17,21 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[allow(unsafe_code)] // env mutation is confined to the locked section
 fn with_isolated_empty_cache<T>(f: impl FnOnce() -> T) -> T {
-    let _guard = ENV_LOCK.lock().expect("env lock");
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cache = TempDir::new().expect("cache");
     let config = TempDir::new().expect("config");
     let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
     let prev_config = std::env::var_os("DOCSBASE_CONFIG_DIR");
+    // `runtime::resolve` honours `ORT_DYLIB_PATH` before every other source,
+    // so a host-exported value would turn the asserted connect hint into a
+    // resolved runtime (round-7 C2).
+    let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
     unsafe {
         std::env::set_var("DOCSBASE_CACHE_DIR", cache.path());
         std::env::set_var("DOCSBASE_CONFIG_DIR", config.path());
+        std::env::remove_var("ORT_DYLIB_PATH");
     }
     let out = f();
     unsafe {
@@ -35,6 +42,10 @@ fn with_isolated_empty_cache<T>(f: impl FnOnce() -> T) -> T {
         match prev_config {
             Some(value) => std::env::set_var("DOCSBASE_CONFIG_DIR", value),
             None => std::env::remove_var("DOCSBASE_CONFIG_DIR"),
+        }
+        match prev_ort {
+            Some(value) => std::env::set_var("ORT_DYLIB_PATH", value),
+            None => std::env::remove_var("ORT_DYLIB_PATH"),
         }
     }
     out
@@ -49,7 +60,10 @@ fn embedder_without_runtime_is_connect_hint() {
         normalize: true,
     };
     let providers = ProvidersCfg::default();
-    let Err(err) = local_embedder(&cfg, &providers) else {
+    // The helper clears a host `ORT_DYLIB_PATH`, which would otherwise
+    // resolve and produce a load error instead of the connect hint
+    // (round-7 C2).
+    let Err(err) = with_isolated_empty_cache(|| local_embedder(&cfg, &providers)) else {
         panic!("expected admission without a runtime");
     };
     assert!(matches!(err, Error::Admission { .. }));

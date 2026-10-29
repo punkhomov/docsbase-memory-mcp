@@ -206,8 +206,23 @@ pub enum ProviderState {
 pub struct ProviderStatus {
     /// Readiness state.
     pub state: ProviderState,
+    /// Resolved runtime library the provider would use, when one exists.
+    /// Carried separately from [`reason`](Self::reason) so a `Connected`
+    /// row can show its path in the path column (round-7 C1).
+    pub path: Option<std::path::PathBuf>,
     /// One-line diagnostic for non-Connected states.
     pub reason: Option<String>,
+}
+
+impl ProviderStatus {
+    /// Builds a status with no resolved path.
+    fn state_only(state: ProviderState, reason: Option<String>) -> Self {
+        Self {
+            state,
+            path: None,
+            reason,
+        }
+    }
 }
 
 /// Data-dir ORT install path when one exists. Only the `hybrid-local` build
@@ -230,69 +245,65 @@ fn data_dir_library() -> Option<std::path::PathBuf> {
 /// `OpenRouter` is `Connected` when enabled.
 #[must_use]
 pub fn provider_status(providers: &ProvidersCfg, name: &str) -> ProviderStatus {
+    use ProviderState::{Broken, Connected, NotConnected, Unknown};
     match name {
         PROVIDER_FASTEMBED => {
             let Some(provider) = providers.fastembed.as_ref() else {
-                return ProviderStatus {
-                    state: ProviderState::Unknown,
-                    reason: Some(format!("run `docsbase connect {PROVIDER_FASTEMBED}`")),
-                };
+                return ProviderStatus::state_only(
+                    Unknown,
+                    Some(format!("run `docsbase connect {PROVIDER_FASTEMBED}`")),
+                );
             };
             if !provider.enabled {
-                return ProviderStatus {
-                    state: ProviderState::NotConnected,
-                    reason: Some(format!("run `docsbase connect {PROVIDER_FASTEMBED}`")),
-                };
+                return ProviderStatus::state_only(
+                    NotConnected,
+                    Some(format!("run `docsbase connect {PROVIDER_FASTEMBED}`")),
+                );
             }
             match &provider.runtime_path {
                 // A recorded path that no longer exists is Broken, not
                 // Connected (FR-2).
                 Some(path) if !path.exists() => ProviderStatus {
-                    state: ProviderState::Broken,
+                    state: Broken,
+                    path: Some(path.clone()),
                     reason: Some(format!(
                         "runtime library {} is missing; re-run `docsbase connect {PROVIDER_FASTEMBED} --force`",
                         path.display()
                     )),
                 },
-                Some(_) => ProviderStatus {
-                    state: ProviderState::Connected,
-                    reason: provider.runtime.clone(),
+                Some(path) => ProviderStatus {
+                    state: Connected,
+                    path: Some(path.clone()),
+                    reason: None,
                 },
                 // No recorded path: the resolver falls back to the data-dir
                 // install, so report exactly what it would find (no
                 // recursion into `runtime_status`, which calls back here).
                 None => match data_dir_library() {
                     Some(path) => ProviderStatus {
-                        state: ProviderState::Connected,
-                        reason: Some(path.display().to_string()),
+                        state: Connected,
+                        path: Some(path),
+                        reason: None,
                     },
-                    None => ProviderStatus {
-                        state: ProviderState::NotConnected,
-                        reason: Some(
-                            "runtime not installed; run `docsbase connect fastembed`".to_owned(),
-                        ),
-                    },
+                    None => ProviderStatus::state_only(
+                        NotConnected,
+                        Some("runtime not installed; run `docsbase connect fastembed`".to_owned()),
+                    ),
                 },
             }
         }
         PROVIDER_OPENROUTER => match &providers.openrouter {
-            None => ProviderStatus {
-                state: ProviderState::Unknown,
-                reason: Some("run `docsbase connect openrouter`".to_owned()),
-            },
-            Some(provider) if provider.enabled => ProviderStatus {
-                state: ProviderState::Connected,
-                reason: None,
-            },
-            Some(_) => ProviderStatus {
-                state: ProviderState::NotConnected,
-                reason: Some("run `docsbase connect openrouter`".to_owned()),
-            },
+            None => ProviderStatus::state_only(
+                Unknown,
+                Some("run `docsbase connect openrouter`".to_owned()),
+            ),
+            Some(provider) if provider.enabled => ProviderStatus::state_only(Connected, None),
+            Some(_) => ProviderStatus::state_only(
+                NotConnected,
+                Some("run `docsbase connect openrouter`".to_owned()),
+            ),
         },
-        _ => ProviderStatus {
-            state: ProviderState::Unknown,
-            reason: Some(format!("unknown provider \"{name}\"")),
-        },
+        _ => ProviderStatus::state_only(Unknown, Some(format!("unknown provider \"{name}\""))),
     }
 }
 
@@ -925,10 +936,8 @@ mod tests {
 
         let connected = provider_status(&providers, PROVIDER_FASTEMBED);
         assert_eq!(connected.state, ProviderState::Connected, "{connected:?}");
-        assert_eq!(
-            connected.reason.as_deref(),
-            Some(lib.display().to_string().as_str())
-        );
+        assert_eq!(connected.path.as_deref(), Some(lib.as_path()));
+        assert_eq!(connected.reason, None, "Connected rows carry no diagnostic");
         drop(data);
     }
 
@@ -956,13 +965,18 @@ mod tests {
             fastembed: Some(FastembedProvider {
                 enabled: true,
                 runtime: Some("1.24.4".to_owned()),
-                runtime_path: Some(runtime_path),
+                runtime_path: Some(runtime_path.clone()),
             }),
             openrouter: None,
         };
         let status = provider_status(&connected_fastembed, PROVIDER_FASTEMBED);
         assert_eq!(status.state, Connected);
-        assert_eq!(status.reason.as_deref(), Some("1.24.4"));
+        assert_eq!(
+            status.path.as_deref(),
+            Some(runtime_path.as_path()),
+            "resolved library is reported in the path field"
+        );
+        assert_eq!(status.reason, None, "Connected rows carry no diagnostic");
 
         let disabled = ProvidersCfg {
             fastembed: Some(FastembedProvider {

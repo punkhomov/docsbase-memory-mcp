@@ -6,9 +6,23 @@
 /// runs race each other. Keep this one lock for every env-touching test.
 #[cfg(test)]
 pub(crate) mod test_env {
-    use std::sync::Mutex;
+    /// Single env lock for the whole test binary: the `hybrid-local` build
+    /// shares the runtime guard (which also neutralizes a host
+    /// `ORT_DYLIB_PATH`); the default build has no ORT env surface, so a
+    /// plain mutex is enough (round-7 C2).
+    #[cfg(feature = "hybrid-local")]
+    pub(crate) use crate::hybrid::runtime::test_env::{EnvGuard, env_guard};
 
-    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
+    #[cfg(not(feature = "hybrid-local"))]
+    pub(crate) type EnvGuard = std::sync::MutexGuard<'static, ()>;
+
+    #[cfg(not(feature = "hybrid-local"))]
+    pub(crate) fn env_guard() -> EnvGuard {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 pub mod connect;

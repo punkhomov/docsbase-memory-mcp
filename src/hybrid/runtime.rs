@@ -211,17 +211,23 @@ pub struct RuntimeStatus {
     pub reason: Option<String>,
 }
 
-/// Path of the data-dir ORT install when one exists. This is the fallback
-/// the resolver uses when no `runtime_path` is recorded; it is also what
-/// `config::provider_status` reports for such an entry, so both surfaces
-/// agree (round-6 deepseek). Deliberately provider-free to avoid a
-/// `provider_status` ↔ `runtime_status` cycle.
+/// Data-dir ORT install path, checked for existence. This is the SINGLE
+/// place that computes the fallback `resolve` uses when no `runtime_path` is
+/// recorded, so the resolver and the status surfaces cannot drift
+/// (round-6/round-7 C4). `Err` carries the platform admission (unsupported
+/// target, macOS below the minimum) so `resolve` can fail loudly, while the
+/// status surfaces degrade to "not installed".
+fn data_dir_library_checked() -> Result<Option<PathBuf>> {
+    let installed = library_path(platform_target()?);
+    Ok(installed.exists().then_some(installed))
+}
+
+/// Best-effort data-dir install path for the status surfaces
+/// (`config::provider_status`, `runtime_status`). Deliberately
+/// provider-free to avoid a `provider_status` ↔ `runtime_status` cycle.
 #[must_use]
-pub fn data_dir_library_path() -> Option<PathBuf> {
-    platform_target()
-        .ok()
-        .map(library_path)
-        .filter(|path| path.exists())
+pub(crate) fn data_dir_library_path() -> Option<PathBuf> {
+    data_dir_library_checked().ok().flatten()
 }
 
 /// Computes the fastembed runtime status from the global providers entry and
@@ -674,27 +680,33 @@ pub fn install(
 /// inherent to rename pairs; the restore below covers the rename-failure
 /// path.
 fn promote_runtime(root: &Path, target: &Target, staging: &Path, final_dir: &Path) -> Result<()> {
+    match promote_inner(root, target, staging, final_dir) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            // Single cleanup point for every failure mode (stash rename,
+            // publish rename, restore): the extracted staging tree must
+            // never be left behind (round-6/round-7 C3).
+            let _ = std::fs::remove_dir_all(staging);
+            Err(err)
+        }
+    }
+}
+
+/// Stash-then-publish without cleanup: callers go through
+/// [`promote_runtime`], which removes the staging tree on any error.
+fn promote_inner(root: &Path, target: &Target, staging: &Path, final_dir: &Path) -> Result<()> {
     let backup = root.join(format!(".old-{}", target.triple));
     if final_dir.exists() {
         let _ = std::fs::remove_dir_all(&backup);
-        if let Err(err) = std::fs::rename(final_dir, &backup) {
-            // The previous runtime stays in place; drop the staging copy so
-            // a failed `--force` (e.g. a loaded library blocking the rename)
-            // leaves nothing behind (round-6 deepseek).
-            let _ = std::fs::remove_dir_all(staging);
-            return Err(Error::internal_with_source(
-                format!("stash old runtime {}", final_dir.display()),
-                err,
-            ));
-        }
+        std::fs::rename(final_dir, &backup).map_err(|err| {
+            Error::internal_with_source(format!("stash old runtime {}", final_dir.display()), err)
+        })?;
     }
     if let Err(err) = std::fs::rename(staging, final_dir) {
+        // Try to restore the previous runtime before surfacing the error.
         if backup.exists() {
             let _ = std::fs::rename(&backup, final_dir);
         }
-        // Drop the staging copy we just extracted (round-6 mimo: the
-        // publish-failure arm used to strand a fully extracted runtime).
-        let _ = std::fs::remove_dir_all(staging);
         return Err(Error::internal_with_source(
             format!("publish {}", final_dir.display()),
             err,
@@ -741,15 +753,17 @@ pub fn resolve(cfg: &ProvidersCfg) -> Result<PathBuf> {
             }
             // Provider enabled but no explicit path: fall back to the
             // data-dir install produced by `connect fastembed` (FR-11
-            // order: env → runtime_path → data-dir → admission).
-            let installed = library_path(platform_target()?);
-            if installed.exists() {
+            // order: env → runtime_path → data-dir → admission). The
+            // computation is shared with the status surfaces so the two can
+            // never disagree about which path counts as installed.
+            if let Some(installed) = data_dir_library_checked()? {
                 return Ok(installed);
             }
+            let slot = library_path(platform_target()?);
             Err(Error::Admission {
                 message: format!(
                     "fastembed has no runtime path and the data-dir install {} is missing; run `docsbase connect fastembed`",
-                    installed.display()
+                    slot.display()
                 ),
             })
         }
@@ -806,14 +820,55 @@ pub fn init(path: &Path) -> Result<()> {
 pub(crate) mod test_env {
     use std::sync::Mutex;
 
-    /// Serializes tests that touch the data dir / runtime root.
+    /// Serializes every test that touches the data dir, the runtime root or
+    /// `ORT_DYLIB_PATH`. Shared with the CLI and local-model tests through
+    /// `cli::test_env::env_guard`, so there is exactly one env lock.
     static RUNTIME_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Poison-tolerant guard (a panicked sibling must not cascade).
-    pub(crate) fn runtime_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        RUNTIME_TEST_LOCK
+    /// Poison-tolerant env guard: holds the single env lock for its
+    /// lifetime and hides a host-exported `ORT_DYLIB_PATH` (restored on
+    /// drop), because `runtime::resolve` honours it before any provider or
+    /// data-dir fallback — an exported override silently flips every
+    /// resolution test (round-7 C2). Tests that exercise the override set
+    /// the variable again AFTER taking the guard.
+    pub(crate) struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        old_ort: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for EnvGuard {
+        #[allow(unsafe_code)] // test-only env restore
+        fn drop(&mut self) {
+            match &self.old_ort {
+                Some(value) => unsafe {
+                    std::env::set_var("ORT_DYLIB_PATH", value);
+                },
+                None => unsafe {
+                    std::env::remove_var("ORT_DYLIB_PATH");
+                },
+            }
+        }
+    }
+
+    /// Poison-tolerant env guard (a panicked sibling must not cascade).
+    #[allow(unsafe_code)] // test-only env mutation, restored on drop
+    pub(crate) fn env_guard() -> EnvGuard {
+        let lock = RUNTIME_TEST_LOCK
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let old_ort = std::env::var_os("ORT_DYLIB_PATH");
+        unsafe {
+            std::env::remove_var("ORT_DYLIB_PATH");
+        }
+        EnvGuard {
+            _lock: lock,
+            old_ort,
+        }
+    }
+
+    /// Alias kept for the runtime tests' wording.
+    pub(crate) fn runtime_test_guard() -> EnvGuard {
+        env_guard()
     }
 
     /// Test-only RAII: points `DOCSBASE_DATA_DIR` at a fresh temporary
@@ -879,6 +934,7 @@ mod tests {
         calls: Arc<AtomicUsize>,
         target: Target,
         corrupt: bool,
+        omit_library: bool,
     }
 
     impl FakeSource {
@@ -886,11 +942,19 @@ mod tests {
             self.calls.load(Ordering::Relaxed)
         }
 
+        /// Source whose (hash-valid) archive contains no library entry.
+        fn without_library(target: Target) -> Self {
+            let mut source = Self::new(target);
+            source.omit_library = true;
+            source
+        }
+
         fn new(target: Target) -> Self {
             Self {
                 calls: Arc::new(AtomicUsize::new(0)),
                 target,
                 corrupt: false,
+                omit_library: false,
             }
         }
 
@@ -901,8 +965,13 @@ mod tests {
             header.set_size(content.len() as u64);
             header.set_mode(0o755);
             header.set_cksum();
+            let entry = if self.omit_library {
+                "not-the-library.txt"
+            } else {
+                self.target.library_path
+            };
             builder
-                .append_data(&mut header, self.target.library_path, &content[..])
+                .append_data(&mut header, entry, &content[..])
                 .expect("append");
             let plain = builder.into_inner().expect("finish tar");
             let mut encoder =
@@ -921,6 +990,35 @@ mod tests {
                 });
             }
             Ok(self.build_archive())
+        }
+    }
+
+    /// Builds a target whose size/sha256 match an archive of `entry` bytes
+    /// of `12_345` filler (the extract-arm test needs a hash-valid archive).
+    fn fake_target_with_entry(entry: &str) -> Target {
+        let content = vec![0xAB; 12_345];
+        let archive = {
+            let mut builder = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, entry, &content[..])
+                .expect("append");
+            let plain = builder.into_inner().expect("finish tar");
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(&plain).expect("gzip");
+            encoder.finish().expect("gzip finish")
+        };
+        Target {
+            triple: "x86_64-unknown-linux-gnu",
+            archive_url: "https://example.invalid/fake.tgz",
+            archive_sha256: Box::leak(sha256_hex(&archive).into_boxed_str()),
+            archive_size: archive.len() as u64,
+            library_path: "onnxruntime-linux-x64-1.24.4/lib/libonnxruntime.so.1.24.4",
+            library_size: content.len() as u64,
         }
     }
 
@@ -1056,6 +1154,31 @@ mod tests {
             b"old-lib",
             "previous runtime untouched"
         );
+    }
+
+    #[test]
+    fn install_extract_failure_leaves_no_staging() {
+        // Round-7 C3: the archive passes size+sha256 but has no library
+        // entry, so extraction fails AFTER staging exists — the staging
+        // tree must be removed.
+        let _guard = runtime_test_guard();
+        let _data = TestDataDir::new();
+        let target = fake_target_with_entry("not-the-library.txt");
+        let source = FakeSource::without_library(target);
+        let dir = runtime_root();
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = install(&target, &source, false).expect_err("extract fails");
+        assert!(err.to_string().contains("runtime"), "{err}");
+        let staging = dir.join(format!(".staging-{}", target.triple));
+        assert!(
+            !staging.exists(),
+            "staging tree removed after extract failure"
+        );
+        assert!(
+            !library_path(&target).exists(),
+            "no library published on failure"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

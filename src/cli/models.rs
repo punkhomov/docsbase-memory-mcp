@@ -1400,7 +1400,7 @@ mod tests {
     #[cfg(feature = "hybrid-remote")]
     use crate::hybrid::wire::{Transport, TransportResponse};
 
-    use crate::cli::test_env::ENV_LOCK;
+    use crate::cli::test_env::env_guard;
 
     #[allow(unsafe_code)] // env mutation is confined to this locked section
     fn with_env<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V, f: impl FnOnce()) {
@@ -1411,7 +1411,7 @@ mod tests {
     /// shared env lock (nested `with_env` calls would deadlock).
     #[allow(unsafe_code)] // env mutation is confined to this locked section
     fn with_envs<K: AsRef<OsStr>, V: AsRef<OsStr>>(pairs: &[(K, V)], f: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = env_guard();
         // std::env::{set_var,remove_var} are unsafe in edition 2024.
         // SAFETY: env vars are only mutated inside this lock, and the test
         // process runs a single thread at this point (no concurrent access).
@@ -1441,7 +1441,7 @@ mod tests {
     #[cfg_attr(not(feature = "hybrid-remote"), allow(dead_code))]
     #[allow(unsafe_code)]
     fn without_env<K: AsRef<OsStr>>(key: K, f: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = env_guard();
         let prev = std::env::var_os(key.as_ref());
         unsafe {
             std::env::remove_var(key.as_ref());

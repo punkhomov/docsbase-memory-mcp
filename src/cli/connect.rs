@@ -84,14 +84,13 @@ fn print_status() -> Result<()> {
                 .unwrap_or("-"),
             _ => "-",
         };
-        let path = match name {
-            PROVIDER_FASTEMBED => providers
-                .fastembed
-                .as_ref()
-                .and_then(|provider| provider.runtime_path.as_ref())
-                .map_or_else(|| "-".to_owned(), |path| path.display().to_string()),
-            _ => "-".to_owned(),
-        };
+        // The resolved library comes from the status, not from the config
+        // field: an entry without `runtime_path` still resolves through the
+        // data-dir install, and that path must show up here (round-7 C1).
+        let path = status
+            .path
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), |path| path.display().to_string());
         println!(
             "{name}\t{}\t{version}\t{path}\t{}",
             state_label(status.state),
@@ -375,8 +374,8 @@ mod tests {
 
     /// Shared with every other CLI unit-test module (`cli::test_env`);
     /// env mutation must be serialized process-wide.
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        crate::cli::test_env::ENV_LOCK.lock().expect("env lock")
+    fn env_guard() -> crate::cli::test_env::EnvGuard {
+        crate::cli::test_env::env_guard()
     }
 
     /// Fake transport that records the requested URL and replays a scripted

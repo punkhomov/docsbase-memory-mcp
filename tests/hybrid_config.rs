@@ -3,7 +3,7 @@
 //! offline build and in `--features hybrid-remote` (SC-3, SC-4).
 
 #[cfg(feature = "hybrid-local")]
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use docsbase_memory::error::Error;
 use docsbase_memory::hybrid::Ranking;
@@ -43,7 +43,7 @@ fn jobs_embed_texts_threads_real_providers() {
         openrouter: None,
     };
     let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
-    let env_guard = ENV_LOCK.lock().expect("env lock");
+    let env_guard = env_guard();
     // SAFETY: single-threaded under the shared module lock; restored
     // immediately after (round-2 M3: sibling env-mutating tests are
     // serialized through the same lock).
@@ -345,6 +345,46 @@ fn fastembed_only_config_does_not_demand_openrouter_key() {
 #[cfg(feature = "hybrid-local")]
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Lock plus a cleared `ORT_DYLIB_PATH`: `runtime::resolve` ranks the env
+/// override above every provider/data-dir source, so a host-exported value
+/// would flip the asserted hint (round-7 C2). Restores the value on drop.
+#[cfg(feature = "hybrid-local")]
+struct EnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    old_ort: Option<std::ffi::OsString>,
+}
+
+#[cfg(feature = "hybrid-local")]
+impl Drop for EnvGuard {
+    #[allow(unsafe_code)] // test-only env restore
+    fn drop(&mut self) {
+        match &self.old_ort {
+            Some(value) => unsafe {
+                std::env::set_var("ORT_DYLIB_PATH", value);
+            },
+            None => unsafe {
+                std::env::remove_var("ORT_DYLIB_PATH");
+            },
+        }
+    }
+}
+
+#[cfg(feature = "hybrid-local")]
+#[allow(unsafe_code)] // test-only env mutation, restored on drop
+fn env_guard() -> EnvGuard {
+    let lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let old_ort = std::env::var_os("ORT_DYLIB_PATH");
+    unsafe {
+        std::env::remove_var("ORT_DYLIB_PATH");
+    }
+    EnvGuard {
+        _lock: lock,
+        old_ort,
+    }
+}
+
 #[cfg(feature = "hybrid-local")]
 #[test]
 #[allow(unsafe_code)] // env isolation under the local lock
@@ -377,7 +417,7 @@ fn from_config_fastembed_uses_real_provider_config() {
         ..HybridCfg::default()
     };
 
-    let _env_guard = ENV_LOCK.lock().expect("env lock");
+    let _env_guard = env_guard();
     let prev = std::env::var_os("DOCSBASE_CACHE_DIR");
     // SAFETY: single-threaded under the local lock.
     unsafe {

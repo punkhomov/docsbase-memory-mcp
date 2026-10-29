@@ -439,3 +439,12 @@ Ledger: одна запись на таск (что сделано, чем пр�
   - C4 (P2, VERIFIED): `resolve` inlines the data-dir fallback instead of calling `data_dir_library_path`, so their error mapping diverges (`platform_target` Err → `None`/"not installed" vs propagated admission) on unsupported/old-macOS targets.
   - C5 (P3, VERIFIED): no end-to-end assertion of the FR-13 restart note in `tests/connect.rs` (the `reinstalled` bool is pinned in `runtime.rs`).
   - C6 (P3, VERIFIED): `runtime::data_dir_library_path` is `pub` while every consumer is in-crate.
+
+## Round-7 findings C1–C6 — fixed
+- C1 (P2, print layer): `ProviderStatus` gained `path: Option<PathBuf>`; `Connected` rows now carry the resolved library in `path` with `reason: None`, and `print_status` prints `status.path` instead of re-reading `runtime_path`. Verified by CLI run: data-dir install → `Connected … <path>  -`; no install → `NotConnected  -  runtime not installed; run …`.
+- C2 (P2, host-dependent tests): one env guard now hides a host-exported `ORT_DYLIB_PATH` — `runtime::test_env::env_guard()` (single lock, poison-tolerant, restores on drop) is re-exported as `cli::test_env::env_guard` for `hybrid-local` builds; `hybrid::local`, `cli::models`, `cli::connect` tests use it; `tests/config.rs`, `tests/hybrid_config.rs`, `tests/hybrid_local.rs` clear the variable the same way; CLI-spawning suites (`tests/cli_models.rs`, `tests/connect.rs`) `env_remove` it for the child. Evidence: with `ORT_DYLIB_PATH` pointing at a fake library the lib suite is 201/0 (was 181/19) and `hybrid_local`/`cli_models`/`connect`/`hybrid_config`/`config`/`hybrid_models` are all green.
+- C3 (P2, untested cleanup arms): `promote_runtime` now wraps `promote_inner` and removes the staging tree in ONE place on any error (stash, publish or restore), so the stash test covers both renames; new `install_extract_failure_leaves_no_staging` uses a hash-valid archive without the library entry to exercise the extract arm.
+- C4 (P2, duplicated fallback): `data_dir_library_checked()` is the single computation; `resolve` consumes it (propagating the platform admission) and the status surfaces use the best-effort `data_dir_library_path()` wrapper.
+- C5 (P3, no e2e note test): `connect_fastembed_noop_does_not_ask_for_a_restart` seeds the data-dir install so `install` takes the fast path, then asserts the CLI reports the install and prints NO restart note.
+- C6 (P3): `data_dir_library_path` is now `pub(crate)`.
+- OQ-3 resolved by human ruling: live run is manual only; no workflow was created for `hybrid_local_live`.

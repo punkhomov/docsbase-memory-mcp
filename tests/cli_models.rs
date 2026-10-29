@@ -24,6 +24,12 @@ impl Env {
         let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("docsbase");
         cmd.env("DOCSBASE_CACHE_DIR", self.cache.path());
         cmd.env("DOCSBASE_CONFIG_DIR", self.config.path());
+        // Host-independent: `runtime::resolve` honours `ORT_DYLIB_PATH`
+        // before any provider/data-dir fallback, so an exported override
+        // would turn the asserted connect/fetch hints into a load error
+        // (round-7 C2).
+        cmd.env_remove("ORT_DYLIB_PATH");
+        cmd.env_remove("DOCSBASE_DATA_DIR");
         cmd
     }
 }

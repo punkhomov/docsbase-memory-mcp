@@ -741,7 +741,7 @@ mod tests {
     /// through the shared CLI lock.
     #[allow(unsafe_code)] // env mutation is confined to the locked section
     fn with_isolated_empty_cache<T>(f: impl FnOnce() -> T) -> T {
-        let _guard = crate::cli::test_env::ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::cli::test_env::env_guard();
         let cache = tempfile::TempDir::new().expect("tmp");
         let config = tempfile::TempDir::new().expect("tmp");
         let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
