@@ -358,7 +358,7 @@ pub fn available_space(path: &Path) -> io::Result<u64> {
     let ok = unsafe {
         GetDiskFreeSpaceExW(
             wide.as_ptr(),
-            &mut free_bytes,
+            &raw mut free_bytes,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         )
