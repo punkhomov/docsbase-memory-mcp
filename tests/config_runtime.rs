@@ -318,6 +318,15 @@ fn broken_global_config_blocks_open_until_restart() {
     assert_eq!(status["restart_required"], false, "status: {status}");
 }
 
+/// Watcher batches are coarse-grained on Windows (`ReadDirectoryChangesW`
+/// coalesces and only reports after the buffer fills or a short idle gap) and
+/// shared CI runners run these debug builds ~2-3x slower than a dev host, so
+/// the same batch can take 4-5x longer there. The bound only gates the
+/// failure path: a passing run returns as soon as the entry is indexed.
+fn watcher_deadline() -> Duration {
+    Duration::from_secs(if cfg!(windows) { 60 } else { 20 })
+}
+
 #[test]
 fn watcher_uses_reopened_config() {
     let mut env = Env::new(&[
@@ -336,7 +345,7 @@ fn watcher_uses_reopened_config() {
     // Run one watcher batch under v1 so the filter caches bbb as indexable;
     // the v2 swap must invalidate that cache too.
     write_file(env.root(), "bbb/seed.md", doc("seedwidget").as_bytes());
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + watcher_deadline();
     while Instant::now() < deadline && search(&mut first, "seedwidget").is_empty() {
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -353,7 +362,7 @@ fn watcher_uses_reopened_config() {
     write_file(env.root(), "aaa/a.md", doc("alphawidget9").as_bytes());
     write_file(env.root(), "bbb/b.md", doc("betawidget9").as_bytes());
 
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + watcher_deadline();
     let mut found = false;
     while Instant::now() < deadline {
         if search(&mut second, "alphawidget9") == vec!["aaa/a.md"] {

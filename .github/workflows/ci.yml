@@ -38,6 +38,7 @@ jobs:
           test -f docs/CONFIG.md
           test -f docs/MCP.md
           test -f docs/ARCHITECTURE.md
+          test -f docs/ci.md
           sh -n install.sh
           VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
           grep -q "\[$VERSION\]" CHANGELOG.md || (echo "::error::CHANGELOG.md has no [$VERSION] entry" && exit 1)
@@ -79,10 +80,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Feature lints (hybrid-remote)
         run: cargo clippy --locked --features hybrid-remote --all-targets -- -D warnings
-      - name: Feature suite (fixtures only, no network)
-        run: cargo test --locked --features hybrid-remote
-      - name: ANN fallback survives the release panic strategy (SC-4)
-        run: cargo test --release --locked --features hybrid-remote --test hybrid_ann ann_load_failure_falls_back_to_exact -- --exact
+      # The remote-only runtime paths are also exercised by the combo suite in
+      # `linux-local`; what only a single-feature build can prove is that the
+      # crate compiles and links with `hybrid-local` absent, plus the
+      # feature-admission assertions. Rationale: docs/ci.md.
+      - name: Feature-sensitive tests (hybrid-remote only)
+        run: |
+          cargo test --locked --features hybrid-remote --test hybrid_config \
+            --test config --test hybrid_openrouter
       - name: Default build stays offline (NFR-1, SC-1)
         run: |
           if cargo tree --locked -e normal | grep -wE 'fastembed|ort|tokenizers|hf-hub|image|native-tls|ureq|reqwest'; then
@@ -112,8 +117,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Feature lints (hybrid-local)
         run: cargo clippy --locked --features hybrid-local --all-targets -- -D warnings
-      - name: Feature suite (offline; no model downloads)
-        run: cargo test --locked --features hybrid-local
+      # Compile matrix for the feature axis: every 1- and 2-feature
+      # combination, all targets. Catches "compiles only with exactly these
+      # two features on" without a 2^n x OS test matrix (docs/ci.md).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - name: Feature matrix compiles (powerset, depth 2)
+        run: cargo hack check --locked --feature-powerset --depth 2 --all-targets
+      # The combo suite below is the runtime lane for every provider feature;
+      # this single-feature run keeps the assertions that only a build without
+      # the other feature can make.
+      - name: Feature-sensitive tests (hybrid-local only; offline)
+        run: |
+          cargo test --locked --features hybrid-local --test cli_models \
+            --test hybrid_config --test hybrid_local --test hybrid_models --test connect
       - name: Combined-feature suite (hybrid-local + hybrid-remote; offline)
         run: cargo test --locked --features hybrid-local,hybrid-remote
       - name: Combined-feature lints (hybrid-local + hybrid-remote)
@@ -134,6 +152,12 @@ jobs:
           cargo clippy --all-targets -- -D warnings
       - name: hybrid-local compiles (check-only, no downloads)
         run: cargo check --locked --features hybrid-local --all-targets
+      # Hermetic (fakes only, no downloads, no ORT dylib): this executes the
+      # platform-specific provisioning code — rename-over-existing, secure
+      # dirs, staging containers — on the real Windows filesystem instead of
+      # merely type-checking it (docs/ci.md).
+      - name: hybrid-local lib suite (no downloads)
+        run: cargo test --locked --features hybrid-local --lib
       - name: Functional suite (daemon + CLI + MCP, ADR-10)
         run: cargo test --locked
 
@@ -157,5 +181,11 @@ jobs:
           cargo clippy --all-targets -- -D warnings
       - name: hybrid-local compiles (check-only, no downloads)
         run: cargo check --locked --features hybrid-local --all-targets
+      # Hermetic (fakes only, no downloads, no ORT dylib): this executes the
+      # platform-specific provisioning code — rename-over-existing, secure
+      # dirs, staging containers — on the real Windows/macOS filesystem
+      # instead of merely type-checking it (docs/ci.md).
+      - name: hybrid-local lib suite (no downloads)
+        run: cargo test --locked --features hybrid-local --lib
       - name: Functional suite (macOS, aarch64)
         run: cargo test --locked

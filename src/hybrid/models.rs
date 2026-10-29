@@ -1728,9 +1728,17 @@ mod tests {
         let _shared = lock.try_read().expect("shared lock acquired");
         let started = std::time::Instant::now();
         let err = fetch_into(&entry, &source, true, &dir).expect_err("bounded refusal");
+        // The bound is relative to the nominal retry budget. A hard 2 s
+        // assumed `sleep(20ms)` sleeps exactly 20 ms, but the lib suite runs
+        // ~200 tests in parallel and the macOS runner overshoots each sleep
+        // 2x (CI run 40895556715). 10x the nominal budget still catches a
+        // retry loop that grew into a real backoff; a blocking lock would
+        // hang outright, since the holder lives for the whole test.
+        let nominal = EXCLUSIVE_LOCK_RETRY_DELAY * EXCLUSIVE_LOCK_RETRIES;
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "refused promptly, not hung"
+            started.elapsed() < nominal * 10,
+            "refused promptly, not hung: took {:?}, nominal budget {nominal:?}",
+            started.elapsed()
         );
         assert!(matches!(err, Error::Admission { .. }));
         assert!(err.to_string().contains("in use"), "{err}");

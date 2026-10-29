@@ -1131,22 +1131,24 @@ mod tests {
         // tree must not be left behind.
         let tmp = tempfile::TempDir::new().expect("tmp");
         let target = fake_target();
-        let root = tmp.path().to_path_buf();
-        let final_dir = root.join(target.triple);
-        let staging = root.join(format!(".staging-{}", target.triple));
-        let backup = root.join(format!(".old-{}", target.triple));
+        // The stash rename must fail on every platform. A file parked at the
+        // backup path does NOT do that on Windows: `fs::rename` is
+        // `MoveFileExW` + REPLACE_EXISTING, which replaces an existing *file*
+        // with the directory (CI run 40895556715). Renaming into a missing
+        // parent fails everywhere, so the runtime root is simply absent.
+        let root = tmp.path().join("absent-root");
+        let live = tmp.path().join("live");
+        let final_dir = live.join(target.triple);
+        let staging = live.join(format!(".staging-{}", target.triple));
         let installed = final_dir.join(target.library_path);
         std::fs::create_dir_all(installed.parent().expect("parent")).expect("mkdir");
         std::fs::write(&installed, b"old-lib").expect("old lib");
         std::fs::create_dir_all(staging.join(target.library_path).parent().expect("parent"))
             .expect("staging dirs");
         std::fs::write(staging.join(target.library_path), b"new-lib").expect("new lib");
-        // A regular file where the backup directory should go makes the
-        // stash rename fail after the staging copy already exists.
-        std::fs::write(&backup, b"not-a-dir").expect("blocking backup file");
 
         let err = promote_runtime(&root, &target, &staging, &final_dir)
-            .expect_err("stash fails: backup is a file");
+            .expect_err("stash fails: the runtime root is absent");
         assert!(err.to_string().contains("stash old runtime"), "{err}");
         assert!(!staging.exists(), "staging tree removed on stash failure");
         assert_eq!(
