@@ -104,3 +104,30 @@
 - Verify после правок: `--lib` default 130, `hybrid-local` 209, `hybrid-remote`
   144, combo 223; clippy `--all-targets -D warnings` чисто во всех четырёх;
   fmt чисто.
+
+## T2 — `from_config` и `provider_status` через таблицу
+
+- `Task <T2>: complete`. `from_config(cfg, providers)` → `from_config_with(table,
+  cfg, providers)`: таблица — параметр (FR-10), внутри один `build_stages` на
+  провайдера, клиент `OpenRouter` по-прежнему создаётся один раз на конфиг.
+  `provider_status` = обёртка над `Provider::status` (неизвестное имя остаётся
+  диагностикой `Unknown` с причиной, а не внутренней ошибкой).
+  Тела `provider_status` переехали в реализации провайдеров; `validate_stage_shapes`
+  проверяет принадлежность по реестру, сохраняя прежние тексты
+  (`hybrid.embedding: unknown provider "x" (supported: …)`).
+- Проверка: lib default 130 / local 209 / remote 144 / combo 223; `config` 22,
+  `hybrid_config` 13 (combo) и 7 (default), `cli_models` 23, `connect` 7,
+  `hybrid_local` 3, `hybrid_models` 4, `hybrid_openrouter` 20; clippy
+  `--all-targets -D warnings` чисто (default и combo); fmt чисто.
+- Ruling: гейт фичи стал **compile-time** (`Provider::enabled()`), поэтому
+  параметры `remote_on`/`local_on` у `from_config` удалены — все 8 вызывающих
+  передавали туда `cfg!(…)`, то есть дублировали одно и то же знание. Тесты,
+  которым нужен «выключенный» провайдер, используют `from_config_with` с
+  таблицей, где провайдер объявлен как feature-disabled (`DisabledProvider` в
+  `tests/hybrid_config.rs`), а настоящий текст сообщения проверяется прямым
+  вызовом `Provider::feature_missing()` (реальные «feature off»-сборки гоняются
+  отдельными CI-лейнами).
+- minor (deferred): `resolve_embedding`/`resolve_reranker` пока остаются
+  свободными функциями в `config.rs` с `match provider` — их тела переезжают в
+  провайдеров в T4 (там же `resolve_window` и границы окна), до тех пор
+  `rg`-гейт T6 не применяется.

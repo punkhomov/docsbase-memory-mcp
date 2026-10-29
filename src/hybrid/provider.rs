@@ -10,11 +10,15 @@
 //! (`src/cli/connect.rs`), so the core never imports `cli` and the default
 //! offline build never drags `ureq`/`zip` in through this table.
 
+use std::sync::Arc;
+
 use super::config::{
     EmbeddingCfg, PROVIDER_FASTEMBED, PROVIDER_OPENROUTER, ProviderStatus, ProvidersCfg,
     RerankerCfg,
 };
 use crate::error::{Error, Result};
+use crate::hybrid::Reranker;
+use crate::vector_cache::Embedder;
 
 /// Role of a model. Lives here rather than in `models` so the registry can name
 /// it in every build: `models` is gated by `hybrid-local`.
@@ -104,6 +108,9 @@ impl std::fmt::Display for ModelAddress<'_> {
     }
 }
 
+/// The pair of stages a provider can build: embedding and rerank.
+pub type Stages = (Option<Arc<dyn Embedder>>, Option<Arc<dyn Reranker>>);
+
 /// One row of the provider registry (FR-5).
 ///
 /// Everything the core needs to resolve and build a provider's stages. A
@@ -147,6 +154,31 @@ pub trait Provider: Sync {
         normalize: bool,
     ) -> Result<EmbeddingCfg>;
 
+    /// Builds the stages this provider owns. One call for both stages so a
+    /// provider can share expensive resources between them (the `OpenRouter`
+    /// client owns a `reqwest::Client` and a `tokio::Runtime`).
+    ///
+    /// # Errors
+    /// Propagates provider construction (missing key, missing runtime/model,
+    /// feature-off admission).
+    fn build_stages(
+        &self,
+        embedding: Option<&EmbeddingCfg>,
+        reranker: Option<&RerankerCfg>,
+        providers: &ProvidersCfg,
+    ) -> Result<Stages>;
+
+    /// The admission raised when a stage needs this provider but the build
+    /// lacks its feature. Provider-owned so the corrective action stays exact.
+    fn feature_missing(&self) -> Error {
+        Error::Admission {
+            message: format!(
+                "hybrid is enabled with a \"{}\" stage but this build lacks the required feature; rebuild with it or set hybrid = false",
+                self.name()
+            ),
+        }
+    }
+
     /// Provider-specific validation and defaults for the rerank stage,
     /// including the window bounds (one owner for the `MIN..=MAX` range).
     ///
@@ -173,7 +205,76 @@ impl Provider for FastembedProvider {
     }
 
     fn status(&self, providers: &ProvidersCfg) -> ProviderStatus {
-        super::config::provider_status(providers, PROVIDER_FASTEMBED)
+        use super::config::ProviderState::{Broken, Connected, NotConnected, Unknown};
+        let connect = format!("run `docsbase connect {PROVIDER_FASTEMBED}`");
+        let Some(provider) = providers.fastembed.as_ref() else {
+            return ProviderStatus::state_only(Unknown, Some(connect));
+        };
+        if !provider.enabled {
+            return ProviderStatus::state_only(NotConnected, Some(connect));
+        }
+        match &provider.runtime_path {
+            // A recorded path that no longer exists is Broken, not Connected
+            // (FR-2).
+            Some(path) if !path.exists() => ProviderStatus {
+                state: Broken,
+                path: Some(path.clone()),
+                reason: Some(format!(
+                    "runtime library {} is missing; re-run `docsbase connect {PROVIDER_FASTEMBED} --force`",
+                    path.display()
+                )),
+            },
+            Some(path) => ProviderStatus {
+                state: Connected,
+                path: Some(path.clone()),
+                reason: None,
+            },
+            // No recorded path: the resolver falls back to the data-dir
+            // install, so report exactly what it would find (no recursion into
+            // `runtime_status`, which calls back here).
+            None => match super::config::data_dir_library() {
+                Some(path) => ProviderStatus {
+                    state: Connected,
+                    path: Some(path),
+                    reason: None,
+                },
+                None => ProviderStatus::state_only(
+                    NotConnected,
+                    Some("runtime not installed; run `docsbase connect fastembed`".to_owned()),
+                ),
+            },
+        }
+    }
+
+    fn build_stages(
+        &self,
+        embedding: Option<&EmbeddingCfg>,
+        reranker: Option<&RerankerCfg>,
+        providers: &ProvidersCfg,
+    ) -> Result<Stages> {
+        #[cfg(feature = "hybrid-local")]
+        {
+            let embedder = embedding
+                .map(|cfg| super::local::embedder(cfg, providers))
+                .transpose()?;
+            let reranker = reranker
+                .map(|cfg| super::local::reranker(cfg, providers))
+                .transpose()?;
+            Ok((embedder, reranker))
+        }
+        #[cfg(not(feature = "hybrid-local"))]
+        {
+            let _ = (embedding, reranker, providers);
+            Err(self.feature_missing())
+        }
+    }
+
+    fn feature_missing(&self) -> Error {
+        Error::Admission {
+            message: "hybrid is enabled with a fastembed stage but this build lacks the `hybrid-local` feature; \
+                      rebuild with --features hybrid-local or set hybrid = false"
+                .to_owned(),
+        }
     }
 
     fn resolve_embedding(
@@ -212,7 +313,60 @@ impl Provider for OpenrouterProvider {
     }
 
     fn status(&self, providers: &ProvidersCfg) -> ProviderStatus {
-        super::config::provider_status(providers, PROVIDER_OPENROUTER)
+        use super::config::ProviderState::{Connected, NotConnected, Unknown};
+        match &providers.openrouter {
+            None => ProviderStatus::state_only(
+                Unknown,
+                Some("run `docsbase connect openrouter`".to_owned()),
+            ),
+            Some(provider) if provider.enabled => ProviderStatus::state_only(Connected, None),
+            Some(_) => ProviderStatus::state_only(
+                NotConnected,
+                Some("run `docsbase connect openrouter`".to_owned()),
+            ),
+        }
+    }
+
+    fn build_stages(
+        &self,
+        embedding: Option<&EmbeddingCfg>,
+        reranker: Option<&RerankerCfg>,
+        providers: &ProvidersCfg,
+    ) -> Result<Stages> {
+        #[cfg(feature = "hybrid-remote")]
+        {
+            let _ = providers;
+            // One client for both stages (it owns an http client and a
+            // runtime); built only when a stage actually needs it, so a
+            // fastembed-only config never demands `OPENROUTER_API_KEY`.
+            let client = Arc::new(super::openrouter::OpenRouterClient::from_env()?);
+            let embedder = embedding.map(|cfg| {
+                Arc::new(super::openrouter::OpenRouterEmbedder::with_client(
+                    cfg.clone(),
+                    Arc::clone(&client),
+                )) as Arc<dyn Embedder>
+            });
+            let reranker = reranker.map(|cfg| {
+                Arc::new(super::openrouter::OpenRouterReranker::with_client(
+                    cfg.clone(),
+                    client,
+                )) as Arc<dyn Reranker>
+            });
+            Ok((embedder, reranker))
+        }
+        #[cfg(not(feature = "hybrid-remote"))]
+        {
+            let _ = (embedding, reranker, providers);
+            Err(self.feature_missing())
+        }
+    }
+
+    fn feature_missing(&self) -> Error {
+        Error::Admission {
+            message: "hybrid is enabled with an OpenRouter stage but this build lacks the `hybrid-remote` feature; \
+                      rebuild with --features hybrid-remote or set hybrid = false"
+                .to_owned(),
+        }
     }
 
     fn resolve_embedding(
@@ -401,6 +555,14 @@ mod tests {
                     model: "tiny".to_owned(),
                     window,
                 })
+            }
+            fn build_stages(
+                &self,
+                _embedding: Option<&EmbeddingCfg>,
+                _reranker: Option<&RerankerCfg>,
+                _providers: &ProvidersCfg,
+            ) -> Result<Stages> {
+                Ok((None, None))
             }
         }
         static ECHO: EchoProvider = EchoProvider;

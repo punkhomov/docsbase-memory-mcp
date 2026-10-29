@@ -8,10 +8,12 @@ use std::sync::{Mutex, MutexGuard};
 use docsbase_memory::error::Error;
 use docsbase_memory::hybrid::Ranking;
 use docsbase_memory::hybrid::blocking;
+use docsbase_memory::hybrid::config::ProviderState;
 #[cfg(feature = "hybrid-remote")]
 use docsbase_memory::hybrid::config::RerankerCfg;
 use docsbase_memory::hybrid::config::{
     CacheCfg, EmbeddingCfg, HybridCfg, ProvidersCfg, embedding_model_id, from_config,
+    from_config_with,
 };
 
 #[cfg(feature = "hybrid-local")]
@@ -95,46 +97,48 @@ fn cache_key_carries_model_dim_and_postprocess() {
 
 #[test]
 fn disabled_hybrid_resolves_to_empty_stages() {
-    let stages = from_config(
-        &HybridCfg::default(),
-        &ProvidersCfg::default(),
-        cfg!(feature = "hybrid-remote"),
-        cfg!(feature = "hybrid-local"),
-    )
-    .expect("disabled hybrid must resolve");
+    let stages = from_config(&HybridCfg::default(), &ProvidersCfg::default())
+        .expect("disabled hybrid must resolve");
     assert!(stages.embedder.is_none());
     assert!(stages.reranker.is_none());
 }
 
 #[test]
 fn feature_off_admission_is_explicit() {
-    // `feature_on = false` models the offline build even when the feature is
-    // compiled in; the always-off build takes the same path.
-    let error = from_config(
+    // The gate is compile-time (`Provider::enabled`), so the *mechanism* is
+    // asserted through an explicit table that reports the provider as
+    // feature-disabled — the same table seam the extensibility test uses.
+    let table: &[&'static dyn docsbase_memory::hybrid::Provider] = &[&DISABLED];
+    let error = from_config_with(
+        table,
         &HybridCfg::enabled_with_defaults(),
         &ProvidersCfg::default(),
-        false,
-        cfg!(feature = "hybrid-local"),
     )
     .expect_err("feature-off + enabled must be an explicit admission error");
-    let Error::Admission { message } = error else {
-        panic!("expected Admission, got {error}");
-    };
     assert!(
-        message.contains("hybrid-remote"),
-        "message must name the feature: {message}"
+        matches!(&error, Error::Admission { .. }),
+        "expected Admission, got {error}"
     );
 
-    if !cfg!(feature = "hybrid-remote") {
-        let error = from_config(
-            &HybridCfg::enabled_with_defaults(),
-            &ProvidersCfg::default(),
-            true,
-            cfg!(feature = "hybrid-local"),
-        )
-        .expect_err("default build must reject enabled hybrid");
-        assert!(matches!(error, Error::Admission { .. }));
+    // The real message names the real feature. It is only reachable in a build
+    // without the feature, which the single-feature CI lanes provide; here the
+    // provider's own message is asserted directly.
+    let provider =
+        docsbase_memory::hybrid::provider(docsbase_memory::hybrid::config::PROVIDER_OPENROUTER)
+            .expect("openrouter is registered in every build");
+    if cfg!(feature = "hybrid-remote") {
+        assert!(provider.enabled());
+    } else {
+        assert!(!provider.enabled());
     }
+    assert!(
+        provider
+            .feature_missing()
+            .to_string()
+            .contains("hybrid-remote"),
+        "message must name the feature: {}",
+        provider.feature_missing()
+    );
 }
 
 #[cfg(feature = "hybrid-remote")]
@@ -150,13 +154,8 @@ fn unknown_provider_is_rejected_before_any_network_setup() {
         ranking: Ranking::Lexical,
         cache: CacheCfg::default(),
     };
-    let error = from_config(
-        &cfg,
-        &ProvidersCfg::default(),
-        true,
-        cfg!(feature = "hybrid-local"),
-    )
-    .expect_err("provider must be validated");
+    let error =
+        from_config(&cfg, &ProvidersCfg::default()).expect_err("provider must be validated");
     let Error::Admission { message } = error else {
         panic!("expected Admission");
     };
@@ -173,12 +172,7 @@ fn unknown_provider_is_rejected_before_any_network_setup() {
         cache: CacheCfg::default(),
     };
     assert!(matches!(
-        from_config(
-            &cfg,
-            &ProvidersCfg::default(),
-            true,
-            cfg!(feature = "hybrid-local")
-        ),
+        from_config(&cfg, &ProvidersCfg::default()),
         Err(Error::Admission { .. })
     ));
 }
@@ -197,13 +191,8 @@ fn rerank_window_bounds_are_enforced() {
             ranking: Ranking::Lexical,
             cache: CacheCfg::default(),
         };
-        let error = from_config(
-            &cfg,
-            &ProvidersCfg::default(),
-            true,
-            cfg!(feature = "hybrid-local"),
-        )
-        .expect_err("window must be bounded");
+        let error =
+            from_config(&cfg, &ProvidersCfg::default()).expect_err("window must be bounded");
         let Error::Admission { message } = error else {
             panic!("expected Admission for window {window}");
         };
@@ -220,8 +209,6 @@ fn missing_key_is_an_admission_error() {
     let error = from_config(
         &HybridCfg::enabled_with_defaults(),
         &ProvidersCfg::default(),
-        true,
-        cfg!(feature = "hybrid-local"),
     )
     .expect_err("missing key must fail admission");
     let Error::Admission { message } = error else {
@@ -262,18 +249,74 @@ fn rrf_without_the_embedding_stage_is_an_admission_error() {
         ranking: Ranking::Rrf,
         cache: CacheCfg::default(),
     };
-    let err = from_config(
-        &cfg,
-        &ProvidersCfg::default(),
-        true,
-        cfg!(feature = "hybrid-local"),
-    )
-    .expect_err("rrf without embedding");
+    let err = from_config(&cfg, &ProvidersCfg::default()).expect_err("rrf without embedding");
     assert!(
         matches!(&err, Error::Admission { message } if message.contains("rrf")),
         "{err}"
     );
 }
+
+/// `openrouter` as a build without `hybrid-remote` sees it: registered (so
+/// config validation passes) but feature-disabled. The gate is compile-time now
+/// (`Provider::enabled`), so tests express "feature off" through the table
+/// instead of build flags (design §3, FR-10).
+struct DisabledProvider;
+
+impl docsbase_memory::hybrid::Provider for DisabledProvider {
+    fn name(&self) -> &'static str {
+        docsbase_memory::hybrid::config::PROVIDER_OPENROUTER
+    }
+
+    fn enabled(&self) -> bool {
+        false
+    }
+
+    fn status(&self, _providers: &ProvidersCfg) -> docsbase_memory::hybrid::ProviderStatus {
+        docsbase_memory::hybrid::ProviderStatus {
+            state: ProviderState::NotConnected,
+            path: None,
+            reason: Some("test provider is disabled".to_owned()),
+        }
+    }
+
+    fn resolve_embedding(
+        &self,
+        _model: Option<&str>,
+        _dims: Option<u32>,
+        _normalize: bool,
+    ) -> Result<docsbase_memory::hybrid::EmbeddingCfg, Error> {
+        Err(Error::Admission {
+            message: "test provider is disabled".to_owned(),
+        })
+    }
+
+    fn resolve_reranker(
+        &self,
+        _model: Option<&str>,
+        _window: u32,
+    ) -> Result<docsbase_memory::hybrid::RerankerCfg, Error> {
+        Err(Error::Admission {
+            message: "test provider is disabled".to_owned(),
+        })
+    }
+
+    fn build_stages(
+        &self,
+        _embedding: Option<&docsbase_memory::hybrid::EmbeddingCfg>,
+        _reranker: Option<&docsbase_memory::hybrid::RerankerCfg>,
+        _providers: &ProvidersCfg,
+    ) -> Result<
+        (
+            Option<std::sync::Arc<dyn docsbase_memory::vector_cache::Embedder>>,
+            Option<std::sync::Arc<dyn docsbase_memory::hybrid::Reranker>>,
+        ),
+        Error,
+    > {
+        Err(self.feature_missing())
+    }
+}
+
+static DISABLED: DisabledProvider = DisabledProvider;
 
 #[test]
 fn rrf_keeps_the_configuration_error_across_feature_modes() {
@@ -284,17 +327,17 @@ fn rrf_keeps_the_configuration_error_across_feature_modes() {
         ranking: Ranking::Rrf,
         cache: CacheCfg::default(),
     };
-    for feature_on in [false, true] {
-        let err = from_config(
-            &cfg,
-            &ProvidersCfg::default(),
-            feature_on,
-            cfg!(feature = "hybrid-local"),
-        )
-        .expect_err("rrf without embedding");
+    // Both tables: the registry (whatever this build has) and a table whose
+    // only provider is feature-disabled. The config error outranks both.
+    let table: &[&'static dyn docsbase_memory::hybrid::Provider] = &[&DISABLED];
+    for result in [
+        from_config(&cfg, &ProvidersCfg::default()),
+        from_config_with(table, &cfg, &ProvidersCfg::default()),
+    ] {
+        let err = result.expect_err("rrf without embedding");
         assert!(
             matches!(&err, Error::Admission { message } if message.contains("rrf")),
-            "feature_on={feature_on}: {err}"
+            "{err}"
         );
     }
 }
@@ -308,8 +351,8 @@ fn enabled_without_stages_resolves_to_empty_stages_offline() {
         ranking: Ranking::Lexical,
         cache: CacheCfg::default(),
     };
-    let stages = from_config(&cfg, &ProvidersCfg::default(), false, false)
-        .expect("no stages, nothing to resolve");
+    let stages =
+        from_config(&cfg, &ProvidersCfg::default()).expect("no stages, nothing to resolve");
     assert!(stages.embedder.is_none() && stages.reranker.is_none());
 }
 
@@ -332,7 +375,7 @@ fn fastembed_only_config_does_not_demand_openrouter_key() {
     };
     // No OPENROUTER_API_KEY in the environment: the fastembed-only config
     // must fail on the local seam (stub, T4), never on the remote key.
-    let err = from_config(&cfg, &ProvidersCfg::default(), true, true).expect_err("local stage");
+    let err = from_config(&cfg, &ProvidersCfg::default()).expect_err("local stage");
     assert!(!err.to_string().contains("OPENROUTER_API_KEY"), "{err}");
 }
 
@@ -423,7 +466,7 @@ fn from_config_fastembed_uses_real_provider_config() {
     unsafe {
         std::env::set_var("DOCSBASE_CACHE_DIR", cache.path());
     }
-    let result = from_config(&cfg, &providers, false, true);
+    let result = from_config(&cfg, &providers);
     // SAFETY: same locked section.
     unsafe {
         match prev {
