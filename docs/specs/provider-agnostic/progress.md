@@ -49,3 +49,22 @@
   `cli` и не тянет `ureq`/`zip` в дефолтную сборку.
 - Ruling: расширяемость доказывается параметрами (таблица, провижинер), а не
   тестовыми глобалами — глобалы не существуют в спавнящемся бинаре.
+
+## T1 — реестр провайдеров и адрес модели
+
+- `Task <T1>: complete (ed8d7f0..)`. Добавлен `src/hybrid/provider.rs`:
+  `ModelAddress` (провайдер — до первого `/`, модель — остаток),
+  `Task`/`CatalogModel` (переехали из `models`, `models` реэкспортирует),
+  `trait Provider` (`name`/`feature`/`status`/`resolve_embedding`/`resolve_reranker`/
+  `catalog`), негейченная таблица `REGISTRY` (`providers()`, `provider()`,
+  `provider_names()`), `feature_enabled()`.
+- Тесты: `model_address_splits_at_the_first_slash`,
+  `model_address_rejects_bare_and_malformed_input`,
+  `registry_lists_every_provider_with_its_feature`, `unknown_provider_lists_the_registry`,
+  `feature_enabled_matches_the_build`.
+- Проверка: default lib 128 passed, combo lib 221 passed, clippy (default и
+  `hybrid-local`) чисто, fmt чисто. Поведение не изменилось — `from_config`,
+  `provider_status` и CLI пока работают по-старому (T2/T4).
+- Ruling: `ModelAddress::parse` — чистая синтаксическая проверка; подсказка
+  «did you mean `fastembed/<name>`» строится в CLI по каталогу (T4), поэтому
+  парсер не зависит от реестра моделей.

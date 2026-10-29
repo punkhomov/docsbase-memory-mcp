@@ -16,6 +16,7 @@ pub mod ann_store;
 pub mod config;
 pub mod dense;
 pub mod jobs;
+pub mod provider;
 pub mod rrf;
 
 #[cfg(feature = "hybrid-local")]
@@ -38,6 +39,7 @@ pub use config::{
     PROVIDER_FASTEMBED, ProviderState, ProviderStatus, ProvidersCfg, Ranking, RerankerCfg,
     embedding_model_id, from_config, provider_status, resolve_embedding, resolve_reranker,
 };
+pub use provider::{CatalogModel, ModelAddress, Provider, Task, provider, providers};
 
 /// Cross-encoder style reranking stage (FR-2, FR-11).
 ///
