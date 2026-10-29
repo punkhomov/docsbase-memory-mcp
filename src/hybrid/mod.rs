@@ -39,7 +39,7 @@ pub use config::{
     PROVIDER_FASTEMBED, ProviderState, ProviderStatus, ProvidersCfg, Ranking, RerankerCfg,
     embedding_model_id, from_config, provider_status, resolve_embedding, resolve_reranker,
 };
-pub use provider::{CatalogModel, ModelAddress, Provider, Task, provider, providers};
+pub use provider::{ModelAddress, Provider, Task, provider, providers};
 
 /// Cross-encoder style reranking stage (FR-2, FR-11).
 ///

@@ -43,19 +43,11 @@ impl<'a> ModelAddress<'a> {
 }
 impl std::fmt::Display for ModelAddress<'_>;  // `provider/model`
 
-/// Роль модели. Живёт здесь (не в `models`), потому что нужна трейту в любой
-/// сборке: `models` гейтится `hybrid-local` (`src/hybrid/mod.rs:24`), а
-/// `Provider::catalog` — нет (ревью muse, P1-2). `models` реэкспортирует.
+/// Роль модели. Живёт здесь (не в `models`), потому что нужна в любой сборке:
+/// `models` гейтится `hybrid-local` (`src/hybrid/mod.rs:25`). `models`
+/// реэкспортирует.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Task { Embedding, Rerank }
-
-/// Запись закрытого каталога (только данные, без ML-типов).
-pub struct CatalogModel {
-    pub name: &'static str,
-    pub task: Task,
-    pub dims: usize,
-    pub revision: &'static str,
-}
 
 /// Одна строка таблицы провайдеров (G2, FR-5).
 pub trait Provider: Sync {
@@ -79,8 +71,6 @@ pub trait Provider: Sync {
         reranker: Option<&RerankerCfg>,
         providers: &ProvidersCfg,
     ) -> Result<(Option<Arc<dyn Embedder>>, Option<Arc<dyn Reranker>>)>;
-    /// Закрытый каталог моделей; `None` — каталога нет (remote API).
-    fn catalog(&self, task: Task) -> Option<&'static [CatalogModel]> { None }
 }
 
 /// Регистрация: единственное место, где перечислены провайдеры (FR-5, G4).
@@ -88,6 +78,11 @@ pub fn providers() -> &'static [&'static dyn Provider];
 pub fn provider(name: &str) -> Result<&'static dyn Provider>;  // Admission + список
 pub fn feature_enabled(feature: &str) -> bool;                 // один match по фичам
 ```
+
+Каталог моделей (`models list`, `models use` без `--dims`) — не отдельный тип
+в ядре, а **проекция** `models::REGISTRY` внутри реализации fastembed-провайдера
+(T4), с тестом паритета имени/задачи/dims/revision: второй каталог разъехался бы
+с тем, что реально скачивает `fetch` (ревью T1, P2-3).
 
 Тяжёлые части (fastembed/ORT, HTTP-клиент) остаются в своих модулях за
 `#[cfg(feature = …)]`; в сборке без фичи `build_stages` возвращает

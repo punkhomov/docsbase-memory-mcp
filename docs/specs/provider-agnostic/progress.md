@@ -65,6 +65,42 @@
 - Проверка: default lib 128 passed, combo lib 221 passed, clippy (default и
   `hybrid-local`) чисто, fmt чисто. Поведение не изменилось — `from_config`,
   `provider_status` и CLI пока работают по-старому (T2/T4).
-- Ruling: `ModelAddress::parse` — чистая синтаксическая проверка; подсказка
-  «did you mean `fastembed/<name>`» строится в CLI по каталогу (T4), поэтому
-  парсер не зависит от реестра моделей.
+- Ruling: `ModelAddress::parse` проверяет синтаксис и **имя провайдера против
+  таблицы** (параметр `table` в `parse_with`, глобальная таблица в `parse`);
+  подсказка «did you mean `fastembed/<name>`» строится в CLI по каталогу (T4),
+  поэтому от реестра *моделей* парсер не зависит.
+
+### T1 fix round (reviewer-deepseek, APPROVED WITH NOTES)
+
+- P1-1 (`parse` закрыт на глобальный `REGISTRY` → тест третьего провайдера не
+  мог пройти через параметр): **исправлено**. `parse_with(table, raw)`,
+  `provider_in(table, name)`, `provider_names_in(table)`; `parse`/`provider` —
+  обёртки над глобальной таблицей. Тест
+  `parse_with_accepts_a_provider_absent_from_the_global_registry`.
+- P1-2 (делегирующие `resolve_*` не воспроизводили поведение вызывающих:
+  `dims: None` у openrouter молча давал 2048 вместо требования `--dims`,
+  `normalize` был захардкожен `true`, границы окна реранка жили в CLI):
+  **исправлено**. Сигнатуры расширены до `resolve_embedding(model: Option<&str>,
+  dims: Option<u32>, normalize: bool)` и `resolve_reranker(model: Option<&str>,
+  window: u32)`; перенос границ `MIN..=MAX` в реализацию провайдера — задача T4
+  (там же удаляется `resolve_window`), записано в `tasks.md`.
+- P2-3 (`CatalogModel` — второй каталог, `dims: usize` не выражает rerank-строку):
+  **исправлено удалением**. `CatalogModel`/`Provider::catalog` появятся в T4 как
+  проекция `models::REGISTRY` с тестом паритета (имя/задача/dims/revision), а не
+  как ручная копия.
+- P2-4 (`feature_enabled` молча возвращал `false` для любой не захардкоженной
+  фичи → новый провайдер был бы неработоспособен в любой сборке):
+  **исправлено**. Вместо общей функции — `Provider::enabled()` с `cfg!`-литералом
+  в модуле провайдера; `feature_enabled` удалён. Тест
+  `provider_enabled_follows_its_own_feature`.
+- P3-5 (`Task::label` дублировал CLI-шный `task_label`): удалён.
+- P3-6 (парсер не триммил, хотя CLI триммит): `parse_with` триммит вход; тест
+  `model_address_trims_surrounding_whitespace`.
+- P3-7 (в admission про неизвестного провайдера не было примера формы): добавлено
+  `write "<provider>/<model>"`, проверено в тесте.
+- P3-8/P3-9 (неточности ledger и устаревшие ссылки на строки в дизайне):
+  исправлены — `CatalogModel` никогда не жил в `models`; `pub mod models` теперь
+  строка 25.
+- Verify после правок: `--lib` default 130, `hybrid-local` 209, `hybrid-remote`
+  144, combo 223; clippy `--all-targets -D warnings` чисто во всех четырёх;
+  fmt чисто.

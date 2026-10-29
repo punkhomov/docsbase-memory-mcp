@@ -26,30 +26,6 @@ pub enum Task {
     Rerank,
 }
 
-impl Task {
-    /// Human label used by CLI output and admissions.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Embedding => "embedding",
-            Self::Rerank => "rerank",
-        }
-    }
-}
-
-/// One entry of a provider's closed catalog (data only, no ML types).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CatalogModel {
-    /// Model name as the provider knows it (no provider prefix).
-    pub name: &'static str,
-    /// Which stage the model serves.
-    pub task: Task,
-    /// Vector width the model produces.
-    pub dims: usize,
-    /// Pinned revision the catalog entry refers to.
-    pub revision: &'static str,
-}
-
 /// A model address: `<provider>/<model>` (FR-1).
 ///
 /// The provider is the segment before the **first** `/`; the model is the rest,
@@ -68,11 +44,23 @@ impl<'a> ModelAddress<'a> {
     /// [`Error::Admission`] when the address has no `/`, an empty provider or
     /// an empty model, or names a provider that is not registered.
     pub fn parse(raw: &'a str) -> Result<Self> {
+        Self::parse_with(providers(), raw)
+    }
+
+    /// Like [`parse`](Self::parse), but validates the provider half against an
+    /// explicit table — the seam the extensibility test uses (FR-10).
+    ///
+    /// # Errors
+    /// Same as [`parse`](Self::parse).
+    pub fn parse_with(table: &[&'static dyn Provider], raw: &'a str) -> Result<Self> {
+        // Callers hand over CLI arguments; the today's CLI trims them, so the
+        // parser does too (a trailing space would otherwise land in `model`).
+        let raw = raw.trim();
         let Some((provider, model)) = raw.split_once('/') else {
             return Err(Error::Admission {
                 message: format!(
                     "\"{raw}\" is not a model address; write \"<provider>/<model>\" (providers: {})",
-                    provider_names()
+                    provider_names_in(table)
                 ),
             });
         };
@@ -80,7 +68,7 @@ impl<'a> ModelAddress<'a> {
             return Err(Error::Admission {
                 message: format!(
                     "\"{raw}\" has an empty provider; write \"<provider>/<model>\" (providers: {})",
-                    provider_names()
+                    provider_names_in(table)
                 ),
             });
         }
@@ -88,12 +76,12 @@ impl<'a> ModelAddress<'a> {
             return Err(Error::Admission {
                 message: format!(
                     "\"{raw}\" has an empty model name; write \"<provider>/<model>\" (providers: {})",
-                    provider_names()
+                    provider_names_in(table)
                 ),
             });
         }
         // Validates the provider half (unknown names never reach a stage).
-        crate::hybrid::provider::provider(provider)?;
+        provider_in(table, provider)?;
         Ok(Self { provider, model })
     }
 
@@ -131,27 +119,41 @@ pub trait Provider: Sync {
         None
     }
 
+    /// Whether this build can actually use the provider. A provider that
+    /// declares a [`feature`](Self::feature) must override this with its own
+    /// `cfg!(feature = "…")` literal: `cfg!` needs a literal, so the mapping
+    /// cannot live in one shared function (a new provider would otherwise be
+    /// silently unusable — FR-5, G4).
+    fn enabled(&self) -> bool {
+        true
+    }
+
     /// Readiness for the status table (FR-7).
     fn status(&self, providers: &ProvidersCfg) -> ProviderStatus;
 
     /// Provider-specific validation and defaults for the embedding stage.
     ///
+    /// `model = None` means "the provider's default", which only a provider
+    /// with a default may accept; `normalize` is the user's setting and is part
+    /// of the cache key, so it must pass through unchanged.
+    ///
     /// # Errors
-    /// [`Error::Admission`] for unknown models, wrong task and invalid dims.
-    fn resolve_embedding(&self, model: &str, dims: Option<u32>) -> Result<EmbeddingCfg>;
+    /// [`Error::Admission`] for unknown models, wrong task, missing dims where
+    /// the provider has no catalog, and invalid dims.
+    fn resolve_embedding(
+        &self,
+        model: Option<&str>,
+        dims: Option<u32>,
+        normalize: bool,
+    ) -> Result<EmbeddingCfg>;
 
-    /// Provider-specific validation and defaults for the rerank stage.
+    /// Provider-specific validation and defaults for the rerank stage,
+    /// including the window bounds (one owner for the `MIN..=MAX` range).
     ///
     /// # Errors
     /// [`Error::Admission`] for unknown models, wrong task and out-of-range
     /// windows.
-    fn resolve_reranker(&self, model: &str, window: u32) -> Result<RerankerCfg>;
-
-    /// Closed catalog of known models, or `None` when the provider has none
-    /// (remote APIs accept arbitrary ids).
-    fn catalog(&self, _task: Task) -> Option<&'static [CatalogModel]> {
-        None
-    }
+    fn resolve_reranker(&self, model: Option<&str>, window: u32) -> Result<RerankerCfg>;
 }
 
 /// `fastembed` — local ONNX inference behind `hybrid-local` (ADR-17).
@@ -166,16 +168,30 @@ impl Provider for FastembedProvider {
         Some("hybrid-local")
     }
 
+    fn enabled(&self) -> bool {
+        cfg!(feature = "hybrid-local")
+    }
+
     fn status(&self, providers: &ProvidersCfg) -> ProviderStatus {
         super::config::provider_status(providers, PROVIDER_FASTEMBED)
     }
 
-    fn resolve_embedding(&self, model: &str, dims: Option<u32>) -> Result<EmbeddingCfg> {
-        super::config::resolve_embedding(PROVIDER_FASTEMBED, Some(model.to_owned()), dims, true)
+    fn resolve_embedding(
+        &self,
+        model: Option<&str>,
+        dims: Option<u32>,
+        normalize: bool,
+    ) -> Result<EmbeddingCfg> {
+        super::config::resolve_embedding(
+            PROVIDER_FASTEMBED,
+            model.map(str::to_owned),
+            dims,
+            normalize,
+        )
     }
 
-    fn resolve_reranker(&self, model: &str, window: u32) -> Result<RerankerCfg> {
-        super::config::resolve_reranker(PROVIDER_FASTEMBED, Some(model.to_owned()), window)
+    fn resolve_reranker(&self, model: Option<&str>, window: u32) -> Result<RerankerCfg> {
+        super::config::resolve_reranker(PROVIDER_FASTEMBED, model.map(str::to_owned), window)
     }
 }
 
@@ -191,16 +207,30 @@ impl Provider for OpenrouterProvider {
         Some("hybrid-remote")
     }
 
+    fn enabled(&self) -> bool {
+        cfg!(feature = "hybrid-remote")
+    }
+
     fn status(&self, providers: &ProvidersCfg) -> ProviderStatus {
         super::config::provider_status(providers, PROVIDER_OPENROUTER)
     }
 
-    fn resolve_embedding(&self, model: &str, dims: Option<u32>) -> Result<EmbeddingCfg> {
-        super::config::resolve_embedding(PROVIDER_OPENROUTER, Some(model.to_owned()), dims, true)
+    fn resolve_embedding(
+        &self,
+        model: Option<&str>,
+        dims: Option<u32>,
+        normalize: bool,
+    ) -> Result<EmbeddingCfg> {
+        super::config::resolve_embedding(
+            PROVIDER_OPENROUTER,
+            model.map(str::to_owned),
+            dims,
+            normalize,
+        )
     }
 
-    fn resolve_reranker(&self, model: &str, window: u32) -> Result<RerankerCfg> {
-        super::config::resolve_reranker(PROVIDER_OPENROUTER, Some(model.to_owned()), window)
+    fn resolve_reranker(&self, model: Option<&str>, window: u32) -> Result<RerankerCfg> {
+        super::config::resolve_reranker(PROVIDER_OPENROUTER, model.map(str::to_owned), window)
     }
 }
 
@@ -221,16 +251,24 @@ pub fn providers() -> &'static [&'static dyn Provider] {
 /// Looks a provider up by registry name.
 ///
 /// # Errors
-/// [`Error::Admission`] listing the registered names.
+/// [`Error::Admission`] listing the registered names and the address form.
 pub fn provider(name: &str) -> Result<&'static dyn Provider> {
-    providers()
+    provider_in(providers(), name)
+}
+
+/// Like [`provider`], against an explicit table (the FR-10 seam).
+///
+/// # Errors
+/// [`Error::Admission`] listing the registered names and the address form.
+pub fn provider_in(table: &[&'static dyn Provider], name: &str) -> Result<&'static dyn Provider> {
+    table
         .iter()
         .copied()
         .find(|p| p.name() == name)
         .ok_or_else(|| Error::Admission {
             message: format!(
-                "unknown provider \"{name}\" (registered: {})",
-                provider_names()
+                "unknown provider \"{name}\" (registered: {}); write \"<provider>/<model>\"",
+                provider_names_in(table)
             ),
         })
 }
@@ -238,22 +276,17 @@ pub fn provider(name: &str) -> Result<&'static dyn Provider> {
 /// Comma-separated registry names, for admissions.
 #[must_use]
 pub fn provider_names() -> String {
-    providers()
+    provider_names_in(providers())
+}
+
+/// Comma-separated names of an explicit table (the FR-10 seam).
+#[must_use]
+pub fn provider_names_in(table: &[&'static dyn Provider]) -> String {
+    table
         .iter()
         .map(|p| p.name())
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// Whether a build feature is enabled. The single place that maps a feature
-/// name to `cfg!`, so providers never grow their own `cfg!` chains.
-#[must_use]
-pub fn feature_enabled(feature: &str) -> bool {
-    match feature {
-        "hybrid-local" => cfg!(feature = "hybrid-local"),
-        "hybrid-remote" => cfg!(feature = "hybrid-remote"),
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -324,15 +357,73 @@ mod tests {
     }
 
     #[test]
-    fn feature_enabled_matches_the_build() {
-        assert_eq!(
-            feature_enabled("hybrid-local"),
-            cfg!(feature = "hybrid-local")
-        );
-        assert_eq!(
-            feature_enabled("hybrid-remote"),
-            cfg!(feature = "hybrid-remote")
-        );
-        assert!(!feature_enabled("no-such-feature"));
+    fn provider_enabled_follows_its_own_feature() {
+        let remote = provider(PROVIDER_OPENROUTER).expect("openrouter");
+        let local = provider(PROVIDER_FASTEMBED).expect("fastembed");
+        assert_eq!(remote.enabled(), cfg!(feature = "hybrid-remote"));
+        assert_eq!(local.enabled(), cfg!(feature = "hybrid-local"));
+        // The registry itself is ungated: both providers exist either way.
+        assert_eq!(providers().len(), 2);
+    }
+
+    #[test]
+    fn parse_with_accepts_a_provider_absent_from_the_global_registry() {
+        // The FR-10 seam: a third provider validated against an explicit table.
+        struct EchoProvider;
+        impl Provider for EchoProvider {
+            fn name(&self) -> &'static str {
+                "echo"
+            }
+            fn status(&self, _providers: &ProvidersCfg) -> ProviderStatus {
+                ProviderStatus {
+                    state: super::super::config::ProviderState::Connected,
+                    path: None,
+                    reason: None,
+                }
+            }
+            fn resolve_embedding(
+                &self,
+                model: Option<&str>,
+                dims: Option<u32>,
+                normalize: bool,
+            ) -> Result<EmbeddingCfg> {
+                let cfg = EmbeddingCfg {
+                    provider: "echo".to_owned(),
+                    model: model.unwrap_or("tiny").to_owned(),
+                    dimensions: dims.unwrap_or(4),
+                    normalize,
+                };
+                Ok(cfg)
+            }
+            fn resolve_reranker(&self, _model: Option<&str>, window: u32) -> Result<RerankerCfg> {
+                Ok(RerankerCfg {
+                    provider: "echo".to_owned(),
+                    model: "tiny".to_owned(),
+                    window,
+                })
+            }
+        }
+        static ECHO: EchoProvider = EchoProvider;
+        let table: &[&'static dyn Provider] = &[&ECHO];
+
+        let addr = ModelAddress::parse_with(table, "echo/tiny").expect("echo address");
+        assert_eq!(addr.provider(), "echo");
+        assert_eq!(addr.model(), "tiny");
+
+        let Err(err) = ModelAddress::parse_with(table, "nope/x") else {
+            panic!("unknown provider must be refused");
+        };
+        let text = err.to_string();
+        assert!(text.contains("echo"), "admission lists the table: {text}");
+        assert!(!text.contains(PROVIDER_FASTEMBED), "{text}");
+        // The global registry still does not know `echo`.
+        assert!(ModelAddress::parse("echo/tiny").is_err());
+    }
+
+    #[test]
+    fn model_address_trims_surrounding_whitespace() {
+        let addr = ModelAddress::parse("  fastembed/bge-small-en-v1.5 \n").expect("trimmed");
+        assert_eq!(addr.provider(), PROVIDER_FASTEMBED);
+        assert_eq!(addr.model(), "bge-small-en-v1.5");
     }
 }

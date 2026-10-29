@@ -121,8 +121,13 @@
   (`models fetch openrouter/<id>` → «no local model cache»).
 - `selected_line_prints_addresses` (`models list` → `selected: embed=fastembed/...`).
 
-**GREEN.** `ModelAddress::parse` в CLI; `resolve_provider` удалён;
-`resolve_dims`/`resolve_window` → `Provider::resolve_embedding`/`resolve_reranker`.
+**GREEN.** `ModelAddress::parse` в CLI (с подсказкой по каталогу при голом
+имени); `resolve_provider` удалён; `resolve_dims` → `Provider::resolve_embedding`;
+`resolve_window` удалён, границы `MIN_RERANK_WINDOW..=MAX_RERANK_WINDOW`
+переезжают в реализацию `resolve_reranker` (один владелец диапазона, ревью T1
+P1-2), `validate_stage_shapes` переиспользует её вместо своей копии.
+Каталог для `models list`/`use` — проекция `models::REGISTRY` внутри
+fastembed-провайдера (`OnceLock<Vec<CatalogModel>>`) + тест паритета.
 
 **Verify.** V3 (обновлённые тесты — единственные, где меняется ожидание), V1, V4.
 
