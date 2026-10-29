@@ -290,8 +290,11 @@ fn restart_note(reinstalled: bool) -> Option<&'static str> {
 }
 
 /// Reports the macOS code-signature state of an installed runtime library:
-/// `valid`, `adhoc`, or `missing` (when codesign cannot read it).
-#[cfg(target_os = "macos")]
+/// `valid`, `adhoc`, or `missing` (when codesign cannot read it). Gated like
+/// its only caller (`connect_fastembed`): in the default build the runtime
+/// install does not exist, so an ungated helper is dead code and `-D warnings`
+/// fails the macOS default clippy job.
+#[cfg(all(target_os = "macos", feature = "hybrid-local"))]
 fn macos_signature_state(path: &std::path::Path) -> &'static str {
     use std::process::Command;
     let output = Command::new("codesign")

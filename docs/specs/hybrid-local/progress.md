@@ -449,3 +449,4 @@ Ledger: одна запись на таск (что сделано, чем пр�
 - C6 (P3): `data_dir_library_path` is now `pub(crate)`.
 - OQ-3 resolved by human ruling: live run is manual only; no workflow was created for `hybrid_local_live`.
 - Fix round-7 C5 residual (deepseek P3): the FR-13 decision is now a pure `restart_note(reinstalled)` predicate (cfg-gated with `connect_fastembed`), unit-tested on BOTH branches — the note's positive path is no longer unasserted.
+- Fix CI portability failures found on PR #50: macOS default-feature clippy reported `macos_signature_state` as dead code (its only caller sits in the `hybrid-local`-gated `connect_fastembed`) — the helper is now gated `#[cfg(all(target_os = "macos", feature = "hybrid-local"))]`; the Windows build failed to compile `path_to_wide` because `&OsStr` has no `encode_utf16` — it now uses `OsStrExt::encode_wide` (Win32 wide buffer). Both were never compiled on the Linux dev host.

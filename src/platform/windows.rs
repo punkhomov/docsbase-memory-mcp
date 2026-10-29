@@ -371,7 +371,8 @@ pub fn available_space(path: &Path) -> io::Result<u64> {
 
 /// Converts a path to a NUL-terminated UTF-16 buffer for Win32 calls.
 fn path_to_wide(path: &Path) -> io::Result<Vec<u16>> {
-    let mut wide: Vec<u16> = path.as_os_str().encode_utf16().collect();
+    use std::os::windows::ffi::OsStrExt;
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     wide.push(0);
     if wide.len() > u32::MAX as usize {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "path too long"));
