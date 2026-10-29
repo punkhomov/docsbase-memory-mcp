@@ -64,6 +64,13 @@ jobs:
   linux-hybrid:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # CI runners are shared VMs and ~2-2.5x slower than the host that
+      # calibrated baseline.json (measured 2026-10-29: same gate test 6.5 s
+      # locally vs 12.5-13 s here; Rrf p95 13.16 ms baseline vs 26.7-33.0 ms).
+      # The factor scales only the RELATIVE part of the latency budget
+      # (baseline x 1.5 x slack + 5 ms); the absolute 500 ms ceiling stays.
+      DOCSBASE_BENCH_LATENCY_SLACK: "3"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88.0
@@ -90,6 +97,13 @@ jobs:
     # action; recorded in docs/specs/hybrid-local/progress.md).
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # CI runners are shared VMs and ~2-2.5x slower than the host that
+      # calibrated baseline.json (measured 2026-10-29: same gate test 6.5 s
+      # locally vs 12.5-13 s here; Rrf p95 13.16 ms baseline vs 26.7-33.0 ms).
+      # The factor scales only the RELATIVE part of the latency budget
+      # (baseline x 1.5 x slack + 5 ms); the absolute 500 ms ceiling stays.
+      DOCSBASE_BENCH_LATENCY_SLACK: "3"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88.0

@@ -39,6 +39,16 @@ RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --features hybrid-remote --test sear
 OPENROUTER_API_KEY=... RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --features hybrid-remote --test search_bench_live -- --ignored live_measurement   # manual, cost-capped
 ```
 
+Timing budgets are host-relative, not host-absolute: CI runners are shared VMs
+and consistently **2–2.5× slower** than a developer machine (measured
+2026-10-29: the same `search_bench` gate test takes 6.5 s locally and 12.5–13 s
+on `ubuntu-latest`; Rrf p95 13.16 ms in `baseline.json` vs 26.7–33.0 ms on CI).
+Never "fix" a CI timing failure by concluding the code got slower, and never
+tighten a latency budget from a local run. The offline latency gate therefore
+applies `baseline_p95 × 1.5 × DOCSBASE_BENCH_LATENCY_SLACK + 5 ms` (CI sets the
+factor to 3, locally it is 1.0) with the absolute 500 ms ceiling unscaled —
+see `docs/specs/search-benchmark/requirements.md` FR-22, Delta 2026-10-29.
+
 Search-benchmark gate policy (DELTA-3): the gate test
 (`metrics_match_baseline`) runs inside the required `linux` CI job — a red
 gate is a red `linux` check, which branch protection blocks from merging.

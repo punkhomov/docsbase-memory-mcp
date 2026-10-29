@@ -2386,11 +2386,22 @@ fn evaluate_is_deterministic() {
 
 #[test]
 fn latency_budget_math() {
-    for (baseline, want) in [(100.0, 155.0), (400.0, 500.0), (0.0, 5.0)] {
-        let got = support::bench::latency_allowed_ms(baseline);
+    // Strict local budget (slack 1.0) and the CI host factor, which scales
+    // the RELATIVE part only — the absolute 500 ms ceiling still clamps.
+    for (baseline, slack, want) in [
+        (100.0, 1.0, 155.0),
+        (400.0, 1.0, 500.0),
+        (0.0, 1.0, 5.0),
+        (100.0, 3.0, 455.0),
+        (13.16, 3.0, 64.22),
+        (400.0, 3.0, 500.0),
+        // A nonsensical factor degrades to the strict budget.
+        (100.0, 0.5, 155.0),
+    ] {
+        let got = support::bench::latency_allowed_ms_for(baseline, slack);
         assert!(
             (got - want).abs() < 1e-9,
-            "latency_allowed_ms({baseline}) = {got}, want {want}"
+            "latency_allowed_ms_for({baseline}, {slack}) = {got}, want {want}"
         );
     }
     let base = toy_baseline();
