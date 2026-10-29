@@ -96,7 +96,10 @@ fn wait_for_ann(
             _ if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(25));
             }
-            other => panic!("no ANN within timeout: {other:?}"),
+            other => panic!(
+                "no ANN within {timeout:?} (waited {:?}): {other:?}",
+                Instant::now() + timeout - deadline
+            ),
         }
     }
 }
@@ -196,13 +199,23 @@ fn rss_mib() -> Option<f64> {
 
 #[test]
 fn ann_e2e_8k_x_256() {
+    // The wait is a budget, not a target: the ANN build runs on a background
+    // thread of a DEBUG binary and competes with ~500 sibling tests, and a
+    // shared CI runner is 2-3x slower than a dev host (docs/ci.md). 60 s is
+    // plenty on Linux; the Windows runner ran out of it after a 165 s test
+    // (CI run 40900557474) without any build error — pure CPU slowness.
+    let timeout = if cfg!(windows) {
+        Duration::from_secs(300)
+    } else {
+        Duration::from_secs(60)
+    };
     run_e2e(
         8_000,
         DimEmbedder {
             dim: 256,
             model: "e2e/model@d256@l2",
         },
-        Duration::from_secs(60),
+        timeout,
     );
 }
 
