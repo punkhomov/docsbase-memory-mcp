@@ -16,6 +16,15 @@ fn write(dir: &Path, name: &str, body: &str) {
 #[cfg(feature = "hybrid-local")]
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Poison-tolerant lock (a panicking env test must not cascade into the
+/// other ones — round-6 deepseek).
+#[cfg(feature = "hybrid-local")]
+fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[test]
 fn defaults_when_missing() {
     let config_dir = TempDir::new().expect("tempdir");
@@ -517,7 +526,7 @@ fn fastembed_without_provider_fails_with_connect_hint() {
     // it must serialize against the mutating tests AND isolate itself from
     // the host environment: an exported `ORT_DYLIB_PATH` would resolve and
     // turn the expected connect hint into a load error (round-6 deepseek).
-    let _env_guard = ENV_LOCK.lock().expect("env lock");
+    let _env_guard = env_guard();
     let cache = TempDir::new().expect("cache");
     let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
     let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
@@ -575,13 +584,17 @@ fn fastembed_unfetched_model_fails_with_fetch_hint() {
     );
     // Isolate the model cache: the real user cache may already contain a
     // fetched copy (live T8 runs), which would pass the cached check
-    // instead of failing with the fetch hint.
-    let _env_guard = ENV_LOCK.lock().expect("env lock");
+    // instead of failing with the fetch hint. `ORT_DYLIB_PATH` is cleared
+    // for the same reason: it outranks the recorded `runtime_path`, so an
+    // exported value would change the admission (round-6 deepseek).
+    let _env_guard = env_guard();
     let cache = TempDir::new().expect("cache");
     let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
+    let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
     // SAFETY: env mutation serialized by ENV_LOCK; restored below.
     unsafe {
         std::env::set_var("DOCSBASE_CACHE_DIR", cache.path());
+        std::env::remove_var("ORT_DYLIB_PATH");
     }
     let config = Config::load_from(config_dir.path(), None).expect("load ok");
     // Keep the cache isolation alive across the embedder call (see C3:
@@ -598,6 +611,10 @@ fn fastembed_unfetched_model_fails_with_fetch_hint() {
         match prev_cache {
             Some(value) => std::env::set_var("DOCSBASE_CACHE_DIR", value),
             None => std::env::remove_var("DOCSBASE_CACHE_DIR"),
+        }
+        match prev_ort {
+            Some(value) => std::env::set_var("ORT_DYLIB_PATH", value),
+            None => std::env::remove_var("ORT_DYLIB_PATH"),
         }
     }
     let text = err.to_string();
@@ -622,7 +639,7 @@ fn fastembed_env_runtime_override_reaches_model_check() {
         "[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\n",
     );
     let config = Config::load_from(config_dir.path(), None).expect("load ok");
-    let _env_guard = ENV_LOCK.lock().expect("env lock");
+    let _env_guard = env_guard();
     let cache = TempDir::new().expect("cache");
     let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
     let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
