@@ -8,6 +8,23 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ## [Unreleased]
 
+### Added
+
+- Local hybrid provider `hybrid-local` (spec `docs/specs/hybrid-local`,
+  ADR-17): offline fastembed embeddings + rerank behind the `hybrid-local`
+  build feature. Adds `docsbase connect fastembed` (pinned ONNX Runtime
+  1.24.4 install with sha256 verification, `--check`/`--force`), `docsbase
+  models fetch|list` (pinned HF revisions, per-file sha256, atomic install,
+  size caps), and purpose-first `docsbase models use embed|rerank <model>`
+  (project/global scope matrix, provider inference from the registry,
+  offline probes). Canonical local model id
+  `fastembed/<name>@d<dim>@<l2|raw>@r<rev8>@p<prompt_version>`. `docsbase
+  models remove <name>` removes all cached revisions (refuses while a model
+  is loaded; `--force` deletes anyway). `docsbase uninstall --dry-run`
+  lists the ONNX Runtime install and model cache before any deletion. The
+  default build stays fully offline (NFR-1); no weights or runtime are
+  shipped in the binary.
+
 ### Changed
 
 - Hybrid default model pins are free OpenRouter routes

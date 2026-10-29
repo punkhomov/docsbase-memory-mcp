@@ -44,12 +44,17 @@ fn min_publish_age_configured() {
 #[test]
 fn models_use_dry_run_prints_pinnable_table() {
     let dir = tempfile::TempDir::new().expect("tmp");
+    // A project file is required for the default scope; seed an empty one
+    // so the dry-run resolves the project target (FR-8).
+    std::fs::write(dir.path().join(".docsbase.toml"), "[hybrid]\n").expect("seed");
     let out = Command::new(env!("CARGO_BIN_EXE_docsbase"))
         .args([
             "models",
             "use",
-            "--embedding",
+            "embed",
             "m/e",
+            "--provider",
+            "openrouter",
             "--dims",
             "128",
             "--dry-run",
@@ -71,16 +76,18 @@ fn models_use_dry_run_prints_pinnable_table() {
     );
     assert!(stdout.contains("m/e"), "{stdout}");
     assert!(stdout.contains("128"), "{stdout}");
-    assert!(
-        std::fs::read_dir(dir.path()).expect("ls").next().is_none(),
+    let project_file = std::fs::read_to_string(dir.path().join(".docsbase.toml")).expect("read");
+    assert_eq!(
+        project_file, "[hybrid]\n",
         "dry-run must not write anything"
     );
 }
 
-/// Bare `models use` must fail loudly (nothing to set), not silently succeed.
+/// Bare `models use` must fail loudly (no purpose), not silently succeed.
 #[test]
-fn models_use_without_flags_fails() {
+fn models_use_without_purpose_fails() {
     let dir = tempfile::TempDir::new().expect("tmp");
+    std::fs::write(dir.path().join(".docsbase.toml"), "[hybrid]\n").expect("seed");
     let out = Command::new(env!("CARGO_BIN_EXE_docsbase"))
         .args(["models", "use", "--path"])
         .arg(dir.path())

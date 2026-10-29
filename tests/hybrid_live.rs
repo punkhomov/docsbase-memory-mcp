@@ -131,7 +131,13 @@ fn live_golden_rerank_measurement() {
     let mut project = project;
     project.status = ProjectStatus::Indexed;
 
-    let stages = from_config(&config.hybrid_cfg, true).expect("stages");
+    let stages = from_config(
+        &config.hybrid_cfg,
+        &config.providers,
+        true,
+        cfg!(feature = "hybrid-local"),
+    )
+    .expect("stages");
     assert!(stages.embedder.is_some() && stages.reranker.is_some());
 
     let mut bm25_hits = 0usize;
@@ -232,7 +238,13 @@ fn live_golden_dense_rrf_measurement() {
     let mut project = project;
     project.status = ProjectStatus::Indexed;
 
-    let stages_all = from_config(&config.hybrid_cfg, true).expect("stages");
+    let stages_all = from_config(
+        &config.hybrid_cfg,
+        &config.providers,
+        true,
+        cfg!(feature = "hybrid-local"),
+    )
+    .expect("stages");
     assert!(stages_all.embedder.is_some() && stages_all.reranker.is_some());
     let stages_rrf = HybridStages {
         embedder: stages_all.embedder.clone(),

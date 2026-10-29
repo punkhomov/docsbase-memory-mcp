@@ -34,7 +34,12 @@ pub fn run(path: Option<&Path>) -> anyhow::Result<()> {
     let config = Config::load(Some(&project.canonical_root))?;
     // Fail fast (FR-14): a hybrid misconfiguration must surface on command
     // start, not after the index commit already happened.
-    crate::hybrid::from_config(&config.hybrid_cfg, cfg!(feature = "hybrid-remote"))?;
+    crate::hybrid::from_config(
+        &config.hybrid_cfg,
+        &config.providers,
+        cfg!(feature = "hybrid-remote"),
+        cfg!(feature = "hybrid-local"),
+    )?;
     let cache_root = db.cache_root().to_path_buf();
     let stats = tools::run_project_index(&mut db, &cache_root, &project, &config)?;
 

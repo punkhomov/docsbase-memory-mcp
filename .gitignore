@@ -9,3 +9,6 @@
 *.swp
 .vscode/
 .idea/
+
+# Local agent harness (review panel prompts, machine-mode config)
+/.pi/

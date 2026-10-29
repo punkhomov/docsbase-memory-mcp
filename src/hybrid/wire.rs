@@ -32,6 +32,13 @@ pub trait Transport: Send + Sync {
         headers: &[(String, String)],
         body: &str,
     ) -> Result<TransportResponse>;
+
+    /// Sends one JSON GET request (no body). Used by the connect key probe
+    /// (FR-3: 0 model tokens).
+    ///
+    /// # Errors
+    /// Transport-level failures (DNS, TLS, timeouts).
+    fn get_json(&self, url: &str, headers: &[(String, String)]) -> Result<TransportResponse>;
 }
 
 /// Maximum input texts per embeddings request (FR-6).

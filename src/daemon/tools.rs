@@ -105,14 +105,9 @@ fn dense_candidates(
     let Some(embedder) = stages.embedder.as_deref() else {
         return Ok(Vec::new());
     };
-    let mut vectors = blocking::enter(|| embedder.embed(&[query.to_owned()]))?;
-    if vectors.len() != 1 {
-        return Err(Error::internal(format!(
-            "dense query embedding returned {} vectors for one input",
-            vectors.len()
-        )));
-    }
-    let vector = vectors.pop().unwrap_or_default();
+    // Search embeds through `embed_query` so local providers apply their
+    // registry query prefix (FR-10, SC-9); backfill uses `embed`.
+    let vector = blocking::enter(|| embedder.embed_query(query))?;
     let model_id = embedder.model_id();
     match dense.get(db, project.id, model_id)? {
         DenseRows::Ready(index) => dense::top_k(&vector, index.rows(), fetch),
@@ -699,7 +694,7 @@ pub fn run_sync_job_in(
     // completes the coverage a previous offline period left behind (FR-15);
     // cached chunks cost nothing, so this is a no-op once covered.
     let outcome = run_project_index(db, cache, project, config).and_then(|stats| {
-        hybrid_jobs::embed_project_chunks(db, &config.hybrid_cfg, project.id)?;
+        hybrid_jobs::embed_project_chunks(db, &config.hybrid_cfg, &config.providers, project.id)?;
         Ok(stats)
     });
     let (state, stats_json) = match &outcome {
@@ -832,6 +827,7 @@ mod tests {
     use crate::index::job::run_full;
     use crate::index::tantivy_index::IndexHandle;
     use crate::store::models::ProjectStatus;
+    use crate::vector_cache::Embedder;
 
     /// Reranker that reverses the candidates, scores by rank and records the
     /// documents it saw (FR-11 contract; SC-2).
@@ -889,6 +885,56 @@ mod tests {
             .iter()
             .map(|row| row["chunk_id"].as_u64().expect("chunk_id"))
             .collect()
+    }
+
+    /// Spy embedder: records whether `embed_query`/`embed` were called and
+    /// returns fixed vectors (FR-10, SC-9).
+    #[derive(Default)]
+    struct SpyEmbedder {
+        query_calls: AtomicUsize,
+        passage_calls: AtomicUsize,
+    }
+
+    impl Embedder for SpyEmbedder {
+        fn model_id(&self) -> &'static str {
+            "spy/model@d3@l2"
+        }
+
+        #[allow(clippy::cast_precision_loss)]
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            self.passage_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(texts
+                .iter()
+                .map(|text| vec![text.len() as f32, 0.0, 0.0])
+                .collect())
+        }
+
+        #[allow(clippy::cast_precision_loss)]
+        fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+            self.query_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![text.len() as f32, 0.0, 0.0])
+        }
+    }
+
+    #[test]
+    fn dense_search_path_uses_embed_query() {
+        let (_cache, db, project) = env();
+        let spy = Arc::new(SpyEmbedder::default());
+        let stages = HybridStages {
+            embedder: Some(spy.clone()),
+            reranker: None,
+            ranking: Ranking::Rrf,
+        };
+        let dense = DenseCache::new();
+        let hits = dense_candidates(&stages, &dense, &db, &project, "widgets", 10)
+            .expect("dense candidates");
+        // The query path must go through `embed_query` (registry prefixes),
+        // never through the passage `embed`.
+        assert_eq!(spy.query_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(spy.passage_calls.load(Ordering::SeqCst), 0);
+        // With an empty cache and exact-only dense, no hits are expected but
+        // the call must succeed.
+        assert!(hits.len() <= 10);
     }
 
     #[test]

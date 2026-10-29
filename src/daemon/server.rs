@@ -20,7 +20,7 @@ use crate::daemon::session::SessionRegistry;
 use crate::daemon::tools;
 use crate::error::{Error, Result};
 use crate::hybrid::HybridStages;
-use crate::hybrid::config::{Ranking, cache_model_id};
+use crate::hybrid::config::{Ranking, embedding_model_id};
 use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits};
 use crate::hybrid::jobs as hybrid_jobs;
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
@@ -126,7 +126,9 @@ impl Shared {
         let config = self.project_config(project)?;
         let stages = Arc::new(crate::hybrid::from_config(
             &config.hybrid_cfg,
+            &config.providers,
             cfg!(feature = "hybrid-remote"),
+            cfg!(feature = "hybrid-local"),
         )?);
         self.stages_map().insert(project.id, Arc::clone(&stages));
         Ok(stages)
@@ -233,7 +235,7 @@ impl Shared {
         // shorthand keeps `Ranking::Lexical` (Delta 0.3). Cleanup stays
         // unconditional: a ranking flip must still reclaim old dumps.
         let warm = config.hybrid_cfg.enabled && config.hybrid_cfg.ranking == Ranking::Rrf;
-        let model_id = cache_model_id(embed_cfg);
+        let model_id = embedding_model_id(embed_cfg);
         let cache_path = self.cache.clone();
         let dense = self.dense.snapshot();
         let project_id = project.id;

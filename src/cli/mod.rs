@@ -1,5 +1,31 @@
 //! CLI entry points (FR-30).
 
+/// Shared test seam for CLI unit-test modules: environment mutation
+/// (`DOCSBASE_CONFIG_DIR`, `OPENROUTER_API_KEY`, …) must be serialized
+/// across all modules that read it concurrently, or parallel `cargo test`
+/// runs race each other. Keep this one lock for every env-touching test.
+#[cfg(test)]
+pub(crate) mod test_env {
+    /// Single env lock for the whole test binary: the `hybrid-local` build
+    /// shares the runtime guard (which also neutralizes a host
+    /// `ORT_DYLIB_PATH`); the default build has no ORT env surface, so a
+    /// plain mutex is enough (round-7 C2).
+    #[cfg(feature = "hybrid-local")]
+    pub(crate) use crate::hybrid::runtime::test_env::{EnvGuard, env_guard};
+
+    #[cfg(not(feature = "hybrid-local"))]
+    pub(crate) type EnvGuard = std::sync::MutexGuard<'static, ()>;
+
+    #[cfg(not(feature = "hybrid-local"))]
+    pub(crate) fn env_guard() -> EnvGuard {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+pub mod connect;
 pub mod index;
 pub mod install;
 pub mod models;
@@ -80,6 +106,12 @@ pub enum Command {
         #[command(subcommand)]
         command: models::ModelsCommand,
     },
+    /// Prepare providers on this machine (status, openrouter, fastembed).
+    Connect {
+        /// Provider subcommand.
+        #[command(subcommand)]
+        provider: Option<connect::ConnectProvider>,
+    },
     /// Install (or update) the binary and register owned artifacts.
     Install,
     /// Update the installed binary from a GitHub release (network).
@@ -102,6 +134,9 @@ pub enum Command {
         /// Delete without an interactive confirmation prompt.
         #[arg(long)]
         yes: bool,
+        /// Print everything that would be removed, delete nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -132,7 +167,14 @@ pub fn run() -> anyhow::Result<()> {
         },
         Command::Models { command } => match command {
             models::ModelsCommand::Use(args) => models::run(&args),
+            #[cfg(feature = "hybrid-local")]
+            models::ModelsCommand::Fetch(args) => models::fetch_cmd(&args),
+            #[cfg(feature = "hybrid-local")]
+            models::ModelsCommand::List => models::list_cmd(),
+            #[cfg(feature = "hybrid-local")]
+            models::ModelsCommand::Remove(args) => models::remove_cmd(&args),
         },
+        Command::Connect { provider } => connect::run(&connect::ConnectArgs { provider }),
         Command::Install => install::install(),
         Command::Update {
             check,
@@ -145,7 +187,7 @@ pub fn run() -> anyhow::Result<()> {
             version,
             from,
         }),
-        Command::Uninstall { yes } => install::uninstall(yes),
+        Command::Uninstall { yes, dry_run } => install::uninstall(yes, dry_run),
     }
 }
 

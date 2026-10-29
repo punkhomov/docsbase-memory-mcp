@@ -335,3 +335,16 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   `DOCSBASE_BENCH_ACCEPT_NEW_KNOWN=1` and prints the known-set diff always.
   FR-15 carries the technical guard. A regression can no longer be greened
   through regenerate without the explicit human accept.
+
+- Delta 2026-10-29 (FR-22, host-speed factor) — from PR #50 CI evidence: the
+  offline latency gate fired on both `linux-hybrid` and `linux-local` with
+  Rrf p95 26.67 ms and 32.99 ms against a 24.74 ms budget (baseline 13.16 ms),
+  and RrfRerank 27.92/28.50 ms against 25.97 ms (baseline 13.98 ms) — while
+  nDCG/hit-rate deltas were exactly 0.0 for every slice. Locally the same gate
+  test passes and takes 6.5 s; on the runner it takes 12.5–13 s, i.e. the host
+  is ~2× slower than the one that calibrated the baseline. Fix: budget is
+  `baseline_p95 × 1.5 × DOCSBASE_BENCH_LATENCY_SLACK + 5 ms` (CI sets 3.0,
+  default/local 1.0), absolute 500 ms ceiling unscaled; pure function
+  `latency_allowed_ms_for` + `latency_slack` with `latency_budget_math` pinning
+  slack 1.0, 3.0 and the invalid-factor fallback. No baseline value changed —
+  the no-regression signal is preserved (a 3× regression on CI still fails).

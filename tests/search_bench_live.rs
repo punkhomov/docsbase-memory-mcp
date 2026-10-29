@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use docsbase_memory::hybrid::config::cache_model_id;
+use docsbase_memory::hybrid::config::embedding_model_id;
 use docsbase_memory::hybrid::openrouter::{OpenRouterEmbedder, OpenRouterReranker};
 use docsbase_memory::hybrid::{EmbeddingCfg, RerankerCfg};
 use docsbase_memory::vector_cache::Embedder;
@@ -31,7 +31,7 @@ fn record_fixtures() {
     openrouter_key().expect("export OPENROUTER_API_KEY to record fixtures");
     let embed_cfg = EmbeddingCfg::default();
     let rerank_cfg = RerankerCfg::default();
-    let embed_pin = cache_model_id(&embed_cfg);
+    let embed_pin = embedding_model_id(&embed_cfg);
     assert_eq!(
         embed_pin,
         "openrouter/nvidia/nemotron-3-embed-1b:free@d2048@l2"
@@ -211,6 +211,14 @@ fn usage_is_parsed_from_recorded_response() {
                 body,
                 retry_after: None,
             })
+        }
+
+        fn get_json(
+            &self,
+            url: &str,
+            headers: &[(String, String)],
+        ) -> docsbase_memory::error::Result<TransportResponse> {
+            self.post_json(url, headers, "")
         }
     }
     use std::sync::Arc;
@@ -528,7 +536,7 @@ fn live_measurement() {
     let env = support::bench::build_env(&root.join("corpus"), "live", 60..=85).expect("index");
     let embed_cfg = EmbeddingCfg::default();
     let rerank_cfg = RerankerCfg::default();
-    let embed_pin = cache_model_id(&embed_cfg);
+    let embed_pin = embedding_model_id(&embed_cfg);
     let rerank_pin = format!("{}/{}", rerank_cfg.provider, rerank_cfg.model);
     let (embed_client, embed_recorder) = live_client(&key, &embed_pin);
     // Per-query search embeds go through pacing (free tier ~20 req/min);

@@ -59,11 +59,21 @@ pub struct Coverage {
 /// # Errors
 /// Feature/admission errors when hybrid is enabled in an offline build, plus
 /// cache and provider failures (failures stay explicit, NFR-2).
-pub fn embed_texts(cache_root: &Path, cfg: &HybridCfg, texts: &[String]) -> Result<u64> {
+pub fn embed_texts(
+    cache_root: &Path,
+    cfg: &HybridCfg,
+    providers: &crate::hybrid::config::ProvidersCfg,
+    texts: &[String],
+) -> Result<u64> {
     if !cfg.enabled || cfg.embedding.is_none() || texts.is_empty() {
         return Ok(0);
     }
-    let stages = from_config(cfg, cfg!(feature = "hybrid-remote"))?;
+    let stages = from_config(
+        cfg,
+        providers,
+        cfg!(feature = "hybrid-remote"),
+        cfg!(feature = "hybrid-local"),
+    )?;
     let Some(embedder) = stages.embedder else {
         return Ok(0);
     };
@@ -105,11 +115,21 @@ pub fn embed_texts_with_limits(
 ///
 /// # Errors
 /// Feature/admission, cache and provider failures.
-pub fn embed_project_chunks(db: &Db, cfg: &HybridCfg, project_id: i64) -> Result<u64> {
+pub fn embed_project_chunks(
+    db: &Db,
+    cfg: &HybridCfg,
+    providers: &crate::hybrid::config::ProvidersCfg,
+    project_id: i64,
+) -> Result<u64> {
     if !cfg.enabled || cfg.embedding.is_none() {
         return Ok(0);
     }
-    let stages = from_config(cfg, cfg!(feature = "hybrid-remote"))?;
+    let stages = from_config(
+        cfg,
+        providers,
+        cfg!(feature = "hybrid-remote"),
+        cfg!(feature = "hybrid-local"),
+    )?;
     let Some(embedder) = stages.embedder else {
         return Ok(0);
     };
@@ -222,10 +242,12 @@ pub fn coverage(db: &Db, cfg: &HybridCfg, project_id: i64) -> Result<Option<Cove
         return Ok(None);
     };
     // Coverage needs only the cache key, not a provider client: reporting
-    // stays cheap and never builds runtimes per status call (NFR-1).
+    // stays cheap and never builds runtimes per status call (NFR-1). The
+    // canonical key (FR-9) keeps coverage aligned with the embedder and the
+    // ANN warm path (SC-10).
     coverage_for_key_with_limits(
         db,
-        &super::config::cache_model_id(embedding),
+        &super::config::embedding_model_id(embedding),
         project_id,
         cfg.cache.limits(),
     )

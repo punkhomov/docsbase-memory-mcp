@@ -19,13 +19,14 @@ not promised before 1.0. The daemon owns the project registry, per-project
 full-text indexes, file watchers and sync jobs. The `.md` files on disk are
 the only source of truth; the MCP surface is read-only over the index.
 No network calls at runtime by default — no telemetry, no cloud, no Docker.
-Optional hybrid search stages (OpenRouter embeddings + rerank, with opt-in
-RRF fusion over the cached vectors via `ranking = "rrf"`) are opt-in per
-project/request, ship behind the `hybrid-remote` build feature and require
-`OPENROUTER_API_KEY`; the default build stays fully offline and never falls
-back silently (see [`docs/CONFIG.md`](docs/CONFIG.md)). Default model pins
-are free OpenRouter routes, which may train on prompts and rotate monthly;
-paid pins via `docsbase models use`.
+Optional hybrid search stages — **local** (`hybrid-local`: fastembed + ONNX
+Runtime, fully offline after provisioning) or **remote** (`hybrid-remote`:
+OpenRouter, requires `OPENROUTER_API_KEY`) — are opt-in per project/request
+with RRF fusion over the cached vectors via `ranking = "rrf"`. The default
+build stays fully offline and never falls back silently (see
+[`docs/CONFIG.md`](docs/CONFIG.md)). Default remote pins are free OpenRouter
+routes: they may train on prompts and the roster rotates monthly. Paid pins
+via `docsbase models use` (see the hybrid section in `docs/CONFIG.md`).
 
 Supported platforms: **Linux x86_64** (static binary), **Windows x64**
 (`.exe`) and **macOS 12+ on Apple Silicon**. Intel Macs are out of scope
@@ -62,6 +63,27 @@ Building from source or installing manually? Run `docsbase install` once to
 register the binary — the scripts above already do it for you.
 
 Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
+
+### Optional: local embeddings (fastembed, `hybrid-local`)
+
+Build with the feature, install the ONNX Runtime, fetch the pinned models,
+then point the stages at them (all provisioning commands are offline-safe and
+idempotent):
+
+```sh
+cargo build --release --features hybrid-local
+# 1. Install the pinned ONNX Runtime (downloads once; `--check` reports state)
+docsbase connect fastembed
+# 2. Fetch a registry model (revision + sha256 pinned in code)
+docsbase models fetch bge-small-en-v1.5
+docsbase models fetch jina-reranker-v1-turbo-en
+# 3. Pin the stages (dims inferred from the registry for fastembed)
+docsbase models use embed bge-small-en-v1.5
+docsbase models use rerank jina-reranker-v1-turbo-en
+```
+
+`models use` validates a project file; outside any project pass `--global`.
+Everything above works fully offline after the explicit fetch steps.
 
 ## Install
 

@@ -456,6 +456,33 @@ pub fn secure_executable(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))
 }
 
+/// Free bytes available on the filesystem holding `path` (POSIX
+/// `statvfs`); used by the fetch/connect free-space preflight (FR-13).
+///
+/// # Errors
+/// Returns the raw IO error when `statvfs` fails.
+#[allow(unsafe_code)] // libc FFI: SAFETY comments on each block
+pub fn available_space(path: &Path) -> io::Result<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    // SAFETY: `stats` is a zeroed statvfs of the correct size; `statvfs`
+    // fills it and returns 0 on success.
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stats.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the call succeeded, so `stats` is fully initialized.
+    let stats = unsafe { stats.assume_init() };
+    // Widen to u128 so the multiplication is overflow-safe and the code is
+    // portable across Unix libcs (signed `f_bavail` on some targets).
+    let free = u128::from(stats.f_bavail) * u128::from(stats.f_frsize);
+    Ok(u64::try_from(free).unwrap_or(u64::MAX))
+}
+
 /// Opens (creating if needed) a `0600` append-only log file; pre-existing
 /// files are tightened too (`mode` only applies at creation).
 ///

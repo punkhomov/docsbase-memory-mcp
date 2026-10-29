@@ -19,14 +19,14 @@
 полнотекстовыми индексами, вотчерами и sync-джобами. Единственный источник
 истины — `.md`-файлы на диске; MCP-поверхность — read-only поверх индекса.
 В рантайме по умолчанию ноль сетевых вызовов: ни телеметрии, ни облака, ни
-Docker. Опциональные hybrid-стадии поиска (embeddings + rerank через
-OpenRouter, плюс opt-in RRF-fusion по кэшу векторов — `ranking = "rrf"`)
-включаются явно per-project/per-request, поставляются за feature-флагом
-`hybrid-remote` и требуют `OPENROUTER_API_KEY`; дефолтная сборка остаётся
-полностью офлайн и не делает молчаливого fallback
-(см. [`docs/CONFIG.md`](docs/CONFIG.md)). Дефолтные пины моделей —
-бесплатные маршруты OpenRouter: могут учиться на промптах и меняются
-ежемесячно; платные пины — через `docsbase models use`.
+Docker. Опциональные hybrid-стадии поиска — **локальные** (`hybrid-local`:
+fastembed + ONNX Runtime, полностью офлайн после provisioning) или
+**удалённые** (`hybrid-remote`: OpenRouter, требует `OPENROUTER_API_KEY`) —
+включаются явно per-project/per-request с RRF-fusion по кэшу векторов —
+`ranking = "rrf"`; дефолтная сборка остаётся полностью офлайн и не делает
+молчаливого fallback (см. [`docs/CONFIG.md`](docs/CONFIG.md)).
+Дефолтные пины моделей — бесплатные маршруты OpenRouter: могут учиться на
+промптах и меняются ежемесячно; платные пины — через `docsbase models use`.
 
 Поддерживаемые платформы: **Linux x86_64** (статический бинарь),
 **Windows x64** (`.exe`) и **macOS 12+ на Apple Silicon**. Intel-маки вне
@@ -62,6 +62,26 @@ $env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punk
 раз, чтобы зарегистрировать бинарь — скрипты выше делают это сами.
 
 Полное прохождение: [`docs/QUICKSTART.md`](docs/QUICKSTART.md) (EN).
+
+### Опционально: локальные эмбеддинги (fastembed, `hybrid-local`)
+
+Соберите с feature, установите ONNX Runtime, скачайте закреплённые модели и
+укажите стадии (все шаги provisioning офлайн-безопасны и идемпотентны):
+
+```sh
+cargo build --release --features hybrid-local
+# 1. Установка закреплённого ONNX Runtime (скачивается один раз; `--check` показывает состояние)
+docsbase connect fastembed
+# 2. Скачивание модели из реестра (revision + sha256 закреплены в коде)
+docsbase models fetch bge-small-en-v1.5
+docsbase models fetch jina-reranker-v1-turbo-en
+# 3. Указание стадий (dims берутся из реестра для fastembed)
+docsbase models use embed bge-small-en-v1.5
+docsbase models use rerank jina-reranker-v1-turbo-en
+```
+
+`models use` проверяет файл проекта; вне проекта передайте `--global`. Всё
+перечисленное работает полностью офлайн после явных шагов fetch.
 
 ## Установка
 

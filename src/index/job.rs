@@ -378,7 +378,12 @@ fn finish_plan(
         .iter()
         .flat_map(|pending| pending.chunks.iter().map(|chunk| chunk.text.clone()))
         .collect();
-    crate::hybrid::jobs::embed_texts(db.cache_root(), &config.hybrid_cfg, &texts)?;
+    crate::hybrid::jobs::embed_texts(
+        db.cache_root(),
+        &config.hybrid_cfg,
+        &config.providers,
+        &texts,
+    )?;
     // Tantivy first, then a short SQLite write transaction (R2): the marker
     // rows make a crash in between reprocess on the next run.
     index.commit()?;

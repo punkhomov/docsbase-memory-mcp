@@ -30,11 +30,21 @@ Unknown keys are rejected (`deny_unknown_fields`) — typos fail loudly.
 
 ## Hybrid stages (opt-in, spec `docs/specs/hybrid-providers`)
 
-Hybrid search needs a build with the `hybrid-remote` feature
-(`cargo build --features hybrid-remote`) and `OPENROUTER_API_KEY` in the
-environment; the default build stays fully offline and any enabled hybrid
-configuration fails with an explicit admission error instead of silently
-falling back to BM25.
+Hybrid search is opt-in per project. Two providers exist:
+
+- `openrouter` (spec `docs/specs/hybrid-providers`): remote embeddings +
+  rerank; needs a build with `--features hybrid-remote` and
+  `OPENROUTER_API_KEY` in the environment.
+- `fastembed` (spec `docs/specs/hybrid-local`): local ONNX models; needs a
+  build with `--features hybrid-local`, the ONNX Runtime installed
+  (`docsbase connect fastembed`), and pinned registry models fetched
+  (`docsbase models fetch <name>`).
+
+Provider entries (`[providers]`) live only in the global config; a project
+may reference a provider but never define one. The default build stays fully
+offline and any enabled hybrid configuration whose provider is unavailable
+fails with an explicit admission error instead of silently falling back to
+BM25.
 
 ```toml
 hybrid = true          # shorthand: both stages with defaults
@@ -45,14 +55,14 @@ enabled = true
 ranking = "lexical"                # "lexical" | "rrf" (see below)
 
 [hybrid.embedding]
-provider = "openrouter"            # iteration 1 allows only openrouter
-model = "nvidia/nemotron-3-embed-1b:free"  # default; fixed width, no MRL
-dimensions = 2048                  # part of the vector cache key
+provider = "openrouter"            # or "fastembed" (local ONNX)
+model = "nvidia/nemotron-3-embed-1b:free"  # openrouter default; registry name for fastembed
+dimensions = 2048                  # part of the vector cache key (registry-inferred for fastembed)
 normalize = true                   # L2; part of the cache key
 
 [hybrid.reranker]
-provider = "openrouter"
-model = "nvidia/llama-nemotron-rerank-vl-1b-v2:free"  # default
+provider = "openrouter"            # or "fastembed"
+model = "nvidia/llama-nemotron-rerank-vl-1b-v2:free"  # openrouter default; registry name for fastembed
 window = 50                        # candidate window per search (10..=100)
 
 [hybrid.cache]
@@ -70,14 +80,32 @@ admitted only when `graph + exact rows` fits the resident cap
 of ~1.22 GiB). Raising `hybrid.cache.max_bytes` does not admit a larger corpus;
 past roughly 92k chunks at `d2048` the project stays on the exact path.
 
-Default pins are free OpenRouter routes: they may train on prompts and the
-roster rotates monthly. Paid pins (e.g. `qwen/qwen3-embedding-8b`,
+Default remote pins are free OpenRouter routes: they may train on prompts and
+the roster rotates monthly. Paid pins (e.g. `qwen/qwen3-embedding-8b`,
 `cohere/rerank-v3.5`) are one explicit `docsbase models use` away and stay
-pinned once set.
+pinned once set. Local models have no default: every fastembed stage must
+name a registry row (`docsbase models list`), fetched first with `docsbase
+models fetch <name>`.
+
+Models are pinned purpose-first, one stage per call: `docsbase models use
+embed <model> [--provider P] [--dims N] [--local|--global]` and `docsbase
+models use rerank <model> [--provider P] [--window N] [--local|--global]`.
+`docsbase models list` shows provider states, the selected pins and per-model
+cache sizes. `docsbase models remove <name>` removes every cached revision of
+a model and refuses while the model is loaded (pass `--force` to delete
+anyway). `docsbase uninstall --dry-run` lists the owned artifacts — including
+the ONNX Runtime install and the model cache (FR-13) — before any deletion.
+Scope: inside a project the project `.docsbase.toml` is written by default
+(`--local` optional); `--global` writes the machine config and is required
+outside a project; `--path` overrides the project root. `--dry-run` prints
+the merged table without probing or writing. `--provider` is optional for
+registry names (fastembed inferred); unknown names require it.
 
 Semantics: chunk vectors are cached content-addressed
-(`openrouter/<model>@d<dim>@<l2|raw>`); opening a project with incomplete
-coverage enqueues a background sync job (`embed_coverage` in `status`);
+(`openrouter/<model>@d<dim>@<l2|raw>` or
+`fastembed/<name>@d<dim>@<l2|raw>@r<rev8>@p<prompt_version>`); opening a
+project with incomplete coverage enqueues a background sync job
+(`embed_coverage` in `status`);
 searches rerank the candidate window (`max(limit, window)` candidates: plain
 BM25, or under `ranking = "rrf"` the fused BM25 + dense list truncated to the
 same size); `rerank=false` per request skips the rerank stage (the MCP
@@ -102,8 +130,15 @@ Global `config.toml`:
 max_file_size = 2097152
 max_docs_per_project = 20000
 auto_index = false
-hybrid = false   # true = hybrid stages (needs --features hybrid-remote build)
+hybrid = false   # true = hybrid stages (per-provider build feature)
 ignores = ["drafts/**", "*.tmp.md"]
+
+# Providers live only in the global config (never in a project file).
+# fastembed: after `docsbase connect fastembed`; runtime_path is optional
+# (the data-dir install is used otherwise).
+[providers.fastembed]
+enabled = true
+# runtime_path = "/opt/onnxruntime/lib/libonnxruntime.so"
 ```
 
 Project `.docsbase.toml` (layered on top of global):
@@ -142,3 +177,14 @@ docsbase config   # effective values for the current directory (JSON)
   (`docsbase daemon stop` first).
 - Daemon reads the global config once at start; project config is read when
   the project is opened.
+- Provisioning changes need a daemon restart: `docsbase connect fastembed`
+  (runtime library) and `docsbase models fetch <name>` (a revision that
+  actually landed on disk) both print a restart note, because a running
+  daemon keeps the ORT library and its loaded model instances until it is
+  restarted.
+- Local inference memory: the embedder holds one ORT session per cache key
+  (~model size, int8 rows are the small case referred to by NFR-4). The
+  reranker additionally holds the ONNX bytes in RAM while its session is
+  built (`OnnxSource::Memory`, which is what makes load-time sha256
+  verification possible), so a 1.1 GiB fp32 reranker such as
+  `bge-reranker-base` peaks at roughly twice its file size during load.

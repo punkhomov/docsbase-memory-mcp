@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::vector_cache::Embedder;
 
-use super::config::{EmbeddingCfg, RerankerCfg, cache_model_id};
+use super::config::{EmbeddingCfg, RerankerCfg, embedding_model_id};
 use super::wire::{self, Transport, TransportResponse};
 use super::{Reranker, blocking};
 
@@ -20,11 +20,14 @@ pub const BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// App attribution headers (FR-9; values are OQ-2, finalized here).
 const HTTP_REFERER: &str = "https://github.com/punkhomov/docsbase-memory-mcp";
-const X_TITLE: &str = "docsbase-memory-mcp";
+pub(crate) const X_TITLE: &str = "docsbase-memory-mcp";
 
-/// Input type for chunk (document) embeddings; query side would use
-/// `search_query` when a dense stage arrives (iteration 2).
+/// Input type for chunk (document) embeddings.
 const INPUT_TYPE_DOCUMENT: &str = "search_document";
+
+/// Input type for query embeddings (FR-10 role-aware path; `embed_query`
+/// uses this so the provider embeds queries as queries, not documents).
+const INPUT_TYPE_QUERY: &str = "search_query";
 
 /// API key that never leaks through `Debug` (FR-4, I2).
 #[derive(Clone)]
@@ -113,6 +116,23 @@ impl OpenRouterClient {
         normalize: bool,
         texts: &[String],
     ) -> Result<Vec<Vec<f32>>> {
+        self.embed_texts_with_type(model, dimensions, normalize, texts, INPUT_TYPE_DOCUMENT)
+    }
+
+    /// Like [`embed_texts`], but with an explicit `input_type` (the query
+    /// role uses `search_query` — FR-10).
+    ///
+    /// # Errors
+    /// Same as [`embed_texts`] (provider/transport failures; wrong count or
+    /// inconsistent dimensions → [`Error::Internal`]).
+    pub fn embed_texts_with_type(
+        &self,
+        model: &str,
+        dimensions: u32,
+        normalize: bool,
+        texts: &[String],
+        input_type: &str,
+    ) -> Result<Vec<Vec<f32>>> {
         ensure_context()?;
         let url = format!("{}/embeddings", self.base_url);
         let mut vectors = Vec::with_capacity(texts.len());
@@ -122,7 +142,7 @@ impl OpenRouterClient {
                 model,
                 input: batch,
                 dimensions,
-                input_type: INPUT_TYPE_DOCUMENT,
+                input_type,
             };
             let body = serde_json::to_string(&request)
                 .map_err(|err| Error::internal_with_source("encode embeddings request", err))?;
@@ -327,7 +347,7 @@ impl OpenRouterEmbedder {
     /// Builds the stage with an explicit client (shared with the reranker).
     #[must_use]
     pub fn with_client(cfg: EmbeddingCfg, client: Arc<OpenRouterClient>) -> Self {
-        let model_id = cache_model_id(&cfg);
+        let model_id = embedding_model_id(&cfg);
         Self {
             client,
             cfg,
@@ -357,6 +377,19 @@ impl Embedder for OpenRouterEmbedder {
             self.cfg.normalize,
             texts,
         )
+    }
+
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        let mut vectors = self.client.embed_texts_with_type(
+            &self.cfg.model,
+            self.cfg.dimensions,
+            self.cfg.normalize,
+            &[text.to_owned()],
+            INPUT_TYPE_QUERY,
+        )?;
+        vectors
+            .pop()
+            .ok_or_else(|| Error::internal("embed returned no vector for one input"))
     }
 }
 
@@ -437,6 +470,36 @@ impl Transport for ReqwestTransport {
     ) -> Result<TransportResponse> {
         let future = async {
             let mut request = self.http.post(url).body(body.to_owned());
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|err| Error::internal_with_source("OpenRouter request failed", err))?;
+            let status = response.status().as_u16();
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .map(Duration::from_secs);
+            let body = response
+                .text()
+                .await
+                .map_err(|err| Error::internal_with_source("read OpenRouter response", err))?;
+            Ok(TransportResponse {
+                status,
+                body,
+                retry_after,
+            })
+        };
+        self.block_on(future)
+    }
+
+    fn get_json(&self, url: &str, headers: &[(String, String)]) -> Result<TransportResponse> {
+        let future = async {
+            let mut request = self.http.get(url);
             for (name, value) in headers {
                 request = request.header(name, value);
             }

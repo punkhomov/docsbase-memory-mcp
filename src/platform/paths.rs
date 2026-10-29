@@ -190,6 +190,23 @@ pub fn normalize_for_compare(path: &Path) -> String {
     }
 }
 
+/// Stable byte representation of a path, used where a path must be hashed
+/// (e.g. the cross-process config lock name). Unix exposes the raw bytes;
+/// other platforms fall back to the lossy UTF-8 form, which is consistent
+/// for any single installation (ADR-9: OS-specific path access lives here).
+#[must_use]
+pub fn as_bytes(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        path.as_os_str().to_string_lossy().into_owned().into_bytes()
+    }
+}
+
 /// Windows comparison key (`/` separators, lowercase); compiled under
 /// `cfg(test)` on Linux so the folding stays covered (ADR-9, T36).
 #[cfg(any(windows, test))]

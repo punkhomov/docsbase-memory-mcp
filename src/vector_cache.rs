@@ -46,6 +46,18 @@ pub trait Embedder: Send + Sync {
     /// # Errors
     /// Implementation-defined failures (model, IO).
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    /// Embeds one query with the role-aware query prefix (FR-10). The
+    /// default embeds the bare text; local providers override this to apply
+    /// their registry `query_prefix`.
+    ///
+    /// # Errors
+    /// Implementation-defined failures (model, IO).
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        let mut vectors = self.embed(&[text.to_owned()])?;
+        vectors
+            .pop()
+            .ok_or_else(|| Error::internal("embed returned no vector for one input"))
+    }
 }
 
 /// Stable content key of one chunk (blake3, hex).

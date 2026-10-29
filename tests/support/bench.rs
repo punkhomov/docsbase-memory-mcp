@@ -2299,11 +2299,55 @@ pub fn percentile(samples: &[f64], q: f64) -> f64 {
     }
 }
 
-/// Latency budget for one configuration (FR-22): baseline p95 × 1.5 + 5 ms,
-/// capped at the absolute 500 ms ceiling.
+/// Baseline p95 multiplier of the latency budget (FR-22): a fixed 2×
+/// regression is a failure, everything below it is tolerated.
+pub const LATENCY_BUDGET_MULTIPLIER: f64 = 1.5;
+
+/// Additive slack of the latency budget, in milliseconds (FR-22).
+pub const LATENCY_BUDGET_SLACK_MS: f64 = 5.0;
+
+/// Host-speed factor applied to the latency budget. CI runners are shared
+/// VMs and consistently 2–2.5× slower than the machine that calibrated
+/// `baseline.json` (measured 2026-10-29: the same gate test takes 6.5 s
+/// locally and 12.5–13 s on `ubuntu-latest`; Rrf p95 13.16 ms baseline vs
+/// 26.67–32.99 ms on CI). CI sets `DOCSBASE_BENCH_LATENCY_SLACK` so the
+/// RELATIVE regression signal survives the host difference; the absolute
+/// 500 ms ceiling still applies and is not scaled.
+#[must_use]
+pub fn latency_slack() -> f64 {
+    match std::env::var("DOCSBASE_BENCH_LATENCY_SLACK") {
+        Ok(raw) => match raw.trim().parse::<f64>() {
+            Ok(value) if value >= 1.0 && value.is_finite() => value,
+            _ => {
+                eprintln!(
+                    "warning: DOCSBASE_BENCH_LATENCY_SLACK={raw:?} is not a number >= 1.0; using 1.0"
+                );
+                1.0
+            }
+        },
+        Err(_) => 1.0,
+    }
+}
+
+/// Latency budget for one configuration (FR-22) for an explicit host factor:
+/// `baseline p95 × 1.5 × slack + 5 ms`, capped at the absolute 500 ms
+/// ceiling. Pure so both the strict (local, slack 1.0) and slow-host
+/// (CI) budgets are unit-tested.
+#[must_use]
+pub fn latency_allowed_ms_for(baseline_p95_ms: f64, slack: f64) -> f64 {
+    let slack = if slack.is_finite() && slack >= 1.0 {
+        slack
+    } else {
+        1.0
+    };
+    (baseline_p95_ms * LATENCY_BUDGET_MULTIPLIER * slack + LATENCY_BUDGET_SLACK_MS)
+        .min(MAX_LATENCY_MS)
+}
+
+/// Latency budget for the current host (see [`latency_slack`]).
 #[must_use]
 pub fn latency_allowed_ms(baseline_p95_ms: f64) -> f64 {
-    (baseline_p95_ms * 1.5 + 5.0).min(MAX_LATENCY_MS)
+    latency_allowed_ms_for(baseline_p95_ms, latency_slack())
 }
 
 fn unix_timestamp() -> String {
@@ -3429,6 +3473,14 @@ pub mod live_transport {
                 }
             }
             Ok(response)
+        }
+
+        fn get_json(
+            &self,
+            url: &str,
+            headers: &[(String, String)],
+        ) -> docsbase_memory::error::Result<TransportResponse> {
+            self.inner.get_json(url, headers)
         }
     }
 }

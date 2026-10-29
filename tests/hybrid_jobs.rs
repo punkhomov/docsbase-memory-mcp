@@ -108,7 +108,13 @@ fn disabled_hybrid_is_a_zero_no_op() {
     assert!(embedded > 0);
 
     let cfg = HybridCfg::default();
-    let count = embed_texts(cache.path(), &cfg, &["x".to_owned()]).expect("disabled");
+    let count = embed_texts(
+        cache.path(),
+        &cfg,
+        &docsbase_memory::hybrid::config::ProvidersCfg::default(),
+        &["x".to_owned()],
+    )
+    .expect("disabled");
     assert_eq!(count, 0, "disabled stages must not embed");
 }
 
@@ -119,6 +125,7 @@ fn enabled_hybrid_in_the_offline_build_is_an_admission_error() {
     let error = embed_texts(
         cache.path(),
         &HybridCfg::enabled_with_defaults(),
+        &docsbase_memory::hybrid::config::ProvidersCfg::default(),
         &["x".to_owned()],
     )
     .expect_err("offline build must refuse enabled hybrid (FR-14)");

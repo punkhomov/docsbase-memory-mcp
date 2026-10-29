@@ -531,7 +531,7 @@ static/MSRV), `hnsw` (rust-cv; 2021, hamming-oriented), `hannoy`/LMDB (C).
 releases, кастомные `corenn-kernels` и нет mmap-истории в нашем сценарии.
 
 **ADR-16. Vector-cache capacity/pinning для ANN (spec `docs/specs/hybrid-providers`, DELTA-9).**
-Выбрано: `[hybrid.cache] max_bytes` (default 1 GiB) ограничивает
+Выбрано: `[hybrid.cache] max_bytes` (default 1 GiB; резидентный cap `DenseCacheLimits.max_bytes` — 1.5 GiB с Delta 0.3.1) ограничивает
 content-addressed `VectorCache`; ANN требует 100% coverage, поэтому дефолт
 256 MiB заменён. Backfill берёт per-project lease: уникальные хеши проекта
 пишутся в `vector_cache_leases` на 1 час, `evict` их не трогает; успешный ANN
@@ -541,6 +541,59 @@ kept). Отклонено: строить ANN по частичному покр
 отдельный vector store (дублирует source of truth), безусловное удаление
 tmp-каталогов (гонка с build), удаление текущего проекта при disk cleanup.
 Закрыто T11 2026-10-23: Windows/macOS runtime подтверждён CI, T1.5 снят, спека ann-index — Final.
+
+**ADR-17. Local embedding/rerank provider: `fastembed` + ONNX Runtime за фичей `hybrid-local` (spec `docs/specs/hybrid-local`).**
+Выбрано: третий провайдер hybrid-ступеней — локальный `fastembed` (Apache-2.0) за
+отдельной фичей `hybrid-local`; дефолтная сборка остаётся полностью офлайн (SC-8:
+в `cargo tree` нет `fastembed`/`ort`/`tokenizers`/`hf-hub`/`reqwest`). Веса моделей
+в бинарь не входят; дефолтных моделей нет. Провайдер становится доступен только
+после явного `docsbase connect fastembed`, который ставит ONNX Runtime (не требует
+предустановленного рантайма) и пишет `[providers.fastembed]` в **глобальный** конфиг
+(`enabled = true`, версия/путь рантайма). Дефолтных моделей в реестре нет; существующие
+дефолты OpenRouter не меняются, а для не-openrouter провайдера `model` обязателен.
+Модели скачиваются только явно
+(`docsbase models fetch <name>`) с HF по **pinned revision** с проверкой sha256;
+`models use` purpose-first: `models use embed <model>` / `models use rerank <model>`,
+одна стадия за вызов (смешать нельзя), опции под назначение (`--dims` / `--window`);
+пишет только эту секцию в проект (по умолчанию) или в глобальный конфиг (`--global`,
+обязателен вне проекта).
+Сеть на index/search-путях запрещена: отсутствие рантайма/модели — admission-ошибка
+с подсказкой, без молчаливого fallback.
+ORT-стратегия: `ort-load-dynamic`; `connect` качает закреплённый ONNX Runtime
+(**1.24.4**, `api-24`; `linux-x64/aarch64`, `osx-arm64`, `win-x64/arm64` — macOS
+x86_64 больше не публикуется, минимальная macOS 14.0) под платформу/арх, проверяет
+sha256 и кладёт в data-dir; на старте
+`ort::init_from(path)` до создания сессий (порядок резолва: `ORT_DYLIB_PATH` →
+`providers.fastembed.runtime_path` → data-dir → ошибка; data-dir без записи провайдера
+не используется). На macOS скачанный dylib проверяется `codesign --verify --strict`;
+`com.apple.quarantine` снимается, если присутствует, а ad-hoc подпись (`codesign -s -`)
+применяется только при провале проверки. `[providers]` валиден только в глобальном конфиге: проектный файл
+парсится отдельным типом без поля `providers` — это структурная защита, а не проверка
+после merge. Рантайм считается исполняемым кодом: explicit connect, pinned
+version + hash, запись в SECURITY. Бюджет 40 MiB (NFR-2) относится к бинарю;
+рантайм и модели — отдельные кэши вне бюджета (размеры фиксируются в CONFIG/docs).
+Зависимости (фича, точные пины): `fastembed = { version = "=7.1.1",
+default-features = false }` (cooldown 14 дней; 7.2+ — после 2026-11-04/06; embedding
+ONNX грузится как `Vec<u8>` во всех версиях при MSRV 1.88: 7.5 всё ещё так, а
+`OnnxSource` есть только для rerank; 7.5.0 сам объявляет 1.88, но пинит ort rc.15
+с MSRV 1.92),
+`ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }`
+(release candidate — риск зафиксирован), `ureq = "=3.4.2"`, `sha2 = "=0.10.9"`,
+`flate2 = "=1.1.10"`, `tar = "=0.4.46"`, `zip = "=8.6.0"` для загрузки/распаковки
+рантайма (9.0.0 ровно на границе cooldown, поэтому 8.6.0), `tokenizers` с
+Oniguruma (C, прецедент — bundled sqlite3). Модели:
+`bge-small-en-v1.5` (384, CLS, 133 MB), `multilingual-e5-small` int8 (384,
+Mean, 118 MB), rerank-кандидаты `jina-reranker-v1-turbo-en` int8 (38 MB, Apache-2.0,
+8K) и `bge-reranker-base` (1.11 GB);
+`jina-reranker-v2` отклонён (CC-BY-NC-4.0); ни одна модель не выбирается по умолчанию.
+E5 требует `query: `/`passage: `, BGE — query-instruction; `Embedder` получает
+`embed_query`, канонический `model_id` — `@p<prompt_version>` (FR-9/FR-10).
+Фичи: `hybrid-local` даёт `connect fastembed`/status и `models fetch|list|remove`;
+`hybrid-remote` — `connect openrouter`; `models use` доступен при любой из фич (probe
+диспетчеризуется по провайдеру); обе совместимы, дефолтная сборка не содержит ни одной.
+Отклонено: бандлить ORT в релизные артефакты, авто-скачивание при первом поиске,
+дефолтная модель, обязательный локальный вес в v1, candle-only путь (нет rerank),
+новые пользовательские ключи сверх `[providers]`/`[hybrid]`.
 
 ## 13. Directory structure
 
