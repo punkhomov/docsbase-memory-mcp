@@ -490,6 +490,11 @@ fn cold_start_loads_persisted_ann_without_vectors_db() {
     drop(dense);
     drop(db);
 
+    // This removal is the regression check for the publish/lease ordering in
+    // `build_in_background`: `wait_for_ann` only sees `Ann` once the build
+    // thread has released its `vectors.db` handle. Publishing before the lease
+    // release made this fail on Windows with a sharing violation while Linux
+    // unlinks the open file happily (CI run 41043371926).
     for suffix in ["", "-wal", "-shm"] {
         let path = cache.path().join(format!("vectors.db{suffix}"));
         if path.exists() {

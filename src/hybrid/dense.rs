@@ -956,28 +956,24 @@ fn build_in_background(
     test_build_delay();
     let vector_root = store_root.clone();
     let unpin_hashes = Arc::clone(&hashes);
-    let result: Result<()> = catch_unwind(AssertUnwindSafe(|| {
+    // The build returns the loaded index instead of publishing it: the lease
+    // must be released *before* the ANN becomes visible. Publishing first left
+    // a window in which the vectors DB was still open (lease release re-opens
+    // it) while callers already saw `Ann`, so a purge racing the tail of a
+    // build hit a Windows sharing violation on `vectors.db` (CI run
+    // 41043371926, `cold_start_loads_persisted_ann_without_vectors_db`).
+    let result: Result<(Arc<AnnIndex>, u64)> = catch_unwind(AssertUnwindSafe(|| {
         let ann = AnnIndex::build(&rows, dim)?;
         let store = AnnStore::new(store_root);
         let slot = ann.dump(&store, &key)?;
-        // Publish must not hold the source rows, the built graph and the loaded
+        // Loading must not hold the source rows, the built graph and the loaded
         // copy at once: on the heap-reload path that would add a third full
         // copy (~1.86 GiB at 75k x 2048) on top of the admitted peak.
         let published_bytes = ann.estimated_bytes() as u64;
         drop(ann);
         drop(rows);
         let loaded = AnnIndex::load(&slot)?;
-        let mut entries = cache.lock_entries();
-        if let Some(entry) = entries.get_mut(&project_id)
-            && entry.generation == key.generation
-            && entry.model_id == key.model_id
-        {
-            entry.state = DenseRows::Ann(Arc::new(loaded));
-            entry.bytes = published_bytes;
-            entry.last_used = cache.tick();
-        }
-        cache.enforce_byte_cap(&mut entries, project_id);
-        Ok(())
+        Ok((Arc::new(loaded), published_bytes))
     }))
     .unwrap_or_else(|payload| Err(Error::internal(format!("ann build panic: {payload:?}"))));
     if result.is_ok() {
@@ -997,6 +993,20 @@ fn build_in_background(
                 eprintln!("warning: cannot release ann vector lease: {err}");
             }
         }
+    }
+    if let Ok((loaded, published_bytes)) = &result {
+        // Publish last: once `Ann` is visible the build thread holds no
+        // `vectors.db` handle, so a purge can delete it immediately.
+        let mut entries = cache.lock_entries();
+        if let Some(entry) = entries.get_mut(&project_id)
+            && entry.generation == key.generation
+            && entry.model_id == key.model_id
+        {
+            entry.state = DenseRows::Ann(Arc::clone(loaded));
+            entry.bytes = *published_bytes;
+            entry.last_used = cache.tick();
+        }
+        cache.enforce_byte_cap(&mut entries, project_id);
     }
     if let Err(err) = result {
         eprintln!("warning: ann build failed for project {project_id}: {err}; keeping exact");
