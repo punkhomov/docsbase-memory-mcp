@@ -179,7 +179,7 @@ impl Provisioner for OpenrouterProvisioner {
         #[cfg(feature = "hybrid-remote")]
         {
             let transport = crate::hybrid::openrouter::ReqwestTransport::new()?;
-            probe_openrouter_key(&transport, false)?;
+            probe_openrouter_key(&transport)?;
             lines.push("openrouter: key probe accepted (not stored)".to_owned());
         }
         #[cfg(not(feature = "hybrid-remote"))]
@@ -191,7 +191,7 @@ impl Provisioner for OpenrouterProvisioner {
         #[cfg(feature = "hybrid-remote")]
         {
             let transport = crate::hybrid::openrouter::ReqwestTransport::new()?;
-            probe_openrouter_key(&transport, true)?;
+            probe_openrouter_key(&transport)?;
             Ok(InstallOutcome {
                 lines: vec![
                     "openrouter provider connected (key validated; never stored)".to_owned(),
@@ -222,7 +222,7 @@ impl Provisioner for OpenrouterProvisioner {
 /// Returns [`Error::Admission`] for a missing/empty key, 401/403 (check the
 /// key), transport failures (retry) or any other status.
 #[cfg(feature = "hybrid-remote")]
-fn probe_openrouter_key(transport: &dyn crate::hybrid::wire::Transport, write: bool) -> Result<()> {
+fn probe_openrouter_key(transport: &dyn crate::hybrid::wire::Transport) -> Result<()> {
     use crate::hybrid::openrouter::BASE_URL;
 
     let key = std::env::var("OPENROUTER_API_KEY").map_err(|_| Error::Admission {
@@ -258,9 +258,6 @@ fn probe_openrouter_key(transport: &dyn crate::hybrid::wire::Transport, write: b
                 message: format!("key probe returned HTTP {other}; retry"),
             });
         }
-    }
-    if write {
-        write_global_provider(PROVIDER_OPENROUTER, &OpenrouterProvisioner.record())?;
     }
     Ok(())
 }
@@ -469,7 +466,6 @@ fn write_global_provider_locked(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "hybrid-local")]
     #[test]
     fn every_provisioner_is_a_registered_provider() {
         // The CLI provisioning table is a second table; this keeps it in sync
@@ -624,7 +620,7 @@ mod tests {
             status: 200,
             transport_error: false,
         };
-        probe_openrouter_key(&transport, true).expect("probe ok");
+        probe_openrouter_key(&transport).expect("probe ok");
         // GET to the key endpoint, zero model tokens.
         let calls = transport.calls.lock().expect("calls");
         assert_eq!(calls.len(), 1);
@@ -634,7 +630,14 @@ mod tests {
             calls[0]
         );
         drop(calls);
-        // Provider entry written, key never persisted.
+        // The probe itself is pure (the frame owns the single config write),
+        // and the record it feeds never contains the key.
+        assert!(
+            !dir.path().join("config.toml").exists(),
+            "the probe must not write the config"
+        );
+        write_global_provider(PROVIDER_OPENROUTER, &OpenrouterProvisioner.record())
+            .expect("frame write");
         let path = dir.path().join("config.toml");
         let text = std::fs::read_to_string(&path).expect("config written");
         assert!(text.contains("providers"), "{text}");
@@ -679,7 +682,7 @@ mod tests {
             status: 401,
             transport_error: false,
         };
-        let err = probe_openrouter_key(&transport, true).expect_err("401 rejected");
+        let err = probe_openrouter_key(&transport).expect_err("401 rejected");
         assert!(matches!(err, Error::Admission { .. }), "{err:?}");
         let text = format!("{err}");
         assert!(text.contains("OPENROUTER_API_KEY"), "{text}");
@@ -722,7 +725,7 @@ mod tests {
             status: 200,
             transport_error: true,
         };
-        let err = probe_openrouter_key(&transport, true).expect_err("transport fails");
+        let err = probe_openrouter_key(&transport).expect_err("transport fails");
         let text = format!("{err}");
         assert!(text.contains("retry"), "{text}");
         assert!(!dir.path().join("config.toml").exists());

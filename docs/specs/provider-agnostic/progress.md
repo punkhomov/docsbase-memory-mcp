@@ -295,3 +295,33 @@
 - Замечание по окружению: диск был забит (`target/debug/deps` 40 ГБ), линковка
   тестов падала с «No space left on device»; старые тест-бинари удалены,
   сборка восстановлена. К коду отношения не имеет.
+
+## Финальное ревью (reviewer-muse): BLOCK → исправлено
+
+- P1-1 (`models use` не provider-agnostic: `validate_embedding_stage`/
+  `validate_reranker_stage`/`probe_stage` матчили имена, `models list`
+  хардкодил префикс): **исправлено**. Провайдер теперь владеет проверкой:
+  `Provider::probe_embedding`/`probe_reranker` (fastembed — офлайн-проверка
+  рантайма и кэша модели, openrouter — single-shot сетевой проб с переносом
+  реализации в `hybrid/openrouter.rs` как `pub(crate)`), плюс
+  `Provider::requires_normalize`. Валидация сохранённой стадии идёт через
+  `provider(name)` (список из реестра), `models list` берёт префикс из
+  каталога-владельца строки. `PROVIDER_*` в `src/cli/models.rs` больше нет.
+- P1-2 (подсказки печатали голые имена, которые новый CLI отвергает):
+  **исправлено**. `probe_embedding`/`probe_reranker` и `remove_cmd` печатают
+  `docsbase models fetch fastembed/<name>`; тесты проверяют адрес.
+- P2-3 (`docs/CONFIG.md` пример `qwen/…` без провайдера): исправлено на
+  `openrouter/qwen/qwen3-embedding-8b`.
+- P2-4 (тест расширяемости переоценивал охват): в тесте зафиксирован скоуп
+  (ядровые швы), CLI-путь покрыт провайдерскими тестами `probe_*`.
+- P2-5 (изменение приоритета admission не было объявлено): добавлена дельта в
+  FR-11.
+- P3-6 (`openrouter` писал конфиг дважды): probe стал чистым, единственная
+  запись — в каркасе; тест проверяет, что probe не пишет.
+- P3-7 (`print_summary` считал пин с `normalize: true`): читает значение из
+  стадии (ключ `@raw`/`@l2` больше не врёт).
+- P3-8 (тест дрейфа таблиц был под `hybrid-local`): гейт снят, тест идёт во
+  всех сборках.
+- Проверка после правок: lib 137 / 217 / 151 / 231; `cli_models` 22,
+  `connect` 7, `config` 24, `hybrid_config` 8, `smoke` 5; clippy
+  `-D warnings` 0 ошибок во всех четырёх конфигурациях; fmt чисто.

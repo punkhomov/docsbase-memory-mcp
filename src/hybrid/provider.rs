@@ -204,6 +204,30 @@ pub trait Provider: Sync {
         Ok(ProviderRecord::new(record_enabled(self.name(), table)?))
     }
 
+    /// Pre-write check for the embedding stage (FR-8): can this build serve it
+    /// *now*? The provider owns the probe, so the CLI never branches on names.
+    ///
+    /// # Errors
+    /// Admission with exactly one corrective action, or an incompatible
+    /// response schema from a remote probe.
+    fn probe_embedding(&self, _cfg: &EmbeddingCfg) -> Result<()> {
+        Ok(())
+    }
+
+    /// Pre-write check for the rerank stage (FR-8).
+    ///
+    /// # Errors
+    /// Same as [`probe_embedding`](Self::probe_embedding).
+    fn probe_reranker(&self, _cfg: &RerankerCfg) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether this provider requires `normalize = true` (registry models are
+    /// L2-normalized by contract).
+    fn requires_normalize(&self) -> bool {
+        false
+    }
+
     /// Canonical cache key of an embedding config, when this provider defines
     /// its own shape. `None` keeps the legacy formatter (FR-9).
     fn cache_model_id(&self, _cfg: &EmbeddingCfg) -> Option<String> {
@@ -309,6 +333,57 @@ impl Provider for FastembedProvider {
             }
         }
         Ok(ProviderRecord { enabled, params })
+    }
+
+    fn probe_embedding(&self, cfg: &EmbeddingCfg) -> Result<()> {
+        #[cfg(feature = "hybrid-local")]
+        {
+            // Runtime first (connect hint), then the cached model (fetch hint).
+            let global = crate::config::Config::global()?;
+            super::runtime::resolve(&global.providers)?;
+            let entry = super::models::entry(&cfg.model)?;
+            if !super::models::cached(entry)? {
+                return Err(Error::Admission {
+                    message: format!(
+                        "model \"{}\" is not fetched; run `docsbase models fetch {PROVIDER_FASTEMBED}/{}`",
+                        cfg.model, cfg.model
+                    ),
+                });
+            }
+            Ok(())
+        }
+        #[cfg(not(feature = "hybrid-local"))]
+        {
+            let _ = cfg;
+            Err(self.feature_missing())
+        }
+    }
+
+    fn probe_reranker(&self, cfg: &RerankerCfg) -> Result<()> {
+        #[cfg(feature = "hybrid-local")]
+        {
+            let global = crate::config::Config::global()?;
+            super::runtime::resolve(&global.providers)?;
+            let entry = super::models::entry(&cfg.model)?;
+            if !super::models::cached(entry)? {
+                return Err(Error::Admission {
+                    message: format!(
+                        "model \"{}\" is not fetched; run `docsbase models fetch {PROVIDER_FASTEMBED}/{}`",
+                        cfg.model, cfg.model
+                    ),
+                });
+            }
+            Ok(())
+        }
+        #[cfg(not(feature = "hybrid-local"))]
+        {
+            let _ = cfg;
+            Err(self.feature_missing())
+        }
+    }
+
+    fn requires_normalize(&self) -> bool {
+        true
     }
 
     fn cache_model_id(&self, cfg: &EmbeddingCfg) -> Option<String> {
@@ -564,6 +639,32 @@ impl Provider for OpenrouterProvider {
                 NotConnected,
                 Some("run `docsbase connect openrouter`".to_owned()),
             ),
+        }
+    }
+
+    fn probe_embedding(&self, cfg: &EmbeddingCfg) -> Result<()> {
+        #[cfg(feature = "hybrid-remote")]
+        {
+            let transport = super::openrouter::ReqwestTransport::new()?;
+            super::openrouter::probe_embedding_with(&transport, &cfg.model, cfg.dimensions)
+        }
+        #[cfg(not(feature = "hybrid-remote"))]
+        {
+            let _ = cfg;
+            Err(self.feature_missing())
+        }
+    }
+
+    fn probe_reranker(&self, cfg: &RerankerCfg) -> Result<()> {
+        #[cfg(feature = "hybrid-remote")]
+        {
+            let transport = super::openrouter::ReqwestTransport::new()?;
+            super::openrouter::probe_reranker_with(&transport, &cfg.model)
+        }
+        #[cfg(not(feature = "hybrid-remote"))]
+        {
+            let _ = cfg;
+            Err(self.feature_missing())
         }
     }
 
@@ -972,6 +1073,10 @@ mod tests {
 
     #[test]
     fn third_provider_needs_only_a_registration() {
+        // Scope: the core seams (address, resolution, stage construction,
+        // status). The CLI-side validation/probe now go through the same
+        // registry lookups; their provider-owned bodies are covered by
+        // `probe_embedding`/`requires_normalize` tests per provider.
         // FR-10 / G4: a provider declared entirely in a test module goes
         // through stage construction, status, address parsing and stage
         // resolution. Nothing in `config.rs` or `cli/*` changes for it.

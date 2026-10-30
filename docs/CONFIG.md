@@ -81,7 +81,7 @@ of ~1.22 GiB). Raising `hybrid.cache.max_bytes` does not admit a larger corpus;
 past roughly 92k chunks at `d2048` the project stays on the exact path.
 
 Default remote pins are free OpenRouter routes: they may train on prompts and
-the roster rotates monthly. Paid pins (e.g. `qwen/qwen3-embedding-8b`,
+the roster rotates monthly. Paid pins (e.g. `openrouter/qwen/qwen3-embedding-8b`,
 `openrouter/cohere/rerank-v3.5`) are one explicit `docsbase models use` away and stay
 pinned once set. Local models have no default: every fastembed stage must
 name a registry row (`docsbase models list`), fetched first with `docsbase
