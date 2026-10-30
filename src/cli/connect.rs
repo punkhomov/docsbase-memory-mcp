@@ -5,7 +5,6 @@
 //! writes `[providers.*]` entries into the global config.
 
 use clap::Args;
-use clap::Subcommand;
 
 use crate::error::{Error, Result};
 use crate::hybrid::config::{
@@ -15,34 +14,50 @@ use crate::hybrid::config::{
 /// `docsbase connect` arguments.
 #[derive(Debug, Args)]
 pub struct ConnectArgs {
-    /// Provider to connect.
-    #[command(subcommand)]
-    pub provider: Option<ConnectProvider>,
-}
-
-/// Provider subcommands.
-#[derive(Debug, Subcommand)]
-pub enum ConnectProvider {
-    /// Validate a key from `OPENROUTER_API_KEY` and register the provider
-    /// (`hybrid-remote`).
-    #[cfg(feature = "hybrid-remote")]
-    Openrouter,
-    /// Install the pinned ONNX Runtime and register `[providers.fastembed]`
-    /// (`hybrid-local`).
-    #[cfg(feature = "hybrid-local")]
-    Fastembed(FastembedArgs),
-}
-
-/// `connect fastembed` flags.
-#[cfg(feature = "hybrid-local")]
-#[derive(Debug, Args)]
-pub struct FastembedArgs {
-    /// Only report the runtime state (does not install).
+    /// Provider to prepare (omit to print the status table).
+    pub provider: Option<String>,
+    /// Report the provider state without writing anything.
     #[arg(long)]
     pub check: bool,
-    /// Re-download and replace the runtime even when installed.
+    /// Re-probe / reinstall even when the provider is already prepared.
     #[arg(long)]
     pub force: bool,
+}
+
+/// The provider-specific half of `connect`: report and prepare. Lives in the
+/// CLI layer on purpose — the core registry must not know about `ureq`, `zip`
+/// or config writes (ADR-18, design §6).
+trait Provisioner {
+    /// Report lines for `--check`; never writes.
+    ///
+    /// # Errors
+    /// Admission when the state cannot be determined.
+    fn check(&self) -> Result<Vec<String>>;
+    /// Prepares the provider and returns its report lines.
+    ///
+    /// # Errors
+    /// Admission for a rejected probe, a failed download or a hash mismatch.
+    fn install(&self, force: bool) -> Result<InstallOutcome>;
+    /// The `[providers.<name>]` payload written after a successful install.
+    fn record(&self) -> toml::Table;
+}
+
+/// What an install did, for the restart hint (FR-13).
+struct InstallOutcome {
+    lines: Vec<String>,
+    /// True only when something was actually (re)installed.
+    reinstalled: bool,
+}
+
+/// CLI-side provisioning table. A second table is the price of keeping the
+/// core provider-agnostic; `every_provisioner_is_a_registered_provider`
+/// catches drift between the two.
+fn provisioner_for(name: &str) -> Option<&'static dyn Provisioner> {
+    match name {
+        PROVIDER_OPENROUTER => Some(&OpenrouterProvisioner),
+        PROVIDER_FASTEMBED => Some(&FastembedProvisioner),
+        _ => None,
+    }
 }
 
 /// Runs `docsbase connect`.
@@ -51,22 +66,87 @@ pub struct FastembedArgs {
 /// Returns [`Error::Admission`] for provisioning failures (missing key,
 /// offline, hash mismatch, unsupported target, free-space shortfall).
 pub fn run(args: &ConnectArgs) -> anyhow::Result<()> {
-    match &args.provider {
-        None => print_status()?,
-        #[cfg(feature = "hybrid-remote")]
-        Some(ConnectProvider::Openrouter) => connect_openrouter()?,
-        #[cfg(feature = "hybrid-local")]
-        Some(ConnectProvider::Fastembed(fastembed)) => connect_fastembed(fastembed)?,
-        #[allow(unreachable_patterns)]
-        Some(_) => {
+    let Some(name) = args.provider.as_deref() else {
+        if args.check || args.force {
             return Err(Error::Admission {
-                message: "this build has neither hybrid provider feature enabled; rebuild with --features hybrid-local and/or hybrid-remote"
+                message: "`--check`/`--force` need a provider: `docsbase connect <provider> [--check] [--force]`"
                     .to_owned(),
             }
             .into());
         }
+        print_status()?;
+        return Ok(());
+    };
+    // Validate the name against the provider registry first, so an unknown
+    // provider lists the registry (FR-5) rather than a provisioning hint. The
+    // registry's own message talks about model addresses, which is the wrong
+    // vocabulary for a provider name.
+    if crate::hybrid::provider::provider(name).is_err() {
+        return Err(crate::hybrid::provider::unknown_provider(name).into());
+    }
+    let Some(provisioner) = provisioner_for(name) else {
+        return Err(Error::Admission {
+            message: format!("provider \"{name}\" needs no preparation"),
+        }
+        .into());
+    };
+    connect_frame(provisioner, name, args.check, args.force)
+}
+
+/// The one frame every provider goes through (FR-8): flag validation →
+/// report or install → config write → restart hint. The provider supplies
+/// the bodies; the frame is provider-agnostic and unit-tested with a fake.
+fn connect_frame(
+    provisioner: &dyn Provisioner,
+    name: &str,
+    check: bool,
+    force: bool,
+) -> anyhow::Result<()> {
+    if check && force {
+        return Err(Error::Admission {
+            message: "`--check` and `--force` are mutually exclusive; use `--force` alone to reinstall, or `--check` alone to report state"
+                .to_owned(),
+        }
+        .into());
+    }
+    if check {
+        for line in provisioner.check()? {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+    let outcome = provisioner.install(force)?;
+    write_global_provider(name, &provisioner.record())?;
+    for line in &outcome.lines {
+        println!("{line}");
+    }
+    if let Some(note) = restart_note(outcome.reinstalled) {
+        println!("{note}");
     }
     Ok(())
+}
+
+/// One `provider/state/version/path/reason` row — the same columns for every
+/// provider, so `connect <p> --check` and the status table agree (AC-3, FR-7).
+fn status_row(name: &str, providers: &crate::hybrid::config::ProvidersCfg) -> Vec<String> {
+    let provider = match crate::hybrid::provider::provider(name) {
+        Ok(provider) => provider,
+        Err(err) => return vec![format!("{name}\tunknown\t-\t-\t{}", err.inner_message())],
+    };
+    let status = provider.status(providers);
+    vec![format!(
+        "{}\t{}\t{}\t{}\t{}",
+        name,
+        state_label(status.state),
+        provider
+            .version(providers)
+            .unwrap_or_else(|| "-".to_owned()),
+        status
+            .path
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), |path| path.display().to_string()),
+        status.reason.as_deref().unwrap_or("-")
+    )]
 }
 
 /// Status table over the configured providers (FR-2).
@@ -74,16 +154,12 @@ fn print_status() -> Result<()> {
     let config = crate::config::Config::global()?;
     let providers = &config.providers;
     println!("provider\tstate\tversion\tpath\treason");
-    for name in [PROVIDER_FASTEMBED, PROVIDER_OPENROUTER] {
+    for provider in crate::hybrid::provider::providers() {
+        let name = provider.name();
         let status = provider_status(providers, name);
-        let version = match name {
-            PROVIDER_FASTEMBED => providers
-                .fastembed
-                .as_ref()
-                .and_then(|provider| provider.runtime.as_deref())
-                .unwrap_or("-"),
-            _ => "-",
-        };
+        let version = provider
+            .version(providers)
+            .unwrap_or_else(|| "-".to_owned());
         // The resolved library comes from the status, not from the config
         // field: an entry without `runtime_path` still resolves through the
         // data-dir install, and that path must show up here (round-7 C1).
@@ -109,34 +185,65 @@ fn state_label(state: ProviderState) -> &'static str {
     }
 }
 
-/// Validates `OPENROUTER_API_KEY` with a zero-token `GET /api/v1/key` probe
-/// (FR-3) and records `[providers.openrouter]` without the key.
-#[cfg_attr(not(feature = "hybrid-remote"), allow(dead_code))]
-fn connect_openrouter() -> anyhow::Result<()> {
-    #[cfg(feature = "hybrid-remote")]
-    {
-        let transport = crate::hybrid::openrouter::ReqwestTransport::new()?;
-        probe_openrouter_key(&transport)
-    }
-    #[cfg(not(feature = "hybrid-remote"))]
-    {
-        Err(Error::Admission {
-            message: "connect openrouter needs the hybrid-remote build; rebuild with --features hybrid-remote"
-                .to_owned(),
+/// `openrouter` provisioning: validate the key with a zero-token probe and
+/// record `enabled = true` (never the key itself).
+struct OpenrouterProvisioner;
+
+impl Provisioner for OpenrouterProvisioner {
+    fn check(&self) -> Result<Vec<String>> {
+        // `--check` reports the recorded state and probes the key, but writes
+        // nothing (FR-8). The row has the same columns as every other provider
+        // (AC-3), so `connect <p> --check` output is comparable across
+        // providers.
+        let config = crate::config::Config::global()?;
+        let mut lines = status_row(PROVIDER_OPENROUTER, &config.providers);
+        #[cfg(feature = "hybrid-remote")]
+        {
+            let transport = crate::hybrid::openrouter::ReqwestTransport::new()?;
+            probe_openrouter_key(&transport)?;
+            lines.push("openrouter: key probe accepted (not stored)".to_owned());
         }
-        .into())
+        #[cfg(not(feature = "hybrid-remote"))]
+        lines.push("openrouter: needs the hybrid-remote build to probe the key".to_owned());
+        Ok(lines)
+    }
+
+    fn install(&self, _force: bool) -> Result<InstallOutcome> {
+        #[cfg(feature = "hybrid-remote")]
+        {
+            let transport = crate::hybrid::openrouter::ReqwestTransport::new()?;
+            probe_openrouter_key(&transport)?;
+            Ok(InstallOutcome {
+                lines: vec![
+                    "openrouter provider connected (key validated; never stored)".to_owned(),
+                ],
+                // Nothing is installed locally, so a running daemon has
+                // nothing to reload.
+                reinstalled: false,
+            })
+        }
+        #[cfg(not(feature = "hybrid-remote"))]
+        {
+            Err(crate::hybrid::provider::provider(PROVIDER_OPENROUTER)?.feature_missing())
+        }
+    }
+
+    fn record(&self) -> toml::Table {
+        let mut table = toml::Table::new();
+        table.insert("enabled".to_owned(), toml::Value::Boolean(true));
+        table
     }
 }
 
-/// Performs the key probe over an injected [`Transport`] — the single-shot
-/// path (no retry wrapper, FR-3) — and writes the provider entry on success.
-/// The key is never stored or logged (FR-3).
+/// Validates `OPENROUTER_API_KEY` with a zero-token `GET /api/v1/key` probe
+/// (FR-3). Writes the provider entry only when `write` is set (`--check` must
+/// not touch the config). The key is never stored or logged.
 ///
 /// # Errors
 /// Returns [`Error::Admission`] for a missing/empty key, 401/403 (check the
 /// key), transport failures (retry) or any other status.
 #[cfg(feature = "hybrid-remote")]
-fn probe_openrouter_key(transport: &dyn crate::hybrid::wire::Transport) -> anyhow::Result<()> {
+fn probe_openrouter_key(transport: &dyn crate::hybrid::wire::Transport) -> Result<()> {
     use crate::hybrid::openrouter::BASE_URL;
 
     let key = std::env::var("OPENROUTER_API_KEY").map_err(|_| Error::Admission {
@@ -146,8 +253,7 @@ fn probe_openrouter_key(transport: &dyn crate::hybrid::wire::Transport) -> anyho
     if key.trim().is_empty() {
         return Err(Error::Admission {
             message: "OPENROUTER_API_KEY is empty".to_owned(),
-        }
-        .into());
+        });
     }
     let headers = vec![("Authorization".to_owned(), format!("Bearer {key}"))];
     let response = transport
@@ -166,67 +272,45 @@ fn probe_openrouter_key(transport: &dyn crate::hybrid::wire::Transport) -> anyho
                     "OPENROUTER_API_KEY was rejected (HTTP {}); check the key",
                     response.status
                 ),
-            }
-            .into());
+            });
         }
         other => {
             return Err(Error::Admission {
                 message: format!("key probe returned HTTP {other}; retry"),
-            }
-            .into());
+            });
         }
     }
-    write_global_provider(
-        PROVIDER_OPENROUTER,
-        &[("enabled", toml::Value::Boolean(true))],
-    )?;
-    println!("openrouter provider connected (key validated; never stored)");
     Ok(())
 }
 
-/// Installs the pinned ONNX Runtime and records `[providers.fastembed]`
-/// (FR-4).
-#[cfg(feature = "hybrid-local")]
-fn connect_fastembed(args: &FastembedArgs) -> anyhow::Result<()> {
-    use crate::hybrid::runtime::{self, HttpRuntimeSource, ORT_VERSION};
+/// `fastembed` provisioning: install the pinned ONNX Runtime and record its
+/// version and path.
+struct FastembedProvisioner;
 
-    // `--check` reports state; `--force` reinstalls. Together they are
-    // contradictory — reject loudly instead of silently installing
-    // (round-2 U4), matching the scope-flag conflict handling.
-    if args.check && args.force {
-        return Err(Error::Admission {
-            message: "`--check` and `--force` are mutually exclusive; use `--force` alone to reinstall, or `--check` alone to report state"
-                .to_owned(),
-        }
-        .into());
-    }
-
-    let target = runtime::platform_target()?;
-
-    // `--check` reports the runtime state; macOS additionally reports the
-    // signature state (valid/adhoc/missing) — brief T2 step 5.
-    if args.check && !args.force {
-        let config = crate::config::Config::global()?;
-        let status = runtime::runtime_status(&config.providers);
-        println!(
-            "fastembed runtime: state={} version={} path={} reason={}",
-            status.state,
-            status.version.as_deref().unwrap_or("-"),
-            status
-                .path
-                .as_ref()
-                .map_or_else(|| "-".to_owned(), |path| path.display().to_string()),
-            status.reason.as_deref().unwrap_or("-")
-        );
-        if let Some(path) = &status.path {
+impl Provisioner for FastembedProvisioner {
+    fn check(&self) -> Result<Vec<String>> {
+        #[cfg(feature = "hybrid-local")]
+        {
+            use crate::hybrid::runtime::{self, ORT_VERSION};
+            let target = runtime::platform_target()?;
+            let config = crate::config::Config::global()?;
+            // Same columns as every provider (AC-3).
+            let mut lines = status_row(PROVIDER_FASTEMBED, &config.providers);
+            let status = runtime::runtime_status(&config.providers);
+            let Some(path) = &status.path else {
+                lines.push(format!(
+                    "fastembed runtime {ORT_VERSION} is not installed; run `docsbase connect fastembed`"
+                ));
+                return Ok(lines);
+            };
             // A vanished path is a Broken state, not an internal error
             // (diagnostic commands must not fail with Internal; panel C8).
             let Ok(metadata) = std::fs::metadata(path) else {
-                println!(
+                lines.push(format!(
                     "fastembed runtime {} is missing; re-run `docsbase connect fastembed --force`",
                     path.display()
-                );
-                return Ok(());
+                ));
+                return Ok(lines);
             };
             if metadata.len() != target.library_size {
                 return Err(Error::Admission {
@@ -236,55 +320,73 @@ fn connect_fastembed(args: &FastembedArgs) -> anyhow::Result<()> {
                         metadata.len(),
                         target.library_size
                     ),
-                }
-                .into());
+                });
             }
             #[cfg(target_os = "macos")]
-            println!("macOS signature state: {}", macos_signature_state(path));
-            println!(
+            lines.push(format!(
+                "macOS signature state: {}",
+                macos_signature_state(path)
+            ));
+            lines.push(format!(
                 "fastembed runtime {ORT_VERSION} installed: {}",
                 path.display()
-            );
-        } else {
-            println!(
-                "fastembed runtime {ORT_VERSION} is not installed; run `docsbase connect fastembed`"
-            );
+            ));
+            Ok(lines)
         }
-        return Ok(());
+        #[cfg(not(feature = "hybrid-local"))]
+        {
+            Err(crate::hybrid::provider::provider(PROVIDER_FASTEMBED)?.feature_missing())
+        }
     }
 
-    let source = HttpRuntimeSource::new()?;
-    let (installed, reinstalled) = runtime::install(target, &source, args.force)?;
-    write_global_provider(
-        PROVIDER_FASTEMBED,
-        &[
-            ("enabled", toml::Value::Boolean(true)),
-            ("runtime", toml::Value::String(ORT_VERSION.to_owned())),
-            (
-                "runtime_path",
-                toml::Value::String(installed.display().to_string()),
-            ),
-        ],
-    )?;
-    println!(
-        "fastembed runtime {ORT_VERSION} installed: {} (sha256 {})",
-        installed.display(),
-        target.archive_sha256
-    );
-    // FR-13: a running daemon keeps the previously loaded ORT library
-    // mapped (and its cached model instances) until restarted; say so only
-    // when this call actually (re)installed the runtime — a no-op
-    // `connect` must not ask for a restart (round-6 mimo/muse/deepseek).
-    if let Some(note) = restart_note(reinstalled) {
-        println!("{note}");
+    fn install(&self, force: bool) -> Result<InstallOutcome> {
+        #[cfg(feature = "hybrid-local")]
+        {
+            use crate::hybrid::runtime::{self, HttpRuntimeSource, ORT_VERSION};
+            let target = runtime::platform_target()?;
+            let source = HttpRuntimeSource::new()?;
+            let (installed, reinstalled) = runtime::install(target, &source, force)?;
+            Ok(InstallOutcome {
+                lines: vec![format!(
+                    "fastembed runtime {ORT_VERSION} installed: {} (sha256 {})",
+                    installed.display(),
+                    target.archive_sha256
+                )],
+                reinstalled,
+            })
+        }
+        #[cfg(not(feature = "hybrid-local"))]
+        {
+            let _ = force;
+            Err(crate::hybrid::provider::provider(PROVIDER_FASTEMBED)?.feature_missing())
+        }
     }
-    Ok(())
+
+    fn record(&self) -> toml::Table {
+        let mut table = toml::Table::new();
+        table.insert("enabled".to_owned(), toml::Value::Boolean(true));
+        #[cfg(feature = "hybrid-local")]
+        {
+            use crate::hybrid::runtime::ORT_VERSION;
+            if let Ok(target) = crate::hybrid::runtime::platform_target() {
+                let path = crate::hybrid::runtime::library_path(target);
+                table.insert(
+                    "runtime".to_owned(),
+                    toml::Value::String(ORT_VERSION.to_owned()),
+                );
+                table.insert(
+                    "runtime_path".to_owned(),
+                    toml::Value::String(path.display().to_string()),
+                );
+            }
+        }
+        table
+    }
 }
 
-/// FR-13 note for a `connect fastembed` run: present only when the runtime
-/// was actually (re)installed (round-7 deepseek: the decision is a pure
-/// predicate so both branches are unit-testable without a network install).
-#[cfg(feature = "hybrid-local")]
+/// FR-13 note for a `connect` run: present only when something was actually
+/// (re)installed (round-7 deepseek: the decision is a pure predicate so both
+/// branches are unit-testable without a network install).
 fn restart_note(reinstalled: bool) -> Option<&'static str> {
     reinstalled.then_some("note: restart a running detached daemon to pick up the runtime")
 }
@@ -320,7 +422,7 @@ fn macos_signature_state(path: &std::path::Path) -> &'static str {
     not(any(feature = "hybrid-local", feature = "hybrid-remote")),
     allow(dead_code)
 )]
-fn write_global_provider(name: &str, fields: &[(&str, toml::Value)]) -> Result<()> {
+fn write_global_provider(name: &str, record: &toml::Table) -> Result<()> {
     let config_dir = crate::config::paths::config_dir()?;
     crate::platform::fs::secure_dir(&config_dir).map_err(|err| {
         Error::internal_with_source(format!("create {}", config_dir.display()), err)
@@ -328,7 +430,7 @@ fn write_global_provider(name: &str, fields: &[(&str, toml::Value)]) -> Result<(
     let path = config_dir.join("config.toml");
     // Cross-process serialization with `models use --global` (C13).
     crate::config::paths::with_config_write_lock(&path, || {
-        write_global_provider_locked(name, fields, &path).map_err(|err| anyhow::anyhow!("{err}"))
+        write_global_provider_locked(name, record, &path).map_err(|err| anyhow::anyhow!("{err}"))
     })
     .map_err(|err| Error::internal(err.to_string()))
 }
@@ -336,7 +438,7 @@ fn write_global_provider(name: &str, fields: &[(&str, toml::Value)]) -> Result<(
 /// The read-modify-write body, run under the config-write lock.
 fn write_global_provider_locked(
     name: &str,
-    fields: &[(&str, toml::Value)],
+    record: &toml::Table,
     path: &std::path::Path,
 ) -> Result<()> {
     let mut root: toml::Value = match std::fs::read_to_string(path) {
@@ -361,11 +463,7 @@ fn write_global_provider_locked(
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
         .as_table_mut()
         .ok_or_else(|| Error::internal("providers is not a table"))?;
-    let mut provider_table = toml::map::Map::new();
-    for (key, value) in fields {
-        provider_table.insert((*key).to_owned(), value.clone());
-    }
-    providers.insert(name.to_owned(), toml::Value::Table(provider_table));
+    providers.insert(name.to_owned(), toml::Value::Table(record.clone()));
 
     let rendered =
         toml::to_string(&root).map_err(|err| Error::internal_with_source("render config", err))?;
@@ -381,7 +479,85 @@ fn write_global_provider_locked(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn every_provisioner_is_a_registered_provider() {
+        // The CLI provisioning table is a second table; this keeps it in sync
+        // with the provider registry (ADR-18 design §6).
+        for provider in crate::hybrid::provider::providers() {
+            assert!(
+                provisioner_for(provider.name()).is_some(),
+                "provider \"{}\" has no provisioner",
+                provider.name()
+            );
+        }
+        assert!(provisioner_for("no-such-provider").is_none());
+    }
+
+    /// Fake provisioner: proves the frame is provider-agnostic (FR-10).
+    struct FakeProvisioner {
+        writes: std::sync::atomic::AtomicUsize,
+        installed: bool,
+    }
+
+    impl Provisioner for FakeProvisioner {
+        fn check(&self) -> Result<Vec<String>> {
+            Ok(vec!["fake: check".to_owned()])
+        }
+        fn install(&self, force: bool) -> Result<InstallOutcome> {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(InstallOutcome {
+                lines: vec![format!("fake: install force={force}")],
+                reinstalled: self.installed,
+            })
+        }
+        fn record(&self) -> toml::Table {
+            let mut table = toml::Table::new();
+            table.insert("enabled".to_owned(), toml::Value::Boolean(true));
+            table
+        }
+    }
+
+    #[test]
+    fn connect_frame_rejects_check_with_force_for_every_provider() {
+        let fake = FakeProvisioner {
+            writes: std::sync::atomic::AtomicUsize::new(0),
+            installed: false,
+        };
+        let err = connect_frame(&fake, "fake", true, true).expect_err("conflicting flags");
+        assert!(err.to_string().contains("mutually exclusive"), "{err}");
+        assert_eq!(
+            fake.writes.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a rejected frame must not touch the provider"
+        );
+    }
+
+    #[test]
+    #[allow(unsafe_code)] // env isolation under the shared env lock
+    fn connect_frame_check_never_writes_the_config() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let _guard = env_guard();
+        // SAFETY: single-threaded under the shared env lock.
+        unsafe {
+            std::env::set_var("DOCSBASE_CONFIG_DIR", dir.path());
+        }
+        let fake = FakeProvisioner {
+            writes: std::sync::atomic::AtomicUsize::new(0),
+            installed: false,
+        };
+        connect_frame(&fake, "fake", true, false).expect("check");
+        assert_eq!(
+            fake.writes.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "`--check` must not install"
+        );
+        assert!(
+            !dir.path().join("config.toml").exists(),
+            "`--check` must not write the config"
+        );
+    }
+
     #[test]
     fn restart_note_only_after_a_real_install() {
         // Round-7 deepseek: both halves of the FR-13 decision are pinned —
@@ -467,7 +643,14 @@ mod tests {
             calls[0]
         );
         drop(calls);
-        // Provider entry written, key never persisted.
+        // The probe itself is pure (the frame owns the single config write),
+        // and the record it feeds never contains the key.
+        assert!(
+            !dir.path().join("config.toml").exists(),
+            "the probe must not write the config"
+        );
+        write_global_provider(PROVIDER_OPENROUTER, &OpenrouterProvisioner.record())
+            .expect("frame write");
         let path = dir.path().join("config.toml");
         let text = std::fs::read_to_string(&path).expect("config written");
         assert!(text.contains("providers"), "{text}");
@@ -513,7 +696,7 @@ mod tests {
             transport_error: false,
         };
         let err = probe_openrouter_key(&transport).expect_err("401 rejected");
-        assert!(matches!(err, anyhow::Error { .. }));
+        assert!(matches!(err, Error::Admission { .. }), "{err:?}");
         let text = format!("{err}");
         assert!(text.contains("OPENROUTER_API_KEY"), "{text}");
         assert!(
@@ -596,11 +779,9 @@ mod tests {
         }
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "max_file_size = 77\n[hybrid]\nenabled = true\n").expect("seed");
-        write_global_provider(
-            PROVIDER_FASTEMBED,
-            &[("enabled", toml::Value::Boolean(true))],
-        )
-        .expect("write");
+        let mut record = toml::Table::new();
+        record.insert("enabled".to_owned(), toml::Value::Boolean(true));
+        write_global_provider(PROVIDER_FASTEMBED, &record).expect("write");
         let reloaded: toml::Value =
             toml::from_str(&std::fs::read_to_string(&path).expect("read back")).expect("reparse");
         assert_eq!(

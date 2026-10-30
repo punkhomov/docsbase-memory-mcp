@@ -168,7 +168,50 @@ fn connect_fastembed_noop_does_not_ask_for_a_restart() {
 }
 
 #[test]
-fn unsupported_provider_name_is_clap_error() {
+fn connect_check_prints_the_same_columns_for_every_provider() {
+    // AC-3: the status table and `connect <p> --check` render the same
+    // provider/state/version/path/reason columns, so providers are comparable
+    // line by line. `openrouter --check` also probes the network, so the row
+    // shape is asserted through the status table for both and through
+    // `fastembed --check` (which stays offline).
+    let env = Env::new();
+    let output = env
+        .cmd()
+        .args(["connect"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    for provider in ["fastembed", "openrouter"] {
+        let row = stdout
+            .lines()
+            .find(|line| line.starts_with(provider))
+            .unwrap_or_else(|| panic!("no {provider} row in: {stdout}"));
+        assert_eq!(
+            row.split('\t').count(),
+            5,
+            "provider/state/version/path/reason: {row}"
+        );
+    }
+
+    let check = env
+        .cmd()
+        .args(["connect", "fastembed", "--check"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let check_out = String::from_utf8_lossy(&check.stdout).into_owned();
+    let row = check_out
+        .lines()
+        .find(|line| line.starts_with("fastembed\t"))
+        .unwrap_or_else(|| panic!("no fastembed row in: {check_out}"));
+    assert_eq!(row.split('\t').count(), 5, "{row}");
+}
+
+#[test]
+fn unsupported_provider_name_is_an_admission() {
     let env = Env::new();
     env.cmd()
         .args(["connect", "no-such-provider"])

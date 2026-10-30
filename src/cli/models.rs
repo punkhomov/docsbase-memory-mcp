@@ -3,11 +3,11 @@
 //! model per invocation, options scoped to the purpose. Scope: project
 //! `.docsbase.toml` by default (or `--local`); `--global` writes the
 //! machine config and is required outside a project; `--path` overrides
-//! the project root and cannot combine with `--global`. Provider inference:
-//! a registry name implies `fastembed`; any other name requires
-//! `--provider`. Probes: fastembed offline against the cached model;
-//! `OpenRouter` single-shot (no retry wrapper). Unknown models, unsupported
-//! widths and unreachable providers fail here — never later at index time.
+//! the project root and cannot combine with `--global`. The model is always an
+//! address (`<provider>/<model>`); there is no provider inference. The probe is
+//! provider-owned (fastembed offline against the cached model, `OpenRouter`
+//! single-shot). Unknown models, unsupported widths and unreachable providers
+//! fail here — never later at index time.
 
 #[cfg(feature = "hybrid-local")]
 use std::path::Path;
@@ -17,9 +17,9 @@ use clap::{Args, Subcommand};
 
 use crate::error::Error;
 use crate::hybrid::config::{
-    DEFAULT_RERANK_WINDOW, MAX_RERANK_WINDOW, MIN_RERANK_WINDOW, PROVIDER_FASTEMBED,
-    PROVIDER_OPENROUTER,
+    DEFAULT_RERANK_WINDOW, MAX_RERANK_WINDOW, MIN_RERANK_WINDOW, PROVIDER_OPENROUTER,
 };
+use crate::hybrid::provider::{CatalogModel, ModelAddress, Provider, Task, providers};
 
 /// Model management commands.
 #[derive(Debug, Subcommand)]
@@ -41,7 +41,7 @@ pub enum ModelsCommand {
 #[cfg(feature = "hybrid-local")]
 #[derive(Debug, Args)]
 pub struct FetchArgs {
-    /// Registry name of the model to fetch.
+    /// Model address `<provider>/<model>` (only providers with a local cache).
     pub name: String,
     /// Re-download even when the cached revision verifies.
     #[arg(long)]
@@ -52,7 +52,7 @@ pub struct FetchArgs {
 #[cfg(feature = "hybrid-local")]
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
-    /// Registry name of the model to remove.
+    /// Model address `<provider>/<model>` (only providers with a local cache).
     pub name: String,
     /// Delete even while a loaded instance holds the shared cache lock.
     #[arg(long)]
@@ -94,13 +94,11 @@ pub enum UsePurpose {
 /// Embedding stage arguments.
 #[derive(Debug, Args)]
 pub struct EmbedArgs {
-    /// Model id as the provider knows it; a registry name implies fastembed.
+    /// Model address `<provider>/<model>`, e.g. `fastembed/bge-small-en-v1.5`
+    /// or `openrouter/nvidia/nemotron-3-embed-1b:free`.
     pub model: String,
-    /// Provider override; required when the model is not a registry entry.
-    #[arg(long)]
-    pub provider: Option<String>,
-    /// Embedding width. Optional for fastembed (inferred from the registry);
-    /// required for `OpenRouter`, which has no catalog.
+    /// Embedding width. Optional for a provider with a catalog (inferred from
+    /// it); required otherwise, because widths are model-specific.
     #[arg(long)]
     pub dims: Option<u32>,
 }
@@ -108,17 +106,35 @@ pub struct EmbedArgs {
 /// Rerank stage arguments.
 #[derive(Debug, Args)]
 pub struct RerankArgs {
-    /// Model id as the provider knows it; a registry name implies fastembed.
+    /// Model address `<provider>/<model>`.
     pub model: String,
-    /// Provider override; required when the model is not a registry entry.
-    #[arg(long)]
-    pub provider: Option<String>,
     /// Rerank candidate window.
     #[arg(long)]
     pub window: Option<u32>,
 }
 
-/// Runs `models fetch <name>`: looks up the registry, downloads every pinned
+/// The model half of a local-cache address (`fastembed/<name>`), refusing a
+/// provider that has no local cache at all (NG3).
+///
+/// # Errors
+/// [`Error::Admission`] for a bad address or a provider without a cache.
+#[cfg(feature = "hybrid-local")]
+fn local_model_name(raw: &str) -> anyhow::Result<&str> {
+    let address = parse_address(raw)?;
+    let owner = crate::hybrid::provider::provider(address.provider())?;
+    if owner.catalog().is_none() {
+        return Err(Error::Admission {
+            message: format!(
+                "provider \"{}\" has no local model cache; models are downloaded by the provider — nothing to fetch or remove",
+                owner.name()
+            ),
+        }
+        .into());
+    }
+    Ok(address.model())
+}
+
+/// Runs `models fetch <address>`: looks up the registry, downloads every pinned
 /// file with verification and installs atomically (FR-6). The only network
 /// step in the model lifecycle; search/index never call it.
 ///
@@ -128,7 +144,7 @@ pub struct RerankArgs {
 #[cfg(feature = "hybrid-local")]
 pub fn fetch_cmd(args: &FetchArgs) -> anyhow::Result<()> {
     use crate::hybrid::models;
-    let entry = models::entry(&args.name)?;
+    let entry = models::entry(local_model_name(&args.name)?)?;
     let source = models::HttpModelSource::new()?;
     let (dir, installed) = models::fetch(entry, &source, args.force)?;
     println!(
@@ -162,40 +178,48 @@ pub fn list_cmd() -> anyhow::Result<()> {
     // merged config (global + project).
     let global = crate::config::Config::global()?;
     let (embed_pin, rerank_pin) = selected_pins();
-    let fastembed_state =
-        crate::hybrid::config::provider_status(&global.providers, PROVIDER_FASTEMBED);
-    let openrouter_state =
-        crate::hybrid::config::provider_status(&global.providers, PROVIDER_OPENROUTER);
-    println!(
-        "providers:\tfastembed={}\topenrouter={}",
-        state_label(fastembed_state.state),
-        state_label(openrouter_state.state)
-    );
+    let providers_line: Vec<String> = providers()
+        .iter()
+        .map(|provider| {
+            let status = crate::hybrid::config::provider_status(&global.providers, provider.name());
+            format!("{}={}", provider.name(), state_label(status.state))
+        })
+        .collect();
+    println!("providers:\t{}", providers_line.join("\t"));
     println!(
         "selected:\tembed={}\trerank={}",
         embed_pin.as_deref().unwrap_or("-"),
         rerank_pin.as_deref().unwrap_or("-")
     );
-    for entry in models::REGISTRY {
-        // Shallow per-file size check (no full hashing per invocation;
-        // round-3 deepseek-7).
-        let state = if models::cached_shallow(entry)? {
-            "fetched"
-        } else {
-            "missing"
+    // Rows come from the provider catalogs (FR-9): a new provider's models
+    // appear here without touching this loop. Size/cache state is local-cache
+    // knowledge, so it is looked up in the registry by name.
+    for provider in providers() {
+        let Some(catalog) = provider.catalog() else {
+            continue;
         };
-        let cached_bytes = if state == "fetched" {
-            dir_size(&models::cache_dir(entry.name, entry.revision))
-        } else {
-            0
-        };
-        println!(
-            "{}\t{}\t{}\t{state}\t{} on disk",
-            entry.name,
-            task_label(entry.task),
-            human_bytes(entry.total_size()),
-            human_bytes(cached_bytes)
-        );
+        for row in catalog {
+            let entry = models::REGISTRY.iter().find(|entry| entry.name == row.name);
+            let (total, cached_bytes, state) = match entry {
+                // Shallow per-file size check (no full hashing per invocation;
+                // round-3 deepseek-7).
+                Some(entry) if models::cached_shallow(entry)? => (
+                    human_bytes(entry.total_size()),
+                    human_bytes(dir_size(&models::cache_dir(entry.name, entry.revision))),
+                    "fetched",
+                ),
+                Some(entry) => (human_bytes(entry.total_size()), human_bytes(0), "missing"),
+                // A catalog row the local registry does not know: no cache to
+                // report, but the address is still printable.
+                None => (human_bytes(0), human_bytes(0), "not cached locally"),
+            };
+            println!(
+                "{}/{}\t{}\t{total}\t{state}\t{cached_bytes} on disk",
+                provider.name(),
+                row.name,
+                task_label(row.task)
+            );
+        }
     }
     Ok(())
 }
@@ -212,7 +236,7 @@ pub fn list_cmd() -> anyhow::Result<()> {
 pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
     use crate::hybrid::models;
 
-    let entry = models::entry(&args.name)?;
+    let entry = models::entry(local_model_name(&args.name)?)?;
     // Every cached revision is removed (FR-7), including stale revisions
     // from an older registry pin and partial installs: gate on the model's
     // directory, not on the currently pinned revision directory.
@@ -238,7 +262,7 @@ pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
     if !root_exists && !orphan_exists {
         return Err(Error::Admission {
             message: format!(
-                "model \"{}\" is not fetched (nothing to remove); run `docsbase models fetch {}`",
+                "model \"{}\" is not fetched (nothing to remove); run `docsbase models fetch fastembed/{}`",
                 entry.name, entry.name
             ),
         }
@@ -341,43 +365,31 @@ fn state_label(state: crate::hybrid::config::ProviderState) -> &'static str {
 }
 
 /// Selected hybrid pins from the merged config (global + project), FR-9.
+///
+/// Rendered as `<provider>/<model>` addresses (rerank keeps its window), so a
+/// user can copy the line straight back into `models use`.
 #[cfg(feature = "hybrid-local")]
 fn selected_pins() -> (Option<String>, Option<String>) {
-    use crate::hybrid::EmbeddingCfg;
-    use crate::hybrid::config::embedding_model_id;
-
     let mut embed = None;
     let mut rerank = None;
     let mut collect = |root: &toml::Value| {
         let Some(hybrid) = root.get("hybrid").and_then(toml::Value::as_table) else {
             return;
         };
-        if let Some(stage) = hybrid.get("embedding").and_then(toml::Value::as_table) {
-            let (Some(provider), Some(model), Some(dims)) = (
+        if let Some(stage) = hybrid.get("embedding").and_then(toml::Value::as_table)
+            && let (Some(provider), Some(model)) = (
                 stage.get("provider").and_then(toml::Value::as_str),
                 stage.get("model").and_then(toml::Value::as_str),
-                stage.get("dimensions").and_then(toml::Value::as_integer),
-            ) else {
-                return;
-            };
-            let normalize = stage
-                .get("normalize")
-                .and_then(toml::Value::as_bool)
-                .unwrap_or(true);
-            embed = Some(embedding_model_id(&EmbeddingCfg {
-                provider: provider.to_owned(),
-                model: model.to_owned(),
-                dimensions: u32::try_from(dims).unwrap_or_default(),
-                normalize,
-            }));
+            )
+        {
+            embed = Some(format!("{provider}/{model}"));
         }
-        if let Some(stage) = hybrid.get("reranker").and_then(toml::Value::as_table) {
-            let (Some(provider), Some(model)) = (
+        if let Some(stage) = hybrid.get("reranker").and_then(toml::Value::as_table)
+            && let (Some(provider), Some(model)) = (
                 stage.get("provider").and_then(toml::Value::as_str),
                 stage.get("model").and_then(toml::Value::as_str),
-            ) else {
-                return;
-            };
+            )
+        {
             let window = stage
                 .get("window")
                 .and_then(toml::Value::as_integer)
@@ -397,11 +409,10 @@ fn selected_pins() -> (Option<String>, Option<String>) {
     (embed, rerank)
 }
 
-#[cfg(feature = "hybrid-local")]
-fn task_label(task: crate::hybrid::models::Task) -> &'static str {
+fn task_label(task: Task) -> &'static str {
     match task {
-        crate::hybrid::models::Task::Embedding => "embedding",
-        crate::hybrid::models::Task::Rerank => "rerank",
+        Task::Embedding => "embedding",
+        Task::Rerank => "rerank",
     }
 }
 
@@ -427,44 +438,33 @@ pub fn run(args: &UseArgs) -> anyhow::Result<()> {
 
     let (stage_key, stage, probe) = match &args.purpose {
         UsePurpose::Embed(embed) => {
-            let (provider, dims) = resolve_embed_stage(embed)?;
-            let model = embed.model.trim().to_owned();
+            let cfg = resolve_embed_stage(embed, !args.dry_run)?;
             let mut stage = toml::map::Map::new();
-            stage.insert("provider".to_owned(), toml::Value::String(provider.clone()));
-            stage.insert("model".to_owned(), toml::Value::String(model.clone()));
+            stage.insert(
+                "provider".to_owned(),
+                toml::Value::String(cfg.provider.clone()),
+            );
+            stage.insert("model".to_owned(), toml::Value::String(cfg.model.clone()));
             stage.insert(
                 "dimensions".to_owned(),
-                toml::Value::Integer(i64::from(dims)),
+                toml::Value::Integer(i64::from(cfg.dimensions)),
             );
-            stage.insert("normalize".to_owned(), toml::Value::Boolean(true));
-            (
-                "embedding",
-                stage,
-                ProbeSpec {
-                    provider,
-                    model,
-                    dims: Some(dims),
-                    window: None,
-                },
-            )
+            stage.insert("normalize".to_owned(), toml::Value::Boolean(cfg.normalize));
+            ("embedding", stage, StageProbe::Embedding(cfg))
         }
         UsePurpose::Rerank(rerank) => {
-            let (provider, window) = resolve_rerank_stage(rerank)?;
-            let model = rerank.model.trim().to_owned();
+            let cfg = resolve_rerank_stage(rerank, !args.dry_run)?;
             let mut stage = toml::map::Map::new();
-            stage.insert("provider".to_owned(), toml::Value::String(provider.clone()));
-            stage.insert("model".to_owned(), toml::Value::String(model.clone()));
-            stage.insert("window".to_owned(), toml::Value::Integer(i64::from(window)));
-            (
-                "reranker",
-                stage,
-                ProbeSpec {
-                    provider,
-                    model,
-                    dims: None,
-                    window: Some(window),
-                },
-            )
+            stage.insert(
+                "provider".to_owned(),
+                toml::Value::String(cfg.provider.clone()),
+            );
+            stage.insert("model".to_owned(), toml::Value::String(cfg.model.clone()));
+            stage.insert(
+                "window".to_owned(),
+                toml::Value::Integer(i64::from(cfg.window)),
+            );
+            ("reranker", stage, StageProbe::Reranker(cfg))
         }
     };
 
@@ -631,147 +631,149 @@ impl Segment {
     }
 }
 
-/// Infers the provider: a registry name implies `fastembed` (purpose must
-/// match the row's task); any other name needs an explicit `--provider`
-/// (`OpenRouter` has no catalog, FR-8).
-///
-/// # Errors
-/// Admission for a registry row whose task does not match the purpose, or
-/// for an unknown name without `--provider`.
-fn resolve_provider(
-    segment: Segment,
-    model: &str,
-    explicit: Option<&str>,
-) -> anyhow::Result<String> {
-    #[cfg(feature = "hybrid-local")]
-    {
-        use crate::hybrid::models::{self, Task};
-        if let Ok(entry) = models::entry(model) {
-            let expected = match segment {
-                Segment::Embedding => Task::Embedding,
-                Segment::Rerank => Task::Rerank,
-            };
-            if entry.task != expected {
-                return Err(Error::Admission {
+/// Splits an address and adds the catalog hint the syntax-only parser cannot
+/// give: a bare name that a provider's catalog knows gets its corrected
+/// address (FR-2).
+fn parse_address(raw: &str) -> anyhow::Result<ModelAddress<'_>> {
+    match ModelAddress::parse(raw) {
+        Ok(address) => Ok(address),
+        Err(err) => {
+            let bare = raw.trim();
+            let suggestion = providers().iter().find_map(|provider| {
+                provider
+                    .catalog()?
+                    .iter()
+                    .find(|model| model.name == bare)
+                    .map(|_| format!("{}/{bare}", provider.name()))
+            });
+            match suggestion {
+                Some(address) => Err(Error::Admission {
                     message: format!(
-                        "\"{model}\" is a {} model, not for {}; pick from `docsbase models list`",
-                        task_label(entry.task),
-                        segment.label()
+                        "\"{bare}\" is not a model address; use \"{address}\" (providers: {})",
+                        crate::hybrid::provider::provider_names()
                     ),
                 }
-                .into());
+                .into()),
+                None => Err(err.into()),
             }
-            // A registry model is always fastembed; an explicit conflicting
-            // `--provider` is an error, not a silent override (panel C7).
-            if let Some(provider) = explicit {
-                if provider != PROVIDER_FASTEMBED {
-                    return Err(Error::Admission {
-                        message: format!(
-                            "\"{model}\" is a local registry model ({PROVIDER_FASTEMBED}); --provider {provider} conflicts — remove it"
-                        ),
-                    }
-                    .into());
-                }
-            }
-            return Ok(PROVIDER_FASTEMBED.to_owned());
         }
     }
-    if let Some(provider) = explicit {
-        return match provider {
-            PROVIDER_FASTEMBED | PROVIDER_OPENROUTER => Ok(provider.to_owned()),
-            other => Err(Error::Admission {
-                message: format!(
-                    "unknown provider \"{other}\"; want {PROVIDER_FASTEMBED} or {PROVIDER_OPENROUTER}"
-                ),
-            }
-            .into()),
-        };
+}
+
+/// A provider that must be usable in this build and must have a catalog entry
+/// for `model`, when it has a catalog at all.
+///
+/// # Errors
+/// [`Error::Admission`] for a feature-off build, a model missing from a closed
+/// catalog, or a catalog row that serves the other stage.
+fn catalog_row(
+    provider: &'static dyn Provider,
+    segment: Segment,
+    model: &str,
+) -> anyhow::Result<Option<CatalogModel>> {
+    let Some(catalog) = provider.catalog() else {
+        return Ok(None);
+    };
+    let Some(row) = catalog.iter().find(|row| row.name == model) else {
+        return Err(Error::Admission {
+            message: format!(
+                "\"{model}\" is not in the {} catalog; run `docsbase models list`",
+                provider.name()
+            ),
+        }
+        .into());
+    };
+    let wanted = match segment {
+        Segment::Embedding => Task::Embedding,
+        Segment::Rerank => Task::Rerank,
+    };
+    if row.task != wanted {
+        return Err(Error::Admission {
+            message: format!(
+                "\"{model}\" is a {} model, not for {}; pick from `docsbase models list`",
+                task_label(row.task),
+                segment.label()
+            ),
+        }
+        .into());
     }
-    Err(Error::Admission {
-        message: format!(
-            "\"{model}\" is not a local registry entry for {}; pass --provider (for example {PROVIDER_OPENROUTER})",
-            segment.label()
-        ),
-    }
-    .into())
+    Ok(Some(*row))
 }
 
 /// Resolves the embedding stage into `(provider, dimensions)`.
 ///
 /// # Errors
-/// Admission for unknown models, wrong-task rows, dims mismatch with the
-/// registry, and missing dims for non-fastembed providers.
-fn resolve_embed_stage(args: &EmbedArgs) -> anyhow::Result<(String, u32)> {
-    let model = args.model.trim();
-    let provider = resolve_provider(Segment::Embedding, model, args.provider.as_deref())?;
-    let dims = resolve_dims(model, &provider, args.dims)?;
-    Ok((provider, dims))
+/// Admission for a bad address, a feature-off provider, an unknown model, a
+/// wrong-task row, and dims that are missing (no catalog) or mismatched.
+fn resolve_embed_stage(
+    args: &EmbedArgs,
+    check_capability: bool,
+) -> anyhow::Result<crate::hybrid::EmbeddingCfg> {
+    let address = parse_address(&args.model)?;
+    let provider = crate::hybrid::provider::provider(address.provider())?;
+    // A provider this build cannot use says so, instead of pretending it has no
+    // catalog (the message `main` produced for fastembed without the feature).
+    // `--dry-run` previews a file without probing, so it skips the capability
+    // check as it always has.
+    if check_capability && !provider.enabled() {
+        return Err(provider.feature_missing().into());
+    }
+    let row = catalog_row(provider, Segment::Embedding, address.model())?;
+    let dims = match (row.and_then(|row| row.dims), args.dims) {
+        // A catalog row is authoritative (FR-9): `--dims` may only agree.
+        (Some(registry_dims), Some(given)) => {
+            let registry_dims = u32::try_from(registry_dims)
+                .map_err(|_| Error::internal("registry dimensions out of range"))?;
+            if given != registry_dims {
+                return Err(Error::Admission {
+                    message: format!(
+                        "--dims {given} does not match the registry ({registry_dims}); the registry row is authoritative"
+                    ),
+                }
+                .into());
+            }
+            registry_dims
+        }
+        (Some(registry_dims), None) => u32::try_from(registry_dims)
+            .map_err(|_| Error::internal("registry dimensions out of range"))?,
+        (None, Some(0)) => {
+            return Err(Error::Admission {
+                message: "--dims must be positive".to_owned(),
+            }
+            .into());
+        }
+        (None, Some(given)) => given,
+        (None, None) => {
+            return Err(Error::Admission {
+                message: format!(
+                    "--dims is required for {} (no catalog; widths are model-specific)",
+                    provider.name()
+                ),
+            }
+            .into());
+        }
+    };
+    // The provider gets the final say on its own stage shape.
+    Ok(provider.resolve_embedding(Some(address.model()), Some(dims), true)?)
 }
 
 /// Resolves the rerank stage into `(provider, window)`.
 ///
 /// # Errors
-/// Admission for unknown models, wrong-task rows and out-of-range windows.
-fn resolve_rerank_stage(args: &RerankArgs) -> anyhow::Result<(String, u32)> {
-    let model = args.model.trim();
-    let provider = resolve_provider(Segment::Rerank, model, args.provider.as_deref())?;
+/// Admission for a bad address, a feature-off provider, an unknown model, a
+/// wrong-task row and out-of-range windows.
+fn resolve_rerank_stage(
+    args: &RerankArgs,
+    check_capability: bool,
+) -> anyhow::Result<crate::hybrid::RerankerCfg> {
+    let address = parse_address(&args.model)?;
+    let provider = crate::hybrid::provider::provider(address.provider())?;
+    if check_capability && !provider.enabled() {
+        return Err(provider.feature_missing().into());
+    }
+    catalog_row(provider, Segment::Rerank, address.model())?;
     let window = resolve_window(args.window)?;
-    Ok((provider, window))
-}
-
-/// Embedding width: fastembed reads the registry row (an optional
-/// `--dims` must match); other providers require an explicit `--dims`.
-///
-/// # Errors
-/// Admission for dims mismatch, zero dims, or a missing required `--dims`.
-fn resolve_dims(model: &str, provider: &str, dims: Option<u32>) -> anyhow::Result<u32> {
-    if provider == PROVIDER_FASTEMBED {
-        #[cfg(feature = "hybrid-local")]
-        {
-            use crate::hybrid::models;
-            let entry = models::entry(model)?;
-            let registry_dims = entry.dim.ok_or_else(|| Error::Admission {
-                message: format!(
-                    "\"{model}\" is not an embedding model; pick from `docsbase models list`"
-                ),
-            })?;
-            let registry_dims = u32::try_from(registry_dims)
-                .map_err(|_| Error::internal("registry dimensions out of range"))?;
-            return match dims {
-                Some(given) if given != registry_dims => Err(Error::Admission {
-                    message: format!(
-                        "--dims {given} does not match the registry ({registry_dims}); the registry row is authoritative"
-                    ),
-                }
-                .into()),
-                Some(given) => Ok(given),
-                None => Ok(registry_dims),
-            };
-        }
-        #[cfg(not(feature = "hybrid-local"))]
-        {
-            let _ = (model, dims);
-            return Err(Error::Admission {
-                message:
-                    "fastembed needs the hybrid-local build; rebuild with --features hybrid-local"
-                        .to_owned(),
-            }
-            .into());
-        }
-    }
-    match dims {
-        Some(dims) if dims > 0 => Ok(dims),
-        Some(_) => Err(Error::Admission {
-            message: "--dims must be positive".to_owned(),
-        }
-        .into()),
-        None => Err(Error::Admission {
-            message: format!(
-                "--dims is required for {provider} (no catalog; widths are model-specific)"
-            ),
-        }
-        .into()),
-    }
+    Ok(provider.resolve_reranker(Some(address.model()), window)?)
 }
 
 /// Rerank window with bounds checking; default when omitted.
@@ -881,36 +883,36 @@ fn validate_embedding_stage(hybrid: &toml::map::Map<String, toml::Value>) -> any
             .into());
         }
         let provider = stage.get("provider").and_then(toml::Value::as_str);
-        match provider {
-            Some(PROVIDER_FASTEMBED) => {
-                if !stage
-                    .get("normalize")
-                    .and_then(toml::Value::as_bool)
-                    .unwrap_or(true)
-                {
-                    return Err(Error::Admission {
-                        message: "existing hybrid.embedding.normalize must be true for fastembed (run `docsbase models use embed <model>` to fix)"
-                            .to_owned(),
-                    }
-                    .into());
-                }
+        let Some(provider_name) = provider else {
+            return Err(Error::Admission {
+                message: "existing hybrid.embedding.provider is missing (run `docsbase models use embed <model>` to fix)"
+                    .to_owned(),
             }
-            Some(PROVIDER_OPENROUTER) => {}
-            Some(other) => {
-                return Err(Error::Admission {
-                    message: format!(
-                        "existing hybrid.embedding.provider {other:?} is unknown (want {PROVIDER_FASTEMBED} or {PROVIDER_OPENROUTER}; run `docsbase models use embed <model>` to fix)"
-                    ),
-                }
-                .into());
+            .into());
+        };
+        // Registry lookup, then a provider-owned capability check: no names
+        // here, so a third provider validates like the built-in ones (FR-10).
+        let provider = crate::hybrid::provider::provider(provider_name).map_err(|_| {
+            Error::Admission {
+                message: format!(
+                    "existing hybrid.embedding.provider {provider_name:?} is unknown (registered: {}; run `docsbase models use embed <model>` to fix)",
+                    crate::hybrid::provider::provider_names()
+                ),
             }
-            None => {
-                return Err(Error::Admission {
-                    message: "existing hybrid.embedding.provider is missing (run `docsbase models use embed <model>` to fix)"
-                        .to_owned(),
-                }
-                .into());
+        })?;
+        if provider.requires_normalize()
+            && !stage
+                .get("normalize")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(true)
+        {
+            return Err(Error::Admission {
+                message: format!(
+                    "existing hybrid.embedding.normalize must be true for {} (run `docsbase models use embed <model>` to fix)",
+                    provider.name()
+                ),
             }
+            .into());
         }
     }
     Ok(())
@@ -932,24 +934,19 @@ fn validate_reranker_stage(hybrid: &toml::map::Map<String, toml::Value>) -> anyh
             .into());
         }
         let provider = stage.get("provider").and_then(toml::Value::as_str);
-        match provider {
-            Some(PROVIDER_FASTEMBED | PROVIDER_OPENROUTER) => {}
-            Some(other) => {
-                return Err(Error::Admission {
-                    message: format!(
-                        "existing hybrid.reranker.provider {other:?} is unknown (want {PROVIDER_FASTEMBED} or {PROVIDER_OPENROUTER}; run `docsbase models use rerank <model>` to fix)"
-                    ),
-                }
-                .into());
+        let Some(provider_name) = provider else {
+            return Err(Error::Admission {
+                message: "existing hybrid.reranker.provider is missing (run `docsbase models use rerank <model>` to fix)"
+                    .to_owned(),
             }
-            None => {
-                return Err(Error::Admission {
-                    message: "existing hybrid.reranker.provider is missing (run `docsbase models use rerank <model>` to fix)"
-                        .to_owned(),
-                }
-                .into());
-            }
-        }
+            .into());
+        };
+        crate::hybrid::provider::provider(provider_name).map_err(|_| Error::Admission {
+            message: format!(
+                "existing hybrid.reranker.provider {provider_name:?} is unknown (registered: {}; run `docsbase models use rerank <model>` to fix)",
+                crate::hybrid::provider::provider_names()
+            ),
+        })?;
         if let Some(window) = stage.get("window").and_then(toml::Value::as_integer) {
             let valid = u32::try_from(window)
                 .is_ok_and(|value| (MIN_RERANK_WINDOW..=MAX_RERANK_WINDOW).contains(&value));
@@ -1033,229 +1030,31 @@ fn free_route_note(table: &toml::Value) -> Option<String> {
         routes.join(", ")
     ))
 }
-/// What the probe validates for a resolved stage.
-#[cfg_attr(
-    // `dims`/`window` are only read by the OpenRouter probe (hybrid-remote).
-    not(feature = "hybrid-remote"),
-    allow(dead_code)
-)]
-struct ProbeSpec {
-    provider: String,
-    model: String,
-    dims: Option<u32>,
-    window: Option<u32>,
+/// A resolved stage awaiting its pre-write probe (FR-8).
+enum StageProbe {
+    Embedding(crate::hybrid::EmbeddingCfg),
+    Reranker(crate::hybrid::RerankerCfg),
 }
 
-/// Probes the resolved stage before writing (FR-8): fastembed validates the
-/// provider/runtime and cached model offline; `OpenRouter` performs exactly
-/// one embed and one rerank over a single-shot path (no retry wrapper).
+/// Probes the resolved stage before writing (FR-8). The provider owns the
+/// probe — fastembed validates the runtime and the cached model offline,
+/// `OpenRouter` performs exactly one embed and one rerank — so this stays a
+/// registry lookup with no provider names (ADR-18, NFR-2).
 ///
 /// # Errors
 /// Admission for missing provider/runtime/model or a rejected probe;
 /// `Internal` for an incompatible response schema.
-fn probe_stage(spec: &ProbeSpec) -> anyhow::Result<()> {
-    match spec.provider.as_str() {
-        PROVIDER_FASTEMBED => probe_fastembed_offline(&spec.model),
-        PROVIDER_OPENROUTER => probe_openrouter_singleshot(spec),
-        other => Err(Error::Admission {
-            message: format!(
-                "unknown provider \"{other}\"; want {PROVIDER_FASTEMBED} or {PROVIDER_OPENROUTER}"
-            ),
+fn probe_stage(probe: &StageProbe) -> anyhow::Result<()> {
+    match probe {
+        StageProbe::Embedding(cfg) => {
+            let provider = crate::hybrid::provider::provider(&cfg.provider)?;
+            Ok(provider.probe_embedding(cfg)?)
         }
-        .into()),
-    }
-}
-
-/// Offline fastembed probe: the runtime must resolve (connect hint) and the
-/// model must be cached (fetch hint). No network (FR-8, SC-5).
-///
-/// # Errors
-/// Admission with exactly one corrective action.
-#[cfg(feature = "hybrid-local")]
-fn probe_fastembed_offline(model: &str) -> anyhow::Result<()> {
-    use crate::config::Config;
-    use crate::hybrid::models;
-    use crate::hybrid::runtime;
-
-    let global = Config::global()?;
-    runtime::resolve(&global.providers)?;
-    let entry = models::entry(model)?;
-    if !models::cached(entry)? {
-        return Err(Error::Admission {
-            message: format!(
-                "model \"{model}\" is not fetched; run `docsbase models fetch {model}`"
-            ),
+        StageProbe::Reranker(cfg) => {
+            let provider = crate::hybrid::provider::provider(&cfg.provider)?;
+            Ok(provider.probe_reranker(cfg)?)
         }
-        .into());
     }
-    Ok(())
-}
-
-#[cfg(not(feature = "hybrid-local"))]
-fn probe_fastembed_offline(_model: &str) -> anyhow::Result<()> {
-    Err(Error::Admission {
-        message: "fastembed needs the hybrid-local build; rebuild with --features hybrid-local"
-            .to_owned(),
-    }
-    .into())
-}
-
-/// Single-shot `OpenRouter` probe (FR-8): one embed of `docsbase probe`, one
-/// rerank of (`docsbase`, `probe`) — each exactly one POST (the fixture
-/// payloads below are asserted by the fake-transport tests), no retry
-/// wrapper. 401/403 → `Admission` (`check key`); transport failures →
-/// `Admission` (retry).
-///
-/// # Errors
-/// Admission for missing/rejected key or transport failure; `Internal` for
-/// an incompatible response schema.
-#[cfg(feature = "hybrid-remote")]
-fn probe_openrouter_singleshot(spec: &ProbeSpec) -> anyhow::Result<()> {
-    use crate::hybrid::openrouter::ReqwestTransport;
-    let transport = ReqwestTransport::new()?;
-    probe_openrouter_singleshot_with(&transport, spec)
-}
-
-#[cfg(not(feature = "hybrid-remote"))]
-fn probe_openrouter_singleshot(_spec: &ProbeSpec) -> anyhow::Result<()> {
-    Err(Error::Admission {
-        message: "OpenRouter needs the hybrid-remote build; rebuild with --features hybrid-remote"
-            .to_owned(),
-    }
-    .into())
-}
-
-/// Probe core over an injected transport (test seam).
-#[cfg(feature = "hybrid-remote")]
-fn probe_openrouter_singleshot_with(
-    transport: &dyn crate::hybrid::wire::Transport,
-    spec: &ProbeSpec,
-) -> anyhow::Result<()> {
-    if let Some(dims) = spec.dims {
-        probe_openrouter_embed(transport, &spec.model, dims)?;
-    }
-    if spec.window.is_some() {
-        probe_openrouter_rerank(transport, &spec.model)?;
-    }
-    Ok(())
-}
-
-/// One embed POST, single-shot (no retry wrapper).
-#[cfg(feature = "hybrid-remote")]
-fn probe_openrouter_embed(
-    transport: &dyn crate::hybrid::wire::Transport,
-    model: &str,
-    dims: u32,
-) -> anyhow::Result<()> {
-    use crate::hybrid::openrouter::BASE_URL;
-
-    let url = format!("{BASE_URL}/embeddings");
-    let request = serde_json::json!({
-        "model": model,
-        "input": ["docsbase probe"],
-        "dimensions": dims,
-        "input_type": "document",
-    });
-    let body = serde_json::to_string(&request)
-        .map_err(|err| Error::internal_with_source("encode probe embed", err))?;
-    let response = transport
-        .post_json(&url, &bearer_headers()?, &body)
-        .map_err(|err| Error::Admission {
-            message: format!(
-                "probe embed failed: {}; check the network and retry",
-                err.inner_message()
-            ),
-        })?;
-    classify_probe_status(response.status, "embed")?;
-    let parsed: serde_json::Value = serde_json::from_str(&response.body)
-        .map_err(|err| Error::internal_with_source("incompatible OpenRouter probe schema", err))?;
-    let width_ok = parsed["data"]
-        .get(0)
-        .and_then(|datum| datum.get("embedding"))
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|values| values.len() == dims as usize);
-    if !width_ok {
-        return Err(Error::internal(format!(
-            "probe embed returned a wrong shape for width {dims}"
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-/// One rerank POST, single-shot (no retry wrapper).
-#[cfg(feature = "hybrid-remote")]
-fn probe_openrouter_rerank(
-    transport: &dyn crate::hybrid::wire::Transport,
-    model: &str,
-) -> anyhow::Result<()> {
-    use crate::hybrid::openrouter::BASE_URL;
-
-    let url = format!("{BASE_URL}/rerank");
-    let request = serde_json::json!({
-        "model": model,
-        "query": "docsbase",
-        "documents": ["probe"],
-        "top_n": 2,
-    });
-    let body = serde_json::to_string(&request)
-        .map_err(|err| Error::internal_with_source("encode probe rerank", err))?;
-    let response = transport
-        .post_json(&url, &bearer_headers()?, &body)
-        .map_err(|err| Error::Admission {
-            message: format!(
-                "probe rerank failed: {}; check the network and retry",
-                err.inner_message()
-            ),
-        })?;
-    classify_probe_status(response.status, "rerank")?;
-    let parsed: serde_json::Value = serde_json::from_str(&response.body)
-        .map_err(|err| Error::internal_with_source("incompatible OpenRouter probe schema", err))?;
-    let count = parsed["results"].as_array().map_or(0, Vec::len);
-    if count != 2 {
-        return Err(Error::internal(format!(
-            "probe rerank returned {count} scores for two documents"
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-/// Maps probe HTTP statuses to admission errors (single-shot: no retry).
-#[cfg(feature = "hybrid-remote")]
-fn classify_probe_status(status: u16, stage: &str) -> anyhow::Result<()> {
-    match status {
-        200 => Ok(()),
-        401 | 403 => Err(Error::Admission {
-            message: format!(
-                "probe {stage} was rejected (HTTP {status}); check OPENROUTER_API_KEY"
-            ),
-        }
-        .into()),
-        other => Err(Error::Admission {
-            message: format!("probe {stage} returned HTTP {other}; check the network and retry"),
-        }
-        .into()),
-    }
-}
-
-/// Bearer headers for `OpenRouter` probes; the key is never stored or logged
-/// (FR-3).
-#[cfg(feature = "hybrid-remote")]
-fn bearer_headers() -> crate::error::Result<Vec<(String, String)>> {
-    use crate::hybrid::openrouter::X_TITLE;
-    let key = std::env::var("OPENROUTER_API_KEY").map_err(|_| Error::Admission {
-        message: "OPENROUTER_API_KEY is not set; export it to use OpenRouter".to_owned(),
-    })?;
-    if key.trim().is_empty() {
-        return Err(Error::Admission {
-            message: "OPENROUTER_API_KEY is empty".to_owned(),
-        });
-    }
-    Ok(vec![
-        ("Authorization".to_owned(), format!("Bearer {key}")),
-        ("X-Title".to_owned(), X_TITLE.to_owned()),
-    ])
 }
 
 /// Reads the global config file; a missing file means "no global overrides
@@ -1360,12 +1159,18 @@ fn print_summary(table: &toml::Value) {
             .get("provider")
             .and_then(toml::Value::as_str)
             .unwrap_or(PROVIDER_OPENROUTER);
+        // `normalize` is part of the cache key (`@l2` vs `@raw`), so the
+        // summary must read the stage's value, not assume the default.
+        let normalize = stage
+            .get("normalize")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(true);
         let pin = if cfg!(feature = "hybrid-local") {
             embedding_model_id(&EmbeddingCfg {
                 provider: provider.to_owned(),
                 model: model.to_owned(),
                 dimensions: u32::try_from(dims).unwrap_or_default(),
-                normalize: true,
+                normalize,
             })
         } else {
             format!("{provider}/{model}")
@@ -1459,19 +1264,17 @@ mod tests {
         toml::from_str(toml_text).expect("test TOML parses")
     }
 
-    fn embed_args(model: &str, provider: Option<&str>, dims: Option<u32>) -> EmbedArgs {
+    fn embed_args(model: &str, dims: Option<u32>) -> EmbedArgs {
         EmbedArgs {
             model: model.to_owned(),
-            provider: provider.map(str::to_owned),
             dims,
         }
     }
 
     #[cfg_attr(not(feature = "hybrid-local"), allow(dead_code))]
-    fn rerank_args(model: &str, provider: Option<&str>, window: Option<u32>) -> RerankArgs {
+    fn rerank_args(model: &str, window: Option<u32>) -> RerankArgs {
         RerankArgs {
             model: model.to_owned(),
-            provider: provider.map(str::to_owned),
             window,
         }
     }
@@ -1524,7 +1327,7 @@ mod tests {
 
     #[test]
     fn scope_both_flags_error() {
-        let mut args = use_args(UsePurpose::Embed(embed_args("m", None, None)));
+        let mut args = use_args(UsePurpose::Embed(embed_args("m", None)));
         args.local = true;
         args.global = true;
         let err = resolve_scope(&args).expect_err("both flags");
@@ -1533,7 +1336,7 @@ mod tests {
 
     #[test]
     fn scope_path_with_global_error() {
-        let mut args = use_args(UsePurpose::Embed(embed_args("m", None, None)));
+        let mut args = use_args(UsePurpose::Embed(embed_args("m", None)));
         args.path = Some(PathBuf::from("/tmp"));
         args.global = true;
         let err = resolve_scope(&args).expect_err("path+global");
@@ -1542,7 +1345,7 @@ mod tests {
 
     #[test]
     fn scope_global_wins() {
-        let mut args = use_args(UsePurpose::Embed(embed_args("m", None, None)));
+        let mut args = use_args(UsePurpose::Embed(embed_args("m", None)));
         args.global = true;
         assert_eq!(resolve_scope(&args).expect("global"), Scope::Global);
     }
@@ -1551,7 +1354,7 @@ mod tests {
     fn scope_inside_project_default_and_local() {
         let dir = tempfile::TempDir::new().expect("tmp");
         std::fs::write(dir.path().join(".docsbase.toml"), "[hybrid]\n").expect("project file");
-        let mut args = use_args(UsePurpose::Embed(embed_args("m", None, None)));
+        let mut args = use_args(UsePurpose::Embed(embed_args("m", None)));
         args.path = Some(dir.path().to_path_buf());
         assert_eq!(
             resolve_scope(&args).expect("default"),
@@ -1567,22 +1370,26 @@ mod tests {
     #[test]
     fn scope_outside_project_requires_global() {
         let dir = tempfile::TempDir::new().expect("tmp"); // no .docsbase.toml
-        let mut args = use_args(UsePurpose::Embed(embed_args("m", None, None)));
+        let mut args = use_args(UsePurpose::Embed(embed_args("m", None)));
         args.path = Some(dir.path().to_path_buf());
         let err = resolve_scope(&args).expect_err("outside project");
         assert!(err.to_string().contains("--global"), "{err}");
     }
 
-    // ---------- purpose / provider inference (FR-8) ----------
+    // ---------- address parsing / provider resolution (FR-1, FR-2) ----------
 
     #[cfg(feature = "hybrid-local")]
     #[test]
-    fn registry_name_implies_fastembed_and_infers_dims() {
-        let (provider, dims) =
-            resolve_embed_stage(&embed_args("bge-small-en-v1.5", None, None)).expect("embed");
-        assert_eq!(provider, PROVIDER_FASTEMBED);
-        assert_eq!(dims, 384);
-        let err = resolve_embed_stage(&embed_args("bge-small-en-v1.5", None, Some(123)))
+    fn addressed_registry_model_infers_dims() {
+        let cfg = resolve_embed_stage(&embed_args("fastembed/bge-small-en-v1.5", None), true)
+            .expect("embed");
+        assert_eq!(cfg.provider, crate::hybrid::config::PROVIDER_FASTEMBED);
+        assert_eq!(
+            cfg.model, "bge-small-en-v1.5",
+            "the config keeps the bare model"
+        );
+        assert_eq!(cfg.dimensions, 384);
+        let err = resolve_embed_stage(&embed_args("fastembed/bge-small-en-v1.5", Some(123)), true)
             .expect_err("dims mismatch");
         assert!(err.to_string().contains("registry"), "{err}");
     }
@@ -1590,7 +1397,7 @@ mod tests {
     #[cfg(feature = "hybrid-local")]
     #[test]
     fn rerank_purpose_rejects_embedding_row() {
-        let err = resolve_rerank_stage(&rerank_args("bge-small-en-v1.5", None, None))
+        let err = resolve_rerank_stage(&rerank_args("fastembed/bge-small-en-v1.5", None), true)
             .expect_err("wrong task");
         assert!(err.to_string().contains("not for rerank"), "{err}");
     }
@@ -1598,30 +1405,45 @@ mod tests {
     #[cfg(feature = "hybrid-local")]
     #[test]
     fn embed_purpose_rejects_rerank_row() {
-        let err = resolve_embed_stage(&embed_args("jina-reranker-v1-turbo-en", None, None))
-            .expect_err("wrong task");
+        let err = resolve_embed_stage(
+            &embed_args("fastembed/jina-reranker-v1-turbo-en", None),
+            true,
+        )
+        .expect_err("wrong task");
         assert!(err.to_string().contains("not for embedding"), "{err}");
     }
 
+    #[cfg(feature = "hybrid-local")]
     #[test]
-    fn unknown_model_requires_provider() {
-        let err = resolve_embed_stage(&embed_args("some/model", None, Some(128)))
-            .expect_err("unknown without provider");
-        assert!(err.to_string().contains("--provider"), "{err}");
-        let (provider, _) =
-            resolve_embed_stage(&embed_args("some/model", Some("openrouter"), Some(128)))
-                .expect("explicit provider");
-        assert_eq!(provider, PROVIDER_OPENROUTER);
+    fn bare_registry_name_suggests_its_address() {
+        let err = resolve_embed_stage(&embed_args("bge-small-en-v1.5", None), true)
+            .expect_err("bare name");
+        let text = err.to_string();
+        assert!(text.contains("fastembed/bge-small-en-v1.5"), "{text}");
+        assert!(text.contains("providers:"), "{text}");
     }
 
     #[test]
-    fn openrouter_requires_dims() {
-        let err = resolve_embed_stage(&embed_args("some/model", Some("openrouter"), None))
+    fn unknown_provider_is_refused_before_dims() {
+        let err = resolve_embed_stage(&embed_args("some/model", Some(128)), true)
+            .expect_err("unknown provider");
+        assert!(err.to_string().contains("unknown provider"), "{err}");
+    }
+
+    #[cfg(feature = "hybrid-remote")]
+    #[test]
+    fn provider_without_a_catalog_requires_dims() {
+        let err = resolve_embed_stage(&embed_args("openrouter/some/model", None), true)
             .expect_err("missing dims");
         assert!(err.to_string().contains("--dims"), "{err}");
-        let err = resolve_embed_stage(&embed_args("some/model", Some("openrouter"), Some(0)))
+        let err = resolve_embed_stage(&embed_args("openrouter/some/model", Some(0)), true)
             .expect_err("zero dims");
         assert!(err.to_string().contains("positive"), "{err}");
+        let cfg = resolve_embed_stage(&embed_args("openrouter/some/model", Some(128)), true)
+            .expect("explicit dims");
+        assert_eq!(cfg.provider, PROVIDER_OPENROUTER);
+        assert_eq!(cfg.model, "some/model", "the model keeps its own slashes");
+        assert_eq!(cfg.dimensions, 128);
     }
 
     #[test]
@@ -1913,7 +1735,16 @@ mod tests {
     fn fastembed_probe_missing_runtime_gives_connect_hint() {
         let dir = tempfile::TempDir::new().expect("tmp");
         with_env("DOCSBASE_CONFIG_DIR", dir.path(), || {
-            let err = probe_fastembed_offline("bge-small-en-v1.5").expect_err("no runtime");
+            let provider =
+                crate::hybrid::provider::provider(crate::hybrid::config::PROVIDER_FASTEMBED)
+                    .expect("fastembed");
+            let cfg = crate::hybrid::EmbeddingCfg {
+                provider: crate::hybrid::config::PROVIDER_FASTEMBED.to_owned(),
+                model: "bge-small-en-v1.5".to_owned(),
+                dimensions: 384,
+                normalize: true,
+            };
+            let err = provider.probe_embedding(&cfg).expect_err("no runtime");
             assert!(err.to_string().contains("connect fastembed"), "{err}");
         });
     }
@@ -1944,13 +1775,40 @@ mod tests {
                 ("DOCSBASE_CACHE_DIR", cache.path()),
             ],
             || {
-                let err = probe_fastembed_offline("bge-small-en-v1.5").expect_err("not fetched");
+                let provider =
+                    crate::hybrid::provider::provider(crate::hybrid::config::PROVIDER_FASTEMBED)
+                        .expect("fastembed");
+                let cfg = crate::hybrid::EmbeddingCfg {
+                    provider: crate::hybrid::config::PROVIDER_FASTEMBED.to_owned(),
+                    model: "bge-small-en-v1.5".to_owned(),
+                    dimensions: 384,
+                    normalize: true,
+                };
+                let err = provider.probe_embedding(&cfg).expect_err("not fetched");
                 assert!(err.to_string().contains("models fetch"), "{err}");
             },
         );
     }
 
     // ---------- OpenRouter single-shot probe (FR-8, SC-5) ----------
+
+    /// Test adapter: the CLI no longer owns the probe, so the fake-transport
+    /// tests drive the provider helpers directly through this shim.
+    #[cfg(feature = "hybrid-remote")]
+    fn probe_openrouter_singleshot_with(
+        transport: &dyn crate::hybrid::wire::Transport,
+        model: &str,
+        dims: Option<u32>,
+        window: Option<u32>,
+    ) -> crate::error::Result<()> {
+        if let Some(dims) = dims {
+            crate::hybrid::openrouter::probe_embedding_with(transport, model, dims)?;
+        }
+        if window.is_some() {
+            crate::hybrid::openrouter::probe_reranker_with(transport, model)?;
+        }
+        Ok(())
+    }
 
     #[cfg(feature = "hybrid-remote")]
     struct ProbeFake {
@@ -2015,13 +1873,10 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         };
         with_env("OPENROUTER_API_KEY", "k", || {
-            let spec = ProbeSpec {
-                provider: PROVIDER_OPENROUTER.to_owned(),
-                model: "m/e".to_owned(),
-                dims: Some(128),
-                window: None,
-            };
-            probe_openrouter_singleshot_with(&fake, &spec).expect("probe ok");
+            let model = "m/e";
+            let dims = Some(128);
+            let window = None;
+            probe_openrouter_singleshot_with(&fake, model, dims, window).expect("probe ok");
             let calls = fake.calls.lock().expect("calls");
             assert_eq!(calls.len(), 1, "one embed call");
             let (url, body) = &calls[0];
@@ -2051,13 +1906,10 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         };
         with_env("OPENROUTER_API_KEY", "k", || {
-            let spec = ProbeSpec {
-                provider: PROVIDER_OPENROUTER.to_owned(),
-                model: "m/e".to_owned(),
-                dims: Some(128),
-                window: Some(50),
-            };
-            probe_openrouter_singleshot_with(&fake, &spec).expect("probe ok");
+            let model = "m/e";
+            let dims = Some(128);
+            let window = Some(50);
+            probe_openrouter_singleshot_with(&fake, model, dims, window).expect("probe ok");
         });
         let calls = fake.calls.lock().expect("calls");
         assert_eq!(calls.len(), 2, "one embed + one rerank");
@@ -2088,13 +1940,11 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         };
         with_env("OPENROUTER_API_KEY", "k", || {
-            let spec = ProbeSpec {
-                provider: PROVIDER_OPENROUTER.to_owned(),
-                model: "m/e".to_owned(),
-                dims: Some(128),
-                window: None,
-            };
-            let err = probe_openrouter_singleshot_with(&fake, &spec).expect_err("401");
+            let model = "m/e";
+            let dims = Some(128);
+            let window = None;
+            let err =
+                probe_openrouter_singleshot_with(&fake, model, dims, window).expect_err("401");
             assert!(err.to_string().contains("OPENROUTER_API_KEY"), "{err}");
         });
     }
@@ -2111,13 +1961,11 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         };
         with_env("OPENROUTER_API_KEY", "k", || {
-            let spec = ProbeSpec {
-                provider: PROVIDER_OPENROUTER.to_owned(),
-                model: "m/e".to_owned(),
-                dims: Some(128),
-                window: None,
-            };
-            let err = probe_openrouter_singleshot_with(&fake, &spec).expect_err("transport");
+            let model = "m/e";
+            let dims = Some(128);
+            let window = None;
+            let err = probe_openrouter_singleshot_with(&fake, model, dims, window)
+                .expect_err("transport");
             assert!(err.to_string().contains("retry"), "{err}");
         });
     }
@@ -2134,13 +1982,11 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         };
         with_env("OPENROUTER_API_KEY", "k", || {
-            let spec = ProbeSpec {
-                provider: PROVIDER_OPENROUTER.to_owned(),
-                model: "m/e".to_owned(),
-                dims: Some(128),
-                window: None,
-            };
-            probe_openrouter_singleshot_with(&fake, &spec).expect_err("width mismatch");
+            let model = "m/e";
+            let dims = Some(128);
+            let window = None;
+            probe_openrouter_singleshot_with(&fake, model, dims, window)
+                .expect_err("width mismatch");
         });
     }
 
@@ -2157,13 +2003,11 @@ mod tests {
         };
         // No OPENROUTER_API_KEY present (removed, not emptied).
         without_env("OPENROUTER_API_KEY", || {
-            let spec = ProbeSpec {
-                provider: PROVIDER_OPENROUTER.to_owned(),
-                model: "m/e".to_owned(),
-                dims: Some(128),
-                window: None,
-            };
-            let err = probe_openrouter_singleshot_with(&fake, &spec).expect_err("no key");
+            let model = "m/e";
+            let dims = Some(128);
+            let window = None;
+            let err =
+                probe_openrouter_singleshot_with(&fake, model, dims, window).expect_err("no key");
             assert!(err.to_string().contains("OPENROUTER_API_KEY"), "{err}");
         });
     }
@@ -2245,7 +2089,7 @@ mod tests {
         std::fs::create_dir_all(backup_c.join("stale-2")).expect("backup orphan");
         std::fs::create_dir_all(&collision).expect("collision");
         with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
-            remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect("remove");
+            remove_cmd(&remove_args("fastembed/bge-small-en-v1.5", false)).expect("remove");
         });
         assert!(!model_dir.exists(), "root removed");
         assert!(!staging_c.exists(), "staging container swept");
@@ -2266,7 +2110,7 @@ mod tests {
         std::fs::create_dir_all(staging_c.join("stale-1")).expect("staging orphan");
         std::fs::create_dir_all(backup_c.join("stale-2")).expect("backup orphan");
         with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
-            remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect("cleanup");
+            remove_cmd(&remove_args("fastembed/bge-small-en-v1.5", false)).expect("cleanup");
         });
         assert!(!staging_c.exists(), "staging container cleaned");
         assert!(!backup_c.exists(), "backup container cleaned");
@@ -2289,7 +2133,7 @@ mod tests {
         std::fs::create_dir_all(&stale).expect("create stale rev");
         std::fs::write(stale.join("model.onnx"), b"x").expect("file");
         with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
-            remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect("remove");
+            remove_cmd(&remove_args("fastembed/bge-small-en-v1.5", false)).expect("remove");
         });
         assert!(!pinned.exists(), "pinned revision removed");
         assert!(!stale.exists(), "stale revision removed too");
@@ -2311,7 +2155,8 @@ mod tests {
         std::fs::create_dir_all(&stale).expect("create stale rev");
         std::fs::write(stale.join("model.onnx"), b"x").expect("file");
         with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
-            remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect("remove stale-only");
+            remove_cmd(&remove_args("fastembed/bge-small-en-v1.5", false))
+                .expect("remove stale-only");
         });
         assert!(!stale.exists(), "stale revision removed");
         assert!(
@@ -2326,7 +2171,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tmp");
         let model_dir = seed_model_cache(dir.path(), "bge-small-en-v1.5");
         with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
-            remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect("remove");
+            remove_cmd(&remove_args("fastembed/bge-small-en-v1.5", false)).expect("remove");
         });
         assert!(!model_dir.exists(), "model cache removed");
     }
@@ -2339,11 +2184,12 @@ mod tests {
         with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
             // The exact shared guard T4/T5 instances hold for their lifetime.
             let guard = crate::hybrid::local::take_shared_lock(&model_dir).expect("shared lock");
-            let err = remove_cmd(&remove_args("bge-small-en-v1.5", false))
+            let err = remove_cmd(&remove_args("fastembed/bge-small-en-v1.5", false))
                 .expect_err("refused while loaded");
             assert!(err.to_string().contains("in use"), "{err}");
             drop(guard);
-            remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect("remove after drop");
+            remove_cmd(&remove_args("fastembed/bge-small-en-v1.5", false))
+                .expect("remove after drop");
         });
         assert!(!model_dir.exists(), "removed after guard drop");
     }
@@ -2355,7 +2201,7 @@ mod tests {
         let model_dir = seed_model_cache(dir.path(), "bge-small-en-v1.5");
         with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
             let _guard = crate::hybrid::local::take_shared_lock(&model_dir).expect("shared lock");
-            remove_cmd(&remove_args("bge-small-en-v1.5", true)).expect("force remove");
+            remove_cmd(&remove_args("fastembed/bge-small-en-v1.5", true)).expect("force remove");
         });
         assert!(!model_dir.exists(), "force removal deletes anyway");
     }
@@ -2381,7 +2227,7 @@ mod tests {
             let lock: &'static mut fd_lock::RwLock<std::fs::File> =
                 Box::leak(Box::new(fd_lock::RwLock::new(file)));
             let _in_flight = lock.try_write().expect("fetch holds exclusive");
-            let err = remove_cmd(&remove_args("bge-small-en-v1.5", false))
+            let err = remove_cmd(&remove_args("fastembed/bge-small-en-v1.5", false))
                 .expect_err("refused while fetch in flight");
             assert!(err.to_string().contains("in use"), "{err}");
         });
@@ -2398,11 +2244,12 @@ mod tests {
         std::fs::write(stale.join("model.onnx"), b"x").expect("file");
         with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
             let guard = crate::hybrid::local::take_shared_lock(&stale).expect("shared lock");
-            let err = remove_cmd(&remove_args("bge-small-en-v1.5", false))
+            let err = remove_cmd(&remove_args("fastembed/bge-small-en-v1.5", false))
                 .expect_err("refused while stale revision loaded");
             assert!(err.to_string().contains("in use"), "{err}");
             drop(guard);
-            remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect("remove after drop");
+            remove_cmd(&remove_args("fastembed/bge-small-en-v1.5", false))
+                .expect("remove after drop");
         });
         assert!(!model_dir.exists(), "removed after guard drop");
     }
@@ -2417,7 +2264,7 @@ mod tests {
         std::fs::write(stale.join("model.onnx"), b"x").expect("file");
         with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
             let _guard = crate::hybrid::local::take_shared_lock(&stale).expect("shared lock");
-            remove_cmd(&remove_args("bge-small-en-v1.5", true)).expect("force remove");
+            remove_cmd(&remove_args("fastembed/bge-small-en-v1.5", true)).expect("force remove");
         });
         assert!(
             !model_dir.exists(),
@@ -2430,8 +2277,8 @@ mod tests {
     fn remove_not_fetched_is_admission() {
         let dir = tempfile::TempDir::new().expect("tmp");
         with_env("DOCSBASE_CACHE_DIR", dir.path(), || {
-            let err =
-                remove_cmd(&remove_args("bge-small-en-v1.5", false)).expect_err("not fetched");
+            let err = remove_cmd(&remove_args("fastembed/bge-small-en-v1.5", false))
+                .expect_err("not fetched");
             assert!(err.to_string().contains("not fetched"), "{err}");
         });
     }

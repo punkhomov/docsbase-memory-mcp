@@ -27,6 +27,19 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ### Changed
 
+- **Breaking (CLI):** every model is now addressed as `<provider>/<model>` in
+  `docsbase models use|fetch|remove` — a bare name is rejected with the corrected
+  command, and `--provider` is gone (`models fetch bge-small-en-v1.5` becomes
+  `models fetch fastembed/bge-small-en-v1.5`). Config files are unaffected: the
+  address lives only on the CLI boundary and `provider`/`model` stay separate
+  keys, so cache keys and vector stores remain valid.
+- Hybrid providers are a registry, not `match` branches (spec
+  `docs/specs/provider-agnostic`, ADR-18): stage resolution, status, `models
+  list` and `connect` are provider-agnostic, `[providers.<name>]` records are
+  generic TOML validated by the provider itself, and adding a provider needs one
+  module plus one registration row. `docsbase connect <provider> [--check]
+  [--force]` now has the same flags for every provider (`connect openrouter`
+  gained `--check`/`--force`).
 - CI lanes rebalanced (`docs/ci.md`): the combo feature build is now the single
   runtime lane for provider features, the feature axis is covered by
   `cargo hack --feature-powerset --depth 2`, macOS/Windows additionally execute

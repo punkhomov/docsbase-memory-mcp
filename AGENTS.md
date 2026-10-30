@@ -52,6 +52,13 @@ see `docs/specs/search-benchmark/requirements.md` FR-22, Delta 2026-10-29.
 CI lanes, cache and timing decisions are documented in `docs/ci.md` (why not
 one all-features artifact, why not a 2^n x OS matrix, why per-job caches).
 
+Code graph (GitNexus): reindex with
+`gitnexus analyze --force --embeddings --pdg --index-only` — `--embeddings`
+enables semantic search, `--pdg` builds the CFG/PDG layer used by
+`pdg_query`/`explain`, and `--index-only` keeps the tool from injecting its own
+section into `AGENTS.md`/`CLAUDE.md` and from installing skills under
+`.claude/`/`.agents/`.
+
 Search-benchmark gate policy (DELTA-3): the gate test
 (`metrics_match_baseline`) runs inside the required `linux` CI job — a red
 gate is a red `linux` check, which branch protection blocks from merging.

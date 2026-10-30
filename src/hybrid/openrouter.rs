@@ -527,3 +527,114 @@ impl Transport for ReqwestTransport {
         self.block_on(future)
     }
 }
+
+// ---------- stage probes (single-shot, no retry wrapper) ----------
+
+/// One embed POST, single-shot (no retry wrapper).
+#[cfg(feature = "hybrid-remote")]
+pub(crate) fn probe_embedding_with(
+    transport: &dyn crate::hybrid::wire::Transport,
+    model: &str,
+    dims: u32,
+) -> crate::error::Result<()> {
+    let url = format!("{BASE_URL}/embeddings");
+    let request = serde_json::json!({
+        "model": model,
+        "input": ["docsbase probe"],
+        "dimensions": dims,
+        "input_type": "document",
+    });
+    let body = serde_json::to_string(&request)
+        .map_err(|err| Error::internal_with_source("encode probe embed", err))?;
+    let response = transport
+        .post_json(&url, &bearer_headers()?, &body)
+        .map_err(|err| Error::Admission {
+            message: format!(
+                "probe embed failed: {}; check the network and retry",
+                err.inner_message()
+            ),
+        })?;
+    classify_probe_status(response.status, "embed")?;
+    let parsed: serde_json::Value = serde_json::from_str(&response.body)
+        .map_err(|err| Error::internal_with_source("incompatible OpenRouter probe schema", err))?;
+    let width_ok = parsed["data"]
+        .get(0)
+        .and_then(|datum| datum.get("embedding"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|values| values.len() == dims as usize);
+    if !width_ok {
+        return Err(Error::internal(format!(
+            "probe embed returned a wrong shape for width {dims}"
+        )));
+    }
+    Ok(())
+}
+
+/// One rerank POST, single-shot (no retry wrapper).
+#[cfg(feature = "hybrid-remote")]
+pub(crate) fn probe_reranker_with(
+    transport: &dyn crate::hybrid::wire::Transport,
+    model: &str,
+) -> crate::error::Result<()> {
+    let url = format!("{BASE_URL}/rerank");
+    let request = serde_json::json!({
+        "model": model,
+        "query": "docsbase",
+        "documents": ["probe"],
+        "top_n": 2,
+    });
+    let body = serde_json::to_string(&request)
+        .map_err(|err| Error::internal_with_source("encode probe rerank", err))?;
+    let response = transport
+        .post_json(&url, &bearer_headers()?, &body)
+        .map_err(|err| Error::Admission {
+            message: format!(
+                "probe rerank failed: {}; check the network and retry",
+                err.inner_message()
+            ),
+        })?;
+    classify_probe_status(response.status, "rerank")?;
+    let parsed: serde_json::Value = serde_json::from_str(&response.body)
+        .map_err(|err| Error::internal_with_source("incompatible OpenRouter probe schema", err))?;
+    let count = parsed["results"].as_array().map_or(0, Vec::len);
+    if count != 2 {
+        return Err(Error::internal(format!(
+            "probe rerank returned {count} scores for two documents"
+        )));
+    }
+    Ok(())
+}
+
+/// Maps probe HTTP statuses to admission errors (single-shot: no retry).
+#[cfg(feature = "hybrid-remote")]
+fn classify_probe_status(status: u16, stage: &str) -> crate::error::Result<()> {
+    match status {
+        200 => Ok(()),
+        401 | 403 => Err(Error::Admission {
+            message: format!(
+                "probe {stage} was rejected (HTTP {status}); check OPENROUTER_API_KEY"
+            ),
+        }),
+        other => Err(Error::Admission {
+            message: format!("probe {stage} returned HTTP {other}; check the network and retry"),
+        }),
+    }
+}
+
+/// Bearer headers for `OpenRouter` probes; the key is never stored or logged
+/// (FR-3).
+#[cfg(feature = "hybrid-remote")]
+pub(crate) fn bearer_headers() -> crate::error::Result<Vec<(String, String)>> {
+    let key = std::env::var("OPENROUTER_API_KEY").map_err(|_| Error::Admission {
+        message: "OPENROUTER_API_KEY is not set; export it to use OpenRouter".to_owned(),
+    })?;
+    if key.trim().is_empty() {
+        return Err(Error::Admission {
+            message: "OPENROUTER_API_KEY is empty".to_owned(),
+        });
+    }
+    Ok(vec![
+        ("Authorization".to_owned(), format!("Bearer {key}")),
+        ("X-Title".to_owned(), X_TITLE.to_owned()),
+    ])
+}

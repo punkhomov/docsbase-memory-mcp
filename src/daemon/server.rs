@@ -127,8 +127,6 @@ impl Shared {
         let stages = Arc::new(crate::hybrid::from_config(
             &config.hybrid_cfg,
             &config.providers,
-            cfg!(feature = "hybrid-remote"),
-            cfg!(feature = "hybrid-local"),
         )?);
         self.stages_map().insert(project.id, Arc::clone(&stages));
         Ok(stages)

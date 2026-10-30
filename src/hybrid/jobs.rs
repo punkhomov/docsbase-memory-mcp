@@ -68,12 +68,7 @@ pub fn embed_texts(
     if !cfg.enabled || cfg.embedding.is_none() || texts.is_empty() {
         return Ok(0);
     }
-    let stages = from_config(
-        cfg,
-        providers,
-        cfg!(feature = "hybrid-remote"),
-        cfg!(feature = "hybrid-local"),
-    )?;
+    let stages = from_config(cfg, providers)?;
     let Some(embedder) = stages.embedder else {
         return Ok(0);
     };
@@ -124,12 +119,7 @@ pub fn embed_project_chunks(
     if !cfg.enabled || cfg.embedding.is_none() {
         return Ok(0);
     }
-    let stages = from_config(
-        cfg,
-        providers,
-        cfg!(feature = "hybrid-remote"),
-        cfg!(feature = "hybrid-local"),
-    )?;
+    let stages = from_config(cfg, providers)?;
     let Some(embedder) = stages.embedder else {
         return Ok(0);
     };

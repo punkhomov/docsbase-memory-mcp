@@ -77,14 +77,10 @@ static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 pub const PREFLIGHT_MULTIPLIER_NUMERATOR: u64 = 3;
 pub const PREFLIGHT_MULTIPLIER_DENOMINATOR: u64 = 2;
 
-/// What a registry model is used for (data model §7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Task {
-    /// Text embedding (vector output).
-    Embedding,
-    /// Cross-encoder reranking (score output).
-    Rerank,
-}
+/// What a registry model is used for (data model §7). Defined in
+/// [`super::provider`] so the provider registry can name it in builds without
+/// `hybrid-local`; re-exported here for the registry tables and tests.
+pub use super::provider::Task;
 
 /// Pooling strategy for an embedding model (fastembed `Pooling`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -762,7 +758,7 @@ fn fetch_one(
         let _ = std::fs::remove_file(&part);
         return Err(Error::Admission {
             message: format!(
-                "{}: size mismatch (registry {}, downloaded {}); re-run `docsbase models fetch {}`",
+                "{}: size mismatch (registry {}, downloaded {}); re-run `docsbase models fetch fastembed/{}`",
                 spec.path, spec.size, byte_len, entry.name
             ),
         });
@@ -909,7 +905,7 @@ pub(crate) fn fetch_into(
     else {
         return Err(Error::Admission {
             message: format!(
-                "model \"{}\" is loaded/in use; stop the daemon (or retry) then re-run `docsbase models fetch {}`",
+                "model \"{}\" is loaded/in use; stop the daemon (or retry) then re-run `docsbase models fetch fastembed/{}`",
                 entry.name, entry.name
             ),
         });
