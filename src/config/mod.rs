@@ -125,7 +125,7 @@ impl HybridToggle {
                 let embedding = match table.embedding {
                     Some(embedding) => Some(resolve_embedding(
                         &embedding.provider,
-                        embedding.model,
+                        embedding.model.as_deref(),
                         embedding.dimensions,
                         embedding.normalize,
                     )?),
@@ -134,7 +134,7 @@ impl HybridToggle {
                 let reranker = match table.reranker {
                     Some(reranker) => Some(resolve_reranker(
                         &reranker.provider,
-                        reranker.model,
+                        reranker.model.as_deref(),
                         reranker.window,
                     )?),
                     None => None,

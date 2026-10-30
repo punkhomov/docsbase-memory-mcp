@@ -405,129 +405,22 @@ pub fn provider_status(providers: &ProvidersCfg, name: &str) -> ProviderStatus {
 /// model, a wrong non-registry dim, or `normalize = false` on fastembed.
 pub fn resolve_embedding(
     provider: &str,
-    model: Option<String>,
+    model: Option<&str>,
     dimensions: Option<u32>,
     normalize: bool,
 ) -> Result<EmbeddingCfg> {
-    match provider {
-        PROVIDER_OPENROUTER => Ok(EmbeddingCfg {
-            provider: provider.to_owned(),
-            model: model.unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL.to_owned()),
-            dimensions: dimensions.unwrap_or(DEFAULT_DIMENSIONS),
-            normalize,
-        }),
-        PROVIDER_FASTEMBED => {
-            #[cfg(feature = "hybrid-local")]
-            {
-                let model = model.ok_or_else(|| Error::Admission {
-                    message: "hybrid.embedding: provider \"fastembed\" requires an explicit `model` (registry name); run `docsbase models list`"
-                        .to_owned(),
-                })?;
-                if !normalize {
-                    return Err(Error::Admission {
-                        message:
-                            "hybrid.embedding: fastembed registry models require normalize = true"
-                                .to_owned(),
-                    });
-                }
-                let entry = crate::hybrid::models::entry(&model)?;
-                let dim = entry.dim.ok_or_else(|| Error::Admission {
-                    message: format!(
-                        "hybrid.embedding: \"{model}\" is a rerank model, not an embedding model"
-                    ),
-                })?;
-                let dim = u32::try_from(dim).map_err(|_| Error::Admission {
-                    message: format!(
-                        "hybrid.embedding: registry dim for \"{model}\" is out of range"
-                    ),
-                })?;
-                match dimensions {
-                    None => Ok(EmbeddingCfg {
-                        provider: provider.to_owned(),
-                        model,
-                        dimensions: dim,
-                        normalize: true,
-                    }),
-                    Some(given) if given == dim => Ok(EmbeddingCfg {
-                        provider: provider.to_owned(),
-                        model,
-                        dimensions: given,
-                        normalize: true,
-                    }),
-                    Some(given) => Err(Error::Admission {
-                        message: format!(
-                            "hybrid.embedding: dimensions {given} do not match the registry dimension {dim} for \"{model}\""
-                        ),
-                    }),
-                }
-            }
-            #[cfg(not(feature = "hybrid-local"))]
-            {
-                let _ = (model, dimensions, normalize);
-                Err(Error::Admission {
-                    message: "hybrid.embedding: provider \"fastembed\" requires the `hybrid-local` build feature"
-                        .to_owned(),
-                })
-            }
-        }
-        _ => Err(Error::Admission {
-            message: format!(
-                "hybrid.embedding: unknown provider \"{provider}\" (supported: \"{PROVIDER_OPENROUTER}\", \"{PROVIDER_FASTEMBED}\")"
-            ),
-        }),
-    }
+    crate::hybrid::provider::provider(provider)?.resolve_embedding(model, dimensions, normalize)
 }
 
 /// Provider-aware resolution of the rerank stage (FR-5): `OpenRouter` fills
-/// its default model; `fastembed` requires an explicit registry model of the
-/// `Rerank` task.
+/// its documented defaults when absent; `fastembed` requires an explicit
+/// registry model with the rerank task and checks the window bounds.
 ///
 /// # Errors
 /// Returns [`Error::Admission`] for an unknown provider, a missing fastembed
-/// model, or an embedding model selected for rerank.
-pub fn resolve_reranker(provider: &str, model: Option<String>, window: u32) -> Result<RerankerCfg> {
-    match provider {
-        PROVIDER_OPENROUTER => Ok(RerankerCfg {
-            provider: provider.to_owned(),
-            model: model.unwrap_or_else(|| DEFAULT_RERANK_MODEL.to_owned()),
-            window,
-        }),
-        PROVIDER_FASTEMBED => {
-            #[cfg(feature = "hybrid-local")]
-            {
-                let model = model.ok_or_else(|| Error::Admission {
-                    message: "hybrid.reranker: provider \"fastembed\" requires an explicit `model` (registry name); run `docsbase models list`"
-                        .to_owned(),
-                })?;
-                let entry = crate::hybrid::models::entry(&model)?;
-                if entry.task != crate::hybrid::models::Task::Rerank {
-                    return Err(Error::Admission {
-                        message: format!(
-                            "hybrid.reranker: \"{model}\" is an embedding model, not a rerank model"
-                        ),
-                    });
-                }
-                Ok(RerankerCfg {
-                    provider: provider.to_owned(),
-                    model,
-                    window,
-                })
-            }
-            #[cfg(not(feature = "hybrid-local"))]
-            {
-                let _ = (model, window);
-                Err(Error::Admission {
-                    message: "hybrid.reranker: provider \"fastembed\" requires the `hybrid-local` build feature"
-                        .to_owned(),
-                })
-            }
-        }
-        _ => Err(Error::Admission {
-            message: format!(
-                "hybrid.reranker: unknown provider \"{provider}\" (supported: \"{PROVIDER_OPENROUTER}\", \"{PROVIDER_FASTEMBED}\")"
-            ),
-        }),
-    }
+/// model, a non-rerank registry row, or an out-of-range window.
+pub fn resolve_reranker(provider: &str, model: Option<&str>, window: u32) -> Result<RerankerCfg> {
+    crate::hybrid::provider::provider(provider)?.resolve_reranker(model, window)
 }
 
 /// Legacy `OpenRouter` cache key (FR-5): `openrouter/<model>@d<dim>@<l2|raw>`.
@@ -724,13 +617,8 @@ mod tests {
         assert_eq!(cfg.dimensions, DEFAULT_DIMENSIONS);
         assert!(cfg.normalize);
         // Explicit values win.
-        let explicit = resolve_embedding(
-            PROVIDER_OPENROUTER,
-            Some("org/model".to_owned()),
-            Some(1024),
-            false,
-        )
-        .expect("resolve");
+        let explicit = resolve_embedding(PROVIDER_OPENROUTER, Some("org/model"), Some(1024), false)
+            .expect("resolve");
         assert_eq!(explicit.model, "org/model");
         assert_eq!(explicit.dimensions, 1024);
         assert!(!explicit.normalize);
@@ -788,7 +676,7 @@ mod tests {
         // Missing dims → registry dim.
         let cfg = resolve_embedding(
             PROVIDER_FASTEMBED,
-            Some("multilingual-e5-small".to_owned()),
+            Some("multilingual-e5-small"),
             None,
             true,
         )
@@ -797,7 +685,7 @@ mod tests {
         // Wrong dims → admission.
         let err = resolve_embedding(
             PROVIDER_FASTEMBED,
-            Some("multilingual-e5-small".to_owned()),
+            Some("multilingual-e5-small"),
             Some(128),
             true,
         )
@@ -806,27 +694,19 @@ mod tests {
         // normalize = false → admission (FR-9).
         let err = resolve_embedding(
             PROVIDER_FASTEMBED,
-            Some("multilingual-e5-small".to_owned()),
+            Some("multilingual-e5-small"),
             None,
             false,
         )
         .expect_err("normalize false");
         assert!(matches!(err, Error::Admission { .. }));
         // An embedding model for rerank → admission.
-        let err = resolve_reranker(
-            PROVIDER_FASTEMBED,
-            Some("multilingual-e5-small".to_owned()),
-            30,
-        )
-        .expect_err("embedding model for rerank");
+        let err = resolve_reranker(PROVIDER_FASTEMBED, Some("multilingual-e5-small"), 30)
+            .expect_err("embedding model for rerank");
         assert!(matches!(err, Error::Admission { .. }));
         // A rerank model resolves.
-        let rerank = resolve_reranker(
-            PROVIDER_FASTEMBED,
-            Some("jina-reranker-v1-turbo-en".to_owned()),
-            30,
-        )
-        .expect("resolve");
+        let rerank = resolve_reranker(PROVIDER_FASTEMBED, Some("jina-reranker-v1-turbo-en"), 30)
+            .expect("resolve");
         assert_eq!(rerank.window, 30);
     }
 

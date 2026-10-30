@@ -148,6 +148,22 @@ fn reject_unknown_keys(name: &str, table: &toml::Table, allowed: &[&str]) -> Res
     })
 }
 
+/// One entry of a provider's closed catalog (data only, no ML types).
+///
+/// `dims` is `Option` because a rerank model has no vector width
+/// (`models::ModelEntry.dim` is `None` for those rows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatalogModel {
+    /// Model name as the provider knows it (no provider prefix).
+    pub name: &'static str,
+    /// Which stage the model serves.
+    pub task: Task,
+    /// Vector width for embedding rows.
+    pub dims: Option<usize>,
+    /// Pinned revision the catalog entry refers to.
+    pub revision: &'static str,
+}
+
 /// The pair of stages a provider can build: embedding and rerank.
 pub type Stages = (Option<Arc<dyn Embedder>>, Option<Arc<dyn Reranker>>);
 
@@ -186,6 +202,12 @@ pub trait Provider: Sync {
     fn parse_record(&self, table: &toml::Table) -> Result<ProviderRecord> {
         reject_unknown_keys(self.name(), table, &[])?;
         Ok(ProviderRecord::new(record_enabled(self.name(), table)?))
+    }
+
+    /// Closed catalog of known models, or `None` when the provider has none
+    /// (remote APIs accept arbitrary ids). Callers filter by [`Task`].
+    fn catalog(&self) -> Option<&'static [CatalogModel]> {
+        None
     }
 
     /// Readiness for the status table (FR-7).
@@ -277,6 +299,34 @@ impl Provider for FastembedProvider {
         Ok(ProviderRecord { enabled, params })
     }
 
+    fn catalog(&self) -> Option<&'static [CatalogModel]> {
+        #[cfg(feature = "hybrid-local")]
+        {
+            // Projection of the authoritative registry, built once: a second
+            // hand-written catalog would drift from what `fetch` downloads
+            // (T1 review P2-3). `catalog_matches_the_registry` pins parity.
+            static CATALOG: std::sync::OnceLock<&'static [CatalogModel]> =
+                std::sync::OnceLock::new();
+            let catalog = CATALOG.get_or_init(|| {
+                let rows: Vec<CatalogModel> = super::models::REGISTRY
+                    .iter()
+                    .map(|entry| CatalogModel {
+                        name: entry.name,
+                        task: entry.task,
+                        dims: entry.dim,
+                        revision: entry.revision,
+                    })
+                    .collect();
+                Box::leak(rows.into_boxed_slice())
+            });
+            Some(catalog)
+        }
+        #[cfg(not(feature = "hybrid-local"))]
+        {
+            None
+        }
+    }
+
     fn status(&self, providers: &ProvidersCfg) -> ProviderStatus {
         use super::config::ProviderState::{Broken, Connected, NotConnected, Unknown};
         let connect = format!("run `docsbase connect {PROVIDER_FASTEMBED}`");
@@ -359,16 +409,96 @@ impl Provider for FastembedProvider {
         dims: Option<u32>,
         normalize: bool,
     ) -> Result<EmbeddingCfg> {
-        super::config::resolve_embedding(
-            PROVIDER_FASTEMBED,
-            model.map(str::to_owned),
-            dims,
-            normalize,
-        )
+        let Some(model) = model else {
+            return Err(Error::Admission {
+                message: "hybrid.embedding: provider \"fastembed\" requires an explicit `model` (registry name); run `docsbase models list`"
+                    .to_owned(),
+            });
+        };
+        if !normalize {
+            return Err(Error::Admission {
+                message: "hybrid.embedding: fastembed registry models require normalize = true"
+                    .to_owned(),
+            });
+        }
+        #[cfg(feature = "hybrid-local")]
+        {
+            let entry = super::models::entry(model)?;
+            let Some(dim) = entry.dim else {
+                return Err(Error::Admission {
+                    message: format!(
+                        "hybrid.embedding: \"{model}\" is a rerank model, not an embedding model"
+                    ),
+                });
+            };
+            let Ok(dim) = u32::try_from(dim) else {
+                return Err(Error::Admission {
+                    message: format!(
+                        "hybrid.embedding: registry dim for \"{model}\" is out of range"
+                    ),
+                });
+            };
+            match dims {
+                None => Ok(EmbeddingCfg {
+                    provider: PROVIDER_FASTEMBED.to_owned(),
+                    model: model.to_owned(),
+                    dimensions: dim,
+                    normalize: true,
+                }),
+                Some(given) if given == dim => Ok(EmbeddingCfg {
+                    provider: PROVIDER_FASTEMBED.to_owned(),
+                    model: model.to_owned(),
+                    dimensions: given,
+                    normalize: true,
+                }),
+                Some(given) => Err(Error::Admission {
+                    message: format!(
+                        "hybrid.embedding: dimensions {given} do not match the registry dimension {dim} for \"{model}\""
+                    ),
+                }),
+            }
+        }
+        #[cfg(not(feature = "hybrid-local"))]
+        {
+            let _ = (dims, model);
+            Err(Error::Admission {
+                message: "hybrid.embedding: provider \"fastembed\" requires the `hybrid-local` build feature"
+                    .to_owned(),
+            })
+        }
     }
 
     fn resolve_reranker(&self, model: Option<&str>, window: u32) -> Result<RerankerCfg> {
-        super::config::resolve_reranker(PROVIDER_FASTEMBED, model.map(str::to_owned), window)
+        let Some(model) = model else {
+            return Err(Error::Admission {
+                message: "hybrid.reranker: provider \"fastembed\" requires an explicit `model` (registry name); run `docsbase models list`"
+                    .to_owned(),
+            });
+        };
+        #[cfg(feature = "hybrid-local")]
+        {
+            let entry = super::models::entry(model)?;
+            if entry.task != Task::Rerank {
+                return Err(Error::Admission {
+                    message: format!(
+                        "hybrid.reranker: \"{model}\" is an embedding model, not a rerank model"
+                    ),
+                });
+            }
+            Ok(RerankerCfg {
+                provider: PROVIDER_FASTEMBED.to_owned(),
+                model: model.to_owned(),
+                window,
+            })
+        }
+        #[cfg(not(feature = "hybrid-local"))]
+        {
+            let _ = (window, model);
+            Err(Error::Admission {
+                message: "hybrid.reranker: provider \"fastembed\" requires the `hybrid-local` build feature"
+                    .to_owned(),
+            })
+        }
     }
 }
 
@@ -452,16 +582,26 @@ impl Provider for OpenrouterProvider {
         dims: Option<u32>,
         normalize: bool,
     ) -> Result<EmbeddingCfg> {
-        super::config::resolve_embedding(
-            PROVIDER_OPENROUTER,
-            model.map(str::to_owned),
-            dims,
+        Ok(EmbeddingCfg {
+            provider: PROVIDER_OPENROUTER.to_owned(),
+            model: model.map_or_else(
+                || super::config::DEFAULT_EMBEDDING_MODEL.to_owned(),
+                str::to_owned,
+            ),
+            dimensions: dims.unwrap_or(super::config::DEFAULT_DIMENSIONS),
             normalize,
-        )
+        })
     }
 
     fn resolve_reranker(&self, model: Option<&str>, window: u32) -> Result<RerankerCfg> {
-        super::config::resolve_reranker(PROVIDER_OPENROUTER, model.map(str::to_owned), window)
+        Ok(RerankerCfg {
+            provider: PROVIDER_OPENROUTER.to_owned(),
+            model: model.map_or_else(
+                || super::config::DEFAULT_RERANK_MODEL.to_owned(),
+                str::to_owned,
+            ),
+            window,
+        })
     }
 }
 
@@ -771,6 +911,30 @@ mod tests {
             let text = provider.feature_missing().to_string();
             assert!(text.contains(feature), "{}: {text}", provider.name());
         }
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    #[test]
+    fn catalog_matches_the_registry() {
+        use crate::hybrid::models;
+        // The catalog is a projection, so it cannot drift from what `fetch`
+        // downloads (T1 review P2-3).
+        let local = provider(PROVIDER_FASTEMBED).expect("fastembed");
+        let catalog = local.catalog().expect("local provider has a catalog");
+        assert_eq!(catalog.len(), models::REGISTRY.len());
+        for (row, entry) in catalog.iter().zip(models::REGISTRY.iter()) {
+            assert_eq!(row.name, entry.name);
+            assert_eq!(row.task, entry.task);
+            assert_eq!(row.dims, entry.dim);
+            assert_eq!(row.revision, entry.revision);
+        }
+        // A remote provider has no catalog: its ids are open-ended.
+        assert!(
+            provider(PROVIDER_OPENROUTER)
+                .expect("openrouter")
+                .catalog()
+                .is_none()
+        );
     }
 
     #[test]

@@ -185,3 +185,36 @@
   требовало.
 - minor (deferred): `write_global_provider` в `cli/connect.rs` по-прежнему
   собирает TOML руками из пар ключ-значение; унификация записи записи — T5.
+
+## T4 — адрес `<provider>/<model>` в CLI
+
+- `Task <T4>: complete`. `models use embed|rerank`, `models fetch`, `models remove`
+  принимают только адрес: `ModelAddress::parse` + подсказка по каталогу для
+  голого имени (`"bge-small-en-v1.5" is not a model address; use
+  "fastembed/bge-small-en-v1.5"`). `--provider` удалён.
+- Тела `resolve_embedding`/`resolve_reranker` переехали из `config.rs` в
+  реализации провайдеров (тексты сохранены дословно); свободные функции стали
+  обёртками над реестром. Границы окна реранка остались у CLI-флага
+  (`resolve_window`), а провайдер валидирует свою стадию для конфиг-пути.
+- Каталог: `CatalogModel { name, task, dims: Option<usize>, revision }` +
+  `Provider::catalog()`; fastembed отдаёт **проекцию** `models::REGISTRY` через
+  `OnceLock` + `Box::leak`, паритет закреплён тестом `catalog_matches_the_registry`.
+- Вывод: `models list` печатает строки каталога адресами
+  (`fastembed/bge-small-en-v1.5`), `providers:` — циклом по реестру,
+  `selected:` — адресом из конфига (`fastembed/bge-small-en-v1.5`,
+  `…@w50` для реранка).
+- `fetch`/`remove` для провайдера без локального кэша → Admission «no local model
+  cache; models are downloaded by the provider» (NG3).
+- FR-12 закреплён структурно: `use_cmd` строит конфиг из `EmbeddingCfg`/
+  `RerankerCfg` (provider + голое имя), полный адрес в `model` невозможен.
+- Тесты: юнит-набор `cli::models` переписан на адреса (адрес → dims из каталога,
+  голое имя → подсказка, провайдер без каталога → обязательный `--dims`,
+  `openrouter/some/model` сохраняет слэши модели); интеграционные —
+  `bare_model_name_is_rejected_with_the_corrected_address`,
+  `unknown_provider_in_an_address_is_admission`; удалены два теста про
+  несуществующий `--provider`.
+- Проверка: lib 132 / 213 / 146 / 227; `config` 24, `hybrid_config` 8+13,
+  `cli_models` 22, `connect` 7, `hybrid_local` 3, `hybrid_models` 4,
+  `hybrid_openrouter` 20; clippy `-D warnings` чист в default и combo; fmt чист.
+- Ruling: голое имя больше не выводит провайдера **нигде** — в том числе в
+  `fetch`/`remove`; единственный источник провайдера — первый сегмент адреса.

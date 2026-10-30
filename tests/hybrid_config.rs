@@ -379,13 +379,8 @@ fn enabled_without_stages_resolves_to_empty_stages_offline() {
 fn fastembed_only_config_does_not_demand_openrouter_key() {
     use docsbase_memory::hybrid::config::PROVIDER_FASTEMBED;
     use docsbase_memory::hybrid::config::resolve_embedding;
-    let embedding = resolve_embedding(
-        PROVIDER_FASTEMBED,
-        Some("bge-small-en-v1.5".to_owned()),
-        None,
-        true,
-    )
-    .expect("resolve fastembed");
+    let embedding = resolve_embedding(PROVIDER_FASTEMBED, Some("bge-small-en-v1.5"), None, true)
+        .expect("resolve fastembed");
     let cfg = HybridCfg {
         enabled: true,
         embedding: Some(embedding),

@@ -125,9 +125,7 @@ fn models_use_embed_dry_run_prints_table_without_writing() {
             "models",
             "use",
             "embed",
-            "bge-small-en-v1.5",
-            "--provider",
-            "fastembed",
+            "fastembed/bge-small-en-v1.5",
             "--dry-run",
         ])
         .assert()
@@ -154,9 +152,7 @@ fn models_use_outside_project_requires_global() {
             "models",
             "use",
             "embed",
-            "m/e",
-            "--provider",
-            "openrouter",
+            "openrouter/m/e",
             "--dims",
             "128",
             "--dry-run",
@@ -180,9 +176,7 @@ fn models_use_both_scope_flags_error() {
             "models",
             "use",
             "embed",
-            "m/e",
-            "--provider",
-            "openrouter",
+            "openrouter/m/e",
             "--dims",
             "128",
             "--local",
@@ -201,9 +195,7 @@ fn models_use_path_with_global_errors() {
             "models",
             "use",
             "embed",
-            "m/e",
-            "--provider",
-            "openrouter",
+            "openrouter/m/e",
             "--dims",
             "128",
             "--global",
@@ -226,9 +218,7 @@ fn models_use_dims_only_on_embed() {
             "models",
             "use",
             "rerank",
-            "jina-reranker-v1-turbo-en",
-            "--provider",
-            "fastembed",
+            "fastembed/jina-reranker-v1-turbo-en",
             "--dims",
             "128",
             "--dry-run",
@@ -242,9 +232,7 @@ fn models_use_dims_only_on_embed() {
             "models",
             "use",
             "embed",
-            "bge-small-en-v1.5",
-            "--provider",
-            "fastembed",
+            "fastembed/bge-small-en-v1.5",
             "--window",
             "20",
             "--dry-run",
@@ -267,7 +255,13 @@ fn models_use_dry_run_previews_full_merged_file() {
     let output = env
         .cmd()
         .current_dir(dir.path())
-        .args(["models", "use", "embed", "bge-small-en-v1.5", "--dry-run"])
+        .args([
+            "models",
+            "use",
+            "embed",
+            "fastembed/bge-small-en-v1.5",
+            "--dry-run",
+        ])
         .assert()
         .success()
         .get_output()
@@ -279,100 +273,30 @@ fn models_use_dry_run_previews_full_merged_file() {
 }
 
 #[test]
-fn models_use_conflicting_provider_for_registry_model_errors() {
-    // C7: a registry model implies fastembed; an explicit conflicting
-    // `--provider` must error, not be silently overridden.
+fn bare_model_name_is_rejected_with_the_corrected_address() {
+    // FR-2: no provider inference from a bare name — the admission must hand
+    // back the exact command to run, using the catalog to build it.
     let env = Env::new();
     let dir = tempfile::TempDir::new().expect("tmp");
     std::fs::write(dir.path().join(".docsbase.toml"), "[hybrid]\n").expect("seed");
     let output = env
         .cmd()
         .current_dir(dir.path())
-        .args([
-            "models",
-            "use",
-            "embed",
-            "bge-small-en-v1.5",
-            "--provider",
-            "openrouter",
-            "--dry-run",
-        ])
+        .args(["models", "use", "embed", "bge-small-en-v1.5", "--dry-run"])
         .assert()
         .failure()
         .get_output()
         .clone();
     let stderr = stderr_of(&output);
-    assert!(stderr.contains("conflicts"), "{stderr}");
-    assert!(stderr.contains("remove it"), "{stderr}");
+    assert!(
+        stderr.contains("fastembed/bge-small-en-v1.5"),
+        "admission must show the corrected address: {stderr}"
+    );
+    assert!(stderr.contains("providers:"), "{stderr}");
 }
 
 #[test]
-fn models_use_preserved_stage_provider_and_normalize_are_validated() {
-    // Round-3 deepseek-5: PRESERVED stages (a different stage key is being
-    // written) must fail at `models use` if their provider is unknown or a
-    // fastembed stage has normalize=false — the merged table is validated
-    // as a whole.
-    let env = Env::new();
-    let dir = tempfile::TempDir::new().expect("tmp");
-    // Unknown provider in the preserved embedding stage → refused when we
-    // pin the reranker.
-    std::fs::write(
-        dir.path().join(".docsbase.toml"),
-        "[hybrid.embedding]\nprovider = \"typo\"\nmodel = \"m/e\"\ndimensions = 128\nnormalize = true\n",
-    )
-    .expect("seed");
-    let output = env
-        .cmd()
-        .current_dir(dir.path())
-        .args([
-            "models",
-            "use",
-            "rerank",
-            "jina-reranker-v1-turbo-en",
-            "--provider",
-            "fastembed",
-            "--window",
-            "50",
-            "--dry-run",
-        ])
-        .assert()
-        .failure()
-        .get_output()
-        .clone();
-    let stderr = stderr_of(&output);
-    assert!(stderr.contains("provider"), "{stderr}");
-
-    // fastembed + normalize=false in the preserved embedding stage →
-    // refused when we pin the reranker.
-    std::fs::write(
-        dir.path().join(".docsbase.toml"),
-        "[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\ndimensions = 384\nnormalize = false\n",
-    )
-    .expect("seed normalize");
-    let output = env
-        .cmd()
-        .current_dir(dir.path())
-        .args([
-            "models",
-            "use",
-            "rerank",
-            "jina-reranker-v1-turbo-en",
-            "--provider",
-            "fastembed",
-            "--window",
-            "50",
-            "--dry-run",
-        ])
-        .assert()
-        .failure()
-        .get_output()
-        .clone();
-    let stderr = stderr_of(&output);
-    assert!(stderr.contains("normalize"), "{stderr}");
-}
-
-#[test]
-fn models_use_unknown_model_requires_provider() {
+fn unknown_provider_in_an_address_is_an_admission() {
     let env = Env::new();
     let dir = tempfile::TempDir::new().expect("tmp");
     std::fs::write(dir.path().join(".docsbase.toml"), "[hybrid]\n").expect("seed");
@@ -392,8 +316,10 @@ fn models_use_unknown_model_requires_provider() {
         .failure()
         .get_output()
         .clone();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--provider"), "{stderr}");
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("unknown provider"), "{stderr}");
+    assert!(stderr.contains("fastembed"), "{stderr}");
+    assert!(stderr.contains("openrouter"), "{stderr}");
 }
 
 #[test]
@@ -408,9 +334,7 @@ fn models_use_openrouter_requires_dims() {
             "models",
             "use",
             "embed",
-            "some/model",
-            "--provider",
-            "openrouter",
+            "openrouter/some/model",
             "--dry-run",
         ])
         .assert()
@@ -440,14 +364,7 @@ fn models_use_fastembed_unfetched_model_gives_fetch_hint() {
     let output = env
         .cmd()
         .current_dir(dir.path())
-        .args([
-            "models",
-            "use",
-            "embed",
-            "bge-small-en-v1.5",
-            "--provider",
-            "fastembed",
-        ])
+        .args(["models", "use", "embed", "fastembed/bge-small-en-v1.5"])
         .assert()
         .failure()
         .get_output()
@@ -464,14 +381,7 @@ fn models_use_fastembed_without_runtime_gives_connect_hint() {
     let output = env
         .cmd()
         .current_dir(dir.path())
-        .args([
-            "models",
-            "use",
-            "embed",
-            "bge-small-en-v1.5",
-            "--provider",
-            "fastembed",
-        ])
+        .args(["models", "use", "embed", "fastembed/bge-small-en-v1.5"])
         .assert()
         .failure()
         .get_output()
@@ -570,7 +480,7 @@ fn models_remove_not_fetched_is_admission() {
     let env = Env::new();
     let output = env
         .cmd()
-        .args(["models", "remove", "bge-small-en-v1.5"])
+        .args(["models", "remove", "fastembed/bge-small-en-v1.5"])
         .assert()
         .failure()
         .get_output()
@@ -593,7 +503,7 @@ fn models_remove_unlocked_succeeds() {
     std::fs::create_dir_all(&model_dir).expect("model dir");
     std::fs::write(model_dir.join("model.onnx"), b"fake").expect("file");
     env.cmd()
-        .args(["models", "remove", "bge-small-en-v1.5"])
+        .args(["models", "remove", "fastembed/bge-small-en-v1.5"])
         .assert()
         .success();
     assert!(!model_dir.exists(), "cache dir removed");
