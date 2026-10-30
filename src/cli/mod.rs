@@ -108,9 +108,14 @@ pub enum Command {
     },
     /// Prepare providers on this machine (status, openrouter, fastembed).
     Connect {
-        /// Provider subcommand.
-        #[command(subcommand)]
-        provider: Option<connect::ConnectProvider>,
+        /// Provider to prepare; omit for the status table.
+        provider: Option<String>,
+        /// Report the state without writing anything.
+        #[arg(long)]
+        check: bool,
+        /// Re-probe / reinstall even when already prepared.
+        #[arg(long)]
+        force: bool,
     },
     /// Install (or update) the binary and register owned artifacts.
     Install,
@@ -174,7 +179,15 @@ pub fn run() -> anyhow::Result<()> {
             #[cfg(feature = "hybrid-local")]
             models::ModelsCommand::Remove(args) => models::remove_cmd(&args),
         },
-        Command::Connect { provider } => connect::run(&connect::ConnectArgs { provider }),
+        Command::Connect {
+            provider,
+            check,
+            force,
+        } => connect::run(&connect::ConnectArgs {
+            provider,
+            check,
+            force,
+        }),
         Command::Install => install::install(),
         Command::Update {
             check,

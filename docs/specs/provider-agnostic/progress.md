@@ -218,3 +218,34 @@
   `hybrid_openrouter` 20; clippy `-D warnings` чист в default и combo; fmt чист.
 - Ruling: голое имя больше не выводит провайдера **нигде** — в том числе в
   `fetch`/`remove`; единственный источник провайдера — первый сегмент адреса.
+
+## T5 — единый `connect <provider> [--check] [--force]`
+
+- `Task <T5>: complete`. `ConnectProvider`/`FastembedArgs` удалены; вместо них
+  `ConnectArgs { provider: Option<String>, check, force }` и один каркас
+  `connect_frame(&dyn Provisioner, name, check, force)`: проверка флагов →
+  `check()` или `install(force)` → запись `[providers.<name>]` из
+  `Provisioner::record()` → строки отчёта → подсказка о рестарте только при
+  реальной установке.
+- `trait Provisioner` и таблица `provisioner_for(name)` живут в CLI-слое
+  (ядро не знает про `ureq`/`zip`); дрейф двух таблиц ловит
+  `every_provisioner_is_a_registered_provider`.
+- Семантика флагов одинакова для всех: `--check` — отчёт без записи (у
+  openrouter дополнительно zero-token probe ключа), `--force` — переустановка /
+  повторная проверка с перезаписью, `--check --force` — один и тот же Admission.
+  `connect <unknown>` перечисляет имена из реестра (без «model address» лексики).
+- `write_global_provider` принимает `&toml::Table` от провайдера (единый
+  поставщик содержимого, P3-9 ревью спеки).
+- Тесты: `every_provisioner_is_a_registered_provider`,
+  `connect_frame_rejects_check_with_force_for_every_provider`,
+  `connect_frame_check_never_writes_the_config`; существующие 7 тестов
+  `tests/connect.rs` зелёные без изменений.
+- Проверка: lib 135 / 216 / 149 / 230; `connect` 7, `cli_models` 22,
+  `config` 24, `hybrid_config` 8+13; clippy `-D warnings` чист в default и combo;
+  fmt чист. Ручной смоук: `connect` (таблица из реестра), `connect fastembed
+  --check`, `connect fastembed --check --force` (mutually exclusive),
+  `connect openrouter --check` (401 на фейковом ключе — сеть, как и раньше),
+  `connect nope` (список провайдеров).
+- Ruling: рестарт-подсказка остаётся частью каркаса, но её включает только
+  провайдер через `InstallOutcome.reinstalled` (openrouter ничего не ставит
+  локально → никогда).
