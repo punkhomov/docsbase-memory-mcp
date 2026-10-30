@@ -73,11 +73,11 @@ cargo build --release --features hybrid-local
 # 1. Установка закреплённого ONNX Runtime (скачивается один раз; `--check` показывает состояние)
 docsbase connect fastembed
 # 2. Скачивание модели из реестра (revision + sha256 закреплены в коде)
-docsbase models fetch bge-small-en-v1.5
-docsbase models fetch jina-reranker-v1-turbo-en
+docsbase models fetch fastembed/bge-small-en-v1.5
+docsbase models fetch fastembed/jina-reranker-v1-turbo-en
 # 3. Указание стадий (dims берутся из реестра для fastembed)
-docsbase models use embed bge-small-en-v1.5
-docsbase models use rerank jina-reranker-v1-turbo-en
+docsbase models use embed fastembed/bge-small-en-v1.5
+docsbase models use rerank fastembed/jina-reranker-v1-turbo-en
 ```
 
 `models use` проверяет файл проекта; вне проекта передайте `--global`. Всё

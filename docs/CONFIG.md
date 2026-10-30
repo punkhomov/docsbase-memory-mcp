@@ -38,7 +38,7 @@ Hybrid search is opt-in per project. Two providers exist:
 - `fastembed` (spec `docs/specs/hybrid-local`): local ONNX models; needs a
   build with `--features hybrid-local`, the ONNX Runtime installed
   (`docsbase connect fastembed`), and pinned registry models fetched
-  (`docsbase models fetch <name>`).
+  (`docsbase models fetch fastembed/<name>`).
 
 Provider entries (`[providers]`) live only in the global config; a project
 may reference a provider but never define one. The default build stays fully
@@ -82,16 +82,29 @@ past roughly 92k chunks at `d2048` the project stays on the exact path.
 
 Default remote pins are free OpenRouter routes: they may train on prompts and
 the roster rotates monthly. Paid pins (e.g. `qwen/qwen3-embedding-8b`,
-`cohere/rerank-v3.5`) are one explicit `docsbase models use` away and stay
+`openrouter/cohere/rerank-v3.5`) are one explicit `docsbase models use` away and stay
 pinned once set. Local models have no default: every fastembed stage must
 name a registry row (`docsbase models list`), fetched first with `docsbase
-models fetch <name>`.
+models fetch fastembed/<name>`.
 
-Models are pinned purpose-first, one stage per call: `docsbase models use
-embed <model> [--provider P] [--dims N] [--local|--global]` and `docsbase
-models use rerank <model> [--provider P] [--window N] [--local|--global]`.
+Models are pinned purpose-first, one stage per call, and every model is
+addressed as `<provider>/<model>` — the provider is the segment before the
+first `/`, so remote ids keep their own slashes
+(`openrouter/nvidia/nemotron-3-embed-1b:free`). A bare name is rejected with the
+corrected command; there is no provider inference:
+
+```
+docsbase models use embed  <provider>/<model> [--dims N]   [--local|--global]
+docsbase models use rerank <provider>/<model> [--window N] [--local|--global]
+docsbase models fetch  <provider>/<model> [--force]        # providers with a local cache
+docsbase models remove <provider>/<model> [--force]
+docsbase connect <provider> [--check] [--force]
+```
+
+`--dims` is optional only for a provider with a catalog (it is inferred from
+the registry row and must agree); a provider without a catalog requires it.
 `docsbase models list` shows provider states, the selected pins and per-model
-cache sizes. `docsbase models remove <name>` removes every cached revision of
+cache sizes. `docsbase models remove fastembed/<name>` removes every cached revision of
 a model and refuses while the model is loaded (pass `--force` to delete
 anyway). `docsbase uninstall --dry-run` lists the owned artifacts — including
 the ONNX Runtime install and the model cache (FR-13) — before any deletion.
@@ -178,7 +191,7 @@ docsbase config   # effective values for the current directory (JSON)
 - Daemon reads the global config once at start; project config is read when
   the project is opened.
 - Provisioning changes need a daemon restart: `docsbase connect fastembed`
-  (runtime library) and `docsbase models fetch <name>` (a revision that
+  (runtime library) and `docsbase models fetch fastembed/<name>` (a revision that
   actually landed on disk) both print a restart note, because a running
   daemon keeps the ORT library and its loaded model instances until it is
   restarted.
