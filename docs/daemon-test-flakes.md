@@ -228,3 +228,27 @@ CI периодически падает на Linux/Windows; перезапус�
 - Флейк 7 (2026-10-29, run `40882092301`): исправлен тестом — платформенный
   дедлайн ожидания батча вотчера (`watcher_deadline()`), см. `docs/ci.md`
   про host-relative бюджеты.
+
+## Flake #8 — `cold_start_loads_persisted_ann_without_vectors_db` (Windows)
+
+**Symptom.** Windows CI: `remove vectors db: Os { code: 32, kind: Uncategorized,
+message: "The process cannot access the file because it is being used by another
+process." }` right after `wait_for_ann` reported the ANN as published. Linux and
+macOS never fail.
+
+**Root cause (a real bug, not a test flake).** `build_in_background` published
+the `Ann` entry and only *then* re-opened `VectorCache` to release the backfill
+lease. So there was a window where callers already saw the ANN while the build
+thread still held an open `vectors.db` connection. On Windows an open handle is
+a sharing violation for `remove_file`; on Unix `unlink` of an open file just
+works. Any purge (`models remove`, cache clear) racing the tail of a build hit
+the same thing in production.
+
+**Fix.** The build closure now returns the loaded index and the publish happens
+*after* the lease release, so "ANN visible" implies "no `vectors.db` handle
+held". The existing test's `remove_file` is the regression check (Windows only,
+since Unix cannot observe it) and carries a comment naming the ordering
+invariant so it is not reintroduced.
+
+**Ruling.** Not a timeout to raise and not a retry to add: fix the ordering once
+in the shared code path.
