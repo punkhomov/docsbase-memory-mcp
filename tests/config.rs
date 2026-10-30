@@ -390,7 +390,9 @@ fn global_providers_parse_and_expose() {
     );
 
     let config = Config::load_from(config_dir.path(), None).expect("load");
-    let fastembed = config.providers.fastembed.expect("fastembed entry");
+    let fastembed = docsbase_memory::hybrid::config::fastembed_record(&config.providers)
+        .expect("record")
+        .expect("fastembed entry");
     assert!(fastembed.enabled);
     assert_eq!(fastembed.runtime.as_deref(), Some("1.24.4"));
     assert_eq!(
@@ -398,9 +400,8 @@ fn global_providers_parse_and_expose() {
         Some(std::path::Path::new("/tmp/libonnxruntime.so"))
     );
     assert!(
-        config
-            .providers
-            .openrouter
+        docsbase_memory::hybrid::config::openrouter_record(&config.providers)
+            .expect("record")
             .expect("openrouter entry")
             .enabled
     );
@@ -415,7 +416,50 @@ fn unknown_provider_name_rejected_at_global() {
         "[providers.wat]\nenabled = true\n",
     );
     let err = Config::load_from(config_dir.path(), None).expect_err("unknown provider");
-    assert!(err.to_string().contains("wat"), "{err}");
+    let text = err.to_string();
+    assert!(text.contains("wat"), "{text}");
+    // The admission comes from the registry, not a hardcoded pair (FR-4).
+    assert!(text.contains("fastembed"), "{text}");
+    assert!(text.contains("openrouter"), "{text}");
+}
+
+#[test]
+fn unknown_key_inside_a_provider_record_is_an_admission() {
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[providers.fastembed]\nenabled = true\nrutime_path = \"/tmp/x\"\n",
+    );
+    let err = Config::load_from(config_dir.path(), None).expect_err("unknown key");
+    let text = err.to_string();
+    // A typo must not silently disable the provider, and the message names the
+    // provider plus the keys it accepts (FR-4; was a serde `Internal` before).
+    assert!(text.contains("fastembed"), "{text}");
+    assert!(text.contains("rutime_path"), "{text}");
+    assert!(text.contains("runtime_path"), "{text}");
+}
+
+#[test]
+fn provider_record_of_a_feature_disabled_provider_still_parses() {
+    // A file written by a build with `hybrid-local` must load in a build
+    // without it: the feature gates *use*, never parsing (FR-4, ADR-18).
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[providers.fastembed]\nenabled = true\nruntime = \"1.24.4\"\nruntime_path = \"/tmp/libonnxruntime.so\"\n",
+    );
+    let config = Config::load_from(config_dir.path(), None).expect("record parses in every build");
+    let record = docsbase_memory::hybrid::config::fastembed_record(&config.providers)
+        .expect("typed view")
+        .expect("fastembed record");
+    assert!(record.enabled);
+    assert_eq!(record.runtime.as_deref(), Some("1.24.4"));
+    assert_eq!(
+        record.runtime_path.as_deref(),
+        Some(std::path::Path::new("/tmp/libonnxruntime.so"))
+    );
 }
 
 #[test]
@@ -455,7 +499,12 @@ fn global_defaults_then_project_override() {
     assert_eq!(embedding.model, "project/model", "project wins");
     assert_eq!(embedding.dimensions, 256);
     // The project cannot smuggle providers; the global ones survive.
-    assert!(config.providers.openrouter.expect("openrouter").enabled);
+    assert!(
+        docsbase_memory::hybrid::config::openrouter_record(&config.providers)
+            .expect("record")
+            .expect("openrouter")
+            .enabled
+    );
     let global_only = Config::load_from(config_dir.path(), None).expect("load");
     let global_embedding = global_only.hybrid_cfg.embedding.expect("embedding stage");
     assert_eq!(global_embedding.model, "global/model");

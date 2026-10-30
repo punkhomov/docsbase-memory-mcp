@@ -2,21 +2,22 @@
 //! (FR-28, FR-29; OQ-4; ADR-6).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
 use crate::hybrid::config::{
-    CacheCfg, DEFAULT_RERANK_WINDOW, FastembedProvider, HybridCfg, MAX_RERANK_WINDOW,
-    MIN_RERANK_WINDOW, OpenrouterProvider, PROVIDER_OPENROUTER, ProvidersCfg, Ranking,
-    resolve_embedding, resolve_reranker,
+    CacheCfg, DEFAULT_RERANK_WINDOW, HybridCfg, MAX_RERANK_WINDOW, MIN_RERANK_WINDOW,
+    PROVIDER_OPENROUTER, ProvidersCfg, Ranking, resolve_embedding, resolve_reranker,
 };
 
 pub mod paths;
 
 /// Effective configuration after merging all sources.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not `Eq`: provider records carry `toml::Table`, which is only `PartialEq`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// Extra ignore patterns, appended to the built-in defaults.
     pub ignores: Vec<String>,
@@ -75,7 +76,7 @@ struct GlobalFileConfig {
     max_docs_per_project: Option<usize>,
     auto_index: Option<bool>,
     hybrid: Option<HybridToggle>,
-    providers: Option<HashMap<String, ProviderFile>>,
+    providers: Option<HashMap<String, toml::Table>>,
 }
 
 /// Raw **project** file shape: identical to the global shape minus
@@ -90,46 +91,18 @@ struct ProjectFileConfig {
     hybrid: Option<HybridToggle>,
 }
 
-/// Raw `[providers.<name>]` entry (machine-local).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProviderFile {
-    #[serde(default = "def_true")]
-    enabled: bool,
-    #[serde(default)]
-    runtime: Option<String>,
-    #[serde(default)]
-    runtime_path: Option<PathBuf>,
-}
-
-/// Converts the raw providers map into the typed [`ProvidersCfg`]; known
-/// provider names are mapped, unknown ones are rejected so a typo cannot
-/// silently disable a provider.
-fn providers_from_raw(raw: HashMap<String, ProviderFile>) -> Result<ProvidersCfg> {
-    use crate::hybrid::config::PROVIDER_FASTEMBED;
+/// Converts the raw `[providers.*]` map into the typed [`ProvidersCfg`].
+///
+/// The provider registry owns both halves of validation, so adding a provider
+/// never touches this file (FR-4, ADR-18): an unknown name is an admission
+/// listing the registry, and the keys of a known provider are validated by
+/// that provider. Parsing never consults build features — a file written by a
+/// feature-enabled build must load in every build.
+fn providers_from_raw(raw: HashMap<String, toml::Table>) -> Result<ProvidersCfg> {
     let mut out = ProvidersCfg::default();
-    for (name, file) in raw {
-        match name.as_str() {
-            PROVIDER_FASTEMBED => {
-                out.fastembed = Some(FastembedProvider {
-                    enabled: file.enabled,
-                    runtime: file.runtime,
-                    runtime_path: file.runtime_path,
-                });
-            }
-            crate::hybrid::config::PROVIDER_OPENROUTER => {
-                out.openrouter = Some(OpenrouterProvider {
-                    enabled: file.enabled,
-                });
-            }
-            _ => {
-                return Err(Error::Admission {
-                    message: format!(
-                        "unknown provider \"{name}\" in the global config (supported: \"{PROVIDER_FASTEMBED}\", \"{PROVIDER_OPENROUTER}\")"
-                    ),
-                });
-            }
-        }
+    for (name, table) in raw {
+        let provider = crate::hybrid::provider::provider(&name)?;
+        out.insert(name, provider.parse_record(&table)?);
     }
     Ok(out)
 }

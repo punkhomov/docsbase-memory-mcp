@@ -236,8 +236,8 @@ pub(crate) fn data_dir_library_path() -> Option<PathBuf> {
 /// it), so `--check` never lies about what `resolve` would pick.
 #[must_use]
 pub fn runtime_status(providers: &ProvidersCfg) -> RuntimeStatus {
-    let path = providers
-        .fastembed
+    let record = super::config::fastembed_record(providers).ok().flatten();
+    let path = record
         .as_ref()
         .and_then(|provider| provider.runtime_path.as_ref())
         .cloned()
@@ -245,12 +245,11 @@ pub fn runtime_status(providers: &ProvidersCfg) -> RuntimeStatus {
     // A connected provider requires an actually existing library: short-
     // circuit only when the resolved path exists (a recorded runtime_path
     // that vanished must stay Broken, matching provider_status/resolve).
-    let has_entry = providers.fastembed.as_ref().is_some_and(|p| p.enabled);
+    let has_entry = record.as_ref().is_some_and(|p| p.enabled);
     if has_entry && path.as_ref().is_some_and(|path| path.exists()) {
         return RuntimeStatus {
             state: "Connected",
-            version: providers
-                .fastembed
+            version: record
                 .as_ref()
                 .and_then(|provider| provider.runtime.clone())
                 .or_else(|| Some(ORT_VERSION.to_owned())),
@@ -262,8 +261,7 @@ pub fn runtime_status(providers: &ProvidersCfg) -> RuntimeStatus {
     match status.state {
         crate::hybrid::config::ProviderState::Connected => RuntimeStatus {
             state: "Connected",
-            version: providers
-                .fastembed
+            version: record
                 .as_ref()
                 .and_then(|provider| provider.runtime.clone()),
             path,
@@ -271,8 +269,7 @@ pub fn runtime_status(providers: &ProvidersCfg) -> RuntimeStatus {
         },
         crate::hybrid::config::ProviderState::Broken => RuntimeStatus {
             state: "Broken",
-            version: providers
-                .fastembed
+            version: record
                 .as_ref()
                 .and_then(|provider| provider.runtime.clone()),
             path,
@@ -738,7 +735,8 @@ pub fn resolve(cfg: &ProvidersCfg) -> Result<PathBuf> {
         }
         return Ok(path);
     }
-    match &cfg.fastembed {
+    let record = super::config::fastembed_record(cfg)?;
+    match &record {
         Some(provider) if provider.enabled => {
             if let Some(path) = &provider.runtime_path {
                 if !path.exists() {
@@ -920,6 +918,7 @@ pub(crate) mod test_env {
 
 #[cfg(test)]
 mod tests {
+    use super::super::config::PROVIDER_FASTEMBED;
     use std::collections::HashSet;
     use std::io::Write as _;
     use std::sync::Arc;
@@ -1332,14 +1331,15 @@ mod tests {
         }
 
         // Connected provider path wins.
-        let provider = ProvidersCfg {
-            fastembed: Some(FastembedProvider {
+        let provider = ProvidersCfg::default().with(
+            PROVIDER_FASTEMBED,
+            FastembedProvider {
                 enabled: true,
                 runtime: Some(ORT_VERSION.to_owned()),
                 runtime_path: Some(fake_lib.clone()),
-            }),
-            openrouter: None,
-        };
+            }
+            .to_record(),
+        );
         let resolved = resolve(&provider).expect("provider path");
         assert_eq!(resolved, fake_lib);
 
@@ -1350,26 +1350,28 @@ mod tests {
         let data_dir_install = library_path(target);
         std::fs::create_dir_all(data_dir_install.parent().expect("parent")).expect("mkdir");
         std::fs::write(&data_dir_install, b"fake").expect("touch");
-        let no_path = ProvidersCfg {
-            fastembed: Some(FastembedProvider {
+        let no_path = ProvidersCfg::default().with(
+            PROVIDER_FASTEMBED,
+            (FastembedProvider {
                 enabled: true,
                 runtime: Some(ORT_VERSION.to_owned()),
                 runtime_path: None,
-            }),
-            openrouter: None,
-        };
+            })
+            .to_record(),
+        );
         let resolved = resolve(&no_path).expect("data-dir fallback");
         assert_eq!(resolved, data_dir_install);
 
         // Broken path → admission.
-        let broken = ProvidersCfg {
-            fastembed: Some(FastembedProvider {
+        let broken = ProvidersCfg::default().with(
+            PROVIDER_FASTEMBED,
+            (FastembedProvider {
                 enabled: true,
                 runtime: Some(ORT_VERSION.to_owned()),
                 runtime_path: Some(dir.path().join("missing.so")),
-            }),
-            openrouter: None,
-        };
+            })
+            .to_record(),
+        );
         let err = resolve(&broken).expect_err("broken");
         assert!(err.to_string().contains("--force"), "{err}");
     }
@@ -1468,14 +1470,15 @@ mod tests {
         use crate::hybrid::config::FastembedProvider;
         let dir = tempfile::TempDir::new().expect("tmp");
         let missing = dir.path().join("libonnxruntime.so"); // never created
-        let providers = ProvidersCfg {
-            fastembed: Some(FastembedProvider {
+        let providers = ProvidersCfg::default().with(
+            PROVIDER_FASTEMBED,
+            (FastembedProvider {
                 enabled: true,
                 runtime: Some(ORT_VERSION.to_owned()),
                 runtime_path: Some(missing),
-            }),
-            openrouter: None,
-        };
+            })
+            .to_record(),
+        );
         let status = runtime_status(&providers);
         assert_eq!(status.state, "Broken", "vanished runtime path is Broken");
         assert!(status.reason.is_some());
@@ -1491,14 +1494,15 @@ mod tests {
         let installed = library_path(target);
         std::fs::create_dir_all(installed.parent().expect("parent")).expect("mkdir");
         std::fs::write(&installed, b"fake").expect("touch");
-        let providers = ProvidersCfg {
-            fastembed: Some(FastembedProvider {
+        let providers = ProvidersCfg::default().with(
+            PROVIDER_FASTEMBED,
+            (FastembedProvider {
                 enabled: true,
                 runtime: None,
                 runtime_path: None,
-            }),
-            openrouter: None,
-        };
+            })
+            .to_record(),
+        );
         let status = runtime_status(&providers);
         assert_eq!(status.state, "Connected");
         assert_eq!(status.path.as_ref(), Some(&installed));

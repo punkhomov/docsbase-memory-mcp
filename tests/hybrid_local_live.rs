@@ -76,11 +76,14 @@ fn live_fetch_embed_rerank() {
 
     // ---- runtime must resolve (connect or ORT_DYLIB_PATH) ----
     let providers = providers();
-    if !providers.fastembed.as_ref().is_some_and(|p| p.enabled)
-        && std::env::var_os("ORT_DYLIB_PATH").is_none()
-    {
-        panic!("no fastembed provider configured; {}", runtime_hint());
-    }
+    let fastembed_enabled = docsbase_memory::hybrid::config::fastembed_record(&providers)
+        .expect("record")
+        .is_some_and(|record| record.enabled);
+    assert!(
+        fastembed_enabled || std::env::var_os("ORT_DYLIB_PATH").is_some(),
+        "no fastembed provider configured; {}",
+        runtime_hint()
+    );
 
     // ---- embed 3 texts; query prefix asserted (FR-10) ----
     let embed_cfg = EmbeddingCfg {

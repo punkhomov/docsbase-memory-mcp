@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use super::config::{
-    EmbeddingCfg, PROVIDER_FASTEMBED, PROVIDER_OPENROUTER, ProviderStatus, ProvidersCfg,
-    RerankerCfg,
+    EmbeddingCfg, PROVIDER_FASTEMBED, PROVIDER_OPENROUTER, ProviderRecord, ProviderStatus,
+    ProvidersCfg, RerankerCfg,
 };
 use crate::error::{Error, Result};
 use crate::hybrid::Reranker;
@@ -108,6 +108,46 @@ impl std::fmt::Display for ModelAddress<'_> {
     }
 }
 
+/// `enabled` from a `[providers.<name>]` table (absent = true, as before).
+///
+/// # Errors
+/// [`Error::Admission`] when the key is not a boolean.
+fn record_enabled(name: &str, table: &toml::Table) -> Result<bool> {
+    match table.get("enabled") {
+        None => Ok(true),
+        Some(toml::Value::Boolean(value)) => Ok(*value),
+        Some(_) => Err(super::config::type_error(
+            &format!("providers.{name}"),
+            "enabled",
+            "a boolean",
+        )),
+    }
+}
+
+/// Rejects keys outside `allowed` (`enabled` is always allowed).
+///
+/// # Errors
+/// [`Error::Admission`] listing the provider's allowed keys.
+fn reject_unknown_keys(name: &str, table: &toml::Table, allowed: &[&str]) -> Result<()> {
+    let unknown: Vec<&str> = table
+        .keys()
+        .map(String::as_str)
+        .filter(|key| *key != "enabled" && !allowed.contains(key))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let mut keys = vec!["enabled"];
+    keys.extend_from_slice(allowed);
+    Err(Error::Admission {
+        message: format!(
+            "providers.{name}: unknown key(s) {}; allowed keys: {}",
+            unknown.join(", "),
+            keys.join(", ")
+        ),
+    })
+}
+
 /// The pair of stages a provider can build: embedding and rerank.
 pub type Stages = (Option<Arc<dyn Embedder>>, Option<Arc<dyn Reranker>>);
 
@@ -133,6 +173,19 @@ pub trait Provider: Sync {
     /// silently unusable — FR-5, G4).
     fn enabled(&self) -> bool {
         true
+    }
+
+    /// Validates this provider's `[providers.<name>]` keys (FR-4). The default
+    /// accepts only `enabled` and rejects anything else, so a typo cannot
+    /// silently disable a provider; a provider with its own keys overrides
+    /// this. Parsing never looks at build features: a file written by a
+    /// feature-enabled build must load in every build.
+    ///
+    /// # Errors
+    /// [`Error::Admission`] naming the provider and its allowed keys.
+    fn parse_record(&self, table: &toml::Table) -> Result<ProviderRecord> {
+        reject_unknown_keys(self.name(), table, &[])?;
+        Ok(ProviderRecord::new(record_enabled(self.name(), table)?))
     }
 
     /// Readiness for the status table (FR-7).
@@ -204,10 +257,33 @@ impl Provider for FastembedProvider {
         cfg!(feature = "hybrid-local")
     }
 
+    fn parse_record(&self, table: &toml::Table) -> Result<ProviderRecord> {
+        reject_unknown_keys(PROVIDER_FASTEMBED, table, &["runtime", "runtime_path"])?;
+        let enabled = record_enabled(PROVIDER_FASTEMBED, table)?;
+        // Reuse the typed view's own type checks instead of duplicating them.
+        let mut params = toml::Table::new();
+        for key in ["runtime", "runtime_path"] {
+            if let Some(value) = table.get(key) {
+                if !value.is_str() {
+                    return Err(super::config::type_error(
+                        &format!("providers.{PROVIDER_FASTEMBED}"),
+                        key,
+                        "a string",
+                    ));
+                }
+                params.insert((*key).to_owned(), value.clone());
+            }
+        }
+        Ok(ProviderRecord { enabled, params })
+    }
+
     fn status(&self, providers: &ProvidersCfg) -> ProviderStatus {
         use super::config::ProviderState::{Broken, Connected, NotConnected, Unknown};
         let connect = format!("run `docsbase connect {PROVIDER_FASTEMBED}`");
-        let Some(provider) = providers.fastembed.as_ref() else {
+        let Ok(provider) = super::config::fastembed_record(providers) else {
+            return ProviderStatus::state_only(Unknown, Some(connect));
+        };
+        let Some(provider) = provider else {
             return ProviderStatus::state_only(Unknown, Some(connect));
         };
         if !provider.enabled {
@@ -314,7 +390,8 @@ impl Provider for OpenrouterProvider {
 
     fn status(&self, providers: &ProvidersCfg) -> ProviderStatus {
         use super::config::ProviderState::{Connected, NotConnected, Unknown};
-        match &providers.openrouter {
+        let record = super::config::openrouter_record(providers).ok().flatten();
+        match &record {
             None => ProviderStatus::state_only(
                 Unknown,
                 Some("run `docsbase connect openrouter`".to_owned()),
@@ -580,6 +657,120 @@ mod tests {
         assert!(!text.contains(PROVIDER_FASTEMBED), "{text}");
         // The global registry still does not know `echo`.
         assert!(ModelAddress::parse("echo/tiny").is_err());
+    }
+
+    #[test]
+    fn provider_status_golden_unchanged() {
+        use super::super::config::{FastembedProvider, OpenrouterProvider, ProviderState};
+        use std::path::PathBuf;
+
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let live = tmp.path().join("libonnxruntime.so");
+        std::fs::write(&live, b"fake").expect("touch");
+        let gone = PathBuf::from("/nonexistent/libonnxruntime.so");
+
+        let cases: Vec<(&str, ProvidersCfg, ProviderState, Option<&str>)> = vec![
+            // (provider, config, expected state, expected reason substring)
+            (
+                PROVIDER_FASTEMBED,
+                ProvidersCfg::default(),
+                ProviderState::Unknown,
+                Some("run `docsbase connect fastembed`"),
+            ),
+            (
+                PROVIDER_FASTEMBED,
+                ProvidersCfg::default().with(
+                    PROVIDER_FASTEMBED,
+                    FastembedProvider {
+                        enabled: false,
+                        runtime: None,
+                        runtime_path: None,
+                    }
+                    .to_record(),
+                ),
+                ProviderState::NotConnected,
+                Some("run `docsbase connect fastembed`"),
+            ),
+            (
+                PROVIDER_FASTEMBED,
+                ProvidersCfg::default().with(
+                    PROVIDER_FASTEMBED,
+                    FastembedProvider {
+                        enabled: true,
+                        runtime: Some("1.24.4".to_owned()),
+                        runtime_path: Some(live.clone()),
+                    }
+                    .to_record(),
+                ),
+                ProviderState::Connected,
+                None,
+            ),
+            (
+                PROVIDER_FASTEMBED,
+                ProvidersCfg::default().with(
+                    PROVIDER_FASTEMBED,
+                    FastembedProvider {
+                        enabled: true,
+                        runtime: Some("1.24.4".to_owned()),
+                        runtime_path: Some(gone),
+                    }
+                    .to_record(),
+                ),
+                ProviderState::Broken,
+                Some("is missing; re-run `docsbase connect fastembed --force`"),
+            ),
+            (
+                PROVIDER_OPENROUTER,
+                ProvidersCfg::default(),
+                ProviderState::Unknown,
+                Some("run `docsbase connect openrouter`"),
+            ),
+            (
+                PROVIDER_OPENROUTER,
+                ProvidersCfg::default().with(
+                    PROVIDER_OPENROUTER,
+                    OpenrouterProvider { enabled: false }.to_record(),
+                ),
+                ProviderState::NotConnected,
+                Some("run `docsbase connect openrouter`"),
+            ),
+            (
+                PROVIDER_OPENROUTER,
+                ProvidersCfg::default().with(
+                    PROVIDER_OPENROUTER,
+                    OpenrouterProvider { enabled: true }.to_record(),
+                ),
+                ProviderState::Connected,
+                None,
+            ),
+        ];
+
+        for (name, providers, state, reason) in cases {
+            let status = super::super::config::provider_status(&providers, name);
+            assert_eq!(status.state, state, "{name}: {status:?}");
+            match reason {
+                None => assert_eq!(status.reason, None, "{name}: {status:?}"),
+                Some(fragment) => {
+                    let text = status.reason.clone().unwrap_or_default();
+                    assert!(text.contains(fragment), "{name}: {text}");
+                    // NFR-4: a status row carries no error taxonomy prefix.
+                    assert!(!text.contains("admission refused:"), "{name}: {text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn feature_missing_messages_name_the_declared_feature() {
+        // Keeps `feature()` and the message in sync: the string a user reads
+        // must name the feature the registry declares (T2 review P3-7).
+        for provider in providers() {
+            let Some(feature) = provider.feature() else {
+                continue;
+            };
+            let text = provider.feature_missing().to_string();
+            assert!(text.contains(feature), "{}: {text}", provider.name());
+        }
     }
 
     #[test]

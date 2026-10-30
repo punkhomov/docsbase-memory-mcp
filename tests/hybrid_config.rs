@@ -9,7 +9,6 @@ use docsbase_memory::error::Error;
 use docsbase_memory::hybrid::Ranking;
 use docsbase_memory::hybrid::blocking;
 use docsbase_memory::hybrid::config::ProviderState;
-#[cfg(feature = "hybrid-remote")]
 use docsbase_memory::hybrid::config::RerankerCfg;
 use docsbase_memory::hybrid::config::{
     CacheCfg, EmbeddingCfg, HybridCfg, ProvidersCfg, embedding_model_id, from_config,
@@ -24,7 +23,7 @@ fn jobs_embed_texts_threads_real_providers() {
     // job pipeline) must thread the real `ProvidersCfg`; a dangling
     // runtime_path surfaces the resolve-stage admission (--force hint),
     // never "is not connected" (which would indicate a `default()`).
-    use docsbase_memory::hybrid::config::FastembedProvider;
+    use docsbase_memory::hybrid::config::{FastembedProvider, PROVIDER_FASTEMBED};
     use docsbase_memory::hybrid::jobs;
     let cache = tempfile::TempDir::new().expect("cache");
     let cfg = HybridCfg {
@@ -36,14 +35,15 @@ fn jobs_embed_texts_threads_real_providers() {
         }),
         ..HybridCfg::default()
     };
-    let providers = ProvidersCfg {
-        fastembed: Some(FastembedProvider {
+    let providers = ProvidersCfg::default().with(
+        PROVIDER_FASTEMBED,
+        FastembedProvider {
             enabled: true,
             runtime: Some("1.24.4".to_owned()),
             runtime_path: Some("/nonexistent/libonnxruntime.so".into()),
-        }),
-        openrouter: None,
-    };
+        }
+        .to_record(),
+    );
     let prev_cache = std::env::var_os("DOCSBASE_CACHE_DIR");
     let env_guard = env_guard();
     // SAFETY: single-threaded under the shared module lock; restored
@@ -120,6 +120,25 @@ fn feature_off_admission_is_explicit() {
         "expected Admission, got {error}"
     );
 
+    // The real registry refuses the same config in a build without the
+    // feature. This branch is the only assertion of that, so keep it: the
+    // feature-off lanes (default, hybrid-local) run it.
+    #[cfg(not(feature = "hybrid-remote"))]
+    {
+        let error = from_config(
+            &HybridCfg::enabled_with_defaults(),
+            &ProvidersCfg::default(),
+        )
+        .expect_err("feature-off build must reject an OpenRouter stage");
+        let Error::Admission { message } = error else {
+            panic!("expected Admission, got {error}");
+        };
+        assert!(
+            message.contains("hybrid-remote"),
+            "message must name the feature: {message}"
+        );
+    }
+
     // The real message names the real feature. It is only reachable in a build
     // without the feature, which the single-feature CI lanes provide; here the
     // provider's own message is asserted directly.
@@ -141,7 +160,6 @@ fn feature_off_admission_is_explicit() {
     );
 }
 
-#[cfg(feature = "hybrid-remote")]
 #[test]
 fn unknown_provider_is_rejected_before_any_network_setup() {
     let cfg = HybridCfg {
@@ -432,7 +450,7 @@ fn env_guard() -> EnvGuard {
 #[test]
 #[allow(unsafe_code)] // env isolation under the local lock
 fn from_config_fastembed_uses_real_provider_config() {
-    use docsbase_memory::hybrid::config::{FastembedProvider, ProviderState};
+    use docsbase_memory::hybrid::config::{FastembedProvider, PROVIDER_FASTEMBED, ProviderState};
 
     // Runtime present via runtime_path; model cache isolated & empty → the
     // stage must fail with the FETCH hint, never "not connected" (P0: the
@@ -441,14 +459,15 @@ fn from_config_fastembed_uses_real_provider_config() {
     let runtime = tempfile::TempDir::new().expect("runtime");
     let runtime_path = runtime.path().join("libonnxruntime.so");
     std::fs::write(&runtime_path, b"fake").expect("touch");
-    let providers = ProvidersCfg {
-        fastembed: Some(FastembedProvider {
+    let providers = ProvidersCfg::default().with(
+        PROVIDER_FASTEMBED,
+        FastembedProvider {
             enabled: true,
             runtime: Some("1.24.4".to_owned()),
             runtime_path: Some(runtime_path),
-        }),
-        openrouter: None,
-    };
+        }
+        .to_record(),
+    );
     let cfg = HybridCfg {
         enabled: true,
         embedding: Some(EmbeddingCfg {

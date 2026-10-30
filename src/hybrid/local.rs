@@ -624,6 +624,7 @@ fn clone_entry(entry: &ModelEntry<'_>) -> ModelEntry<'static> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::config::PROVIDER_FASTEMBED;
     use super::*;
     use crate::hybrid::models::test_support::{FakeSource, fake_cache_dir, fake_entry};
 
@@ -777,14 +778,15 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tmp");
         let runtime_path = dir.path().join("libonnxruntime.so");
         std::fs::write(&runtime_path, b"fake").expect("touch");
-        let providers = ProvidersCfg {
-            fastembed: Some(super::super::config::FastembedProvider {
+        let providers = ProvidersCfg::default().with(
+            PROVIDER_FASTEMBED,
+            super::super::config::FastembedProvider {
                 enabled: true,
                 runtime: Some("1.24.4".to_owned()),
                 runtime_path: Some(runtime_path),
-            }),
-            openrouter: None,
-        };
+            }
+            .to_record(),
+        );
         let Err(err) = with_isolated_empty_cache(|| embedder(&cfg, &providers)) else {
             panic!("expected admission without a fetched model");
         };
@@ -1025,14 +1027,15 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tmp");
         let runtime_path = dir.path().join("libonnxruntime.so");
         std::fs::write(&runtime_path, b"fake").expect("touch");
-        let providers = ProvidersCfg {
-            fastembed: Some(super::super::config::FastembedProvider {
+        let providers = ProvidersCfg::default().with(
+            PROVIDER_FASTEMBED,
+            super::super::config::FastembedProvider {
                 enabled: true,
                 runtime: Some("1.24.4".to_owned()),
                 runtime_path: Some(runtime_path),
-            }),
-            openrouter: None,
-        };
+            }
+            .to_record(),
+        );
         let Err(err) = with_isolated_empty_cache(|| reranker(&cfg, &providers)) else {
             panic!("expected admission without a fetched model");
         };

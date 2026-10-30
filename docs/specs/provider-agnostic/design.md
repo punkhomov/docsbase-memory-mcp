@@ -126,9 +126,19 @@ fn from_config_with(table: &[&'static dyn Provider], …) -> Result<HybridStages
 }
 ```
 
-`resolve(p)` = `provider(p)` + проверка `feature()` против build и
-`remote_on`/`local_on`; тексты `feature_missing_remote/local` остаются
-байт-в-байт (FR-11), просто вызываются из одного места.
+`resolve(p)` = `provider(p)` + проверка `enabled()`; тексты
+`feature_missing_remote/local` остаются байт-в-байт (FR-11), просто вызываются
+из одного места.
+
+**Delta 2026-10-29 (T2).** Параметры `remote_on`/`local_on` удалены: все
+вызывающие передавали туда `cfg!(feature = …)`, то есть дублировали
+compile-time знание. Гейт — `Provider::enabled()` (свой `cfg!`-литерал в модуле
+провайдера), а `feature()` остаётся метаданными для текстов сообщений; тест
+`feature_missing_messages_name_the_declared_feature` держит их в согласии.
+Порядок проверок в `from_config_with` — форма конфига (`validate_stage_shapes`,
+`cache.max_bytes`) до гейта фичи: так сохраняются прежние тексты про
+`hybrid.embedding: unknown provider …`, и меняется только приоритет ошибок у
+заведомо невалидного конфига (объявлено здесь, FR-11).
 
 Клиент OpenRouter живёт внутри `build_stages` и разделяется между стадиями
 одного провайдера — то есть ровно одно создание на конфиг, как сегодня

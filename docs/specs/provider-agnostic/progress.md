@@ -131,3 +131,57 @@
   свободными функциями в `config.rs` с `match provider` — их тела переезжают в
   провайдеров в T4 (там же `resolve_window` и границы окна), до тех пор
   `rg`-гейт T6 не применяется.
+
+### T2 fix round (reviewer-deepseek, APPROVED WITH NOTES)
+
+- P2-1 (`feature_off_admission_is_explicit` не ловил удаление гейта: билдер
+  фейкового провайдера сам возвращал тот же Admission): **исправлено**.
+  `DisabledProvider::build_stages` → `Ok((None, None))`, поэтому отказать может
+  только гейт; возвращена ветка `#[cfg(not(feature = "hybrid-remote"))]`, где
+  **реальный** реестр отвергает OpenRouter-стадию в сборке без фичи.
+- P2-2 (заявленные в tasks.md golden-тесты T2 отсутствовали): **добавлены**
+  `provider_status_golden_unchanged` (состояние + reason-фрагмент для обоих
+  провайдеров, включая Broken и оба Unknown) и
+  `feature_missing_messages_name_the_declared_feature`.
+- P2-3 (`provider_status` светил `admission refused:` в пользовательский
+  reason): **исправлено** — `err.inner_message()`; тест golden проверяет
+  отсутствие префикса.
+- P2-4 (док `from_config` описывал удалённый параметр + инертный
+  `cfg_attr(allow(unused_variables))`): удалено.
+- P2-5 (design §3 всё ещё показывал старую сигнатуру и гейт по `feature()`):
+  добавлена дельта 2026-10-29 (T2).
+- P3-6 (изменился приоритет ошибок: форма конфига теперь раньше гейта фичи):
+  **объявлено** дельтой в design §3; побочно снят `#[cfg(feature =
+  "hybrid-remote")]` с `unknown_provider_is_rejected_before_any_network_setup` —
+  теперь это покрытие есть и в дефолтном лейне.
+- P3-7 (`feature()` без продуктивного потребителя): добавлен тест согласия
+  `feature_missing_messages_name_the_declared_feature`; сам метод оставлен как
+  объявленные метаданные (FR-5).
+- P3-8 (неверные цифры в ledger): исправлено — `from_config` имел 19 вызовов
+  (5 в `src/`, 14 в тестах), и в дефолтном лейне реальный гейт теперь снова
+  проверяется.
+
+## T3 — generic-записи провайдеров в конфиге
+
+- `Task <T3>: complete`. `[providers.<name>]` больше не типизирован в
+  `src/config/mod.rs`: таблица читается как `toml::Table`, имя проверяется по
+  реестру, ключи — реализацией провайдера (`Provider::parse_record`).
+  `ProvidersCfg` стал `BTreeMap<String, ProviderRecord>` (`get`/`iter`/`insert`/
+  `with`), `ProviderRecord { enabled, params }`; типизированные вьюхи —
+  `FastembedProvider`/`OpenrouterProvider` с `to_record`/`from_record` и
+  геттерами `fastembed_record`/`openrouter_record`.
+- Новые тесты: `unknown_key_inside_a_provider_record_is_an_admission`
+  (опечатка `rutime_path` → Admission со списком допустимых ключей, было
+  `Internal` из serde), `provider_record_of_a_feature_disabled_provider_still_parses`
+  (файл, записанный сборкой с `hybrid-local`, читается дефолтной сборкой),
+  плюс ужесточён `unknown_provider_name_rejected_at_global` (текст обязан
+  перечислять имена из реестра).
+- Проверка: lib 132 / 211 / 146 / 225 по четырём конфигурациям; `config` 24,
+  `hybrid_config` 8 (default) и 13 (combo), `cli_models` 23, `connect` 7,
+  `hybrid_local` 3, `hybrid_models` 4, `hybrid_openrouter` 20; clippy
+  `--all-targets -D warnings` чист (default и combo); fmt чист.
+- Ruling: `ProviderRecord.params` — `toml::Table`, поэтому `Config` и
+  `ProvidersCfg` больше не `Eq` (только `PartialEq`); ничего в продукте `Eq` не
+  требовало.
+- minor (deferred): `write_global_provider` в `cli/connect.rs` по-прежнему
+  собирает TOML руками из пар ключ-значение; унификация записи записи — T5.

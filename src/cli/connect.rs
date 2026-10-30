@@ -77,12 +77,12 @@ fn print_status() -> Result<()> {
     for name in [PROVIDER_FASTEMBED, PROVIDER_OPENROUTER] {
         let status = provider_status(providers, name);
         let version = match name {
-            PROVIDER_FASTEMBED => providers
-                .fastembed
-                .as_ref()
-                .and_then(|provider| provider.runtime.as_deref())
-                .unwrap_or("-"),
-            _ => "-",
+            PROVIDER_FASTEMBED => crate::hybrid::config::fastembed_record(providers)
+                .ok()
+                .flatten()
+                .and_then(|provider| provider.runtime)
+                .unwrap_or_else(|| "-".to_owned()),
+            _ => "-".to_owned(),
         };
         // The resolved library comes from the status, not from the config
         // field: an entry without `runtime_path` still resolves through the

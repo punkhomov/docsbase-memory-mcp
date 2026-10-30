@@ -159,20 +159,66 @@ impl Default for RerankerCfg {
     }
 }
 
-/// Machine-local provider records from the **global** config only (FR-1):
-/// `[providers.fastembed]` / `[providers.openrouter]`. Project files have no
-/// `providers` field (structural), so machine capabilities are never
-/// committed to repositories.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProvidersCfg {
-    /// `fastembed` provider record (ADR-17).
-    pub fastembed: Option<FastembedProvider>,
-    /// `OpenRouter` provider record.
-    pub openrouter: Option<OpenrouterProvider>,
+/// One `[providers.<name>]` record, provider-agnostic: the common `enabled`
+/// flag plus the provider's own keys, kept exactly as written so a provider
+/// module can give them a typed view.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProviderRecord {
+    /// Provider prepared on this machine.
+    pub enabled: bool,
+    /// Provider-specific keys (`runtime`, `runtime_path`, …).
+    pub params: toml::Table,
 }
 
-/// `[providers.fastembed]` record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ProviderRecord {
+    /// A record with `enabled` and no provider-specific keys.
+    #[must_use]
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            params: toml::Table::new(),
+        }
+    }
+}
+
+/// Machine-local provider records from the **global** config only (FR-1):
+/// `[providers.<name>]`. Project files have no `providers` field
+/// (structural), so machine capabilities are never committed to repositories.
+///
+/// Generic on purpose: a new provider needs no change here (FR-4, ADR-18).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProvidersCfg {
+    entries: std::collections::BTreeMap<String, ProviderRecord>,
+}
+
+impl ProvidersCfg {
+    /// The record of `name`, when the global config has one.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&ProviderRecord> {
+        self.entries.get(name)
+    }
+
+    /// Every configured provider, name-ordered.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &ProviderRecord)> {
+        self.entries.iter()
+    }
+
+    /// Inserts (or replaces) a record; used by the config loader, the CLI
+    /// writers and tests.
+    pub fn insert(&mut self, name: impl Into<String>, record: ProviderRecord) {
+        self.entries.insert(name.into(), record);
+    }
+
+    /// Builder form of [`insert`](Self::insert).
+    #[must_use]
+    pub fn with(mut self, name: impl Into<String>, record: ProviderRecord) -> Self {
+        self.insert(name, record);
+        self
+    }
+}
+
+/// Typed view of `[providers.fastembed]` (ADR-17).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FastembedProvider {
     /// Provider prepared on this machine.
     pub enabled: bool,
@@ -182,11 +228,99 @@ pub struct FastembedProvider {
     pub runtime_path: Option<PathBuf>,
 }
 
-/// `[providers.openrouter]` record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl FastembedProvider {
+    /// The generic record this view serialises to.
+    #[must_use]
+    pub fn to_record(&self) -> ProviderRecord {
+        let mut params = toml::Table::new();
+        if let Some(runtime) = &self.runtime {
+            params.insert("runtime".to_owned(), toml::Value::String(runtime.clone()));
+        }
+        if let Some(path) = &self.runtime_path {
+            params.insert(
+                "runtime_path".to_owned(),
+                toml::Value::String(path.display().to_string()),
+            );
+        }
+        ProviderRecord {
+            enabled: self.enabled,
+            params,
+        }
+    }
+
+    /// Reads the view out of a validated record.
+    ///
+    /// # Errors
+    /// [`Error::Admission`] when a key has the wrong type (only reachable for
+    /// a record built programmatically, not for a parsed file).
+    pub fn from_record(record: &ProviderRecord) -> Result<Self> {
+        let runtime = match record.params.get("runtime") {
+            None => None,
+            Some(toml::Value::String(value)) => Some(value.clone()),
+            Some(_) => return Err(type_error("providers.fastembed", "runtime", "a string")),
+        };
+        let runtime_path = match record.params.get("runtime_path") {
+            None => None,
+            Some(toml::Value::String(value)) => Some(PathBuf::from(value)),
+            Some(_) => {
+                return Err(type_error(
+                    "providers.fastembed",
+                    "runtime_path",
+                    "a string",
+                ));
+            }
+        };
+        Ok(Self {
+            enabled: record.enabled,
+            runtime,
+            runtime_path,
+        })
+    }
+}
+
+/// Typed view of `[providers.openrouter]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpenrouterProvider {
     /// Key validated and recorded on this machine.
     pub enabled: bool,
+}
+
+impl OpenrouterProvider {
+    /// The generic record this view serialises to.
+    #[must_use]
+    pub fn to_record(&self) -> ProviderRecord {
+        ProviderRecord::new(self.enabled)
+    }
+}
+
+/// Admission for a provider key of the wrong TOML type.
+pub(crate) fn type_error(where_: &str, key: &str, want: &str) -> Error {
+    Error::Admission {
+        message: format!("{where_}.{key} must be {want}"),
+    }
+}
+
+/// Typed `fastembed` record, if the global config has one.
+///
+/// # Errors
+/// Propagates a wrong-type key.
+pub fn fastembed_record(providers: &ProvidersCfg) -> Result<Option<FastembedProvider>> {
+    providers
+        .get(PROVIDER_FASTEMBED)
+        .map(FastembedProvider::from_record)
+        .transpose()
+}
+
+/// Typed `openrouter` record, if the global config has one.
+///
+/// # Errors
+/// Propagates a wrong-type key.
+pub fn openrouter_record(providers: &ProvidersCfg) -> Result<Option<OpenrouterProvider>> {
+    Ok(providers
+        .get(PROVIDER_OPENROUTER)
+        .map(|record| OpenrouterProvider {
+            enabled: record.enabled,
+        }))
 }
 
 /// A provider's readiness state (FR-2).
@@ -249,11 +383,14 @@ pub fn provider_status(providers: &ProvidersCfg, name: &str) -> ProviderStatus {
     match crate::hybrid::provider::provider(name) {
         Ok(provider) => provider.status(providers),
         // An unknown name is a diagnostic, not an internal error: the status
-        // table must keep printing rows for names it does not know.
+        // table must keep printing rows for names it does not know. The reason
+        // is the bare message — the `admission refused:` taxonomy prefix and
+        // the address-form hint belong to CLI errors, not to a status row
+        // (NFR-4).
         Err(err) => ProviderStatus {
             state: ProviderState::Unknown,
             path: None,
-            reason: Some(err.to_string()),
+            reason: Some(err.inner_message()),
         },
     }
 }
@@ -454,15 +591,14 @@ impl std::fmt::Debug for HybridStages {
 
 /// Builds the stages from resolved configuration (FR-3, FR-13, FR-14).
 ///
-/// `feature_on` mirrors `cfg!(feature = "hybrid-remote")` at the call site;
-/// tests pass `false` in a feature-build to exercise the offline-build path.
-/// A missing API key or an unknown provider is an [`Error::Admission`]: no
-/// silent BM25-only fallback (NFR-2, SC-3).
+/// Build capability is compile-time now (`Provider::enabled`), so there is no
+/// feature flag to pass in: a stage naming a provider this build cannot use is
+/// an [`Error::Admission`], as is a missing API key or an unknown provider —
+/// no silent BM25-only fallback (NFR-2, SC-3).
 ///
 /// # Errors
 /// Returns [`Error::Admission`] for a feature-off build, an unknown provider,
 /// an out-of-range window or a missing `OPENROUTER_API_KEY`.
-#[cfg_attr(not(feature = "hybrid-local"), allow(unused_variables))]
 pub fn from_config(cfg: &HybridCfg, providers: &ProvidersCfg) -> Result<HybridStages> {
     from_config_with(crate::hybrid::provider::providers(), cfg, providers)
 }
@@ -810,14 +946,15 @@ mod tests {
         use crate::hybrid::runtime::test_env::{TestDataDir, runtime_test_guard};
         let _guard = runtime_test_guard();
         let data = TestDataDir::new();
-        let providers = ProvidersCfg {
-            fastembed: Some(FastembedProvider {
+        let providers = ProvidersCfg::default().with(
+            PROVIDER_FASTEMBED,
+            FastembedProvider {
                 enabled: true,
                 runtime: Some("1.24.4".to_owned()),
                 runtime_path: None,
-            }),
-            openrouter: None,
-        };
+            }
+            .to_record(),
+        );
 
         // Empty data dir: nothing to fall back to.
         let empty = provider_status(&providers, PROVIDER_FASTEMBED);
@@ -869,14 +1006,15 @@ mod tests {
         let runtime_file = tempfile::TempDir::new().expect("tmp");
         let runtime_path = runtime_file.path().join("libonnxruntime.so");
         std::fs::write(&runtime_path, b"fake").expect("touch runtime");
-        let connected_fastembed = ProvidersCfg {
-            fastembed: Some(FastembedProvider {
+        let connected_fastembed = ProvidersCfg::default().with(
+            PROVIDER_FASTEMBED,
+            FastembedProvider {
                 enabled: true,
                 runtime: Some("1.24.4".to_owned()),
                 runtime_path: Some(runtime_path.clone()),
-            }),
-            openrouter: None,
-        };
+            }
+            .to_record(),
+        );
         let status = provider_status(&connected_fastembed, PROVIDER_FASTEMBED);
         assert_eq!(status.state, Connected);
         assert_eq!(
@@ -886,27 +1024,29 @@ mod tests {
         );
         assert_eq!(status.reason, None, "Connected rows carry no diagnostic");
 
-        let disabled = ProvidersCfg {
-            fastembed: Some(FastembedProvider {
+        let disabled = ProvidersCfg::default().with(
+            PROVIDER_FASTEMBED,
+            FastembedProvider {
                 enabled: false,
                 runtime: None,
                 runtime_path: None,
-            }),
-            openrouter: None,
-        };
+            }
+            .to_record(),
+        );
         assert_eq!(
             provider_status(&disabled, PROVIDER_FASTEMBED).state,
             NotConnected
         );
 
-        let no_runtime = ProvidersCfg {
-            fastembed: Some(FastembedProvider {
+        let no_runtime = ProvidersCfg::default().with(
+            PROVIDER_FASTEMBED,
+            FastembedProvider {
                 enabled: true,
                 runtime: None,
                 runtime_path: None,
-            }),
-            openrouter: None,
-        };
+            }
+            .to_record(),
+        );
         assert_eq!(
             provider_status(&no_runtime, PROVIDER_FASTEMBED).state,
             NotConnected
@@ -914,20 +1054,21 @@ mod tests {
 
         // A recorded runtime path that vanished is Broken, not Connected
         // (FR-2).
-        let broken = ProvidersCfg {
-            fastembed: Some(FastembedProvider {
+        let broken = ProvidersCfg::default().with(
+            PROVIDER_FASTEMBED,
+            FastembedProvider {
                 enabled: true,
                 runtime: Some("1.24.4".to_owned()),
                 runtime_path: Some(PathBuf::from("/nonexistent/onnxruntime.so")),
-            }),
-            openrouter: None,
-        };
+            }
+            .to_record(),
+        );
         assert_eq!(provider_status(&broken, PROVIDER_FASTEMBED).state, Broken);
 
-        let connected_openrouter = ProvidersCfg {
-            fastembed: None,
-            openrouter: Some(OpenrouterProvider { enabled: true }),
-        };
+        let connected_openrouter = ProvidersCfg::default().with(
+            PROVIDER_OPENROUTER,
+            OpenrouterProvider { enabled: true }.to_record(),
+        );
         assert_eq!(
             provider_status(&connected_openrouter, PROVIDER_OPENROUTER).state,
             Connected

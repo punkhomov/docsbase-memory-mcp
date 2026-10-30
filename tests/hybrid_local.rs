@@ -81,14 +81,15 @@ fn embedder_without_model_is_fetch_hint() {
     let runtime = TempDir::new().expect("runtime");
     let runtime_path = runtime.path().join("libonnxruntime.so");
     std::fs::write(&runtime_path, b"fake").expect("touch");
-    let providers = ProvidersCfg {
-        fastembed: Some(docsbase_memory::hybrid::config::FastembedProvider {
+    let providers = ProvidersCfg::default().with(
+        docsbase_memory::hybrid::config::PROVIDER_FASTEMBED,
+        docsbase_memory::hybrid::config::FastembedProvider {
             enabled: true,
             runtime: Some("1.24.4".to_owned()),
             runtime_path: Some(runtime_path),
-        }),
-        openrouter: None,
-    };
+        }
+        .to_record(),
+    );
     let Err(err) = with_isolated_empty_cache(|| local_embedder(&cfg, &providers)) else {
         panic!("expected admission without a fetched model");
     };
