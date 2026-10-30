@@ -127,7 +127,7 @@ pub enum Command {
         /// Reinstall even when the running version already matches the target.
         #[arg(long)]
         force: bool,
-        /// Release tag to install instead of the latest (e.g. v0.1.0-alpha.4).
+        /// Release tag to install instead of the latest (e.g. v0.1.0-alpha.5).
         #[arg(long, value_name = "TAG", conflicts_with = "from")]
         version: Option<String>,
         /// Install a local binary, skipping download and verification.

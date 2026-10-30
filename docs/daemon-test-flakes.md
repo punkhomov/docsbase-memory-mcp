@@ -252,3 +252,25 @@ invariant so it is not reintroduced.
 
 **Ruling.** Not a timeout to raise and not a retry to add: fix the ordering once
 in the shared code path.
+
+## Flake #9 — `search_runs_during_the_build_and_ann_serves_the_read_path`
+
+**Symptom.** `hybrid_rank_ann`: `search during the build must stream exact, not
+consult the ANN` failed while the same test passes on an idle machine. The test
+took 9.0 s when it failed and 11–13 s when it passed locally, but **29.5 s on
+the `linux-hybrid` runner**.
+
+**Root cause.** The test held the background ANN build open with a fixed
+`set_test_build_delay(1_500)` and then measured "did the search consult the
+ANN". On a slow host the *search itself* outlasts 1.5 s, the build finishes
+first, and the assertion fires. This is the same host-relative-timing mistake
+the latency gate was fixed for (FR-22 Delta 2026-10-29), in test form.
+
+**Fix.** The delay hook is replaced by a gate (`TestBuildGate` /
+`set_test_build_gate`): the build blocks at its start until the test opens the
+gate, which happens only after the during-build assertions. The guarantee is now
+structural — no constant to outrun — and the hook waits with a 120 s timeout so
+a panicking test cannot wedge the build thread.
+
+**Ruling.** Never pin "still in flight" with a sleep; use a gate. A sleep can
+only be right for one host speed.

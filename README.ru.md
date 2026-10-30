@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![MSRV 1.88](https://img.shields.io/badge/MSRV-1.88-blue.svg)](rust-toolchain.toml)
 
-> **Альфа:** текущая версия [`0.1.0-alpha.4`](CHANGELOG.md). До `0.1.0`
+> **Альфа:** текущая версия [`0.1.0-alpha.5`](CHANGELOG.md). До `0.1.0`
 > возможны ломающие изменения. Git-тег `v<version>` всегда равен
 > `version` в `Cargo.toml`.
 >
@@ -97,7 +97,7 @@ curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/
 
 Ставит бинарь в `~/.local/bin` (переопределяется `DOCSBASE_BIN_DIR`),
 проверяет `sha256` и регистрирует бинарь (`docsbase install`). Зафиксировать
-версию: `DOCSBASE_VERSION=v0.1.0-alpha.4`.
+версию: `DOCSBASE_VERSION=v0.1.0-alpha.5`.
 
 ### Windows x64 (PowerShell)
 
@@ -122,7 +122,7 @@ curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/
 ### Сборка из исходников (любая поддерживаемая платформа)
 
 ```sh
-cargo install --locked docsbase --version 0.1.0-alpha.4
+cargo install --locked docsbase --version 0.1.0-alpha.5
 docsbase install   # зарегистрировать бинарь в демоне
 ```
 
@@ -141,7 +141,7 @@ docsbase install   # зарегистрировать бинарь в демон
 ### Обновление и проверка
 
 `docsbase update` проверяет последний релиз, верифицирует и заменяет бинарь
-(зафиксировать версию: `docsbase update --version v0.1.0-alpha.4`). Каждый
+(зафиксировать версию: `docsbase update --version v0.1.0-alpha.5`). Каждый
 релиз содержит файлы `sha256sum`, SBOM и SLSA-provenance сборки (Sigstore).
 
 ## CLI кратко

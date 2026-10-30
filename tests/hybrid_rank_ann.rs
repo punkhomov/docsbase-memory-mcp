@@ -20,9 +20,9 @@ use docsbase_memory::daemon::tools::ann_search_count;
 use docsbase_memory::daemon::tools::{run_project_index, search_docs_with};
 use docsbase_memory::error::Result;
 use docsbase_memory::hybrid::ann::AnnIndex;
-#[cfg(debug_assertions)]
-use docsbase_memory::hybrid::dense::set_test_build_delay;
 use docsbase_memory::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits, DenseRows};
+#[cfg(debug_assertions)]
+use docsbase_memory::hybrid::dense::{TestBuildGate, set_test_build_gate};
 use docsbase_memory::hybrid::jobs::embed_project_chunks_with;
 use docsbase_memory::hybrid::{HybridStages, Ranking};
 use docsbase_memory::store::Db;
@@ -102,25 +102,29 @@ fn wait_for_ann(dense: &DenseCache, db: &Db, project_id: i64) -> Arc<AnnIndex> {
     }
 }
 
-/// Resets the debug build delay even if the test panics, so a failure cannot
-/// slow every later build in the same process.
+/// Clears the build gate and opens it even if the test panics, so a failure
+/// cannot leave a build thread waiting for the rest of the process lifetime.
 #[cfg(debug_assertions)]
-struct DelayReset;
+struct GateReset(TestBuildGate);
 
 #[cfg(debug_assertions)]
-impl Drop for DelayReset {
+impl Drop for GateReset {
     fn drop(&mut self) {
-        set_test_build_delay(0);
+        self.0.open();
+        set_test_build_gate(None);
     }
 }
 
 #[cfg(debug_assertions)]
 #[test]
 fn search_runs_during_the_build_and_ann_serves_the_read_path() {
-    // Hold the background build open so the exact-fallback search below is
-    // guaranteed to run while the build is still in flight (SC-11).
-    set_test_build_delay(1_500);
-    let _delay_reset = DelayReset;
+    // Hold the background build at its start so the exact-fallback search
+    // below is guaranteed to run while the build is still in flight (SC-11),
+    // however slow this host is. A fixed sleep raced the search on loaded
+    // runners (the same test takes 29.5 s on CI, 11 s locally).
+    let gate = TestBuildGate::new();
+    set_test_build_gate(Some(gate.clone()));
+    let _gate_reset = GateReset(gate.clone());
     let (cache, db, project) = project_with_many_docs();
     let stored = embed_project_chunks_with(&db, &LengthEmbedder, project.id).expect("embed");
     assert!(
@@ -165,6 +169,7 @@ fn search_runs_during_the_build_and_ann_serves_the_read_path() {
         );
     }
 
+    gate.open();
     let _ann = wait_for_ann(&dense, &db, project.id);
     let before = ann_search_count();
     let value = search_docs_with(
@@ -201,7 +206,10 @@ fn search_runs_during_the_build_and_ann_serves_the_read_path() {
 
     // Asking for more candidates than the index holds makes the ANN answer
     // insufficient: the request falls back to exact and must not count as an
-    // ANN-served lookup (Delta 0.3.2).
+    // ANN-served lookup (Delta 0.3.2). The fetch must exceed the *chunk* count,
+    // not the document count — 600 docs split into >1000 chunks, so a fixed
+    // 1000 was sometimes satisfiable and counted.
+    let oversized = u32::try_from(stored).expect("chunk count fits") + 1;
     let before = ann_search_count();
     search_docs_with(
         &stages(),
@@ -210,7 +218,7 @@ fn search_runs_during_the_build_and_ann_serves_the_read_path() {
         cache.path(),
         &project,
         &json!({ "query": "alpha", "limit": 10 }),
-        1_000,
+        oversized,
     )
     .expect("search with an oversized fetch");
     assert_eq!(

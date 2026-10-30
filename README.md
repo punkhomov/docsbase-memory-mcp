@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![MSRV 1.88](https://img.shields.io/badge/MSRV-1.88-blue.svg)](rust-toolchain.toml)
 
-> **Alpha:** current version [`0.1.0-alpha.4`](CHANGELOG.md). Breaking changes
+> **Alpha:** current version [`0.1.0-alpha.5`](CHANGELOG.md). Breaking changes
 > are expected before `0.1.0`. Git tag `v<version>` always equals
 > `version` in `Cargo.toml`.
 >
@@ -98,7 +98,7 @@ curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/
 
 Installs to `~/.local/bin` (override with `DOCSBASE_BIN_DIR`), verifies
 `sha256`, and registers the binary (`docsbase install`). Pin a version with
-`DOCSBASE_VERSION=v0.1.0-alpha.4`.
+`DOCSBASE_VERSION=v0.1.0-alpha.5`.
 
 ### Windows x64 (PowerShell)
 
@@ -123,7 +123,7 @@ prompts (notarization is not needed for this path).
 ### Build from source (any supported platform)
 
 ```sh
-cargo install --locked docsbase --version 0.1.0-alpha.4
+cargo install --locked docsbase --version 0.1.0-alpha.5
 docsbase install   # register the binary with the daemon
 ```
 
@@ -142,7 +142,7 @@ provenance with `gh attestation verify`, put the binary on `PATH`, then run
 ### Updates and verification
 
 `docsbase update` checks the latest release, verifies it, and replaces the
-binary (pin with `docsbase update --version v0.1.0-alpha.4`). Every release
+binary (pin with `docsbase update --version v0.1.0-alpha.5`). Every release
 ships `sha256sum` files, an SBOM, and SLSA build provenance (Sigstore).
 
 ## CLI reference (short)

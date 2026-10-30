@@ -8,8 +8,16 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5] — 2026-10-30
+
 ### Fixed
 
+- ANN publish/release ordering: a background build published the index and
+  only then re-opened the vector cache to release its backfill lease, so a purge
+  (`models remove`, cache clear) racing the tail of a build hit a Windows
+  sharing violation on `vectors.db` (Unix unlinks the open file, so CI only ever
+  failed on Windows). The build now releases the lease before the index becomes
+  visible, so "ANN visible" implies no open `vectors.db` handle.
 - `docsbase update` recorded the *calling* binary's `build_id` in
   `install.json` and echoed it on the `installed …` line, so an update from an
   older binary described the old build. The manifest now describes the installed
@@ -202,7 +210,8 @@ First public alpha. Expect breaking changes before `0.1.0`.
   `min-publish-age = 14 days`, GitHub Releases with sha256, SBOM
   and SLSA build provenance.
 
-[Unreleased]: https://github.com/punkhomov/docsbase-memory-mcp/compare/v0.1.0-alpha.4...HEAD
+[Unreleased]: https://github.com/punkhomov/docsbase-memory-mcp/compare/v0.1.0-alpha.5...HEAD
+[0.1.0-alpha.5]: https://github.com/punkhomov/docsbase-memory-mcp/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/punkhomov/docsbase-memory-mcp/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/punkhomov/docsbase-memory-mcp/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/punkhomov/docsbase-memory-mcp/releases/tag/v0.1.0-alpha.2
