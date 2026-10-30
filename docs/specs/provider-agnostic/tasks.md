@@ -173,11 +173,14 @@ fastembed-провайдера (`OnceLock<Vec<CatalogModel>>`) + тест пар
 - Гейт: `rg -n 'PROVIDER_FASTEMBED|PROVIDER_OPENROUTER' src/` даёт совпадения
   только в `src/hybrid/{provider,local,openrouter}.rs`, в объявлениях констант и
   дефолт-значении провайдера (`src/hybrid/config.rs:18,21,131,155`,
-  `src/config/mod.rs:227`) и в CLI-таблице провижинеров
-  (`src/cli/connect.rs:57-58`). Остаются два известных исключения, записанных в
-  ledger как `minor (deferred)`: валидация *сохранённой* стадии в
-  `src/cli/models.rs` (`validate_embedding_stage`/`validate_reranker_stage`
-  решают, что проверять, по имени провайдера) и `probe_stage` там же.
+  `src/config/mod.rs:227`), в типизированных вьюхах записей
+  (`fastembed_record`/`openrouter_record` в `src/hybrid/config.rs` — это чтение
+  конкретной записи, а не диспетчеризация) и в трёх CLI-местах, где имя — это
+  **значение**, а не ветвление: CLI-таблица провижинеров
+  (`src/cli/connect.rs`), дефолт-провайдер для строки `selected:`
+  (`unwrap_or(PROVIDER_OPENROUTER)`, исторический продукт-дефолт) и
+  fallback-владелец строки каталога в `models list`. Ни одно из них не является
+  `match`/`if` по имени провайдера, и добавление провайдера их не трогает.
 
 **Verify.** V2, V3, гейт-`rg` (в отчёте задачи — вывод команды).
 
