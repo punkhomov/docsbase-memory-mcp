@@ -2,7 +2,7 @@
 
 Supported: **Linux x86_64**, **Windows x64** and **macOS 12+ (Apple
 Silicon)**. Intel Macs and universal binaries are out of scope for v1.
-Alpha version: `0.1.0-alpha.4` (`v0.1.0-alpha.4` tag).
+Alpha version: `0.1.0-alpha.5` (`v0.1.0-alpha.5` tag).
 
 ## Option A — script (recommended)
 
@@ -55,11 +55,11 @@ $env:DOCSBASE_CHANNEL = "prerelease"; iex (irm .../install.ps1)
 `DOCSBASE_VERSION` pins an exact tag and overrides the channel:
 
 ```sh
-DOCSBASE_VERSION=v0.1.0-alpha.4 sh install.sh
+DOCSBASE_VERSION=v0.1.0-alpha.5 sh install.sh
 ```
 
 ```powershell
-$env:DOCSBASE_VERSION = "v0.1.0-alpha.4"; iex (irm .../install.ps1)
+$env:DOCSBASE_VERSION = "v0.1.0-alpha.5"; iex (irm .../install.ps1)
 ```
 
 ## Option B — Cargo
@@ -112,7 +112,7 @@ docsbase install
 docsbase update              # latest release; no-op when already current
 docsbase update --check      # only report whether an update exists
 docsbase update --force      # reinstall the current version
-docsbase update --version v0.1.0-alpha.4   # pin a release tag
+docsbase update --version v0.1.0-alpha.5   # pin a release tag
 ```
 
 `docsbase update` downloads the release asset for your platform, verifies

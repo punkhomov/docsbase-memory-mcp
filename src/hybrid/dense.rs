@@ -917,23 +917,59 @@ impl DenseCache {
     }
 }
 
-/// Test-only build delay in milliseconds (SC-11 coverage).
-#[cfg(debug_assertions)]
-static TEST_BUILD_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Test-only hook: slows background builds so a test can prove that a search
-/// ran while the build was still in flight (SC-11). Absent in release builds.
+/// Test-only hook: holds background builds at their start until the test opens
+/// the gate, so "the search ran while the build was still in flight" (SC-11)
+/// is a structural guarantee instead of a race against a fixed sleep. A sleep
+/// cannot do this: on a loaded runner the search itself outlasts any constant
+/// (CI: 29.5 s for the same test that takes 11 s locally). Absent in release
+/// builds.
 #[cfg(debug_assertions)]
 #[doc(hidden)]
-pub fn set_test_build_delay(ms: u64) {
-    TEST_BUILD_DELAY_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+#[derive(Clone, Default)]
+pub struct TestBuildGate(std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+
+#[cfg(debug_assertions)]
+impl TestBuildGate {
+    /// A closed gate.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Releases every build waiting at this gate.
+    pub fn open(&self) {
+        let (lock, ready) = &*self.0;
+        if let Ok(mut open) = lock.lock() {
+            *open = true;
+        }
+        ready.notify_all();
+    }
+}
+
+#[cfg(debug_assertions)]
+static TEST_BUILD_GATE: std::sync::Mutex<Option<TestBuildGate>> = std::sync::Mutex::new(None);
+
+/// Test-only hook: installs (or clears) the build gate. Absent in release
+/// builds.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn set_test_build_gate(gate: Option<TestBuildGate>) {
+    if let Ok(mut slot) = TEST_BUILD_GATE.lock() {
+        *slot = gate;
+    }
 }
 
 #[cfg(debug_assertions)]
 fn test_build_delay() {
-    let ms = TEST_BUILD_DELAY_MS.load(std::sync::atomic::Ordering::Relaxed);
-    if ms > 0 {
-        std::thread::sleep(std::time::Duration::from_millis(ms));
+    let gate = TEST_BUILD_GATE.lock().ok().and_then(|slot| slot.clone());
+    let Some(gate) = gate else {
+        return;
+    };
+    let (lock, ready) = &*gate.0;
+    if let Ok(open) = lock.lock() {
+        // A test that panics before opening the gate must not wedge the build
+        // thread forever.
+        let _ = ready.wait_timeout_while(open, std::time::Duration::from_secs(120), |open| !*open);
     }
 }
 
