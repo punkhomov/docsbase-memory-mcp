@@ -8,6 +8,17 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- `docsbase update` recorded the *calling* binary's `build_id` in
+  `install.json` and echoed it on the `installed …` line, so an update from an
+  older binary described the old build. The manifest now describes the installed
+  artifact: the released version on `update`, and the artifact's own
+  `--version` on `update --from` (`docsbase unknown` if it cannot answer).
+  `docsbase install` is unchanged — there the caller is the installed file.
+  ([#39](https://github.com/punkhomov/docsbase-memory-mcp/issues/39))
+
+
 ### Added
 
 - Local hybrid provider `hybrid-local` (spec `docs/specs/hybrid-local`,

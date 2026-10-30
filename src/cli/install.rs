@@ -32,10 +32,34 @@ pub const MANIFEST: &str = "install.json";
 /// the copy/rename fails.
 pub fn install() -> anyhow::Result<()> {
     let source = std::env::current_exe().context("resolve current executable")?;
-    let (target, data) = install_from(&source, Some(&source))?;
-    println!("installed {} ({})", target.display(), protocol::build_id());
+    let build_id = protocol::build_id();
+    let (target, data) = install_from(&source, Some(&source), &build_id)?;
+    println!("installed {} ({build_id})", target.display());
     println!("manifest: {}", data.join(MANIFEST).display());
     Ok(())
+}
+
+/// Identity of an artifact we did not build: ask it. `update --from` installs
+/// whatever binary it is handed, so the manifest must record that binary's own
+/// build id, not the caller's (issue #39). A file that cannot identify itself
+/// gets `docsbase unknown` — never a value borrowed from the caller.
+pub(crate) fn probed_build_id(path: &Path) -> String {
+    let parsed = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| parse_build_id(&String::from_utf8_lossy(&output.stdout)));
+    parsed.unwrap_or_else(|| "docsbase unknown".to_owned())
+}
+
+/// Accepts the first `--version` line that names this binary.
+fn parse_build_id(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("docsbase "))
+        .map(str::to_owned)
 }
 
 /// Shared install/update coordination (FR-5): stop the daemon, wait for every
@@ -54,6 +78,7 @@ pub fn install() -> anyhow::Result<()> {
 pub(crate) fn install_from(
     source: &Path,
     launcher: Option<&Path>,
+    build_id: &str,
 ) -> anyhow::Result<(PathBuf, PathBuf)> {
     let cache = paths::cache_dir()?;
     crate::platform::fs::secure_dir(&cache)
@@ -74,7 +99,7 @@ pub(crate) fn install_from(
     swap_binary(source, &target)?;
 
     let manifest = Manifest {
-        build_id: protocol::build_id(),
+        build_id: build_id.to_owned(),
         protocol_version: PROTOCOL_VERSION,
         schema_version: SCHEMA_VERSION,
         binary: target.clone(),
@@ -492,4 +517,42 @@ fn unix_now() -> i64 {
         .map_or(0, |since| {
             i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_build_id;
+
+    #[test]
+    fn build_id_is_read_from_the_artifact_version_line() {
+        assert_eq!(
+            parse_build_id("docsbase 9.9.9\n").as_deref(),
+            Some("docsbase 9.9.9")
+        );
+        // clap may print a leading blank line or extra lines: take the first
+        // line that names the binary.
+        assert_eq!(
+            parse_build_id("\nwarning: something\ndocsbase 1.2.3\n").as_deref(),
+            Some("docsbase 1.2.3")
+        );
+        assert_eq!(parse_build_id(""), None);
+        assert_eq!(parse_build_id("docsbase\n"), None);
+        assert_eq!(parse_build_id("othertool 1.0.0\n"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_asks_the_artifact_and_never_borrows_the_caller_identity() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let script = dir.path().join("candidate");
+        std::fs::write(&script, "#!/bin/sh\necho 'docsbase 9.9.9'\n").expect("write");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert_eq!(super::probed_build_id(&script), "docsbase 9.9.9");
+
+        // Not executable: the honest answer is "unknown", not the caller's id.
+        let broken = dir.path().join("broken");
+        std::fs::write(&broken, b"not a binary").expect("write");
+        assert_eq!(super::probed_build_id(&broken), "docsbase unknown");
+    }
 }
