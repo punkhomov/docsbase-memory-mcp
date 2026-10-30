@@ -521,7 +521,7 @@ fn unix_now() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_build_id, probed_build_id};
+    use super::parse_build_id;
 
     #[test]
     fn build_id_is_read_from_the_artifact_version_line() {
@@ -548,11 +548,11 @@ mod tests {
         let script = dir.path().join("candidate");
         std::fs::write(&script, "#!/bin/sh\necho 'docsbase 9.9.9'\n").expect("write");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        assert_eq!(probed_build_id(&script), "docsbase 9.9.9");
+        assert_eq!(super::probed_build_id(&script), "docsbase 9.9.9");
 
         // Not executable: the honest answer is "unknown", not the caller's id.
         let broken = dir.path().join("broken");
         std::fs::write(&broken, b"not a binary").expect("write");
-        assert_eq!(probed_build_id(&broken), "docsbase unknown");
+        assert_eq!(super::probed_build_id(&broken), "docsbase unknown");
     }
 }
