@@ -270,3 +270,28 @@
   это следующий шаг (потребует `Provider::probe`, CLI-only метод).
 - Проверка: lib 136 / 217 / 150 / 231; clippy `-D warnings` чист (default и
   combo); fmt чист.
+
+## T7 — документация
+
+- `Task <T7>: complete`. `README.md`/`README.ru.md`: примеры
+  `models fetch|use` переведены на адреса; `docs/CONFIG.md`: раздел про
+  адресацию (`<provider>/<model>`, первый `/`, голых имён нет, `--dims`
+  опционален только при каталоге), `connect <provider> [--check] [--force]`;
+  `CHANGELOG.md`: **breaking** для CLI + запись про реестр провайдеров.
+- Проверка: `sh -n install.sh`, наличие `[version]` в CHANGELOG (гейт джобы
+  `docs`), `rg` по док-примерам — все команды моделей содержат `/`.
+
+## T8 — финальная сходимость
+
+- `Task <T8>: complete`. Полная матрица: `cargo test --locked` (default) —
+  все бинари зелёные; `cargo test --locked --features
+  hybrid-local,hybrid-remote` — 63 «test result: ok», падений нет;
+  `search_bench` (гейт качества и latency) 68 passed / 2 ignored;
+  `cargo tree` (NFR-1) — в дефолтном дереве нет `fastembed`/`ort`/`tokenizers`/
+  `hf-hub`/`ureq`/`reqwest`; clippy `-D warnings` 0 ошибок в default и combo;
+  `cargo fmt --check` чисто.
+- Побочно: `tests/smoke.rs::models_use_dry_run_prints_pinnable_table` переведён
+  на адрес (был последний bare-name вызов в тестах).
+- Замечание по окружению: диск был забит (`target/debug/deps` 40 ГБ), линковка
+  тестов падала с «No space left on device»; старые тест-бинари удалены,
+  сборка восстановлена. К коду отношения не имеет.
