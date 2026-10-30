@@ -758,7 +758,7 @@ fn fetch_one(
         let _ = std::fs::remove_file(&part);
         return Err(Error::Admission {
             message: format!(
-                "{}: size mismatch (registry {}, downloaded {}); re-run `docsbase models fetch {}`",
+                "{}: size mismatch (registry {}, downloaded {}); re-run `docsbase models fetch fastembed/{}`",
                 spec.path, spec.size, byte_len, entry.name
             ),
         });
@@ -905,7 +905,7 @@ pub(crate) fn fetch_into(
     else {
         return Err(Error::Admission {
             message: format!(
-                "model \"{}\" is loaded/in use; stop the daemon (or retry) then re-run `docsbase models fetch {}`",
+                "model \"{}\" is loaded/in use; stop the daemon (or retry) then re-run `docsbase models fetch fastembed/{}`",
                 entry.name, entry.name
             ),
         });

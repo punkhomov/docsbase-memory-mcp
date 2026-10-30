@@ -101,7 +101,8 @@ struct ProjectFileConfig {
 fn providers_from_raw(raw: HashMap<String, toml::Table>) -> Result<ProvidersCfg> {
     let mut out = ProvidersCfg::default();
     for (name, table) in raw {
-        let provider = crate::hybrid::provider::provider(&name)?;
+        let provider = crate::hybrid::provider::provider(&name)
+            .map_err(|_| crate::hybrid::provider::unknown_provider(&name))?;
         out.insert(name, provider.parse_record(&table)?);
     }
     Ok(out)

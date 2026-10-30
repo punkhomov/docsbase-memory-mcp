@@ -67,6 +67,13 @@ fn provisioner_for(name: &str) -> Option<&'static dyn Provisioner> {
 /// offline, hash mismatch, unsupported target, free-space shortfall).
 pub fn run(args: &ConnectArgs) -> anyhow::Result<()> {
     let Some(name) = args.provider.as_deref() else {
+        if args.check || args.force {
+            return Err(Error::Admission {
+                message: "`--check`/`--force` need a provider: `docsbase connect <provider> [--check] [--force]`"
+                    .to_owned(),
+            }
+            .into());
+        }
         print_status()?;
         return Ok(());
     };
@@ -75,13 +82,7 @@ pub fn run(args: &ConnectArgs) -> anyhow::Result<()> {
     // registry's own message talks about model addresses, which is the wrong
     // vocabulary for a provider name.
     if crate::hybrid::provider::provider(name).is_err() {
-        return Err(Error::Admission {
-            message: format!(
-                "unknown provider \"{name}\" (registered: {})",
-                crate::hybrid::provider::provider_names()
-            ),
-        }
-        .into());
+        return Err(crate::hybrid::provider::unknown_provider(name).into());
     }
     let Some(provisioner) = provisioner_for(name) else {
         return Err(Error::Admission {
@@ -123,6 +124,29 @@ fn connect_frame(
         println!("{note}");
     }
     Ok(())
+}
+
+/// One `provider/state/version/path/reason` row — the same columns for every
+/// provider, so `connect <p> --check` and the status table agree (AC-3, FR-7).
+fn status_row(name: &str, providers: &crate::hybrid::config::ProvidersCfg) -> Vec<String> {
+    let provider = match crate::hybrid::provider::provider(name) {
+        Ok(provider) => provider,
+        Err(err) => return vec![format!("{name}\tunknown\t-\t-\t{}", err.inner_message())],
+    };
+    let status = provider.status(providers);
+    vec![format!(
+        "{}\t{}\t{}\t{}\t{}",
+        name,
+        state_label(status.state),
+        provider
+            .version(providers)
+            .unwrap_or_else(|| "-".to_owned()),
+        status
+            .path
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), |path| path.display().to_string()),
+        status.reason.as_deref().unwrap_or("-")
+    )]
 }
 
 /// Status table over the configured providers (FR-2).
@@ -168,14 +192,11 @@ struct OpenrouterProvisioner;
 impl Provisioner for OpenrouterProvisioner {
     fn check(&self) -> Result<Vec<String>> {
         // `--check` reports the recorded state and probes the key, but writes
-        // nothing (FR-8).
+        // nothing (FR-8). The row has the same columns as every other provider
+        // (AC-3), so `connect <p> --check` output is comparable across
+        // providers.
         let config = crate::config::Config::global()?;
-        let status = provider_status(&config.providers, PROVIDER_OPENROUTER);
-        let mut lines = vec![format!(
-            "openrouter: state={} reason={}",
-            state_label(status.state),
-            status.reason.as_deref().unwrap_or("-")
-        )];
+        let mut lines = status_row(PROVIDER_OPENROUTER, &config.providers);
         #[cfg(feature = "hybrid-remote")]
         {
             let transport = crate::hybrid::openrouter::ReqwestTransport::new()?;
@@ -273,17 +294,9 @@ impl Provisioner for FastembedProvisioner {
             use crate::hybrid::runtime::{self, ORT_VERSION};
             let target = runtime::platform_target()?;
             let config = crate::config::Config::global()?;
+            // Same columns as every provider (AC-3).
+            let mut lines = status_row(PROVIDER_FASTEMBED, &config.providers);
             let status = runtime::runtime_status(&config.providers);
-            let mut lines = vec![format!(
-                "fastembed runtime: state={} version={} path={} reason={}",
-                status.state,
-                status.version.as_deref().unwrap_or("-"),
-                status
-                    .path
-                    .as_ref()
-                    .map_or_else(|| "-".to_owned(), |path| path.display().to_string()),
-                status.reason.as_deref().unwrap_or("-")
-            )];
             let Some(path) = &status.path else {
                 lines.push(format!(
                     "fastembed runtime {ORT_VERSION} is not installed; run `docsbase connect fastembed`"

@@ -142,6 +142,57 @@ fn models_use_embed_dry_run_prints_table_without_writing() {
 }
 
 #[test]
+fn models_use_preserved_stage_provider_and_normalize_are_validated() {
+    // Pinning one stage must not silently bless a broken *other* stage: the
+    // preserved provider is validated against the registry and a
+    // normalize-requiring provider must keep `normalize = true`.
+    let env = Env::new();
+    let dir = tempfile::TempDir::new().expect("tmp");
+    std::fs::write(
+        dir.path().join(".docsbase.toml"),
+        "[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\ndimensions = 384\nnormalize = false\n",
+    )
+    .expect("seed");
+    let output = env
+        .cmd()
+        .current_dir(dir.path())
+        .args([
+            "models",
+            "use",
+            "rerank",
+            "fastembed/jina-reranker-v1-turbo-en",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("normalize"), "{stderr}");
+
+    std::fs::write(
+        dir.path().join(".docsbase.toml"),
+        "[hybrid.embedding]\nprovider = \"nope\"\nmodel = \"m\"\ndimensions = 8\n",
+    )
+    .expect("seed");
+    let output = env
+        .cmd()
+        .current_dir(dir.path())
+        .args([
+            "models",
+            "use",
+            "rerank",
+            "fastembed/jina-reranker-v1-turbo-en",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("nope"), "{stderr}");
+    assert!(stderr.contains("registered:"), "{stderr}");
+}
+
+#[test]
 fn models_use_outside_project_requires_global() {
     let env = Env::new();
     let dir = tempfile::TempDir::new().expect("tmp"); // no .docsbase.toml

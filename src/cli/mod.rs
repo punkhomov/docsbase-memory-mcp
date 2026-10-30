@@ -106,7 +106,7 @@ pub enum Command {
         #[command(subcommand)]
         command: models::ModelsCommand,
     },
-    /// Prepare providers on this machine (status, openrouter, fastembed).
+    /// Prepare providers on this machine (status, or `connect <provider>`).
     Connect {
         /// Provider to prepare; omit for the status table.
         provider: Option<String>,

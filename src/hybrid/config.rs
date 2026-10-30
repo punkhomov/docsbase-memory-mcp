@@ -391,7 +391,9 @@ pub fn provider_status_in(
     providers: &ProvidersCfg,
     name: &str,
 ) -> ProviderStatus {
-    match crate::hybrid::provider::provider_in(table, name) {
+    match crate::hybrid::provider::provider_in(table, name)
+        .map_err(|_| crate::hybrid::provider::unknown_provider(name))
+    {
         Ok(provider) => provider.status(providers),
         // An unknown name is a diagnostic, not an internal error: the status
         // table must keep printing rows for names it does not know. The reason

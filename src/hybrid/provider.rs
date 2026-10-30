@@ -76,7 +76,9 @@ impl<'a> ModelAddress<'a> {
                 ),
             });
         }
-        if model.is_empty() {
+        // An empty first model segment (`openrouter//x`) would be persisted and
+        // sent to the API; FR-1 lists it as an admission.
+        if model.is_empty() || model.starts_with('/') {
             return Err(Error::Admission {
                 message: format!(
                     "\"{raw}\" has an empty model name; write \"<provider>/<model>\" (providers: {})",
@@ -290,8 +292,11 @@ pub trait Provider: Sync {
         }
     }
 
-    /// Provider-specific validation and defaults for the rerank stage,
-    /// including the window bounds (one owner for the `MIN..=MAX` range).
+    /// Provider-specific validation and defaults for the rerank stage.
+    ///
+    /// Implementations must reject a window outside
+    /// `MIN_RERANK_WINDOW..=MAX_RERANK_WINDOW` (the config and CLI layers also
+    /// check it, for their own messages).
     ///
     /// # Errors
     /// [`Error::Admission`] for unknown models, wrong task and out-of-range
@@ -577,6 +582,16 @@ impl Provider for FastembedProvider {
     }
 
     fn resolve_reranker(&self, model: Option<&str>, window: u32) -> Result<RerankerCfg> {
+        if !(super::config::MIN_RERANK_WINDOW..=super::config::MAX_RERANK_WINDOW).contains(&window)
+        {
+            return Err(Error::Admission {
+                message: format!(
+                    "hybrid.reranker.window must be between {} and {}, got {window}",
+                    super::config::MIN_RERANK_WINDOW,
+                    super::config::MAX_RERANK_WINDOW
+                ),
+            });
+        }
         let Some(model) = model else {
             return Err(Error::Admission {
                 message: "hybrid.reranker: provider \"fastembed\" requires an explicit `model` (registry name); run `docsbase models list`"
@@ -728,6 +743,16 @@ impl Provider for OpenrouterProvider {
     }
 
     fn resolve_reranker(&self, model: Option<&str>, window: u32) -> Result<RerankerCfg> {
+        if !(super::config::MIN_RERANK_WINDOW..=super::config::MAX_RERANK_WINDOW).contains(&window)
+        {
+            return Err(Error::Admission {
+                message: format!(
+                    "hybrid.reranker.window must be between {} and {}, got {window}",
+                    super::config::MIN_RERANK_WINDOW,
+                    super::config::MAX_RERANK_WINDOW
+                ),
+            });
+        }
         Ok(RerankerCfg {
             provider: PROVIDER_OPENROUTER.to_owned(),
             model: model.map_or_else(
@@ -759,6 +784,21 @@ pub fn providers() -> &'static [&'static dyn Provider] {
 /// [`Error::Admission`] listing the registered names and the address form.
 pub fn provider(name: &str) -> Result<&'static dyn Provider> {
     provider_in(providers(), name)
+}
+
+/// Unknown-provider admission without CLI vocabulary (no address hint): used
+/// where the caller is a config file or a status row, not a model address.
+///
+/// # Errors
+/// Always [`Error::Admission`] listing the registered names.
+#[must_use]
+pub fn unknown_provider(name: &str) -> Error {
+    Error::Admission {
+        message: format!(
+            "unknown provider \"{name}\" (registered: {})",
+            provider_names()
+        ),
+    }
 }
 
 /// Like [`provider`], against an explicit table (the FR-10 seam).

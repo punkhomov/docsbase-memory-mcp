@@ -3,11 +3,11 @@
 //! model per invocation, options scoped to the purpose. Scope: project
 //! `.docsbase.toml` by default (or `--local`); `--global` writes the
 //! machine config and is required outside a project; `--path` overrides
-//! the project root and cannot combine with `--global`. Provider inference:
-//! a registry name implies `fastembed`; any other name requires
-//! `--provider`. Probes: fastembed offline against the cached model;
-//! `OpenRouter` single-shot (no retry wrapper). Unknown models, unsupported
-//! widths and unreachable providers fail here — never later at index time.
+//! the project root and cannot combine with `--global`. The model is always an
+//! address (`<provider>/<model>`); there is no provider inference. The probe is
+//! provider-owned (fastembed offline against the cached model, `OpenRouter`
+//! single-shot). Unknown models, unsupported widths and unreachable providers
+//! fail here — never later at index time.
 
 #[cfg(feature = "hybrid-local")]
 use std::path::Path;
@@ -266,7 +266,7 @@ pub fn remove_cmd(args: &RemoveArgs) -> anyhow::Result<()> {
     if !root_exists && !orphan_exists {
         return Err(Error::Admission {
             message: format!(
-                "model \"{}\" is not fetched (nothing to remove); run `docsbase models fetch {}`",
+                "model \"{}\" is not fetched (nothing to remove); run `docsbase models fetch fastembed/{}`",
                 entry.name, entry.name
             ),
         }
@@ -442,7 +442,7 @@ pub fn run(args: &UseArgs) -> anyhow::Result<()> {
 
     let (stage_key, stage, probe) = match &args.purpose {
         UsePurpose::Embed(embed) => {
-            let cfg = resolve_embed_stage(embed)?;
+            let cfg = resolve_embed_stage(embed, !args.dry_run)?;
             let mut stage = toml::map::Map::new();
             stage.insert(
                 "provider".to_owned(),
@@ -457,7 +457,7 @@ pub fn run(args: &UseArgs) -> anyhow::Result<()> {
             ("embedding", stage, StageProbe::Embedding(cfg))
         }
         UsePurpose::Rerank(rerank) => {
-            let cfg = resolve_rerank_stage(rerank)?;
+            let cfg = resolve_rerank_stage(rerank, !args.dry_run)?;
             let mut stage = toml::map::Map::new();
             stage.insert(
                 "provider".to_owned(),
@@ -709,9 +709,19 @@ fn catalog_row(
 /// # Errors
 /// Admission for a bad address, a feature-off provider, an unknown model, a
 /// wrong-task row, and dims that are missing (no catalog) or mismatched.
-fn resolve_embed_stage(args: &EmbedArgs) -> anyhow::Result<crate::hybrid::EmbeddingCfg> {
+fn resolve_embed_stage(
+    args: &EmbedArgs,
+    check_capability: bool,
+) -> anyhow::Result<crate::hybrid::EmbeddingCfg> {
     let address = parse_address(&args.model)?;
     let provider = crate::hybrid::provider::provider(address.provider())?;
+    // A provider this build cannot use says so, instead of pretending it has no
+    // catalog (the message `main` produced for fastembed without the feature).
+    // `--dry-run` previews a file without probing, so it skips the capability
+    // check as it always has.
+    if check_capability && !provider.enabled() {
+        return Err(provider.feature_missing().into());
+    }
     let row = catalog_row(provider, Segment::Embedding, address.model())?;
     let dims = match (row.and_then(|row| row.dims), args.dims) {
         // A catalog row is authoritative (FR-9): `--dims` may only agree.
@@ -756,9 +766,15 @@ fn resolve_embed_stage(args: &EmbedArgs) -> anyhow::Result<crate::hybrid::Embedd
 /// # Errors
 /// Admission for a bad address, a feature-off provider, an unknown model, a
 /// wrong-task row and out-of-range windows.
-fn resolve_rerank_stage(args: &RerankArgs) -> anyhow::Result<crate::hybrid::RerankerCfg> {
+fn resolve_rerank_stage(
+    args: &RerankArgs,
+    check_capability: bool,
+) -> anyhow::Result<crate::hybrid::RerankerCfg> {
     let address = parse_address(&args.model)?;
     let provider = crate::hybrid::provider::provider(address.provider())?;
+    if check_capability && !provider.enabled() {
+        return Err(provider.feature_missing().into());
+    }
     catalog_row(provider, Segment::Rerank, address.model())?;
     let window = resolve_window(args.window)?;
     Ok(provider.resolve_reranker(Some(address.model()), window)?)
@@ -1369,15 +1385,15 @@ mod tests {
     #[cfg(feature = "hybrid-local")]
     #[test]
     fn addressed_registry_model_infers_dims() {
-        let cfg =
-            resolve_embed_stage(&embed_args("fastembed/bge-small-en-v1.5", None)).expect("embed");
+        let cfg = resolve_embed_stage(&embed_args("fastembed/bge-small-en-v1.5", None), true)
+            .expect("embed");
         assert_eq!(cfg.provider, crate::hybrid::config::PROVIDER_FASTEMBED);
         assert_eq!(
             cfg.model, "bge-small-en-v1.5",
             "the config keeps the bare model"
         );
         assert_eq!(cfg.dimensions, 384);
-        let err = resolve_embed_stage(&embed_args("fastembed/bge-small-en-v1.5", Some(123)))
+        let err = resolve_embed_stage(&embed_args("fastembed/bge-small-en-v1.5", Some(123)), true)
             .expect_err("dims mismatch");
         assert!(err.to_string().contains("registry"), "{err}");
     }
@@ -1385,7 +1401,7 @@ mod tests {
     #[cfg(feature = "hybrid-local")]
     #[test]
     fn rerank_purpose_rejects_embedding_row() {
-        let err = resolve_rerank_stage(&rerank_args("fastembed/bge-small-en-v1.5", None))
+        let err = resolve_rerank_stage(&rerank_args("fastembed/bge-small-en-v1.5", None), true)
             .expect_err("wrong task");
         assert!(err.to_string().contains("not for rerank"), "{err}");
     }
@@ -1393,16 +1409,19 @@ mod tests {
     #[cfg(feature = "hybrid-local")]
     #[test]
     fn embed_purpose_rejects_rerank_row() {
-        let err = resolve_embed_stage(&embed_args("fastembed/jina-reranker-v1-turbo-en", None))
-            .expect_err("wrong task");
+        let err = resolve_embed_stage(
+            &embed_args("fastembed/jina-reranker-v1-turbo-en", None),
+            true,
+        )
+        .expect_err("wrong task");
         assert!(err.to_string().contains("not for embedding"), "{err}");
     }
 
     #[cfg(feature = "hybrid-local")]
     #[test]
     fn bare_registry_name_suggests_its_address() {
-        let err =
-            resolve_embed_stage(&embed_args("bge-small-en-v1.5", None)).expect_err("bare name");
+        let err = resolve_embed_stage(&embed_args("bge-small-en-v1.5", None), true)
+            .expect_err("bare name");
         let text = err.to_string();
         assert!(text.contains("fastembed/bge-small-en-v1.5"), "{text}");
         assert!(text.contains("providers:"), "{text}");
@@ -1410,20 +1429,21 @@ mod tests {
 
     #[test]
     fn unknown_provider_is_refused_before_dims() {
-        let err = resolve_embed_stage(&embed_args("some/model", Some(128)))
+        let err = resolve_embed_stage(&embed_args("some/model", Some(128)), true)
             .expect_err("unknown provider");
         assert!(err.to_string().contains("unknown provider"), "{err}");
     }
 
+    #[cfg(feature = "hybrid-remote")]
     #[test]
     fn provider_without_a_catalog_requires_dims() {
-        let err = resolve_embed_stage(&embed_args("openrouter/some/model", None))
+        let err = resolve_embed_stage(&embed_args("openrouter/some/model", None), true)
             .expect_err("missing dims");
         assert!(err.to_string().contains("--dims"), "{err}");
-        let err = resolve_embed_stage(&embed_args("openrouter/some/model", Some(0)))
+        let err = resolve_embed_stage(&embed_args("openrouter/some/model", Some(0)), true)
             .expect_err("zero dims");
         assert!(err.to_string().contains("positive"), "{err}");
-        let cfg = resolve_embed_stage(&embed_args("openrouter/some/model", Some(128)))
+        let cfg = resolve_embed_stage(&embed_args("openrouter/some/model", Some(128)), true)
             .expect("explicit dims");
         assert_eq!(cfg.provider, PROVIDER_OPENROUTER);
         assert_eq!(cfg.model, "some/model", "the model keeps its own slashes");

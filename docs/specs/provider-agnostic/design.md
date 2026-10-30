@@ -76,7 +76,8 @@ pub trait Provider: Sync {
 /// Регистрация: единственное место, где перечислены провайдеры (FR-5, G4).
 pub fn providers() -> &'static [&'static dyn Provider];
 pub fn provider(name: &str) -> Result<&'static dyn Provider>;  // Admission + список
-pub fn feature_enabled(feature: &str) -> bool;                 // один match по фичам
+// (первая редакция объявляла здесь `feature_enabled`; удалён в T1 в пользу
+// `Provider::enabled()` — см. дельту 2026-10-29 (T2) в §3)
 ```
 
 Каталог моделей (`models list`, `models use` без `--dims`) — не отдельный тип
@@ -201,7 +202,9 @@ impl ProvidersCfg {
   (`src/config/mod.rs:85`) не имеет поля `providers` вовсе, поэтому
   `[providers.*]` в проекте по-прежнему не парсится — это не проверка после
   merge, а отсутствие поля в типе.
-- `ProvidersCfg` обязан сохранить `Debug + Default + PartialEq + Eq`
+- `ProvidersCfg` обязан сохранить `Debug + Default + PartialEq` (**дельта
+  2026-10-29, T3:** `Eq` невозможен — `toml::Table` реализует только
+  `PartialEq`; ни один потребитель `Eq` не требовал)
   (используется в `Config`, тестах сравнения и `cli_models`): `BTreeMap` их
   сохраняет, `toml::Table` — `PartialEq`/`Eq` тоже.
 - Типизированный доступ для провайдера остаётся в его модуле:

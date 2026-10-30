@@ -72,7 +72,7 @@ pub fn embedder(cfg: &EmbeddingCfg, providers: &ProvidersCfg) -> Result<Arc<dyn 
     if !models::cached(entry)? {
         return Err(Error::Admission {
             message: format!(
-                "fastembed model \"{}\" is not fetched; run `docsbase models fetch {}`",
+                "fastembed model \"{}\" is not fetched; run `docsbase models fetch fastembed/{}`",
                 cfg.model, cfg.model
             ),
         });
@@ -330,7 +330,7 @@ pub fn reranker(cfg: &RerankerCfg, providers: &ProvidersCfg) -> Result<Arc<dyn R
     if !models::cached(entry)? {
         return Err(Error::Admission {
             message: format!(
-                "fastembed model \"{}\" is not fetched; run `docsbase models fetch {}`",
+                "fastembed model \"{}\" is not fetched; run `docsbase models fetch fastembed/{}`",
                 cfg.model, cfg.model
             ),
         });
@@ -497,7 +497,7 @@ fn apply_role_prefix(text: &str, entry: &ModelEntry<'_>, is_query: bool) -> Stri
 fn read_cache_file(cache_dir: &Path, path: &Path, entry: &ModelEntry<'_>) -> Result<Vec<u8>> {
     let bytes = std::fs::read(path).map_err(|err| Error::Admission {
         message: format!(
-            "fastembed model \"{}\" cache file {} is unreadable ({}); re-run `docsbase models fetch {}`",
+            "fastembed model \"{}\" cache file {} is unreadable ({}); re-run `docsbase models fetch fastembed/{}`",
             entry.name,
             path.display(),
             err,
@@ -518,7 +518,7 @@ fn read_cache_file(cache_dir: &Path, path: &Path, entry: &ModelEntry<'_>) -> Res
     if bytes.len() as u64 != spec.size {
         return Err(Error::Admission {
             message: format!(
-                "fastembed model \"{}\" cache file {} has size {} (registry says {}); re-run `docsbase models fetch {}`",
+                "fastembed model \"{}\" cache file {} has size {} (registry says {}); re-run `docsbase models fetch fastembed/{}`",
                 entry.name,
                 path.display(),
                 bytes.len(),
@@ -531,7 +531,7 @@ fn read_cache_file(cache_dir: &Path, path: &Path, entry: &ModelEntry<'_>) -> Res
     if digest != spec.sha256 {
         return Err(Error::Admission {
             message: format!(
-                "fastembed model \"{}\" cache file {} is corrupted (sha256 mismatch); re-run `docsbase models fetch {} --force`",
+                "fastembed model \"{}\" cache file {} is corrupted (sha256 mismatch); re-run `docsbase models fetch fastembed/{} --force`",
                 entry.name,
                 path.display(),
                 entry.name
@@ -568,7 +568,7 @@ pub(crate) fn take_shared_lock(dir: &Path) -> Result<RwLockReadGuard<'static, st
             );
             return Err(Error::Admission {
                 message: format!(
-                    "fastembed model \"{name}\" is not fetched; run `docsbase models fetch {name}`"
+                    "fastembed model \"{name}\" is not fetched; run `docsbase models fetch fastembed/{name}`"
                 ),
             });
         }
@@ -857,7 +857,8 @@ mod tests {
         let err = take_shared_lock(&rev).expect_err("vanished root");
         assert!(matches!(err, Error::Admission { .. }));
         assert!(
-            err.to_string().contains("models fetch bge-small-en-v1.5"),
+            err.to_string()
+                .contains("models fetch fastembed/bge-small-en-v1.5"),
             "{err}"
         );
         // Existing root: succeeds.

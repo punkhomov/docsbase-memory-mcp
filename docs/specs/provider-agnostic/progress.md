@@ -325,3 +325,41 @@
 - Проверка после правок: lib 137 / 217 / 151 / 231; `cli_models` 22,
   `connect` 7, `config` 24, `hybrid_config` 8, `smoke` 5; clippy
   `-D warnings` 0 ошибок во всех четырёх конфигурациях; fmt чисто.
+
+## Финальное ревью (reviewer-deepseek): APPROVED WITH NOTES → исправлено
+
+- P1 (подсказки всё ещё печатали голое имя: `remove_cmd` и шесть сайтов в
+  `src/hybrid/local.rs`/`models.rs`): **исправлено** — везде
+  `docsbase models fetch fastembed/<name>`; три закреплённых ассерта обновлены.
+  Ledger-запись про `remove_cmd` была ложной, здесь исправлена.
+- P2-2 (AC-3: `connect <p> --check` печатал разные форматы): **исправлено** —
+  общий `status_row()` (`provider/state/version/path/reason`) для таблицы
+  статуса и для `--check`; тест `connect_check_prints_the_same_columns_for_every_provider`.
+- P2-3 (`DisabledProvider::build_stages` всё ещё возвращал тот же Admission →
+  тест гейта был мутационно слепым): **исправлено** на `Ok((None, None))`;
+  реальный отказ проверяется в feature-off лейне.
+- P2-4 (удалённый тест был единственным e2e-покрытием валидации сохранённой
+  стадии): **возвращён** как
+  `models_use_preserved_stage_provider_and_normalize_are_validated` с адресами
+  (normalize=false и неизвестный провайдер).
+- P2-5 (`--provider` всё ещё документирован в `docs/CONFIG.md` и в модульном
+  доке `cli/models.rs`): удалено, доки теперь говорят только про адрес.
+- P3-6 (`openrouter//model` принимался): теперь Admission (пустой первый сегмент
+  модели).
+- P3-7 (реестровые admissions тащили CLI-лексику адреса в конфиг/статус):
+  добавлен `provider::unknown_provider()` без подсказки об адресе; используется
+  загрузчиком конфига, статусом и `connect`.
+- P3-8 (док трейта обещал проверку границ окна, которой не было): границы
+  `MIN..=MAX` проверяются в обеих реализациях `resolve_reranker`.
+- P3-9 (AC-4: `fastembed_record`/`openrouter_record` остались в `config.rs`):
+  осознанно оставлены — это типизированные вьюхи конфига, а не диспетчеризация;
+  allowlist в `tasks.md` дополнен.
+- Прочее из «also noticed»: `connect --check/--force` без провайдера больше не
+  игнорируются молча; help-текст `connect` не перечисляет провайдеров;
+  `unsupported_provider_name_is_an_admission`; дельты в дизайне (`feature_enabled`
+  удалён, `ProvidersCfg: PartialEq`); тест на отказ
+  `[providers.openrouter] runtime = …`; для сборки без фичи `models use` снова
+  говорит про отсутствующую фичу, а не про «no catalog».
+- Проверка: lib 136 / 216 / 151 / 231; полная default-сьюта и combo-сьюта
+  (63 «test result: ok») зелёные; clippy `-D warnings` 0 во всех четырёх;
+  fmt чисто; `cargo tree` дефолтной сборки чист (NFR-1).

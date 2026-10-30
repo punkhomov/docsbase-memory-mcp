@@ -111,8 +111,8 @@ the ONNX Runtime install and the model cache (FR-13) — before any deletion.
 Scope: inside a project the project `.docsbase.toml` is written by default
 (`--local` optional); `--global` writes the machine config and is required
 outside a project; `--path` overrides the project root. `--dry-run` prints
-the merged table without probing or writing. `--provider` is optional for
-registry names (fastembed inferred); unknown names require it.
+the merged table without probing or writing. The model is always an address
+(`<provider>/<model>`); there is no provider inference.
 
 Semantics: chunk vectors are cached content-addressed
 (`openrouter/<model>@d<dim>@<l2|raw>` or

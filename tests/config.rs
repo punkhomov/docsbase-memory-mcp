@@ -441,6 +441,23 @@ fn unknown_key_inside_a_provider_record_is_an_admission() {
 }
 
 #[test]
+fn key_of_another_provider_is_rejected_by_name() {
+    // `runtime` belongs to fastembed; on openrouter it used to be silently
+    // dropped, now it is an admission naming the provider's own keys (FR-4).
+    let config_dir = TempDir::new().expect("tempdir");
+    write(
+        config_dir.path(),
+        "config.toml",
+        "[providers.openrouter]\nenabled = true\nruntime = \"1.24.4\"\n",
+    );
+    let err = Config::load_from(config_dir.path(), None).expect_err("foreign key");
+    let text = err.to_string();
+    assert!(text.contains("openrouter"), "{text}");
+    assert!(text.contains("runtime"), "{text}");
+    assert!(text.contains("enabled"), "lists the allowed keys: {text}");
+}
+
+#[test]
 fn provider_record_of_a_feature_disabled_provider_still_parses() {
     // A file written by a build with `hybrid-local` must load in a build
     // without it: the feature gates *use*, never parsing (FR-4, ADR-18).
@@ -668,7 +685,10 @@ fn fastembed_unfetched_model_fails_with_fetch_hint() {
     }
     let text = err.to_string();
     assert!(text.contains("admission refused"), "{text}");
-    assert!(text.contains("models fetch bge-small-en-v1.5"), "{text}");
+    assert!(
+        text.contains("models fetch fastembed/bge-small-en-v1.5"),
+        "{text}"
+    );
 }
 
 #[cfg(feature = "hybrid-local")]
@@ -718,6 +738,9 @@ fn fastembed_env_runtime_override_reaches_model_check() {
     };
     let text = err.to_string();
     assert!(text.contains("admission refused"), "{text}");
-    assert!(text.contains("models fetch bge-small-en-v1.5"), "{text}");
+    assert!(
+        text.contains("models fetch fastembed/bge-small-en-v1.5"),
+        "{text}"
+    );
     assert!(!text.contains("is not ready"), "{text}");
 }

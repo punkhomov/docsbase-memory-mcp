@@ -330,7 +330,9 @@ impl docsbase_memory::hybrid::Provider for DisabledProvider {
         ),
         Error,
     > {
-        Err(self.feature_missing())
+        // Deliberately succeed: only the gate in `from_config_with` may refuse
+        // this provider, so deleting the gate turns the test red.
+        Ok((None, None))
     }
 }
 
