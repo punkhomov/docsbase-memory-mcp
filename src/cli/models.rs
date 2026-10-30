@@ -191,39 +191,35 @@ pub fn list_cmd() -> anyhow::Result<()> {
         embed_pin.as_deref().unwrap_or("-"),
         rerank_pin.as_deref().unwrap_or("-")
     );
-    for entry in models::REGISTRY {
-        // Shallow per-file size check (no full hashing per invocation;
-        // round-3 deepseek-7).
-        let state = if models::cached_shallow(entry)? {
-            "fetched"
-        } else {
-            "missing"
+    // Rows come from the provider catalogs (FR-9): a new provider's models
+    // appear here without touching this loop. Size/cache state is local-cache
+    // knowledge, so it is looked up in the registry by name.
+    for provider in providers() {
+        let Some(catalog) = provider.catalog() else {
+            continue;
         };
-        let cached_bytes = if state == "fetched" {
-            dir_size(&models::cache_dir(entry.name, entry.revision))
-        } else {
-            0
-        };
-        // Address form, so a copy-pasted line works as a `models use|fetch`
-        // argument (FR-9). The provider prefix comes from the catalog row's
-        // owner, never from a hardcoded name.
-        let owner = providers()
-            .iter()
-            .find(|provider| {
-                provider
-                    .catalog()
-                    .is_some_and(|catalog| catalog.iter().any(|row| row.name == entry.name))
-            })
-            .map_or(crate::hybrid::config::PROVIDER_FASTEMBED, |provider| {
-                provider.name()
-            });
-        println!(
-            "{owner}/{}\t{}\t{}\t{state}\t{} on disk",
-            entry.name,
-            task_label(entry.task),
-            human_bytes(entry.total_size()),
-            human_bytes(cached_bytes)
-        );
+        for row in catalog {
+            let entry = models::REGISTRY.iter().find(|entry| entry.name == row.name);
+            let (total, cached_bytes, state) = match entry {
+                // Shallow per-file size check (no full hashing per invocation;
+                // round-3 deepseek-7).
+                Some(entry) if models::cached_shallow(entry)? => (
+                    human_bytes(entry.total_size()),
+                    human_bytes(dir_size(&models::cache_dir(entry.name, entry.revision))),
+                    "fetched",
+                ),
+                Some(entry) => (human_bytes(entry.total_size()), human_bytes(0), "missing"),
+                // A catalog row the local registry does not know: no cache to
+                // report, but the address is still printable.
+                None => (human_bytes(0), human_bytes(0), "not cached locally"),
+            };
+            println!(
+                "{}/{}\t{}\t{total}\t{state}\t{cached_bytes} on disk",
+                provider.name(),
+                row.name,
+                task_label(row.task)
+            );
+        }
     }
     Ok(())
 }
