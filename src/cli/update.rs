@@ -81,15 +81,14 @@ pub fn run(opts: &Options) -> anyhow::Result<()> {
     let newbin = extract(&archive, tmp.path())?;
 
     let launcher = std::env::current_exe().ok();
-    let (target, data) = install::install_from(&newbin, launcher.as_deref())
+    // The manifest describes the artifact being installed, not the caller
+    // (issue #39): the tag is authoritative here.
+    let build_id = format!("docsbase {version}");
+    let (target, data) = install::install_from(&newbin, launcher.as_deref(), &build_id)
         .with_context(|| format!("install {}", newbin.display()))?;
     self_replace(&target);
     println!("updated docsbase {current} -> {version}");
-    println!(
-        "installed {} ({})",
-        target.display(),
-        crate::ipc::protocol::build_id()
-    );
+    println!("installed {} ({build_id})", target.display());
     println!("manifest: {}", data.join(install::MANIFEST).display());
     println!("the daemon was stopped; it restarts on next use");
     Ok(())
@@ -97,15 +96,14 @@ pub fn run(opts: &Options) -> anyhow::Result<()> {
 
 fn install_local(current: &str, from: &Path) -> anyhow::Result<()> {
     let launcher = std::env::current_exe().ok();
-    let (target, data) = install::install_from(from, launcher.as_deref())
+    // A hand-picked binary must identify itself; the caller's id would be a lie
+    // about the file being installed (issue #39).
+    let build_id = install::probed_build_id(from);
+    let (target, data) = install::install_from(from, launcher.as_deref(), &build_id)
         .with_context(|| format!("install {}", from.display()))?;
     self_replace(&target);
     println!("updated docsbase {current} -> {}", from.display());
-    println!(
-        "installed {} ({})",
-        target.display(),
-        crate::ipc::protocol::build_id()
-    );
+    println!("installed {} ({build_id})", target.display());
     println!("manifest: {}", data.join(install::MANIFEST).display());
     Ok(())
 }

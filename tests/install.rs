@@ -312,6 +312,21 @@ fn update_from_local_binary_replaces_invoked_and_owned() {
         stdout.contains("updated invoked binary"),
         "stdout: {stdout}"
     );
+    // Issue #39: the manifest must describe the *installed* artifact, never the
+    // calling binary. This candidate cannot identify itself, so the honest
+    // value is "unknown" — the caller's own version would be a lie.
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(env.manifest()).expect("manifest")).expect("json");
+    let recorded = manifest["build_id"].as_str().unwrap_or("");
+    assert_ne!(
+        recorded,
+        format!("docsbase {}", env!("CARGO_PKG_VERSION")),
+        "manifest recorded the caller's build id: {recorded}"
+    );
+    assert!(
+        stdout.contains(recorded),
+        "the installed line must echo the recorded build id {recorded}: {stdout}"
+    );
 }
 
 #[test]

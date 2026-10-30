@@ -91,7 +91,10 @@ Requires Rust 1.88+. Local dev uses the nightly pinned in
   `~/Library/Application Support/docsbase-memory-mcp/bin/docsbase` on macOS,
   `%LOCALAPPDATA%\docsbase-memory-mcp\bin\docsbase.exe` on Windows).
 - Writes the owned manifest `install.json` (binary, socket/pipe, cache root,
-  `build_id`, protocol/schema versions).
+  `build_id`, protocol/schema versions). `build_id` always describes the file
+  that was installed, never the process that ran the command: `update` records
+  the released version, `update --from <path>` asks that binary for its
+  `--version` (and records `docsbase unknown` when it cannot answer).
 - Prints the installed path and manifest location.
 
 Custom locations (used by tests and advanced setups):
