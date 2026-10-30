@@ -50,6 +50,27 @@ fn a_failed_commit_marks_the_index_for_rebuild_and_the_next_run_heals() {
         index_dir.join(REBUILD_MARKER).exists(),
         "a failed commit must mark the index for recreation"
     );
+    // The healing window removes the index directory (marker included), so a
+    // sibling marker must keep the rebuild state visible: a reader that slips
+    // in during the heal must not be told "index is missing"
+    // (`watcher_recovers_from_a_commit_failure` flaked on Windows CI for
+    // exactly that).
+    let surviving = index_dir
+        .parent()
+        .expect("project dir")
+        .join(REBUILD_MARKER);
+    assert!(
+        surviving.exists(),
+        "the rebuild state must survive the directory removal"
+    );
+    let during_heal = docsbase_memory::index::tantivy_index::ReadIndex::open(&index_dir)
+        .err()
+        .map(|err| err.to_string())
+        .unwrap_or_default();
+    assert!(
+        during_heal.contains("needs to be rebuilt"),
+        "a reader during the heal sees the rebuild state, got: {during_heal}"
+    );
     let status = registry::project_by_id(&db, project.id)
         .expect("project")
         .expect("state")
@@ -62,6 +83,10 @@ fn a_failed_commit_marks_the_index_for_rebuild_and_the_next_run_heals() {
     assert!(
         !index_dir.join(REBUILD_MARKER).exists(),
         "the recovery rebuild clears the marker"
+    );
+    assert!(
+        !surviving.exists(),
+        "the recovery rebuild clears the surviving marker too"
     );
     let project = registry::project_by_id(&db, project.id)
         .expect("project")

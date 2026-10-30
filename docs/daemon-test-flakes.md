@@ -274,3 +274,26 @@ a panicking test cannot wedge the build thread.
 
 **Ruling.** Never pin "still in flight" with a sleep; use a gate. A sleep can
 only be right for one host speed.
+
+## Flake #10 — `watcher_recovers_from_a_commit_failure` (Windows)
+
+**Symptom.** Windows `ci` on the merge of #55:
+`only the rebuild marker may interrupt the healing window: project error: index
+…\projects\1\tantivy is missing (hint: run docsbase index to rebuild)`.
+
+**Root cause (real, not a test artifact).** The heal path
+(`create_fresh`) removes the whole index directory and then rewrites
+`docsbase.rebuild` inside it. Between the removal and the rewrite there was no
+marker *and* no `meta.json`, so `ReadIndex::open` fell through to its "index is
+missing" branch and told the user to run `docsbase index` — while the daemon was
+already rebuilding. On Linux that window is microseconds; on Windows the
+directory removal itself retries for up to 2 s, so a 50 ms poll loop lands in it.
+
+**Fix.** The rebuild state is also recorded in a sibling marker
+(`<project>/docsbase.rebuild`), written before the directory is removed and
+cleared by `mark_rebuilt`. The project directory is never deleted by the heal, so
+a reader sees "needs to be rebuilt" for the entire window. `ReadIndex::open` and
+`open_or_create` consult either marker.
+
+**Ruling.** A state that must be visible while a directory is being destroyed
+cannot live inside that directory.

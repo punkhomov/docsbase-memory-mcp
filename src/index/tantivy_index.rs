@@ -183,6 +183,7 @@ impl IndexHandle {
                 Ok(existing)
                     if fields_from(&existing.schema()).is_ok()
                         && !marker.exists()
+                        && !healing_marker_present(dir)
                         && tokenizer_version_matches(dir) =>
                 {
                     existing
@@ -254,6 +255,16 @@ impl IndexHandle {
     /// # Errors
     /// Returns [`Error::Internal`] when the marker cannot be removed.
     pub fn mark_rebuilt(&mut self) -> Result<()> {
+        if let Some(healing) = healing_marker(&self.dir) {
+            match std::fs::remove_file(&healing) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => eprintln!(
+                    "warning: cannot remove rebuild marker {}: {err}",
+                    healing.display()
+                ),
+            }
+        }
         let marker = self.dir.join(REBUILD_MARKER);
         match std::fs::remove_file(&marker) {
             Ok(()) => {
@@ -356,6 +367,7 @@ impl IndexHandle {
     /// the caller rebuilds from `SQLite` (best effort: a failure to write the
     /// marker still surfaces the original commit error).
     fn mark_needs_rebuild(&mut self, reason: &str) {
+        write_healing_marker(&self.dir);
         let marker = self.dir.join(REBUILD_MARKER);
         if let Err(err) = write_rebuild_marker(&self.dir, &marker) {
             eprintln!(
@@ -388,7 +400,7 @@ impl ReadIndex {
     /// # Errors
     /// Returns [`Error::Internal`] when the index is missing or unreadable.
     pub fn open(dir: &Path) -> Result<Self> {
-        if dir.join(REBUILD_MARKER).exists() {
+        if healing_marker_present(dir) {
             return Err(Error::Project {
                 message: format!("index {} needs to be rebuilt", dir.display()),
                 instruction: Some("run `docsbase index` to rebuild".to_owned()),
@@ -566,6 +578,9 @@ fn create_fresh(dir: &Path, marker: &Path) -> Result<()> {
     // retries give readers time instead of failing the batch outright.
     const REMOVE_ATTEMPTS: u32 = 20;
     const REMOVE_PAUSE: Duration = Duration::from_millis(100);
+    // Before the directory goes away: the reader must keep seeing "needs to be
+    // rebuilt" while the heal runs, not "index is missing".
+    write_healing_marker(dir);
     remove_dir_all_retry(dir, REMOVE_ATTEMPTS, REMOVE_PAUSE, &|dir| {
         std::fs::remove_dir_all(dir)
     })
@@ -615,6 +630,37 @@ fn tokenizer_version_matches(dir: &Path) -> bool {
     tokenizer_version(dir)
         .and_then(|value| value.parse::<u32>().ok())
         .is_some_and(|version| version == tokenizer::TOKENIZER_VERSION)
+}
+
+/// Sibling marker of the index directory (`<project>/docsbase.rebuild`).
+///
+/// The in-directory marker cannot cover the healing window: `create_fresh`
+/// removes the whole directory, so between the removal and the marker rewrite a
+/// reader saw a bare "index is missing" instead of the rebuild state. The
+/// sibling lives in the project directory, which the heal never deletes, so the
+/// rebuild state is visible for the entire window (Windows CI,
+/// `watcher_recovers_from_a_commit_failure`).
+fn healing_marker(dir: &Path) -> Option<PathBuf> {
+    dir.parent().map(|parent| parent.join(REBUILD_MARKER))
+}
+
+/// True while either marker says the index is not usable yet.
+fn healing_marker_present(dir: &Path) -> bool {
+    dir.join(REBUILD_MARKER).exists() || healing_marker(dir).is_some_and(|marker| marker.exists())
+}
+
+/// Best-effort sibling marker write: the in-directory marker is the durable
+/// one, this only keeps the healing window readable.
+fn write_healing_marker(dir: &Path) {
+    let Some(marker) = healing_marker(dir) else {
+        return;
+    };
+    if let Err(err) = std::fs::write(&marker, b"rebuild required\n") {
+        eprintln!(
+            "warning: cannot write rebuild marker {}: {err}",
+            marker.display()
+        );
+    }
 }
 
 fn write_rebuild_marker(dir: &Path, marker: &Path) -> Result<()> {
