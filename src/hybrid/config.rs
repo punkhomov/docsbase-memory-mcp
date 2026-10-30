@@ -380,7 +380,18 @@ pub(crate) fn data_dir_library() -> Option<std::path::PathBuf> {
 /// `OpenRouter` is `Connected` when enabled.
 #[must_use]
 pub fn provider_status(providers: &ProvidersCfg, name: &str) -> ProviderStatus {
-    match crate::hybrid::provider::provider(name) {
+    provider_status_in(crate::hybrid::provider::providers(), providers, name)
+}
+
+/// [`provider_status`] against an explicit table — the seam a third provider
+/// (and its status row) uses without a global registration (FR-10).
+#[must_use]
+pub fn provider_status_in(
+    table: &[&'static dyn Provider],
+    providers: &ProvidersCfg,
+    name: &str,
+) -> ProviderStatus {
+    match crate::hybrid::provider::provider_in(table, name) {
         Ok(provider) => provider.status(providers),
         // An unknown name is a diagnostic, not an internal error: the status
         // table must keep printing rows for names it does not know. The reason
@@ -442,23 +453,13 @@ fn legacy_cache_model_id(cfg: &EmbeddingCfg) -> String {
 /// call this function.
 #[must_use]
 pub fn embedding_model_id(cfg: &EmbeddingCfg) -> String {
-    #[cfg(feature = "hybrid-local")]
-    if cfg.provider == PROVIDER_FASTEMBED {
-        // Resolution (FR-5) guarantees the entry exists before this runs
-        // (`resolve_embedding` rejects unknown models), so the fallback
-        // below is unreachable through validated config; it exists only to
-        // keep this pure formatter infallible. It must NOT be used for new
-        // fastembed keys (a legacy-shaped key would drop the revision/prompt
-        // components and could collide across revisions, FR-9).
-        if let Some(id) = crate::hybrid::models::canonical_id_for(
-            &cfg.model,
-            cfg.dimensions as usize,
-            cfg.normalize,
-        ) {
-            return id;
-        }
-    }
-    legacy_cache_model_id(cfg)
+    // The provider owns its key shape; a provider without one falls back to the
+    // legacy `openrouter/<model>@d<dim>@<l2|raw>` form, kept byte-identical so
+    // existing vector caches are not orphaned (FR-9, SC-10).
+    crate::hybrid::provider::provider(&cfg.provider)
+        .ok()
+        .and_then(|provider| provider.cache_model_id(cfg))
+        .unwrap_or_else(|| legacy_cache_model_id(cfg))
 }
 
 /// Concrete stages handed to the index and search paths.

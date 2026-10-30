@@ -133,14 +133,9 @@ fn print_status() -> Result<()> {
     for provider in crate::hybrid::provider::providers() {
         let name = provider.name();
         let status = provider_status(providers, name);
-        let version = match name {
-            PROVIDER_FASTEMBED => crate::hybrid::config::fastembed_record(providers)
-                .ok()
-                .flatten()
-                .and_then(|provider| provider.runtime)
-                .unwrap_or_else(|| "-".to_owned()),
-            _ => "-".to_owned(),
-        };
+        let version = provider
+            .version(providers)
+            .unwrap_or_else(|| "-".to_owned());
         // The resolved library comes from the status, not from the config
         // field: an entry without `runtime_path` still resolves through the
         // data-dir install, and that path must show up here (round-7 C1).

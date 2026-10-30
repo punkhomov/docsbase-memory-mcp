@@ -171,8 +171,13 @@ fastembed-провайдера (`OnceLock<Vec<CatalogModel>>`) + тест пар
   (ревью muse P1-5: без `#[cfg(test)]`-глобалов, они не видны спавнящемуся
   бинарю).
 - Гейт: `rg -n 'PROVIDER_FASTEMBED|PROVIDER_OPENROUTER' src/` даёт совпадения
-  только в `src/hybrid/local.rs`, `src/hybrid/openrouter.rs`,
-  `src/hybrid/provider.rs` (регистрация) и `src/hybrid/config.rs` (константы).
+  только в `src/hybrid/{provider,local,openrouter}.rs`, в объявлениях констант и
+  дефолт-значении провайдера (`src/hybrid/config.rs:18,21,131,155`,
+  `src/config/mod.rs:227`) и в CLI-таблице провижинеров
+  (`src/cli/connect.rs:57-58`). Остаются два известных исключения, записанных в
+  ledger как `minor (deferred)`: валидация *сохранённой* стадии в
+  `src/cli/models.rs` (`validate_embedding_stage`/`validate_reranker_stage`
+  решают, что проверять, по имени провайдера) и `probe_stage` там же.
 
 **Verify.** V2, V3, гейт-`rg` (в отчёте задачи — вывод команды).
 

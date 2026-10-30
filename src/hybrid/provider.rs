@@ -204,6 +204,12 @@ pub trait Provider: Sync {
         Ok(ProviderRecord::new(record_enabled(self.name(), table)?))
     }
 
+    /// Canonical cache key of an embedding config, when this provider defines
+    /// its own shape. `None` keeps the legacy formatter (FR-9).
+    fn cache_model_id(&self, _cfg: &EmbeddingCfg) -> Option<String> {
+        None
+    }
+
     /// Closed catalog of known models, or `None` when the provider has none
     /// (remote APIs accept arbitrary ids). Callers filter by [`Task`].
     fn catalog(&self) -> Option<&'static [CatalogModel]> {
@@ -212,6 +218,12 @@ pub trait Provider: Sync {
 
     /// Readiness for the status table (FR-7).
     fn status(&self, providers: &ProvidersCfg) -> ProviderStatus;
+
+    /// Prepared version to show in the status table, when the provider records
+    /// one (`fastembed` records its ONNX Runtime version).
+    fn version(&self, _providers: &ProvidersCfg) -> Option<String> {
+        None
+    }
 
     /// Provider-specific validation and defaults for the embedding stage.
     ///
@@ -299,6 +311,20 @@ impl Provider for FastembedProvider {
         Ok(ProviderRecord { enabled, params })
     }
 
+    fn cache_model_id(&self, cfg: &EmbeddingCfg) -> Option<String> {
+        #[cfg(feature = "hybrid-local")]
+        {
+            // Resolution (FR-5) guarantees the entry exists before this runs;
+            // the fallback keeps the formatter infallible.
+            super::models::canonical_id_for(&cfg.model, cfg.dimensions as usize, cfg.normalize)
+        }
+        #[cfg(not(feature = "hybrid-local"))]
+        {
+            let _ = cfg;
+            None
+        }
+    }
+
     fn catalog(&self) -> Option<&'static [CatalogModel]> {
         #[cfg(feature = "hybrid-local")]
         {
@@ -370,6 +396,13 @@ impl Provider for FastembedProvider {
                 ),
             },
         }
+    }
+
+    fn version(&self, providers: &ProvidersCfg) -> Option<String> {
+        super::config::fastembed_record(providers)
+            .ok()
+            .flatten()
+            .and_then(|record| record.runtime)
     }
 
     fn build_stages(
@@ -935,6 +968,116 @@ mod tests {
                 .catalog()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn third_provider_needs_only_a_registration() {
+        // FR-10 / G4: a provider declared entirely in a test module goes
+        // through stage construction, status, address parsing and stage
+        // resolution. Nothing in `config.rs` or `cli/*` changes for it.
+        use crate::hybrid::config::ProviderState;
+        use crate::vector_cache::Embedder;
+
+        // Test-only float maths: exact values, no precision concerns.
+        #[allow(clippy::cast_precision_loss)]
+        fn width(text: &str) -> f32 {
+            text.len() as f32
+        }
+
+        struct EchoEmbedder;
+
+        impl Embedder for EchoEmbedder {
+            fn model_id(&self) -> &'static str {
+                "echo/tiny@d4@l2@r0@p1"
+            }
+            fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                Ok(texts
+                    .iter()
+                    .map(|text| vec![width(text), 0.0, 0.0, 1.0])
+                    .collect())
+            }
+        }
+
+        struct EchoProvider;
+
+        impl Provider for EchoProvider {
+            fn name(&self) -> &'static str {
+                "echo"
+            }
+            fn status(&self, _providers: &ProvidersCfg) -> ProviderStatus {
+                ProviderStatus {
+                    state: ProviderState::Connected,
+                    path: None,
+                    reason: None,
+                }
+            }
+            fn resolve_embedding(
+                &self,
+                model: Option<&str>,
+                dims: Option<u32>,
+                normalize: bool,
+            ) -> Result<EmbeddingCfg> {
+                Ok(EmbeddingCfg {
+                    provider: "echo".to_owned(),
+                    model: model.unwrap_or("tiny").to_owned(),
+                    dimensions: dims.unwrap_or(4),
+                    normalize,
+                })
+            }
+            fn resolve_reranker(&self, _model: Option<&str>, window: u32) -> Result<RerankerCfg> {
+                Ok(RerankerCfg {
+                    provider: "echo".to_owned(),
+                    model: "tiny".to_owned(),
+                    window,
+                })
+            }
+            fn build_stages(
+                &self,
+                embedding: Option<&EmbeddingCfg>,
+                _reranker: Option<&RerankerCfg>,
+                _providers: &ProvidersCfg,
+            ) -> Result<Stages> {
+                let stage: Option<Arc<dyn Embedder>> =
+                    embedding.map(|_| Arc::new(EchoEmbedder) as Arc<dyn Embedder>);
+                Ok((stage, None))
+            }
+        }
+
+        static ECHO: EchoProvider = EchoProvider;
+        let table: &[&'static dyn Provider] = &[&ECHO];
+
+        // 1. Address parsing against the explicit table.
+        let address = ModelAddress::parse_with(table, "echo/tiny").expect("echo address");
+        assert_eq!(address.provider(), "echo");
+
+        // 2. Stage resolution through the provider.
+        let echo = provider_in(table, "echo").expect("echo");
+        let cfg = echo
+            .resolve_embedding(Some(address.model()), None, true)
+            .expect("resolve");
+        assert_eq!(cfg.model, "tiny");
+        assert_eq!(cfg.dimensions, 4);
+
+        // 3. Stage construction through the generic dispatcher.
+        let hybrid = super::super::config::HybridCfg {
+            enabled: true,
+            embedding: Some(cfg.clone()),
+            reranker: None,
+            ranking: super::super::config::Ranking::Rrf,
+            cache: super::super::config::CacheCfg::default(),
+        };
+        let stages =
+            super::super::config::from_config_with(table, &hybrid, &ProvidersCfg::default())
+                .expect("third provider builds a stage");
+        let embedder = stages.embedder.expect("echo embedder");
+        assert_eq!(embedder.model_id(), "echo/tiny@d4@l2@r0@p1");
+        let vector = &embedder.embed(&["abcd".to_owned()]).expect("embed")[0];
+        assert!((vector[0] - 4.0).abs() < f32::EPSILON, "{vector:?}");
+
+        // 4. Status goes through the same row.
+        let status =
+            super::super::config::provider_status_in(table, &ProvidersCfg::default(), "echo");
+        assert_eq!(status.state, ProviderState::Connected);
     }
 
     #[test]

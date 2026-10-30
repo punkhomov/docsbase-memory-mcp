@@ -249,3 +249,24 @@
 - Ruling: рестарт-подсказка остаётся частью каркаса, но её включает только
   провайдер через `InstallOutcome.reinstalled` (openrouter ничего не ставит
   локально → никогда).
+
+## T6 — тест расширяемости и гейт по `PROVIDER_*`
+
+- `Task <T6>: complete`. `third_provider_needs_only_a_registration`: провайдер
+  `echo`, объявленный целиком в тестовом модуле, проходит через
+  `ModelAddress::parse_with`, `resolve_embedding`, `from_config_with`,
+  `provider_status_in` и реально отдаёт вектор — ни одной правки в `config.rs`
+  или `cli/*`.
+- Ради этого добавлены два шва: `provider_status_in(table, …)` (обёртка
+  `provider_status`) и `Provider::cache_model_id` — канонический ключ кэша
+  fastembed переехал из `config.rs` в реализацию провайдера, `embedding_model_id`
+  стал диспетчером с legacy-фолбэком (FR-9, ключи не изменились).
+- `Provider::version(&ProvidersCfg)` убрал последний `match name` из таблицы
+  статуса (`connect`-колонка `version`).
+- Гейт `rg` (см. `tasks.md` T6): имена провайдеров остались только в их модулях,
+  в константах/дефолт-значении и в CLI-таблице провижинеров.
+- minor (deferred): валидация *сохранённой* стадии и `probe_stage` в
+  `src/cli/models.rs` всё ещё выбирают, что проверять, по имени провайдера —
+  это следующий шаг (потребует `Provider::probe`, CLI-only метод).
+- Проверка: lib 136 / 217 / 150 / 231; clippy `-D warnings` чист (default и
+  combo); fmt чист.
