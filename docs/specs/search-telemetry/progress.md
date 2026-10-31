@@ -55,3 +55,24 @@ Ledger исполнения `docs/specs/search-telemetry/tasks.md`. Одна з�
   asserted `50` for the lexical case and was wrong, not the code.
   Ruling: T1 and T2 landed together — an envelope without the fields is not
   observable, and splitting them would have added a throwaway shape.
+
+- Task T3: complete (2026-10-31). Stage timings. `stage_ms` covers bm25, dense,
+  rrf, rerank and `total`, each from an `Instant` span nested inside `started`;
+  `elapsed_ms` saturates instead of wrapping. Tests:
+  `stage_timings_are_nested_and_cover_only_what_ran` (a reranker that measures how
+  long it actually held the stage; `stage_ms.rerank >= held` and
+  `sum(stages) <= total`) and `a_stage_that_did_not_run_has_no_key`.
+  Verify: `--test hybrid_ranking` 17 passed.
+  Ruling: the test's workload is a *measured* hold (the reranker records its own
+  span), not a `sleep` used to pin "in flight" — the Flake #9 lesson applies to
+  synchronisation, and a measured lower bound needs no tolerance.
+- Task T4: complete (2026-10-31). `degraded` tokens. `dense_candidates` records
+  the reason at the point of the decision (`ann-building` for `Building`,
+  `ann-insufficient` for a short ANN answer, `ann-error` for a failed lookup or a
+  `Failed` entry, `exact-fallback` for `TooLarge`), `degrade()` deduplicates and
+  preserves order; `search_docs_with` records `no-rerank-stage` when a project has
+  a reranker and the request opts out. Tests: `opting_out_of_an_available_rerank_stage_is_reported`
+  and, in `hybrid_rank_ann`, the during-build search now asserts
+  `degraded == ["ann-building"]`.
+  Verify: `--test hybrid_ranking` 18 passed, `--test hybrid_rank_ann` 1 passed;
+  full default suite 63 `test result: ok`; clippy 0; fmt clean.

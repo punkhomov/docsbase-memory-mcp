@@ -5,6 +5,7 @@
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use docsbase_memory::config::Config;
 use docsbase_memory::daemon::registry;
@@ -72,6 +73,26 @@ impl Reranker for ReverseReranker {
         Ok((0..n)
             .map(|rank| (docs.len() - 1 - rank, (n - rank) as f32))
             .collect())
+    }
+}
+
+/// Reranker that blocks for a measured time and reports it, so the test can
+/// assert `stage_ms.rerank` is at least that long. No arbitrary sleep is used
+/// to pin "in flight" (Flake #9): the duration is the measured span itself.
+#[derive(Default)]
+struct SlowReranker {
+    held_ms: std::sync::Mutex<Vec<u64>>,
+}
+
+impl Reranker for SlowReranker {
+    #[allow(clippy::cast_precision_loss)]
+    fn rerank(&self, _query: &str, docs: &[String], top_n: usize) -> Result<Vec<(usize, f32)>> {
+        let started = std::time::Instant::now();
+        std::thread::sleep(Duration::from_millis(40));
+        let held = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.held_ms.lock().expect("held").push(held);
+        let n = docs.len().min(top_n);
+        Ok((0..n).map(|rank| (rank, (n - rank) as f32)).collect())
     }
 }
 
@@ -275,6 +296,111 @@ fn explain_reports_the_scale_and_the_stages_that_ran() {
 
 /// A `rerank: false` request on a project with a stage answers in fused order,
 /// so the scale must say `rrf`, not `rerank`.
+/// Stage timings are nested inside the total and only cover stages that ran
+/// (search-telemetry FR-3 / SC-3).
+#[test]
+fn stage_timings_are_nested_and_cover_only_what_ran() {
+    let (cache, db, project) = project_with_docs();
+    embed_all(&db, project.id);
+    let dense = DenseCache::new();
+    let slow = Arc::new(SlowReranker::default());
+    let stages = HybridStages {
+        embedder: Some(Arc::new(FakeEmbedder)),
+        reranker: Some(Arc::clone(&slow) as Arc<dyn Reranker>),
+        ranking: Ranking::Rrf,
+    };
+    let value = search_docs_with(
+        &stages,
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 3, "explain": true }),
+        50,
+    )
+    .expect("explain search");
+
+    let meta = &value["meta"];
+    let stage_ms = meta["stage_ms"].as_object().expect("stage_ms is an object");
+    let held = *slow
+        .held_ms
+        .lock()
+        .expect("held")
+        .first()
+        .expect("one call");
+    assert!(
+        stage_ms["rerank"].as_u64().unwrap_or_default() >= held,
+        "the rerank stage must cover the work it held: {stage_ms:?} vs {held} ms"
+    );
+    let total = stage_ms["total"].as_u64().expect("total");
+    let sum: u64 = ["bm25", "dense", "rrf", "rerank"]
+        .iter()
+        .filter_map(|stage| stage_ms[*stage].as_u64())
+        .sum();
+    assert!(
+        sum <= total,
+        "spans are nested: sum {sum} must not exceed total {total}"
+    );
+    for stage in ["bm25", "dense", "rrf", "rerank"] {
+        assert!(
+            stage_ms.contains_key(stage),
+            "{stage} ran and must be timed"
+        );
+    }
+}
+
+#[test]
+fn a_stage_that_did_not_run_has_no_key() {
+    let (cache, db, project) = project_with_docs();
+    let dense = DenseCache::new();
+    let value = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 3, "explain": true }),
+        50,
+    )
+    .expect("lexical explain search");
+    let stage_ms = value["meta"]["stage_ms"]
+        .as_object()
+        .expect("stage_ms is an object");
+    assert!(stage_ms.contains_key("bm25"));
+    assert!(stage_ms.contains_key("total"));
+    for absent in ["dense", "rrf", "rerank"] {
+        assert!(
+            !stage_ms.contains_key(absent),
+            "{absent} did not run, so it must not appear: {stage_ms:?}"
+        );
+    }
+}
+
+/// Opting out of an available rerank stage is reported, not silent
+/// (search-telemetry FR-4).
+#[test]
+fn opting_out_of_an_available_rerank_stage_is_reported() {
+    let (cache, db, project) = project_with_docs();
+    embed_all(&db, project.id);
+    let dense = DenseCache::new();
+    let reranker = Arc::new(ReverseReranker::default());
+    let value = search_docs_with(
+        &rrf_stages(Some(Arc::clone(&reranker))),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 3, "rerank": false, "explain": true }),
+        50,
+    )
+    .expect("explain search");
+    assert_eq!(
+        value["meta"]["degraded"],
+        serde_json::json!(["no-rerank-stage"])
+    );
+    assert_eq!(reranker.calls.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn explain_follows_the_effective_path_not_the_config() {
     let (cache, db, project) = project_with_docs();

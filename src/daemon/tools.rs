@@ -15,7 +15,7 @@ use crate::hybrid::blocking;
 use crate::hybrid::config::DEFAULT_RERANK_WINDOW;
 use crate::hybrid::dense::{self, DenseCache, DenseRows};
 use crate::hybrid::jobs::{self as hybrid_jobs, Coverage};
-use crate::hybrid::meta::{self, ScoreScale, SearchMeta, Stage};
+use crate::hybrid::meta::{self, Degraded, ScoreScale, SearchMeta, Stage};
 use crate::hybrid::rrf::rrf_merge;
 use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
@@ -102,6 +102,7 @@ fn dense_candidates(
     project: &Project,
     query: &str,
     fetch: usize,
+    degraded: &mut Vec<Degraded>,
 ) -> Result<Vec<(u64, f32)>> {
     let Some(embedder) = stages.embedder.as_deref() else {
         return Ok(Vec::new());
@@ -123,18 +124,29 @@ fn dense_candidates(
                     "warning: ann returned {} candidates for fetch {fetch}; falling back to exact",
                     hits.len()
                 );
+                degrade(degraded, Degraded::AnnInsufficient);
                 stream_exact(db, model_id, project.id, &vector, fetch)
             }
             Err(err) => {
                 eprintln!("warning: ann search failed: {err}; falling back to exact");
+                degrade(degraded, Degraded::AnnError);
                 stream_exact(db, model_id, project.id, &vector, fetch)
             }
         },
-        DenseRows::TooLarge(hashes) => stream_hashes(db, model_id, &hashes, &vector, fetch),
+        DenseRows::TooLarge(hashes) => {
+            // Above the resident cap by design: exact streaming is the answer,
+            // not an error.
+            degrade(degraded, Degraded::ExactFallback);
+            stream_hashes(db, model_id, &hashes, &vector, fetch)
+        }
         DenseRows::Building(building) => {
+            degrade(degraded, Degraded::AnnBuilding);
             stream_hashes(db, model_id, &building.hashes, &vector, fetch)
         }
-        DenseRows::Failed(failed) => stream_hashes(db, model_id, &failed.hashes, &vector, fetch),
+        DenseRows::Failed(failed) => {
+            degrade(degraded, Degraded::AnnError);
+            stream_hashes(db, model_id, &failed.hashes, &vector, fetch)
+        }
     }
 }
 
@@ -231,25 +243,40 @@ pub fn search_docs_with(
     } else {
         limit
     };
+    // Spans are sequential and nested inside `started`, so
+    // `sum(stage_ms) <= total` holds by construction (design §2).
     let started = std::time::Instant::now();
+    let mut stage_ms: Vec<(Stage, u64)> = Vec::with_capacity(4);
+    let mut degraded: Vec<Degraded> = Vec::new();
+    if !rerank_active && stages.reranker.is_some() {
+        // The project has a rerank stage; this request opted out of it.
+        degrade(&mut degraded, Degraded::NoRerankStage);
+    }
     let index = ReadIndex::open(&lifecycle::index_dir(cache, project.id))?;
     let hits = index.search(&query, fetch)?;
-    let bm25_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    stage_ms.push((Stage::Bm25, elapsed_ms(started)));
 
     let bm25: Vec<(u64, f32)> = hits.iter().map(|hit| (hit.chunk_id, hit.score)).collect();
     let mut ordered: Vec<(u64, f32)> = if rrf_active {
-        let dense_hits = dense_candidates(stages, dense, db, project, &query, fetch)?;
+        let dense_started = std::time::Instant::now();
+        let dense_hits =
+            dense_candidates(stages, dense, db, project, &query, fetch, &mut degraded)?;
+        stage_ms.push((Stage::Dense, elapsed_ms(dense_started)));
+        let fuse_started = std::time::Instant::now();
         let mut fused = rrf_merge(&bm25, &dense_hits);
         // The union of two fetch-sized lists can reach 2x fetch; the rerank
         // stage must not see more candidates than the configured window
         // (FR-11, FR-16).
         fused.truncate(fetch);
+        stage_ms.push((Stage::Rrf, elapsed_ms(fuse_started)));
         fused
     } else {
         bm25
     };
     if rerank_active {
+        let rerank_started = std::time::Instant::now();
         apply_rerank(stages, db, &query, &mut ordered)?;
+        stage_ms.push((Stage::Rerank, elapsed_ms(rerank_started)));
     }
     ordered.truncate(limit);
 
@@ -272,12 +299,25 @@ pub fn search_docs_with(
     let meta = build_meta(
         rerank_active,
         rrf_active,
-        bm25_ms,
-        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        stage_ms,
+        degraded,
+        elapsed_ms(started),
         fetch,
         repo::index_generation(db.connection(), project.id)?,
     );
     Ok(meta::envelope(&rows, &meta))
+}
+
+/// Records a degradation once (order preserved, no duplicates).
+fn degrade(degraded: &mut Vec<Degraded>, reason: Degraded) {
+    if !degraded.contains(&reason) {
+        degraded.push(reason);
+    }
+}
+
+/// Milliseconds elapsed since `start`, saturating instead of wrapping.
+fn elapsed_ms(start: std::time::Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Parsed `search_docs` arguments: types are validated once, so the search body
@@ -362,7 +402,8 @@ fn empty_response(db: &Db, project: &Project, explain: bool) -> Result<Value> {
 fn build_meta(
     rerank_active: bool,
     rrf_active: bool,
-    bm25_ms: u64,
+    stage_ms: Vec<(Stage, u64)>,
+    degraded: Vec<Degraded>,
     total_ms: u64,
     fetch: usize,
     index_generation: i64,
@@ -386,10 +427,10 @@ fn build_meta(
         score_scale,
         stages,
         total_ms,
-        stage_ms: vec![(Stage::Bm25, bm25_ms)],
+        stage_ms,
         window: fetch,
         index_generation,
-        degraded: Vec::new(),
+        degraded,
     }
 }
 
@@ -1026,7 +1067,8 @@ mod tests {
             ranking: Ranking::Rrf,
         };
         let dense = DenseCache::new();
-        let hits = dense_candidates(&stages, &dense, &db, &project, "widgets", 10)
+        let mut degraded = Vec::new();
+        let hits = dense_candidates(&stages, &dense, &db, &project, "widgets", 10, &mut degraded)
             .expect("dense candidates");
         // The query path must go through `embed_query` (registry prefixes),
         // never through the passage `embed`.
