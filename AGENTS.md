@@ -1,8 +1,9 @@
 # AGENTS.md — working guide for coding agents
 
 One page of hard rules, verification commands, process and pointers.
-Authoritative sources: `docs/constitution.md`, `docs/specs/`, the product docs
-linked below. This file only indexes them — do not duplicate spec content here.
+Authoritative sources: `docs/specs/constitution.md`, `docs/specs/`, the product
+docs linked below. This file only indexes them — do not duplicate spec content
+here.
 
 ## Repo map
 

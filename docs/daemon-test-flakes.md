@@ -298,6 +298,41 @@ a reader sees "needs to be rebuilt" for the entire window. `ReadIndex::open` and
 **Ruling.** A state that must be visible while a directory is being destroyed
 cannot live inside that directory.
 
+## Flake #11 — `hybrid_rank_ann::search_runs_during_the_build_and_ann_serves_the_read_path` (macOS)
+
+**Symptom.** macOS `ci` on #57 (a docs-only change):
+`a published ANN must serve the read path`, with
+`warning: ann returned 37 candidates for fetch 50; falling back to exact`.
+
+**Root cause 1 — the fake embedder was degenerate.** `LengthEmbedder` put the
+text length in dim 0 and a constant in dim 1, so every point of the 12k-chunk
+corpus sat on one line, thousands of them near-duplicates. `hnsw_rs` builds a
+nondeterministic graph over that, and its search sometimes reached only 37 of
+the 50 requested neighbours. The read path then fell back to exact — the
+documented behaviour — and the assertion failed for a reason unrelated to
+publishing. The vectors are now FNV-1a seeded and L2-normalized, so the graph is
+well connected and the assertion tests the read path.
+
+**Root cause 2 — the "oversized fetch" sub-assertion was unsatisfiable by
+design.** `fetch = limit.max(window).min(MAX_HITS)` with `MAX_HITS = 1000`
+(`daemon/tools.rs:258`), so asking a 12k-chunk project for `chunks + 1` becomes a
+request for 1000 — which the graph answers. The assertion therefore passed only
+when the build had not published yet, i.e. it flaked on timing. The check now
+lives in its own test with a 20-document corpus (~40 chunks), where the clamp
+genuinely exceeds the graph.
+
+**Root cause 3 — the process-global build gate broke a second test.** The
+fallback check first lived in its own `#[test]`; on Windows it timed out with
+`no ANN within timeout: Building(..)` after 120 s. `set_test_build_gate` is a
+process-global static, so the second test's build waited on the *first* test's
+gate. The check now runs inside the main test, after the gate is open.
+
+**Ruling.** A fake embedder must produce spread vectors — collinear duplicates
+turn an ANN assertion into a lottery on graph construction. And an assertion
+about "the ANN cannot satisfy this fetch" has to be expressed *within* the
+clamp, never above it: above the clamp the request is rewritten and the premise
+disappears.
+
 ## Flake #12 — `install::concurrent_stops_do_not_wedge` (linux-local)
 
 **Symptom.** `linux-local`, combined-feature suite:
