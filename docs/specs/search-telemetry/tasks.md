@@ -32,13 +32,17 @@ SC-1 проверялся, а не декларировался; заодно н
 
 **Files:**
 - Create: `docs/specs/search-telemetry/design.md`.
-- Create: `tests/search_response_shape.rs` (или расширить `tests/mcp_frontend.rs`).
+- Modify: `tests/hybrid_ranking.rs` (фикстура четырёх конфигураций уже там —
+  отдельный файл завёл бы вторую копию `project_with_docs`).
 
 **Steps:**
 1. Тест: `search_docs` без `explain` для всех четырёх конфигураций даёт ровно
    текущий JSON (снапшот через `serde_json::to_string`), включая порядок ключей
    элемента.
 2. Тот же тест: `limit = 0` → `[]`; `Error::Query` → ошибка без `meta`.
+   Плюс одна зафиксированная пара (запрос, конфигурация) сравнивается побайтово с
+   сохранённой строкой — набор ключей без значений ловит только добавление поля,
+   но не дрейф `score`/`lines`.
 3. `design.md`: точки замера (`Instant` вокруг стадий в `search_docs_with`),
    структура `SearchMeta`, хранилище `AnnOutcome` (где живёт: `Shared`),
    маппинг имён на OTel, TTL/LRU.
@@ -46,7 +50,7 @@ SC-1 проверялся, а не декларировался; заодно н
 **Acceptance:** тест зелёный **до** изменений и остаётся зелёным после каждого
 следующего шага; `design.md` описывает точки замера и хранилище.
 
-**Verify:** `cargo test --locked --test search_response_shape`
+**Verify:** `cargo test --locked --test hybrid_ranking`
 
 **Depends:** —
 
@@ -69,11 +73,14 @@ SC-1 проверялся, а не декларировался; заодно н
    (`score_scale`, `stages`, `window`, `index_generation`, `degraded: []`).
 4. CLI: `--explain` печатает тот же конверт; без флага — прежний pretty-print.
 5. `limit = 0` и пути ошибок — по FR-8.
+6. Тест на **MCP-границе** (`tests/mcp_frontend.rs`): дефолтный результат
+   `search_docs` — массив. Тест в `search_docs_with` этого не покрывает: конверт
+   можно добавить в frontend-слое, мимо шва.
 
 **Acceptance:** SC-1 (дефолт побайтово), SC-2 (шкала для 4 конфигураций), SC-5
 (границы).
 
-**Verify:** `cargo test --locked --test search_response_shape --test hybrid_ranking --test cli_read`
+**Verify:** `cargo test --locked --test hybrid_ranking --test mcp_frontend --test cli_read`
 
 **Depends:** T0
 
@@ -99,7 +106,7 @@ SC-1 проверялся, а не декларировался; заодно н
 **Acceptance:** SC-2; `window` в тесте с `limit: 5, window: 50` равен 50, а при
 `window: 10_000` — 1000.
 
-**Verify:** `cargo test --locked --test hybrid_ranking --test search_response_shape`
+**Verify:** `cargo test --locked --test hybrid_ranking`
 
 **Depends:** T1
 
@@ -164,14 +171,16 @@ SC-1 проверялся, а не декларировался; заодно н
   передаёт в `status`).
 - Modify: `src/daemon/tools.rs` (`status`/`project_entry`: `ann`,
   `index_generation`).
-- Modify: `src/cli/status.rs` (direct-режим: `disabled`/`loading`).
+- Modify: `src/cli/status.rs` (direct-режим: `unknown` + `daemon not running`).
+- Create: `tests/status.rs` (цели `--test status` до этого не существовало).
 
 **Steps:**
 1. RED: тест «после ANN-поиска `status.projects[0].ann.state == "ready"`»;
    сейчас поля нет.
 2. Путь поиска пишет исход (`ready`/`building`/`too_large`/`fallback` + `reason`).
-3. `status` читает запись; нет записи + hybrid off → `disabled`; hybrid on, записи
-   нет → `loading` + `reason: "no search yet"`; запись старше TTL → `stale`.
+3. `status` читает запись; нет записи + hybrid off по конфигу → `disabled`;
+   hybrid on, записи нет → `loading` + `reason: "no search yet"`; запись старше
+   TTL → `stale`; `None` (нет кэша в вызывающем коде) → `unknown`.
 4. `vectors`/`estimated_bytes` — из резидентного `AnnIndex`, иначе `null`.
 5. `index_generation` — из `repo::index_generation`, тест сравнивает с БД.
 

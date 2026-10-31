@@ -22,3 +22,19 @@ Ledger исполнения `docs/specs/search-telemetry/tasks.md`. Одна з�
   its public signature for a field the cache owns.
   Ruling: `serde_json::Value` keeps object keys sorted, so the contract is the key
   *set*, not insertion order; the test sorts before comparing.
+
+- Spec re-review (2026-10-31): **ACCEPT WITH NOTES** (1×P1, 2×P2, 2×P3), все
+  исправлены в rev 0.3.
+  P1: запись исхода живёт в памяти процесса, поэтому одноразовый `docsbase search`
+  её не переживает, а `docsbase status` без демона её не увидит — запись объявлена
+  daemon-only, CLI отвечает `unknown` + `daemon not running`; в enum добавлен
+  `unknown`, `disabled` зарезервирован за конфигом.
+  P2: `Verify:` ссылались на несуществующие цели (`search_response_shape`,
+  `status`) — T0–T2 переведены на `--test hybrid_ranking`, T5 создаёт
+  `tests/status.rs`; SC-1 переформулирован: форма проверяется на двух швах
+  (`search_docs_with` и MCP-граница), плюс побайтовое сравнение одной пары
+  (запрос, конфигурация), потому что набор ключей не ловит дрейф значений.
+  P3: в `design.md` поправлен список вызовов `status` (реально `tests/registry.rs`
+  и `tests/vcs.rs` ×2, не `cleanup.rs`) и смысл `None` (`unknown`, не `disabled`).
+  Ruling: состояние, которое живёт в процессе, не может обещаться CLI-процессу;
+  лучше честный `unknown`, чем `disabled`, который врёт о причине.

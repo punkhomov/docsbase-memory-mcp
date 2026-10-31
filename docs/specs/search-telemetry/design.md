@@ -92,16 +92,26 @@ pub struct AnnOutcome {
 ```
 
 - Путь поиска пишет исход в точке решения (`dense_candidates`).
-- `status` читает его через `Option<&DenseCache>`; в CLI direct-режиме кэш есть
-  (`LoadOnly`), в тестах можно передать `None` — тогда `ann.state == "disabled"`.
+- `status` читает его через `Option<&DenseCache>`; `None` → `unknown` (состояние
+  неизвестно), а `disabled` остаётся за «тир выключен конфигом». Смешивать эти
+  два состояния нельзя: тест на `loading`/`disabled` иначе проходит по неверной
+  причине.
 - TTL 1 час: запись старше → `stale`. Вытеснение — вместе с записями кэша
   (`max_projects`), плюс жёсткий предел: одна запись на проект.
 - `vectors`/`estimated_bytes` берутся из резидентного `AnnIndex`
   (`ann.rs::count/dim/estimated_bytes`); если индекс не резидентен — `null`.
   Дисковых чтений на `status` нет.
 
-`status` меняет сигнатуру: добавляется `dense: Option<&DenseCache>`. Это ломает
-три тестовых вызова (`tests/cleanup.rs`), они обновляются в T5.
+`status` меняет сигнатуру: добавляется `dense: Option<&DenseCache>`. Обновляются
+два продакшн-вызова (`src/daemon/server.rs`, `src/cli/status.rs`) и три тестовых
+(`tests/registry.rs`, `tests/vcs.rs` ×2) — в T5.
+
+**CLI direct-режим.** `docsbase search` создаёт `DenseCache` на один процесс
+(`src/cli/search.rs:46`, `LoadOnly`), поэтому запись исхода умирает вместе с ним,
+а `docsbase status` без демона строит свой кэш и записи не видит. Это не
+недосмотр, а следствие того, что исход — состояние демона: CLI отвечает
+`unknown` + `reason: "daemon not running"`. Персистентность ради одного поля не
+заводим; если понадобится — это отдельный шаг (файл рядом с `ann_store`).
 
 ## 6. OTel-совместимость без зависимости
 
