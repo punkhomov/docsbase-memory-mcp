@@ -15,6 +15,7 @@ use crate::hybrid::blocking;
 use crate::hybrid::config::DEFAULT_RERANK_WINDOW;
 use crate::hybrid::dense::{self, DenseCache, DenseRows};
 use crate::hybrid::jobs::{self as hybrid_jobs, Coverage};
+use crate::hybrid::meta::{self, ScoreScale, SearchMeta, Stage};
 use crate::hybrid::rrf::rrf_merge;
 use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
@@ -199,49 +200,15 @@ pub fn search_docs_with(
     window: u32,
 ) -> Result<Value> {
     ensure_indexed(project)?;
-    let query = args
-        .get("query")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::Protocol {
-            message: "search_docs: missing query".to_owned(),
-        })?;
-    // Client-supplied limits are clamped: the top-k collector allocates
-    // proportional to the request (final review C1). A wrong type is a
-    // protocol error instead of a silent default.
-    let limit = match args.get("limit") {
-        None | Some(Value::Null) => 10,
-        Some(value) => {
-            let raw = value.as_u64().ok_or_else(|| Error::Protocol {
-                message: format!("search_docs: limit must be a positive integer, got {value}"),
-            })?;
-            if raw == 0 {
-                return Ok(Value::Array(Vec::new()));
-            }
-            usize::try_from(raw).unwrap_or(usize::MAX).min(MAX_HITS)
-        }
-    };
-    if let Some(scope) = args.get("scope")
-        && scope.as_str() != Some("project")
-    {
-        return Err(Error::Protocol {
-            message: format!("search_docs: scope must be \"project\", got {scope}"),
-        });
+    let SearchArgs {
+        query,
+        limit,
+        explain,
+        rerank: requested,
+    } = parse_search_args(args)?;
+    if limit == 0 {
+        return empty_response(db, project, explain);
     }
-
-    let requested = match args.get("rerank") {
-        None | Some(Value::Null) => None,
-        Some(value) => Some(value.as_bool().ok_or_else(|| Error::Protocol {
-            message: format!("search_docs: rerank must be a boolean, got {value}"),
-        })?),
-    };
-    let rerank_active = requested.unwrap_or(stages.reranker.is_some());
-    if requested == Some(true) && stages.reranker.is_none() {
-        return Err(Error::Protocol {
-            message: "search_docs: rerank=true but hybrid rerank is not enabled for this project"
-                .to_owned(),
-        });
-    }
-
     // The rerank and RRF stages need a wider candidate window than the
     // requested limit (FR-11, FR-16); plain BM25 fetches exactly the limit.
     // `HybridStages` is a public type: rrf with no embedder is an invariant
@@ -252,17 +219,26 @@ pub fn search_docs_with(
             "search_docs: rrf ranking requires the embedding stage (FR-17)",
         ));
     }
+    let rerank_active = requested.unwrap_or(stages.reranker.is_some());
+    if requested == Some(true) && stages.reranker.is_none() {
+        return Err(Error::Protocol {
+            message: "search_docs: rerank=true but hybrid rerank is not enabled for this project"
+                .to_owned(),
+        });
+    }
     let fetch = if rerank_active || rrf_active {
         limit.max(window as usize).min(MAX_HITS)
     } else {
         limit
     };
+    let started = std::time::Instant::now();
     let index = ReadIndex::open(&lifecycle::index_dir(cache, project.id))?;
-    let hits = index.search(query, fetch)?;
+    let hits = index.search(&query, fetch)?;
+    let bm25_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     let bm25: Vec<(u64, f32)> = hits.iter().map(|hit| (hit.chunk_id, hit.score)).collect();
     let mut ordered: Vec<(u64, f32)> = if rrf_active {
-        let dense_hits = dense_candidates(stages, dense, db, project, query, fetch)?;
+        let dense_hits = dense_candidates(stages, dense, db, project, &query, fetch)?;
         let mut fused = rrf_merge(&bm25, &dense_hits);
         // The union of two fetch-sized lists can reach 2x fetch; the rerank
         // stage must not see more candidates than the configured window
@@ -273,7 +249,7 @@ pub fn search_docs_with(
         bm25
     };
     if rerank_active {
-        apply_rerank(stages, db, query, &mut ordered)?;
+        apply_rerank(stages, db, &query, &mut ordered)?;
     }
     ordered.truncate(limit);
 
@@ -290,7 +266,131 @@ pub fn search_docs_with(
             }));
         }
     }
-    Ok(Value::Array(rows))
+    if !explain {
+        return Ok(Value::Array(rows));
+    }
+    let meta = build_meta(
+        rerank_active,
+        rrf_active,
+        bm25_ms,
+        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        fetch,
+        repo::index_generation(db.connection(), project.id)?,
+    );
+    Ok(meta::envelope(&rows, &meta))
+}
+
+/// Parsed `search_docs` arguments: types are validated once, so the search body
+/// stays about searching.
+struct SearchArgs {
+    query: String,
+    limit: usize,
+    explain: bool,
+    rerank: Option<bool>,
+}
+
+fn parse_search_args(args: &Value) -> Result<SearchArgs> {
+    let query = args
+        .get("query")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Protocol {
+            message: "search_docs: missing query".to_owned(),
+        })?
+        .to_owned();
+    // Telemetry is opt-in: the default response stays the bare citation array
+    // (FR-1/FR-7, spec `search-telemetry`).
+    let explain = match args.get("explain") {
+        None | Some(Value::Null) => false,
+        Some(value) => value.as_bool().ok_or_else(|| Error::Protocol {
+            message: format!("search_docs: explain must be a boolean, got {value}"),
+        })?,
+    };
+    // Client-supplied limits are clamped: the top-k collector allocates
+    // proportional to the request (final review C1). A wrong type is a
+    // protocol error instead of a silent default.
+    let limit = match args.get("limit") {
+        None | Some(Value::Null) => 10,
+        Some(value) => {
+            let raw = value.as_u64().ok_or_else(|| Error::Protocol {
+                message: format!("search_docs: limit must be a positive integer, got {value}"),
+            })?;
+            usize::try_from(raw).unwrap_or(usize::MAX).min(MAX_HITS)
+        }
+    };
+    if let Some(scope) = args.get("scope")
+        && scope.as_str() != Some("project")
+    {
+        return Err(Error::Protocol {
+            message: format!("search_docs: scope must be \"project\", got {scope}"),
+        });
+    }
+    let rerank = match args.get("rerank") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_bool().ok_or_else(|| Error::Protocol {
+            message: format!("search_docs: rerank must be a boolean, got {value}"),
+        })?),
+    };
+    Ok(SearchArgs {
+        query,
+        limit,
+        explain,
+        rerank,
+    })
+}
+
+/// `limit = 0` answers without searching (FR-8): `[]`, or an envelope whose
+/// `window` is `0` when telemetry was requested.
+fn empty_response(db: &Db, project: &Project, explain: bool) -> Result<Value> {
+    if !explain {
+        return Ok(Value::Array(Vec::new()));
+    }
+    let meta = SearchMeta {
+        score_scale: ScoreScale::Bm25,
+        stages: Vec::new(),
+        total_ms: 0,
+        stage_ms: Vec::new(),
+        window: 0,
+        index_generation: repo::index_generation(db.connection(), project.id)?,
+        degraded: Vec::new(),
+    };
+    Ok(meta::envelope(&[], &meta))
+}
+
+/// Telemetry for one search (FR-2). The scale and the stage list come from what
+/// actually ran, never from the config: a `rerank: false` request on a project
+/// with a stage answers in fused order, so the scale is `rrf`.
+fn build_meta(
+    rerank_active: bool,
+    rrf_active: bool,
+    bm25_ms: u64,
+    total_ms: u64,
+    fetch: usize,
+    index_generation: i64,
+) -> SearchMeta {
+    let score_scale = if rerank_active {
+        ScoreScale::Rerank
+    } else if rrf_active {
+        ScoreScale::Rrf
+    } else {
+        ScoreScale::Bm25
+    };
+    let mut stages = vec![Stage::Bm25];
+    if rrf_active {
+        stages.push(Stage::Dense);
+        stages.push(Stage::Rrf);
+    }
+    if rerank_active {
+        stages.push(Stage::Rerank);
+    }
+    SearchMeta {
+        score_scale,
+        stages,
+        total_ms,
+        stage_ms: vec![(Stage::Bm25, bm25_ms)],
+        window: fetch,
+        index_generation,
+        degraded: Vec::new(),
+    }
 }
 
 /// `list_docs`: keyset-paginated documents of one project (FR-25).

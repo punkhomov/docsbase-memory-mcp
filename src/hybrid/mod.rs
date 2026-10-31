@@ -16,6 +16,7 @@ pub mod ann_store;
 pub mod config;
 pub mod dense;
 pub mod jobs;
+pub mod meta;
 pub mod provider;
 pub mod rrf;
 

@@ -206,6 +206,125 @@ fn default_response_shape_is_the_bare_citation_array() {
     }
 }
 
+/// `explain: true` adds the envelope; the scale and stages come from what ran,
+/// not from the config (search-telemetry FR-2).
+#[test]
+fn explain_reports_the_scale_and_the_stages_that_ran() {
+    let (cache, db, project) = project_with_docs();
+    embed_all(&db, project.id);
+    let dense = DenseCache::new();
+    let reranker = Arc::new(ReverseReranker::default());
+    // `window` is the fetch that actually happened: a lexical search fetches
+    // exactly `limit`, a fused or reranked one fetches `max(limit, window)`.
+    let cases: Vec<(&str, HybridStages, &str, Vec<&str>, u64)> = vec![
+        ("lexical", HybridStages::default(), "bm25", vec!["bm25"], 3),
+        (
+            "rrf",
+            rrf_stages(None),
+            "rrf",
+            vec!["bm25", "dense", "rrf"],
+            50,
+        ),
+        (
+            "rrf+rerank",
+            rrf_stages(Some(Arc::clone(&reranker))),
+            "rerank",
+            vec!["bm25", "dense", "rrf", "rerank"],
+            50,
+        ),
+    ];
+    for (label, stages, scale, expected_stages, expected_window) in cases {
+        let value = search_docs_with(
+            &stages,
+            &dense,
+            &db,
+            cache.path(),
+            &project,
+            &json!({ "query": "alpha", "limit": 3, "explain": true }),
+            50,
+        )
+        .expect("explain search");
+        let meta = &value["meta"];
+        assert_eq!(meta["score_scale"], scale, "{label}");
+        assert_eq!(
+            meta["stages"],
+            serde_json::json!(expected_stages),
+            "{label}"
+        );
+        assert_eq!(
+            meta["window"], expected_window,
+            "{label}: window is the fetch, not limit"
+        );
+        assert!(
+            meta["index_generation"].as_i64().unwrap_or_default() >= 0,
+            "{label}: generation is reported"
+        );
+        assert_eq!(meta["degraded"], serde_json::json!([]), "{label}");
+        assert!(
+            meta["stage_ms"]["total"].as_u64().is_some(),
+            "{label}: total timing present"
+        );
+        assert!(
+            value["hits"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty()),
+            "{label}: hits stay the same array"
+        );
+    }
+}
+
+/// A `rerank: false` request on a project with a stage answers in fused order,
+/// so the scale must say `rrf`, not `rerank`.
+#[test]
+fn explain_follows_the_effective_path_not_the_config() {
+    let (cache, db, project) = project_with_docs();
+    embed_all(&db, project.id);
+    let dense = DenseCache::new();
+    let reranker = Arc::new(ReverseReranker::default());
+    let value = search_docs_with(
+        &rrf_stages(Some(Arc::clone(&reranker))),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 3, "rerank": false, "explain": true }),
+        50,
+    )
+    .expect("explain search");
+    assert_eq!(value["meta"]["score_scale"], "rrf");
+    assert_eq!(reranker.calls.load(Ordering::SeqCst), 0, "no rerank call");
+}
+
+#[test]
+fn explain_wraps_the_empty_result_and_rejects_a_bad_flag() {
+    let (cache, db, project) = project_with_docs();
+    let dense = DenseCache::new();
+    let empty = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 0, "explain": true }),
+        50,
+    )
+    .expect("limit 0 with explain");
+    assert_eq!(empty["hits"], json!([]));
+    assert_eq!(empty["meta"]["window"], 0);
+
+    let err = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "explain": "yes" }),
+        50,
+    )
+    .expect_err("a non-boolean explain is a protocol error");
+    assert!(err.to_string().contains("explain"), "{err}");
+}
+
 #[test]
 fn limit_zero_and_errors_carry_no_metadata() {
     let (cache, db, project) = project_with_docs();

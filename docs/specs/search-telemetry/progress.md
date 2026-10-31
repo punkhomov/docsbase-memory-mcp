@@ -38,3 +38,20 @@ Ledger исполнения `docs/specs/search-telemetry/tasks.md`. Одна з�
   и `tests/vcs.rs` ×2, не `cleanup.rs`) и смысл `None` (`unknown`, не `disabled`).
   Ruling: состояние, которое живёт в процессе, не может обещаться CLI-процессу;
   лучше честный `unknown`, чем `disabled`, который врёт о причине.
+
+- Task T1+T2: complete (2026-10-31). `explain` on the boundary + `SearchMeta`.
+  `src/hybrid/meta.rs` (ScoreScale/Stage/Degraded/SearchMeta/envelope + 3 unit
+  tests: OTel pairs unique, token set pinned, JSON field names); `search_docs_with`
+  gains `explain` (bool, wrong type = protocol error), the envelope is built by
+  `build_meta` from what actually ran, and argument parsing moved to
+  `parse_search_args` (clippy line budget). MCP schema + `docsbase search --explain`.
+  Tests: `explain_reports_the_scale_and_the_stages_that_ran` (3 configs, scale +
+  stages + window + generation + degraded), `explain_follows_the_effective_path_not_the_config`
+  (`rerank: false` answers `rrf`, provider not called), `explain_wraps_the_empty_result_and_rejects_a_bad_flag`.
+  Verify: `--test hybrid_ranking` 15 passed; full default suite 63 `test result: ok`;
+  clippy 0; fmt clean.
+  Ruling: `window` is the fetch that actually happened — `limit` for a lexical
+  search, `max(limit, window)` when fused/reranked; the first version of the test
+  asserted `50` for the lexical case and was wrong, not the code.
+  Ruling: T1 and T2 landed together — an envelope without the fields is not
+  observable, and splitting them would have added a throwaway shape.

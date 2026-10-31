@@ -71,6 +71,9 @@ pub enum Command {
         /// Maximum number of hits.
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// Attach telemetry: `{hits, meta}` instead of a bare array.
+        #[arg(long)]
+        explain: bool,
     },
     /// List indexed documents of the current project.
     List,
@@ -160,7 +163,11 @@ pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Index { path } => index::run(path.as_deref()),
-        Command::Search { query, limit } => search::run(&query, limit),
+        Command::Search {
+            query,
+            limit,
+            explain,
+        } => search::run(&query, limit, explain),
         Command::List => status::list(),
         Command::Sync { path } => sync(path.as_deref()),
         Command::Config => show_config(),
