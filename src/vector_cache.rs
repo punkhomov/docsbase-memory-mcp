@@ -1,7 +1,7 @@
 //! Content-addressed embedding cache (T53; ADR-12, phase 2).
 //!
-//! Contract only: no model ships here and nothing wires the cache into
-//! `search_docs` yet (`Config::hybrid` stays off). The point is the key:
+//! Contract: no model ships here. The cache is opened by the dense path
+//! (`hybrid::dense`) and reused across searches; the point is the key:
 //! vectors are addressed by `(model_id, chunk_hash)`, never by path or
 //! `(doc_id, seq)`, so switching branches, rebasing or duplicating a
 //! worktree never re-embeds unchanged bytes.

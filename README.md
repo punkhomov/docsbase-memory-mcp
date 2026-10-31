@@ -11,11 +11,14 @@
 >
 > Read this in another language: [Русский](README.ru.md) · **English**
 
-The core is a plain Rust library (`docsbase_memory`); the `docsbase` binary is
-its first consumer with three roles: **CLI**, **stdio MCP server**, and a
-**per-account daemon**. Embedding the library into applications and pipelines
-(as a cargo dependency) is an explicit long-term direction - API stability is
-not promised before 1.0. The daemon owns the project registry, per-project
+The `docsbase` binary has three roles: **CLI**, **stdio MCP server**, and a
+**per-account daemon**. Those three are the supported contract — the CLI flags,
+the MCP tool schema in [`docs/MCP.md`](docs/MCP.md) and the IPC protocol
+version. The crate is **not a library yet**: it is unpublished, `src/lib.rs`
+exposes the internal modules with no facade, and the module layout follows the
+binary. Turning `docsbase_memory` into an embeddable cargo dependency is a plan,
+not a shipped feature — a stable API surface and its semver promise land at the
+first publish, not before. The daemon owns the project registry, per-project
 full-text indexes, file watchers and sync jobs. The `.md` files on disk are
 the only source of truth; the MCP surface is read-only over the index.
 No network calls at runtime by default — no telemetry, no cloud, no Docker.
