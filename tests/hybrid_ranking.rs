@@ -133,6 +133,111 @@ fn close(actual: f64, expected: f64) {
     );
 }
 
+/// The default response shape is a contract: `search_docs` without `explain`
+/// returns the bare citation array, and every element keeps this exact key set
+/// and order. `explain: true` may add an envelope later; this test is the guard
+/// that the default path never gains one (search-telemetry SC-1).
+fn assert_bare_citation_array(value: &Value) {
+    let rows = value
+        .as_array()
+        .unwrap_or_else(|| panic!("default response must stay an array, got {value}"));
+    for row in rows {
+        // `serde_json::Value` keeps object keys sorted, so the contract is the
+        // key *set*: an extra field (an envelope, a snippet) fails here.
+        let mut keys: Vec<&str> = row
+            .as_object()
+            .expect("citation object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["chunk_id", "heading_path", "lines", "path", "score"],
+            "citation key set is part of the contract"
+        );
+        assert!(row["chunk_id"].is_u64(), "chunk_id stays an integer: {row}");
+        assert_eq!(
+            row["lines"].as_array().map(Vec::len),
+            Some(2),
+            "lines stays [start, end]: {row}"
+        );
+        assert!(row["score"].is_number(), "score stays numeric: {row}");
+    }
+    let serialized = serde_json::to_string(value).expect("serialize");
+    assert!(
+        serialized.starts_with('['),
+        "no envelope on the default path: {serialized}"
+    );
+}
+
+#[test]
+fn default_response_shape_is_the_bare_citation_array() {
+    let (cache, db, project) = project_with_docs();
+    embed_all(&db, project.id);
+    let dense = DenseCache::new();
+    let reranker = Arc::new(ReverseReranker::default());
+    let cases: Vec<(&str, HybridStages)> = vec![
+        ("bm25", HybridStages::default()),
+        (
+            "bm25+rerank",
+            HybridStages {
+                embedder: None,
+                reranker: Some(Arc::clone(&reranker) as Arc<dyn Reranker>),
+                ranking: Ranking::Lexical,
+            },
+        ),
+        ("rrf", rrf_stages(None)),
+        ("rrf+rerank", rrf_stages(Some(Arc::clone(&reranker)))),
+    ];
+    for (label, stages) in cases {
+        let value = search_docs_with(
+            &stages,
+            &dense,
+            &db,
+            cache.path(),
+            &project,
+            &json!({ "query": "alpha", "limit": 3 }),
+            50,
+        )
+        .expect("search");
+        assert!(!value.as_array().expect("array").is_empty(), "{label}");
+        assert_bare_citation_array(&value);
+    }
+}
+
+#[test]
+fn limit_zero_and_errors_carry_no_metadata() {
+    let (cache, db, project) = project_with_docs();
+    let dense = DenseCache::new();
+    let empty = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 0 }),
+        50,
+    )
+    .expect("limit 0");
+    assert_eq!(empty, json!([]), "limit 0 stays an empty array");
+
+    let err = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": "many" }),
+        50,
+    )
+    .expect_err("a non-integer limit is a protocol error");
+    assert!(
+        !err.to_string().contains("meta"),
+        "errors never carry telemetry: {err}"
+    );
+}
+
 #[test]
 fn lexical_search_stays_bm25_only() {
     let (cache, db, project) = project_with_docs();
