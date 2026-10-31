@@ -168,12 +168,13 @@ pub fn stop_daemon(cache: &Path) -> Result<()> {
         match platform::connect_blocking(&endpoint) {
             Ok(mut stream) => {
                 no_listener_since = None;
-                stream
-                    .write_all(&bytes)
-                    .map_err(|err| Error::internal_with_source("send stop request", err))?;
-                stream
-                    .flush()
-                    .map_err(|err| Error::internal_with_source("flush stop request", err))?;
+                // A write can fail because the peer is already shutting down
+                // and closed the connection; that is a stop under way, not a
+                // client error. Keep polling the process below, which is what
+                // decides success.
+                if stream.write_all(&bytes).is_ok() {
+                    let _ = stream.flush();
+                }
             }
             Err(_) if !platform::exists(&endpoint) => {
                 let since = *no_listener_since.get_or_insert_with(Instant::now);
@@ -381,11 +382,20 @@ fn cleanup_stale(cache: &Path) -> Result<()> {
     if is_running(cache) {
         return Ok(());
     }
-    let state = state_file(cache);
-    if state.exists() {
-        fs::remove_file(&state).map_err(|err| {
-            Error::internal_with_source(format!("remove {}", state.display()), err)
-        })?;
+    // Idempotent by nature: concurrent stops (and a stop racing the daemon's
+    // own cleanup) must not turn a sibling's success into an error. `exists()`
+    // + `remove_file()` is a TOCTOU pair, so the NotFound arm is the real
+    // guard, not the check above.
+    match fs::remove_file(state_file(cache)) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            let state = state_file(cache);
+            return Err(Error::internal_with_source(
+                format!("remove {}", state.display()),
+                err,
+            ));
+        }
     }
     let endpoint = platform::daemon_endpoint(cache);
     platform::remove(&endpoint).map_err(|err| {

@@ -297,3 +297,31 @@ a reader sees "needs to be rebuilt" for the entire window. `ReadIndex::open` and
 
 **Ruling.** A state that must be visible while a directory is being destroyed
 cannot live inside that directory.
+
+## Flake #12 — `install::concurrent_stops_do_not_wedge` (linux-local)
+
+**Symptom.** `linux-local`, combined-feature suite:
+`concurrent stop must succeed` at `tests/install.rs:491` — one of four
+concurrent `docsbase daemon stop` runs exited non-zero. The test discarded the
+command's stderr, so the reason was invisible.
+
+**Candidates, and what was done.** The failure was not reproduced locally
+(48 + 120 + 360 concurrent-stop invocations, 0 failures), so this is **not a
+proven root cause** — it is two races removed plus a diagnostic added:
+
+1. `cleanup_stale` did `state.exists()` then `fs::remove_file()`: a TOCTOU pair.
+   When several stops observe a dead daemon, the first removes the state file
+   and the rest got `ENOENT`, which surfaced as a client error. Removal is now
+   `NotFound`-tolerant (`platform::remove` for the endpoint already was).
+2. `stop_daemon` propagated `write_all`/`flush` failures. A write can fail
+   because the peer is already shutting down and closed the connection — a stop
+   under way, not a client error. The loop now ignores the write result and lets
+   the process-exit poll decide, which is what "did it stop" means.
+
+**Diagnostic.** The test now carries each stop's stderr into the assertion
+message, so the next occurrence names the failing path instead of just "must
+succeed".
+
+**Ruling.** Cleanup that any number of processes may run concurrently must treat
+`NotFound` as success — and a test that asserts on a subprocess must print that
+subprocess's stderr, otherwise a rare failure is unactionable.

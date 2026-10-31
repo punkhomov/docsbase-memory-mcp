@@ -479,16 +479,16 @@ fn concurrent_stops_do_not_wedge() {
     for _ in 0..4 {
         let mut command = env.cmd();
         stops.push(std::thread::spawn(move || {
-            command
-                .args(["daemon", "stop"])
-                .output()
-                .expect("run stop")
-                .status
-                .success()
+            let output = command.args(["daemon", "stop"]).output().expect("run stop");
+            (
+                output.status.success(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )
         }));
     }
     for stop in stops {
-        assert!(stop.join().expect("join"), "concurrent stop must succeed");
+        let (ok, stderr) = stop.join().expect("join");
+        assert!(ok, "concurrent stop must succeed; stderr: {stderr}");
     }
     assert!(
         wait_until(Duration::from_secs(3), || !process_alive(pid)),
