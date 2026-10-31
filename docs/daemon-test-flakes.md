@@ -321,6 +321,12 @@ when the build had not published yet, i.e. it flaked on timing. The check now
 lives in its own test with a 20-document corpus (~40 chunks), where the clamp
 genuinely exceeds the graph.
 
+**Root cause 3 — the process-global build gate broke a second test.** The
+fallback check first lived in its own `#[test]`; on Windows it timed out with
+`no ANN within timeout: Building(..)` after 120 s. `set_test_build_gate` is a
+process-global static, so the second test's build waited on the *first* test's
+gate. The check now runs inside the main test, after the gate is open.
+
 **Ruling.** A fake embedder must produce spread vectors — collinear duplicates
 turn an ANN assertion into a lottery on graph construction. And an assertion
 about "the ANN cannot satisfy this fetch" has to be expressed *within* the

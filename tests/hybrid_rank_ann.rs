@@ -10,6 +10,7 @@
 #![allow(clippy::cast_precision_loss, clippy::field_reassign_with_default)]
 
 use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -101,6 +102,20 @@ fn project_with_many_docs() -> (TempDir, Db, Project) {
     project_with_docs(VECTORS)
 }
 
+/// Adds a second project to an existing cache and database.
+fn add_project(db: &mut Db, cache: &std::path::Path, count: usize) -> (TempDir, Project) {
+    let root = TempDir::new().expect("root");
+    for i in 0..count {
+        let body = "x".repeat(1000 + i * 100);
+        fs::write(root.path().join(format!("d{i:04}.md")), body).expect("write doc");
+    }
+    let canonical = root.path().canonicalize().expect("canonical");
+    let mut project = registry::ensure_project(db, &canonical).expect("project");
+    run_project_index(db, cache, &project, &Config::default()).expect("index");
+    project.status = ProjectStatus::Indexed;
+    (root, project)
+}
+
 fn stages() -> HybridStages {
     HybridStages {
         embedder: Some(Arc::new(SpreadEmbedder)),
@@ -147,6 +162,49 @@ impl Drop for GateReset {
     }
 }
 
+/// A fetch the graph cannot satisfy must fall back to exact and must not be
+/// counted as an ANN-served lookup (Delta 0.3.2).
+///
+/// The window is clamped to `MAX_HITS` before the dense stage sees it, so "more
+/// than the graph holds" is only reachable on a corpus smaller than that clamp:
+/// asking a 12k-chunk project for more becomes a request for 1000, which the
+/// graph answers. This runs inside the main test rather than in its own because
+/// the build gate is process-global — a second test would wait on the first
+/// one's gate (it timed out on Windows).
+#[cfg(debug_assertions)]
+fn unsatisfiable_fetch_falls_back_without_counting(db: &mut Db, dense: &DenseCache, cache: &Path) {
+    let (small_root, small) = add_project(db, cache, SMALL_DOCS);
+    embed_project_chunks_with(db, &SpreadEmbedder, small.id).expect("embed small");
+    let small_ann = wait_for_ann(dense, db, small.id);
+    drop(small_ann);
+
+    let chunks = repo::project_counts(db.connection(), small.id)
+        .expect("project counts")
+        .chunks;
+    assert!(
+        usize::try_from(chunks).expect("chunk count fits") < MAX_HITS,
+        "the clamp must exceed this corpus, got {chunks} chunks"
+    );
+
+    let before = ann_search_count();
+    search_docs_with(
+        &stages(),
+        dense,
+        db,
+        cache,
+        &small,
+        &json!({ "query": "alpha", "limit": 10 }),
+        u32::try_from(MAX_HITS).expect("MAX_HITS fits"),
+    )
+    .expect("search with a fetch the graph cannot satisfy");
+    assert_eq!(
+        ann_search_count(),
+        before,
+        "a fallback answer must not count as an ANN-served lookup"
+    );
+    drop(small_root);
+}
+
 #[cfg(debug_assertions)]
 #[test]
 fn search_runs_during_the_build_and_ann_serves_the_read_path() {
@@ -157,7 +215,7 @@ fn search_runs_during_the_build_and_ann_serves_the_read_path() {
     let gate = TestBuildGate::new();
     set_test_build_gate(Some(gate.clone()));
     let _gate_reset = GateReset(gate.clone());
-    let (cache, db, project) = project_with_many_docs();
+    let (cache, mut db, project) = project_with_many_docs();
     let stored = embed_project_chunks_with(&db, &SpreadEmbedder, project.id).expect("embed");
     assert!(
         stored >= VECTORS as u64,
@@ -247,49 +305,6 @@ fn search_runs_during_the_build_and_ann_serves_the_read_path() {
         after_publish, repeat,
         "persisted ANN answers deterministically"
     );
-}
 
-/// A fetch the graph cannot satisfy must fall back to exact and must not be
-/// counted as an ANN-served lookup (Delta 0.3.2).
-///
-/// The window is clamped to `MAX_HITS` (1000) before the dense stage sees it,
-/// so "more than the graph holds" is only reachable on a corpus smaller than
-/// that clamp. Asking a 12k-chunk project for `chunks + 1` does not test this:
-/// the request becomes 1000 and the graph answers it — which is exactly how the
-/// old assertion flaked, since it depended on whether the build had published.
-#[cfg(debug_assertions)]
-#[test]
-fn an_unsatisfiable_fetch_falls_back_without_counting() {
-    let (cache, db, project) = project_with_docs(SMALL_DOCS);
-    embed_project_chunks_with(&db, &SpreadEmbedder, project.id).expect("embed");
-
-    let mut limits = DenseCacheLimits::default();
-    limits.min_vectors = 2;
-    let dense = DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, cache.path(), limits);
-    let _ann = wait_for_ann(&dense, &db, project.id);
-
-    let chunks = repo::project_counts(db.connection(), project.id)
-        .expect("project counts")
-        .chunks;
-    assert!(
-        usize::try_from(chunks).expect("chunk count fits") < MAX_HITS,
-        "the clamp must exceed this corpus, got {chunks} chunks"
-    );
-
-    let before = ann_search_count();
-    search_docs_with(
-        &stages(),
-        &dense,
-        &db,
-        cache.path(),
-        &project,
-        &json!({ "query": "alpha", "limit": 10 }),
-        u32::try_from(MAX_HITS).expect("MAX_HITS fits"),
-    )
-    .expect("search with a fetch the graph cannot satisfy");
-    assert_eq!(
-        ann_search_count(),
-        before,
-        "a fallback answer must not count as an ANN-served lookup"
-    );
+    unsatisfiable_fetch_falls_back_without_counting(&mut db, &dense, cache.path());
 }
