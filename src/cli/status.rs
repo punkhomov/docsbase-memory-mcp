@@ -61,6 +61,8 @@ pub fn status() -> anyhow::Result<()> {
         None,
         &|_| false,
         &|_| None,
+        // Direct mode has no daemon, so it cannot see the ANN outcome record.
+        None,
     )?;
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())

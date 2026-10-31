@@ -97,6 +97,66 @@ impl Degraded {
     }
 }
 
+/// State of the ANN tier as the daemon last observed it (FR-5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnState {
+    /// The tier is off by configuration.
+    Disabled,
+    /// Hybrid is on but no search has run since the daemon started.
+    Loading,
+    /// A background build is in flight.
+    Building,
+    /// The ANN served the last search.
+    Ready,
+    /// The project is above the resident cap; exact streaming answers.
+    TooLarge,
+    /// The last search fell back to exact for another reason.
+    Fallback,
+    /// The last observation is older than the TTL.
+    Stale,
+    /// The caller cannot see the daemon's state (CLI direct mode).
+    Unknown,
+}
+
+impl AnnState {
+    /// Stable wire name (contract).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Loading => "loading",
+            Self::Building => "building",
+            Self::Ready => "ready",
+            Self::TooLarge => "too_large",
+            Self::Fallback => "fallback",
+            Self::Stale => "stale",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// How long a recorded observation stays authoritative (FR-6).
+pub const ANN_OUTCOME_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// The last ANN outcome the search path observed for one project (FR-6).
+#[derive(Debug, Clone, Copy)]
+pub struct AnnOutcome {
+    /// State at that moment.
+    pub state: AnnState,
+    /// Why, when the state is not `ready`; never empty in that case.
+    pub reason: Option<&'static str>,
+    /// When it was observed (monotonic).
+    pub at: std::time::Instant,
+}
+
+impl AnnOutcome {
+    /// True once the observation is older than [`ANN_OUTCOME_TTL`].
+    #[must_use]
+    pub fn is_stale(&self) -> bool {
+        self.at.elapsed() > ANN_OUTCOME_TTL
+    }
+}
+
 /// Telemetry attached to one search response (FR-2).
 #[derive(Debug, Clone)]
 pub struct SearchMeta {
@@ -144,7 +204,7 @@ pub fn envelope(hits: &[Value], meta: &SearchMeta) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{Degraded, ScoreScale, SearchMeta, Stage};
+    use super::{AnnState, Degraded, ScoreScale, SearchMeta, Stage};
 
     #[test]
     fn stage_names_have_unique_otel_pairs() {
@@ -182,6 +242,34 @@ mod tests {
                 "ann-error",
                 "exact-fallback",
                 "no-rerank-stage"
+            ]
+        );
+    }
+
+    #[test]
+    fn ann_states_are_the_contract_set() {
+        let states = [
+            AnnState::Disabled,
+            AnnState::Loading,
+            AnnState::Building,
+            AnnState::Ready,
+            AnnState::TooLarge,
+            AnnState::Fallback,
+            AnnState::Stale,
+            AnnState::Unknown,
+        ];
+        let names: Vec<&str> = states.iter().map(|state| state.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "disabled",
+                "loading",
+                "building",
+                "ready",
+                "too_large",
+                "fallback",
+                "stale",
+                "unknown"
             ]
         );
     }

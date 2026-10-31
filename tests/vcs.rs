@@ -30,7 +30,7 @@ fn vcs_status_reports_branch_and_head() {
         fd_count: 0,
         threads: 0,
     };
-    let value = tools::status(&db, &stats, 0, None, &|_| false, &|_| None).expect("status");
+    let value = tools::status(&db, &stats, 0, None, &|_| false, &|_| None, None).expect("status");
     let entry = &value["projects"][0];
     assert_eq!(entry["id"], json!(project.id));
     assert_eq!(entry["name"], json!(project.name));
@@ -51,6 +51,6 @@ fn vcs_status_omits_git_outside_repository() {
         fd_count: 0,
         threads: 0,
     };
-    let value = tools::status(&db, &stats, 0, None, &|_| false, &|_| None).expect("status");
+    let value = tools::status(&db, &stats, 0, None, &|_| false, &|_| None, None).expect("status");
     assert!(value["projects"][0].get("git").is_none());
 }

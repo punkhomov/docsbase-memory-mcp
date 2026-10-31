@@ -15,7 +15,7 @@ use crate::hybrid::blocking;
 use crate::hybrid::config::DEFAULT_RERANK_WINDOW;
 use crate::hybrid::dense::{self, DenseCache, DenseRows};
 use crate::hybrid::jobs::{self as hybrid_jobs, Coverage};
-use crate::hybrid::meta::{self, Degraded, ScoreScale, SearchMeta, Stage};
+use crate::hybrid::meta::{self, AnnState, Degraded, ScoreScale, SearchMeta, Stage};
 use crate::hybrid::rrf::rrf_merge;
 use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
@@ -111,12 +111,17 @@ fn dense_candidates(
     // registry query prefix (FR-10, SC-9); backfill uses `embed`.
     let vector = blocking::enter(|| embedder.embed_query(query))?;
     let model_id = embedder.model_id();
-    match dense.get(db, project.id, model_id)? {
-        DenseRows::Ready(index) => dense::top_k(&vector, index.rows(), fetch),
+    let rows = dense.get(db, project.id, model_id)?;
+    match rows {
+        DenseRows::Ready(index) => {
+            dense.record_outcome(project.id, AnnState::Ready, None);
+            dense::top_k(&vector, index.rows(), fetch)
+        }
         DenseRows::Ann(ann) => match ann.search(&vector, fetch) {
             Ok(hits) if hits.len() >= fetch => {
                 #[cfg(debug_assertions)]
                 ANN_SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                dense.record_outcome(project.id, AnnState::Ready, None);
                 Ok(hits)
             }
             Ok(hits) => {
@@ -125,11 +130,17 @@ fn dense_candidates(
                     hits.len()
                 );
                 degrade(degraded, Degraded::AnnInsufficient);
+                dense.record_outcome(
+                    project.id,
+                    AnnState::Fallback,
+                    Some("ann returned fewer candidates than the window"),
+                );
                 stream_exact(db, model_id, project.id, &vector, fetch)
             }
             Err(err) => {
                 eprintln!("warning: ann search failed: {err}; falling back to exact");
                 degrade(degraded, Degraded::AnnError);
+                dense.record_outcome(project.id, AnnState::Fallback, Some("ann search failed"));
                 stream_exact(db, model_id, project.id, &vector, fetch)
             }
         },
@@ -137,14 +148,29 @@ fn dense_candidates(
             // Above the resident cap by design: exact streaming is the answer,
             // not an error.
             degrade(degraded, Degraded::ExactFallback);
+            dense.record_outcome(
+                project.id,
+                AnnState::TooLarge,
+                Some("above the resident cap"),
+            );
             stream_hashes(db, model_id, &hashes, &vector, fetch)
         }
         DenseRows::Building(building) => {
             degrade(degraded, Degraded::AnnBuilding);
+            dense.record_outcome(
+                project.id,
+                AnnState::Building,
+                Some("background build in flight"),
+            );
             stream_hashes(db, model_id, &building.hashes, &vector, fetch)
         }
         DenseRows::Failed(failed) => {
             degrade(degraded, Degraded::AnnError);
+            dense.record_outcome(
+                project.id,
+                AnnState::Fallback,
+                Some("the last build failed"),
+            );
             stream_hashes(db, model_id, &failed.hashes, &vector, fetch)
         }
     }
@@ -306,6 +332,38 @@ pub fn search_docs_with(
         repo::index_generation(db.connection(), project.id)?,
     );
     Ok(meta::envelope(&rows, &meta))
+}
+
+/// ANN tier state as the daemon last saw it (FR-5/FR-6): the last recorded
+/// outcome when there is one, otherwise the config/absence tells the story.
+fn ann_state(dense: Option<&DenseCache>, project_id: i64, hybrid_on: bool) -> Value {
+    let Some(dense) = dense else {
+        // CLI direct mode: the outcome record lives in the daemon process.
+        return json!({
+            "state": AnnState::Unknown.as_str(),
+            "vectors": Value::Null,
+            "estimated_bytes": Value::Null,
+            "reason": "daemon not running",
+        });
+    };
+    let snapshot = dense.ann_snapshot(project_id);
+    let (vectors, bytes) = snapshot.map_or((Value::Null, Value::Null), |(count, bytes)| {
+        (json!(count), json!(bytes))
+    });
+    let (state, reason) = match dense.outcome(project_id) {
+        Some(outcome) if outcome.is_stale() => {
+            (AnnState::Stale, Some("last search is older than one hour"))
+        }
+        Some(outcome) => (outcome.state, outcome.reason),
+        None if !hybrid_on => (AnnState::Disabled, Some("hybrid off")),
+        None => (AnnState::Loading, Some("no search yet")),
+    };
+    json!({
+        "state": state.as_str(),
+        "vectors": vectors,
+        "estimated_bytes": bytes,
+        "reason": reason.map_or(Value::Null, Value::from),
+    })
 }
 
 /// Records a degradation once (order preserved, no duplicates).
@@ -669,15 +727,19 @@ pub fn status(
     restart_notice: Option<&str>,
     watching: &dyn Fn(i64) -> bool,
     coverage: &dyn Fn(&Project) -> Option<Coverage>,
+    dense: Option<&DenseCache>,
 ) -> Result<Value> {
     let mut projects = Vec::new();
     for project in registry::list_projects(db)? {
         let mut entry = project_entry(db, &project, Some(watching(project.id)), true)?;
         entry["root_state"] = json!(registry::root_state(&project.canonical_root).as_str());
+        entry["index_generation"] = json!(repo::index_generation(db.connection(), project.id)?);
+        let hybrid_on = coverage(&project).is_some();
         entry["embed_coverage"] = match coverage(&project) {
             Some(cov) => json!({ "cached": cov.cached, "total": cov.total }),
             None => Value::Null,
         };
+        entry["ann"] = ann_state(dense, project.id, hybrid_on);
         projects.push(entry);
     }
     let hint = projects

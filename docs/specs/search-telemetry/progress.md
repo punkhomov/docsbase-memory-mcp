@@ -76,3 +76,32 @@ Ledger исполнения `docs/specs/search-telemetry/tasks.md`. Одна з�
   `degraded == ["ann-building"]`.
   Verify: `--test hybrid_ranking` 18 passed, `--test hybrid_rank_ann` 1 passed;
   full default suite 63 `test result: ok`; clippy 0; fmt clean.
+
+- Task T5: complete (2026-10-31). `AnnOutcome` + `status.ann` + `index_generation`.
+  `DenseCache` gains `outcomes` (one record per project, capped at
+  `limits.max_projects`, oldest dropped) with `record_outcome`/`outcome`/
+  `ann_snapshot`; `dense_candidates` records at each decision point; `status`
+  takes `Option<&DenseCache>`, emits `index_generation` and `ann`, and
+  `ann_state()` maps absence → `unknown` (no daemon), no record + hybrid off →
+  `disabled`, no record + hybrid on → `loading`, stale record → `stale`.
+  `tests/status.rs` (new target): unknown without a daemon, ready after a
+  published ANN search (with `vectors > 0`), disabled, loading, and a recorded
+  fallback naming its reason. Call sites updated: `daemon/server.rs`,
+  `cli/status.rs`, `tests/registry.rs`, `tests/vcs.rs` ×2.
+  Verify: `--test status` 5 passed; full default suite 64 `test result: ok`;
+  combo 64; clippy 0; fmt clean.
+  Ruling: `status` reads the record, never the tier — no build, no disk read, and
+  `vectors`/`estimated_bytes` are `null` when the graph is not resident.
+  Ruling: the 2-chunk fixture can only satisfy `fetch = 2`; a `10` window made the
+  ANN answer "insufficient" and the test reported `fallback` — the state was
+  correct and the test's premise was not.
+- Task T6: complete (2026-10-31). OTel name table in `meta.rs` (`Stage::otel()`),
+  unit test `stage_names_have_unique_otel_pairs`; no OTel dependency.
+- Task T7: complete (2026-10-31). `docs/MCP.md` (explain + Telemetry section +
+  status fields) and `CHANGELOG` [Unreleased]/Added.
+- Task T8: complete (2026-10-31). `search_bench` 68 passed with
+  `metrics_match_baseline` green and `baseline.json` untouched (`git diff` empty);
+  `perf_budget` release 6 passed; full default suite 64; combo 64; clippy 0; fmt
+  clean.
+  Ruling: the baseline was not regenerated — `hits[]` is byte-identical on the
+  default path, which is what SC-1/FR-7 require.

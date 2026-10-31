@@ -240,6 +240,12 @@ impl AnnIndex {
         })
     }
 
+    /// Number of vectors in the graph.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
     /// Estimated resident bytes: vectors plus graph overhead (design §8).
     #[must_use]
     pub fn estimated_bytes(&self) -> usize {
