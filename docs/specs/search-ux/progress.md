@@ -46,3 +46,14 @@ Ruling фиксируют принятые решения; minor — что от
   (`limit == 0` и кламп `limit ≤ MAX_HITS`), без которых формула окна читалась
   неоднозначно; в T2 добавлен шаг «`empty_response` собирает `filters`/`trimmed`».
   Ruling: пустой вход батчей — не край, а норма; guard обязателен и покрыт тестом.
+
+- Task T0: complete (2026-10-31). Characterization + deltas + the direct-mode bug.
+  RED → GREEN: `tests/cli_read.rs::explain_works_without_a_daemon` failed with the
+  bare array (the direct path forwarded only `{query, limit}`), now green after
+  `src/cli/search.rs` forwards `explain`. Датированные дельты добавлены в
+  `ann-index/requirements.md` (§13) и `search-quality/requirements.md` (§13):
+  аддитивные opt-in поля разрешены, дефолтная форма и baseline не меняются.
+  Verify: `--test cli_read` 10 passed, `--test hybrid_ranking` 18 passed,
+  clippy 0, fmt clean.
+  Ruling: починка `explain` в direct-режиме сделана в T0, а не в T4 — иначе ветка
+  оставалась бы красной между коммитами; T4 доберёт только новые ключи.

@@ -55,7 +55,11 @@ pub fn run(query: &str, limit: usize, explain: bool) -> anyhow::Result<()> {
         &db,
         &cache,
         &project,
-        &serde_json::json!({ "query": query, "limit": limit }),
+        //
+        // Direct mode forwards every search argument, `explain` included: it used
+        // to drop it, so `--explain` worked only with a daemon running
+        // (search-ux FR-8, T0).
+        &serde_json::json!({ "query": query, "limit": limit, "explain": explain }),
         window,
     )?;
     println!("{}", serde_json::to_string_pretty(&value)?);

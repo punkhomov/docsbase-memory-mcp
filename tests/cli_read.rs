@@ -80,6 +80,28 @@ fn search_without_daemon() {
     assert!(first["score"].as_f64().expect("score") > 0.0);
 }
 
+/// `--explain` must work in direct mode too: the daemon path forwards it, the
+/// direct path used to drop it (search-ux FR-8, T0 RED).
+#[test]
+fn explain_works_without_a_daemon() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    env.index();
+
+    let output = env
+        .cmd()
+        .args(["search", "widgets", "--limit", "5", "--explain"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let value = stdout_json(&output);
+    assert!(
+        value["hits"].as_array().is_some(),
+        "direct mode must return the envelope, got: {value}"
+    );
+    assert_eq!(value["meta"]["score_scale"], "bm25");
+}
+
 #[test]
 fn config_prints_effective_values() {
     let env = Env::new(&[("README.md", DOC)]);
