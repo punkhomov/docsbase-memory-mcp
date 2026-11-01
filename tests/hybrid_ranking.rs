@@ -231,6 +231,254 @@ fn default_response_shape_is_the_bare_citation_array() {
 /// not from the config (search-telemetry FR-2).
 /// `snippet: true` attaches a fragment that is literally a prefix of the chunk
 /// text, and only then (search-ux FR-1 / SC-2).
+/// `path_prefix` is a literal prefix over the candidate window
+/// (search-ux FR-3 / SC-4).
+#[test]
+fn path_prefix_filters_the_window() {
+    let (cache, db, project) = project_with_docs();
+    let dense = DenseCache::new();
+    let all = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 3 }),
+        50,
+    )
+    .expect("plain search");
+    assert!(paths(&all).iter().any(|path| path != "c.md"));
+
+    let filtered = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 3, "path_prefix": "c." }),
+        50,
+    )
+    .expect("filtered search");
+    let hits = paths(&filtered);
+    assert!(!hits.is_empty(), "the prefix matches one document");
+    assert!(
+        hits.iter().all(|path| path.starts_with("c.")),
+        "no foreign hits: {hits:?}"
+    );
+
+    // Literal: `C.` (uppercase) matches nothing, unlike SQL LIKE.
+    let case = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 3, "path_prefix": "C." }),
+        50,
+    )
+    .expect("case-sensitive prefix");
+    assert_eq!(case, json!([]), "the prefix is not case-insensitive");
+}
+
+/// `tags` is an AND over frontmatter tags; missing frontmatter means no tags
+/// (search-ux FR-4).
+#[test]
+fn tags_filter_on_frontmatter() {
+    let (cache, db, project) = project_with_tagged_doc();
+    let dense = DenseCache::new();
+    let tagged = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "widgets", "limit": 5, "tags": ["api"] }),
+        50,
+    )
+    .expect("tag search");
+    let hits = paths(&tagged);
+    assert_eq!(
+        hits,
+        vec!["tagged.md"],
+        "only the tagged document: {hits:?}"
+    );
+
+    let both = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "widgets", "limit": 5, "tags": ["api", "docs"] }),
+        50,
+    )
+    .expect("and search");
+    assert_eq!(paths(&both), vec!["tagged.md"]);
+
+    let missing = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "widgets", "limit": 5, "tags": ["nope"] }),
+        50,
+    )
+    .expect("no match is not an error");
+    assert_eq!(missing, json!([]), "empty result, not an error");
+}
+
+/// `dedupe: "path"` keeps at most `n_per_doc` chunks per document without
+/// reordering the survivors (search-ux FR-2 / SC-3).
+#[test]
+fn dedupe_by_path_caps_chunks_per_document() {
+    let (cache, db, project) = project_with_chunky_doc();
+    let dense = DenseCache::new();
+    let plain = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "widgets", "limit": 8 }),
+        50,
+    )
+    .expect("plain search");
+    let plain_paths = paths(&plain);
+    assert!(
+        plain_paths.len() > 1 && plain_paths.iter().all(|path| path == "chunky.md"),
+        "the fixture fills the page with one file: {plain_paths:?}"
+    );
+
+    let deduped = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "widgets", "limit": 8, "dedupe": "path" }),
+        50,
+    )
+    .expect("deduped search");
+    assert_eq!(
+        paths(&deduped),
+        vec!["chunky.md"],
+        "one chunk per document by default"
+    );
+
+    let two = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "widgets", "limit": 8, "dedupe": "path", "n_per_doc": 2 }),
+        50,
+    )
+    .expect("two per document");
+    assert_eq!(paths(&two).len(), 2, "n_per_doc = 2 keeps two: {two}");
+    let plain_order = scores(&plain);
+    assert!(
+        plain_order.windows(2).all(|pair| pair[0] >= pair[1]),
+        "the fixture ranks descending, so survivors keep their order"
+    );
+}
+
+/// `n_per_doc` is only meaningful with dedupe, and stays in range (FR-2).
+#[test]
+fn dedupe_arguments_are_validated() {
+    let (cache, db, project) = project_with_docs();
+    let dense = DenseCache::new();
+    let base = json!({ "query": "alpha", "limit": 3 });
+    let with = |extra: serde_json::Value| {
+        let mut args = base.clone();
+        for (key, value) in extra.as_object().expect("object") {
+            args[key.as_str()] = value.clone();
+        }
+        search_docs_with(
+            &HybridStages::default(),
+            &dense,
+            &db,
+            cache.path(),
+            &project,
+            &args,
+            50,
+        )
+        .map(|_| ())
+    };
+    assert!(
+        with(json!({ "n_per_doc": 2 })).is_err(),
+        "n_per_doc without dedupe is a protocol error"
+    );
+    assert!(with(json!({ "dedupe": "path", "n_per_doc": 0 })).is_err());
+    assert!(with(json!({ "dedupe": "path", "n_per_doc": 11 })).is_err());
+    assert!(with(json!({ "dedupe": "filename" })).is_err());
+    assert!(
+        with(json!({ "tags": "api" })).is_err(),
+        "tags must be an array"
+    );
+    assert!(
+        with(json!({ "tags": [1] })).is_err(),
+        "tags must be strings"
+    );
+    assert!(with(json!({ "path_prefix": 5 })).is_err());
+    assert!(
+        with(json!({ "path_prefix": "a.", "tags": [], "dedupe": "path" })).is_ok(),
+        "empty tags is a no-op"
+    );
+}
+
+/// A project whose single document is long enough to split into many chunks.
+fn project_with_chunky_doc() -> (TempDir, Db, Project) {
+    let cache = TempDir::new().expect("cache");
+    let root = TempDir::new().expect("root");
+    let mut body = String::from("# Chunky\n\n");
+    for i in 0..24 {
+        body.push_str("widgets ");
+        body.push_str(&i.to_string());
+        body.push(' ');
+        body.push_str(&"ж".repeat(560));
+        body.push_str("\n\n");
+    }
+    std::fs::write(root.path().join("chunky.md"), body).expect("write doc");
+    let mut db = Db::open(cache.path()).expect("db");
+    let canonical = root.path().canonicalize().expect("canonical");
+    let mut project = registry::ensure_project(&mut db, &canonical).expect("project");
+    docsbase_memory::daemon::tools::run_project_index(
+        &mut db,
+        cache.path(),
+        &project,
+        &Config::default(),
+    )
+    .expect("index");
+    project.status = ProjectStatus::Indexed;
+    (cache, db, project)
+}
+
+/// A project with one tagged and one untagged document.
+fn project_with_tagged_doc() -> (TempDir, Db, Project) {
+    let cache = TempDir::new().expect("cache");
+    let root = TempDir::new().expect("root");
+    std::fs::write(
+        root.path().join("tagged.md"),
+        "---\ntags: api, docs\n---\n\n# Tagged\n\nwidgets\n",
+    )
+    .expect("write tagged");
+    std::fs::write(root.path().join("plain.md"), "# Plain\n\nwidgets\n").expect("write plain");
+    let mut db = Db::open(cache.path()).expect("db");
+    let canonical = root.path().canonicalize().expect("canonical");
+    let mut project = registry::ensure_project(&mut db, &canonical).expect("project");
+    docsbase_memory::daemon::tools::run_project_index(
+        &mut db,
+        cache.path(),
+        &project,
+        &Config::default(),
+    )
+    .expect("index");
+    project.status = ProjectStatus::Indexed;
+    (cache, db, project)
+}
+
 #[test]
 fn snippet_is_a_prefix_of_the_chunk_text() {
     let (cache, db, project) = project_with_docs();

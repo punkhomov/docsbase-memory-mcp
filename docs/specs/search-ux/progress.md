@@ -73,3 +73,35 @@ Ruling фиксируют принятые решения; minor — что от
   fmt clean.
   Ruling: `build_rows` extracted to satisfy the clippy line budget, and it keeps the
   two paths explicit — a snippet path with one JOIN and the untouched default path.
+
+- Task T2: complete (2026-10-31). Window, `path_prefix`, `tags`, `meta.filters/trimmed`.
+  `repo::doc_meta` (один запрос на батч из 400 id, пустой вход → пустая мапа без
+  SQL); `SEARCH_UX_OVERSCAN = 4` применяется только на лексическом пути;
+  `apply_post_filter` (path_prefix `starts_with` → tags AND → dedupe) стоит после
+  `apply_rerank` и до `truncate(limit)`; `FiltersMeta`/`TrimmedMeta` в `meta.rs`,
+  `empty_response` тоже их собирает.
+  Tests: `path_prefix_filters_the_window` (в т.ч. регистрозависимость: `C.` не
+  матчит `c.md`, в отличие от SQL `LIKE`), `tags_filter_on_frontmatter` (AND,
+  отсутствие тега → пустой результат, не ошибка), `dedupe_arguments_are_validated`
+  (`n_per_doc` без dedupe, `0`, `11`, `dedupe: "filename"`, `tags: "api"`,
+  `tags: [1]`, `path_prefix: 5`).
+  Verify: `--test hybrid_ranking` 24 passed; полная сьюта 64 ok.
+  Ruling: фильтр по пути — `starts_with` в Rust, а не `LIKE`: SQL `LIKE` в SQLite
+  ASCII case-insensitive и трактует `%`/`_` как маски, то есть буквальный префикс
+  он не выражает.
+- Task T3: complete (2026-10-31). Dedupe по документу.
+  `retain` с `HashMap<doc_id, usize>` до `truncate(limit)`; порядок выживших не
+  меняется; `trimmed.deduped` считает отброшенных.
+  Test: `dedupe_by_path_caps_chunks_per_document` — фикстура из одного файла на 8+
+  чанков: без дедупа выдача заполняется одним путём, с `dedupe: "path"` остаётся
+  один хит, с `n_per_doc: 2` — два, счётчики сходятся.
+  Verify: `--test hybrid_ranking` 24 passed.
+- Task T2b: pending (нужен прогон на срезе `ru_morph`; в T6).
+- Task T4: complete (2026-10-31). CLI и direct-режим.
+  `search::Options` — единый набор, `Options::args()` строит JSON для обоих швов,
+  так что daemon и direct отправляют идентичный запрос; исправлена потеря
+  `explain` (T0) и добавлены `--snippet`, `--dedupe`, `--n-per-doc`,
+  `--path-prefix`, `--tag` (повторяемый).
+  Test: `direct_mode_forwards_post_filter_flags` (префикс, сниппет, `meta.filters`).
+  Verify: `--test cli_read` 11 passed; полная сьюта 64 ok; `search_bench` 68 passed,
+  `metrics_match_baseline` зелёный, baseline не тронут; clippy 0; fmt clean.

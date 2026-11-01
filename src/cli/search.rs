@@ -5,7 +5,8 @@ use crate::config::Config;
 use crate::config::paths;
 use crate::daemon::tools;
 
-/// Runs `docsbase search <query> [--limit N] [--explain] [--snippet]`, printing a JSON array
+/// Runs `docsbase search <query> [--limit N] [--explain] [--snippet] [--dedupe …]`,
+/// printing a JSON array
 /// of `{path, heading_path, lines, score}` (FR-20) or, with `--explain`, the
 /// `{hits, meta}` envelope (spec `search-telemetry`, FR-1). Hits whose citation row
 /// vanished during an R2 crash window are dropped from the snapshot.
@@ -13,17 +14,52 @@ use crate::daemon::tools;
 /// # Errors
 /// Returns an error when the project is unregistered/not indexed, the snapshot
 /// cannot be opened, or the query is invalid.
-pub fn run(query: &str, limit: usize, explain: bool, snippet: bool) -> anyhow::Result<()> {
-    if let Some(value) = crate::cli::try_daemon(
-        "search_docs",
-        serde_json::json!({
+pub struct Options {
+    /// Maximum number of hits.
+    pub limit: usize,
+    /// Return `{hits, meta}` instead of the bare array.
+    pub explain: bool,
+    /// Attach a text fragment to each hit.
+    pub snippet: bool,
+    /// `none` or `path`.
+    pub dedupe: String,
+    /// Chunks kept per document (dedupe only).
+    pub n_per_doc: Option<u64>,
+    /// Project-relative path prefix.
+    pub path_prefix: Option<String>,
+    /// Required frontmatter tags (AND).
+    pub tags: Vec<String>,
+}
+
+impl Options {
+    /// The MCP argument object, so both seams send exactly the same request.
+    fn args(&self, query: &str) -> serde_json::Value {
+        let mut args = serde_json::json!({
             "query": query,
-            "limit": limit,
-            "explain": explain,
-            "snippet": snippet,
-        }),
-        true,
-    )? {
+            "limit": self.limit,
+            "explain": self.explain,
+            "snippet": self.snippet,
+            "dedupe": self.dedupe,
+        });
+        if let Some(n) = self.n_per_doc {
+            args["n_per_doc"] = serde_json::json!(n);
+        }
+        if let Some(prefix) = &self.path_prefix {
+            args["path_prefix"] = serde_json::json!(prefix);
+        }
+        if !self.tags.is_empty() {
+            args["tags"] = serde_json::json!(self.tags);
+        }
+        args
+    }
+}
+
+///
+/// # Errors
+/// Returns an error when the project is unregistered or not indexed, the
+/// snapshot cannot be opened, or the query or an argument is invalid.
+pub fn run(query: &str, options: &Options) -> anyhow::Result<()> {
+    if let Some(value) = crate::cli::try_daemon("search_docs", options.args(query), true)? {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
@@ -64,12 +100,7 @@ pub fn run(query: &str, limit: usize, explain: bool, snippet: bool) -> anyhow::R
         // Direct mode forwards every search argument, `explain` included: it used
         // to drop it, so `--explain` worked only with a daemon running
         // (search-ux FR-8, T0).
-        &serde_json::json!({
-            "query": query,
-            "limit": limit,
-            "explain": explain,
-            "snippet": snippet,
-        }),
+        &options.args(query),
         window,
     )?;
     println!("{}", serde_json::to_string_pretty(&value)?);

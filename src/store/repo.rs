@@ -397,6 +397,51 @@ pub fn citations_with_text(
     Ok(found)
 }
 
+/// Path and frontmatter of one document, for the search post-filter
+/// (spec `search-ux` FR-3/FR-4).
+pub struct DocMeta {
+    /// Path relative to the project root.
+    pub rel_path: String,
+    /// Raw frontmatter JSON as stored (`None` when the document has none).
+    pub frontmatter_json: Option<String>,
+}
+
+/// [`DocMeta`] for `ids`, in one query per [`BATCH_KEYS`] batch.
+///
+/// An empty `ids` returns an empty map **without SQL**: `IN ()` is a syntax
+/// error and an empty candidate window is a normal outcome.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on `SQLite` failures.
+pub fn doc_meta(conn: &Connection, ids: &[i64]) -> Result<std::collections::HashMap<i64, DocMeta>> {
+    let mut found = std::collections::HashMap::with_capacity(ids.len());
+    for batch in ids.chunks(BATCH_KEYS) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql =
+            format!("SELECT id, rel_path, frontmatter_json FROM docs WHERE id IN ({placeholders})");
+        let mut statement = conn.prepare(&sql).map_err(db_error)?;
+        let params: Vec<i64> = batch.to_vec();
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(params), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    DocMeta {
+                        rel_path: row.get(1)?,
+                        frontmatter_json: row.get(2)?,
+                    },
+                ))
+            })
+            .map_err(db_error)?;
+        for row in rows {
+            let (id, meta) = row.map_err(db_error)?;
+            found.insert(id, meta);
+        }
+    }
+    Ok(found)
+}
+
 /// One `docsbase list` row (FR-25 snapshot view).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocOverview {

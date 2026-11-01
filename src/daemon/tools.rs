@@ -15,7 +15,9 @@ use crate::hybrid::blocking;
 use crate::hybrid::config::DEFAULT_RERANK_WINDOW;
 use crate::hybrid::dense::{self, DenseCache, DenseRows};
 use crate::hybrid::jobs::{self as hybrid_jobs, Coverage};
-use crate::hybrid::meta::{self, AnnState, Degraded, ScoreScale, SearchMeta, Stage};
+use crate::hybrid::meta::{
+    self, AnnState, Degraded, FiltersMeta, ScoreScale, SearchMeta, Stage, TrimmedMeta,
+};
 use crate::hybrid::rrf::rrf_merge;
 use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
@@ -244,7 +246,12 @@ pub fn search_docs_with(
         explain,
         rerank: requested,
         snippet,
+        dedupe,
+        n_per_doc,
+        path_prefix,
+        tags,
     } = parse_search_args(args)?;
+    let filtering = dedupe != Dedupe::None || path_prefix.is_some() || !tags.is_empty();
     if limit == 0 {
         return empty_response(db, project, explain);
     }
@@ -266,7 +273,16 @@ pub fn search_docs_with(
         });
     }
     let fetch = if rerank_active || rrf_active {
+        // The window already holds `window` candidates for `limit` slots;
+        // widening it would only cost rerank work (FR-2).
         limit.max(window as usize).min(MAX_HITS)
+    } else if filtering {
+        // Lexical fetch == limit, so the post-filter would have nothing to
+        // backfill from without this overscan.
+        limit
+            .saturating_mul(SEARCH_UX_OVERSCAN)
+            .max(limit)
+            .min(MAX_HITS)
     } else {
         limit
     };
@@ -305,6 +321,14 @@ pub fn search_docs_with(
         apply_rerank(stages, db, &query, &mut ordered)?;
         stage_ms.push((Stage::Rerank, elapsed_ms(rerank_started)));
     }
+    let PostFilterOutcome { filters, trimmed } = apply_post_filter(
+        db.connection(),
+        &mut ordered,
+        dedupe,
+        n_per_doc,
+        path_prefix.as_deref(),
+        &tags,
+    )?;
     ordered.truncate(limit);
 
     let rows = build_rows(db.connection(), ordered, snippet)?;
@@ -312,10 +336,13 @@ pub fn search_docs_with(
         return Ok(Value::Array(rows));
     }
     let meta = build_meta(
-        rerank_active,
-        rrf_active,
+        ActiveStages {
+            rerank_active,
+            rrf_active,
+        },
         stage_ms,
         degraded,
+        PostFilterOutcome { filters, trimmed },
         elapsed_ms(started),
         fetch,
         repo::index_generation(db.connection(), project.id)?,
@@ -409,6 +436,86 @@ fn build_rows(
     Ok(rows)
 }
 
+/// Post-filter over the candidate window (`search-ux` FR-2…FR-5): path prefix,
+/// then frontmatter tags, then the per-document cap. Order of the survivors is
+/// preserved because `retain` only drops.
+fn apply_post_filter(
+    conn: &rusqlite::Connection,
+    ordered: &mut Vec<(u64, f32)>,
+    dedupe: Dedupe,
+    n_per_doc: usize,
+    path_prefix: Option<&str>,
+    tags: &[String],
+) -> Result<PostFilterOutcome> {
+    let filters = FiltersMeta {
+        path_prefix: path_prefix.map(str::to_owned),
+        tags: tags.to_vec(),
+        dedupe: (dedupe == Dedupe::Path).then_some("path"),
+        n_per_doc: (dedupe == Dedupe::Path).then_some(n_per_doc),
+    };
+    let mut trimmed = TrimmedMeta::default();
+    if path_prefix.is_some() || !tags.is_empty() {
+        // Paths and frontmatter for the whole window, one query per batch.
+        let ids: Vec<i64> = ordered
+            .iter()
+            .map(|(chunk_id, _)| chunk_id_parts(*chunk_id).0)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let meta_by_id = repo::doc_meta(conn, &ids)?;
+        ordered.retain(|(chunk_id, _)| {
+            let doc_id = chunk_id_parts(*chunk_id).0;
+            let keep = meta_by_id.get(&doc_id).is_some_and(|meta| {
+                path_prefix
+                    .as_ref()
+                    .is_none_or(|prefix| meta.rel_path.starts_with(prefix))
+                    && (tags.is_empty() || has_tags(meta.frontmatter_json.as_deref(), tags))
+            });
+            if !keep {
+                trimmed.filtered_out += 1;
+            }
+            keep
+        });
+    }
+    if dedupe == Dedupe::Path {
+        let mut per_doc: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+        ordered.retain(|(chunk_id, _)| {
+            let doc_id = chunk_id_parts(*chunk_id).0;
+            let seen = per_doc.entry(doc_id).or_insert(0);
+            if *seen >= n_per_doc {
+                trimmed.deduped += 1;
+                false
+            } else {
+                *seen += 1;
+                true
+            }
+        });
+    }
+    Ok(PostFilterOutcome { filters, trimmed })
+}
+
+/// Post-filter overscan on the lexical path (`search-ux` FR-2).
+pub const SEARCH_UX_OVERSCAN: usize = 4;
+
+/// Upper bound for `n_per_doc` (`search-ux` FR-2).
+pub const MAX_CHUNKS_PER_DOC: u64 = 10;
+
+/// True when the document's frontmatter carries every requested tag. Garbage in
+/// the stored JSON means "no tags", never an error (`search-ux` FR-4).
+fn has_tags(frontmatter_json: Option<&str>, required: &[String]) -> bool {
+    let Some(raw) = frontmatter_json else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return false;
+    };
+    let Some(stored) = value.get("tags").and_then(Value::as_array) else {
+        return false;
+    };
+    let stored: Vec<&str> = stored.iter().filter_map(Value::as_str).collect();
+    required.iter().all(|tag| stored.contains(&tag.as_str()))
+}
+
 /// Longest snippet returned to a caller (`search-ux` FR-1).
 pub const SNIPPET_MAX_CHARS: usize = 240;
 
@@ -426,6 +533,86 @@ fn elapsed_ms(start: std::time::Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Post-filter keys of `search_docs` (`search-ux` FR-2…FR-4), validated in one
+/// place so the search body stays about searching.
+struct PostFilterArgs {
+    dedupe: Dedupe,
+    n_per_doc: usize,
+    path_prefix: Option<String>,
+    tags: Vec<String>,
+}
+
+fn parse_post_filter(args: &Value) -> Result<PostFilterArgs> {
+    let dedupe = match args.get("dedupe") {
+        None | Some(Value::Null) => Dedupe::None,
+        Some(value) => match value.as_str() {
+            Some("none") => Dedupe::None,
+            Some("path") => Dedupe::Path,
+            _ => {
+                return Err(Error::Protocol {
+                    message: format!(
+                        "search_docs: dedupe must be \"none\" or \"path\", got {value}"
+                    ),
+                });
+            }
+        },
+    };
+    let n_per_doc = match args.get("n_per_doc") {
+        None | Some(Value::Null) => 1,
+        Some(value) => {
+            let raw = value.as_u64().ok_or_else(|| Error::Protocol {
+                message: format!("search_docs: n_per_doc must be an integer, got {value}"),
+            })?;
+            if !(1..=MAX_CHUNKS_PER_DOC).contains(&raw) {
+                return Err(Error::Protocol {
+                    message: format!(
+                        "search_docs: n_per_doc must be 1..={MAX_CHUNKS_PER_DOC}, got {raw}"
+                    ),
+                });
+            }
+            usize::try_from(raw).unwrap_or(usize::try_from(MAX_CHUNKS_PER_DOC).unwrap_or(10))
+        }
+    };
+    if args.get("n_per_doc").is_some() && n_per_doc != 1 && dedupe != Dedupe::Path {
+        return Err(Error::Protocol {
+            message: "search_docs: n_per_doc requires dedupe = \"path\"".to_owned(),
+        });
+    }
+    let path_prefix = match args.get("path_prefix") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| Error::Protocol {
+                    message: format!("search_docs: path_prefix must be a string, got {value}"),
+                })?
+                .to_owned(),
+        ),
+    };
+    let tags = match args.get("tags") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(value) => {
+            let raw = value.as_array().ok_or_else(|| Error::Protocol {
+                message: format!("search_docs: tags must be an array of strings, got {value}"),
+            })?;
+            let mut tags = Vec::with_capacity(raw.len());
+            for tag in raw {
+                let tag = tag.as_str().ok_or_else(|| Error::Protocol {
+                    message: format!("search_docs: tags must contain strings, got {tag}"),
+                })?;
+                tags.push(tag.to_owned());
+            }
+            tags
+        }
+    };
+    Ok(PostFilterArgs {
+        dedupe,
+        n_per_doc,
+        path_prefix,
+        tags,
+    })
+}
+
 /// Parsed `search_docs` arguments: types are validated once, so the search body
 /// stays about searching.
 struct SearchArgs {
@@ -434,6 +621,19 @@ struct SearchArgs {
     explain: bool,
     rerank: Option<bool>,
     snippet: bool,
+    dedupe: Dedupe,
+    n_per_doc: usize,
+    path_prefix: Option<String>,
+    tags: Vec<String>,
+}
+
+/// Which post-filter the caller asked for (`search-ux` FR-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dedupe {
+    /// No post-filter (the default).
+    None,
+    /// At most `n_per_doc` chunks per document.
+    Path,
 }
 
 fn parse_search_args(args: &Value) -> Result<SearchArgs> {
@@ -483,12 +683,22 @@ fn parse_search_args(args: &Value) -> Result<SearchArgs> {
             message: format!("search_docs: rerank must be a boolean, got {value}"),
         })?),
     };
+    let PostFilterArgs {
+        dedupe,
+        n_per_doc,
+        path_prefix,
+        tags,
+    } = parse_post_filter(args)?;
     Ok(SearchArgs {
         query,
         limit,
         explain,
         rerank,
         snippet,
+        dedupe,
+        n_per_doc,
+        path_prefix,
+        tags,
     })
 }
 
@@ -506,22 +716,42 @@ fn empty_response(db: &Db, project: &Project, explain: bool) -> Result<Value> {
         window: 0,
         index_generation: repo::index_generation(db.connection(), project.id)?,
         degraded: Vec::new(),
+        filters: None,
+        trimmed: Some(TrimmedMeta::default()),
     };
     Ok(meta::envelope(&[], &meta))
+}
+
+/// Which ranking stages actually ran this search.
+#[derive(Clone, Copy)]
+struct ActiveStages {
+    rerank_active: bool,
+    rrf_active: bool,
+}
+
+/// Filters applied to the window and what they dropped.
+struct PostFilterOutcome {
+    filters: FiltersMeta,
+    trimmed: TrimmedMeta,
 }
 
 /// Telemetry for one search (FR-2). The scale and the stage list come from what
 /// actually ran, never from the config: a `rerank: false` request on a project
 /// with a stage answers in fused order, so the scale is `rrf`.
 fn build_meta(
-    rerank_active: bool,
-    rrf_active: bool,
+    active: ActiveStages,
     stage_ms: Vec<(Stage, u64)>,
     degraded: Vec<Degraded>,
+    post: PostFilterOutcome,
     total_ms: u64,
     fetch: usize,
     index_generation: i64,
 ) -> SearchMeta {
+    let ActiveStages {
+        rerank_active,
+        rrf_active,
+    } = active;
+    let PostFilterOutcome { filters, trimmed } = post;
     let score_scale = if rerank_active {
         ScoreScale::Rerank
     } else if rrf_active {
@@ -545,6 +775,8 @@ fn build_meta(
         window: fetch,
         index_generation,
         degraded,
+        filters: Some(filters),
+        trimmed: Some(trimmed),
     }
 }
 

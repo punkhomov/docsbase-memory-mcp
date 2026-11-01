@@ -77,6 +77,18 @@ pub enum Command {
         /// Attach a text fragment to each hit.
         #[arg(long)]
         snippet: bool,
+        /// Post-filter: `none` (default) or `path` (cap chunks per document).
+        #[arg(long, default_value = "none")]
+        dedupe: String,
+        /// Chunks kept per document when `--dedupe path` (default 1, max 10).
+        #[arg(long)]
+        n_per_doc: Option<u64>,
+        /// Only documents whose project-relative path starts with this prefix.
+        #[arg(long)]
+        path_prefix: Option<String>,
+        /// Require this frontmatter tag (repeatable, AND).
+        #[arg(long = "tag")]
+        tags: Vec<String>,
     },
     /// List indexed documents of the current project.
     List,
@@ -171,7 +183,22 @@ pub fn run() -> anyhow::Result<()> {
             limit,
             explain,
             snippet,
-        } => search::run(&query, limit, explain, snippet),
+            dedupe,
+            n_per_doc,
+            path_prefix,
+            tags,
+        } => search::run(
+            &query,
+            &search::Options {
+                limit,
+                explain,
+                snippet,
+                dedupe,
+                n_per_doc,
+                path_prefix,
+                tags,
+            },
+        ),
         Command::List => status::list(),
         Command::Sync { path } => sync(path.as_deref()),
         Command::Config => show_config(),

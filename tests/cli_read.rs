@@ -102,6 +102,41 @@ fn explain_works_without_a_daemon() {
     assert_eq!(value["meta"]["score_scale"], "bm25");
 }
 
+/// The new post-filter flags reach the same seam as the MCP keys
+/// (search-ux FR-8).
+#[test]
+fn direct_mode_forwards_post_filter_flags() {
+    let env = Env::new(&[("docs/a.md", DOC), ("other/b.md", DOC)]);
+    env.index();
+
+    let output = env
+        .cmd()
+        .args([
+            "search",
+            "widgets",
+            "--path-prefix",
+            "docs/",
+            "--snippet",
+            "--explain",
+            "--dedupe",
+            "path",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let value = stdout_json(&output);
+    let hits = value["hits"].as_array().expect("hits");
+    assert!(!hits.is_empty(), "prefix matches: {value}");
+    assert!(
+        hits.iter().all(|hit| hit["path"] == "docs/a.md"),
+        "only the prefixed document: {value}"
+    );
+    assert!(hits[0]["snippet"].is_string(), "snippet forwarded: {value}");
+    assert_eq!(value["meta"]["filters"]["path_prefix"], "docs/");
+    assert_eq!(value["meta"]["filters"]["dedupe"], "path");
+}
+
 #[test]
 fn config_prints_effective_values() {
     let env = Env::new(&[("README.md", DOC)]);
