@@ -303,3 +303,14 @@ trigger — индексация/запрос; observable outcome — метри
    без выпадений из top-k на остальных (hit@k, FR-3).
 4. Значение cap (эквивалент токенов). **Default:** ≈300–500 токенов, уточняется
    замером в S2.
+
+## 13. Deltas
+
+- **2026-10-31 — аддитивные opt-in поля `search_docs` разрешены спеком
+  `search-ux`.** §2 (Non-goals: «Изменение публичных контрактов MCP/CLI (формы
+  ответов `search_docs`/`docsbase search`)») и §11 (Out of scope) запрещали
+  **изменение** формы. Спек `search-ux` не меняет дефолтную форму — без новых
+  ключей ответ побайтово прежний (FR-6/SC-1 у него), — а добавляет opt-in поля:
+  `snippet`/`snippet_truncated` в `hits[]`, `meta.filters`/`meta.trimmed` в
+  конверте `explain`. `baseline.json` не перегенерируется, гейт
+  `metrics_match_baseline` остаётся зелёным.

@@ -32,6 +32,7 @@ pub fn catalogue() -> Vec<Tool> {
                     "limit": { "type": "integer", "minimum": 1, "description": "Max hits (default 10)." },
                     "scope": { "type": "string", "enum": ["project"], "description": "Reserved; v1 supports only the current project." },
                     "rerank": { "type": "boolean", "description": "Per-request hybrid rerank override; default follows the project configuration. true requires hybrid rerank to be enabled." },
+                    "snippet": { "type": "boolean", "description": "Attach a text fragment (<= 240 chars) to each hit, cut on a character boundary; snippet_truncated marks a cut fragment." },
                     "explain": { "type": "boolean", "description": "Return {hits, meta} instead of a bare array. meta names the score scale, the stages that ran, per-stage timings, the candidate window, the index generation and any degradations." }
                 },
                 "required": ["query"]
