@@ -558,7 +558,10 @@ fn parse_post_filter(args: &Value) -> Result<PostFilterArgs> {
         },
     };
     let n_per_doc = match args.get("n_per_doc") {
-        None | Some(Value::Null) => 1,
+        // Measured default: with 1 the ru_morph slice loses 3 of 11 expected-path
+        // hits, with 2 it loses one and still halves the repetition
+        // (`tests/search_bench.rs::dedupe_slice_diagnostics`).
+        None | Some(Value::Null) => 2,
         Some(value) => {
             let raw = value.as_u64().ok_or_else(|| Error::Protocol {
                 message: format!("search_docs: n_per_doc must be an integer, got {value}"),
@@ -573,7 +576,7 @@ fn parse_post_filter(args: &Value) -> Result<PostFilterArgs> {
             usize::try_from(raw).unwrap_or(usize::try_from(MAX_CHUNKS_PER_DOC).unwrap_or(10))
         }
     };
-    if args.get("n_per_doc").is_some() && n_per_doc != 1 && dedupe != Dedupe::Path {
+    if args.get("n_per_doc").is_some() && dedupe != Dedupe::Path {
         return Err(Error::Protocol {
             message: "search_docs: n_per_doc requires dedupe = \"path\"".to_owned(),
         });

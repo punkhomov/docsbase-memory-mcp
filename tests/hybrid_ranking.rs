@@ -362,8 +362,24 @@ fn dedupe_by_path_caps_chunks_per_document() {
     .expect("deduped search");
     assert_eq!(
         paths(&deduped),
+        vec!["chunky.md", "chunky.md"],
+        "the measured default is n_per_doc = 2"
+    );
+
+    let one = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "widgets", "limit": 8, "dedupe": "path", "n_per_doc": 1 }),
+        50,
+    )
+    .expect("one per document");
+    assert_eq!(
+        paths(&one),
         vec!["chunky.md"],
-        "one chunk per document by default"
+        "n_per_doc = 1 keeps exactly one chunk"
     );
 
     let two = search_docs_with(

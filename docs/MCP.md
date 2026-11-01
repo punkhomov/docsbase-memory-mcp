@@ -21,7 +21,7 @@ tools bind correctly.
 
 | Tool | Scope | Input | Notes |
 |---|---|---|---|
-| `search_docs` | project | `{query: string, limit?: int ≥ 1 (default 10), scope?: "project", rerank?: bool, explain?: bool}` | Lexical BM25 over chunks, or hybrid when the project enables it; returns `{chunk_id, path, heading_path, lines, score}` citations. `scope` is reserved: v1 serves the current project only. `rerank` overrides the project setting per request; `true` requires a rerank stage. `explain` returns `{hits, meta}` — see [Telemetry](#telemetry) |
+| `search_docs` | project | `{query: string, limit?: int ≥ 1 (default 10), scope?: "project", rerank?: bool, explain?: bool, snippet?: bool, dedupe?: "none"\|"path", n_per_doc?: int 1…10, path_prefix?: string, tags?: [string]}` | Lexical BM25 over chunks, or hybrid when the project enables it; returns `{chunk_id, path, heading_path, lines, score}` citations. `scope` is reserved: v1 serves the current project only. `rerank` overrides the project setting per request; `true` requires a rerank stage. `explain` returns `{hits, meta}` — see [Telemetry](#telemetry). `snippet`, `dedupe`, `path_prefix` and `tags` are post-filters — see [Post-filters](#post-filters) |
 | `get_doc` | project | `{path: string}` | Full document by project-relative path |
 | `read_neighbors` | project | `{chunk_id: int, before?: int (default 1), after?: int (default 1)}` | Adjacent chunks for progressive disclosure |
 | `list_docs` | project | `{limit?: int (default 50), cursor?: string}` | Keyset-paginated `{title, size, chunks}` |
@@ -62,6 +62,23 @@ is the bare array above, unchanged.
 | `window` | Candidate window actually fetched: `limit` for a lexical search, `max(limit, window)` when fused or reranked, clamped to 1000 |
 | `index_generation` | Index generation the answer was served from |
 | `degraded` | Reasons the tier did not serve in full: `ann-building`, `ann-insufficient`, `ann-error`, `exact-fallback`, `no-rerank-stage`. Empty is the normal answer |
+
+## Post-filters
+
+All four are opt-in; without them the response is the bare array above, unchanged.
+
+| Key | Effect |
+|---|---|
+| `snippet: true` | Adds `snippet` (≤ 240 characters, cut on a character boundary) and `snippet_truncated` to each hit. The fragment is a prefix of the chunk's own text and costs no extra round-trip |
+| `dedupe: "path"` | Keeps at most `n_per_doc` chunks per document, preserving the relative order of the survivors |
+| `n_per_doc` | Chunks per document when deduping, `1…10`. Defaults to `2`: measured on the `ru_morph` benchmark slice, `1` loses 3 of 11 expected-path hits while `2` loses one and still halves the repetition. Rejected without `dedupe: "path"` |
+| `path_prefix` | Literal, case-sensitive prefix of the project-relative path (`docs/` matches `docs/a.md`, not `Docs/a.md` or `docsx.md`) |
+| `tags` | Frontmatter tags, AND over all of them; a document without frontmatter has no tags |
+
+Filters apply to a widened candidate window (lexical searches fetch `limit × 4`,
+capped at 1000), so a narrow filter may return fewer than `limit` hits — an empty
+result is not an error. With `explain: true`, `meta.filters` echoes what was asked
+and `meta.trimmed` reports how many candidates each stage dropped.
 
 `status.projects[].ann.state` is `disabled`, `loading`, `building`, `ready`,
 `too_large`, `fallback`, `stale` or `unknown`; `reason` is present for every state

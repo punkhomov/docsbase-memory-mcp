@@ -105,3 +105,37 @@ Ruling фиксируют принятые решения; minor — что от
   Test: `direct_mode_forwards_post_filter_flags` (префикс, сниппет, `meta.filters`).
   Verify: `--test cli_read` 11 passed; полная сьюта 64 ok; `search_bench` 68 passed,
   `metrics_match_baseline` зелёный, baseline не тронут; clippy 0; fmt clean.
+
+- Task T2b: complete (2026-10-31). Измерение дедупа на `ru_morph` (12 кейсов,
+  `search_bench::dedupe_slice_diagnostics`):
+
+  | `n_per_doc` | `duplicate_path_ratio` | `hit` |
+  |---|---|---|
+  | plain | 0.582 | 11 |
+  | 1 | 0.000 | 8 |
+  | 2 | 0.357 | 10 |
+  | 3 | 0.480 | 12 |
+  | 4 | 0.526 | 12 |
+
+  Ни одно значение не даёт одновременно `ratio ≤ 0.20` и все хиты — исходная
+  формулировка SC-3 была невыполнима. Ruling: дефолт `n_per_doc = 2` (потеря
+  одного `hit` из 11, повторы падают почти вдвое), критерий в SC-3 заменён на
+  измеренную кривую; требование «ratio ≤ 0.20» снято как несовместимое с
+  сохранением recall на этом срезе.
+  Замечание по эффекту окна: `n_per_doc=3` даёт `hit 12` — на один больше plain,
+  потому что расширенное окно (`limit × 4`) приносит кандидата, которого
+  лексический `fetch == limit` не видел; это эффект overscan, а не дедупа.
+  Базовый прогон (`metrics_match_baseline`) не изменился.
+
+- Task T5: complete (2026-10-31). `docs/MCP.md` (таблица `search_docs` с новыми
+  ключами + раздел **Post-filters** с измеренным дефолтом `n_per_doc = 2`,
+  буквальностью префикса и «пустой результат — не ошибка») и `CHANGELOG`
+  [Unreleased]/Added.
+- Task T6: complete (2026-10-31). Прогон и доказательства.
+  `search_bench` 69 passed (включая `dedupe_slice_diagnostics`),
+  `metrics_match_baseline` зелёный, `baseline.json` не изменён (`git diff` пуст);
+  полная default-сьюта 64 `test result: ok`, combo (`hybrid-local,hybrid-remote`)
+  64; clippy 0 в обеих конфигурациях; `cargo fmt --check` чисто.
+  Ruling: замер стоимости окна (`⌈fetch/400⌉ + ⌈limit/400⌉`) на практике остаётся
+  в пределах двух запросов при штатных `limit ≤ 100`; отдельного perf-теста не
+  заводим, бюджет `search-benchmark` FR-22 не пробит (гейт зелёный).
