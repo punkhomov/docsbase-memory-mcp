@@ -40,6 +40,11 @@ let fetch = if rerank_active || rrf_active {
 };
 ```
 
+Формула действует **после** двух существующих предусловий, которые не трогаются:
+раннего `if limit == 0 { return empty_response(...) }` и клампа
+`limit ≤ MAX_HITS` в `parse_search_args`. Без клампа `.min(MAX_HITS)` мог бы
+опустить `fetch` ниже `limit`; с ним — не может.
+
 `SEARCH_UX_OVERSCAN = 4` — константа рядом с `MAX_HITS`, калибруется замером.
 Внутри `ReadIndex::search` уже есть собственное расширение (`limit × 4 + 16`),
 поэтому суммарная работа BM25 может достигать ~16× от `limit`; это записано в
@@ -56,8 +61,12 @@ pub fn doc_meta(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, DocMeta>>
 ```
 
 Реализация: `SELECT id, rel_path, frontmatter_json FROM docs WHERE id IN (…)`,
-нарезая `ids` по 400 (лимит переменных SQLite). Один запрос на фильтр-стадию,
-не на хит.
+нарезая `ids` по 400 (лимит переменных SQLite).
+
+**Пустой вход — пустая мапа без SQL.** `IN ()` — синтаксическая ошибка SQLite, а
+пустое окно (фильтр всё отсёк, или `limit = 0`) — самый частый исход, который
+обязан быть успешным: `if ids.is_empty() { return Ok(HashMap::new()) }`.
+Запросов на ответ: `⌈fetch / 400⌉`, на хит — ноль.
 
 - `path_prefix`: `meta.rel_path.starts_with(&prefix)` — буквально. Никакого
   `LIKE`: он ASCII-case-insensitive и трактует `%`/`_` как маски, а требование —
@@ -96,7 +105,11 @@ pub fn citations_with_text(conn: &Connection, keys: &[(i64, u32)])
 SQL: `SELECT c.doc_id, c.seq, d.rel_path, c.heading_path, c.line_start,
 c.line_end, c.text FROM chunks c JOIN docs d ON d.id = c.doc_id
 WHERE (c.doc_id, c.seq) IN ((?1,?2),(?3,?4),…)` — row values (SQLite ≥ 3.15,
-bundled), нарезка по 400 пар. Один запрос на ответ, а не на хит.
+bundled), нарезка по 400 пар (800 параметров, влезает даже в legacy-лимит 999).
+
+**Пустой вход — пустая мапа без SQL** (та же причина, что в §3): `snippet: true`
+при нулевой выдаче не должен превращаться в `Error::Internal`.
+Запросов на ответ: `⌈limit / 400⌉`, а не по одному на хит.
 
 Без `snippet` используется прежний `citation_for` по одному вызову на хит —
 трогать дефолтный путь нельзя (requirements FR-6).

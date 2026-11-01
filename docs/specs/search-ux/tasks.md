@@ -91,13 +91,41 @@
 1. RED: 50 запросов с `path_prefix` → ноль хитов вне префикса; `tags` — AND.
 2. Расширение `fetch` по правилам design §2 (лексика ×4, fused/rerank — нет).
 3. `doc_meta` одним запросом; `starts_with` для префикса; терпимый разбор тегов.
-4. `meta.filters` и `meta.trimmed` (только при `explain`; `0` при выключенном).
+4. `meta.filters` и `meta.trimmed` (только при `explain`; `0` при выключенном);
+   `empty_response` тоже собирает их (`filters: null`, `trimmed` из нулей).
+5. Пустой вход батчей (`doc_meta`, `citations_with_text`) — пустая мапа **без
+   SQL**: `IN ()` невалиден, а пустой результат — нормальный исход.
 
 **Acceptance:** SC-4, SC-5 (валидация), SC-7 (≤ 2 доп. запроса).
 
 **Verify:** `cargo test --locked --test hybrid_ranking --test mcp_docs`
 
 **Depends:** T1
+
+---
+
+## T2b — Диагностический замер дедупа (владелец SC-3)
+
+**Goal:** FR-11/SC-3: числа для дедупа снимаются тестом, а не руками.
+
+**Files:**
+- Modify: `tests/search_bench.rs` (новый `#[test]` на срезе `ru_morph`).
+
+**Steps:**
+1. Прогнать срез дважды: как есть и с `dedupe: "path"` (через существующий seam
+   `search_docs_with`, аргументы того же вида, что в харнессе).
+2. Агрегировать `bench::evaluate_case` по кейсам: средний
+   `duplicate_path_ratio` и число `hit` (per-case, на своём `k`).
+3. Утверждать: `duplicate_path_ratio ≤ 0.20` и `hit` не ниже базового прогона.
+   Числа печатать (`--nocapture`) и записать в леджер.
+4. Baseline и гейт не трогать: тест диагностический, в `metrics_match_baseline`
+   не входит.
+
+**Acceptance:** тест зелёный, числа в леджере, `baseline.json` без изменений.
+
+**Verify:** `cargo test --locked --test search_bench dedupe_slice_diagnostics -- --nocapture`
+
+**Depends:** T3
 
 ---
 
@@ -167,8 +195,8 @@
 **Steps:**
 1. `search_bench`: дефолтные четыре конфигурации — `metrics_match_baseline`
    зелёный, `baseline.json` не изменён.
-2. Пятая диагностическая конфигурация (`Bm25 + dedupe:path`): `duplicate_path_ratio`
-   и per-case `hit` по срезам — записать числа в леджер.
+2. Числа дедупа берутся из T2b (диагностический тест), а не из нового прогона:
+   сверить, что они записаны в леджер.
 3. Замер p95 до/после для `snippet` и расширенного окна; сравнить с бюджетом
    `search-benchmark` FR-22 (host-relative).
 4. Полная сюита, combo, clippy, fmt.
@@ -196,6 +224,7 @@ cargo fmt --check
 | T1 сниппет | FR-1 / SC-2 | 0.5 d |
 | T2 окно + фильтры + meta | FR-2..FR-5 / SC-4, SC-5, SC-7 | 0.7 d |
 | T3 дедуп | FR-2 / SC-3 | 0.4 d |
+| T2b диагностика дедупа | FR-11 / SC-3 | 0.2 d |
 | T4 CLI | FR-8 | 0.4 d |
 | T5 доки | FR-10 | 0.2 d |
 | T6 замер + прогон | NFR-1, NFR-6 | 0.3 d |
