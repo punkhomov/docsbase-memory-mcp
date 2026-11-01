@@ -5,7 +5,7 @@ use crate::config::Config;
 use crate::config::paths;
 use crate::daemon::tools;
 
-/// Runs `docsbase search <query> [--limit N] [--explain]`, printing a JSON array
+/// Runs `docsbase search <query> [--limit N] [--explain] [--snippet]`, printing a JSON array
 /// of `{path, heading_path, lines, score}` (FR-20) or, with `--explain`, the
 /// `{hits, meta}` envelope (spec `search-telemetry`, FR-1). Hits whose citation row
 /// vanished during an R2 crash window are dropped from the snapshot.
@@ -13,10 +13,15 @@ use crate::daemon::tools;
 /// # Errors
 /// Returns an error when the project is unregistered/not indexed, the snapshot
 /// cannot be opened, or the query is invalid.
-pub fn run(query: &str, limit: usize, explain: bool) -> anyhow::Result<()> {
+pub fn run(query: &str, limit: usize, explain: bool, snippet: bool) -> anyhow::Result<()> {
     if let Some(value) = crate::cli::try_daemon(
         "search_docs",
-        serde_json::json!({ "query": query, "limit": limit, "explain": explain }),
+        serde_json::json!({
+            "query": query,
+            "limit": limit,
+            "explain": explain,
+            "snippet": snippet,
+        }),
         true,
     )? {
         println!("{}", serde_json::to_string_pretty(&value)?);
@@ -59,7 +64,12 @@ pub fn run(query: &str, limit: usize, explain: bool) -> anyhow::Result<()> {
         // Direct mode forwards every search argument, `explain` included: it used
         // to drop it, so `--explain` worked only with a daemon running
         // (search-ux FR-8, T0).
-        &serde_json::json!({ "query": query, "limit": limit, "explain": explain }),
+        &serde_json::json!({
+            "query": query,
+            "limit": limit,
+            "explain": explain,
+            "snippet": snippet,
+        }),
         window,
     )?;
     println!("{}", serde_json::to_string_pretty(&value)?);

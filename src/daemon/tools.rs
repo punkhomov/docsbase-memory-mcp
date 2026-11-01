@@ -243,6 +243,7 @@ pub fn search_docs_with(
         limit,
         explain,
         rerank: requested,
+        snippet,
     } = parse_search_args(args)?;
     if limit == 0 {
         return empty_response(db, project, explain);
@@ -306,19 +307,7 @@ pub fn search_docs_with(
     }
     ordered.truncate(limit);
 
-    let mut rows = Vec::with_capacity(ordered.len());
-    for (chunk_id, score) in ordered {
-        let (doc_id, seq) = chunk_id_parts(chunk_id);
-        if let Some(citation) = repo::citation_for(db.connection(), doc_id, seq)? {
-            rows.push(json!({
-                "chunk_id": chunk_id,
-                "path": citation.path,
-                "heading_path": citation.heading_path,
-                "lines": [citation.line_start, citation.line_end],
-                "score": score,
-            }));
-        }
-    }
+    let rows = build_rows(db.connection(), ordered, snippet)?;
     if !explain {
         return Ok(Value::Array(rows));
     }
@@ -373,6 +362,65 @@ fn degrade(degraded: &mut Vec<Degraded>, reason: Degraded) {
     }
 }
 
+/// Citation rows for the final hits. With `snippet` the text comes from one
+/// JOIN for the whole answer (FR-1/NFR-1); without it the previous per-hit path
+/// is kept so the default response is untouched.
+fn build_rows(
+    conn: &rusqlite::Connection,
+    ordered: Vec<(u64, f32)>,
+    snippet: bool,
+) -> Result<Vec<Value>> {
+    let mut rows = Vec::with_capacity(ordered.len());
+    if snippet {
+        let keys: Vec<(i64, u32)> = ordered
+            .iter()
+            .map(|(chunk_id, _)| chunk_id_parts(*chunk_id))
+            .collect();
+        let mut texts = repo::citations_with_text(conn, &keys)?;
+        for (chunk_id, score) in ordered {
+            let (doc_id, seq) = chunk_id_parts(chunk_id);
+            if let Some((citation, text)) = texts.remove(&(doc_id, seq)) {
+                let (snippet_text, truncated) = snippet_of(&text);
+                rows.push(json!({
+                    "chunk_id": chunk_id,
+                    "path": citation.path,
+                    "heading_path": citation.heading_path,
+                    "lines": [citation.line_start, citation.line_end],
+                    "score": score,
+                    "snippet": snippet_text,
+                    "snippet_truncated": truncated,
+                }));
+            }
+        }
+        return Ok(rows);
+    }
+    for (chunk_id, score) in ordered {
+        let (doc_id, seq) = chunk_id_parts(chunk_id);
+        if let Some(citation) = repo::citation_for(conn, doc_id, seq)? {
+            rows.push(json!({
+                "chunk_id": chunk_id,
+                "path": citation.path,
+                "heading_path": citation.heading_path,
+                "lines": [citation.line_start, citation.line_end],
+                "score": score,
+            }));
+        }
+    }
+    Ok(rows)
+}
+
+/// Longest snippet returned to a caller (`search-ux` FR-1).
+pub const SNIPPET_MAX_CHARS: usize = 240;
+
+/// Prefix of `text` at a char boundary, and whether it was cut (`search-ux`
+/// FR-1). `char_indices` keeps multi-byte characters and `\r\n` intact.
+fn snippet_of(text: &str) -> (String, bool) {
+    match text.char_indices().nth(SNIPPET_MAX_CHARS) {
+        Some((cut, _)) => (text[..cut].to_owned(), true),
+        None => (text.to_owned(), false),
+    }
+}
+
 /// Milliseconds elapsed since `start`, saturating instead of wrapping.
 fn elapsed_ms(start: std::time::Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -385,6 +433,7 @@ struct SearchArgs {
     limit: usize,
     explain: bool,
     rerank: Option<bool>,
+    snippet: bool,
 }
 
 fn parse_search_args(args: &Value) -> Result<SearchArgs> {
@@ -422,6 +471,12 @@ fn parse_search_args(args: &Value) -> Result<SearchArgs> {
             message: format!("search_docs: scope must be \"project\", got {scope}"),
         });
     }
+    let snippet = match args.get("snippet") {
+        None | Some(Value::Null) => false,
+        Some(value) => value.as_bool().ok_or_else(|| Error::Protocol {
+            message: format!("search_docs: snippet must be a boolean, got {value}"),
+        })?,
+    };
     let rerank = match args.get("rerank") {
         None | Some(Value::Null) => None,
         Some(value) => Some(value.as_bool().ok_or_else(|| Error::Protocol {
@@ -433,6 +488,7 @@ fn parse_search_args(args: &Value) -> Result<SearchArgs> {
         limit,
         explain,
         rerank,
+        snippet,
     })
 }
 

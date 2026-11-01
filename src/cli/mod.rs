@@ -74,6 +74,9 @@ pub enum Command {
         /// Attach telemetry: `{hits, meta}` instead of a bare array.
         #[arg(long)]
         explain: bool,
+        /// Attach a text fragment to each hit.
+        #[arg(long)]
+        snippet: bool,
     },
     /// List indexed documents of the current project.
     List,
@@ -167,7 +170,8 @@ pub fn run() -> anyhow::Result<()> {
             query,
             limit,
             explain,
-        } => search::run(&query, limit, explain),
+            snippet,
+        } => search::run(&query, limit, explain, snippet),
         Command::List => status::list(),
         Command::Sync { path } => sync(path.as_deref()),
         Command::Config => show_config(),

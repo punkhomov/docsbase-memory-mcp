@@ -229,6 +229,117 @@ fn default_response_shape_is_the_bare_citation_array() {
 
 /// `explain: true` adds the envelope; the scale and stages come from what ran,
 /// not from the config (search-telemetry FR-2).
+/// `snippet: true` attaches a fragment that is literally a prefix of the chunk
+/// text, and only then (search-ux FR-1 / SC-2).
+#[test]
+fn snippet_is_a_prefix_of_the_chunk_text() {
+    let (cache, db, project) = project_with_docs();
+    let dense = DenseCache::new();
+    let value = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 3, "snippet": true }),
+        50,
+    )
+    .expect("snippet search");
+    let rows = value.as_array().expect("array");
+    assert!(!rows.is_empty());
+    for row in rows {
+        let snippet = row["snippet"].as_str().expect("snippet");
+        assert!(!snippet.is_empty(), "snippet is not empty: {row}");
+        assert_eq!(
+            row["snippet_truncated"],
+            json!(false),
+            "a short chunk is not truncated: {row}"
+        );
+        let (doc_id, seq) = docsbase_memory::index::tantivy_index::chunk_id_parts(
+            row["chunk_id"].as_u64().expect("chunk_id"),
+        );
+        let text = docsbase_memory::store::repo::chunk_text(db.connection(), doc_id, seq)
+            .expect("chunk text")
+            .expect("row exists");
+        assert!(
+            text.starts_with(snippet),
+            "snippet must be a prefix of its own chunk: {snippet:?} vs {text:?}"
+        );
+    }
+}
+
+#[test]
+fn snippet_is_absent_unless_requested_and_marked_when_cut() {
+    let (cache, db, project) = project_with_docs();
+    let dense = DenseCache::new();
+    let plain = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 3 }),
+        50,
+    )
+    .expect("plain search");
+    for row in plain.as_array().expect("array") {
+        assert!(
+            row.get("snippet").is_none(),
+            "no snippet without the key: {row}"
+        );
+        assert!(row.get("snippet_truncated").is_none());
+    }
+
+    // A chunk longer than the limit is cut on a char boundary and flagged.
+    let (cache2, db2, project2) = project_with_long_doc();
+    let dense2 = DenseCache::new();
+    let cut = search_docs_with(
+        &HybridStages::default(),
+        &dense2,
+        &db2,
+        cache2.path(),
+        &project2,
+        &json!({ "query": "widgets", "limit": 1, "snippet": true }),
+        50,
+    )
+    .expect("snippet search");
+    let row = &cut.as_array().expect("array")[0];
+    assert_eq!(row["snippet_truncated"], json!(true), "long chunk is cut");
+    let snippet = row["snippet"].as_str().expect("snippet");
+    assert_eq!(
+        snippet.chars().count(),
+        docsbase_memory::daemon::tools::SNIPPET_MAX_CHARS,
+        "cut at the char limit"
+    );
+    let (doc_id, seq) = docsbase_memory::index::tantivy_index::chunk_id_parts(
+        row["chunk_id"].as_u64().expect("chunk_id"),
+    );
+    let text = docsbase_memory::store::repo::chunk_text(db2.connection(), doc_id, seq)
+        .expect("chunk text")
+        .expect("row exists");
+    assert!(text.starts_with(snippet), "still a prefix of the chunk");
+}
+
+/// A project whose single document is long enough to overflow the snippet limit.
+fn project_with_long_doc() -> (TempDir, Db, Project) {
+    let cache = TempDir::new().expect("cache");
+    let root = TempDir::new().expect("root");
+    let body = format!("# Long\n\nwidgets {}\n", "ж".repeat(600));
+    std::fs::write(root.path().join("long.md"), body).expect("write doc");
+    let mut db = Db::open(cache.path()).expect("db");
+    let canonical = root.path().canonicalize().expect("canonical");
+    let mut project = registry::ensure_project(&mut db, &canonical).expect("project");
+    docsbase_memory::daemon::tools::run_project_index(
+        &mut db,
+        cache.path(),
+        &project,
+        &Config::default(),
+    )
+    .expect("index");
+    project.status = ProjectStatus::Indexed;
+    (cache, db, project)
+}
+
 #[test]
 fn explain_reports_the_scale_and_the_stages_that_ran() {
     let (cache, db, project) = project_with_docs();

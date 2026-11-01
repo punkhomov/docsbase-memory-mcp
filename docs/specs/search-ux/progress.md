@@ -57,3 +57,19 @@ Ruling фиксируют принятые решения; minor — что от
   clippy 0, fmt clean.
   Ruling: починка `explain` в direct-режиме сделана в T0, а не в T4 — иначе ветка
   оставалась бы красной между коммитами; T4 доберёт только новые ключи.
+
+- Task T1: complete (2026-10-31). Snippet in one JOIN.
+  `repo::citations_with_text` (row-value `IN ((?,?)…)`, batches of
+  `BATCH_KEYS = 400`, empty input → empty map **without SQL**), `snippet_of`
+  (`char_indices`, limit `SNIPPET_MAX_CHARS = 240`), `snippet` arg in
+  `parse_search_args` (wrong type → protocol error), rows built by the extracted
+  `build_rows` (default path keeps the per-hit `citation_for`, so nothing changes
+  without the key). MCP schema + `docsbase search --snippet`.
+  Tests: `snippet_is_a_prefix_of_the_chunk_text` (validated against the DB, not the
+  shape), `snippet_is_absent_unless_requested_and_marked_when_cut` (no key → no
+  fields; 600-char CJK chunk → exactly 240 chars, `snippet_truncated: true`, still a
+  prefix).
+  Verify: `--test hybrid_ranking` 20 passed; full default suite 64 ok; clippy 0;
+  fmt clean.
+  Ruling: `build_rows` extracted to satisfy the clippy line budget, and it keeps the
+  two paths explicit — a snippet path with one JOIN and the untouched default path.

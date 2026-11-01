@@ -343,6 +343,60 @@ pub fn citation_for(conn: &Connection, doc_id: i64, seq: u32) -> Result<Option<C
     .map_err(db_error)
 }
 
+/// Batch size for `IN (…)` queries: 400 keys keeps the parameter count (800 for
+/// `(doc_id, seq)` pairs) under even the legacy 999-variable limit.
+pub const BATCH_KEYS: usize = 400;
+
+/// Citations plus chunk text for `keys`, in one query per [`BATCH_KEYS`] batch
+/// (spec `search-ux` FR-1: a snippet must not cost a query per hit).
+///
+/// An empty `keys` returns an empty map **without SQL**: `IN ()` is a syntax
+/// error, and an empty result is the normal outcome of a filtered search.
+///
+/// # Errors
+/// Returns [`Error::Internal`] on `SQLite` failures.
+pub fn citations_with_text(
+    conn: &Connection,
+    keys: &[(i64, u32)],
+) -> Result<std::collections::HashMap<(i64, u32), (Citation, String)>> {
+    let mut found = std::collections::HashMap::with_capacity(keys.len());
+    for batch in keys.chunks(BATCH_KEYS) {
+        let placeholders = std::iter::repeat_n("(?, ?)", batch.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT c.doc_id, c.seq, d.rel_path, c.heading_path, c.line_start, c.line_end, c.text
+             FROM chunks c JOIN docs d ON d.id = c.doc_id
+             WHERE (c.doc_id, c.seq) IN ({placeholders})"
+        );
+        let mut statement = conn.prepare(&sql).map_err(db_error)?;
+        let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(batch.len() * 2);
+        for (doc_id, seq) in batch {
+            params.push(rusqlite::types::Value::Integer(*doc_id));
+            params.push(rusqlite::types::Value::Integer(i64::from(*seq)));
+        }
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(params), |row| {
+                let doc_id: i64 = row.get(0)?;
+                let seq: u32 = row.get(1)?;
+                let citation = Citation {
+                    path: row.get(2)?,
+                    heading_path: row.get(3)?,
+                    line_start: row.get(4)?,
+                    line_end: row.get(5)?,
+                };
+                let text: String = row.get(6)?;
+                Ok(((doc_id, seq), (citation, text)))
+            })
+            .map_err(db_error)?;
+        for row in rows {
+            let (key, value) = row.map_err(db_error)?;
+            found.insert(key, value);
+        }
+    }
+    Ok(found)
+}
+
 /// One `docsbase list` row (FR-25 snapshot view).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocOverview {
