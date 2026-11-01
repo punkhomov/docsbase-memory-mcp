@@ -241,11 +241,16 @@ fn search_runs_during_the_build_and_ann_serves_the_read_path() {
         &db,
         cache.path(),
         &project,
-        &json!({ "query": "alpha", "limit": 10 }),
+        &json!({ "query": "alpha", "limit": 10, "explain": true }),
         50,
     )
     .expect("search during build");
-    let during_build = search(&value);
+    assert_eq!(
+        value["meta"]["degraded"],
+        serde_json::json!(["ann-building"]),
+        "a search during the build says why it streamed exact"
+    );
+    let during_build = search(&value["hits"]);
     assert_eq!(during_build.len(), 10);
     assert_eq!(
         ann_search_count(),

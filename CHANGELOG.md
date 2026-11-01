@@ -8,6 +8,16 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ## [Unreleased]
 
+### Added
+- `search_docs` accepts `explain: true` and returns `{hits, meta}` instead of the
+  bare citation array: `meta` names the score scale (`bm25`/`rrf`/`rerank`), the
+  stages that ran, per-stage timings, the candidate window, the index generation
+  and any degradation reasons. Without the flag the response is unchanged.
+- `status` reports `index_generation` and `ann` (`state`, `vectors`,
+  `estimated_bytes`, `reason`) per project, so a silent fallback from the ANN tier
+  to exact search is visible instead of living only in the daemon log.
+- `docsbase search --explain` prints the same envelope as the MCP tool.
+
 ## [0.1.0-alpha.5] — 2026-10-30
 
 ### Fixed

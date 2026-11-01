@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use crate::error::{Error, Result};
 use crate::hybrid::ann::{self, ANN_MIN_VECTORS, AnnIndex};
 use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore};
+use crate::hybrid::meta::{AnnOutcome, AnnState};
 use crate::store::Db;
 use crate::store::repo;
 use crate::vector_cache::{CacheLimits, VectorCache};
@@ -364,6 +365,7 @@ pub struct DenseCache {
     entries: Arc<Mutex<HashMap<i64, Entry>>>,
     digests: Arc<Mutex<HashMap<(i64, i64), String>>>,
     vector_cache_limits: Arc<Mutex<HashMap<i64, u64>>>,
+    outcomes: Arc<Mutex<HashMap<i64, AnnOutcome>>>,
     clock: Arc<AtomicU64>,
 }
 
@@ -426,12 +428,57 @@ impl DenseCache {
             entries: Arc::new(Mutex::new(HashMap::new())),
             digests: Arc::new(Mutex::new(HashMap::new())),
             vector_cache_limits: Arc::new(Mutex::new(HashMap::new())),
+            outcomes: Arc::new(Mutex::new(HashMap::new())),
             clock: Arc::new(AtomicU64::new(0)),
         }
     }
 
     fn tick(&self) -> u64 {
         self.clock.fetch_add(1, AtomicOrdering::Relaxed)
+    }
+
+    /// Records what the ANN tier did for the last search of `project_id`
+    /// (FR-6). One record per project; the oldest is dropped at the project cap.
+    pub fn record_outcome(&self, project_id: i64, state: AnnState, reason: Option<&'static str>) {
+        let outcome = AnnOutcome {
+            state,
+            reason,
+            at: std::time::Instant::now(),
+        };
+        let mut outcomes = self.lock_outcomes();
+        if outcomes.len() >= self.limits.max_projects
+            && !outcomes.contains_key(&project_id)
+            && let Some((oldest, _)) = outcomes
+                .iter()
+                .min_by_key(|(_, record)| record.at)
+                .map(|(id, record)| (*id, *record))
+        {
+            outcomes.remove(&oldest);
+        }
+        outcomes.insert(project_id, outcome);
+    }
+
+    /// Last recorded ANN outcome for `project_id`, if any.
+    #[must_use]
+    pub fn outcome(&self, project_id: i64) -> Option<AnnOutcome> {
+        self.lock_outcomes().get(&project_id).copied()
+    }
+
+    /// Resident ANN size for `project_id`: `(vectors, estimated_bytes)`.
+    #[must_use]
+    pub fn ann_snapshot(&self, project_id: i64) -> Option<(usize, u64)> {
+        let entries = self.lock_entries();
+        match &entries.get(&project_id)?.state {
+            DenseRows::Ann(ann) => Some((
+                ann.count(),
+                u64::try_from(ann.estimated_bytes()).unwrap_or(u64::MAX),
+            )),
+            _ => None,
+        }
+    }
+
+    fn lock_outcomes(&self) -> std::sync::MutexGuard<'_, HashMap<i64, AnnOutcome>> {
+        self.outcomes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn lock_entries(&self) -> std::sync::MutexGuard<'_, HashMap<i64, Entry>> {
@@ -912,6 +959,7 @@ impl DenseCache {
             entries: Arc::clone(&self.entries),
             digests: Arc::clone(&self.digests),
             vector_cache_limits: Arc::clone(&self.vector_cache_limits),
+            outcomes: Arc::clone(&self.outcomes),
             clock: Arc::clone(&self.clock),
         }
     }

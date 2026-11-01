@@ -778,6 +778,7 @@ fn route_tool(
                         .ok()
                         .flatten()
                 },
+                Some(&shared.dense),
             )
         }
         "list_projects" => tools::list_projects(&db),

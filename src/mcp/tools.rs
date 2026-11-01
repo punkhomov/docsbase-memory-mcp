@@ -31,7 +31,8 @@ pub fn catalogue() -> Vec<Tool> {
                     "query": { "type": "string", "description": "Search query." },
                     "limit": { "type": "integer", "minimum": 1, "description": "Max hits (default 10)." },
                     "scope": { "type": "string", "enum": ["project"], "description": "Reserved; v1 supports only the current project." },
-                    "rerank": { "type": "boolean", "description": "Per-request hybrid rerank override; default follows the project configuration. true requires hybrid rerank to be enabled." }
+                    "rerank": { "type": "boolean", "description": "Per-request hybrid rerank override; default follows the project configuration. true requires hybrid rerank to be enabled." },
+                    "explain": { "type": "boolean", "description": "Return {hits, meta} instead of a bare array. meta names the score scale, the stages that ran, per-stage timings, the candidate window, the index generation and any degradations." }
                 },
                 "required": ["query"]
             }),
