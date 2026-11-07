@@ -9,6 +9,14 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 ## [Unreleased]
 
 ### Added
+- `search_docs` accepts `snippet: true` (a ≤240-character fragment of each hit's
+  chunk, cut on a character boundary), `dedupe: "path"` with `n_per_doc` (at most
+  N chunks per document, default 2 — measured on the benchmark's `ru_morph` slice),
+  and `path_prefix`/`tags` post-filters (literal prefix, frontmatter tags ANDed).
+  All are opt-in: without them the response is unchanged. `meta.filters` and
+  `meta.trimmed` report what was applied and how many candidates were dropped.
+  `docsbase search` gained `--snippet`, `--dedupe`, `--n-per-doc`, `--path-prefix`
+  and a repeatable `--tag`.
 - `search_docs` accepts `explain: true` and returns `{hits, meta}` instead of the
   bare citation array: `meta` names the score scale (`bm25`/`rrf`/`rerank`), the
   stages that ran, per-stage timings, the candidate window, the index generation

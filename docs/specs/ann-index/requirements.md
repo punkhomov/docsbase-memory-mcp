@@ -356,3 +356,13 @@ Non-goals:
 - `src/daemon/tools.rs` — `search_docs_with`, `dense_candidates`.
 - `src/store/repo.rs` — `chunk_hashes`, `index_generation`.
 - `docs/specs/constitution.md` — ADR/dependency rules, no global state.
+
+## 13. Deltas
+
+- **2026-10-31 — аддитивные поля `search_docs` разрешены спеком `search-ux`.**
+  FR-10 («форма `search_docs` не меняется») остаётся в силе для **дефолтного**
+  ответа: без новых ключей `hits[]` прежний. Спек `search-ux` добавляет opt-in
+  ключи (`snippet`, `dedupe`, `n_per_doc`, `path_prefix`, `tags`) и opt-in поля
+  в элементах `hits[]` (`snippet`, `snippet_truncated`) и в конверте `explain`
+  (`meta.filters`, `meta.trimmed`). Это аддитивное расширение, а не изменение
+  контракта; `baseline.json` не перегенерируется.

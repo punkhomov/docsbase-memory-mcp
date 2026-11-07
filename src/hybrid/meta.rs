@@ -157,6 +157,30 @@ impl AnnOutcome {
     }
 }
 
+/// Filters the caller asked for (spec `search-ux` FR-5). Absent keys mean "not
+/// requested", which is different from a filter that matched everything.
+#[derive(Debug, Clone, Default)]
+pub struct FiltersMeta {
+    /// Path prefix, verbatim.
+    pub path_prefix: Option<String>,
+    /// Required frontmatter tags (AND).
+    pub tags: Vec<String>,
+    /// `"path"` when dedupe ran, `None` otherwise.
+    pub dedupe: Option<&'static str>,
+    /// Chunks kept per document when dedupe ran.
+    pub n_per_doc: Option<usize>,
+}
+
+/// What the post-filter dropped (spec `search-ux` FR-5). Counters are `0` when
+/// the corresponding mechanism was not active: a measured zero, not "unknown".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TrimmedMeta {
+    /// Candidates dropped by `path_prefix`/`tags`.
+    pub filtered_out: usize,
+    /// Candidates dropped by `dedupe`.
+    pub deduped: usize,
+}
+
 /// Telemetry attached to one search response (FR-2).
 #[derive(Debug, Clone)]
 pub struct SearchMeta {
@@ -174,6 +198,10 @@ pub struct SearchMeta {
     pub index_generation: i64,
     /// Degradations observed, empty when none.
     pub degraded: Vec<Degraded>,
+    /// Filters requested by the caller, `None` when telemetry is off.
+    pub filters: Option<FiltersMeta>,
+    /// Candidates dropped by the post-filter, `None` when telemetry is off.
+    pub trimmed: Option<TrimmedMeta>,
 }
 
 impl SearchMeta {
@@ -185,14 +213,29 @@ impl SearchMeta {
             stage_ms.insert(stage.as_str().to_owned(), json!(ms));
         }
         stage_ms.insert("total".to_owned(), json!(self.total_ms));
-        json!({
+        let mut meta = json!({
             "score_scale": self.score_scale.as_str(),
             "stages": self.stages.iter().map(|stage| stage.as_str()).collect::<Vec<_>>(),
             "stage_ms": Value::Object(stage_ms),
             "window": self.window,
             "index_generation": self.index_generation,
             "degraded": self.degraded.iter().map(|reason| reason.as_str()).collect::<Vec<_>>(),
-        })
+        });
+        if let Some(filters) = &self.filters {
+            meta["filters"] = json!({
+                "path_prefix": filters.path_prefix,
+                "tags": filters.tags,
+                "dedupe": filters.dedupe,
+                "n_per_doc": filters.n_per_doc,
+            });
+        }
+        if let Some(trimmed) = self.trimmed {
+            meta["trimmed"] = json!({
+                "filtered_out": trimmed.filtered_out,
+                "deduped": trimmed.deduped,
+            });
+        }
+        meta
     }
 }
 
@@ -204,7 +247,7 @@ pub fn envelope(hits: &[Value], meta: &SearchMeta) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnnState, Degraded, ScoreScale, SearchMeta, Stage};
+    use super::{AnnState, Degraded, FiltersMeta, ScoreScale, SearchMeta, Stage, TrimmedMeta};
 
     #[test]
     fn stage_names_have_unique_otel_pairs() {
@@ -284,6 +327,16 @@ mod tests {
             window: 50,
             index_generation: 3,
             degraded: vec![Degraded::ExactFallback],
+            filters: Some(FiltersMeta {
+                path_prefix: Some("docs/".to_owned()),
+                tags: vec!["api".to_owned()],
+                dedupe: Some("path"),
+                n_per_doc: Some(2),
+            }),
+            trimmed: Some(TrimmedMeta {
+                filtered_out: 4,
+                deduped: 3,
+            }),
         };
         let value = meta.to_json();
         assert_eq!(value["score_scale"], "rrf");
@@ -293,5 +346,10 @@ mod tests {
         assert_eq!(value["window"], 50);
         assert_eq!(value["index_generation"], 3);
         assert_eq!(value["degraded"], serde_json::json!(["exact-fallback"]));
+        assert_eq!(value["filters"]["path_prefix"], "docs/");
+        assert_eq!(value["filters"]["tags"], serde_json::json!(["api"]));
+        assert_eq!(value["filters"]["n_per_doc"], 2);
+        assert_eq!(value["trimmed"]["filtered_out"], 4);
+        assert_eq!(value["trimmed"]["deduped"], 3);
     }
 }
