@@ -18,3 +18,29 @@
   тестовая обёртка для мемоизации не нужна.
   Ruling: ключ без `project_id` — вектор запроса не зависит от проекта; при
   требовании изоляции ключ расширяется.
+
+- Review panel (2026-10-31, retroactively — the first commit landed without review):
+  mimo / muse / deepseek, последовательно, одинаковый бриф, дерево чистое после
+  каждого. Вердикты: 3/3 `OK WITH NOTES`, ни одного P0.
+  Утверждения проверены родителем командами (поэтому верификатор не запускался,
+  как разрешает протокол):
+  - **P1 (3/3)**: SC-4 недостижим — `run_config_timed` создаёт `DenseCache` на
+    каждую конфигурацию. Исправлено: `DenseCache::sharing_query_cache()` +
+    `run_config_timed_with_query_cache(..., Some(&cache))`; делится только кэш
+    запросов, строки чанков остаются холодными (иначе поехал бы замер холодного
+    скана). Тест `a_shared_query_cache_is_reused_without_sharing_rows`.
+  - **P2 (2/3)**: равенство ответов в тесте кэша было вакуумным —
+    `CountingEmbedder` объявлял `fake/counting@d2@l2`, а вектора чанков лежали под
+    `fake/model@d2@l2`, поэтому dense-список был пуст и ответ не зависел от
+    вектора запроса. Исправлено: тот же model id + утверждение, что
+    dense-only документ (`b.md`) присутствует.
+  - **P2 (2/3)**: LRU-обновление и байтовый бюджет не были покрыты. Добавлены
+    `a_query_cache_hit_refreshes_recency` и `the_query_cache_respects_its_byte_budget`.
+  - **P2 (2/3)**: doc-комментарии съехали (док `DenseCache` оказался на
+    `type QueryKey`, док теста `explain` — на тесте кэша). Восстановлены.
+  - **P2 (1/3)**: не было `design.md`. Написан.
+  - **P2 (1/3, принято как ограничение)**: нет single-flight — два одновременных
+    одинаковых запроса оба платят. Корректность не страдает; записано в §7 дельт
+    и в `design.md` §6.
+  Verify: `--test hybrid_ranking` 31 passed; полная default-сьюта 64; combo clippy 0;
+  `search_bench` 69 passed, `metrics_match_baseline` зелёный, baseline не тронут.

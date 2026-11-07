@@ -1268,7 +1268,20 @@ pub fn run_config_timed(
     cfg: ConfigId,
     stages: &HybridStages,
 ) -> anyhow::Result<(ConfigRun, Vec<f64>)> {
-    let dense = DenseCache::new();
+    run_config_timed_with_query_cache(env, cases, cfg, stages, None)
+}
+
+/// [`run_config_timed`] that may reuse a query-vector cache shared across
+/// configurations (`search-cost` SC-4): only the query cache is shared, the
+/// chunk rows stay cold per run.
+pub fn run_config_timed_with_query_cache(
+    env: &BenchEnv,
+    cases: &[QueryCase],
+    cfg: ConfigId,
+    stages: &HybridStages,
+    query_cache: Option<&DenseCache>,
+) -> anyhow::Result<(ConfigRun, Vec<f64>)> {
+    let dense = query_cache.map_or_else(DenseCache::new, DenseCache::sharing_query_cache);
     // Warm-up call (discarded): warms the tantivy reader and the dense
     // scan. Errors surface on the first real case below with case context,
     // which diagnoses better than failing the warm-up.

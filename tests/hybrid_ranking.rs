@@ -104,8 +104,11 @@ struct CountingEmbedder {
 }
 
 impl Embedder for CountingEmbedder {
+    // Must match the model the chunk vectors were embedded with, otherwise
+    // `dense.get` finds no rows and the answer never depends on the cached
+    // vector — the equality assertion would be vacuous.
     fn model_id(&self) -> &'static str {
-        "fake/counting@d2@l2"
+        "fake/model@d2@l2"
     }
 
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
@@ -835,6 +838,78 @@ impl Embedder for OtherModelEmbedder {
     fn embed_query(&self, _text: &str) -> Result<Vec<f32>> {
         Ok(vec![1.0, 0.0])
     }
+}
+
+/// A hit refreshes recency, so the recently used entry outlives the oldest
+/// (search-cost FR-2 LRU).
+#[test]
+fn a_query_cache_hit_refreshes_recency() {
+    let dense = DenseCache::new();
+    let cap = docsbase_memory::hybrid::dense::QUERY_CACHE_MAX_ENTRIES;
+    dense.store_query_vector("m", "hot", &[1.0, 0.0]);
+    for i in 0..(cap - 1) {
+        dense.store_query_vector("m", &format!("filler {i}"), &[2.0, 0.0]);
+    }
+    assert!(dense.query_vector("m", "hot").is_some(), "still cached");
+    // One more eviction candidate: "hot" was used most recently, a filler goes.
+    dense.store_query_vector("m", "newest", &[3.0, 0.0]);
+    assert!(
+        dense.query_vector("m", "hot").is_some(),
+        "a hit protects the entry from the next eviction"
+    );
+    assert!(
+        dense.query_vector("m", "filler 0").is_none(),
+        "the least recently used filler was evicted"
+    );
+}
+
+/// The byte budget evicts before the entry cap is reached (search-cost FR-2).
+#[test]
+fn the_query_cache_respects_its_byte_budget() {
+    let dense = DenseCache::new();
+    // Each vector is 256 KiB; 4 MiB fits 16 of them, so 20 must evict.
+    let vector = vec![0.5_f32; 64 * 1024];
+    for i in 0..20 {
+        dense.store_query_vector("m", &format!("big {i}"), &vector);
+    }
+    let stats = dense.query_cache_stats();
+    assert!(
+        stats.bytes <= docsbase_memory::hybrid::dense::QUERY_CACHE_MAX_BYTES,
+        "bytes stay under the budget: {}",
+        stats.bytes
+    );
+    assert!(
+        stats.entries < 20,
+        "eviction happened: {} entries",
+        stats.entries
+    );
+    assert!(dense.query_vector("m", "big 0").is_none(), "oldest evicted");
+    assert!(dense.query_vector("m", "big 19").is_some(), "newest kept");
+}
+
+/// Sharing only the query cache lets two configs reuse vectors without warming
+/// chunk rows (search-cost SC-4).
+#[test]
+fn a_shared_query_cache_is_reused_without_sharing_rows() {
+    let owner = DenseCache::new();
+    owner.store_query_vector("m", "alpha", &[1.0, 0.0]);
+    let borrower = owner.sharing_query_cache();
+    assert!(
+        borrower.query_vector("m", "alpha").is_some(),
+        "the borrower sees the owner's query vectors"
+    );
+    borrower.store_query_vector("m", "beta", &[0.0, 1.0]);
+    assert!(
+        owner.query_vector("m", "beta").is_some(),
+        "sharing is bidirectional"
+    );
+
+    // Rows are not shared: a fresh cache has no entries of its own.
+    let fresh = DenseCache::new();
+    assert!(
+        fresh.query_vector("m", "alpha").is_none(),
+        "an unrelated cache stays empty"
+    );
 }
 
 /// The cache is bounded by entries (search-cost FR-2).

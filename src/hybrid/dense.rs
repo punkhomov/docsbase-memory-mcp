@@ -361,12 +361,10 @@ struct DenseInput {
     full_coverage: bool,
 }
 
-/// Per-project dense cache keyed by `(index generation, model_id)` with an
-/// optional ANN tier (spec ann-index): a new generation or embedding model
-/// replaces the entry, a no-op sync keeps it.
 /// Query-vector cache (`search-cost`): a vector is a pure function of
 /// `(model_id, text)`, so a repeated query needs no provider call. Bounded by
 /// entries and bytes, evicting least-recently-used first.
+///
 /// `(model_id, blake3(query))` — the cache key.
 type QueryKey = (String, String);
 
@@ -379,6 +377,9 @@ struct QueryCache {
     misses: u64,
 }
 
+/// Per-project dense cache keyed by `(index generation, model_id)` with an
+/// optional ANN tier (spec ann-index): a new generation or embedding model
+/// replaces the entry, a no-op sync keeps it.
 pub struct DenseCache {
     limits: DenseCacheLimits,
     policy: AnnPolicy,
@@ -566,6 +567,25 @@ impl DenseCache {
         cache.bytes = cache.bytes.saturating_add(bytes);
         cache.order.push_back(key.clone());
         cache.entries.insert(key, (arc, bytes));
+    }
+
+    /// A cache with fresh row/ANN state that **shares** this one's query cache
+    /// (`search-cost` SC-4): a benchmark run can reuse query vectors across
+    /// configurations without also warming chunk rows, which would corrupt the
+    /// cold-scan latency it measures.
+    #[must_use]
+    pub fn sharing_query_cache(&self) -> Self {
+        Self {
+            limits: self.limits,
+            policy: self.policy,
+            store: self.store.clone(),
+            entries: Arc::new(Mutex::new(HashMap::new())),
+            digests: Arc::new(Mutex::new(HashMap::new())),
+            vector_cache_limits: Arc::new(Mutex::new(HashMap::new())),
+            outcomes: Arc::new(Mutex::new(HashMap::new())),
+            query_cache: Arc::clone(&self.query_cache),
+            clock: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     /// Snapshot of the query-vector cache counters (`search-cost` FR-4).
