@@ -96,6 +96,68 @@ impl Reranker for SlowReranker {
     }
 }
 
+/// Same model id as [`CountingEmbedder`] but returns an orthogonal vector. If the
+/// cache serves the second search, this is never called and the answer cannot
+/// change; if the cache were bypassed or returned the wrong vector, the answer
+/// would move (`search-cost` SC-2).
+#[derive(Default)]
+struct LyingEmbedder {
+    calls: AtomicUsize,
+}
+
+impl Embedder for LyingEmbedder {
+    fn model_id(&self) -> &'static str {
+        "fake/model@d2@l2"
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|_| vec![0.0, 1.0]).collect())
+    }
+
+    fn embed_query(&self, _text: &str) -> Result<Vec<f32>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![0.0, 1.0])
+    }
+}
+
+/// Embedder that counts `embed_query` calls, so the query cache can be proven
+/// to save a provider call (search-cost FR-3/SC-1).
+#[derive(Default)]
+struct CountingEmbedder {
+    queries: AtomicUsize,
+}
+
+impl Embedder for CountingEmbedder {
+    // Must match the model the chunk vectors were embedded with, otherwise
+    // `dense.get` finds no rows and the answer never depends on the cached
+    // vector — the equality assertion would be vacuous.
+    fn model_id(&self) -> &'static str {
+        "fake/model@d2@l2"
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        Ok(texts
+            .iter()
+            .map(|text| {
+                if text.contains("alpha") {
+                    vec![1.0, 0.0]
+                } else {
+                    vec![0.0, 1.0]
+                }
+            })
+            .collect())
+    }
+
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        self.queries.fetch_add(1, Ordering::SeqCst);
+        if text.contains("alpha") {
+            Ok(vec![1.0, 0.0])
+        } else {
+            Ok(vec![0.0, 1.0])
+        }
+    }
+}
+
 fn project_with_docs() -> (TempDir, Db, Project) {
     let cache = TempDir::new().expect("cache");
     let root = TempDir::new().expect("root");
@@ -720,6 +782,219 @@ fn project_with_long_doc() -> (TempDir, Db, Project) {
 
 /// `explain: true` adds the envelope; the scale and stages come from what ran,
 /// not from the config (search-telemetry FR-2).
+/// A repeated query is served from the cache: one provider call for two
+/// searches, identical hits (search-cost FR-1/FR-3, SC-1).
+#[test]
+fn a_repeated_query_does_not_call_the_provider_twice() {
+    let (cache, db, project) = project_with_docs();
+    embed_all(&db, project.id);
+    let dense = DenseCache::new();
+    let embedder = Arc::new(CountingEmbedder::default());
+    let stages = HybridStages {
+        embedder: Some(Arc::clone(&embedder) as Arc<dyn Embedder>),
+        reranker: None,
+        ranking: Ranking::Rrf,
+    };
+    let run = |query: &str| {
+        search_docs_with(
+            &stages,
+            &dense,
+            &db,
+            cache.path(),
+            &project,
+            &json!({ "query": query, "limit": 3 }),
+            50,
+        )
+        .expect("search")
+    };
+    let first = run("alpha");
+    assert_eq!(
+        embedder.queries.load(Ordering::SeqCst),
+        1,
+        "first call embeds"
+    );
+    let second = run("alpha");
+    assert_eq!(
+        embedder.queries.load(Ordering::SeqCst),
+        1,
+        "second call is served from the cache"
+    );
+    assert_eq!(first, second, "the cache cannot change the answer");
+
+    // A second embedder with the same model id but an orthogonal vector: if the
+    // cache really serves the search, it must never be called and the answer
+    // must not move. This is what makes the equality above load-bearing.
+    let liar = Arc::new(LyingEmbedder::default());
+    let lying_stages = HybridStages {
+        embedder: Some(Arc::clone(&liar) as Arc<dyn Embedder>),
+        reranker: None,
+        ranking: Ranking::Rrf,
+    };
+    let third = search_docs_with(
+        &lying_stages,
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 3 }),
+        50,
+    )
+    .expect("cached search");
+    assert_eq!(
+        liar.calls.load(Ordering::SeqCst),
+        0,
+        "the cache must answer, not the provider"
+    );
+    assert_eq!(first, third, "the cached vector is the one that was stored");
+
+    // A different text is a miss; a different model is a different key.
+    let _ = run("alpha gear");
+    assert_eq!(embedder.queries.load(Ordering::SeqCst), 2);
+    let other_model = HybridStages {
+        embedder: Some(Arc::new(OtherModelEmbedder) as Arc<dyn Embedder>),
+        reranker: None,
+        ranking: Ranking::Rrf,
+    };
+    search_docs_with(
+        &other_model,
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 3 }),
+        50,
+    )
+    .expect("other model search");
+
+    let stats = dense.query_cache_stats();
+    assert_eq!(
+        stats.hits, 2,
+        "second search plus the lying embedder's search"
+    );
+    assert_eq!(stats.misses, 3, "alpha, alpha gear, other model");
+    assert_eq!(stats.entries, 3);
+    assert!(stats.bytes > 0);
+}
+
+/// Same geometry under a different model id, to prove the key includes it.
+struct OtherModelEmbedder;
+
+impl Embedder for OtherModelEmbedder {
+    fn model_id(&self) -> &'static str {
+        "fake/other@d2@l2"
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+    }
+
+    fn embed_query(&self, _text: &str) -> Result<Vec<f32>> {
+        Ok(vec![1.0, 0.0])
+    }
+}
+
+/// A hit refreshes recency, so the recently used entry outlives the oldest
+/// (search-cost FR-2 LRU).
+#[test]
+fn a_query_cache_hit_refreshes_recency() {
+    let dense = DenseCache::new();
+    let cap = docsbase_memory::hybrid::dense::QUERY_CACHE_MAX_ENTRIES;
+    dense.store_query_vector("m", "hot", &[1.0, 0.0]);
+    for i in 0..(cap - 1) {
+        dense.store_query_vector("m", &format!("filler {i}"), &[2.0, 0.0]);
+    }
+    assert!(dense.query_vector("m", "hot").is_some(), "still cached");
+    // One more eviction candidate: "hot" was used most recently, a filler goes.
+    dense.store_query_vector("m", "newest", &[3.0, 0.0]);
+    assert!(
+        dense.query_vector("m", "hot").is_some(),
+        "a hit protects the entry from the next eviction"
+    );
+    assert!(
+        dense.query_vector("m", "filler 0").is_none(),
+        "the least recently used filler was evicted"
+    );
+}
+
+/// The byte budget evicts before the entry cap is reached (search-cost FR-2).
+#[test]
+fn the_query_cache_respects_its_byte_budget() {
+    let dense = DenseCache::new();
+    // Each vector is 256 KiB; 4 MiB fits 16 of them, so 20 must evict.
+    let vector = vec![0.5_f32; 64 * 1024];
+    for i in 0..20 {
+        dense.store_query_vector("m", &format!("big {i}"), &vector);
+    }
+    let stats = dense.query_cache_stats();
+    assert!(
+        stats.bytes <= docsbase_memory::hybrid::dense::QUERY_CACHE_MAX_BYTES,
+        "bytes stay under the budget: {}",
+        stats.bytes
+    );
+    assert!(
+        stats.entries < 20,
+        "eviction happened: {} entries",
+        stats.entries
+    );
+    assert!(dense.query_vector("m", "big 0").is_none(), "oldest evicted");
+    assert!(dense.query_vector("m", "big 19").is_some(), "newest kept");
+}
+
+/// Sharing only the query cache lets two configs reuse vectors without warming
+/// chunk rows (search-cost SC-4).
+#[test]
+fn a_shared_query_cache_is_reused_without_sharing_rows() {
+    let owner = DenseCache::new();
+    owner.store_query_vector("m", "alpha", &[1.0, 0.0]);
+    let borrower = owner.sharing_query_cache();
+    assert!(
+        borrower.query_vector("m", "alpha").is_some(),
+        "the borrower sees the owner's query vectors"
+    );
+    borrower.store_query_vector("m", "beta", &[0.0, 1.0]);
+    assert!(
+        owner.query_vector("m", "beta").is_some(),
+        "sharing is bidirectional"
+    );
+
+    // Rows are not shared: a fresh cache has no entries of its own.
+    let fresh = DenseCache::new();
+    assert!(
+        fresh.query_vector("m", "alpha").is_none(),
+        "an unrelated cache stays empty"
+    );
+}
+
+/// The cache is bounded by entries (search-cost FR-2).
+#[test]
+fn the_query_cache_evicts_at_its_cap() {
+    let dense = DenseCache::new();
+    for i in 0..(docsbase_memory::hybrid::dense::QUERY_CACHE_MAX_ENTRIES + 5) {
+        let value = u16::try_from(i).unwrap_or(u16::MAX);
+        dense.store_query_vector("m", &format!("query {i}"), &[f32::from(value); 4]);
+    }
+    let stats = dense.query_cache_stats();
+    assert_eq!(
+        stats.entries,
+        docsbase_memory::hybrid::dense::QUERY_CACHE_MAX_ENTRIES,
+        "entries stay at the cap"
+    );
+    assert!(
+        dense.query_vector("m", "query 0").is_none(),
+        "the oldest entry was evicted"
+    );
+    assert!(
+        dense
+            .query_vector("m", &format!("query {}", i_hint()))
+            .is_some(),
+        "the newest entry is still there"
+    );
+}
+
+fn i_hint() -> usize {
+    docsbase_memory::hybrid::dense::QUERY_CACHE_MAX_ENTRIES + 4
+}
+
 #[test]
 fn explain_reports_the_scale_and_the_stages_that_ran() {
     let (cache, db, project) = project_with_docs();

@@ -9,6 +9,10 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 ## [Unreleased]
 
 ### Added
+- A bounded query-embedding cache inside the dense path: a repeated query with the
+  same model no longer calls the provider. 256 entries / 4 MiB, LRU eviction, and a
+  failed embed is never cached. `status` now reports
+  `query_cache {hits, misses, entries, bytes}`.
 - `search_docs` accepts `snippet: true` (a ≤240-character fragment of each hit's
   chunk, cut on a character boundary), `dedupe: "path"` with `n_per_doc` (at most
   N chunks per document, default 2 — measured on the benchmark's `ru_morph` slice),

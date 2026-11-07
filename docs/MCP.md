@@ -29,7 +29,7 @@ tools bind correctly.
 | `index_project` | registry | `{path?: string}` | Register + full index (defaults to session dir); long-running (600 s budget) |
 | `sync_start` | registry | `{project_id?: int}` | Start (or return active) sync job → `{job_id}`; quick |
 | `sync_status` | registry | `{job_id: int}` | Job `{state: queued\|running\|done\|error, stats}`; poll every ~250 ms |
-| `status` | registry | `{}` | `{protocol_version, build_id, schema_version, projects, sessions, fd_count, threads}`; each project carries its state, document and chunk counts, `root_state`, `embed_coverage`, `index_generation` and `ann` (`{state, vectors, estimated_bytes, reason}`) |
+| `status` | registry | `{}` | `{protocol_version, build_id, schema_version, projects, sessions, fd_count, threads, query_cache}`; each project carries its state, document and chunk counts, `root_state`, `embed_coverage`, `index_generation` and `ann` (`{state, vectors, estimated_bytes, reason}`) |
 
 Project tools require a session bound to a registered project; otherwise the
 server returns a `Project` error with a fix-up instruction (e.g. run
@@ -79,6 +79,12 @@ Filters apply to a widened candidate window (lexical searches fetch `limit × 4`
 capped at 1000), so a narrow filter may return fewer than `limit` hits — an empty
 result is not an error. With `explain: true`, `meta.filters` echoes what was asked
 and `meta.trimmed` reports how many candidates each stage dropped.
+
+`query_cache` reports `{hits, misses, entries, bytes}` for the query-embedding
+cache: a repeated query with the same model is answered without calling the
+provider. It is bounded (256 entries / 4 MiB, least-recently-used eviction) and
+never caches a failed embed. Zeroes mean the caller cannot see the daemon's cache
+(CLI direct mode), not that the cache is off.
 
 `status.projects[].ann.state` is `disabled`, `loading`, `building`, `ready`,
 `too_large`, `fallback`, `stale` or `unknown`; `reason` is present for every state

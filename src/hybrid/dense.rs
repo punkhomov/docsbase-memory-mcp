@@ -29,6 +29,12 @@ use crate::vector_cache::{CacheLimits, VectorCache};
 /// refuses to build and callers stream the scan instead.
 pub const DENSE_CACHE_MAX_VECTORS: usize = 1_000_000;
 
+/// Longest-lived query-vector cache entries (`search-cost` FR-2).
+pub const QUERY_CACHE_MAX_ENTRIES: usize = 256;
+
+/// Byte budget for cached query vectors (`search-cost` FR-2).
+pub const QUERY_CACHE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Backoff after a failed background ANN build before retrying.
 const BUILD_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -355,6 +361,22 @@ struct DenseInput {
     full_coverage: bool,
 }
 
+/// Query-vector cache (`search-cost`): a vector is a pure function of
+/// `(model_id, text)`, so a repeated query needs no provider call. Bounded by
+/// entries and bytes, evicting least-recently-used first.
+///
+/// `(model_id, blake3(query))` — the cache key.
+type QueryKey = (String, String);
+
+#[derive(Default)]
+struct QueryCache {
+    entries: HashMap<QueryKey, (std::sync::Arc<[f32]>, u64)>,
+    order: std::collections::VecDeque<QueryKey>,
+    bytes: u64,
+    hits: u64,
+    misses: u64,
+}
+
 /// Per-project dense cache keyed by `(index generation, model_id)` with an
 /// optional ANN tier (spec ann-index): a new generation or embedding model
 /// replaces the entry, a no-op sync keeps it.
@@ -366,7 +388,21 @@ pub struct DenseCache {
     digests: Arc<Mutex<HashMap<(i64, i64), String>>>,
     vector_cache_limits: Arc<Mutex<HashMap<i64, u64>>>,
     outcomes: Arc<Mutex<HashMap<i64, AnnOutcome>>>,
+    query_cache: Arc<Mutex<QueryCache>>,
     clock: Arc<AtomicU64>,
+}
+
+/// Counters of the query-vector cache (`status.query_cache`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryCacheStats {
+    /// Lookups served without the provider.
+    pub hits: u64,
+    /// Lookups that had to call the provider.
+    pub misses: u64,
+    /// Cached vectors.
+    pub entries: usize,
+    /// Bytes held by cached vectors.
+    pub bytes: u64,
 }
 
 impl Default for DenseCache {
@@ -429,6 +465,7 @@ impl DenseCache {
             digests: Arc::new(Mutex::new(HashMap::new())),
             vector_cache_limits: Arc::new(Mutex::new(HashMap::new())),
             outcomes: Arc::new(Mutex::new(HashMap::new())),
+            query_cache: Arc::new(Mutex::new(QueryCache::default())),
             clock: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -475,6 +512,98 @@ impl DenseCache {
             )),
             _ => None,
         }
+    }
+
+    /// Cached query vector for `(model_id, text)`, counting a hit or a miss
+    /// (`search-cost` FR-1/FR-3). A miss does not insert: the caller embeds and
+    /// calls [`Self::store_query_vector`], so a failed embed is never cached.
+    #[must_use]
+    pub fn query_vector(&self, model_id: &str, text: &str) -> Option<std::sync::Arc<[f32]>> {
+        let key = (model_id.to_owned(), crate::vector_cache::chunk_hash(text));
+        let mut cache = self.lock_query_cache();
+        let cached = cache
+            .entries
+            .get(&key)
+            .map(|(vector, _)| std::sync::Arc::clone(vector));
+        if let Some(vector) = cached {
+            cache.hits += 1;
+            // Refresh recency: move the key to the back of the order queue.
+            if let Some(position) = cache.order.iter().position(|entry| entry == &key) {
+                cache.order.remove(position);
+            }
+            cache.order.push_back(key);
+            return Some(vector);
+        }
+        cache.misses += 1;
+        None
+    }
+
+    /// Stores a query vector, evicting least-recently-used entries until both
+    /// limits hold (`search-cost` FR-2).
+    pub fn store_query_vector(&self, model_id: &str, text: &str, vector: &[f32]) {
+        if vector.is_empty() {
+            return;
+        }
+        let key = (model_id.to_owned(), crate::vector_cache::chunk_hash(text));
+        let bytes = u64::try_from(std::mem::size_of_val(vector)).unwrap_or(u64::MAX);
+        if bytes > QUERY_CACHE_MAX_BYTES {
+            return;
+        }
+        let mut cache = self.lock_query_cache();
+        if cache.entries.contains_key(&key) {
+            return;
+        }
+        let arc: std::sync::Arc<[f32]> = std::sync::Arc::from(vector);
+        while (!cache.entries.is_empty() && cache.entries.len() >= QUERY_CACHE_MAX_ENTRIES)
+            || cache.bytes.saturating_add(bytes) > QUERY_CACHE_MAX_BYTES
+        {
+            let Some(oldest) = cache.order.pop_front() else {
+                break;
+            };
+            if let Some((_, evicted_bytes)) = cache.entries.remove(&oldest) {
+                cache.bytes = cache.bytes.saturating_sub(evicted_bytes);
+            }
+        }
+        cache.bytes = cache.bytes.saturating_add(bytes);
+        cache.order.push_back(key.clone());
+        cache.entries.insert(key, (arc, bytes));
+    }
+
+    /// A cache with fresh row/ANN state that **shares** this one's query cache
+    /// (`search-cost` SC-4): a benchmark run can reuse query vectors across
+    /// configurations without also warming chunk rows, which would corrupt the
+    /// cold-scan latency it measures.
+    #[must_use]
+    pub fn sharing_query_cache(&self) -> Self {
+        Self {
+            limits: self.limits,
+            policy: self.policy,
+            store: self.store.clone(),
+            entries: Arc::new(Mutex::new(HashMap::new())),
+            digests: Arc::new(Mutex::new(HashMap::new())),
+            vector_cache_limits: Arc::new(Mutex::new(HashMap::new())),
+            outcomes: Arc::new(Mutex::new(HashMap::new())),
+            query_cache: Arc::clone(&self.query_cache),
+            clock: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Snapshot of the query-vector cache counters (`search-cost` FR-4).
+    #[must_use]
+    pub fn query_cache_stats(&self) -> QueryCacheStats {
+        let cache = self.lock_query_cache();
+        QueryCacheStats {
+            hits: cache.hits,
+            misses: cache.misses,
+            entries: cache.entries.len(),
+            bytes: cache.bytes,
+        }
+    }
+
+    fn lock_query_cache(&self) -> std::sync::MutexGuard<'_, QueryCache> {
+        self.query_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn lock_outcomes(&self) -> std::sync::MutexGuard<'_, HashMap<i64, AnnOutcome>> {
@@ -960,6 +1089,7 @@ impl DenseCache {
             digests: Arc::clone(&self.digests),
             vector_cache_limits: Arc::clone(&self.vector_cache_limits),
             outcomes: Arc::clone(&self.outcomes),
+            query_cache: Arc::clone(&self.query_cache),
             clock: Arc::clone(&self.clock),
         }
     }

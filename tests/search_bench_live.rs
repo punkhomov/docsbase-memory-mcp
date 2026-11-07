@@ -405,6 +405,7 @@ fn measure_live_config(
     fixtures: &support::bench::Fixtures,
     cfg: support::bench::ConfigId,
     stages: &docsbase_memory::hybrid::HybridStages,
+    query_cache: &docsbase_memory::hybrid::dense::DenseCache,
     embed_recorder: &support::bench::live_transport::RecordingTransport,
     rerank_recorder: &support::bench::live_transport::RecordingTransport,
 ) -> (serde_json::Value, ParetoPoint, f64, Vec<String>) {
@@ -415,8 +416,14 @@ fn measure_live_config(
         rerank_recorder.usage().search_units,
     );
     let (run, latencies) = docsbase_memory::hybrid::blocking::enter(|| {
-        support::bench::run_config_timed(env, &fixtures.cases, cfg, stages)
-            .map_err(|err| docsbase_memory::error::Error::internal(err.to_string()))
+        support::bench::run_config_timed_with_query_cache(
+            env,
+            &fixtures.cases,
+            cfg,
+            stages,
+            Some(query_cache),
+        )
+        .map_err(|err| docsbase_memory::error::Error::internal(err.to_string()))
     })
     .expect("live run");
     let spent_after = embed_recorder.spent_usd() + rerank_recorder.spent_usd();
@@ -556,6 +563,10 @@ fn live_measurement() {
         .map_err(|err| docsbase_memory::error::Error::internal(err.to_string()))
     })
     .expect("backfill");
+    // One query-vector cache for the whole run: the two dense configs embed the
+    // same queries, so the second one is served from the cache
+    // (`search-cost` SC-4).
+    let query_cache = docsbase_memory::hybrid::dense::DenseCache::new();
     let (rerank_client, rerank_recorder) = live_client(&key, &rerank_pin);
     let reranker: Arc<dyn docsbase_memory::hybrid::Reranker> = Arc::new(
         // Free tiers allow ~20 requests/minute; pace bulk live calls.
@@ -581,6 +592,7 @@ fn live_measurement() {
             &fixtures,
             cfg,
             &stages,
+            &query_cache,
             &embed_recorder,
             &rerank_recorder,
         );
