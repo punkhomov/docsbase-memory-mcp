@@ -33,6 +33,10 @@ pub fn catalogue() -> Vec<Tool> {
                     "scope": { "type": "string", "enum": ["project"], "description": "Reserved; v1 supports only the current project." },
                     "rerank": { "type": "boolean", "description": "Per-request hybrid rerank override; default follows the project configuration. true requires hybrid rerank to be enabled." },
                     "snippet": { "type": "boolean", "description": "Attach a text fragment (<= 240 chars) to each hit, cut on a character boundary; snippet_truncated marks a cut fragment." },
+                    "dedupe": { "type": "string", "enum": ["none", "path"], "description": "Post-filter: \"path\" keeps at most n_per_doc chunks per document, preserving the order of the survivors. Default \"none\"." },
+                    "n_per_doc": { "type": "integer", "minimum": 1, "maximum": 10, "description": "Chunks kept per document when dedupe is \"path\" (default 2, measured on the ru_morph benchmark slice). Rejected without dedupe." },
+                    "path_prefix": { "type": "string", "description": "Literal, case-sensitive prefix of the project-relative path; docs/ matches docs/a.md but not Docs/a.md or docsx.md." },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Frontmatter tags, ANDed over all of them; a document without frontmatter has no tags. Only the single-line comma-separated tags form is indexed." },
                     "explain": { "type": "boolean", "description": "Return {hits, meta} instead of a bare array. meta names the score scale, the stages that ran, per-stage timings, the candidate window, the index generation and any degradations." }
                 },
                 "required": ["query"]

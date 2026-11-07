@@ -420,3 +420,38 @@ fn get_doc_escaping_never_overflows_the_frame() {
     let text = err.to_string();
     assert!(text.contains("response frame"), "unexpected error: {text}");
 }
+
+/// Every opt-in `search_docs` key the daemon accepts must be advertised in the
+/// tool schema: an agent builds calls from `tools/list`, not from our docs
+/// (search-ux FR-8).
+#[test]
+fn search_docs_schema_advertises_every_post_filter_key() {
+    let catalogue = docsbase_memory::mcp::tools::catalogue();
+    let search = catalogue
+        .iter()
+        .find(|tool| tool.name == "search_docs")
+        .expect("search_docs tool");
+    let properties = search
+        .input_schema
+        .get("properties")
+        .and_then(|value| value.as_object())
+        .expect("properties");
+    for key in [
+        "query",
+        "limit",
+        "scope",
+        "rerank",
+        "explain",
+        "snippet",
+        "dedupe",
+        "n_per_doc",
+        "path_prefix",
+        "tags",
+    ] {
+        assert!(
+            properties.contains_key(key),
+            "search_docs schema must advertise {key}: {:?}",
+            properties.keys().collect::<Vec<_>>()
+        );
+    }
+}

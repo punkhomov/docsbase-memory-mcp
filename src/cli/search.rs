@@ -54,6 +54,9 @@ impl Options {
     }
 }
 
+/// Runs `docsbase search <query> [--limit N] [--explain] [--snippet] [--dedupe …]`,
+/// printing a JSON array of `{path, heading_path, lines, score}` (FR-20) or, with
+/// `--explain`, the `{hits, meta}` envelope (spec `search-telemetry`, FR-1).
 ///
 /// # Errors
 /// Returns an error when the project is unregistered or not indexed, the

@@ -80,7 +80,7 @@ pub enum Command {
         /// Post-filter: `none` (default) or `path` (cap chunks per document).
         #[arg(long, default_value = "none")]
         dedupe: String,
-        /// Chunks kept per document when `--dedupe path` (default 1, max 10).
+        /// Chunks kept per document when `--dedupe path` (default 2, max 10).
         #[arg(long)]
         n_per_doc: Option<u64>,
         /// Only documents whose project-relative path starts with this prefix.

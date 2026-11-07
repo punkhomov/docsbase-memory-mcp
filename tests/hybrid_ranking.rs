@@ -227,8 +227,6 @@ fn default_response_shape_is_the_bare_citation_array() {
     }
 }
 
-/// `explain: true` adds the envelope; the scale and stages come from what ran,
-/// not from the config (search-telemetry FR-2).
 /// `snippet: true` attaches a fragment that is literally a prefix of the chunk
 /// text, and only then (search-ux FR-1 / SC-2).
 /// `path_prefix` is a literal prefix over the candidate window
@@ -398,6 +396,122 @@ fn dedupe_by_path_caps_chunks_per_document() {
         plain_order.windows(2).all(|pair| pair[0] >= pair[1]),
         "the fixture ranks descending, so survivors keep their order"
     );
+}
+
+/// A slot freed by dedupe is filled by the next candidate from the widened
+/// window, so the page is not just shorter (search-ux FR-2 backfill).
+#[test]
+fn dedupe_fills_freed_slots_with_other_documents() {
+    let (cache, db, project) = project_with_chunky_and_small_docs();
+    let dense = DenseCache::new();
+    let deduped = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "widgets", "limit": 3, "dedupe": "path", "n_per_doc": 1 }),
+        50,
+    )
+    .expect("deduped search");
+    let paths = paths(&deduped);
+    assert_eq!(
+        paths.len(),
+        3,
+        "the window backfills the freed slots: {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|path| path.starts_with("small")),
+        "another document takes a freed slot: {paths:?}"
+    );
+    assert_eq!(
+        paths.iter().filter(|path| *path == "chunky.md").count(),
+        1,
+        "the chunky document is capped at one"
+    );
+}
+
+/// The snippet cut never tears a CRLF pair (search-ux NFR-4).
+#[test]
+fn snippet_never_splits_a_crlf_pair() {
+    let (cache, db, project) = project_with_crlf_doc();
+    let dense = DenseCache::new();
+    let value = search_docs_with(
+        &HybridStages::default(),
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "widgets", "limit": 1, "snippet": true }),
+        50,
+    )
+    .expect("snippet search");
+    let row = &value.as_array().expect("array")[0];
+    let snippet = row["snippet"].as_str().expect("snippet");
+    assert_eq!(row["snippet_truncated"], json!(true));
+    assert!(
+        !snippet.ends_with('\r'),
+        "a cut must not leave a lone CR: {:?}",
+        &snippet[snippet.len().saturating_sub(8)..]
+    );
+}
+
+/// One document with several chunks plus four single-chunk documents, all inside
+/// the widened window — so a slot freed by dedupe has somewhere to go.
+fn project_with_chunky_and_small_docs() -> (TempDir, Db, Project) {
+    let (cache, db, project, root) = index_project_with(|root| {
+        let mut body = String::from("# Chunky\n\n");
+        for i in 0..20 {
+            body.push_str("widgets widgets widgets ");
+            body.push_str(&i.to_string());
+            body.push(' ');
+            body.push_str(&"ж".repeat(560));
+            body.push_str("\n\n");
+        }
+        std::fs::write(root.join("chunky.md"), body).expect("chunky");
+        for i in 0..4 {
+            std::fs::write(
+                root.join(format!("small{i}.md")),
+                format!("# Small {i}\n\nwidgets here\n"),
+            )
+            .expect("small");
+        }
+    });
+    drop(root);
+    (cache, db, project)
+}
+
+/// A CRLF-authored document whose chunk text straddles the snippet boundary.
+fn project_with_crlf_doc() -> (TempDir, Db, Project) {
+    let (cache, db, project, root) = index_project_with(|root| {
+        let mut body = String::from("# Windows\r\n\r\nwidgets ");
+        // 300 CRLF-terminated short lines put a `\r\n` pair at the 240-char cut.
+        for _ in 0..300 {
+            body.push_str("ab\r\n");
+        }
+        std::fs::write(root.join("crlf.md"), body).expect("crlf");
+    });
+    drop(root);
+    (cache, db, project)
+}
+
+/// Indexes a project whose files are written by `write` into a fresh root.
+fn index_project_with(write: impl FnOnce(&std::path::Path)) -> (TempDir, Db, Project, TempDir) {
+    let cache = TempDir::new().expect("cache");
+    let root = TempDir::new().expect("root");
+    write(root.path());
+    let mut db = Db::open(cache.path()).expect("db");
+    let canonical = root.path().canonicalize().expect("canonical");
+    let mut project = registry::ensure_project(&mut db, &canonical).expect("project");
+    docsbase_memory::daemon::tools::run_project_index(
+        &mut db,
+        cache.path(),
+        &project,
+        &Config::default(),
+    )
+    .expect("index");
+    project.status = ProjectStatus::Indexed;
+    (cache, db, project, root)
 }
 
 /// `n_per_doc` is only meaningful with dedupe, and stays in range (FR-2).
@@ -604,6 +718,8 @@ fn project_with_long_doc() -> (TempDir, Db, Project) {
     (cache, db, project)
 }
 
+/// `explain: true` adds the envelope; the scale and stages come from what ran,
+/// not from the config (search-telemetry FR-2).
 #[test]
 fn explain_reports_the_scale_and_the_stages_that_ran() {
     let (cache, db, project) = project_with_docs();

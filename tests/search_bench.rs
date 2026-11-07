@@ -450,6 +450,46 @@ fn bench_root() -> std::path::PathBuf {
 /// once as shipped and once with `dedupe: "path"`, compared through the existing
 /// per-case `evaluate_case` aggregates. Report-only: the baseline and the gate
 /// are untouched.
+/// Mean latency of the plain path vs `snippet + dedupe` on one slice. The panel
+/// found the cost was asserted rather than measured, so this prints a number.
+#[allow(clippy::cast_precision_loss)]
+fn report_latency(
+    cases: &[support::bench::QueryCase],
+    env: &support::bench::BenchEnv,
+    dense: &docsbase_memory::hybrid::dense::DenseCache,
+) {
+    use docsbase_memory::hybrid::HybridStages;
+    let timed = |case: &support::bench::QueryCase, filtered: bool| {
+        let started = std::time::Instant::now();
+        let mut args = serde_json::json!({ "query": case.query, "limit": case.k });
+        if filtered {
+            args["snippet"] = serde_json::json!(true);
+            args["dedupe"] = serde_json::json!("path");
+        }
+        let _ = docsbase_memory::daemon::tools::search_docs_with(
+            &HybridStages::default(),
+            dense,
+            &env.db,
+            env.cache.path(),
+            &env.project,
+            &args,
+            50,
+        )
+        .expect("timed search");
+        started.elapsed().as_secs_f64() * 1000.0
+    };
+    let count = cases.len();
+    if count == 0 {
+        return;
+    }
+    let plain: f64 = cases.iter().map(|case| timed(case, false)).sum::<f64>() / count as f64;
+    let filtered: f64 = cases.iter().map(|case| timed(case, true)).sum::<f64>() / count as f64;
+    println!(
+        "search-ux latency (ru_morph, {count} cases): plain {plain:.2} ms/query, \
+         snippet+dedupe {filtered:.2} ms/query"
+    );
+}
+
 #[test]
 #[allow(clippy::cast_precision_loss)]
 fn dedupe_slice_diagnostics() {
@@ -468,6 +508,7 @@ fn dedupe_slice_diagnostics() {
     let env = support::bench::build_env(&root.join("corpus"), "search-ux", 60..=85)
         .expect("index corpus");
     let dense = docsbase_memory::hybrid::dense::DenseCache::new();
+    report_latency(&cases, &env, &dense);
     let search = |case: &QueryCase, n_per_doc: Option<u64>| {
         let mut args = serde_json::json!({ "query": case.query, "limit": case.k });
         if let Some(n) = n_per_doc {

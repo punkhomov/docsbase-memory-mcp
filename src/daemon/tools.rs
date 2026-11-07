@@ -253,7 +253,12 @@ pub fn search_docs_with(
     } = parse_search_args(args)?;
     let filtering = dedupe != Dedupe::None || path_prefix.is_some() || !tags.is_empty();
     if limit == 0 {
-        return empty_response(db, project, explain);
+        return empty_response(
+            db,
+            project,
+            explain,
+            filters_of(dedupe, n_per_doc, path_prefix.as_deref(), &tags),
+        );
     }
     // The rerank and RRF stages need a wider candidate window than the
     // requested limit (FR-11, FR-16); plain BM25 fetches exactly the limit.
@@ -447,12 +452,7 @@ fn apply_post_filter(
     path_prefix: Option<&str>,
     tags: &[String],
 ) -> Result<PostFilterOutcome> {
-    let filters = FiltersMeta {
-        path_prefix: path_prefix.map(str::to_owned),
-        tags: tags.to_vec(),
-        dedupe: (dedupe == Dedupe::Path).then_some("path"),
-        n_per_doc: (dedupe == Dedupe::Path).then_some(n_per_doc),
-    };
+    let filters = filters_of(dedupe, n_per_doc, path_prefix, tags);
     let mut trimmed = TrimmedMeta::default();
     if path_prefix.is_some() || !tags.is_empty() {
         // Paths and frontmatter for the whole window, one query per batch.
@@ -494,6 +494,21 @@ fn apply_post_filter(
     Ok(PostFilterOutcome { filters, trimmed })
 }
 
+/// Requested post-filters, as reported in `meta.filters` (FR-5).
+fn filters_of(
+    dedupe: Dedupe,
+    n_per_doc: usize,
+    path_prefix: Option<&str>,
+    tags: &[String],
+) -> FiltersMeta {
+    FiltersMeta {
+        path_prefix: path_prefix.map(str::to_owned),
+        tags: tags.to_vec(),
+        dedupe: (dedupe == Dedupe::Path).then_some("path"),
+        n_per_doc: (dedupe == Dedupe::Path).then_some(n_per_doc),
+    }
+}
+
 /// Post-filter overscan on the lexical path (`search-ux` FR-2).
 pub const SEARCH_UX_OVERSCAN: usize = 4;
 
@@ -523,7 +538,17 @@ pub const SNIPPET_MAX_CHARS: usize = 240;
 /// FR-1). `char_indices` keeps multi-byte characters and `\r\n` intact.
 fn snippet_of(text: &str) -> (String, bool) {
     match text.char_indices().nth(SNIPPET_MAX_CHARS) {
-        Some((cut, _)) => (text[..cut].to_owned(), true),
+        Some((cut, _)) => {
+            // Do not tear a CRLF pair: if the cut lands right after `\r` and the
+            // next character is `\n`, drop the `\r` (it is one byte, so the
+            // boundary stays a char boundary).
+            let cut = if text[..cut].ends_with('\r') && text[cut..].starts_with('\n') {
+                cut - 1
+            } else {
+                cut
+            };
+            (text[..cut].to_owned(), true)
+        }
         None => (text.to_owned(), false),
     }
 }
@@ -576,21 +601,23 @@ fn parse_post_filter(args: &Value) -> Result<PostFilterArgs> {
             usize::try_from(raw).unwrap_or(usize::try_from(MAX_CHUNKS_PER_DOC).unwrap_or(10))
         }
     };
-    if args.get("n_per_doc").is_some() && dedupe != Dedupe::Path {
+    // `null` means "unset", like every sibling key: only a real value demands
+    // `dedupe: "path"`.
+    if matches!(args.get("n_per_doc"), Some(value) if !value.is_null()) && dedupe != Dedupe::Path {
         return Err(Error::Protocol {
             message: "search_docs: n_per_doc requires dedupe = \"path\"".to_owned(),
         });
     }
     let path_prefix = match args.get("path_prefix") {
         None | Some(Value::Null) => None,
-        Some(value) => Some(
-            value
-                .as_str()
-                .ok_or_else(|| Error::Protocol {
-                    message: format!("search_docs: path_prefix must be a string, got {value}"),
-                })?
-                .to_owned(),
-        ),
+        Some(value) => {
+            let prefix = value.as_str().ok_or_else(|| Error::Protocol {
+                message: format!("search_docs: path_prefix must be a string, got {value}"),
+            })?;
+            // An empty prefix matches everything: treat it as unset rather than
+            // running the filter machinery for a no-op.
+            (!prefix.is_empty()).then(|| prefix.to_owned())
+        }
     };
     let tags = match args.get("tags") {
         None | Some(Value::Null) => Vec::new(),
@@ -707,7 +734,12 @@ fn parse_search_args(args: &Value) -> Result<SearchArgs> {
 
 /// `limit = 0` answers without searching (FR-8): `[]`, or an envelope whose
 /// `window` is `0` when telemetry was requested.
-fn empty_response(db: &Db, project: &Project, explain: bool) -> Result<Value> {
+fn empty_response(
+    db: &Db,
+    project: &Project,
+    explain: bool,
+    filters: FiltersMeta,
+) -> Result<Value> {
     if !explain {
         return Ok(Value::Array(Vec::new()));
     }
@@ -719,7 +751,7 @@ fn empty_response(db: &Db, project: &Project, explain: bool) -> Result<Value> {
         window: 0,
         index_generation: repo::index_generation(db.connection(), project.id)?,
         degraded: Vec::new(),
-        filters: None,
+        filters: Some(filters),
         trimmed: Some(TrimmedMeta::default()),
     };
     Ok(meta::envelope(&[], &meta))

@@ -73,7 +73,7 @@ All four are opt-in; without them the response is the bare array above, unchange
 | `dedupe: "path"` | Keeps at most `n_per_doc` chunks per document, preserving the relative order of the survivors |
 | `n_per_doc` | Chunks per document when deduping, `1…10`. Defaults to `2`: measured on the `ru_morph` benchmark slice, `1` loses 3 of 11 expected-path hits while `2` loses one and still halves the repetition. Rejected without `dedupe: "path"` |
 | `path_prefix` | Literal, case-sensitive prefix of the project-relative path (`docs/` matches `docs/a.md`, not `Docs/a.md` or `docsx.md`) |
-| `tags` | Frontmatter tags, AND over all of them; a document without frontmatter has no tags |
+| `tags` | Frontmatter tags, AND over all of them; a document without frontmatter has no tags. Only the single-line `tags: a, b` form is indexed — a YAML list (`tags:` followed by `- a`) parses to no tags |
 
 Filters apply to a widened candidate window (lexical searches fetch `limit × 4`,
 capped at 1000), so a narrow filter may return fewer than `limit` hits — an empty
