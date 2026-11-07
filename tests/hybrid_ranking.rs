@@ -96,6 +96,30 @@ impl Reranker for SlowReranker {
     }
 }
 
+/// Same model id as [`CountingEmbedder`] but returns an orthogonal vector. If the
+/// cache serves the second search, this is never called and the answer cannot
+/// change; if the cache were bypassed or returned the wrong vector, the answer
+/// would move (`search-cost` SC-2).
+#[derive(Default)]
+struct LyingEmbedder {
+    calls: AtomicUsize,
+}
+
+impl Embedder for LyingEmbedder {
+    fn model_id(&self) -> &'static str {
+        "fake/model@d2@l2"
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|_| vec![0.0, 1.0]).collect())
+    }
+
+    fn embed_query(&self, _text: &str) -> Result<Vec<f32>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![0.0, 1.0])
+    }
+}
+
 /// Embedder that counts `embed_query` calls, so the query cache can be proven
 /// to save a provider call (search-cost FR-3/SC-1).
 #[derive(Default)]
@@ -797,6 +821,32 @@ fn a_repeated_query_does_not_call_the_provider_twice() {
     );
     assert_eq!(first, second, "the cache cannot change the answer");
 
+    // A second embedder with the same model id but an orthogonal vector: if the
+    // cache really serves the search, it must never be called and the answer
+    // must not move. This is what makes the equality above load-bearing.
+    let liar = Arc::new(LyingEmbedder::default());
+    let lying_stages = HybridStages {
+        embedder: Some(Arc::clone(&liar) as Arc<dyn Embedder>),
+        reranker: None,
+        ranking: Ranking::Rrf,
+    };
+    let third = search_docs_with(
+        &lying_stages,
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({ "query": "alpha", "limit": 3 }),
+        50,
+    )
+    .expect("cached search");
+    assert_eq!(
+        liar.calls.load(Ordering::SeqCst),
+        0,
+        "the cache must answer, not the provider"
+    );
+    assert_eq!(first, third, "the cached vector is the one that was stored");
+
     // A different text is a miss; a different model is a different key.
     let _ = run("alpha gear");
     assert_eq!(embedder.queries.load(Ordering::SeqCst), 2);
@@ -817,7 +867,10 @@ fn a_repeated_query_does_not_call_the_provider_twice() {
     .expect("other model search");
 
     let stats = dense.query_cache_stats();
-    assert_eq!(stats.hits, 1, "one hit");
+    assert_eq!(
+        stats.hits, 2,
+        "second search plus the lying embedder's search"
+    );
     assert_eq!(stats.misses, 3, "alpha, alpha gear, other model");
     assert_eq!(stats.entries, 3);
     assert!(stats.bytes > 0);
