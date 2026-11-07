@@ -166,6 +166,39 @@ fn status_reports_ready_after_an_ann_search() {
     );
 }
 
+/// The daemon exposes the query-vector cache counters, and a caller without a
+/// cache reports zeroes instead of pretending (search-cost FR-4).
+#[test]
+fn status_reports_query_cache_counters() {
+    let (_cache, db, _project) = project();
+    let without =
+        status(&db, &Stats::default(), 0, None, &|_| false, &|_| None, None).expect("status");
+    assert_eq!(without["query_cache"]["hits"], 0);
+    assert_eq!(without["query_cache"]["entries"], 0);
+
+    let (cache, db, _project) = project();
+    let dense = DenseCache::with_policy(AnnPolicy::BuildOrLoad, cache.path());
+    dense.store_query_vector("fake/model@d2@l2", "alpha", &[1.0, 0.0]);
+    let _ = dense.query_vector("fake/model@d2@l2", "alpha");
+    let with = status(
+        &db,
+        &Stats::default(),
+        0,
+        None,
+        &|_| false,
+        &|_| None,
+        Some(&dense),
+    )
+    .expect("status");
+    assert_eq!(with["query_cache"]["hits"], 1);
+    assert_eq!(with["query_cache"]["entries"], 1);
+    assert!(
+        with["query_cache"]["bytes"].as_u64().unwrap_or_default() > 0,
+        "bytes reported: {}",
+        with["query_cache"]
+    );
+}
+
 #[test]
 fn status_reports_disabled_when_hybrid_is_off() {
     let (cache, db, _project) = project();

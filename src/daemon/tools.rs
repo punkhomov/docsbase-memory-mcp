@@ -111,8 +111,17 @@ fn dense_candidates(
     };
     // Search embeds through `embed_query` so local providers apply their
     // registry query prefix (FR-10, SC-9); backfill uses `embed`.
-    let vector = blocking::enter(|| embedder.embed_query(query))?;
+    // A repeated (model, query) pair is served from the query cache: the vector
+    // is a pure function of both, so this cannot change the answer
+    // (`search-cost` FR-1/FR-3).
     let model_id = embedder.model_id();
+    let vector = if let Some(cached) = dense.query_vector(model_id, query) {
+        cached.to_vec()
+    } else {
+        let fresh = blocking::enter(|| embedder.embed_query(query))?;
+        dense.store_query_vector(model_id, query, &fresh);
+        fresh
+    };
     let rows = dense.get(db, project.id, model_id)?;
     match rows {
         DenseRows::Ready(index) => {
@@ -353,6 +362,21 @@ pub fn search_docs_with(
         repo::index_generation(db.connection(), project.id)?,
     );
     Ok(meta::envelope(&rows, &meta))
+}
+
+/// Global query-vector cache counters (`search-cost` FR-4). A caller that
+/// cannot see the daemon's cache reports zeroes rather than pretending.
+fn query_cache_json(dense: Option<&DenseCache>) -> Value {
+    let Some(dense) = dense else {
+        return json!({ "hits": 0, "misses": 0, "entries": 0, "bytes": 0 });
+    };
+    let stats = dense.query_cache_stats();
+    json!({
+        "hits": stats.hits,
+        "misses": stats.misses,
+        "entries": stats.entries,
+        "bytes": stats.bytes,
+    })
 }
 
 /// ANN tier state as the daemon last saw it (FR-5/FR-6): the last recorded
@@ -1073,6 +1097,7 @@ pub fn status(
         "build_id": build_id(),
         "schema_version": db.schema_version()?,
         "projects": projects,
+        "query_cache": query_cache_json(dense),
         "sessions": stats.sessions,
         "fd_count": stats.fd_count,
         "threads": stats.threads,
