@@ -348,3 +348,46 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   `latency_allowed_ms_for` + `latency_slack` with `latency_budget_math` pinning
   slack 1.0, 3.0 and the invalid-factor fallback. No baseline value changed —
   the no-regression signal is preserved (a 3× regression on CI still fails).
+
+- Task T15: complete (2026-11-08, #69). Required offline gate now computes
+  actual corpus/legacy/raw-query hashes and discovers recorded pins before
+  replay; actual root-scoped legacy parity replaces copied baseline parity.
+  Loaded recording pin/dim identities are checked. Recording-time aggregate
+  drift is advisory in report warnings; exact content-addressed replay stays
+  fail-closed. Verify (Rust 1.88.0): 7 new mutation/identity/provenance tests
+  observed RED; search_bench 76 passed / 2 ignored; hybrid-remote live harness
+  unit tests 6 passed / 3 ignored; fmt and all-target Clippy clean.
+  Ruling: baseline raw queries_hash and vector serialized-case metadata hash
+  are distinct namespaces. Existing stale aggregate is reported without
+  invalidating complete vectors or regenerating any data. Production code,
+  frozen inputs, ranking and budgets unchanged. Fresh reviewer: PASS/APPROVED,
+  no findings. Toolchain/fmt evidence supplied separately; platform CI follows.
+
+- Task T16: complete (2026-11-08, #73). Required gate rejects stale healed
+  allowances with an explicit maintenance action, persists that action before
+  failing, and keeps the exact Failure identity. Known -> healed -> reviewed
+  retirement -> recurrence is covered with real gate-generated failures;
+  separate config/kind/evidence cases are covered. Ordinary improvements,
+  manual regeneration, current provenance/parity and known-growth guard stay
+  intact. Verify (Rust 1.88.0): both new lifecycle tests observed RED;
+  search_bench 78 passed / 2 ignored; full `cargo test --locked` 678 passed /
+  11 ignored; shared hybrid-remote live harness 6 passed / 3 ignored; fmt and
+  all-target Clippy clean. Fresh task reviewer: PASS/APPROVED, no findings.
+  Ruling: healed allowances cause a maintenance failure rather than a quality
+  regression; deliberate baseline review remains a human decision. No baseline
+  regeneration performed. Linux verification used writable XDG/TMPDIR and
+  documented shared-host latency slack=3; platform execution remains for CI.
+  Ruling (T15 portability follow-up): core.autocrlf=true changed queries.json
+  to 4822 CRLF lines before explicit attributes. Frozen root JSON is now
+  checked out LF; the same probe returns byte-identical bytes and 0 CRLF.
+  No fixture payload changed. Original T15 reviewer approved this follow-up.
+
+- Final branch review (2026-11-08, T15/T16): converged; no Critical or
+  Important findings. Independent reviewer checked both dated deltas, exact
+  Failure identity, preflight/replay checks, report persistence and LF checkout.
+  minor (deferred): existing required `linux` job omits the documented
+  `DOCSBASE_BENCH_LATENCY_SLACK=3` used by the feature jobs. Hosted timing must
+  be checked independently of the local slack=3 verification.
+  minor (deferred): existing offline CI has no artifact-upload step for
+  `target/search-bench/gate-report.json`. The gate persists its report locally;
+  downloadable CI report publishing remains separate workflow work.

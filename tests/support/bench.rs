@@ -709,6 +709,10 @@ struct OldBaseline {
 /// `search-quality/baseline.json` (FR-16, SC-6).
 pub fn run_legacy_parity() -> anyhow::Result<LegacyParity> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/search-bench");
+    run_legacy_parity_at(&root)
+}
+
+fn run_legacy_parity_at(root: &Path) -> anyhow::Result<LegacyParity> {
     let env = build_env(&root.join("legacy-corpus"), "search-bench-legacy", 10..=10)?;
     let queries_raw =
         std::fs::read_to_string(root.join("legacy.json")).context("read legacy.json")?;
@@ -2007,9 +2011,9 @@ pub struct Baseline {
     pub legacy_parity: LegacyParity,
     pub discrimination: DiscriminationReport,
     pub outcome_matrix: OutcomeMatrix,
-    /// Failures the baseline run itself produced (DELTA-3): the gate fails
-    /// only on failures NOT in this set (regressions), and reports fixed
-    /// ones as improvements. A red baseline stays auditable, never silent.
+    /// Failures the baseline run itself produced (DELTA-3). Failures outside
+    /// this set are regressions; healed entries require deliberate retirement
+    /// (#73). A red baseline stays auditable, never silent.
     pub known_failures: Vec<Failure>,
 }
 
@@ -2101,20 +2105,50 @@ impl ReportMeta {
             index_build_ms: 0.0,
         }
     }
+}
 
-    /// Meta for a current run compared against an existing baseline: hashes
-    /// and pins must reproduce the baseline, otherwise the gate fails.
-    #[must_use]
-    pub fn from_baseline(baseline: &Baseline) -> Self {
-        Self {
-            corpus_hash: baseline.corpus_hash.clone(),
-            legacy_corpus_hash: baseline.legacy_corpus_hash.clone(),
-            queries_hash: baseline.queries_hash.clone(),
-            model_pins: baseline.model_pins.clone(),
-            legacy_parity: baseline.legacy_parity.clone(),
-            index_build_ms: 0.0,
-        }
+/// Reads actual fixture identities and checks them before indexing/replay.
+/// The baseline supplies expected values only, including for fresh parity.
+pub fn load_gate_inputs(
+    root: &Path,
+    baseline: &Baseline,
+) -> anyhow::Result<(Fixtures, ReportMeta)> {
+    let fixtures = Fixtures::load(root)?;
+    let legacy_corpus_hash = corpus_hash(&root.join("legacy-corpus"))?;
+    // Baseline identity is the raw file, including notes and formatting.
+    // Vector recordings use serialized typed cases: a different namespace.
+    let queries_hash = blake3_file(&root.join("queries.json"))?;
+    let model_pins = recorded_model_pins(root)?;
+    let failures = identity_failures(
+        &[
+            ("corpus_hash", &baseline.corpus_hash, &fixtures.corpus_hash),
+            (
+                "legacy_corpus_hash",
+                &baseline.legacy_corpus_hash,
+                &legacy_corpus_hash,
+            ),
+            ("queries_hash", &baseline.queries_hash, &queries_hash),
+        ],
+        &baseline.model_pins,
+        &model_pins,
+    );
+    if !failures.is_empty() {
+        anyhow::bail!("fixture identity preflight failed: {failures:?}");
     }
+    let legacy_parity = run_legacy_parity_at(root)?;
+    let failures = legacy_failures(&legacy_parity, &baseline.legacy_parity);
+    if !legacy_parity.matches || !failures.is_empty() {
+        anyhow::bail!("LegacyMismatch: fresh legacy parity failed: {failures:?}");
+    }
+    let meta = ReportMeta {
+        corpus_hash: fixtures.corpus_hash.clone(),
+        legacy_corpus_hash,
+        queries_hash,
+        model_pins,
+        legacy_parity,
+        index_build_ms: 0.0,
+    };
+    Ok((fixtures, meta))
 }
 
 /// Builds the current run in baseline shape from config runs (FR-13).
@@ -2429,15 +2463,30 @@ fn version_failures(cur: &Baseline, baseline: &Baseline) -> Vec<Failure> {
             actual: format!("fixture_version {}", cur.fixture_version),
         });
     }
-    for (label, base_hash, cur_hash) in [
-        ("corpus_hash", &baseline.corpus_hash, &cur.corpus_hash),
-        (
-            "legacy_corpus_hash",
-            &baseline.legacy_corpus_hash,
-            &cur.legacy_corpus_hash,
-        ),
-        ("queries_hash", &baseline.queries_hash, &cur.queries_hash),
-    ] {
+    out.extend(identity_failures(
+        &[
+            ("corpus_hash", &baseline.corpus_hash, &cur.corpus_hash),
+            (
+                "legacy_corpus_hash",
+                &baseline.legacy_corpus_hash,
+                &cur.legacy_corpus_hash,
+            ),
+            ("queries_hash", &baseline.queries_hash, &cur.queries_hash),
+        ],
+        &baseline.model_pins,
+        &cur.model_pins,
+    ));
+    out
+}
+
+/// Shared identity comparison: preflight and final report use the same rules.
+fn identity_failures(
+    hashes: &[(&str, &str, &str)],
+    baseline_pins: &[String],
+    current_pins: &[String],
+) -> Vec<Failure> {
+    let mut out = Vec::new();
+    for (label, base_hash, cur_hash) in hashes {
         if base_hash != cur_hash {
             out.push(Failure {
                 config: None,
@@ -2449,8 +2498,8 @@ fn version_failures(cur: &Baseline, baseline: &Baseline) -> Vec<Failure> {
             });
         }
     }
-    let mut base_pins = baseline.model_pins.clone();
-    let mut cur_pins = cur.model_pins.clone();
+    let mut base_pins = baseline_pins.to_vec();
+    let mut cur_pins = current_pins.to_vec();
     base_pins.sort();
     cur_pins.sort();
     if base_pins != cur_pins {
@@ -2998,7 +3047,7 @@ pub fn replay_stages(root: &std::path::Path, baseline: &Baseline) -> anyhow::Res
     let mut vectors: Option<VectorFixture> = None;
     for pin in &baseline.model_pins {
         match parse_model_pin(pin)? {
-            ModelPin::Embedding { .. } => {
+            ModelPin::Embedding { dim, .. } => {
                 if embedder.is_some() {
                     anyhow::bail!("two embedding pins in baseline (second: {pin})");
                 }
@@ -3006,6 +3055,18 @@ pub fn replay_stages(root: &std::path::Path, baseline: &Baseline) -> anyhow::Res
                 let fixture = VectorFixture::load(&dir).with_context(|| {
                     format!("missing vector fixture for pin {pin} (run record first)")
                 })?;
+                if fixture.model_pin != *pin {
+                    anyhow::bail!(
+                        "vector model pin mismatch: selected {pin}, recorded {}",
+                        fixture.model_pin
+                    );
+                }
+                if fixture.dim != usize::try_from(dim)? {
+                    anyhow::bail!(
+                        "vector dimension mismatch: selected {dim}, recorded {}",
+                        fixture.dim
+                    );
+                }
                 embedder = Some(Arc::new(ReplayEmbedder {
                     pin: pin.clone(),
                     fixture: Arc::new(fixture.clone()),
@@ -3020,6 +3081,12 @@ pub fn replay_stages(root: &std::path::Path, baseline: &Baseline) -> anyhow::Res
                 let fixture = RerankFixture::load(&path).with_context(|| {
                     format!("missing rerank fixture for pin {pin} (run record first)")
                 })?;
+                if fixture.model_pin != *pin {
+                    anyhow::bail!(
+                        "rerank model pin mismatch: selected {pin}, recorded {}",
+                        fixture.model_pin
+                    );
+                }
                 reranker = Some(Arc::new(ReplayReranker {
                     fixture: Arc::new(fixture),
                 }));
@@ -3031,6 +3098,30 @@ pub fn replay_stages(root: &std::path::Path, baseline: &Baseline) -> anyhow::Res
         reranker,
         vectors,
     })
+}
+
+/// Recording-time aggregate provenance is advisory: replay addresses exact
+/// query/chunk/candidate bytes, independently of annotation-only changes.
+pub fn recording_provenance_warnings(
+    replay: &ReplaySet,
+    fixtures: &Fixtures,
+) -> anyhow::Result<Vec<String>> {
+    let Some(vectors) = &replay.vectors else {
+        return Ok(Vec::new());
+    };
+    let cases_hash = blake3_hash_bytes(&serde_json::to_vec(&fixtures.cases)?);
+    let mut warnings = Vec::new();
+    for (label, recorded, current) in [
+        ("corpus_hash", &vectors.corpus_hash, &fixtures.corpus_hash),
+        ("serialized_cases_hash", &vectors.queries_hash, &cases_hash),
+    ] {
+        if recorded != current {
+            warnings.push(format!(
+                "recording provenance: vectors {label} recorded={recorded} current={current}; content-addressed replay remains strict"
+            ));
+        }
+    }
+    Ok(warnings)
 }
 
 /// Maximum FR-27 lexical Jaccard over semantic expected spans.
@@ -3069,14 +3160,7 @@ pub fn regenerate_from_fixtures(
     accept_new_known: bool,
 ) -> anyhow::Result<Baseline> {
     let fixtures = Fixtures::load(root).context("load fixtures")?;
-    let embed_pins = discover_pins(&root.join("vectors"), true)?;
-    let rerank_pins = discover_pins(&root.join("rerank"), false)?;
-    if embed_pins.len() != 1 || rerank_pins.len() != 1 {
-        anyhow::bail!(
-            "need exactly one embedding + one rerank pin, found {embed_pins:?} / {rerank_pins:?}"
-        );
-    }
-    let model_pins = vec![embed_pins[0].clone(), rerank_pins[0].clone()];
+    let model_pins = recorded_model_pins(root)?;
     let pseudo = Baseline {
         bench_version: BENCH_VERSION,
         fixture_version: FIXTURE_VERSION,
@@ -3124,7 +3208,7 @@ pub fn regenerate_from_fixtures(
         let (run, latencies) = run_config_timed(&env, &fixtures.cases, cfg, &stages)?;
         runs.push((cfg, run, latencies));
     }
-    let legacy_parity = run_legacy_parity()?;
+    let legacy_parity = run_legacy_parity_at(root)?;
     let meta = ReportMeta {
         corpus_hash: fixtures.corpus_hash,
         legacy_corpus_hash: corpus_hash(&root.join("legacy-corpus"))?,
@@ -3170,6 +3254,26 @@ pub fn gate_new_failures(current: &[Failure], known: &[Failure]) -> (Vec<Failure
     (new, fixed)
 }
 
+/// Enforces both regression rejection and retirement of healed allowances.
+/// A healed case is an improvement, but its exception must be removed in the
+/// same reviewed change so a later recurrence cannot hide behind that entry.
+pub fn check_gate_allowances(current: &[Failure], known: &[Failure]) -> anyhow::Result<()> {
+    let (new, healed) = gate_new_failures(current, known);
+    let mut actions = Vec::new();
+    if !new.is_empty() {
+        actions.push(format!("new gate failures: {new:?}"));
+    }
+    if !healed.is_empty() {
+        actions.push(format!(
+            "healed known failures (quality improvements): {healed:?}; retire these stale allowances with a deliberate reviewed baseline update before merge. Run `cargo test --locked --test search_bench regenerate_baseline -- --ignored --exact` and review the diff; the gate never rewrites baseline.json"
+        ));
+    }
+    if !actions.is_empty() {
+        anyhow::bail!("{}", actions.join("\n"));
+    }
+    Ok(())
+}
+
 /// Regenerate guard (blocker 4, FR-15): fresh failures outside the old known
 /// set are a laundering attempt until explicitly accepted. Without accept,
 /// new failures fail loudly with their case ids; healed failures always
@@ -3195,6 +3299,17 @@ pub fn check_known_growth(
             .map(|failure| failure.case_id.clone())
             .collect::<Vec<_>>()
     )
+}
+
+fn recorded_model_pins(root: &Path) -> anyhow::Result<Vec<String>> {
+    let embed_pins = discover_pins(&root.join("vectors"), true)?;
+    let rerank_pins = discover_pins(&root.join("rerank"), false)?;
+    if embed_pins.len() != 1 || rerank_pins.len() != 1 {
+        anyhow::bail!(
+            "need exactly one embedding + one rerank pin, found {embed_pins:?} / {rerank_pins:?}"
+        );
+    }
+    Ok(vec![embed_pins[0].clone(), rerank_pins[0].clone()])
 }
 
 /// Lists recorded model pins: subdirectories of `vectors/`, `*.json` files

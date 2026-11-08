@@ -594,3 +594,39 @@ Baseline из T11 не мержится отдельно: T11+T12 — одна �
 зависимостям; T11 и T12 требуют внешнего ключа при записи фикстур и явно
 помечены blocked; новые крейты не появляются; production `src/**` не
 меняется.
+
+
+## T15 — Independent offline gate provenance (#69)
+
+**Files:** `tests/support/bench.rs`, `tests/search_bench.rs`; dated deltas in
+this spec and ledger. No production modules or fixtures change.
+
+**Interface:** `load_gate_inputs(root: &Path, baseline: &Baseline) ->
+anyhow::Result<(Fixtures, ReportMeta)>`; baseline is comparison-only.
+
+- [x] RED: mutation tests call the actual gate preflight and reject notes-only,
+  added/removed cases, corpus/legacy bytes and recorded model pin drift.
+  A malformed vector blob proves the notes mismatch is checked first.
+- [x] GREEN: read current identities and run actual root-scoped legacy parity;
+  remove `ReportMeta::from_baseline`; share hash/pin comparison with the gate.
+- [x] Check selected replay identities/dimensions and surface aggregate
+  recording provenance as warnings without relabeling or regeneration.
+- [x] Verify baseline gate, search-benchmark suite, formatting and Clippy;
+  fresh task review, fix findings, append ledger and commit separately.
+
+## T16 — Retire healed allowances (#73)
+
+**Depends:** T15. **Files:** same harness/spec; separate commit in one PR.
+
+**Interface:** `check_gate_allowances(current: &[Failure], known: &[Failure])
+-> anyhow::Result<()>`; exact Failure identity remains unchanged.
+
+- [x] RED: known -> healed requires action; after deliberate retirement,
+  recurrence fails. Cover identical case IDs in multiple configs and kinds.
+- [x] GREEN: the actual gate rejects stale allowances with an explicit
+  retirement diagnostic; quality improvements remain visible and other
+  improvements pass. Preserve manual regeneration and known-growth guard.
+- [x] Dated policy delta and docs describe maintenance failure separately
+  from ranking regression; no implicit baseline rewrite.
+- [x] Verify focused/full harness, shared live harness compilation, formatting,
+  Clippy and repository checks; fresh task/final review and ledger per commit.
