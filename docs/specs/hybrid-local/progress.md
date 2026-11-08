@@ -477,3 +477,14 @@ Ledger: одна запись на таск (что сделано, чем пр�
 
   Ruling: independent fix review — all five diagnostics ADDRESSED, no new
   Critical/Important findings or behavior change.
+
+- T10 Windows fixture fix (2026-11-08): native CI reached the full-profile
+  integration tests and exposed raw Windows runtime_path interpolation in
+  tests/cli_models.rs. The same malformed-TOML pattern existed in tests/config.rs.
+  Both now serialize TOML string values instead of hand-quoting display paths;
+  expected fetch hints are unchanged. Targeted suites: cli_models 23 passed,
+  config 31 passed; full-profile clippy/fmt clean. Branch rebased without conflicts
+  onto bae85b4 (#84); full-profile suite/native CI rerun for the new base.
+
+  Ruling: independent fixture-fix review APPROVED; no new Critical/Important
+  findings or production behavior change.

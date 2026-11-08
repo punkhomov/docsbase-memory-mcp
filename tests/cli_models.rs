@@ -407,8 +407,8 @@ fn models_use_fastembed_unfetched_model_gives_fetch_hint() {
     std::fs::write(
         env.config.path().join("config.toml"),
         format!(
-            "[providers.fastembed]\nenabled = true\nruntime_path = \"{}\"\n",
-            runtime.display()
+            "[providers.fastembed]\nenabled = true\nruntime_path = {}\n",
+            toml::Value::String(runtime.to_string_lossy().into_owned())
         ),
     )
     .expect("global config");

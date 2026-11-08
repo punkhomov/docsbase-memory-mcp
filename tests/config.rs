@@ -644,8 +644,8 @@ fn fastembed_unfetched_model_fails_with_fetch_hint() {
         config_dir.path(),
         "config.toml",
         &format!(
-            "[providers.fastembed]\nenabled = true\nruntime = \"1.24.4\"\nruntime_path = \"{}\"\n\n[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\n",
-            runtime_path.display()
+            "[providers.fastembed]\nenabled = true\nruntime = \"1.24.4\"\nruntime_path = {}\n\n[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge-small-en-v1.5\"\n",
+            toml::Value::String(runtime_path.to_string_lossy().into_owned())
         ),
     );
     // Isolate the model cache: the real user cache may already contain a
