@@ -467,3 +467,13 @@ Ledger: одна запись на таск (что сделано, чем пр�
   Ruling: final independent branch review — converged; unmet requirements,
   Critical/Important findings и deferred minors отсутствуют. Native CI и
   ограничения release-archive execution отражены в PR close-out.
+
+- T10 native CI fix (2026-11-08): macOS cli-full clippy exposed five existing
+  diagnostics in local runtime helpers: two unsafe-code warnings, two implicit
+  borrow-as-ptr warnings, and missing must_use. Fixed raw pointer spelling,
+  added must_use, and allowed unsafe only on the existing bounded sysctl
+  wrapper with per-call SAFETY documentation. Linux full-profile clippy/fmt
+  remain clean; native macOS verification follows in CI.
+
+  Ruling: independent fix review — all five diagnostics ADDRESSED, no new
+  Critical/Important findings or behavior change.

@@ -150,6 +150,7 @@ fn select_target(triple: &str) -> Result<&'static Target> {
 /// failure we fail closed (no local provider) rather than silently allowing
 /// an unsupported OS.
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)] // Two bounded sysctl calls; safety is documented at each call.
 fn macos_major_version() -> Result<u32> {
     let mut size = 0;
     // SAFETY: first call sizes the buffer; sysctl writes the size.
@@ -157,7 +158,7 @@ fn macos_major_version() -> Result<u32> {
         libc::sysctlbyname(
             c"kern.osproductversion".as_ptr(),
             std::ptr::null_mut(),
-            &mut size,
+            &raw mut size,
             std::ptr::null_mut(),
             0,
         )
@@ -174,7 +175,7 @@ fn macos_major_version() -> Result<u32> {
         libc::sysctlbyname(
             c"kern.osproductversion".as_ptr(),
             buffer.as_mut_ptr().cast(),
-            &mut size,
+            &raw mut size,
             std::ptr::null_mut(),
             0,
         )
@@ -501,6 +502,7 @@ fn extract_zip_library(archive: &[u8], want: &str) -> Result<Vec<u8>> {
 /// --strict`, ad-hoc sign only on failure. Returns the exact command
 /// sequence as `(program, args)` pairs so it is testable on any host.
 #[cfg(target_os = "macos")]
+#[must_use]
 pub fn macos_fixup_commands(path: &Path) -> Vec<(&'static str, Vec<String>)> {
     let path = path.to_string_lossy().into_owned();
     vec![
