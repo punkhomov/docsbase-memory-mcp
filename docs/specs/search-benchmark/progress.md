@@ -464,3 +464,12 @@ list (EXT-72-4 mandatory free minimum). A valid replay with Rrf-only first
 reproduced the missing guard; validation now rejects omission. No scoring
 or production changes; focused cli-full checks and all-target lint rerun.
 Final report provenance is refreshed against the reachable fix commit.
+
+2026-11-08 final verification: required integrated cli-full suite 870 passed,
+19 intentionally ignored, 65 suites. After mandatory-BM25 guard: external
+cli-full suite 8 passed/1 ignored; cli-full all-target Clippy and fmt clean.
+Final independent reviewer /root/review_external_final (gpt-6-astra, high):
+converged after its one Important BM25-minimum finding was ADDRESSED;
+no new Critical/Important and no deferred minors. Fifth complete SciFact
+release measurement on reachable ef96df0 preserves all 300-case quality;
+final report source identity refreshed. Hosted CI status is maintained in PR.
