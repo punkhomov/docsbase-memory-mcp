@@ -19,7 +19,7 @@ Cargo bundle `cli-full` включает `hybrid-local` и `hybrid-remote`. Ег
 | `windows` | fmt, clippy/test `cli-full`, capabilities smoke | тот же CLI и реальная Windows filesystem/IPC/handle семантика |
 | `linux-hybrid` | remote-only lint/selected tests, lean dependency tree | feature-off assertions и отсутствие ML/network crates в lean Cargo build |
 | `linux-local` | local-only lint/selected tests, powerset check, lean full suite, combo lint | совместимость исходных feature configurations |
-| `nightly` | release tests `cli-full`, perf/offline/platform gates | release-профиль и ресурсные бюджеты |
+| `nightly` | release tests `cli-full`, изолированный perf один раз, offline/platform gates | release-профиль и ресурсные бюджеты |
 
 Compatibility lanes сохранены в этом исправлении поставки. Их дальнейшая
 организация и оптимизация ожиданий/фикстур — отдельная работа. Полная combo
@@ -133,7 +133,7 @@ doctests; inventory/execute могут выполнять работу rustdoc. 
 | Конфигурация, CLI, providers | `config*`, `cli_models`, `cli_read`, `connect`, `error_*`, `hybrid_config/jobs/local/models/openrouter`, `install` | native full; feature-sensitive selections в compatibility lanes |
 | Качество поиска | `search_bench::metrics_match_baseline` и остальные offline benchmark assertions | остаётся обязательным внутри `linux`; выполняется также там, где его включает full suite |
 | Артефакт и offline-инварианты | `artifact`, `offline` | действующие Linux cfg; artifact пока строит release binary из теста |
-| Performance и внешние/длительные проверки | `perf_budget`, `soak`, `hybrid_live`, `hybrid_local_live`, `search_bench_live` | PR сохраняет обычную ignore/cfg политику; release budgets — nightly, soak/live — отдельные weekly/manual workflows; local live — manual |
+| Performance и внешние/длительные проверки | `perf_budget`, `soak`, `hybrid_live`, `hybrid_local_live`, `search_bench_live` | `perf_budget` — opt-in target, release nightly; остальные сохраняют ignore/cfg, soak/live — weekly/manual, local live — manual |
 
 Точные selected suites в compatibility lanes остаются в `ci.yml`. C1 не
 переносит дорогие проверки в nightly и не меняет исполнение этих workflows.
@@ -187,3 +187,42 @@ python3 .github/scripts/observe-tests.py --suite cli-full --phase execute -- car
 
 Python regression checks: `python3 -m unittest discover -s .github/scripts -p 'test_*.py'`.
 Спека и ledger: `docs/specs/ci-testing/`.
+
+## Delta 2026-11-09 — малые ANN-фикстуры и performance target (C2/C3)
+
+Проверки пустого запроса и несовпадающей размерности ANN используют два
+ненулевых 2D-вектора и положительный контроль валидного запроса. Mismatch
+проверяется в обе стороны. Большие 5,000×64 recall/roundtrip сценарии и пороги
+качества сохранены; пересечение ID в high-fetch recall вычисляется через set.
+Принятие неверного запроса как успешного пустого результата проверено временной
+mutation: оба теста падают; production-код восстановлен без изменений.
+
+`perf_budget` объявлен в Cargo.toml с `test = false`: target запускается явно.
+Nightly выполняет две последовательные группы:
+
+```sh
+cargo test --locked --features cli-full --release --test perf_budget -- --nocapture --test-threads=1
+cargo test --locked --features cli-full --release
+```
+
+Первый вызов исполняет все шесть ресурсных проверок ровно один раз, без
+конкурирующих аллокаций соседних тестов того же процесса. Второй запускает все
+остальные default targets и doctests; Cargo автоматически подхватывает новые
+targets. Раньше второй вызов повторял perf с обычным параллелизмом.
+
+`cargo test --release` сам по себе теперь запускает функциональный release
+набор. Для полного локального контроля нужно выполнить обе команды выше.
+Обычный debug suite также не включает шесть ранее ignored perf-тестов; их
+тела, ignore attributes и budgets не изменены.
+
+Cargo `--all-targets` тоже исключает opt-in target (даже вместе с `--test`).
+Поэтому Linux PR job и nightly дополнительно выполняют отдельный вызов:
+
+```sh
+cargo clippy --locked --features cli-full --test perf_budget -- -D warnings
+```
+
+Так Linux-only performance-код продолжает компилироваться и проверяться до
+merge. Новый job не добавляется; подготовленные результаты переиспользуются.
+Остальные PR suites, features, required checks, search gate, schedules и
+таймауты сохранены. Дубликат perf устраняется без изменения численных бюджетов.

@@ -101,11 +101,7 @@ impl Env {
         let launcher = self.launcher();
         fs::copy(daemon_bin(), &launcher).expect("copy launcher");
         let output = output_retry(self.cmd_at(&launcher).arg("install"));
-        assert!(
-            output.status.success(),
-            "install failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert!(output.status.success(), "install failed: {output:?}");
         let bytes = fs::read(self.manifest()).expect("manifest");
         serde_json::from_slice(&bytes).expect("manifest json")
     }

@@ -34,8 +34,9 @@ iteration.
 ```sh
 RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --features cli-full
 RUSTUP_TOOLCHAIN=1.88.0 cargo clippy --locked --features cli-full --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=1.88.0 cargo clippy --locked --features cli-full --test perf_budget -- -D warnings  # opt-in Linux target
 cargo fmt --check
-RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --release --test perf_budget
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --features cli-full --release --test perf_budget -- --test-threads=1
 RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test offline            # Linux only
 INSTA_UPDATE=always RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_golden
 RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_bench

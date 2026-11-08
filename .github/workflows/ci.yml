@@ -70,6 +70,8 @@ jobs:
         run: |
           cargo fmt --check
           cargo clippy --locked --features cli-full --all-targets -- -D warnings
+          # Opt-in performance tests are not selected by --all-targets.
+          cargo clippy --locked --features cli-full --test perf_budget -- -D warnings
       - name: Prepare functional suite (Linux)
         run: python3 .github/scripts/observe-tests.py --suite cli-full --phase prepare -- cargo test --locked --features cli-full --no-run --timings
       - name: Inventory functional suite (Linux)
