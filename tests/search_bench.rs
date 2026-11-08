@@ -2741,12 +2741,281 @@ fn missing_vectors_is_hard_fail() {
     assert!(!err.to_string().is_empty());
 }
 
+/// Copy only inputs; reports and build products never participate in provenance.
+fn gate_fixture_copy() -> TempDir {
+    fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+        fs::create_dir_all(to).expect("copy directory");
+        for entry in fs::read_dir(from).expect("list inputs") {
+            let entry = entry.expect("input");
+            let path = entry.path();
+            let dest = to.join(entry.file_name());
+            if path.is_dir() {
+                copy_dir(&path, &dest);
+            } else {
+                fs::copy(path, dest).expect("copy input");
+            }
+        }
+    }
+    let dir = TempDir::new().expect("fixture copy");
+    copy_dir(&bench_root(), dir.path());
+    dir
+}
+
+#[test]
+fn gate_inputs_reject_notes_drift_before_replay() {
+    let dir = gate_fixture_copy();
+    let root = dir.path();
+    let baseline = support::bench::load_baseline(&root.join("baseline.json")).expect("baseline");
+    let mut cases: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("queries.json")).expect("queries"))
+            .expect("cases");
+    cases[0]["notes"] = "provenance-only edit".into();
+    fs::write(
+        root.join("queries.json"),
+        serde_json::to_vec(&cases).expect("encode"),
+    )
+    .expect("edit notes");
+    // A malformed binary must not be opened before the query identity check.
+    for entry in fs::read_dir(root.join("vectors")).expect("vector dirs") {
+        let path = entry.expect("dir").path().join("manifest.json");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("manifest")).expect("json");
+        fs::write(
+            path.parent()
+                .expect("dir")
+                .join(manifest["bin"].as_str().expect("bin")),
+            [1_u8],
+        )
+        .expect("corrupt blob");
+    }
+    let err = support::bench::load_gate_inputs(root, &baseline)
+        .map(|_| ())
+        .expect_err("notes drift must fail");
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("HashMismatch") && message.contains("queries_hash"),
+        "{message}"
+    );
+}
+
+#[test]
+fn gate_inputs_reject_corpus_legacy_and_case_drift() {
+    for mutation in ["corpus", "legacy", "add_case", "remove_case"] {
+        let dir = gate_fixture_copy();
+        let root = dir.path();
+        let baseline =
+            support::bench::load_baseline(&root.join("baseline.json")).expect("baseline");
+        let expected = match mutation {
+            "corpus" => {
+                fs::write(root.join("corpus/provenance-extra.md"), "new corpus bytes")
+                    .expect("doc");
+                "corpus_hash"
+            }
+            "legacy" => {
+                fs::write(
+                    root.join("legacy-corpus/provenance-extra.md"),
+                    "new legacy bytes",
+                )
+                .expect("doc");
+                "legacy_corpus_hash"
+            }
+            _ => {
+                let path = root.join("queries.json");
+                let mut cases: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).expect("queries")).expect("json");
+                let cases = cases.as_array_mut().expect("cases");
+                if mutation == "remove_case" {
+                    cases.pop();
+                } else {
+                    let mut extra = cases[0].clone();
+                    extra["id"] = "provenance-extra".into();
+                    cases.push(extra);
+                }
+                fs::write(path, serde_json::to_vec(cases).expect("encode")).expect("queries");
+                "queries_hash"
+            }
+        };
+        let err = support::bench::load_gate_inputs(root, &baseline)
+            .map(|_| ())
+            .expect_err(mutation);
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("HashMismatch") && message.contains(expected),
+            "{mutation}: {message}"
+        );
+    }
+}
+
+#[test]
+fn gate_inputs_reject_recorded_model_pin_drift() {
+    for side in ["vectors", "rerank"] {
+        let dir = gate_fixture_copy();
+        let root = dir.path();
+        let baseline =
+            support::bench::load_baseline(&root.join("baseline.json")).expect("baseline");
+        let entry = fs::read_dir(root.join(side))
+            .expect("recordings")
+            .next()
+            .expect("entry")
+            .expect("path")
+            .path();
+        let path = if side == "vectors" {
+            entry.join("manifest.json")
+        } else {
+            entry
+        };
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("manifest")).expect("json");
+        manifest["model_pin"] = if side == "vectors" {
+            "other/embed@d2048@l2"
+        } else {
+            "other/rerank"
+        }
+        .into();
+        fs::write(path, serde_json::to_vec(&manifest).expect("encode")).expect("manifest");
+        let err = support::bench::load_gate_inputs(root, &baseline)
+            .map(|_| ())
+            .expect_err("pin drift");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("HashMismatch") && message.contains("model_pins"),
+            "{side}: {message}"
+        );
+    }
+}
+
+#[test]
+fn gate_inputs_recompute_legacy_parity() {
+    let dir = gate_fixture_copy();
+    let root = dir.path();
+    let baseline = support::bench::load_baseline(&root.join("baseline.json")).expect("baseline");
+    let path = root.join("legacy-baseline.json");
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("legacy baseline")).expect("json");
+    let original = old["cases"][0]["hit"].as_bool().expect("hit");
+    old["cases"][0]["hit"] = (!original).into();
+    fs::write(path, serde_json::to_vec(&old).expect("encode")).expect("change expected parity");
+    let err = support::bench::load_gate_inputs(root, &baseline)
+        .map(|_| ())
+        .expect_err("fresh legacy parity must fail");
+    assert!(format!("{err:#}").contains("LegacyMismatch"), "{err:#}");
+}
+
+#[test]
+fn replay_rejects_recordings_relabelled_as_selected_models() {
+    for side in ["vectors", "rerank"] {
+        let dir = gate_fixture_copy();
+        let root = dir.path();
+        let baseline =
+            support::bench::load_baseline(&root.join("baseline.json")).expect("baseline");
+        let entry = fs::read_dir(root.join(side))
+            .expect("recordings")
+            .next()
+            .expect("entry")
+            .expect("path")
+            .path();
+        let path = if side == "vectors" {
+            entry.join("manifest.json")
+        } else {
+            entry
+        };
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("manifest")).expect("json");
+        manifest["model_pin"] = if side == "vectors" {
+            "other/embed@d2048@l2"
+        } else {
+            "other/rerank"
+        }
+        .into();
+        fs::write(path, serde_json::to_vec(&manifest).expect("encode")).expect("manifest");
+        let err = support::bench::replay_stages(root, &baseline)
+            .err()
+            .expect("recording identity mismatch");
+        assert!(
+            format!("{err:#}").contains("model pin mismatch"),
+            "{side}: {err:#}"
+        );
+    }
+}
+
+#[test]
+fn replay_rejects_embedding_pin_dimension_mismatch() {
+    let dir = gate_fixture_copy();
+    let root = dir.path();
+    let mut baseline =
+        support::bench::load_baseline(&root.join("baseline.json")).expect("baseline");
+    let pin = &mut baseline.model_pins[0];
+    let old_dir = root.join("vectors").join(support::bench::pin_slug(pin));
+    *pin = pin.replace("@d2048@", "@d2@");
+    let new_dir = root.join("vectors").join(support::bench::pin_slug(pin));
+    fs::rename(old_dir, &new_dir).expect("new pin path");
+    let path = new_dir.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("manifest")).expect("json");
+    manifest["model_pin"] = pin.clone().into();
+    fs::write(path, serde_json::to_vec(&manifest).expect("encode")).expect("manifest");
+    let err = support::bench::replay_stages(root, &baseline)
+        .err()
+        .expect("dimension identity mismatch");
+    assert!(format!("{err:#}").contains("dimension mismatch"), "{err:#}");
+}
+
+#[test]
+fn recording_aggregates_warn_without_invalidating_content_addressed_replay() {
+    let dir = gate_fixture_copy();
+    let root = dir.path();
+    let baseline = support::bench::load_baseline(&root.join("baseline.json")).expect("baseline");
+    let manifest_dir = fs::read_dir(root.join("vectors"))
+        .expect("vectors")
+        .next()
+        .expect("entry")
+        .expect("path")
+        .path();
+    let path = manifest_dir.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("manifest")).expect("json");
+    manifest["corpus_hash"] = "recorded-corpus".into();
+    manifest["queries_hash"] = "recorded-serialized-cases".into();
+    fs::write(&path, serde_json::to_vec(&manifest).expect("encode")).expect("manifest");
+    let (fixtures, meta) = support::bench::load_gate_inputs(root, &baseline)
+        .expect("actual gate identity still matches");
+    let replay = support::bench::replay_stages(root, &baseline).expect("recordings load");
+    let warnings =
+        support::bench::recording_provenance_warnings(&replay, &fixtures).expect("provenance");
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("corpus_hash recorded=recorded-corpus"))
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("serialized_cases_hash recorded=recorded-serialized-cases"))
+    );
+    assert_eq!(
+        meta.queries_hash, baseline.queries_hash,
+        "baseline uses current raw file identity"
+    );
+    let vectors = replay.vectors.expect("vectors");
+    vectors
+        .get(&fixtures.cases[0].query)
+        .expect("existing content address still replays");
+    assert!(
+        vectors.get("unrecorded-query-identity").is_err(),
+        "missing content still fails closed"
+    );
+}
+
 /// Full offline gate against the recorded baseline (enabled in T11).
 #[test]
 fn metrics_match_baseline() {
     let root = bench_root();
     let baseline = support::bench::load_baseline(&root.join("baseline.json")).expect("baseline");
-    let fixtures = Fixtures::load(&root).expect("fixtures");
+    let (fixtures, meta) = support::bench::load_gate_inputs(&root, &baseline).expect("gate inputs");
+    let replay = support::bench::replay_stages(&root, &baseline).expect("replay stages");
+    let provenance_warnings = support::bench::recording_provenance_warnings(&replay, &fixtures)
+        .expect("recording provenance");
     let env = support::bench::build_env(&root.join("corpus"), "gate", 60..=85).expect("index");
     let mut runs = Vec::new();
     for cfg in [
@@ -2755,13 +3024,13 @@ fn metrics_match_baseline() {
         support::bench::ConfigId::Rrf,
         support::bench::ConfigId::RrfRerank,
     ] {
-        let replay = support::bench::replay_stages(&root, &baseline).expect("replay stages");
         // Chunk vectors live on disk: without the preload every dense
         // config silently degrades to its lexical base.
         if let Some(fixture) = &replay.vectors {
             support::bench::preload_vectors(&env, fixture).expect("preload");
         }
-        let stages = support::bench::stages_for(cfg, replay.embedder, replay.reranker);
+        let stages =
+            support::bench::stages_for(cfg, replay.embedder.clone(), replay.reranker.clone());
         let (run, lat) =
             support::bench::run_config_timed(&env, &fixtures.cases, cfg, &stages).expect("run");
         runs.push((cfg, run, lat));
@@ -2769,11 +3038,12 @@ fn metrics_match_baseline() {
     let current_like = support::bench::build_baseline_like(
         &fixtures.cases,
         &runs,
-        support::bench::ReportMeta::from_baseline(&baseline),
+        meta,
         baseline.discrimination.semantic_max_lexical_jaccard,
     )
     .expect("current");
     let mut current = support::bench::build_report(&current_like, Some(&baseline));
+    current.warnings.extend(provenance_warnings);
     // Trap placements below rank 1 are diagnostics for release review
     // (DELTA-3), not failures. They persist in the report artifact, so trap
     // movement toward the top stays visible on green runs too.

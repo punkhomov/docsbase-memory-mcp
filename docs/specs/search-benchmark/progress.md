@@ -348,3 +348,17 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   `latency_allowed_ms_for` + `latency_slack` with `latency_budget_math` pinning
   slack 1.0, 3.0 and the invalid-factor fallback. No baseline value changed —
   the no-regression signal is preserved (a 3× regression on CI still fails).
+
+- Task T15: complete (2026-11-08, #69). Required offline gate now computes
+  actual corpus/legacy/raw-query hashes and discovers recorded pins before
+  replay; actual root-scoped legacy parity replaces copied baseline parity.
+  Loaded recording pin/dim identities are checked. Recording-time aggregate
+  drift is advisory in report warnings; exact content-addressed replay stays
+  fail-closed. Verify (Rust 1.88.0): 7 new mutation/identity/provenance tests
+  observed RED; search_bench 76 passed / 2 ignored; hybrid-remote live harness
+  unit tests 6 passed / 3 ignored; fmt and all-target Clippy clean.
+  Ruling: baseline raw queries_hash and vector serialized-case metadata hash
+  are distinct namespaces. Existing stale aggregate is reported without
+  invalidating complete vectors or regenerating any data. Production code,
+  frozen inputs, ranking and budgets unchanged. Fresh reviewer: PASS/APPROVED,
+  no findings. Toolchain/fmt evidence supplied separately; platform CI follows.

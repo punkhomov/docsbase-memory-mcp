@@ -1039,3 +1039,21 @@ tests/
 | FR-32 | §5.11 |
 | NFR-1…NFR-10 | §2, §7, §10, §11 |
 | SC-1…SC-13 | §10 |
+
+
+## Delta 2026-11-08 — independent gate provenance (#69)
+
+`load_gate_inputs(root, baseline) -> Result<(Fixtures, ReportMeta)>` is the
+single preflight used by `metrics_match_baseline` and mutation tests. It
+loads current fixtures, hashes actual corpus/legacy/raw query bytes and
+independently discovers exactly one embedding and one rerank pin. Shared
+identity comparison emits `HashMismatch` before any replay/index run.
+The baseline supplies expected values only. Real legacy execution follows
+identity validation and rejects `LegacyMismatch`; copied parity is removed.
+
+Replay still selects the reviewed baseline's pin paths after successful
+preflight, checks loaded identities/dimensions, and records aggregate
+provenance drift in the existing report warnings. The vector aggregate's
+serialized-case digest is compared only with that same serialization,
+never the baseline raw-file digest. Content-addressed missing vectors or
+candidate pools remain errors. Recording metadata is not rewritten.

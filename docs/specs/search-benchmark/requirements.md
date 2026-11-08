@@ -683,3 +683,21 @@ rationale в ledger (DELTA-1).
   необходимости (явный `models use`). Условие: пользователь предупреждён,
   что free-маршруты могут использовать промпты для обучения и меняются
   каждый месяц; rate limits (20/мин) учитываются pacing'ом записи.
+
+
+## Delta 2026-11-08 — independent gate provenance (#69)
+
+- FR-12/FR-14: the required offline gate reads current corpus/legacy corpus
+  hashes, raw `queries.json` hash and recorded model pins independently of
+  the expected baseline. Identity drift fails before indexing/replay.
+- FR-16: run the legacy corpus at the supplied fixture root and compare its
+  actual results with both the frozen legacy oracle and baseline parity.
+- Baseline `queries_hash` means BLAKE3 of exact file bytes. A vector
+  recording's `queries_hash` means BLAKE3 of serialized typed QueryCase
+  metadata in file order. These are different namespaces. Recording
+  aggregates describe recording-time provenance, and differences are
+  explicit report warnings; they do not invalidate complete content-addressed
+  vectors/pools. Current input drift against baseline still fails closed.
+- Loaded recording model pins and embedding dimensions must agree with the
+  selected pin; replay never relabels a recording as another model.
+- No baseline, corpus, qrels, recordings, ranking or latency-budget changes.
