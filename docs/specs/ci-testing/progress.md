@@ -22,3 +22,22 @@
   Fix: configure observer stdout/stderr as UTF-8; console/log/state regression
   now passes. Scoped re-review: Important ADDRESSED; no new Critical/Important
   findings. Final branch review and native CI follow in PR close-out.
+
+## Delta 2026-11-09
+
+- Task C2: complete (local verification) on `ffeadf6` (#88 merged).
+  Published network changes verified:
+  Windows Actions log and diagnostic artifact download successfully. C1 Windows
+  target timings identify hybrid_rank_ann 197.89 s, lib 197.25 s, ann_e2e
+  150.45 s and ann_recall 67.73 s. These are one runner/run, not a CI p95.
+  Before: two validation tests 24.16 s, Cargo preparation 0.52 s. After: both
+  pass in libtest's 0.00 s resolution; full ann_recall 10/10 passes (54.32 s).
+  Large quality/persistence scenarios and thresholds unchanged; high-fetch
+  membership now uses a set. Mutation accepting empty/mismatched queries makes
+  both tests fail (0 passed/2 failed); source restored byte-for-byte and both
+  tests pass again. MSRV1.88 full cli-full clippy/fmt clean; production diff
+  empty. Fresh task review and native CI recorded at PR close-out.
+  Ruling: fresh C2 review — Spec PASS / Quality APPROVED; findings none.
+  Native PR CI remains pending for final branch close-out.
+- C3: planned after C2; retain isolated perf and preserve the other release
+  targets by automatic Cargo metadata discovery.

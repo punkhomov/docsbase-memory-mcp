@@ -33,3 +33,37 @@ This delta establishes measurements before changing test semantics or routing.
   before/after suite selection is identical. Native PR CI validates all three OS.
 - **SC-3:** No production code, Cargo dependencies, test baselines or test
   assertions change. No tests move to scheduled-only execution in C1.
+
+## Delta 2026-11-09 — C2/C3: small fixtures and isolated performance checks
+
+- **FR-6 (C2):** Empty-query and dimension-mismatch ANN checks use a small,
+  valid index with nonzero vectors. A valid-query control must succeed; empty,
+  shorter and longer queries must retain their error assertions. Keep test names.
+- **FR-7 (C2):** Preserve the 5,000-vector/64-dimension recall and persistence
+  scenarios, query/fetch counts and recall thresholds. Exact/approximate ID
+  intersection may use a set without changing which hits count.
+- **FR-8 (C2):** No production/dependency/baseline/budget change. Demonstrate
+  that accepting invalid queries makes the validation tests fail. Measurements
+  compare test execution separately from compilation, without a CI speedup claim.
+- **FR-9 (C3):** Nightly runs the entire `perf_budget` target exactly once in
+  release `cli-full`, with `--test-threads=1`. It must not run again in the
+  remaining release suite. Preserve all performance assertions and budgets.
+- **FR-10 (C3):** Preserve all other default release test targets, including
+  library/bin tests and doctests. Discover integration targets from Cargo
+  metadata, so new targets are included without a maintained allowlist.
+  Fail explicitly on unsupported target layouts or missing exclusions rather
+  than silently dropping coverage. Preserve Cargo failure status.
+- **FR-11 (C3):** Keep PR jobs, triggers, required search gate, toolchain,
+  features, scheduling and existing ignore policy unchanged. Document the new
+  nightly selection and verify its inventory against the original full suite.
+
+### Success criteria for this delta
+
+- **SC-4:** C2's invalid-acceptance mutation fails both named tests; restored
+  small-fixture tests and the complete `ann_recall` target pass on Rust 1.88.
+  Native PR CI, full clippy and fmt pass.
+- **SC-5:** C3's automated checks cover discovery of a newly added target,
+  exclusion/retention, unsupported layouts and subprocess failure propagation.
+  Actual release inventory partitions into perf exactly once and every other
+  original target exactly once, including doctests. Run isolated perf and the
+  remaining release suite; validate workflow syntax and native PR CI.

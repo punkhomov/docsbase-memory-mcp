@@ -5,6 +5,7 @@
 
 #![allow(clippy::cast_precision_loss)]
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use tempfile::TempDir;
@@ -29,6 +30,19 @@ fn key() -> AnnKey {
         chunk_set_digest: "abcd1234".to_owned(),
         format_version: ANN_FORMAT_VERSION,
     }
+}
+
+/// Query validation runs before graph search and does not need a recall corpus.
+fn small_search_index() -> AnnIndex {
+    let rows: Vec<(u64, Arc<[f32]>)> = vec![
+        (1, Arc::from(vec![1.0_f32, 0.0])),
+        (2, Arc::from(vec![0.0_f32, 1.0])),
+    ];
+    let ann = AnnIndex::build(&rows, 2).expect("build validation index");
+    let hits = ann.search(&[1.0, 0.0], 1).expect("valid query control");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].0, 1, "fixture must answer a valid query");
+    ann
 }
 
 #[test]
@@ -67,11 +81,12 @@ fn high_fetch_recall_matches_the_exact_scan() {
         let mut total = 0usize;
         for vector in a.iter().take(20) {
             let exact = top_k(vector.as_ref(), &rows, fetch).expect("exact scan");
+            let exact_ids: HashSet<u64> = exact.iter().map(|(id, _)| *id).collect();
             let approx = ann.search(vector.as_ref(), fetch).expect("ann search");
             assert_eq!(approx.len(), fetch);
             hit += approx
                 .iter()
-                .filter(|(id, _)| exact.iter().any(|(exact_id, _)| exact_id == id))
+                .filter(|(id, _)| exact_ids.contains(id))
                 .count();
             total += fetch;
         }
@@ -148,22 +163,18 @@ fn tie_break_by_chunk_id() {
 
 #[test]
 fn empty_query_is_an_error() {
-    let a = cluster_vectors(PER_CLUSTER, DIM, 4.0);
-    let b = cluster_vectors(PER_CLUSTER, DIM, -4.0);
-    let ann = AnnIndex::build(&interleaved_rows(&a, &b), DIM).expect("build");
+    let ann = small_search_index();
     let err = ann.search(&[], 10).expect_err("empty query");
     assert!(err.to_string().contains("empty"), "{err}");
 }
 
 #[test]
 fn dimension_mismatch_is_an_error() {
-    let a = cluster_vectors(PER_CLUSTER, DIM, 4.0);
-    let b = cluster_vectors(PER_CLUSTER, DIM, -4.0);
-    let ann = AnnIndex::build(&interleaved_rows(&a, &b), DIM).expect("build");
-    let err = ann
-        .search(&vec![0.0; DIM + 1], 10)
-        .expect_err("dim mismatch");
-    assert!(err.to_string().contains("dim"), "{err}");
+    let ann = small_search_index();
+    for query in [&[1.0][..], &[1.0, 0.0, 0.0][..]] {
+        let err = ann.search(query, 10).expect_err("dim mismatch");
+        assert!(err.to_string().contains("dim"), "{err}");
+    }
 }
 
 #[test]

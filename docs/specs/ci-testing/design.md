@@ -29,3 +29,25 @@ proof that all compilation was warm or cold.
 No new crate or Python package. Keep existing job names, triggers, suite selectors,
 timeouts, release checks and search-quality policy. Future deltas cover test
 correctness, routing, nextest and measured build reuse separately.
+
+## Delta 2026-11-09 — C2/C3
+
+C2 separates input validation from recall/scale fixtures. Both invalid-query
+tests build two nonzero vectors in two dimensions and verify a valid query
+before the invalid case. The mismatch test covers shorter and longer inputs.
+Large recall/persistence fixtures remain unchanged. Exact-scan ID membership
+uses a `HashSet`; approximate result length, corpus, thresholds and sample counts
+retain their current meaning.
+
+C3 keeps the existing isolated performance step and excludes that integration
+target from the remaining release commands. Stable Cargo cannot exclude a single
+test target from its default selection. A stdlib helper reads root-package Cargo
+metadata, selects library/bin tests and every other integration test, then runs
+library doctests separately. It checks the supported target layout/exclusion,
+includes newly discovered integration targets automatically, and propagates the
+first Cargo failure. It leaves test execution to Cargo and does not add a new
+runner, package, job or feature combination. Unsupported layouts fail closed.
+
+Inventory mode appends `-- --list` to the selected Cargo commands, enabling
+before/after comparison without executing performance measurements. Nightly
+uses normal execution. Test bodies, budgets and the PR suite are unchanged in C3.
