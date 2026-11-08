@@ -600,3 +600,17 @@ profile.release.panic="abort"` падает с внятным сообщение
   separately.
 - `search_bench` baseline unchanged; no MCP/CLI changes.
 - T1.5 done (14 days), ADR-15 + delta 0.2 + docs + ledger complete.
+
+## Delta 0.4 tasks (2026-11-08)
+
+### T22 — Bound retained digest generations (#77)
+
+**New crates:** none.
+**RED:** generation history, project capacity without resident entries и zero
+capacity regressions падают на исходном коде.
+**GREEN:** одна generation на проект, global project LRU cap, защита от stale
+lookup, cleanup при project eviction/invalidation.
+**Verify:** `cargo test --locked --lib digest_`,
+`cargo test --locked --test hybrid_ann`, fmt и clippy all-targets.
+**Acceptance:** Delta 0.4 FR-7; без изменения ranking/model identities,
+on-disk формата и конфигурационного интерфейса. Полная suite — PR close-out.

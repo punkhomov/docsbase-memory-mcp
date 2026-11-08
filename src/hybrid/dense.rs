@@ -337,6 +337,13 @@ struct Entry {
     bytes: u64,
 }
 
+struct CachedDigest {
+    digest: String,
+    last_used: u64,
+}
+
+type DigestCache = HashMap<(i64, i64), CachedDigest>;
+
 /// Everything a background ANN build needs (design §8).
 struct BuildJob {
     project_id: i64,
@@ -385,7 +392,7 @@ pub struct DenseCache {
     policy: AnnPolicy,
     store: Option<AnnStore>,
     entries: Arc<Mutex<HashMap<i64, Entry>>>,
-    digests: Arc<Mutex<HashMap<(i64, i64), String>>>,
+    digests: Arc<Mutex<DigestCache>>,
     vector_cache_limits: Arc<Mutex<HashMap<i64, u64>>>,
     outcomes: Arc<Mutex<HashMap<i64, AnnOutcome>>>,
     query_cache: Arc<Mutex<QueryCache>>,
@@ -619,14 +626,39 @@ impl DenseCache {
     fn digest_for(&self, project_id: i64, generation: i64, chunks: &[(u64, String)]) -> String {
         let key = (project_id, generation);
         {
-            let digests = self.digests.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(digest) = digests.get(&key) {
-                return digest.clone();
+            let mut digests = self.digests.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(cached) = digests.get_mut(&key) {
+                cached.last_used = self.tick();
+                return cached.digest.clone();
             }
         }
         let digest = crate::hybrid::ann_store::chunk_set_digest(chunks);
         let mut digests = self.digests.lock().unwrap_or_else(PoisonError::into_inner);
-        digests.insert(key, digest.clone());
+        // An older lookup may finish after a newer generation. Return its
+        // digest to that caller without retaining retired history.
+        if self.limits.max_projects == 0
+            || digests
+                .keys()
+                .any(|(project, newer)| *project == project_id && *newer > generation)
+        {
+            return digest;
+        }
+        digests.retain(|(project, _), _| *project != project_id);
+        if digests.len() >= self.limits.max_projects
+            && let Some(oldest) = digests
+                .iter()
+                .min_by_key(|(_, cached)| cached.last_used)
+                .map(|(key, _)| *key)
+        {
+            digests.remove(&oldest);
+        }
+        digests.insert(
+            key,
+            CachedDigest {
+                digest: digest.clone(),
+                last_used: self.tick(),
+            },
+        );
         digest
     }
 
@@ -1054,12 +1086,10 @@ impl DenseCache {
                 .map(|(id, _)| *id)
         };
         let oldest = pick(true).or_else(|| pick(false))?;
-        if let Some(entry) = entries.get(&oldest) {
-            self.digests
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&(oldest, entry.generation));
-        }
+        self.digests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|(project, _), _| *project != oldest);
         entries.remove(&oldest);
         Some(oldest)
     }
@@ -1776,5 +1806,97 @@ mod tests {
             let digests = dense.digests.lock().unwrap_or_else(PoisonError::into_inner);
             assert_eq!(digests.len(), 1, "a hit must not recompute the digest");
         }
+    }
+
+    #[test]
+    fn digest_history_is_bounded_across_generation_changes() {
+        let dense = DenseCache::new();
+        for generation in 1..=64 {
+            let chunks = vec![(1, format!("hash-{generation}"))];
+            assert_eq!(
+                dense.digest_for(1, generation, &chunks),
+                crate::hybrid::ann_store::chunk_set_digest(&chunks)
+            );
+            let digests = dense.digests.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(digests.len(), 1, "old generations must be discarded");
+            assert!(digests.contains_key(&(1, generation)));
+        }
+        // Work that started before a newer generation must still get its own
+        // correct digest without repopulating the cache's retired history.
+        let old = vec![(1, "retired-hash".to_owned())];
+        assert_eq!(
+            dense.digest_for(1, 1, &old),
+            crate::hybrid::ann_store::chunk_set_digest(&old)
+        );
+        let digests = dense.digests.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(digests.len(), 1);
+        assert!(digests.contains_key(&(1, 64)));
+    }
+
+    #[test]
+    fn digest_cache_bounds_projects_even_without_resident_entries() {
+        let dense = DenseCache::with_policy_and_limits(
+            AnnPolicy::Disabled,
+            None,
+            DenseCacheLimits {
+                max_projects: 2,
+                ..DenseCacheLimits::default()
+            },
+        );
+        let chunks = vec![(1, "hash".to_owned())];
+        dense.digest_for(1, 1, &chunks);
+        dense.digest_for(2, 1, &chunks);
+        dense.digest_for(1, 1, &chunks); // Refresh project 1's recency.
+        dense.digest_for(3, 1, &chunks);
+        {
+            let digests = dense.digests.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(digests.len(), 2);
+            assert!(digests.contains_key(&(1, 1)));
+            assert!(digests.contains_key(&(3, 1)));
+        }
+        for project in 4..=32 {
+            dense.digest_for(project, 1, &chunks);
+            assert!(
+                dense
+                    .digests
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .len()
+                    <= 2
+            );
+        }
+        dense.invalidate(32).expect("invalidate");
+        assert!(
+            !dense
+                .digests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .keys()
+                .any(|(project, _)| *project == 32)
+        );
+    }
+
+    #[test]
+    fn digest_cache_can_be_disabled_with_zero_project_capacity() {
+        let dense = DenseCache::with_policy_and_limits(
+            AnnPolicy::Disabled,
+            None,
+            DenseCacheLimits {
+                max_projects: 0,
+                ..DenseCacheLimits::default()
+            },
+        );
+        let chunks = vec![(1, "hash".to_owned())];
+        assert_eq!(
+            dense.digest_for(1, 1, &chunks),
+            crate::hybrid::ann_store::chunk_set_digest(&chunks)
+        );
+        assert!(
+            dense
+                .digests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+        );
     }
 }

@@ -505,3 +505,13 @@ CI:
 - `ouroboros` 0.18.5 docs.
 - Windows `FlushFileBuffers`: требует `GENERIC_WRITE`
   (<https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers>).
+
+## Delta 0.4 (2026-11-08) — Digest lifetime (#77)
+
+Digest cache ограничен существующим project cap отдельно от resident rows:
+вычисление digest предшествует возможной ошибке vector load, поэтому очистки
+только при entry eviction недостаточно. При вставке удаляется прошлое поколение
+того же проекта и при необходимости LRU другого проекта; hit обновляет recency.
+Проверка generation и вставка выполняются под одним digest mutex. Вычисление
+вне mutex допустимо: старый результат не заменяет уже сохранённый новый;
+история не накапливается даже после eviction и запоздавших вычислений.

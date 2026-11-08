@@ -429,3 +429,12 @@
   with ≤ `SEQUENTIAL_BUILD_MAX` (64) points now use sequential `insert_slice`;
   larger builds keep `parallel_insert_slice`. `ann_recall` passed 20/20 full
   runs afterwards, and the tie-break contract test is the regression guard.
+
+- Task T22: complete (2026-11-08, #77). RED: 3 новые digest-регрессии
+  падают (history grows, project cap ignored, zero capacity ignored).
+  Ruling: bounded project LRU с одной generation на проект, используя текущий
+  max_projects; stale result возвращается caller без накопления истории.
+  Verify: MSRV 1.88.0 — digest tests 4 passed, hybrid_ann 16 passed;
+  fmt и clippy --locked --all-targets -- -D warnings чисты.
+  Ruling: fresh task review — Spec PASS / Quality APPROVED, findings none;
+  full-suite/platform checks remain PR close-out.

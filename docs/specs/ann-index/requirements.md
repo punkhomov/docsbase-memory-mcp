@@ -366,3 +366,13 @@ Non-goals:
   в элементах `hits[]` (`snippet`, `snippet_truncated`) и в конверте `explain`
   (`meta.filters`, `meta.trimmed`). Это аддитивное расширение, а не изменение
   контракта; `baseline.json` не перегенерируется.
+
+## Delta 0.4 (2026-11-08) — Bounded generation metadata (#77)
+
+FR-7: digest metadata имеет не более одной записи на проект и не более
+`DenseCacheLimits.max_projects` записей всего, включая lookup, который не
+опубликовал resident entry. Новое поколение вытесняет старое; запоздавший
+lookup старого поколения получает корректный digest без замещения уже
+закэшированного нового поколения. При вытеснении/invalidation проекта его
+retained digest удаляется. Нулевая capacity отключает сохранение digest.
+Новый конфигурационный параметр, on-disk формат и ranking не вводятся.
