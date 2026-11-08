@@ -18,6 +18,9 @@ here.
 
 ## Commands (verification)
 
+Official CLI builds use `--features cli-full` (both provider implementations).
+The plain Cargo default remains the lean/source compatibility build.
+
 Sandboxed agents: point `CARGO_HOME`/`RUSTUP_HOME` at a writable directory
 first. CI pins the MSRV toolchain explicitly (the repo file pins nightly for
 local development), so validate with `RUSTUP_TOOLCHAIN=1.88.0`.
@@ -29,8 +32,8 @@ plus page cache (`target/` grows to ~19 GB). On constrained hosts cap it:
 iteration.
 
 ```sh
-RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked
-RUSTUP_TOOLCHAIN=1.88.0 cargo clippy --locked --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --features cli-full
+RUSTUP_TOOLCHAIN=1.88.0 cargo clippy --locked --features cli-full --all-targets -- -D warnings
 cargo fmt --check
 RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --release --test perf_budget
 RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test offline            # Linux only

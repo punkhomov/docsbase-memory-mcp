@@ -35,6 +35,14 @@ fastembed + ONNX Runtime, полностью офлайн после provisionin
 **Windows x64** (`.exe`) и **macOS 12+ на Apple Silicon**. Intel-маки вне
 scope (`x86_64-apple-darwin` — Tier 2 у upstream, Intel-железо EOL).
 
+Официальные релизные бинарники включают локальный и удалённый providers
+(`cli-full`). Полный CLI из исходников: `cargo build --release --features cli-full`.
+Обычная Cargo-сборка сохраняет минимальный набор зависимостей. Использование
+providers включается конфигурацией; локальные модели и ONNX Runtime
+устанавливаются отдельно.
+Уже опубликованные assets alpha.5 не содержат эти providers; до исправленного
+релиза используйте полную сборку из исходников.
+
 ## Быстрый старт (5 минут)
 
 ```sh
@@ -72,7 +80,7 @@ $env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punk
 укажите стадии (все шаги provisioning офлайн-безопасны и идемпотентны):
 
 ```sh
-cargo build --release --features hybrid-local
+cargo build --release --features cli-full
 # 1. Установка закреплённого ONNX Runtime (скачивается один раз; `--check` показывает состояние)
 docsbase connect fastembed
 # 2. Скачивание модели из реестра (revision + sha256 закреплены в коде)
@@ -125,7 +133,9 @@ curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/
 ### Сборка из исходников (любая поддерживаемая платформа)
 
 ```sh
-cargo install --locked docsbase --version 0.1.0-alpha.5
+git clone https://github.com/punkhomov/docsbase-memory-mcp.git
+cd docsbase-memory-mcp
+cargo install --path . --locked --features cli-full
 docsbase install   # зарегистрировать бинарь в демоне
 ```
 

@@ -266,3 +266,19 @@ src/cli/connect.rs       # docsbase connect ...
 src/cli/models.rs        # models use/fetch/list/remove + scope
 docs/specs/hybrid-local/ # this spec
 ```
+
+
+## Delta 2026-11-08 — Canonical shipped profile
+
+Cargo.toml задаёт `cli-full` как bundle двух providers. Linux `release-static`
+включает его в alias; Windows/macOS release и все три native CI jobs указывают
+тот же bundle явно. Cargo default=[] не меняется. Lean/source compatibility
+остаётся в Linux compatibility lanes; full native suites заменяют повторные
+local-lib/default runs на платформах. Umbrella исключён из powerset enumeration
+для независимых features; native suites проверяют его напрямую.
+
+`.github/scripts/check-cli-capabilities.py` принимает путь реального бинарника,
+изолирует config/data/cache и удаляет ключ/ORT override. Local CLI проверяется
+через help handler, remote — через pre-network credential validation. Release
+вызывает проверку после распаковки archive; CI — для своего собранного CLI.
+Windows/macOS модели и shared ORT остаются explicit provisioning.

@@ -32,6 +32,11 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ### Fixed
 
+- Official CLI builds include both local and remote embedding/reranking providers
+  through the shared `cli-full` feature bundle. CI tests this profile on all
+  supported platforms, and releases verify provider handlers in the extracted
+  package. Published alpha.5 binaries lacked both providers. Models and ONNX
+  Runtime are still provisioned separately; provider use remains opt-in.
 - Dense-cache memory accounting retains reservations for every live ANN build
   across generation/model changes, eviction and invalidation. Searches stream
   exact results when rows cannot fit beside those builds; stale workers cannot

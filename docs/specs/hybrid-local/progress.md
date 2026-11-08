@@ -450,3 +450,41 @@ Ledger: одна запись на таск (что сделано, чем пр�
 - OQ-3 resolved by human ruling: live run is manual only; no workflow was created for `hybrid_local_live`.
 - Fix round-7 C5 residual (deepseek P3): the FR-13 decision is now a pure `restart_note(reinstalled)` predicate (cfg-gated with `connect_fastembed`), unit-tested on BOTH branches — the note's positive path is no longer unasserted.
 - Fix CI portability failures found on PR #50: macOS default-feature clippy reported `macos_signature_state` as dead code (its only caller sits in the `hybrid-local`-gated `connect_fastembed`) — the helper is now gated `#[cfg(all(target_os = "macos", feature = "hybrid-local"))]`; the Windows build failed to compile `path_to_wide` because `&OsStr` has no `encode_utf16` — it now uses `OsStrExt::encode_wide` (Win32 wide buffer). Both were never compiled on the Linux dev host.
+
+
+- Task T10: complete (2026-11-08). Confirmed published alpha.5 Linux
+  artifact lacks local commands and remote implementation (checksum verified).
+  RED capabilities smoke rejects both omissions. Full static baseline with
+  underlying provider features: smoke passes, 20,064,112 bytes, statically linked.
+  cli-full bundle and packaged-artifact checks added. MSRV full-profile suite: 850 passed, 18 ignored, 0 failures;
+  full-profile clippy/fmt clean. Capabilities smoke passes for full debug and
+  static release binaries. Fresh review and native CI recorded at PR close-out.
+
+  Ruling: fresh T10 review — Spec PASS / Quality APPROVED, findings none.
+  Дополнительно: smoke извлечённого локального full Linux archive прошёл.
+  Native Windows/macOS checks и final branch review — PR close-out.
+
+  Ruling: final independent branch review — converged; unmet requirements,
+  Critical/Important findings и deferred minors отсутствуют. Native CI и
+  ограничения release-archive execution отражены в PR close-out.
+
+- T10 native CI fix (2026-11-08): macOS cli-full clippy exposed five existing
+  diagnostics in local runtime helpers: two unsafe-code warnings, two implicit
+  borrow-as-ptr warnings, and missing must_use. Fixed raw pointer spelling,
+  added must_use, and allowed unsafe only on the existing bounded sysctl
+  wrapper with per-call SAFETY documentation. Linux full-profile clippy/fmt
+  remain clean; native macOS verification follows in CI.
+
+  Ruling: independent fix review — all five diagnostics ADDRESSED, no new
+  Critical/Important findings or behavior change.
+
+- T10 Windows fixture fix (2026-11-08): native CI reached the full-profile
+  integration tests and exposed raw Windows runtime_path interpolation in
+  tests/cli_models.rs. The same malformed-TOML pattern existed in tests/config.rs.
+  Both now serialize TOML string values instead of hand-quoting display paths;
+  expected fetch hints are unchanged. Targeted suites: cli_models 23 passed,
+  config 31 passed; full-profile clippy/fmt clean. Branch rebased without conflicts
+  onto bae85b4 (#84); full-profile suite/native CI rerun for the new base.
+
+  Ruling: independent fixture-fix review APPROVED; no new Critical/Important
+  findings or production behavior change.

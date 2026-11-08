@@ -35,6 +35,13 @@ Supported platforms: **Linux x86_64** (static binary), **Windows x64**
 (`.exe`) and **macOS 12+ on Apple Silicon**. Intel Macs are out of scope
 (`x86_64-apple-darwin` is Tier 2 upstream and Intel hardware is EOL).
 
+Official release binaries include both local and remote providers (`cli-full`).
+For a full CLI built from source, use `cargo build --release --features cli-full`;
+plain Cargo builds retain the lean dependency set. Provider use remains opt-in
+through configuration, and local models/ONNX Runtime are provisioned separately.
+The already published alpha.5 assets omit these providers; use a full source build
+until a corrected release is available.
+
 ## Quickstart (5 minutes)
 
 ```sh
@@ -74,7 +81,7 @@ then point the stages at them (all provisioning commands are offline-safe and
 idempotent):
 
 ```sh
-cargo build --release --features hybrid-local
+cargo build --release --features cli-full
 # 1. Install the pinned ONNX Runtime (downloads once; `--check` reports state)
 docsbase connect fastembed
 # 2. Fetch a registry model (revision + sha256 pinned in code)
@@ -126,7 +133,9 @@ prompts (notarization is not needed for this path).
 ### Build from source (any supported platform)
 
 ```sh
-cargo install --locked docsbase --version 0.1.0-alpha.5
+git clone https://github.com/punkhomov/docsbase-memory-mcp.git
+cd docsbase-memory-mcp
+cargo install --path . --locked --features cli-full
 docsbase install   # register the binary with the daemon
 ```
 

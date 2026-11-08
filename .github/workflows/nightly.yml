@@ -41,16 +41,16 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Offline guarantee (SC-8, NFR-5)
-        run: cargo test --locked --test offline -- --nocapture
+        run: cargo test --locked --features cli-full --test offline -- --nocapture
       - name: Platform seam invariant (ADR-9)
-        run: cargo test --locked --test platform_boundary
+        run: cargo test --locked --features cli-full --test platform_boundary
       - name: Performance budgets (NFR-1, SC-7)
         # Single-threaded: the 10k RSS delta is process-wide and must not
         # race allocations from the 50k-chunk search budget (T52 review).
-        run: cargo test --locked --release --test perf_budget -- --nocapture --test-threads=1
+        run: cargo test --locked --features cli-full --release --test perf_budget -- --nocapture --test-threads=1
       - name: Full release suite
-        run: cargo test --locked --release
+        run: cargo test --locked --features cli-full --release
       - name: Lints
         run: |
           cargo fmt --check
-          cargo clippy --all-targets -- -D warnings
+          cargo clippy --locked --features cli-full --all-targets -- -D warnings
