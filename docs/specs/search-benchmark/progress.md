@@ -420,3 +420,17 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   Fresh task reviewer `/root/review_adjudication_t17`: PASS / APPROVED,
   findings: none. Shared hybrid-remote harness: 6 passed / 3 ignored.
   Финальный review ветки и hosted CI фиксируются в PR.
+
+
+2026-11-08 — #72 planned: T18 absolute frozen diagnostics; T19 explicit
+BEIR external runner and first real SciFact test report. #70 merged as
+3503f2e. Existing proposal is the design basis; no production/CI/provider
+changes or implicit baseline regeneration. License checked before download:
+SciFact claims/annotations CC BY 4.0, abstracts ODC-By 1.0.
+
+Task T18: complete (2026-11-08). RED: two assertions fail for missing
+quality_diagnostics; GREEN: 80 search_bench tests passed, 2 manual ignored.
+Target Clippy/fmt clean. Baseline/ranks/production unchanged. Current counts
+135/141/165/183 hits, 4 separate allowances, 10 common misses documented.
+Ruling: fresh reviewer /root/review_external_t18 — PASS / APPROVED,
+no findings; diagnostics never participate in gate verdict.

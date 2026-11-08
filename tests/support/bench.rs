@@ -2048,6 +2048,9 @@ pub struct Report {
     /// green run still shows trap movement toward the top.
     #[serde(default)]
     pub trap_diagnostics: Vec<String>,
+    /// Absolute quality; never consumed by `gate_failures`. Old reports omit it.
+    #[serde(default)]
+    pub quality_diagnostics: Option<super::diagnostics::QualityDiagnostics>,
 }
 
 /// Machine-readable gate failure (NFR-8: every hard fail carries a reason).
@@ -2295,6 +2298,7 @@ pub fn build_report(current: &Baseline, baseline: Option<&Baseline>) -> Report {
         // Attached explicitly by callers with cases in hand
         // (`attach_trap_diagnostics`); never a default.
         trap_diagnostics: Vec::new(),
+        quality_diagnostics: Some(super::diagnostics::diagnose(current, baseline)),
     }
 }
 
@@ -2942,6 +2946,7 @@ pub fn quality_json(report: &Report) -> String {
         "legacy_parity": report.baseline.legacy_parity,
         "outcome_matrix": report.outcome_matrix,
         "trap_diagnostics": report.trap_diagnostics,
+        "quality_diagnostics": report.quality_diagnostics,
         "discrimination": {
             "saturated_total": report.discrimination.saturated_total,
             "saturated_ratio": report.discrimination.saturated_ratio,

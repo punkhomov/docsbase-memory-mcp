@@ -757,3 +757,46 @@ rationale в ledger (DELTA-1).
   recordings переиспользуются без новых provider calls; запись содержит
   прежнюю recording-time aggregate provenance. Сохранить прежние baseline
   latency/index-build значения: эта коррекция не перекалибровывает бюджеты.
+
+
+## Delta 2026-11-08 — External evaluation and absolute diagnostics (#72)
+
+- **EXT-72-1:** frozen report содержит по каждому реально запущенному режиму
+  и семейству число queries/hits/misses, сохранённых baseline misses и новых
+  misses, macro recall/nDCG и top1 relevant/trap/unjudged/empty. Отдельно
+  показываются retained rank1-trap allowances и пересечение misses всех
+  запущенных режимов. Top1 unjudged не объявляется ошибочным ответом.
+  Это диагностика: прежние gate verdict, baseline и ranking не меняются.
+- **EXT-72-2:** десять общих misses после adjudication #70 перечислены с
+  query IDs и решениями: irregular morphology относится к #48; paraphrase
+  и cross-language — явные accepted limitations текущих записанных моделей,
+  а не доказанная единая ошибка морфологии или повод для tuning.
+- **EXT-72-3:** ручной ignored external runner читает явный BEIR directory:
+  `corpus.jsonl`, `queries.jsonl`, `qrels/<split>.tsv`, `dataset.json`.
+  Проверяет пустые/повторные IDs, текст, неизвестные ссылки qrels и повторные
+  пары. Оценивает только запросы выбранного split с положительными qrels,
+  детерминированно по ID; excluded queries и zero-only queries видны.
+  IDs непрозрачны: файлы Markdown адресуются BLAKE3(ID), исходные IDs
+  сохраняются. Никакой записи по исходным IDs и frozen bounds/validator.
+- **EXT-72-4:** lexical BM25 — default и обязательный бесплатный минимум.
+  Другие режимы выбираются явно, работают только с explicit offline replay:
+  pinned model identities, corpus/queries/tokenizer/adapter identity и
+  content-addressed recordings; отсутствующие данные или ошибка replay
+  отклоняют весь отчёт, включая случаи production fallback. Провайдерские
+  клиенты runner не создаёт, inference spend равен нулю; cap фиксируется.
+- **EXT-72-5:** external JSON с `track: external`, `advisory: true` содержит
+  dataset/version/source/license/download time/split, raw corpus/query/qrels
+  BLAKE3, derived Markdown hash, adapter/harness source hashes/versions,
+  engine revision, TOKENIZER_VERSION, model pins, config, evaluated/excluded
+  IDs/counts, полные per-case ranks/metrics, latency/index time/cost.
+  Положительные qrels бинаризуются в grade 2, zero — explicit nonrelevant,
+  absent judgement — unjudged. Отрицательные scores отклоняются.
+  Document-level relevance оценивается в top-k citation slots, повторный
+  документ не даёт повторного gain; IDCG ограничен k. Это не стандартный
+  BEIR document retrieval score, пока pipeline выдаёт повторные chunks.
+- **EXT-72-6:** первый реальный отчёт SciFact test публикуется полностью;
+  corpus/queries/qrels не вендорятся. Лицензии проверяются до загрузки.
+  Внешний результат advisory, автоматического изменения frozen fixtures,
+  baseline/scoring и CI нет. Важные наблюдения записываются с ограничениями
+  и решением о следующем независимом сете; перенос в frozen — отдельное
+  reviewed delta. Успешный synthetic smoke не закрывает реальную приёмку.

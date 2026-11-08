@@ -1100,3 +1100,39 @@ rerank pools остаются действительными, хотя qrels/cla
 сохраняются отдельным осознанным шагом, а JSON quality diff сравнивается
 при неизменных ranked lists. Применяются существующие validator,
 discrimination, provenance, known-growth и allowance-retirement проверки.
+
+
+## Delta 2026-11-08 — External track (#72)
+
+`tests/support/diagnostics.rs` агрегирует абсолютное качество из ConfigReport
+и baseline comparison. `build_report` прикладывает diagnostics, не меняя
+Baseline и gate_failures. Новый optional/defaulted report field сохраняет
+чтение старых отчётов; quality_json включает детерминированную диагностику.
+
+`tests/support/external.rs` отделяет BEIR ingestion/provenance от frozen
+Fixtures. `ExternalDataset::load(dir, split, k)` валидирует metadata/JSONL/TSV
+и материализует title+text в собственный temp corpus; hash-based filenames
+исключают traversal. `run_external(dataset, options)` переиспользует
+build_env и run_config_timed, затем считает binary document relevance на
+citation slots (IDCG@k, unique gain, исходные document IDs в отчёте).
+ExternalReport — отдельная typed оболочка, а не фиктивный Baseline:
+legacy/discrimination/known allowances к внешней выборке неприменимы.
+
+Replay bundle имеет identity.json (derived corpus hash, raw queries hash,
+TOKENIZER_VERSION, adapter version, embedding/rerank pins) и существующие
+vector/rerank fixtures. Проверяем exact identities, coverage vectors и
+query bytes; checked wrappers запрещают скрытый fallback при ошибке pool.
+Все режимы offline; cost cap и нулевой spend записываются явно. Online
+recording/покупка inference не добавляются в этот ручной evaluation runner.
+
+`tests/search_bench_external.rs` содержит parser/provenance/metric/replay
+regressions и ignored `external_measurement`. Настройки — явные env paths,
+split/k/config list/replay dir/output path. Выход в frozen fixture paths
+запрещён. Отчёт строится полностью до записи; dataset IDs/text не могут
+управлять путями. New crates: none. Production/CI/Cargo не меняются.
+
+Первая выборка: SciFact BEIR archive MD5 5f7d1de60b170fc8027bb7898e2efca1,
+5,183 abstracts, 300 test queries. Claims/annotations CC BY 4.0,
+abstracts ODC-By 1.0 (allenai/scifact LICENSE.md). Результат — вне домена
+проектной документации; он проверяет generalization retrieval pipeline,
+не пригодность конкретного продукта и не относительное качество моделей.
