@@ -331,3 +331,18 @@ CI (windows functional #11): `index_dir_ignored` — watcher сравнивал 
 CI (windows functional #12 + release #2): `index_dir_ignored` — cache-каталог внутри root ещё не существует в момент старта watcher, `canonicalize` падал в короткий путь → `canonicalize_allow_missing` (родитель+имя); release `update_waits_for_synchronous_job` — нижняя граница ожидания 2с несовместима с быстрым release-индексом, снижена до 200мс (реальные инварианты: job_result.is_ok + manifest); при этом soak 3 агента × 1 час в этом ране **прошёл**
 CI split: `ci.yml` (push main/PR: linux+windows fmt/clippy/test, cancel-in-progress), `nightly.yml` — только release-checks (offline/boundary/perf/full release suite/lints), `soak.yml` — weekly (вс 04:23) + dispatch с `soak_secs` (короткий прогон вручную); gate `.github/actions/new-commits` пропускает scheduled-запуски без новых коммитов (сравнение headSha последнего completed-рана; workflow_dispatch — всегда); windows-джоб переехал из nightly в ci
 CI split validation: push-triggered `ci` (linux+windows) — success ~8 мин; dispatch `nightly` (gate + release-checks) — success ~10 мин; dispatch `soak` с `soak_secs=300` — success (ручной override гейта работает); старый часовой soak-ран 37200277998 продолжает идти (windows там уже зелёный); поведение skip без новых коммитов проверится на первом scheduled-запуске
+
+Task T54: complete (2026-11-08, #75). RED: три Linux descriptor-регрессии
+падают на прежнем коде: success/drop оставляет 1 fd вместо 0; busy attempt
+оставляет 2 вместо 1; build mismatch оставляет 1 вместо 0. Ruling: заменить
+leaked lock приватным owning lock/guard через существующий `ouroboros`;
+сохранить `Lease::acquire`, admission diagnostics и process-lock semantics.
+Verify: Rust 1.88.0, full default suite — 668 passed / 0 failed / 11 ignored,
+включая admission 9, install/update, lifecycle, static artifact и search gate;
+clippy --locked --all-targets -- -D warnings и fmt --check чисты.
+Среда: TMPDIR=/var/tmp/docsbase-onboarding-tests (служебные .git markers в
+/tmp и /workspace), writable XDG_DATA_HOME; DOCSBASE_BENCH_LATENCY_SLACK=3
+по documented shared-host policy. Windows/macOS execution — PR CI.
+Ruling: fresh task review — Spec compliance PASS / Quality APPROVED, findings
+none; owner/guard cleanup при constructor/state-check errors и test hygiene
+проверены независимо. Windows/macOS runtime остаётся проверкой PR CI.

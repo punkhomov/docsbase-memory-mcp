@@ -702,3 +702,13 @@ tests/
 | NFR-6 (Windows x64) | `platform/windows.rs`, CI-матрица (ADR-10, T38–T43) |
 | NFR-5, NFR-8 | `logs/daemon.log` + conflict-log, отсутствие сетевых крейтов в дефолтной сборке |
 | NFR-7 | `store/migrations.rs` |
+
+## Delta 2026-11-08 — Owning admission lease (#75)
+
+`admission::Lease` хранит приватный `HeldAdmissionLock`: `RwLock<File>` и
+заимствующий его `RwLockWriteGuard`. Уже используемый `ouroboros` обеспечивает
+владение и порядок уничтожения: guard unlock → lock/File close. Fallible
+constructor закрывает file при отказе `try_write`; локальный owner уничтожается
+при любой последующей ошибке проверки состояния. `Box::leak`, ручной unsafe и
+новые зависимости не нужны. Публичный `Lease::acquire` и admission policy
+сохраняются. Прежнее решение T18 о process-lifetime leak заменено этой дельтой.

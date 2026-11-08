@@ -207,3 +207,126 @@ fn conflict_lines(env: &Env) -> Vec<serde_json::Value> {
         .map(|line| serde_json::from_str(line).expect("ndjson line"))
         .collect()
 }
+
+#[test]
+fn lease_holds_lock_until_drop() {
+    let env = Env::new();
+    let schema = docsbase_memory::store::migrations::SCHEMA_VERSION;
+    let lease = Lease::acquire(env.cache(), &build_id(), schema).expect("acquire lease");
+
+    let output = env.cli().arg("serve").output().expect("competing daemon");
+    assert!(!output.status.success(), "second process must be refused");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("another daemon holds"),
+        "{output:?}"
+    );
+
+    drop(lease);
+    ensure_daemon_with(env.cache(), Some(&daemon_bin())).expect("start after lease drop");
+    stop_daemon(env.cache()).expect("stop daemon");
+}
+
+/// Count only descriptors for this test's lock, excluding files opened by
+/// concurrently running tests and the temporary /proc directory descriptor.
+#[cfg(target_os = "linux")]
+fn admission_lock_fds(env: &Env) -> usize {
+    let path = env
+        .cache()
+        .canonicalize()
+        .expect("canonical cache")
+        .join("state/admission.lock");
+    fs::read_dir("/proc/self/fd")
+        .expect("process descriptors")
+        .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
+        .filter(|target| *target == path)
+        .count()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn repeated_acquire_and_drop_closes_lock_file() {
+    let env = Env::new();
+    let schema = docsbase_memory::store::migrations::SCHEMA_VERSION;
+    for _ in 0..32 {
+        let lease = Lease::acquire(env.cache(), &build_id(), schema).expect("acquire");
+        assert_eq!(admission_lock_fds(&env), 1, "live lease owns one file");
+        drop(lease);
+        assert_eq!(admission_lock_fds(&env), 0, "drop must close the file");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn busy_acquire_attempts_close_lock_file() {
+    let env = Env::new();
+    let schema = docsbase_memory::store::migrations::SCHEMA_VERSION;
+    let lease = Lease::acquire(env.cache(), &build_id(), schema).expect("incumbent");
+    for _ in 0..32 {
+        let err = Lease::acquire(env.cache(), &build_id(), schema).expect_err("busy");
+        assert!(docsbase_memory::daemon::admission::is_lock_busy(&err));
+        assert_eq!(
+            admission_lock_fds(&env),
+            1,
+            "only incumbent may keep a file"
+        );
+    }
+    drop(lease);
+    assert_eq!(admission_lock_fds(&env), 0, "incumbent must close its file");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn admission_check_errors_close_lock_file() {
+    let schema = docsbase_memory::store::migrations::SCHEMA_VERSION;
+    for failure in ["build", "schema", "root", "parse", "read"] {
+        let env = Env::new();
+        env.write_state(&build_id(), schema);
+        let path = env.cache().join("state/daemon.json");
+        match failure {
+            "parse" => fs::write(&path, "not json").expect("corrupt state"),
+            "read" => {
+                fs::remove_file(&path).expect("remove state");
+                fs::create_dir(&path).expect("unreadable state directory");
+            }
+            _ => {
+                let mut state: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).expect("read state")).expect("json");
+                match failure {
+                    "build" => state["build_id"] = "old build".into(),
+                    "schema" => state["schema_version"] = (schema + 1).into(),
+                    "root" => {
+                        state["cache_root"] = env.cache().join("other").to_string_lossy().into();
+                    }
+                    _ => unreachable!(),
+                }
+                fs::write(&path, serde_json::to_vec(&state).expect("encode")).expect("state");
+            }
+        }
+        for _ in 0..16 {
+            let err = Lease::acquire(env.cache(), &build_id(), schema).expect_err(failure);
+            assert!(
+                match failure {
+                    "parse" | "read" => matches!(err, Error::Internal { .. }),
+                    _ => matches!(err, Error::Admission { .. }),
+                },
+                "{failure}: unexpected error: {err}"
+            );
+            assert!(
+                !docsbase_memory::daemon::admission::is_lock_busy(&err),
+                "{failure}: failed validation must release the lock: {err}"
+            );
+            assert_eq!(admission_lock_fds(&env), 0, "{failure}: file must close");
+        }
+        if failure == "read" {
+            fs::remove_dir(&path).expect("remove state directory");
+        } else {
+            fs::remove_file(&path).expect("remove state");
+        }
+        drop(Lease::acquire(env.cache(), &build_id(), schema).expect("recover after error"));
+        assert_eq!(
+            admission_lock_fds(&env),
+            0,
+            "{failure}: recovered file closes"
+        );
+    }
+}

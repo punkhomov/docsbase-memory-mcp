@@ -10,15 +10,22 @@ use crate::conflict::{self, Conflict};
 use crate::daemon::lifecycle::{self, DaemonState};
 use crate::error::{Error, Result};
 
+/// Owns the lock and its borrowing guard. The guard is dropped first to
+/// unlock the file, then the lock closes it, including on admission errors.
+#[ouroboros::self_referencing]
+#[derive(Debug)]
+struct HeldAdmissionLock {
+    lock: RwLock<File>,
+    #[borrows(mut lock)]
+    #[not_covariant]
+    guard: RwLockWriteGuard<'this, File>,
+}
+
 /// Held for the whole daemon lifetime; a second daemon cannot acquire it
-/// (FR-4, FR-9). The underlying `RwLock` is leaked into a `'static` allocation
-/// so the guard can be stored; the daemon exits with the process anyway.
-/// Refused acquires also leak one allocation/fd per call — acceptable for the
-/// once-per-process daemon path and tests.
+/// (FR-4, FR-9). Dropping a lease unlocks and closes its admission file.
 #[derive(Debug)]
 pub struct Lease {
-    #[expect(dead_code, reason = "RAII guard: held, never read, releases on drop")]
-    guard: RwLockWriteGuard<'static, File>,
+    _lock: HeldAdmissionLock,
 }
 
 /// True when `err` is the admission lock being held by a live daemon; callers
@@ -47,9 +54,8 @@ impl Lease {
             .truncate(false)
             .open(&path)
             .map_err(|err| Error::internal_with_source("open admission lock", err))?;
-        let lock: &'static mut RwLock<File> = Box::leak(Box::new(RwLock::new(file)));
-        let guard = match lock.try_write() {
-            Ok(guard) => guard,
+        let lock = match HeldAdmissionLock::try_new(RwLock::new(file), RwLock::try_write) {
+            Ok(lock) => lock,
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                 let incumbent = recorded(cache);
                 let recorded_build = incumbent.as_ref().map(|state| state.build_id.as_str());
@@ -134,7 +140,7 @@ impl Lease {
                 return Err(Error::Admission { message });
             }
         }
-        Ok(Self { guard })
+        Ok(Self { _lock: lock })
     }
 }
 

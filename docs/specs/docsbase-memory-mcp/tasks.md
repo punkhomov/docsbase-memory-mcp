@@ -958,3 +958,19 @@ lru_eviction_capped}` (счётчик вызовов == число различ�
 T49–T52 и наоборот; каждая задача верифицируема `Verify`-командой; новых крейтов нет;
 единственное wire-изменение — additive `status.git`/`root: missing` (T49/T50); git-тесты
 скипаются без бинаря и не флакают; бюджеты меряются только в release.
+
+## Delta 2026-11-08 — Admission resource cleanup (#75)
+
+### T54 — Владение admission lock без утечек
+
+**New crates:** none (`ouroboros` уже используется для owning self-references).
+**Files:** `src/daemon/admission.rs`, `tests/admission.rs`, текущие spec/ledger.
+**RED:** повторные acquire/drop, busy attempts и state-check errors оставляют
+открытые descriptors `admission.lock` (Linux).
+**GREEN:** owning lock/guard; закрытие при отказе конструктора, ошибке валидации
+и drop; эксклюзивность сохраняется до drop и между процессами.
+**Verify:** MSRV 1.88.0; `cargo test --locked`,
+`cargo clippy --locked --all-targets -- -D warnings`, `cargo fmt --check`.
+**Acceptance:** delta FR-4/FR-9 выше; existing admission, install/update,
+lifecycle и kill/recovery tests зелёные; нет новых dependencies, unsafe,
+изменений wire/state/config и несвязанных fixes.
