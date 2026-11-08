@@ -381,3 +381,13 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   to 4822 CRLF lines before explicit attributes. Frozen root JSON is now
   checked out LF; the same probe returns byte-identical bytes and 0 CRLF.
   No fixture payload changed. Original T15 reviewer approved this follow-up.
+
+- Final branch review (2026-11-08, T15/T16): converged; no Critical or
+  Important findings. Independent reviewer checked both dated deltas, exact
+  Failure identity, preflight/replay checks, report persistence and LF checkout.
+  minor (deferred): existing required `linux` job omits the documented
+  `DOCSBASE_BENCH_LATENCY_SLACK=3` used by the feature jobs. Hosted timing must
+  be checked independently of the local slack=3 verification.
+  minor (deferred): existing offline CI has no artifact-upload step for
+  `target/search-bench/gate-report.json`. The gate persists its report locally;
+  downloadable CI report publishing remains separate workflow work.
