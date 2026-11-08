@@ -458,3 +458,9 @@ all 300 per-case quality results; report engine revision/source hash now
 pin this reachable task commit and updated upstream Cargo/runtime tree.
 No source/CI files from #85 modified. Required cli-full verification runs
 on this integrated tree; final status recorded in PR.
+
+2026-11-08 final review fix: require Bm25 in every explicit external config
+list (EXT-72-4 mandatory free minimum). A valid replay with Rrf-only first
+reproduced the missing guard; validation now rejects omission. No scoring
+or production changes; focused cli-full checks and all-target lint rerun.
+Final report provenance is refreshed against the reachable fix commit.

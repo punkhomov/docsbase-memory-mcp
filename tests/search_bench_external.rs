@@ -294,6 +294,16 @@ fn explicit_replay_runs_all_modes_and_missing_content_fails_closed() {
     assert_eq!(result.quality.len(), 4);
     assert_eq!(result.provenance.model_pins.len(), 2);
     assert_eq!(result.cost.provider_requests, 0);
+    let dense_only = ExternalOptions {
+        configs: vec![ConfigId::Rrf],
+        replay_dir: Some(replay.path().into()),
+        ..ExternalOptions::default()
+    };
+    assert!(
+        evaluate_directory(dir.path(), &dense_only).is_err(),
+        "every external report must retain the free BM25 baseline even with valid replay"
+    );
+
     let mut broken = identity.clone();
     broken["tokenizer_version"] = serde_json::json!(0);
     std::fs::write(&path, broken.to_string()).unwrap();

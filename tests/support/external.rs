@@ -68,6 +68,10 @@ impl ExternalOptions {
             !self.configs.is_empty(),
             "select at least one configuration"
         );
+        ensure!(
+            self.configs.contains(&ConfigId::Bm25),
+            "external configurations must include the free BM25 baseline"
+        );
         let unique: BTreeSet<_> = self.configs.iter().collect();
         ensure!(
             unique.len() == self.configs.len(),

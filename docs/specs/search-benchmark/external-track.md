@@ -50,7 +50,8 @@ Hash bytes имеют смысл вместе с adapter/tokenizer versions и s
 
 Дополнительные параметры: `DOCSBASE_EXTERNAL_SPLIT` (default `test`),
 `DOCSBASE_EXTERNAL_K` (1…20, default 10), `DOCSBASE_EXTERNAL_CONFIGS`
-(comma-separated `Bm25,Bm25Rerank,Rrf,RrfRerank`) и
+(comma-separated `Bm25,Bm25Rerank,Rrf,RrfRerank`; список обязан включать
+`Bm25`, остальные режимы добавляются явно) и
 `DOCSBASE_EXTERNAL_REPLAY_DIR`. Не-BM25 требует explicit offline replay;
 cap `DOCSBASE_BENCH_COST_CAP_USD` (default $2, finite nonnegative) записывается,
 но **этот runner никогда не делает provider requests**, spend всегда $0.
