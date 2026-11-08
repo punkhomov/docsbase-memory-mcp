@@ -343,3 +343,6 @@ clippy --locked --all-targets -- -D warnings и fmt --check чисты.
 Среда: TMPDIR=/var/tmp/docsbase-onboarding-tests (служебные .git markers в
 /tmp и /workspace), writable XDG_DATA_HOME; DOCSBASE_BENCH_LATENCY_SLACK=3
 по documented shared-host policy. Windows/macOS execution — PR CI.
+Ruling: fresh task review — Spec compliance PASS / Quality APPROVED, findings
+none; owner/guard cleanup при constructor/state-check errors и test hygiene
+проверены независимо. Windows/macOS runtime остаётся проверкой PR CI.
