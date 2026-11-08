@@ -35,6 +35,14 @@ fastembed + ONNX Runtime, полностью офлайн после provisionin
 **Windows x64** (`.exe`) и **macOS 12+ на Apple Silicon**. Intel-маки вне
 scope (`x86_64-apple-darwin` — Tier 2 у upstream, Intel-железо EOL).
 
+Официальные релизные бинарники включают локальный и удалённый providers
+(`cli-full`). Полный CLI из исходников: `cargo build --release --features cli-full`.
+Обычная Cargo-сборка сохраняет минимальный набор зависимостей. Использование
+providers включается конфигурацией; локальные модели и ONNX Runtime
+устанавливаются отдельно.
+Уже опубликованные assets alpha.5 не содержат эти providers; до исправленного
+релиза используйте полную сборку из исходников.
+
 ## Быстрый старт (5 минут)
 
 ```sh

@@ -152,3 +152,16 @@ are ever deleted. Config files are kept.
   signature) and `curl` installs are not quarantined, so no Gatekeeper prompt
   is expected; a browser-downloaded archive may be quarantined — prefer
   `install.sh` or run `xattr -d com.apple.quarantine docsbase`.
+
+
+## Full CLI distribution (2026-11-08)
+
+Official release builds use `cli-full`, which includes `hybrid-local` and
+`hybrid-remote`. Models and ONNX Runtime remain separate explicit provisioning.
+For a full source build use `cargo build --release --locked --features cli-full`
+(or `cargo release-static --locked` on Linux). A plain Cargo build retains
+the lean dependency set.
+
+The published `v0.1.0-alpha.5` assets predate this correction and omit both
+provider implementations; installed copies require a corrected release or a
+source rebuild to use them.

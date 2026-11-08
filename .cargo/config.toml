@@ -18,6 +18,8 @@ incompatible-publish-age = "deny"
 release-static = [
     "build",
     "--release",
+    "--features",
+    "cli-full",
     "--target",
     "x86_64-unknown-linux-gnu",
     "--config",

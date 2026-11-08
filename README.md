@@ -35,6 +35,13 @@ Supported platforms: **Linux x86_64** (static binary), **Windows x64**
 (`.exe`) and **macOS 12+ on Apple Silicon**. Intel Macs are out of scope
 (`x86_64-apple-darwin` is Tier 2 upstream and Intel hardware is EOL).
 
+Official release binaries include both local and remote providers (`cli-full`).
+For a full CLI built from source, use `cargo build --release --features cli-full`;
+plain Cargo builds retain the lean dependency set. Provider use remains opt-in
+through configuration, and local models/ONNX Runtime are provisioned separately.
+The already published alpha.5 assets omit these providers; use a full source build
+until a corrected release is available.
+
 ## Quickstart (5 minutes)
 
 ```sh

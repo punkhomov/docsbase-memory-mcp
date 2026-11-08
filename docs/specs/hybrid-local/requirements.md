@@ -469,3 +469,19 @@ MCP management tools, `docsbase serve` model endpoints, quantized-on-the-fly con
 - **OQ-7.** Mixed providers per stage (fastembed embedding + OpenRouter rerank): allowed by
   config and written with two separate invocations (`models use embed …`, then
   `models use rerank …`); no command sets both stages at once.
+
+
+## Delta 2026-11-08 — Full CLI distribution
+
+Официальный CLI на Linux/Windows/macOS включает local и remote providers
+эмбеддингов/реранкинга: Cargo feature bundle `cli-full` включает
+`hybrid-local` и `hybrid-remote`. Release и native CI используют этот же bundle.
+Cargo default=[] остаётся lean/source конфигурацией; NFR-1 о её dependency tree
+сохраняется. Наличие provider в бинарнике не включает его использование без
+явного runtime config; модели и ONNX Runtime устанавливаются отдельно.
+
+Acceptance: из извлечённого release archive `models fetch --help` доступен,
+а `connect openrouter --check` без ключа доходит до ошибки отсутствующего
+OPENROUTER_API_KEY, а не до missing-feature ветки. Проверка герметична и не
+скачивает модели/runtime, не отправляет запросы. Linux сохраняет static/40 MiB
+бюджет. Исправление не публикует новый release автоматически.

@@ -301,3 +301,17 @@ machine-local provider registry, and no default models.
   feed T8.
 - **Review focus:** see header; each failure mode is pinned to a test in T1–T6.
 - **Proportion:** 9 tasks, ~6 modules; T9 is lifecycle, not gold-plating.
+
+
+## Delta 2026-11-08
+
+### T10 — Ship both CLI providers
+
+**New crates:** none.
+**RED:** capabilities smoke падает на опубликованном Linux alpha.5 после
+проверки checksum: local commands отсутствуют, remote требует hybrid-remote.
+**GREEN:** общий cli-full bundle для release/native CI; smoke извлечённого
+package на всех платформах; lean dependency contract сохранён.
+**Verify:** MSRV full-profile suite + clippy/fmt; Linux static size/link checks;
+smoke полного бинарника и извлечённого archive; native platform CI.
+Fresh task review и final branch review; merge и release publication не входят.
