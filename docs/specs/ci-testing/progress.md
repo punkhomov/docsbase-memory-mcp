@@ -60,3 +60,15 @@
   final branch review and native PR CI follow at close-out.
   Ruling: fresh C3 review — Spec PASS / Quality APPROVED; findings none.
   Final branch review and native PR functional CI remain pending.
+
+- Task C4: complete (local verification). First native run42521642317
+  at91d4701: macOS failed
+  install_owned_artifacts at tests/install.rs:104 with empty stderr. The helper
+  discarded exit status/stdout, so termination cause is unknown. Capture full
+  Output while retaining the exact success assertion and retry behavior. No
+  unconditional rerun/retry or timing-budget change is added to the test.
+  Existing install target: 15 passed/0 failed; scoped cli-full Clippy and fmt
+  pass. Fresh review and final-head native CI follow. This improves evidence
+  for a recurrence and does not diagnose/fix the original termination cause.
+  Ruling: fresh C4 review — Spec PASS / Quality APPROVED; findings none.
+  Final-head native CI remains pending; original macOS cause remains unknown.

@@ -77,3 +77,13 @@ Cargo-native opt-in selection replaces the initially planned metadata selector.
   syntax. A controlled MSRV release Cargo probe must confirm new targets
   still auto-discover and compile errors in the opt-in target are caught by explicit checking. No metadata helper or
   implementation-mirroring configuration unit tests are required.
+
+## Delta 2026-11-09 — C4: install subprocess failure diagnostics
+
+- **FR-12:** When the install fixture's launcher exits unsuccessfully, include
+  its complete `Output` (exit status, stdout and stderr). Keep the command,
+  success assertion, copy behavior and existing ETXTBSY-only retry unchanged.
+  An empty-stderr macOS failure is an observation, not a diagnosed product bug;
+  neither diagnostics nor a passing rerun may be described as fixing its cause.
+- **SC-6:** Existing install suite, fmt and Clippy pass; fresh task review and
+  final-head native CI pass. No production change or new retry/timeout.

@@ -55,3 +55,11 @@ Linux-only; other native functional checks are unchanged. Six formerly ignored
 debug entries become opt-in; no functional execution or performance budget is
 removed. Real inventories, explicit performance execution and lint checks prove
 the partition. Production code/dependencies remain unchanged.
+
+## Delta 2026-11-09 — C4
+
+The install fixture uses the standard `Output` Debug format already used by
+its index helper. A failed process with empty stderr must still show its exit
+status and stdout. This is diagnostic-only; preserve the real subprocess,
+failure assertion and ETXTBSY-only retry. The observed macOS termination cause
+is unknown because the old message discarded its status.

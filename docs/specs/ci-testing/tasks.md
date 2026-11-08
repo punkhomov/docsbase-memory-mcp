@@ -43,3 +43,15 @@ discovery/doctests and pre-merge compile/lint coverage. Compare actual inventori
 and metadata delta; run release perf. Fresh task review, final branch review and
 full native PR functional CI; merge remains a human action.
 **Acceptance:** FR-9–FR-11; SC-5.
+
+### C4 — Retain the install launcher's exit status
+
+**Delta:** 2026-11-09. **New crates/packages:** none.
+**Trigger:** macOS job128856213927, run42521642317: install_owned_artifacts
+fails in Env::install with empty stderr; the old assertion omits exit status.
+**Scope:** tests/install.rs assertion message and this ledger/spec.
+**Steps:** include full subprocess Output without changing execution/assertion
+semantics; run the existing install target and lint checks; fresh review.
+Record the initial failure and retain the distinction between better diagnostics
+and an unproven root cause. Native final-head CI completes branch close-out.
+**Acceptance:** FR-12; SC-6.
