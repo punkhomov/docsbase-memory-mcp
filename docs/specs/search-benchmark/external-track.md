@@ -1,3 +1,115 @@
+# Delta 2026-11-08 — Рабочий external track (#72)
+
+Ниже сохранён исторический proposal. Реализованный контракт задают
+EXT-72-1…6 в requirements.md, design delta и T18/T19; он уточняет proposal:
+zero qrel — **явное nonrelevant**, отсутствие строки — **unjudged**.
+Все положительные scores бинаризуются, внешние qrels не превращаются
+в whole-document traps frozen suite. ExternalReport — отдельная typed
+оболочка без неприменимых legacy/discrimination/fixture allowances.
+
+## Ручной запуск
+
+Сначала проверить лицензию выбранного источника, затем скачать и распаковать
+корпус **вне репозитория**. BEIR directory содержит `corpus.jsonl`
+(`_id`, optional `title`, `text`), `queries.jsonl` (`_id`, `text`) и
+`qrels/test.tsv` (header `query-id\tcorpus-id\tscore`). Добавить
+`dataset.json` с непустыми строками:
+
+```json
+{
+  "dataset": "SciFact",
+  "dataset_version": "BEIR archive MD5 5f7d1de60b170fc8027bb7898e2efca1",
+  "source_url": "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip",
+  "downloaded_at": "2026-11-08T00:00:00Z",
+  "license_note": "Claims/annotations CC BY 4.0; S2ORC abstracts ODC-By 1.0; Wadden et al. 2020."
+}
+```
+
+Время загрузки указать фактическое. Лицензия SciFact:
+[LICENSE.md, pinned revision](https://github.com/allenai/scifact/blob/a5254a1bf108726a1704d8e191b8a7f2225a029f/LICENSE.md).
+Исходные IDs непрозрачны, loader создаёт собственные hash-named Markdown
+файлы и хранит обратное отображение. Непустые запросы без positive qrels
+выбранного split не оцениваются; все excluded/zero-only IDs видны.
+
+```sh
+mkdir -p target/search-bench
+DOCSBASE_EXTERNAL_DIR=/absolute/path/to/scifact \
+DOCSBASE_EXTERNAL_REPORT="$PWD/target/search-bench/scifact-test.json" \
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --release --no-default-features \
+  --test search_bench_external external_measurement -- --ignored --exact --nocapture
+```
+
+Это advisory measurement, не CI/golden gate. Output parent должен существовать;
+runner пишет завершённый JSON атомарно, не перезаписывает файлы. Внутри репо
+разрешены только `target/search-bench/` и benchmark `reports/`; source dataset
+защищён. Отдельный новый output path позволяет сохранить повторный замер.
+BM25 default, без ключа/модели/сети. Report включает raw и derived hashes,
+полный inventory IDs, исходные document IDs в per-case ranks, runtime source
+hash, harness source hash и git revision, profile/platform, latency/cost.
+Hash bytes имеют смысл вместе с adapter/tokenizer versions и source revision.
+
+Дополнительные параметры: `DOCSBASE_EXTERNAL_SPLIT` (default `test`),
+`DOCSBASE_EXTERNAL_K` (1…20, default 10), `DOCSBASE_EXTERNAL_CONFIGS`
+(comma-separated `Bm25,Bm25Rerank,Rrf,RrfRerank`; список обязан включать
+`Bm25`, остальные режимы добавляются явно) и
+`DOCSBASE_EXTERNAL_REPLAY_DIR`. Не-BM25 требует explicit offline replay;
+cap `DOCSBASE_BENCH_COST_CAP_USD` (default $2, finite nonnegative) записывается,
+но **этот runner никогда не делает provider requests**, spend всегда $0.
+Online recording/оплата inference не входит в evaluation runner.
+
+## Replay contract
+
+В отдельном каталоге `identity.json` фиксирует:
+
+```json
+{
+  "derived_corpus_hash": "BLAKE3 of materialized Markdown corpus",
+  "queries_hash": "BLAKE3 of raw queries.jsonl",
+  "adapter_version": 1,
+  "tokenizer_version": 7,
+  "embedding_model_pin": "provider/model@d1024@l2",
+  "rerank_model_pin": "provider/model"
+}
+```
+
+Пины соответствуют выбранным стадиям. Recordings имеют существующий формат:
+`vectors/<pin_slug>/manifest.json` + named binary, `rerank/<pin_slug>.json`.
+Loader отвергает несовпадающие identities/model/dimension, отсутствующие
+query/chunk vectors и rerank pools. Каждый pool обязан иметь полный
+набор уникальных scores для всех кандидатов: production append fallback
+не должен превращать неполный replay в якобы измеренный rerank. Corpus hash в vector manifest должен
+совпасть с derived hash; aggregate annotation hash не заменяет content keys.
+Runner не создаёт отсутствующие записи и не понижает режим до BM25.
+
+Для подготовки записей доступен существующий test-support API:
+`ExternalDataset::load`, `bench::build_env`, `bench::record_fixtures_with`.
+End-to-end тест `explicit_replay_runs_all_modes_and_missing_content_fails_closed`
+показывает запись/повтор/ошибки с синтетическими providers без сети. Реальные
+provider calls должны выполняться отдельным явно выбранным recording
+оператором с cost cap; инструкция не разрешает неограниченный live вызов.
+
+## Интерпретация и следующий датасет
+
+Метрики — binary document relevance в **top-k citation slots** продукта.
+Повторные chunks занимают slots, но document gain считается один раз;
+IDCG ограничен k. Это не число из стандартного BEIR document-level leaderboard.
+Error::Query остаётся отдельным query_error case с нулевыми метриками;
+запрос не редактируется и не исключается из denominator. Остальные errors
+(в том числе missing replay) прерывают весь отчёт.
+Unjudged top1 не объявляется incorrect. Frozen hit/recall/nDCG и retained
+allowances видны отдельно: [quality review](quality-review-2026-11-08.md).
+
+Первый полный SciFact test report и выводы живут в `reports/`. SciFact —
+scientific abstracts, а не project docs; по нему нельзя заключить, что
+продукт хорошо работает на сайте или что новая модель лучше. Ranking по
+результату не тюнится. До дальнейших изменений качества выбрать другой
+независимый набор ближе к технической документации; LoTTE forum / CoIR
+остаются кандидатами после проверки объёма, лицензии и qrels. Важные gaps
+сначала требуют ручной full-context проверки, затем отдельного reviewed
+решения о переносимом frozen case; автоматического переноса нет.
+
+---
+
 # External Benchmark Track — Proposal (не часть v1-гейта)
 
 Статус: предложение операционного режима. Не меняет v1-гейт, его

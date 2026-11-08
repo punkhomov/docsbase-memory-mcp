@@ -3248,3 +3248,85 @@ fn pacing_reranker_spaces_calls() {
         "second call must wait out the interval"
     );
 }
+
+/// Absolute misses and allowances answer different questions, even on a red run.
+#[test]
+fn absolute_quality_separates_accepted_misses_regressions_and_traps() {
+    let mut base = toy_baseline();
+    let cfg = base.configs.get_mut(&BenchConfigId::Bm25).unwrap();
+    cfg.cases = vec![
+        toy_case_report("accepted", false, 0.0, false),
+        toy_case_report("regressed", true, 1.0, false),
+        toy_case_report("correct", true, 1.0, false),
+        toy_case_report("empty", false, 0.0, false),
+    ];
+    cfg.cases[3].ranks.clear();
+    base.known_failures.push(support::bench::Failure {
+        config: Some(BenchConfigId::Bm25),
+        slice: Some("probe".into()),
+        case_id: Some("old-trap".into()),
+        kind: FailureKind::ForbiddenHit,
+        expected: "no forbidden hit".into(),
+        actual: "forbidden_hit = true".into(),
+    });
+    let mut current = base.clone();
+    current.configs.get_mut(&BenchConfigId::Bm25).unwrap().cases[1] =
+        toy_case_report("regressed", false, 0.0, true);
+    let report = support::bench::build_report(&current, Some(&base));
+    let value = serde_json::to_value(&report).unwrap();
+    let diag = value
+        .get("quality_diagnostics")
+        .expect("absolute quality diagnostics required");
+    let total = &diag["configs"]["Bm25"]["total"];
+    for (field, expected) in [
+        ("queries", 4),
+        ("hits", 1),
+        ("misses", 3),
+        ("accepted_misses", 2),
+        ("new_misses", 1),
+        ("top1_relevant", 1),
+        ("top1_trap", 1),
+        ("top1_unjudged", 1),
+        ("empty_results", 1),
+    ] {
+        assert_eq!(total[field], expected, "{field}");
+    }
+    assert_eq!(diag["configs"]["Bm25"]["slices"]["probe"], *total);
+    assert_eq!(diag["retained_trap_allowances"], 1);
+    assert_eq!(
+        diag["common_miss_ids"],
+        serde_json::json!(["accepted", "empty", "regressed"])
+    );
+    let before = support::bench::gate_failures(&report, &base);
+    let mut changed = value;
+    changed["quality_diagnostics"] = serde_json::Value::Null;
+    let changed: Report = serde_json::from_value(changed).unwrap();
+    assert_eq!(before, support::bench::gate_failures(&changed, &base));
+}
+
+#[test]
+fn absolute_quality_reports_post_adjudication_counts_without_rewriting_baseline() {
+    let base = support::bench::load_baseline(&bench_root().join("baseline.json")).unwrap();
+    let report = support::bench::build_report(&base, Some(&base));
+    let value = serde_json::to_value(&report).unwrap();
+    let diag = value
+        .get("quality_diagnostics")
+        .expect("absolute diagnostics");
+    for (cfg, hits) in [
+        ("Bm25", 135),
+        ("Bm25Rerank", 141),
+        ("Rrf", 165),
+        ("RrfRerank", 183),
+    ] {
+        assert_eq!(diag["configs"][cfg]["total"]["queries"], 193);
+        assert_eq!(diag["configs"][cfg]["total"]["hits"], hits);
+        assert_eq!(diag["configs"][cfg]["total"]["accepted_misses"], 193 - hits);
+        assert_eq!(diag["configs"][cfg]["total"]["new_misses"], 0);
+    }
+    assert_eq!(diag["retained_trap_allowances"], 4);
+    assert_eq!(diag["common_miss_ids"].as_array().unwrap().len(), 10);
+    // Older serialized reports remain readable.
+    let mut old = value;
+    old.as_object_mut().unwrap().remove("quality_diagnostics");
+    let _: Report = serde_json::from_value(old).unwrap();
+}

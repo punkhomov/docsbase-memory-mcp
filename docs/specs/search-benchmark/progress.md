@@ -420,3 +420,56 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   Fresh task reviewer `/root/review_adjudication_t17`: PASS / APPROVED,
   findings: none. Shared hybrid-remote harness: 6 passed / 3 ignored.
   Финальный review ветки и hosted CI фиксируются в PR.
+
+
+2026-11-08 — #72 planned: T18 absolute frozen diagnostics; T19 explicit
+BEIR external runner and first real SciFact test report. #70 merged as
+3503f2e. Existing proposal is the design basis; no production/CI/provider
+changes or implicit baseline regeneration. License checked before download:
+SciFact claims/annotations CC BY 4.0, abstracts ODC-By 1.0.
+
+Task T18: complete (2026-11-08). RED: two assertions fail for missing
+quality_diagnostics; GREEN: 80 search_bench tests passed, 2 manual ignored.
+Target Clippy/fmt clean. Baseline/ranks/production unchanged. Current counts
+135/141/165/183 hits, 4 separate allowances, 10 common misses documented.
+Ruling: fresh reviewer /root/review_external_t18 — PASS / APPROVED,
+no findings; diagnostics never participate in gate verdict.
+
+Task T19: complete (2026-11-08). BEIR adapter, explicit offline replay,
+advisory report and first SciFact test baseline: 5,183 docs, 300 evaluated,
+809 explicitly excluded queries; 211 hits, 89 misses including 7 query
+syntax errors. Three complete release runs have identical 300-case quality;
+final report pins final harness hash. No production/frozen/CI edits or spend.
+Literal-query policy separately tracked as #87; other observations and
+rotation decisions documented without automatic regression-case promotion.
+RED: absent runner; actual Query::Error reproduction; incomplete matched
+rerank pool. GREEN after review fix: 701 tests passed, 12 ignored, 65 suites;
+external 8 passed/1 manual ignored; remote harness 6 passed/3 ignored;
+all-target Clippy and fmt clean. Bench provenance and gate remain green.
+Ruling: fresh reviewer /root/review_external_t19 independently checked all
+300 cases and qrels. One Important finding (incomplete rerank scores could
+fall back to incoming order) fixed with full unique candidate coverage;
+re-review ADDRESSED, no new Critical/Important findings. No deferred minors.
+Final branch review and hosted CI are recorded in the PR before ready.
+
+2026-11-08 integration: unpublished T18/T19 rebased without conflicts onto
+main a293856 (#85). New complete SciFact release run on c25a8d6 preserves
+all 300 per-case quality results; report engine revision/source hash now
+pin this reachable task commit and updated upstream Cargo/runtime tree.
+No source/CI files from #85 modified. Required cli-full verification runs
+on this integrated tree; final status recorded in PR.
+
+2026-11-08 final review fix: require Bm25 in every explicit external config
+list (EXT-72-4 mandatory free minimum). A valid replay with Rrf-only first
+reproduced the missing guard; validation now rejects omission. No scoring
+or production changes; focused cli-full checks and all-target lint rerun.
+Final report provenance is refreshed against the reachable fix commit.
+
+2026-11-08 final verification: required integrated cli-full suite 870 passed,
+19 intentionally ignored, 65 suites. After mandatory-BM25 guard: external
+cli-full suite 8 passed/1 ignored; cli-full all-target Clippy and fmt clean.
+Final independent reviewer /root/review_external_final (gpt-6-astra, high):
+converged after its one Important BM25-minimum finding was ADDRESSED;
+no new Critical/Important and no deferred minors. Fifth complete SciFact
+release measurement on reachable ef96df0 preserves all 300-case quality;
+final report source identity refreshed. Hosted CI status is maintained in PR.

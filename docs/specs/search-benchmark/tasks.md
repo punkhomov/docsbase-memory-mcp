@@ -663,3 +663,49 @@ anyhow::Result<(Fixtures, ReportMeta)>`; baseline is comparison-only.
 
 После T17 выполняются commit и отдельный PR; финальный review ветки и CI
 фиксируются в описании PR перед переводом в ready. Слияние — действие человека.
+
+
+## T18 — Absolute frozen quality diagnostics (#72)
+
+**Spec:** EXT-72-1/2. **Files:** tests/support/diagnostics.rs,
+tests/support/{mod,bench}.rs, tests/search_bench.rs, quality-review-2026-11-08.md.
+**New crates:** none. **Interface:** `diagnose(current: &Baseline,
+baseline: Option<&Baseline>) -> QualityDiagnostics`.
+
+- [x] RED: compare toy current/baseline with accepted miss, new miss, top1
+  relevant/trap/unjudged/empty, separate allowances, slices and common IDs;
+  ensure diagnostic mutation cannot affect gate verdict.
+- [x] GREEN: typed serializable diagnostics attached by build_report and
+  deterministic quality_json; backwards-compatible report deserialization.
+- [x] Gate run verifies 135/141/165/183 hits of 193, 4 retained allowances,
+  10 common misses; document each ID and accepted limitation/#48 linkage.
+- [x] Fresh task review, fix findings, ledger and separate task commit.
+
+## T19 — Manual BEIR external runner and real report (#72)
+
+**Depends:** T18; #70 merged. **Spec:** EXT-72-3…6.
+**Files:** tests/support/external.rs, tests/support/external/{metrics,replay,execution}.rs,
+tests/search_bench_external.rs,
+tests/support/mod.rs, external-track.md, reports/scifact-test-2026-11-08.json,
+reports/scifact-test-2026-11-08.md; specs/ledger. **New crates:** none.
+**Interfaces:** ExternalDataset::load(dir, split, k), run_external(dataset,
+options) -> ExternalReport. All input datasets stay outside repository.
+
+- [x] RED: unordered BEIR input with unsafe opaque IDs, multiple positives,
+  zero/unjudged, unused queries; reject duplicate/missing/unknown IDs,
+  malformed qrels, invalid metadata/split/k and negative scores.
+- [x] GREEN: safe deterministic materialization, independent raw/derived
+  hashes, complete evaluated/excluded inventory, pipeline execution and
+  binary document metrics at citation slots with IDCG@k and unique gain.
+- [x] RED/GREEN: replay opt-in, identity mismatch, missing vectors/pools,
+  stage errors fail closed; BM25 works without key/recordings.
+- [x] RED/GREEN: Error::Query сохраняется как failed case с исходным
+  denominator; остальные stage errors прерывают evaluation.
+- [x] Synthetic end-to-end run twice: identical quality; no frozen mutations.
+- [x] Download licensed SciFact manually, pin metadata/hashes; execute all
+  300 test queries over full 5,183 corpus with BM25; publish full per-case
+  JSON and cautious analysis/rotation decision. No inference calls.
+- [x] Full default tests, shared remote harness units, fmt, all-target Clippy,
+  fresh task review, fix findings, ledger and separate task commit.
+После task commit: final branch review и hosted CI фиксируются в PR;
+агент готовит ready PR, слияние выполняет человек.
