@@ -463,3 +463,7 @@ Ledger: одна запись на таск (что сделано, чем пр�
   Ruling: fresh T10 review — Spec PASS / Quality APPROVED, findings none.
   Дополнительно: smoke извлечённого локального full Linux archive прошёл.
   Native Windows/macOS checks и final branch review — PR close-out.
+
+  Ruling: final independent branch review — converged; unmet requirements,
+  Critical/Important findings и deferred minors отсутствуют. Native CI и
+  ограничения release-archive execution отражены в PR close-out.
