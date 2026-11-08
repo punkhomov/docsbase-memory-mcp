@@ -18,9 +18,9 @@ abstracts; он не является проверкой качества сай
 - Adapter 1, harness bench_version 1, TOKENIZER_VERSION 7; исходные
   файлы/корпус остаются вне репозитория. В error diagnostics включены
   семь отклонённых query texts с атрибуцией выше.
-- Engine revision `0742f17308c5782331fcd39afb8a21ce23361e1e` (production tree тот же,
-  что после #70). Точный runtime source hash и harness source hash
-  фиксируют используемые bytes, включая новый runner до task commit.
+- Engine revision `c25a8d6183cd7e5d27fad47b145c49c4f6954180` (на актуальной базе
+  a293856 после #85, без наших изменений production). Точный runtime source hash и harness source hash
+  фиксируют используемые bytes, включая новый runner из доступного в ветке task commit.
 - Rust 1.88.0, release, Linux x86_64, BM25; model pins пусты.
   Provider requests 0, spend $0, записанный cap $2.
 
@@ -31,7 +31,7 @@ abstracts; он не является проверкой качества сай
 | qrels_hash | `40fd0aeb9b71e6798cfe1aa187ab995b129cc48464aab60b61e4ec2b2a7b873c` |
 | derived_corpus_hash | `860c7eb54515f55209a3286e76ebd7590febf7abbddb465138a04ba6e039cce6` |
 | harness_source_hash | `4b909351fbc5edb13e087bbf67f50d07cee959f26dfb5d58a5acda75268a492d` |
-| engine_source_hash | `4c5408d19ea9ee79decd99797993f254dc14b8f41c73d735ba0df783beea06d1` |
+| engine_source_hash | `0be50882f4138aabb44f1da5f373cbda41e8cf236fe14180b9b56179110b465f` |
 
 Запуск: инструкция и env contract в [external-track.md](../external-track.md).
 Повторный полный release-прогон дал идентичные quality/ranks/errors всех
@@ -39,6 +39,10 @@ abstracts; он не является проверкой качества сай
 После review исправлена проверка полноты offline rerank recordings;
 окончательный report получен новым полным release-прогоном. Его harness
 hash обновился, а quality/ranks/errors всех 300 cases снова идентичны.
+После интеграции upstream #85 выполнен четвёртый полный release-прогон:
+engine revision/source hash обновлены на опубликованный task commit ветки;
+quality всех 300 cases по-прежнему идентично. Точные hashes выше относятся
+к этому окончательному отчёту на актуальной базе.
 Первый запуск до уточнения error policy останавливался на Error::Query
 для ID 1232. Затем изменён только runner: ошибки остаются в denominator.
 Corpus, query texts, qrels, parser и ranking не изменялись.
@@ -57,8 +61,8 @@ Corpus, query texts, qrels, parser и ranking не изменялись.
 | Top1 relevant | 115/300 |
 | Top1 explicit nonrelevant | 0/300 |
 | Top1 unjudged | 178/300 |
-| Search p50 / p95, ms | 1.247 / 2.252 |
-| Index/setup, ms | 1267.0 |
+| Search p50 / p95, ms | 1.557 / 2.682 |
+| Index/setup, ms | 1440.8 |
 
 Метрики используют binary positive **document qrels в citation slots**:
 chunk-дубликат занимает место, но не даёт повторный document gain;

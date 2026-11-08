@@ -1434,8 +1434,8 @@
     "adapter_version": 1,
     "bench_version": 1,
     "harness_source_hash": "4b909351fbc5edb13e087bbf67f50d07cee959f26dfb5d58a5acda75268a492d",
-    "engine_revision": "0742f17308c5782331fcd39afb8a21ce23361e1e",
-    "engine_source_hash": "4c5408d19ea9ee79decd99797993f254dc14b8f41c73d735ba0df783beea06d1",
+    "engine_revision": "c25a8d6183cd7e5d27fad47b145c49c4f6954180",
+    "engine_source_hash": "0be50882f4138aabb44f1da5f373cbda41e8cf236fe14180b9b56179110b465f",
     "tokenizer_version": 7,
     "model_pins": [],
     "replay_hashes": {},
@@ -30333,13 +30333,13 @@
     }
   },
   "performance": {
-    "index_setup_ms": 1266.9817,
+    "index_setup_ms": 1440.7593000000002,
     "build_profile": "release",
     "platform": "linux-x86_64",
     "latency": {
       "Bm25": {
-        "p50_ms": 1.2469000000000001,
-        "p95_ms": 2.252465
+        "p50_ms": 1.5569,
+        "p95_ms": 2.6820400000000006
       }
     }
   },

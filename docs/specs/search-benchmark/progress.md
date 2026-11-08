@@ -451,3 +451,10 @@ Ruling: fresh reviewer /root/review_external_t19 independently checked all
 fall back to incoming order) fixed with full unique candidate coverage;
 re-review ADDRESSED, no new Critical/Important findings. No deferred minors.
 Final branch review and hosted CI are recorded in the PR before ready.
+
+2026-11-08 integration: unpublished T18/T19 rebased without conflicts onto
+main a293856 (#85). New complete SciFact release run on c25a8d6 preserves
+all 300 per-case quality results; report engine revision/source hash now
+pin this reachable task commit and updated upstream Cargo/runtime tree.
+No source/CI files from #85 modified. Required cli-full verification runs
+on this integrated tree; final status recorded in PR.
