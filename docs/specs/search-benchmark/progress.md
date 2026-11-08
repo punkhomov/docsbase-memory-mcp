@@ -362,3 +362,22 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   invalidating complete vectors or regenerating any data. Production code,
   frozen inputs, ranking and budgets unchanged. Fresh reviewer: PASS/APPROVED,
   no findings. Toolchain/fmt evidence supplied separately; platform CI follows.
+
+- Task T16: complete (2026-11-08, #73). Required gate rejects stale healed
+  allowances with an explicit maintenance action, persists that action before
+  failing, and keeps the exact Failure identity. Known -> healed -> reviewed
+  retirement -> recurrence is covered with real gate-generated failures;
+  separate config/kind/evidence cases are covered. Ordinary improvements,
+  manual regeneration, current provenance/parity and known-growth guard stay
+  intact. Verify (Rust 1.88.0): both new lifecycle tests observed RED;
+  search_bench 78 passed / 2 ignored; full `cargo test --locked` 678 passed /
+  11 ignored; shared hybrid-remote live harness 6 passed / 3 ignored; fmt and
+  all-target Clippy clean. Fresh task reviewer: PASS/APPROVED, no findings.
+  Ruling: healed allowances cause a maintenance failure rather than a quality
+  regression; deliberate baseline review remains a human decision. No baseline
+  regeneration performed. Linux verification used writable XDG/TMPDIR and
+  documented shared-host latency slack=3; platform execution remains for CI.
+  Ruling (T15 portability follow-up): core.autocrlf=true changed queries.json
+  to 4822 CRLF lines before explicit attributes. Frozen root JSON is now
+  checked out LF; the same probe returns byte-identical bytes and 0 CRLF.
+  No fixture payload changed. Original T15 reviewer approved this follow-up.

@@ -2011,9 +2011,9 @@ pub struct Baseline {
     pub legacy_parity: LegacyParity,
     pub discrimination: DiscriminationReport,
     pub outcome_matrix: OutcomeMatrix,
-    /// Failures the baseline run itself produced (DELTA-3): the gate fails
-    /// only on failures NOT in this set (regressions), and reports fixed
-    /// ones as improvements. A red baseline stays auditable, never silent.
+    /// Failures the baseline run itself produced (DELTA-3). Failures outside
+    /// this set are regressions; healed entries require deliberate retirement
+    /// (#73). A red baseline stays auditable, never silent.
     pub known_failures: Vec<Failure>,
 }
 
@@ -3252,6 +3252,26 @@ pub fn gate_new_failures(current: &[Failure], known: &[Failure]) -> (Vec<Failure
     new.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
     fixed.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
     (new, fixed)
+}
+
+/// Enforces both regression rejection and retirement of healed allowances.
+/// A healed case is an improvement, but its exception must be removed in the
+/// same reviewed change so a later recurrence cannot hide behind that entry.
+pub fn check_gate_allowances(current: &[Failure], known: &[Failure]) -> anyhow::Result<()> {
+    let (new, healed) = gate_new_failures(current, known);
+    let mut actions = Vec::new();
+    if !new.is_empty() {
+        actions.push(format!("new gate failures: {new:?}"));
+    }
+    if !healed.is_empty() {
+        actions.push(format!(
+            "healed known failures (quality improvements): {healed:?}; retire these stale allowances with a deliberate reviewed baseline update before merge. Run `cargo test --locked --test search_bench regenerate_baseline -- --ignored --exact` and review the diff; the gate never rewrites baseline.json"
+        ));
+    }
+    if !actions.is_empty() {
+        anyhow::bail!("{}", actions.join("\n"));
+    }
+    Ok(())
 }
 
 /// Regenerate guard (blocker 4, FR-15): fresh failures outside the old known

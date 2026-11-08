@@ -1057,3 +1057,23 @@ provenance drift in the existing report warnings. The vector aggregate's
 serialized-case digest is compared only with that same serialization,
 never the baseline raw-file digest. Content-addressed missing vectors or
 candidate pools remain errors. Recording metadata is not rewritten.
+
+
+- Provenance checkout detail (#69): pin benchmark root JSON to LF in
+  .gitattributes, alongside the existing LF Markdown policy. A Windows-style
+  `core.autocrlf=true checkout-index` probe must preserve the query file bytes;
+  no normalization is introduced into the actual hash computation.
+
+
+## Delta 2026-11-08 — retire healed known failures (#73)
+
+`gate_new_failures` remains the exact set classifier. The required test calls
+`check_gate_allowances(current, known) -> Result<()>`, which rejects both new
+quality failures and stale healed entries with distinct diagnostic text.
+Before asserting the result, it persists the action in `Report.warnings` so
+CI artifacts retain config/case/kind/evidence and the manual regeneration
+command. No baseline mutation occurs in the gate. `check_known_growth` and
+explicit regeneration still allow deliberate retirement. The lifecycle test
+uses real gate-generated failures: known -> healed (maintenance failure) ->
+reviewed retirement (pass) -> recurrence (new quality failure). Separate
+config/kind/evidence tests prevent broadening the exact allowlist identity.

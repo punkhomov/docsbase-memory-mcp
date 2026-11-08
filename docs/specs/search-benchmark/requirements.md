@@ -701,3 +701,28 @@ rationale в ledger (DELTA-1).
 - Loaded recording model pins and embedding dimensions must agree with the
   selected pin; replay never relabels a recording as another model.
 - No baseline, corpus, qrels, recordings, ranking or latency-budget changes.
+
+
+- Cross-platform provenance (#69): frozen benchmark root JSON files are
+  checked out with LF via .gitattributes. Raw-file hashing stays exact; Git's
+  core.autocrlf setting must not change the query identity across platforms.
+
+
+## Delta 2026-11-08 — retire healed known failures (#73)
+
+- FR-14/FR-15 and DELTA-3: the required offline gate also checks allowance
+  maintenance. If a known Failure no longer occurs, the gate reports the
+  improvement and requires deliberate reviewed retirement in that change.
+  This is a stale-allowance maintenance failure, not a quality regression.
+  Improvements unrelated to known failures still need no baseline update.
+- A green required check permits exact known failures only while they still
+  reproduce. After the accepted improvement removes its allowance, recurrence
+  is a new failure. Failure identity includes config, slice, case, kind and
+  expected/actual evidence; another config/kind is a separate allowance.
+- The persisted gate report and failing test diagnostic list healed entries
+  and the required action. There is no automatic rewrite or new accept flag.
+- Deliberate workflow: inspect the improvement, run
+  `RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_bench regenerate_baseline -- --ignored --exact`,
+  review the baseline diff (including known removals and host-relative
+  latency), record the decision in progress.md, and rerun the gate. Preserve
+  existing legacy/provenance checks and the explicit known-growth guard.

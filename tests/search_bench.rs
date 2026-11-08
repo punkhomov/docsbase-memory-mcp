@@ -2168,7 +2168,7 @@ fn gate_tolerates_known_failures_but_not_new_ones() {
     let (new, _) = gate_new_failures(&[known_trap("hn-99"), known_trap("hn-100")], &known);
     assert_eq!(new.len(), 1);
     assert_eq!(new[0].case_id.as_deref(), Some("hn-100"));
-    // Trap gone: fixed (reported, not failed).
+    // Trap gone: classified as healed; check_gate_allowances enforces retirement.
     let (new, fixed) = gate_new_failures(&[], &known);
     assert!(new.is_empty());
     assert_eq!(fixed.len(), 1);
@@ -2186,6 +2186,107 @@ fn gate_tolerates_known_failures_but_not_new_ones() {
     assert!(!real.is_empty());
     let (new, _) = gate_new_failures(&real, &real);
     assert!(new.is_empty(), "gate output must tolerate itself");
+}
+
+#[test]
+fn gate_allowance_known_healed_retired_recurrence_lifecycle() {
+    use support::bench::{check_gate_allowances, check_known_growth, gate_failures};
+    let mut baseline = toy_baseline();
+    baseline
+        .configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("cfg")
+        .cases[0]
+        .metrics
+        .forbidden_hit = true;
+    let failing = support::bench::build_report(&baseline, None);
+    baseline.known_failures = gate_failures(&failing, &baseline);
+    assert_eq!(baseline.known_failures.len(), 1, "one known top-1 trap");
+    check_gate_allowances(
+        &gate_failures(&failing, &baseline),
+        &baseline.known_failures,
+    )
+    .expect("known error remains allowed");
+
+    let mut healed = baseline.clone();
+    healed
+        .configs
+        .get_mut(&BenchConfigId::Bm25)
+        .expect("cfg")
+        .cases[0]
+        .metrics
+        .forbidden_hit = false;
+    let current = support::bench::build_report(&healed, Some(&baseline));
+    let failures = gate_failures(&current, &baseline);
+    assert!(
+        failures.is_empty(),
+        "improvement is not a quality regression"
+    );
+    let err = check_gate_allowances(&failures, &baseline.known_failures)
+        .expect_err("healed allowance needs deliberate retirement");
+    let message = err.to_string();
+    assert!(
+        message.contains("retire") && message.contains("regenerate_baseline"),
+        "{message}"
+    );
+    assert!(
+        message.contains("t10-01") && message.contains("Bm25"),
+        "{message}"
+    );
+
+    check_known_growth(&baseline.known_failures, &[], false).expect("manual retirement is allowed");
+    healed.known_failures.clear();
+    check_gate_allowances(&gate_failures(&current, &healed), &healed.known_failures)
+        .expect("retired improvement passes");
+    let err = check_gate_allowances(&gate_failures(&failing, &healed), &healed.known_failures)
+        .expect_err("recurrence is a new failure");
+    assert!(err.to_string().contains("new gate failures"), "{err}");
+}
+
+#[test]
+fn gate_allowance_retirement_distinguishes_configs_and_failure_kinds() {
+    use support::bench::{Failure, FailureKind, check_gate_allowances};
+    let trap = Failure {
+        config: Some(BenchConfigId::Bm25),
+        slice: Some("probe".to_owned()),
+        case_id: Some("same-case".to_owned()),
+        kind: FailureKind::ForbiddenHit,
+        expected: "no forbidden hit".to_owned(),
+        actual: "forbidden_hit = true".to_owned(),
+    };
+    let mut rrf_trap = trap.clone();
+    rrf_trap.config = Some(BenchConfigId::Rrf);
+    let err = check_gate_allowances(std::slice::from_ref(&trap), &[trap.clone(), rrf_trap])
+        .expect_err("Rrf allowance healed independently");
+    let message = err.to_string();
+    assert!(
+        message.contains("Rrf") && !message.contains("Bm25"),
+        "{message}"
+    );
+
+    let mut hit_drop = trap.clone();
+    hit_drop.kind = FailureKind::HitDrop;
+    hit_drop.expected = "hit = true".to_owned();
+    hit_drop.actual = "hit = false".to_owned();
+    let err = check_gate_allowances(
+        std::slice::from_ref(&hit_drop),
+        &[trap.clone(), hit_drop.clone()],
+    )
+    .expect_err("trap allowance healed independently of another kind");
+    let message = err.to_string();
+    assert!(
+        message.contains("ForbiddenHit") && !message.contains("HitDrop"),
+        "{message}"
+    );
+    let mut changed = trap.clone();
+    changed.actual = "different evidence".to_owned();
+    let err = check_gate_allowances(&[changed], &[trap])
+        .expect_err("same config/case/kind is not the same failure evidence");
+    let message = err.to_string();
+    assert!(
+        message.contains("new gate failures") && message.contains("retire"),
+        "{message}"
+    );
 }
 
 /// Regenerate must not launder regressions into known-failures (blocker 4):
@@ -3048,6 +3149,13 @@ fn metrics_match_baseline() {
     // (DELTA-3), not failures. They persist in the report artifact, so trap
     // movement toward the top stays visible on green runs too.
     support::bench::attach_trap_diagnostics(&mut current, &fixtures.cases);
+    let failures = support::bench::gate_failures(&current, &baseline);
+    let gate_check = support::bench::check_gate_allowances(&failures, &baseline.known_failures);
+    if let Err(action) = &gate_check {
+        // Persist the exact healed entries and required action before failing
+        // the required check, alongside any quality regressions.
+        current.warnings.push(action.to_string());
+    }
     let report_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target/search-bench/gate-report.json");
     if let Some(parent) = report_path.parent() {
@@ -3063,19 +3171,7 @@ fn metrics_match_baseline() {
         current.trap_diagnostics.len(),
         report_path.display()
     );
-    let failures = support::bench::gate_failures(&current, &baseline);
-    // DELTA-3: fail only on NEW failures (regressions vs the known set);
-    // fixed known failures are reported as improvements.
-    let (new_failures, fixed) =
-        support::bench::gate_new_failures(&failures, &baseline.known_failures);
-    assert!(
-        new_failures.is_empty(),
-        "new gate failures: {new_failures:?}\ntrap diagnostics:\n{}",
-        current.trap_diagnostics.join("\n")
-    );
-    if !fixed.is_empty() {
-        println!("fixed since baseline: {fixed:?}");
-    }
+    gate_check.expect("quality gate or allowance maintenance failed");
     if cfg!(target_os = "linux") {
         let latency = support::bench::latency_failures(&current, &baseline);
         assert!(latency.is_empty(), "latency failures: {latency:?}");

@@ -621,12 +621,12 @@ anyhow::Result<(Fixtures, ReportMeta)>`; baseline is comparison-only.
 **Interface:** `check_gate_allowances(current: &[Failure], known: &[Failure])
 -> anyhow::Result<()>`; exact Failure identity remains unchanged.
 
-- [ ] RED: known -> healed requires action; after deliberate retirement,
+- [x] RED: known -> healed requires action; after deliberate retirement,
   recurrence fails. Cover identical case IDs in multiple configs and kinds.
-- [ ] GREEN: the actual gate rejects stale allowances with an explicit
+- [x] GREEN: the actual gate rejects stale allowances with an explicit
   retirement diagnostic; quality improvements remain visible and other
   improvements pass. Preserve manual regeneration and known-growth guard.
-- [ ] Dated policy delta and docs describe maintenance failure separately
+- [x] Dated policy delta and docs describe maintenance failure separately
   from ranking regression; no implicit baseline rewrite.
-- [ ] Verify focused/full harness, shared live harness compilation, formatting,
+- [x] Verify focused/full harness, shared live harness compilation, formatting,
   Clippy and repository checks; fresh task/final review and ledger per commit.
