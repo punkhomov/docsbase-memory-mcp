@@ -528,10 +528,12 @@ completion и unwind. Admission под тем же mutex складывает ac
 Eviction/invalidation не отменяют worker и не освобождают его charge. При
 недостатке бюджета `Ready` rows удаляются, fallback хранит только hashes;
 даже hashes могут остаться uncached, если рядом с live reservations нет места.
-При live reservations hash-only fallback остаётся uncached, чтобы давление
-бюджета не превращалось в постоянный `TooLarge`. `stash` под entries mutex
+Hash-only fallback, вызванный live reservations, остаётся uncached, даже если
+worker завершился до вставки: причина отказа передаётся через `stream_transient`,
+а не определяется повторным чтением счётчика. `stash` под entries mutex
 повторно проверяет тот же generation/model и возвращает уже установленный
-`Building`/`Ann`; stale cold lookup не затирает worker своим fallback.
+`Building`/`Ann`; `start_build` также проверяет оба состояния. Stale cold lookup
+не затирает worker своим fallback и не перезапускает только что опубликованный ANN.
 Persisted ANN загружается с повторной проверкой retention budget. Для известной
 model dimension rows+live reservations проверяются до открытия VectorCache.
 Параллельные transient cold allocations не коалесцируются этой дельтой.

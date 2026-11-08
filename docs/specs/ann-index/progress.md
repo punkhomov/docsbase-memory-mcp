@@ -463,3 +463,17 @@
 
   Ruling: re-review — both Important findings and the Minor ADDRESSED;
   no new Critical/Important findings. Release lifecycle regression set: 7 passed.
+
+
+- T22/T23 final branch review fix round (2026-11-08): two Important timing
+  gaps found: start_build could replace a same-key Ann published since the
+  cold miss, and a last reservation released before fallback insertion could
+  make transient TooLarge stick. RED: both delayed-interleaving regressions
+  fail. Fix: recheck Building/Ann at admission; carry transient fallback
+  explicitly through stream_transient independently of the current counter.
+  Verify: dense unit tests 39 passed; fmt/clippy clean. Final full-suite and
+  platform results follow in PR close-out.
+
+  Ruling: final re-review — both Important findings ADDRESSED, no new
+  Critical/Important findings; final verdict converged, deferred minors none.
+  Full-suite and Linux/macOS/Windows/feature checks: PR #83 close-out evidence.

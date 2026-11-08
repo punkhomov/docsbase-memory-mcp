@@ -751,12 +751,21 @@ impl DenseCache {
                 .len()
                 .checked_mul(dim)
                 .and_then(|bytes| bytes.checked_mul(4))
-            && u64::try_from(exact_bytes)
-                .unwrap_or(u64::MAX)
-                .saturating_add(self.active_build_bytes.load(AtomicOrdering::Acquire))
-                > self.limits.max_bytes
         {
-            return Ok(self.stash_too_large(project_id, generation, model_id, chunks));
+            let exact_bytes = u64::try_from(exact_bytes).unwrap_or(u64::MAX);
+            if exact_bytes > self.limits.max_bytes {
+                return Ok(self.stash_too_large(project_id, generation, model_id, chunks));
+            }
+            if exact_bytes.saturating_add(self.active_build_bytes.load(AtomicOrdering::Acquire))
+                > self.limits.max_bytes
+            {
+                return Ok(self.stream_transient(
+                    project_id,
+                    generation,
+                    model_id,
+                    Arc::new(chunks),
+                ));
+            }
         }
         // Cold start must not read every vector just to discover that a valid
         // persisted ANN already exists (FR-8/NFR-3). The model id carries the
@@ -788,7 +797,12 @@ impl DenseCache {
                             return Ok(retained);
                         }
                         drop(state);
-                        return Ok(self.stash_too_large(project_id, generation, model_id, chunks));
+                        return Ok(self.stream_transient(
+                            project_id,
+                            generation,
+                            model_id,
+                            Arc::new(chunks),
+                        ));
                     }
                     Err(err) => {
                         eprintln!("warning: ann load failed: {err}; falling back to exact");
@@ -893,7 +907,12 @@ impl DenseCache {
                         return retained;
                     }
                     drop(state);
-                    return self.stash_too_large(project_id, generation, model_id, chunks);
+                    return self.stream_transient(
+                        project_id,
+                        generation,
+                        model_id,
+                        Arc::new(chunks),
+                    );
                 }
                 Err(err) => {
                     eprintln!("warning: ann load failed: {err}; falling back to exact");
@@ -939,7 +958,7 @@ impl DenseCache {
             // not keep another full row copy when their reservation fills
             // the cap; exact streaming needs only the chunk hashes.
             drop(state);
-            self.stash_streaming(project_id, generation, model_id, hashes)
+            self.stream_transient(project_id, generation, model_id, hashes)
         }
     }
 
@@ -950,19 +969,22 @@ impl DenseCache {
         model_id: &str,
         chunks: Vec<(u64, String)>,
     ) -> DenseRows {
-        self.stash_streaming(project_id, generation, model_id, Arc::new(chunks))
+        let state = DenseRows::TooLarge(Arc::new(chunks));
+        self.stash(project_id, generation, model_id, state.clone())
+            .unwrap_or(state)
     }
 
-    fn stash_streaming(
+    /// A lookup already decided that reservation pressure prevents retention.
+    /// Keep that decision even if its last worker finishes before this call.
+    fn stream_transient(
         &self,
         project_id: i64,
         generation: i64,
         model_id: &str,
         hashes: Arc<Vec<(u64, String)>>,
     ) -> DenseRows {
-        let state = DenseRows::TooLarge(hashes);
-        self.stash(project_id, generation, model_id, state.clone())
-            .unwrap_or(state)
+        self.existing_ann(&mut self.lock_entries(), project_id, generation, model_id)
+            .unwrap_or(DenseRows::TooLarge(hashes))
     }
 
     /// Starts one background build for `(project, generation, model)` and
@@ -979,7 +1001,7 @@ impl DenseCache {
             if let Some(entry) = entries.get(&job.project_id)
                 && entry.generation == job.generation
                 && entry.model_id == job.model_id
-                && matches!(entry.state, DenseRows::Building(_))
+                && matches!(entry.state, DenseRows::Building(_) | DenseRows::Ann(_))
             {
                 return entry.state.clone();
             }
@@ -1140,18 +1162,11 @@ impl DenseCache {
         let mut entries = self.lock_entries();
         // Another cold lookup may have installed/published this build after
         // get's fast-path miss. Never retire it with exact fallback or reload.
-        if let Some(entry) = entries.get_mut(&project_id)
-            && entry.generation == generation
-            && entry.model_id == model_id
-            && matches!(entry.state, DenseRows::Building(_) | DenseRows::Ann(_))
-        {
-            entry.last_used = self.tick();
-            return Some(entry.state.clone());
+        if let Some(existing) = self.existing_ann(&mut entries, project_id, generation, model_id) {
+            return Some(existing);
         }
         let active = self.active_build_bytes.load(AtomicOrdering::Acquire);
-        if (active != 0 && matches!(state, DenseRows::TooLarge(_)))
-            || bytes.saturating_add(active) > self.limits.max_bytes
-        {
+        if bytes.saturating_add(active) > self.limits.max_bytes {
             // Reservation pressure is temporary. Leave this fallback uncached
             // so get retries once a worker finishes. Evicting Building entries
             // here would not free their separately owned working sets.
@@ -1170,6 +1185,24 @@ impl DenseCache {
         entries.insert(project_id, entry);
         self.enforce_byte_cap(&mut entries, project_id);
         entries.get(&project_id).map(|entry| entry.state.clone())
+    }
+
+    fn existing_ann(
+        &self,
+        entries: &mut HashMap<i64, Entry>,
+        project_id: i64,
+        generation: i64,
+        model_id: &str,
+    ) -> Option<DenseRows> {
+        let entry = entries.get_mut(&project_id)?;
+        if entry.generation != generation
+            || entry.model_id != model_id
+            || !matches!(entry.state, DenseRows::Building(_) | DenseRows::Ann(_))
+        {
+            return None;
+        }
+        entry.last_used = self.tick();
+        Some(entry.state.clone())
     }
 
     /// Building entries are views of a separately charged worker, not an
@@ -1708,6 +1741,60 @@ mod tests {
             dense.resolve_rows(2, 1, "m@d128", small_input()),
             DenseRows::Building(_)
         ));
+    }
+
+    #[test]
+    fn build_lifetime_delayed_pressure_fallback_stays_uncached() {
+        let root = tempfile::TempDir::new().expect("cache");
+        let paused = PausedBuilds::new(root.path(), 2, 1);
+        paused.cache.resolve_rows(1, 1, "m@d128", small_input());
+        // A lookup already decided to stream under pressure, but the worker
+        // finishes before that lookup reaches the fallback retention step.
+        paused.finish();
+        let hashes = Arc::new(vec![(1, "hash".to_owned())]);
+        assert!(matches!(
+            paused.cache.stream_transient(2, 1, "m@d128", hashes),
+            DenseRows::TooLarge(_)
+        ));
+        assert!(!paused.cache.lock_entries().contains_key(&2));
+    }
+
+    #[test]
+    fn build_lifetime_delayed_admission_reuses_published_ann() {
+        let root = tempfile::TempDir::new().expect("cache");
+        let paused = PausedBuilds::new(root.path(), 2, 3);
+        let dense = &paused.cache;
+        dense.resolve_rows(1, 1, "m@d128", small_input());
+        paused.finish();
+        let DenseRows::Ann(published) = dense.lock_entries()[&1].state.clone() else {
+            panic!("first build must publish");
+        };
+        // A cold lookup made its seek_ann decision before publication and
+        // resumes at start_build after the first worker has published.
+        let DenseInput {
+            chunks,
+            digest,
+            rows,
+            dim,
+            ..
+        } = small_input();
+        let job = BuildJob {
+            project_id: 1,
+            generation: 1,
+            model_id: "m@d128".to_owned(),
+            key: ann_key(1, 1, "m@d128", dim, chunks.len(), digest),
+            building_bytes: u64::try_from(
+                ann::ann_estimated_bytes(rows.len(), dim) + rows.len() * dim * 4,
+            )
+            .expect("bytes"),
+            rows,
+            hashes: Arc::new(chunks),
+            dim,
+            store_root: Some(root.path().to_path_buf()),
+        };
+        let state = dense.start_build(job);
+        assert!(matches!(state, DenseRows::Ann(current) if Arc::ptr_eq(&current, &published)));
+        assert_eq!(dense.active_build_bytes.load(AtomicOrdering::Acquire), 0);
     }
 
     #[test]
