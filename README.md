@@ -81,7 +81,7 @@ then point the stages at them (all provisioning commands are offline-safe and
 idempotent):
 
 ```sh
-cargo build --release --features hybrid-local
+cargo build --release --features cli-full
 # 1. Install the pinned ONNX Runtime (downloads once; `--check` reports state)
 docsbase connect fastembed
 # 2. Fetch a registry model (revision + sha256 pinned in code)
@@ -133,7 +133,9 @@ prompts (notarization is not needed for this path).
 ### Build from source (any supported platform)
 
 ```sh
-cargo install --locked docsbase --version 0.1.0-alpha.5
+git clone https://github.com/punkhomov/docsbase-memory-mcp.git
+cd docsbase-memory-mcp
+cargo install --path . --locked --features cli-full
 docsbase install   # register the binary with the daemon
 ```
 

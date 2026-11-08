@@ -65,7 +65,9 @@ $env:DOCSBASE_VERSION = "v0.1.0-alpha.5"; iex (irm .../install.ps1)
 ## Option B — Cargo
 
 ```sh
-cargo install --locked docsbase --version 0.1.0-alpha.1
+git clone https://github.com/punkhomov/docsbase-memory-mcp.git
+cd docsbase-memory-mcp
+cargo install --path . --locked --features cli-full
 docsbase install
 ```
 
