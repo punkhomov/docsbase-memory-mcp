@@ -726,3 +726,34 @@ rationale в ledger (DELTA-1).
   review the baseline diff (including known removals and host-relative
   latency), record the decision in progress.md, and rerun the gate. Preserve
   existing legacy/provenance checks and the explicit known-growth guard.
+
+## Delta 2026-11-08 — повторная adjudication спорных запросов (#70)
+
+- **ADJ-70-1 (FR-26/FR-29).** Для `hn-19`, `hard-07`, `hard-10` объединить
+  top-10 всех четырёх offline-конфигураций и проверить полный контекст
+  правдоподобных альтернатив. Сохранить пул с исходным commit, хэшами
+  corpus/queries, model pins и версией токенизатора. Неразмеченный фрагмент
+  не становится отрицательным автоматически.
+- **ADJ-70-2 (FR-2/FR-26).** Оценивать буквальный запрос, не добавляя скрытых
+  ограничений «только CLI display» или «без override». Grade 2 означает
+  самостоятельный ответ, grade 1 — частичный или условный. Новые оценки,
+  причины изменения `absent`, reviewer provenance и спорные границы
+  зафиксировать в dated adjudication report и ledger.
+- **ADJ-70-3 (FR-3).** Три пересмотренных запроса становятся
+  `multi_relevant`: обоснованной противоположной ловушки для них нет.
+  Их ID/query/k сохраняются. Явно раскрыть изменение состава срезов:
+  `hard_negative` 22 → 19, `multi_relevant` 18 → 21.
+- **ADJ-70-4.** Независимо проверить контрасты `ar-01`, `hard-08`, `hn-22`.
+  Их expected/absent/grades остаются прежними; provenance нового ревью
+  добавляется отдельно. Эти ошибки нельзя списывать на неоднозначность
+  трёх пересмотренных запросов.
+- **ADJ-70-5 (FR-15).** Принять явную коррекцию qrels и baseline после
+  независимой adjudication; раскрыть все изменения quality-метрик и
+  удаление утративших основание known allowances. Проверить неизменность
+  всех 772 ranked lists (193 запроса × 4 режима) и контрольных метрик.
+  Изменение оценки вследствие разметки не является улучшением ranking.
+- **ADJ-70-6.** Корпус, query texts, tokenizer, scoring, gate policy и
+  записанные inference payloads сохраняются. Полные content-addressed
+  recordings переиспользуются без новых provider calls; запись содержит
+  прежнюю recording-time aggregate provenance. Сохранить прежние baseline
+  latency/index-build значения: эта коррекция не перекалибровывает бюджеты.

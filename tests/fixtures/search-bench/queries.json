@@ -1295,7 +1295,9 @@
     "notes": "same-root trap, office vs library",
     "reviewed_by": [
       "t3-author",
-      "t3-adjudicator"
+      "t3-adjudicator",
+      "issue70-author",
+      "issue70-adjudicator"
     ]
   },
   {
@@ -2238,7 +2240,7 @@
   {
     "id": "hard-07",
     "query": "default port",
-    "class": "hard_negative",
+    "class": "multi_relevant",
     "k": 10,
     "expected": [
       {
@@ -2248,19 +2250,24 @@
           6
         ],
         "grade": 2
-      }
-    ],
-    "absent": [
+      },
       {
         "path": "traps/port-env.md",
-        "reason": "shares port/default terms, disjoint: fixed default vs env override"
+        "lines": [
+          5,
+          8
+        ],
+        "grade": 1
       }
     ],
+    "absent": [],
     "source": "synthetic",
-    "notes": "default-vs-override trap",
+    "notes": "Re-adjudicated 2026-11-08 (#70): the broad query covers the numeric default and its relationship to overrides. port-env explains override precedence and fallback, but gives no numeric default (grade 1). The synthetic production-configurability statements conflict; they do not justify an opposite-behavior negative for this unspecified intent. See docs/specs/search-benchmark/adjudication-2026-11-08.md.",
     "reviewed_by": [
       "t5-author",
-      "t5-adjudicator"
+      "t5-adjudicator",
+      "issue70-author",
+      "issue70-adjudicator"
     ]
   },
   {
@@ -2288,7 +2295,9 @@
     "notes": "mirror trap of hard-07",
     "reviewed_by": [
       "t5-author",
-      "t5-adjudicator"
+      "t5-adjudicator",
+      "issue70-author",
+      "issue70-adjudicator"
     ]
   },
   {
@@ -2322,7 +2331,7 @@
   {
     "id": "hard-10",
     "query": "timeout in seconds",
-    "class": "hard_negative",
+    "class": "multi_relevant",
     "k": 10,
     "expected": [
       {
@@ -2332,19 +2341,64 @@
           6
         ],
         "grade": 2
-      }
-    ],
-    "absent": [
+      },
       {
         "path": "traps/timeout-ms.md",
-        "reason": "shares timeout/milliseconds terms, disjoint: seconds display vs ms counting"
+        "lines": [
+          5,
+          8
+        ],
+        "grade": 1
+      },
+      {
+        "path": "boundary/daemon-protocol.md",
+        "lines": [
+          54,
+          56
+        ],
+        "grade": 2
+      },
+      {
+        "path": "en/frozen-mcp.md",
+        "lines": [
+          41,
+          43
+        ],
+        "grade": 2
+      },
+      {
+        "path": "multi/timeout-connect.md",
+        "lines": [
+          10,
+          11
+        ],
+        "grade": 2
+      },
+      {
+        "path": "boundary/daemon-protocol.md",
+        "lines": [
+          71,
+          72
+        ],
+        "grade": 1
+      },
+      {
+        "path": "en/child-processes.md",
+        "lines": [
+          20,
+          21
+        ],
+        "grade": 1
       }
     ],
+    "absent": [],
     "source": "synthetic",
-    "notes": "mirror trap of hard-09",
+    "notes": "Re-adjudicated 2026-11-08 (#70): the broad query permits seconds display and timeout durations expressed in seconds. timeout-ms gives a thirty-second default while retaining millisecond accounting (grade 1). Shutdown/drain entries give context-specific grace deadlines rather than general units or CLI display (grade 1). Connection-timeout body 10-11 is relevant even though the pooled heading 1-2 alone does not match it. See docs/specs/search-benchmark/adjudication-2026-11-08.md.",
     "reviewed_by": [
       "t5-author",
-      "t5-adjudicator"
+      "t5-adjudicator",
+      "issue70-author",
+      "issue70-adjudicator"
     ]
   },
   {
@@ -3771,7 +3825,7 @@
   {
     "id": "hn-19",
     "query": "staging host smoke checks after restore",
-    "class": "hard_negative",
+    "class": "multi_relevant",
     "k": 10,
     "expected": [
       {
@@ -3781,19 +3835,32 @@
           12
         ],
         "grade": 2
-      }
-    ],
-    "absent": [
+      },
+      {
+        "path": "semantic/backup-restore.md",
+        "lines": [
+          6,
+          6
+        ],
+        "grade": 1
+      },
       {
         "path": "boundary/index-rebuild.md",
-        "reason": "index self-healing by marker is restore-adjacent, not backup verification"
+        "lines": [
+          68,
+          70
+        ],
+        "grade": 1
       }
     ],
+    "absent": [],
     "source": "synthetic",
-    "notes": "trap surfaced rank 5 in T6 pooling.",
+    "notes": "Re-adjudicated 2026-11-08 (#70): backup-restore supports staging restore verification but omits smoke checks (grade 1). index-rebuild supplies conditional smoke-query evidence (grade 1): restoring an interrupted-rebuild backup completes a rebuild (85-87), and every rebuild receives smoke checks (68-70); this is not a general staging backup-validation procedure. backup-full remains the direct answer. See docs/specs/search-benchmark/adjudication-2026-11-08.md.",
     "reviewed_by": [
       "t12-author",
-      "t12-reviewer"
+      "t12-reviewer",
+      "issue70-author",
+      "issue70-adjudicator"
     ]
   },
   {
@@ -3877,7 +3944,9 @@
     "notes": "format trap with opposite behavior.",
     "reviewed_by": [
       "t12-author",
-      "t12-reviewer"
+      "t12-reviewer",
+      "issue70-author",
+      "issue70-adjudicator"
     ]
   },
   {

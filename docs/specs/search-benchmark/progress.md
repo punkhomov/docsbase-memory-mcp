@@ -391,3 +391,32 @@ Ledger исполнения `docs/specs/search-benchmark/tasks.md`. Одна з�
   minor (deferred): existing offline CI has no artifact-upload step for
   `target/search-bench/gate-report.json`. The gate persists its report locally;
   downloadable CI report publishing remains separate workflow work.
+
+- Task T17: complete (2026-11-08, #70).
+  Собран исторический union top-10 четырёх режимов: 99 уникальных фрагментов
+  для hn-19/hard-07/hard-10 и контролей ar-01/hard-08/hn-22; source commit,
+  corpus/queries hashes, model pins и TOKENIZER_VERSION сохранены в
+  adjudication-2026-11-08-pool.json. Независимый adjudicator
+  `/root/issue70_adjudicator` (tag `issue70-adjudicator`) проверил полный
+  контекст до изменения qrels; его рекомендации приняты автором
+  (`issue70-author`). Таблицы spans/grades и полный quality diff —
+  adjudication-2026-11-08.md.
+  Ruling: hn-19 index-rebuild даёт условно полезную smoke-процедуру после
+  restore-triggered rebuild (85–87 + 68–70), grade 1; прежняя гипотеза автора
+  об unrelated post-rebuild проверке пересмотрена. Broad queries hard-07 и
+  hard-10 не задают fixed-default-only/CLI-display-only intent. Их partial
+  альтернативы не являются противоположными ответами. Три случая переведены
+  в multi_relevant (hard_negative 22→19, multi_relevant 18→21); контрольные
+  qrels и их четыре реальные allowances сохранены.
+  Verify (Rust 1.88.0): RED — HashMismatch до replay после изменения qrels;
+  явный regeneration без accept-new-known — +0 новых / -5 obsolete allowances;
+  GREEN — search_bench 78 passed / 2 ignored; полный suite 691 passed /
+  11 ignored; fmt и all-target Clippy clean. Проверены все 772 неизменных
+  ranked lists, query texts/k всех 193 cases, побайтная неизменность остальных
+  187 case objects, control metrics/qrels и corpus/recordings. Baseline latency
+  и index-build reference сохранены. Рост/падение quality вызваны коррекцией
+  разметки, а не ranking; снижение hard-10 recall/nDCG явно принято. Новых
+  provider calls, изменений production-кода, inference payloads и CI нет.
+  Fresh task reviewer `/root/review_adjudication_t17`: PASS / APPROVED,
+  findings: none. Shared hybrid-remote harness: 6 passed / 3 ignored.
+  Финальный review ветки и hosted CI фиксируются в PR.

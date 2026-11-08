@@ -630,3 +630,36 @@ anyhow::Result<(Fixtures, ReportMeta)>`; baseline is comparison-only.
   from ranking regression; no implicit baseline rewrite.
 - [x] Verify focused/full harness, shared live harness compilation, formatting,
   Clippy and repository checks; fresh task/final review and ledger per commit.
+
+## T17 — Повторная adjudication и явная коррекция qrels (#70)
+
+**Goal:** устранить подтверждённую неполноту/неоднозначность разметки,
+сохранив отдельные реальные дефекты и весь production ranking.
+**Spec:** ADJ-70-1…ADJ-70-6; FR-2/FR-3/FR-15/FR-26/FR-29.
+**Files:** создать `docs/specs/search-benchmark/adjudication-2026-11-08.md` и
+`docs/specs/search-benchmark/adjudication-2026-11-08-pool.json`; изменить
+`tests/fixtures/search-bench/{queries,baseline}.json`, dated deltas и ledger.
+Новых крейтов и изменений `src/**` нет.
+
+- [x] Запустить исходный `metrics_match_baseline`, сохранить отчёт и union
+  top-10 для шести запросов с исходными hashes/model pins/TOKENIZER_VERSION.
+- [x] Выполнить независимое ревью полного контекста всех правдоподобных
+  альтернатив; записать точные spans/grades и ruling по условной
+  релевантности `index-rebuild`, неопределённому port intent и seconds query.
+- [x] Применить таблицу решений из adjudication report к трём запросам;
+  перевести их в multi_relevant. У трёх контролей сохранить qrels и добавить
+  фактическую reviewer provenance. Сохранить остальные 187 кейсов побайтно.
+- [x] RED: штатный gate на изменённых queries и старом baseline обязан
+  отклонить queries_hash. Затем явно выполнить
+  `cargo test --locked --test search_bench regenerate_baseline -- --ignored --exact`
+  без `DOCSBASE_BENCH_ACCEPT_NEW_KNOWN`, сохранить старые latency/index-build
+  значения и проверить quality diff, пять retirements и четыре оставшиеся
+  control allowances.
+- [x] GREEN: `cargo test --locked --test search_bench`; проверить все 772
+  ranked lists, исходные query texts/k, control metrics/qrels, hashes
+  корпуса/recordings и качество за пределами шести reviewed cases.
+- [x] Выполнить fmt, Clippy и обязательные проверки, получить fresh task
+  review, исправить Important/Critical и подготовить ledger.
+
+После T17 выполняются commit и отдельный PR; финальный review ветки и CI
+фиксируются в описании PR перед переводом в ready. Слияние — действие человека.

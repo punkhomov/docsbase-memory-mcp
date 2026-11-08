@@ -1077,3 +1077,26 @@ explicit regeneration still allow deliberate retirement. The lifecycle test
 uses real gate-generated failures: known -> healed (maintenance failure) ->
 reviewed retirement (pass) -> recurrence (new quality failure). Separate
 config/kind/evidence tests prevent broadening the exact allowlist identity.
+
+## Delta 2026-11-08 — adjudication без изменения ranking (#70)
+
+`adjudication-2026-11-08-pool.json` фиксирует объединение top-10 четырёх
+режимов для трёх спорных запросов и трёх независимых контролей. Кандидат
+идентифицируется через path + точный line span; `ranks` сохраняет его
+позиции во всех режимах. Хэши и source commit относятся к исходным данным
+до коррекции, поэтому исторический пул не переписывается после неё.
+
+`adjudication-2026-11-08.md` содержит рубрикатор, полный список принятых
+expected spans/grades, решения по прежним absent, рассмотренные альтернативы
+и границы интерпретации. Полный документ важен: условная релевантность
+post-rebuild smoke checks следует также из раздела о restore-triggered
+rebuild; заголовок connection timeout ведёт к релевантному body, который
+сам ещё не попал в выдачу.
+
+Query text и corpus bytes сохраняются. Поэтому ключи векторов и ordered
+rerank pools остаются действительными, хотя qrels/class/reviewer metadata
+меняют queries hash. После независимой adjudication явный regeneration
+обновляет оценки и retired allowances. Старые latency/index-build значения
+сохраняются отдельным осознанным шагом, а JSON quality diff сравнивается
+при неизменных ranked lists. Применяются существующие validator,
+discrimination, provenance, known-growth и allowance-retirement проверки.

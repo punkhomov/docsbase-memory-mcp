@@ -3,12 +3,12 @@
   "fixture_version": 1,
   "corpus_hash": "d0b29ab5ed44ddd0bbccd92558d19ecd5d60ecace6c6ad4c2bf24401bdc290d0",
   "legacy_corpus_hash": "4390565d463332c47ae8110e97dc910b772f5ee1796a557b2ad57397152de20b",
-  "queries_hash": "897acfbdac8f73347145a763205a42f6a7e886d11c8533456a15fc486b8cad4a",
+  "queries_hash": "b89ea53875cb7c191c305e5fb802e2429a612f75f99cf633eb4ad572796249c4",
   "model_pins": [
     "openrouter/nvidia/nemotron-3-embed-1b:free@d2048@l2",
     "openrouter/nvidia/llama-nemotron-rerank-vl-1b-v2:free"
   ],
-  "generated_at": "1792604283",
+  "generated_at": "1794153759",
   "index_build_ms": 247.41989999999998,
   "configs": {
     "Bm25": {
@@ -6940,7 +6940,7 @@
         },
         {
           "id": "hard-07",
-          "class": "hard_negative",
+          "class": "multi_relevant",
           "k": 10,
           "ranks": [
             {
@@ -7039,7 +7039,7 @@
             "recall": 1.0,
             "mrr": 1.0,
             "ndcg": 1.0,
-            "citation_overlap": 0.1,
+            "citation_overlap": 0.2,
             "forbidden_hit": false,
             "duplicate_path_ratio": 0.2
           },
@@ -7237,7 +7237,7 @@
         },
         {
           "id": "hard-10",
-          "class": "hard_negative",
+          "class": "multi_relevant",
           "k": 10,
           "ranks": [
             {
@@ -7333,17 +7333,17 @@
           ],
           "metrics": {
             "hit": true,
-            "recall": 1.0,
+            "recall": 0.5714285714285714,
             "mrr": 1.0,
-            "ndcg": 1.0,
-            "citation_overlap": 0.1,
+            "ndcg": 0.5700000873565185,
+            "citation_overlap": 0.4,
             "forbidden_hit": false,
             "duplicate_path_ratio": 0.3
           },
           "early": {
             "hit_at_3": true,
-            "recall_at_3": 1.0,
-            "ndcg_at_3": 1.0
+            "recall_at_3": 0.2857142857142857,
+            "ndcg_at_3": 0.3994880953788416
           }
         },
         {
@@ -11378,7 +11378,7 @@
         },
         {
           "id": "hn-19",
-          "class": "hard_negative",
+          "class": "multi_relevant",
           "k": 10,
           "ranks": [
             {
@@ -11473,18 +11473,18 @@
             }
           ],
           "metrics": {
-            "hit": false,
-            "recall": 0.0,
-            "mrr": 0.0,
-            "ndcg": 0.0,
-            "citation_overlap": 0.0,
+            "hit": true,
+            "recall": 0.3333333333333333,
+            "mrr": 1.0,
+            "ndcg": 0.24207625393180188,
+            "citation_overlap": 0.1,
             "forbidden_hit": false,
             "duplicate_path_ratio": 0.2
           },
           "early": {
-            "hit_at_3": false,
-            "recall_at_3": 0.0,
-            "ndcg_at_3": 0.0
+            "hit_at_3": true,
+            "recall_at_3": 0.3333333333333333,
+            "ndcg_at_3": 0.24207625393180188
           }
         },
         {
@@ -15237,14 +15237,14 @@
           "duplicate_path_ratio": 0.26358024691358023
         },
         "hard_negative": {
-          "cases": 22,
-          "hit_rate": 0.8636363636363636,
-          "recall": 0.8636363636363636,
-          "mrr": 0.7954545454545454,
-          "ndcg": 0.8133086027597443,
-          "citation_overlap": 0.134469696969697,
+          "cases": 19,
+          "hit_rate": 0.8947368421052632,
+          "recall": 0.8947368421052632,
+          "mrr": 0.8157894736842105,
+          "ndcg": 0.8364625926691776,
+          "citation_overlap": 0.14517543859649126,
           "forbidden_rate": 0.0,
-          "duplicate_path_ratio": 0.3064393939393939
+          "duplicate_path_ratio": 0.31798245614035087
         },
         "identifier": {
           "cases": 17,
@@ -15277,14 +15277,14 @@
           "duplicate_path_ratio": 0.32505175983436857
         },
         "multi_relevant": {
-          "cases": 18,
-          "hit_rate": 0.8888888888888888,
-          "recall": 0.7407407407407407,
-          "mrr": 0.8166666666666667,
-          "ndcg": 0.7379976782813488,
-          "citation_overlap": 0.22592592592592592,
+          "cases": 21,
+          "hit_rate": 0.9047619047619048,
+          "recall": 0.7256235827664399,
+          "mrr": 0.8428571428571429,
+          "ndcg": 0.7188587881120285,
+          "citation_overlap": 0.22698412698412698,
           "forbidden_rate": 0.0,
-          "duplicate_path_ratio": 0.487037037037037
+          "duplicate_path_ratio": 0.4507936507936507
         },
         "phrase": {
           "cases": 18,
@@ -22251,7 +22251,7 @@
         },
         {
           "id": "hard-07",
-          "class": "hard_negative",
+          "class": "multi_relevant",
           "k": 10,
           "ranks": [
             {
@@ -22348,16 +22348,16 @@
           "metrics": {
             "hit": true,
             "recall": 1.0,
-            "mrr": 0.3333333333333333,
-            "ndcg": 0.5,
-            "citation_overlap": 0.1,
-            "forbidden_hit": true,
+            "mrr": 1.0,
+            "ndcg": 0.6885288809404666,
+            "citation_overlap": 0.2,
+            "forbidden_hit": false,
             "duplicate_path_ratio": 0.2
           },
           "early": {
             "hit_at_3": true,
             "recall_at_3": 1.0,
-            "ndcg_at_3": 0.5
+            "ndcg_at_3": 0.6885288809404666
           }
         },
         {
@@ -22548,7 +22548,7 @@
         },
         {
           "id": "hard-10",
-          "class": "hard_negative",
+          "class": "multi_relevant",
           "k": 10,
           "ranks": [
             {
@@ -22644,17 +22644,17 @@
           ],
           "metrics": {
             "hit": true,
-            "recall": 1.0,
-            "mrr": 0.5,
-            "ndcg": 0.6309297535714575,
-            "citation_overlap": 0.1,
-            "forbidden_hit": true,
+            "recall": 0.5714285714285714,
+            "mrr": 1.0,
+            "ndcg": 0.5846187822204351,
+            "citation_overlap": 0.4,
+            "forbidden_hit": false,
             "duplicate_path_ratio": 0.3
           },
           "early": {
             "hit_at_3": true,
-            "recall_at_3": 1.0,
-            "ndcg_at_3": 0.6309297535714575
+            "recall_at_3": 0.2857142857142857,
+            "ndcg_at_3": 0.33018139202718627
           }
         },
         {
@@ -26689,7 +26689,7 @@
         },
         {
           "id": "hn-19",
-          "class": "hard_negative",
+          "class": "multi_relevant",
           "k": 10,
           "ranks": [
             {
@@ -26784,18 +26784,18 @@
             }
           ],
           "metrics": {
-            "hit": false,
-            "recall": 0.0,
-            "mrr": 0.0,
-            "ndcg": 0.0,
-            "citation_overlap": 0.0,
+            "hit": true,
+            "recall": 0.3333333333333333,
+            "mrr": 1.0,
+            "ndcg": 0.24207625393180188,
+            "citation_overlap": 0.1,
             "forbidden_hit": false,
             "duplicate_path_ratio": 0.1
           },
           "early": {
-            "hit_at_3": false,
-            "recall_at_3": 0.0,
-            "ndcg_at_3": 0.0
+            "hit_at_3": true,
+            "recall_at_3": 0.3333333333333333,
+            "ndcg_at_3": 0.24207625393180188
           }
         },
         {
@@ -30548,14 +30548,14 @@
           "duplicate_path_ratio": 0.22469135802469134
         },
         "hard_negative": {
-          "cases": 22,
-          "hit_rate": 0.8636363636363636,
-          "recall": 0.8636363636363636,
-          "mrr": 0.6439393939393939,
-          "ndcg": 0.7007503761363728,
-          "citation_overlap": 0.134469696969697,
-          "forbidden_rate": 0.13636363636363635,
-          "duplicate_path_ratio": 0.3064393939393939
+          "cases": 19,
+          "hit_rate": 0.8947368421052632,
+          "recall": 0.8947368421052632,
+          "mrr": 0.7017543859649122,
+          "ndcg": 0.7518725537594078,
+          "citation_overlap": 0.14517543859649126,
+          "forbidden_rate": 0.05263157894736842,
+          "duplicate_path_ratio": 0.3232456140350877
         },
         "identifier": {
           "cases": 17,
@@ -30588,14 +30588,14 @@
           "duplicate_path_ratio": 0.30331262939958586
         },
         "multi_relevant": {
-          "cases": 18,
-          "hit_rate": 0.8888888888888888,
-          "recall": 0.6666666666666666,
-          "mrr": 0.8888888888888888,
-          "ndcg": 0.7784434745089391,
-          "citation_overlap": 0.20925925925925928,
+          "cases": 21,
+          "hit_rate": 0.9047619047619048,
+          "recall": 0.6621315192743763,
+          "mrr": 0.9047619047619048,
+          "ndcg": 0.7393907837263624,
+          "citation_overlap": 0.21269841269841266,
           "forbidden_rate": 0.0,
-          "duplicate_path_ratio": 0.5203703703703703
+          "duplicate_path_ratio": 0.4746031746031745
         },
         "phrase": {
           "cases": 18,
@@ -40849,7 +40849,7 @@
         },
         {
           "id": "hard-07",
-          "class": "hard_negative",
+          "class": "multi_relevant",
           "k": 10,
           "ranks": [
             {
@@ -40946,16 +40946,16 @@
           "metrics": {
             "hit": true,
             "recall": 1.0,
-            "mrr": 0.3333333333333333,
-            "ndcg": 0.5,
-            "citation_overlap": 0.1,
+            "mrr": 0.5,
+            "ndcg": 0.58688267143572,
+            "citation_overlap": 0.2,
             "forbidden_hit": false,
             "duplicate_path_ratio": 0.2
           },
           "early": {
             "hit_at_3": true,
             "recall_at_3": 1.0,
-            "ndcg_at_3": 0.5
+            "ndcg_at_3": 0.58688267143572
           }
         },
         {
@@ -41182,7 +41182,7 @@
         },
         {
           "id": "hard-10",
-          "class": "hard_negative",
+          "class": "multi_relevant",
           "k": 10,
           "ranks": [
             {
@@ -41278,17 +41278,17 @@
           ],
           "metrics": {
             "hit": true,
-            "recall": 1.0,
+            "recall": 0.42857142857142855,
             "mrr": 0.5,
-            "ndcg": 0.6309297535714575,
-            "citation_overlap": 0.1,
+            "ndcg": 0.3761898637899559,
+            "citation_overlap": 0.3,
             "forbidden_hit": false,
             "duplicate_path_ratio": 0.4
           },
           "early": {
             "hit_at_3": true,
-            "recall_at_3": 1.0,
-            "ndcg_at_3": 0.6309297535714575
+            "recall_at_3": 0.2857142857142857,
+            "ndcg_at_3": 0.2731116641159232
           }
         },
         {
@@ -47176,7 +47176,7 @@
         },
         {
           "id": "hn-19",
-          "class": "hard_negative",
+          "class": "multi_relevant",
           "k": 10,
           "ranks": [
             {
@@ -47273,16 +47273,16 @@
           "metrics": {
             "hit": true,
             "recall": 1.0,
-            "mrr": 0.3333333333333333,
-            "ndcg": 0.5,
-            "citation_overlap": 0.1,
+            "mrr": 1.0,
+            "ndcg": 0.6988385132278441,
+            "citation_overlap": 0.3,
             "forbidden_hit": false,
             "duplicate_path_ratio": 0.1
           },
           "early": {
             "hit_at_3": true,
-            "recall_at_3": 1.0,
-            "ndcg_at_3": 0.5
+            "recall_at_3": 0.6666666666666666,
+            "ndcg_at_3": 0.6051906348295047
           }
         },
         {
@@ -52091,14 +52091,14 @@
           "duplicate_path_ratio": 0.24999999999999994
         },
         "hard_negative": {
-          "cases": 22,
+          "cases": 19,
           "hit_rate": 1.0,
           "recall": 1.0,
-          "mrr": 0.586038961038961,
-          "ndcg": 0.6894388685039278,
+          "mrr": 0.6171679197994987,
+          "ndcg": 0.7124592291323659,
           "citation_overlap": 0.10000000000000003,
-          "forbidden_rate": 0.045454545454545456,
-          "duplicate_path_ratio": 0.29090909090909084
+          "forbidden_rate": 0.05263157894736842,
+          "duplicate_path_ratio": 0.3
         },
         "identifier": {
           "cases": 17,
@@ -52131,14 +52131,14 @@
           "duplicate_path_ratio": 0.2478260869565217
         },
         "multi_relevant": {
-          "cases": 18,
+          "cases": 21,
           "hit_rate": 1.0,
-          "recall": 0.8055555555555556,
-          "mrr": 0.9027777777777778,
-          "ndcg": 0.8209793368537269,
-          "citation_overlap": 0.18888888888888897,
+          "recall": 0.806122448979592,
+          "mrr": 0.8690476190476191,
+          "ndcg": 0.7828351958009812,
+          "citation_overlap": 0.20000000000000004,
           "forbidden_rate": 0.0,
-          "duplicate_path_ratio": 0.5055555555555554
+          "duplicate_path_ratio": 0.4666666666666665
         },
         "phrase": {
           "cases": 18,
@@ -62392,7 +62392,7 @@
         },
         {
           "id": "hard-07",
-          "class": "hard_negative",
+          "class": "multi_relevant",
           "k": 10,
           "ranks": [
             {
@@ -62489,16 +62489,16 @@
           "metrics": {
             "hit": true,
             "recall": 1.0,
-            "mrr": 0.3333333333333333,
-            "ndcg": 0.5,
-            "citation_overlap": 0.1,
-            "forbidden_hit": true,
+            "mrr": 1.0,
+            "ndcg": 0.6885288809404666,
+            "citation_overlap": 0.2,
+            "forbidden_hit": false,
             "duplicate_path_ratio": 0.4
           },
           "early": {
             "hit_at_3": true,
             "recall_at_3": 1.0,
-            "ndcg_at_3": 0.5
+            "ndcg_at_3": 0.6885288809404666
           }
         },
         {
@@ -62725,7 +62725,7 @@
         },
         {
           "id": "hard-10",
-          "class": "hard_negative",
+          "class": "multi_relevant",
           "k": 10,
           "ranks": [
             {
@@ -62821,17 +62821,17 @@
           ],
           "metrics": {
             "hit": true,
-            "recall": 1.0,
-            "mrr": 0.5,
-            "ndcg": 0.6309297535714575,
-            "citation_overlap": 0.1,
-            "forbidden_hit": true,
+            "recall": 0.5714285714285714,
+            "mrr": 1.0,
+            "ndcg": 0.5846187822204351,
+            "citation_overlap": 0.4,
+            "forbidden_hit": false,
             "duplicate_path_ratio": 0.2
           },
           "early": {
             "hit_at_3": true,
-            "recall_at_3": 1.0,
-            "ndcg_at_3": 0.6309297535714575
+            "recall_at_3": 0.2857142857142857,
+            "ndcg_at_3": 0.33018139202718627
           }
         },
         {
@@ -68719,7 +68719,7 @@
         },
         {
           "id": "hn-19",
-          "class": "hard_negative",
+          "class": "multi_relevant",
           "k": 10,
           "ranks": [
             {
@@ -68816,16 +68816,16 @@
           "metrics": {
             "hit": true,
             "recall": 1.0,
-            "mrr": 0.5,
-            "ndcg": 0.6309297535714575,
-            "citation_overlap": 0.1,
-            "forbidden_hit": true,
+            "mrr": 1.0,
+            "ndcg": 0.8213137146137828,
+            "citation_overlap": 0.3,
+            "forbidden_hit": false,
             "duplicate_path_ratio": 0.4
           },
           "early": {
             "hit_at_3": true,
             "recall_at_3": 1.0,
-            "ndcg_at_3": 0.6309297535714575
+            "ndcg_at_3": 0.8213137146137828
           }
         },
         {
@@ -73634,14 +73634,14 @@
           "duplicate_path_ratio": 0.2222222222222222
         },
         "hard_negative": {
-          "cases": 22,
+          "cases": 19,
           "hit_rate": 1.0,
           "recall": 1.0,
-          "mrr": 0.7575757575757575,
-          "ndcg": 0.8203380922078028,
+          "mrr": 0.8070175438596491,
+          "ndcg": 0.8571357116541446,
           "citation_overlap": 0.10000000000000003,
-          "forbidden_rate": 0.18181818181818182,
-          "duplicate_path_ratio": 0.35454545454545455
+          "forbidden_rate": 0.05263157894736842,
+          "duplicate_path_ratio": 0.35789473684210527
         },
         "identifier": {
           "cases": 17,
@@ -73674,14 +73674,14 @@
           "duplicate_path_ratio": 0.20000000000000007
         },
         "multi_relevant": {
-          "cases": 18,
+          "cases": 21,
           "hit_rate": 1.0,
-          "recall": 0.7777777777777778,
+          "recall": 0.7891156462585033,
           "mrr": 1.0,
-          "ndcg": 0.8895545856200502,
-          "citation_overlap": 0.1833333333333334,
+          "ndcg": 0.8622116151874091,
+          "citation_overlap": 0.2,
           "forbidden_rate": 0.0,
-          "duplicate_path_ratio": 0.4888888888888887
+          "duplicate_path_ratio": 0.4666666666666665
         },
         "phrase": {
           "cases": 18,
@@ -73810,13 +73810,13 @@
     "matches": true
   },
   "discrimination": {
-    "saturated_total": 133,
-    "saturated_ratio": 0.689119170984456,
+    "saturated_total": 134,
+    "saturated_ratio": 0.694300518134715,
     "non_saturated_by_slice": {
       "arabic": 2,
       "cjk": 1,
       "en_morph": 8,
-      "hard_negative": 3,
+      "hard_negative": 2,
       "identifier": 7,
       "long_doc_boundary": 5,
       "mixed_lang": 14,
@@ -73848,9 +73848,9 @@
         "mixed": 6
       },
       "hard_negative": {
-        "all_hit": 19,
+        "all_hit": 17,
         "all_miss": 0,
-        "mixed": 3
+        "mixed": 2
       },
       "identifier": {
         "all_hit": 10,
@@ -73868,7 +73868,7 @@
         "mixed": 11
       },
       "multi_relevant": {
-        "all_hit": 16,
+        "all_hit": 19,
         "all_miss": 0,
         "mixed": 2
       },
@@ -73901,22 +73901,6 @@
     {
       "config": "Bm25Rerank",
       "slice": "hard_negative",
-      "case_id": "hard-07",
-      "kind": "ForbiddenHit",
-      "expected": "no forbidden hit",
-      "actual": "forbidden_hit = true"
-    },
-    {
-      "config": "Bm25Rerank",
-      "slice": "hard_negative",
-      "case_id": "hard-10",
-      "kind": "ForbiddenHit",
-      "expected": "no forbidden hit",
-      "actual": "forbidden_hit = true"
-    },
-    {
-      "config": "Bm25Rerank",
-      "slice": "hard_negative",
       "case_id": "hn-22",
       "kind": "ForbiddenHit",
       "expected": "no forbidden hit",
@@ -73926,30 +73910,6 @@
       "config": "Rrf",
       "slice": "hard_negative",
       "case_id": "hard-08",
-      "kind": "ForbiddenHit",
-      "expected": "no forbidden hit",
-      "actual": "forbidden_hit = true"
-    },
-    {
-      "config": "RrfRerank",
-      "slice": "hard_negative",
-      "case_id": "hard-07",
-      "kind": "ForbiddenHit",
-      "expected": "no forbidden hit",
-      "actual": "forbidden_hit = true"
-    },
-    {
-      "config": "RrfRerank",
-      "slice": "hard_negative",
-      "case_id": "hard-10",
-      "kind": "ForbiddenHit",
-      "expected": "no forbidden hit",
-      "actual": "forbidden_hit = true"
-    },
-    {
-      "config": "RrfRerank",
-      "slice": "hard_negative",
-      "case_id": "hn-19",
       "kind": "ForbiddenHit",
       "expected": "no forbidden hit",
       "actual": "forbidden_hit = true"

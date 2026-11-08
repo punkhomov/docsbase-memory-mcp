@@ -1,0 +1,1601 @@
+{
+  "source_commit": "40132c80fd335017101ddd5c5c7f2cfe48736800",
+  "corpus_hash": "d0b29ab5ed44ddd0bbccd92558d19ecd5d60ecace6c6ad4c2bf24401bdc290d0",
+  "queries_hash": "897acfbdac8f73347145a763205a42f6a7e886d11c8533456a15fc486b8cad4a",
+  "model_pins": [
+    "openrouter/nvidia/nemotron-3-embed-1b:free@d2048@l2",
+    "openrouter/nvidia/llama-nemotron-rerank-vl-1b-v2:free"
+  ],
+  "tokenizer_version": 7,
+  "pooling": "union of top-k from all four offline configurations; unjudged does not mean negative",
+  "cases": [
+    {
+      "id": "hn-19",
+      "query": "staging host smoke checks after restore",
+      "k": 10,
+      "original_judgments": {
+        "expected": [
+          {
+            "path": "multi/backup-full.md",
+            "lines": [
+              10,
+              12
+            ],
+            "grade": 2
+          }
+        ],
+        "absent": [
+          {
+            "path": "boundary/index-rebuild.md",
+            "reason": "index self-healing by marker is restore-adjacent, not backup verification"
+          }
+        ]
+      },
+      "metrics_before": {
+        "Bm25": {
+          "hit": false,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "ndcg": 0.0,
+          "citation_overlap": 0.0,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.2
+        },
+        "Bm25Rerank": {
+          "hit": false,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "ndcg": 0.0,
+          "citation_overlap": 0.0,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.1
+        },
+        "Rrf": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.3333333333333333,
+          "ndcg": 0.5,
+          "citation_overlap": 0.1,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.1
+        },
+        "RrfRerank": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.5,
+          "ndcg": 0.6309297535714575,
+          "citation_overlap": 0.1,
+          "forbidden_hit": true,
+          "duplicate_path_ratio": 0.4
+        }
+      },
+      "candidates": [
+        {
+          "path": "semantic/backup-restore.md",
+          "lines": [
+            1,
+            6
+          ],
+          "heading_path": "Backup and Restore",
+          "ranks": {
+            "Bm25": 1,
+            "Bm25Rerank": 1,
+            "Rrf": 1,
+            "RrfRerank": 3
+          }
+        },
+        {
+          "path": "semantic/health-checks.md",
+          "lines": [
+            1,
+            6
+          ],
+          "heading_path": "Health Checks",
+          "ranks": {
+            "Bm25": 2,
+            "Bm25Rerank": 2,
+            "Rrf": 2
+          }
+        },
+        {
+          "path": "multi/retry-http.md",
+          "lines": [
+            13,
+            18
+          ],
+          "heading_path": "Повторы HTTP-запросов > Заголовок Retry-After",
+          "ranks": {
+            "Bm25": 3,
+            "Bm25Rerank": 4,
+            "Rrf": 4
+          }
+        },
+        {
+          "path": "boundary/quotas-limits.md",
+          "lines": [
+            57,
+            62
+          ],
+          "heading_path": "Quotas and Limits > Over Quota",
+          "ranks": {
+            "Bm25": 4,
+            "Bm25Rerank": 6,
+            "Rrf": 6
+          }
+        },
+        {
+          "path": "en/child-processes.md",
+          "lines": [
+            33,
+            37
+          ],
+          "heading_path": "Child Processes > Health Checks",
+          "ranks": {
+            "Bm25": 5,
+            "Bm25Rerank": 8,
+            "Rrf": 8
+          }
+        },
+        {
+          "path": "traps/port-env.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Port Override > Environment",
+          "ranks": {
+            "Bm25": 6,
+            "Rrf": 10
+          }
+        },
+        {
+          "path": "en/telemetry-matrices.md",
+          "lines": [
+            38,
+            41
+          ],
+          "heading_path": "Telemetry Matrices > Validating Data",
+          "ranks": {
+            "Bm25": 7,
+            "Bm25Rerank": 3
+          }
+        },
+        {
+          "path": "boundary/quotas-limits.md",
+          "lines": [
+            34,
+            45
+          ],
+          "heading_path": "Quotas and Limits > The Refill Math",
+          "ranks": {
+            "Bm25": 8,
+            "Bm25Rerank": 10
+          }
+        },
+        {
+          "path": "boundary/watcher-debounce.md",
+          "lines": [
+            61,
+            65
+          ],
+          "heading_path": "Watcher Debounce > Initial Scan",
+          "ranks": {
+            "Bm25": 9
+          }
+        },
+        {
+          "path": "en/child-processes.md",
+          "lines": [
+            18,
+            22
+          ],
+          "heading_path": "Child Processes > Graceful Shutdown",
+          "ranks": {
+            "Bm25": 10
+          }
+        },
+        {
+          "path": "semantic/feature-flags.md",
+          "lines": [
+            1,
+            6
+          ],
+          "heading_path": "Feature Flags",
+          "ranks": {
+            "Bm25Rerank": 5
+          }
+        },
+        {
+          "path": "api/watch-policy.md",
+          "lines": [
+            8,
+            11
+          ],
+          "heading_path": "Watch Policy > Debounce",
+          "ranks": {
+            "Bm25Rerank": 7
+          }
+        },
+        {
+          "path": "en/socket-bind.md",
+          "lines": [
+            3,
+            7
+          ],
+          "heading_path": "Socket Bind > Binding the daemon socket",
+          "ranks": {
+            "Bm25Rerank": 9
+          }
+        },
+        {
+          "path": "multi/backup-full.md",
+          "lines": [
+            8,
+            13
+          ],
+          "heading_path": "Полные бэкапы > Проверка восстановления",
+          "ranks": {
+            "Rrf": 3,
+            "RrfRerank": 2
+          }
+        },
+        {
+          "path": "boundary/index-rebuild.md",
+          "lines": [
+            66,
+            71
+          ],
+          "heading_path": "Перестройка индекса > Проверка после перестройки",
+          "ranks": {
+            "Rrf": 5,
+            "RrfRerank": 1
+          }
+        },
+        {
+          "path": "multi/backup-full.md",
+          "lines": [
+            19,
+            23
+          ],
+          "heading_path": "Полные бэкапы > Контрольные суммы",
+          "ranks": {
+            "Rrf": 7,
+            "RrfRerank": 4
+          }
+        },
+        {
+          "path": "en/query-timeout.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Query Timeout",
+          "ranks": {
+            "Rrf": 9
+          }
+        },
+        {
+          "path": "multi/log-levels.md",
+          "lines": [
+            9,
+            14
+          ],
+          "heading_path": "Уровни логирования > Warn",
+          "ranks": {
+            "RrfRerank": 5
+          }
+        },
+        {
+          "path": "multi/backup-full.md",
+          "lines": [
+            34,
+            38
+          ],
+          "heading_path": "Полные бэкапы > Время восстановления",
+          "ranks": {
+            "RrfRerank": 6
+          }
+        },
+        {
+          "path": "api/watch-policy.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Watch Policy",
+          "ranks": {
+            "RrfRerank": 7
+          }
+        },
+        {
+          "path": "boundary/index-rebuild.md",
+          "lines": [
+            83,
+            87
+          ],
+          "heading_path": "Перестройка индекса > Перестройка и бэкапы",
+          "ranks": {
+            "RrfRerank": 8
+          }
+        },
+        {
+          "path": "boundary/config-migration.md",
+          "lines": [
+            58,
+            62
+          ],
+          "heading_path": "Миграция конфигурации > Сухой прогон",
+          "ranks": {
+            "RrfRerank": 9
+          }
+        },
+        {
+          "path": "multi/backup-full.md",
+          "lines": [
+            39,
+            43
+          ],
+          "heading_path": "Полные бэкапы > Документация процедуры",
+          "ranks": {
+            "RrfRerank": 10
+          }
+        }
+      ]
+    },
+    {
+      "id": "hard-07",
+      "query": "default port",
+      "k": 10,
+      "original_judgments": {
+        "expected": [
+          {
+            "path": "traps/default-port.md",
+            "lines": [
+              5,
+              6
+            ],
+            "grade": 2
+          }
+        ],
+        "absent": [
+          {
+            "path": "traps/port-env.md",
+            "reason": "shares port/default terms, disjoint: fixed default vs env override"
+          }
+        ]
+      },
+      "metrics_before": {
+        "Bm25": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 1.0,
+          "ndcg": 1.0,
+          "citation_overlap": 0.1,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.2
+        },
+        "Bm25Rerank": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.3333333333333333,
+          "ndcg": 0.5,
+          "citation_overlap": 0.1,
+          "forbidden_hit": true,
+          "duplicate_path_ratio": 0.2
+        },
+        "Rrf": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.3333333333333333,
+          "ndcg": 0.5,
+          "citation_overlap": 0.1,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.2
+        },
+        "RrfRerank": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.3333333333333333,
+          "ndcg": 0.5,
+          "citation_overlap": 0.1,
+          "forbidden_hit": true,
+          "duplicate_path_ratio": 0.4
+        }
+      },
+      "candidates": [
+        {
+          "path": "traps/default-port.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Default Port > Value",
+          "ranks": {
+            "Bm25": 1,
+            "Bm25Rerank": 3,
+            "Rrf": 3,
+            "RrfRerank": 3
+          }
+        },
+        {
+          "path": "traps/port-env.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Port Override > Environment",
+          "ranks": {
+            "Bm25": 2,
+            "Bm25Rerank": 1,
+            "Rrf": 2,
+            "RrfRerank": 1
+          }
+        },
+        {
+          "path": "traps/default-port.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Default Port",
+          "ranks": {
+            "Bm25": 3,
+            "Bm25Rerank": 2,
+            "Rrf": 1,
+            "RrfRerank": 2
+          }
+        },
+        {
+          "path": "traps/port-env.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Port Override",
+          "ranks": {
+            "Bm25": 4,
+            "Bm25Rerank": 4,
+            "Rrf": 4,
+            "RrfRerank": 5
+          }
+        },
+        {
+          "path": "semantic/log-rotation.md",
+          "lines": [
+            1,
+            6
+          ],
+          "heading_path": "Log Rotation",
+          "ranks": {
+            "Bm25": 5,
+            "Bm25Rerank": 6,
+            "Rrf": 8
+          }
+        },
+        {
+          "path": "traps/install-wget.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Install with wget > Download",
+          "ranks": {
+            "Bm25": 6,
+            "Bm25Rerank": 9,
+            "Rrf": 6
+          }
+        },
+        {
+          "path": "traps/install-curl.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Install with curl > Download",
+          "ranks": {
+            "Bm25": 7,
+            "Bm25Rerank": 7,
+            "Rrf": 7
+          }
+        },
+        {
+          "path": "api/frame-budget.md",
+          "lines": [
+            3,
+            7
+          ],
+          "heading_path": "Frame Budget > Size cap",
+          "ranks": {
+            "Bm25": 8,
+            "Bm25Rerank": 5
+          }
+        },
+        {
+          "path": "en/frozen-mcp.md",
+          "lines": [
+            20,
+            38
+          ],
+          "heading_path": "MCP > Tools",
+          "ranks": {
+            "Bm25": 9,
+            "Bm25Rerank": 8
+          }
+        },
+        {
+          "path": "en/frozen-quickstart.md",
+          "lines": [
+            20,
+            37
+          ],
+          "heading_path": "Quickstart > 2. Index a project",
+          "ranks": {
+            "Bm25": 10
+          }
+        },
+        {
+          "path": "traps/timeout-ms.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Timeout Milliseconds > Unit",
+          "ranks": {
+            "Bm25Rerank": 10,
+            "Rrf": 5
+          }
+        },
+        {
+          "path": "boundary/daemon-protocol.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Daemon Protocol",
+          "ranks": {
+            "Rrf": 9
+          }
+        },
+        {
+          "path": "traps/unix-socket.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Unix Socket",
+          "ranks": {
+            "Rrf": 10,
+            "RrfRerank": 8
+          }
+        },
+        {
+          "path": "traps/windows-pipe.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Windows Named Pipe",
+          "ranks": {
+            "RrfRerank": 4
+          }
+        },
+        {
+          "path": "en/socket-bind.md",
+          "lines": [
+            3,
+            7
+          ],
+          "heading_path": "Socket Bind > Binding the daemon socket",
+          "ranks": {
+            "RrfRerank": 6
+          }
+        },
+        {
+          "path": "traps/unix-socket.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Unix Socket > Path",
+          "ranks": {
+            "RrfRerank": 7
+          }
+        },
+        {
+          "path": "api/embed-config.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Embed Config",
+          "ranks": {
+            "RrfRerank": 9
+          }
+        },
+        {
+          "path": "en/socket-bind.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Socket Bind",
+          "ranks": {
+            "RrfRerank": 10
+          }
+        }
+      ]
+    },
+    {
+      "id": "hard-10",
+      "query": "timeout in seconds",
+      "k": 10,
+      "original_judgments": {
+        "expected": [
+          {
+            "path": "traps/timeout-sec.md",
+            "lines": [
+              5,
+              6
+            ],
+            "grade": 2
+          }
+        ],
+        "absent": [
+          {
+            "path": "traps/timeout-ms.md",
+            "reason": "shares timeout/milliseconds terms, disjoint: seconds display vs ms counting"
+          }
+        ]
+      },
+      "metrics_before": {
+        "Bm25": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 1.0,
+          "ndcg": 1.0,
+          "citation_overlap": 0.1,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.3
+        },
+        "Bm25Rerank": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.5,
+          "ndcg": 0.6309297535714575,
+          "citation_overlap": 0.1,
+          "forbidden_hit": true,
+          "duplicate_path_ratio": 0.3
+        },
+        "Rrf": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.5,
+          "ndcg": 0.6309297535714575,
+          "citation_overlap": 0.1,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.4
+        },
+        "RrfRerank": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.5,
+          "ndcg": 0.6309297535714575,
+          "citation_overlap": 0.1,
+          "forbidden_hit": true,
+          "duplicate_path_ratio": 0.2
+        }
+      },
+      "candidates": [
+        {
+          "path": "traps/timeout-sec.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Timeout Seconds > Unit",
+          "ranks": {
+            "Bm25": 1,
+            "Bm25Rerank": 2,
+            "Rrf": 2,
+            "RrfRerank": 2
+          }
+        },
+        {
+          "path": "traps/timeout-sec.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Timeout Seconds",
+          "ranks": {
+            "Bm25": 2,
+            "Bm25Rerank": 3,
+            "Rrf": 1,
+            "RrfRerank": 3
+          }
+        },
+        {
+          "path": "traps/timeout-ms.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Timeout Milliseconds > Unit",
+          "ranks": {
+            "Bm25": 3,
+            "Bm25Rerank": 1,
+            "Rrf": 3,
+            "RrfRerank": 1
+          }
+        },
+        {
+          "path": "phrases/read-timeout.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Read Timeout > Handling",
+          "ranks": {
+            "Bm25": 4,
+            "Rrf": 8
+          }
+        },
+        {
+          "path": "boundary/daemon-protocol.md",
+          "lines": [
+            52,
+            57
+          ],
+          "heading_path": "Daemon Protocol > Timeouts",
+          "ranks": {
+            "Bm25": 5,
+            "Bm25Rerank": 6,
+            "Rrf": 9,
+            "RrfRerank": 6
+          }
+        },
+        {
+          "path": "en/child-processes.md",
+          "lines": [
+            33,
+            37
+          ],
+          "heading_path": "Child Processes > Health Checks",
+          "ranks": {
+            "Bm25": 6
+          }
+        },
+        {
+          "path": "boundary/daemon-protocol.md",
+          "lines": [
+            69,
+            73
+          ],
+          "heading_path": "Daemon Protocol > Shutdown",
+          "ranks": {
+            "Bm25": 7
+          }
+        },
+        {
+          "path": "en/query-timeout.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Query Timeout",
+          "ranks": {
+            "Bm25": 8,
+            "Bm25Rerank": 10,
+            "Rrf": 7
+          }
+        },
+        {
+          "path": "phrases/read-timeout.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Read Timeout",
+          "ranks": {
+            "Bm25": 9,
+            "Bm25Rerank": 9,
+            "Rrf": 6
+          }
+        },
+        {
+          "path": "phrases/timeout-read.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Timeout Read",
+          "ranks": {
+            "Bm25": 10,
+            "Bm25Rerank": 8,
+            "Rrf": 5,
+            "RrfRerank": 10
+          }
+        },
+        {
+          "path": "traps/timeout-ms.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Timeout Milliseconds",
+          "ranks": {
+            "Bm25Rerank": 4,
+            "Rrf": 4,
+            "RrfRerank": 4
+          }
+        },
+        {
+          "path": "en/frozen-mcp.md",
+          "lines": [
+            39,
+            44
+          ],
+          "heading_path": "MCP > Timeouts",
+          "ranks": {
+            "Bm25Rerank": 5,
+            "RrfRerank": 5
+          }
+        },
+        {
+          "path": "en/query-timeout.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Query Timeout > Deadline handling",
+          "ranks": {
+            "Bm25Rerank": 7,
+            "Rrf": 10,
+            "RrfRerank": 9
+          }
+        },
+        {
+          "path": "ru/socket-timeout.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Таймаут сокета > Ограничение ожидания",
+          "ranks": {
+            "RrfRerank": 7
+          }
+        },
+        {
+          "path": "multi/timeout-connect.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Таймаут соединения",
+          "ranks": {
+            "RrfRerank": 8
+          }
+        }
+      ]
+    },
+    {
+      "id": "ar-01",
+      "query": "مكتبة",
+      "k": 10,
+      "original_judgments": {
+        "expected": [
+          {
+            "path": "ar/library.md",
+            "lines": [
+              5,
+              5
+            ],
+            "grade": 2
+          }
+        ],
+        "absent": [
+          {
+            "path": "ar/office.md",
+            "reason": "shares root ك-ت-ب (مكتب office), disjoint: library vs office"
+          }
+        ]
+      },
+      "metrics_before": {
+        "Bm25": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.25,
+          "ndcg": 0.43067655807339306,
+          "citation_overlap": 0.25,
+          "forbidden_hit": true,
+          "duplicate_path_ratio": 0.5
+        },
+        "Bm25Rerank": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.5,
+          "ndcg": 0.6309297535714575,
+          "citation_overlap": 0.25,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.5
+        },
+        "Rrf": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.3333333333333333,
+          "ndcg": 0.5,
+          "citation_overlap": 0.1,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.2
+        },
+        "RrfRerank": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.5,
+          "ndcg": 0.6309297535714575,
+          "citation_overlap": 0.1,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.2
+        }
+      },
+      "candidates": [
+        {
+          "path": "ar/office.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "مكتب > ساعات العمل",
+          "ranks": {
+            "Bm25": 1,
+            "Bm25Rerank": 3,
+            "Rrf": 4,
+            "RrfRerank": 3
+          }
+        },
+        {
+          "path": "ar/library.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "مكتبة",
+          "ranks": {
+            "Bm25": 2,
+            "Bm25Rerank": 1,
+            "Rrf": 1,
+            "RrfRerank": 1
+          }
+        },
+        {
+          "path": "ar/office.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "مكتب",
+          "ranks": {
+            "Bm25": 3,
+            "Bm25Rerank": 4,
+            "Rrf": 2,
+            "RrfRerank": 4
+          }
+        },
+        {
+          "path": "ar/library.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "مكتبة > أقسام المكتبة",
+          "ranks": {
+            "Bm25": 4,
+            "Bm25Rerank": 2,
+            "Rrf": 3,
+            "RrfRerank": 2
+          }
+        },
+        {
+          "path": "ar/school.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "مدرسة",
+          "ranks": {
+            "Rrf": 5,
+            "RrfRerank": 7
+          }
+        },
+        {
+          "path": "ar/lesson.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "درس",
+          "ranks": {
+            "Rrf": 6
+          }
+        },
+        {
+          "path": "cjk/beijing.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "北京",
+          "ranks": {
+            "Rrf": 7
+          }
+        },
+        {
+          "path": "ar/gate.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "بوابة",
+          "ranks": {
+            "Rrf": 8,
+            "RrfRerank": 5
+          }
+        },
+        {
+          "path": "api/frame-budget.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Frame Budget",
+          "ranks": {
+            "Rrf": 9
+          }
+        },
+        {
+          "path": "api/watch-policy.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Watch Policy",
+          "ranks": {
+            "Rrf": 10
+          }
+        },
+        {
+          "path": "ru/grep-patterns.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Поиск по шаблону",
+          "ranks": {
+            "RrfRerank": 6
+          }
+        },
+        {
+          "path": "boundary/rerank-window.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Окно реранка",
+          "ranks": {
+            "RrfRerank": 8
+          }
+        },
+        {
+          "path": "multi/backup-full.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Полные бэкапы",
+          "ranks": {
+            "RrfRerank": 9
+          }
+        },
+        {
+          "path": "cjk/basement.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "地下室",
+          "ranks": {
+            "RrfRerank": 10
+          }
+        }
+      ]
+    },
+    {
+      "id": "hard-08",
+      "query": "PORT environment variable",
+      "k": 10,
+      "original_judgments": {
+        "expected": [
+          {
+            "path": "traps/port-env.md",
+            "lines": [
+              5,
+              6
+            ],
+            "grade": 2
+          }
+        ],
+        "absent": [
+          {
+            "path": "traps/default-port.md",
+            "reason": "shares port/default terms, disjoint: env override vs fixed default"
+          }
+        ]
+      },
+      "metrics_before": {
+        "Bm25": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 1.0,
+          "ndcg": 1.0,
+          "citation_overlap": 0.16666666666666666,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.3333333333333333
+        },
+        "Bm25Rerank": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 1.0,
+          "ndcg": 1.0,
+          "citation_overlap": 0.16666666666666666,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.3333333333333333
+        },
+        "Rrf": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.5,
+          "ndcg": 0.6309297535714575,
+          "citation_overlap": 0.1,
+          "forbidden_hit": true,
+          "duplicate_path_ratio": 0.2
+        },
+        "RrfRerank": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 1.0,
+          "ndcg": 1.0,
+          "citation_overlap": 0.1,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.2
+        }
+      },
+      "candidates": [
+        {
+          "path": "traps/port-env.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Port Override > Environment",
+          "ranks": {
+            "Bm25": 1,
+            "Bm25Rerank": 1,
+            "Rrf": 2,
+            "RrfRerank": 1
+          }
+        },
+        {
+          "path": "traps/default-port.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Default Port",
+          "ranks": {
+            "Bm25": 2,
+            "Bm25Rerank": 4,
+            "Rrf": 1,
+            "RrfRerank": 4
+          }
+        },
+        {
+          "path": "traps/port-env.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Port Override",
+          "ranks": {
+            "Bm25": 3,
+            "Bm25Rerank": 3,
+            "Rrf": 3,
+            "RrfRerank": 3
+          }
+        },
+        {
+          "path": "traps/default-port.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Default Port > Value",
+          "ranks": {
+            "Bm25": 4,
+            "Bm25Rerank": 2,
+            "Rrf": 4,
+            "RrfRerank": 2
+          }
+        },
+        {
+          "path": "api/provider-key.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Provider Key > OpenRouter key",
+          "ranks": {
+            "Bm25": 5,
+            "Bm25Rerank": 5,
+            "Rrf": 5
+          }
+        },
+        {
+          "path": "boundary/daemon-protocol.md",
+          "lines": [
+            9,
+            31
+          ],
+          "heading_path": "Daemon Protocol > Framing",
+          "ranks": {
+            "Bm25": 6,
+            "Bm25Rerank": 6,
+            "Rrf": 8
+          }
+        },
+        {
+          "path": "en/socket-bind.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Socket Bind",
+          "ranks": {
+            "Rrf": 6
+          }
+        },
+        {
+          "path": "traps/unix-socket.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Unix Socket",
+          "ranks": {
+            "Rrf": 7,
+            "RrfRerank": 9
+          }
+        },
+        {
+          "path": "traps/install-curl.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Install with curl",
+          "ranks": {
+            "Rrf": 9
+          }
+        },
+        {
+          "path": "traps/windows-pipe.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Windows Named Pipe",
+          "ranks": {
+            "Rrf": 10,
+            "RrfRerank": 8
+          }
+        },
+        {
+          "path": "ru/socket-setup.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Настройка сокета",
+          "ranks": {
+            "RrfRerank": 5
+          }
+        },
+        {
+          "path": "multi/retry-http.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Повторы HTTP-запросов",
+          "ranks": {
+            "RrfRerank": 6
+          }
+        },
+        {
+          "path": "api/embed-config.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Embed Config",
+          "ranks": {
+            "RrfRerank": 7
+          }
+        },
+        {
+          "path": "en/socket-bind.md",
+          "lines": [
+            3,
+            7
+          ],
+          "heading_path": "Socket Bind > Binding the daemon socket",
+          "ranks": {
+            "RrfRerank": 10
+          }
+        }
+      ]
+    },
+    {
+      "id": "hn-22",
+      "query": "TOML config unknown keys behavior",
+      "k": 10,
+      "original_judgments": {
+        "expected": [
+          {
+            "path": "traps/config-toml.md",
+            "lines": [
+              5,
+              6
+            ],
+            "grade": 2
+          }
+        ],
+        "absent": [
+          {
+            "path": "traps/config-json.md",
+            "reason": "JSON silently ignores unknown keys; TOML fails loudly — format trap"
+          }
+        ]
+      },
+      "metrics_before": {
+        "Bm25": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 1.0,
+          "ndcg": 1.0,
+          "citation_overlap": 0.1,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.4
+        },
+        "Bm25Rerank": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.5,
+          "ndcg": 0.6309297535714575,
+          "citation_overlap": 0.1,
+          "forbidden_hit": true,
+          "duplicate_path_ratio": 0.4
+        },
+        "Rrf": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 1.0,
+          "ndcg": 1.0,
+          "citation_overlap": 0.1,
+          "forbidden_hit": false,
+          "duplicate_path_ratio": 0.3
+        },
+        "RrfRerank": {
+          "hit": true,
+          "recall": 1.0,
+          "mrr": 0.5,
+          "ndcg": 0.6309297535714575,
+          "citation_overlap": 0.1,
+          "forbidden_hit": true,
+          "duplicate_path_ratio": 0.3
+        }
+      },
+      "candidates": [
+        {
+          "path": "traps/config-toml.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "TOML Config > File",
+          "ranks": {
+            "Bm25": 1,
+            "Bm25Rerank": 2,
+            "Rrf": 1,
+            "RrfRerank": 2
+          }
+        },
+        {
+          "path": "traps/config-toml.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "TOML Config",
+          "ranks": {
+            "Bm25": 2,
+            "Bm25Rerank": 3,
+            "Rrf": 2,
+            "RrfRerank": 3
+          }
+        },
+        {
+          "path": "traps/config-json.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Legacy JSON Config > Old format",
+          "ranks": {
+            "Bm25": 3,
+            "Bm25Rerank": 1,
+            "Rrf": 3,
+            "RrfRerank": 1
+          }
+        },
+        {
+          "path": "api/provider-key.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Provider Key > OpenRouter key",
+          "ranks": {
+            "Bm25": 4,
+            "Bm25Rerank": 6,
+            "Rrf": 7,
+            "RrfRerank": 7
+          }
+        },
+        {
+          "path": "boundary/quotas-limits.md",
+          "lines": [
+            9,
+            13
+          ],
+          "heading_path": "Quotas and Limits > Per-Key Buckets",
+          "ranks": {
+            "Bm25": 5
+          }
+        },
+        {
+          "path": "api/provider-key.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Provider Key",
+          "ranks": {
+            "Bm25": 6,
+            "Bm25Rerank": 10,
+            "Rrf": 5
+          }
+        },
+        {
+          "path": "api/embed-config.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Embed Config",
+          "ranks": {
+            "Bm25": 7,
+            "Bm25Rerank": 4,
+            "Rrf": 4,
+            "RrfRerank": 4
+          }
+        },
+        {
+          "path": "traps/config-json.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Legacy JSON Config",
+          "ranks": {
+            "Bm25": 8,
+            "Bm25Rerank": 5,
+            "Rrf": 6,
+            "RrfRerank": 5
+          }
+        },
+        {
+          "path": "en/socket-bind.md",
+          "lines": [
+            3,
+            7
+          ],
+          "heading_path": "Socket Bind > Binding the daemon socket",
+          "ranks": {
+            "Bm25": 9,
+            "Bm25Rerank": 8,
+            "RrfRerank": 10
+          }
+        },
+        {
+          "path": "api/embed-config.md",
+          "lines": [
+            3,
+            6
+          ],
+          "heading_path": "Embed Config > Shorthand",
+          "ranks": {
+            "Bm25": 10,
+            "Bm25Rerank": 7,
+            "RrfRerank": 8
+          }
+        },
+        {
+          "path": "traps/port-env.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Port Override > Environment",
+          "ranks": {
+            "Bm25Rerank": 9,
+            "Rrf": 10
+          }
+        },
+        {
+          "path": "phrases/timeout-read.md",
+          "lines": [
+            3,
+            8
+          ],
+          "heading_path": "Timeout Read > Config reload",
+          "ranks": {
+            "Rrf": 8
+          }
+        },
+        {
+          "path": "boundary/daemon-protocol.md",
+          "lines": [
+            41,
+            45
+          ],
+          "heading_path": "Daemon Protocol > Request Schema",
+          "ranks": {
+            "Rrf": 9
+          }
+        },
+        {
+          "path": "boundary/config-migration.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Миграция конфигурации",
+          "ranks": {
+            "RrfRerank": 6
+          }
+        },
+        {
+          "path": "traps/log-debug.md",
+          "lines": [
+            1,
+            2
+          ],
+          "heading_path": "Debug Logging",
+          "ranks": {
+            "RrfRerank": 9
+          }
+        }
+      ]
+    }
+  ]
+}
