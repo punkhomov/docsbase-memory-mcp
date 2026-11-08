@@ -438,3 +438,28 @@
   fmt и clippy --locked --all-targets -- -D warnings чисты.
   Ruling: fresh task review — Spec PASS / Quality APPROVED, findings none;
   full-suite/platform checks remain PR close-out.
+
+
+- Task T23: complete (2026-11-08, #74). RED: 3 gated regressions fail on
+  the original implementation (generation/LRU replacement, invalidation,
+  same-key stale publication); success/error controls pass. Ruling: RAII
+  reservations live outside entries; admission adds every live worker to
+  resident bytes under the entries mutex. Eviction never releases a live
+  worker's charge. Unretainable rows use hash-only streaming exact; known
+  dimensions reject before opening the vector DB. Publication moves graph
+  ownership and charge together and checks the original Building identity.
+  Verify: MSRV 1.88.0 — dense unit tests 37 passed, hybrid_ann 16 passed;
+  lifecycle tests also verified in release. fmt and all-targets clippy clean.
+  Full-suite/platform checks and fresh review recorded at PR close-out below.
+
+- Task T23 review fix round (2026-11-08): fresh reviewer found two Important
+  cases: overlapping same-key cold lookup could retire Building, and pressure
+  fallback remained cached after release. RED: both deterministic regressions
+  fail. Fix: stash reuses matching Building/Ann under the entries mutex, and
+  fallback beside live reservations stays uncached. Known-width early fallback
+  also reuses the worker. Minor: stale-publication guard now tested against a
+  replacement Building with the same key (ABA), not only a Ready entry.
+  Verify: dense tests 37 passed, hybrid_ann 16 passed; fmt/clippy clean.
+
+  Ruling: re-review — both Important findings and the Minor ADDRESSED;
+  no new Critical/Important findings. Release lifecycle regression set: 7 passed.

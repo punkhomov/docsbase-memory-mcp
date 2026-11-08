@@ -515,3 +515,31 @@ Digest cache ограничен существующим project cap отдел�
 Проверка generation и вставка выполняются под одним digest mutex. Вычисление
 вне mutex допустимо: старый результат не заменяет уже сохранённый новый;
 история не накапливается даже после eviction и запоздавших вычислений.
+
+## Delta 0.5 (2026-11-08) — Reservations outlive entries (#74)
+
+`active_build_bytes` принадлежит общему состоянию DenseCache snapshots,
+отдельно от LRU. `BuildReservation` получает graph+rows charge под entries
+mutex и освобождает его через RAII после drop рабочего набора, включая stale
+completion и unwind. Admission под тем же mutex складывает active reservations
+и bytes всех resident entries, кроме заменяемого проекта. `Building` entry —
+представление уже учтённого worker, повторно его bytes не прибавляются.
+
+Eviction/invalidation не отменяют worker и не освобождают его charge. При
+недостатке бюджета `Ready` rows удаляются, fallback хранит только hashes;
+даже hashes могут остаться uncached, если рядом с live reservations нет места.
+При live reservations hash-only fallback остаётся uncached, чтобы давление
+бюджета не превращалось в постоянный `TooLarge`. `stash` под entries mutex
+повторно проверяет тот же generation/model и возвращает уже установленный
+`Building`/`Ann`; stale cold lookup не затирает worker своим fallback.
+Persisted ANN загружается с повторной проверкой retention budget. Для известной
+model dimension rows+live reservations проверяются до открытия VectorCache.
+Параллельные transient cold allocations не коалесцируются этой дельтой.
+
+Worker проверяет identity исходного `Arc<BuildingAnn>` перед заменой entry;
+одного совпадения generation/model недостаточно. После drop source rows и
+build graph, reload и закрытия vector DB он под entries mutex переводит
+reservation в resident graph bytes. При ошибке сохраняется прежний backoff
+с hash-only состоянием. Per-cache gate и join handles существуют только в
+unit tests: проверки не зависят от времени выполнения соседних тестов и не
+оставляют фоновые потоки за временем жизни временного cache root.

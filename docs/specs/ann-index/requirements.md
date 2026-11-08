@@ -376,3 +376,27 @@ lookup старого поколения получает корректный d
 закэшированного нового поколения. При вытеснении/invalidation проекта его
 retained digest удаляется. Нулевая capacity отключает сохранение digest.
 Новый конфигурационный параметр, on-disk формат и ranking не вводятся.
+
+## Delta 0.5 (2026-11-08) — Live build reservations (#74)
+
+FR-7 / NFR-4: admission учитывает resident entries и резервы **всех живых
+сборок**, включая потерявшие текущий entry при смене generation/model,
+LRU eviction или invalidation. Резерв удерживается до освобождения рабочего
+набора; успешная публикация переводит его в resident ANN под одним mutex.
+Ошибка и unwind освобождают резерв. Старый worker может публиковать результат
+только в свой исходный `Building` entry, а не в новый entry с таким же ключом.
+
+Если rows не помещаются рядом с живыми сборками, поиск использует существующий
+streaming exact по chunk hashes; полная копия rows не сохраняется. Для известной
+размерности отказ происходит до открытия/сканирования vector cache. Новые
+лимиты, конфигурационные ключи, on-disk форматы и ranking не вводятся.
+Временный fallback из-за live reservations не сохраняется как постоянный
+`TooLarge`: следующий lookup повторяет admission после освобождения бюджета.
+Concurrent cold lookup того же ключа переиспользует текущий `Building`/`Ann`,
+включая ранний отказ до сканирования векторов.
+
+SC-6: gated regression покрывает generation/model replacement, eviction,
+invalidation, stale completion и возврат бюджета после успеха/ошибки. Это
+учётный cap cache-owned состояния и build working sets, не hard RSS bound:
+внешние query snapshots и transient concurrent cold loads остаются вне этой
+дельты (связанные #66 / #78).
