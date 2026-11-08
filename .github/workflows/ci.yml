@@ -45,6 +45,8 @@ jobs:
           grep -q 'README.ru.md' README.md
           grep -q 'README.md' README.ru.md
           echo "docs gate OK (version $VERSION)"
+      - name: CI observer regression checks
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
   linux:
     runs-on: ubuntu-latest
@@ -57,15 +59,35 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+      - name: Initialize test diagnostics
+        shell: bash
+        run: |
+          # Never publish observations restored from an earlier cache entry.
+          rm -rf target/ci-observations target/cargo-timings
+          echo "CI_RUST_CACHE_HIT=${{ steps.rust-cache.outputs.cache-hit }}" >> "$GITHUB_ENV"
       - name: Lints (Linux)
         run: |
           cargo fmt --check
           cargo clippy --locked --features cli-full --all-targets -- -D warnings
+      - name: Prepare functional suite (Linux)
+        run: python3 .github/scripts/observe-tests.py --suite cli-full --phase prepare -- cargo test --locked --features cli-full --no-run --timings
+      - name: Inventory functional suite (Linux)
+        run: python3 .github/scripts/observe-tests.py --suite cli-full --phase inventory -- cargo test --locked --features cli-full -- --list
       - name: Functional suite (Linux)
-        run: cargo test --locked --features cli-full
+        run: python3 .github/scripts/observe-tests.py --suite cli-full --phase execute -- cargo test --locked --features cli-full
 
       - name: Full CLI provider capabilities (offline)
         run: python3 .github/scripts/check-cli-capabilities.py target/debug/docsbase
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-diagnostics-${{ github.job }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            target/ci-observations/
+            target/cargo-timings/
 
   linux-hybrid:
     runs-on: ubuntu-latest
@@ -83,15 +105,33 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+      - name: Initialize test diagnostics
+        shell: bash
+        run: |
+          # Never publish observations restored from an earlier cache entry.
+          rm -rf target/ci-observations target/cargo-timings
+          echo "CI_RUST_CACHE_HIT=${{ steps.rust-cache.outputs.cache-hit }}" >> "$GITHUB_ENV"
       - name: Feature lints (hybrid-remote)
         run: cargo clippy --locked --features hybrid-remote --all-targets -- -D warnings
       # The remote-only runtime paths are also exercised by the native CLI
       # suites; what only a single-feature build can prove is that the
       # crate compiles and links with `hybrid-local` absent, plus the
       # feature-admission assertions. Rationale: docs/ci.md.
+      - name: Prepare feature-sensitive tests (hybrid-remote only)
+        run: |
+          python3 .github/scripts/observe-tests.py --suite hybrid-remote --phase prepare -- \
+            cargo test --locked --features hybrid-remote --test hybrid_config \
+            --test config --test hybrid_openrouter --no-run --timings
+      - name: Inventory feature-sensitive tests (hybrid-remote only)
+        run: |
+          python3 .github/scripts/observe-tests.py --suite hybrid-remote --phase inventory -- \
+            cargo test --locked --features hybrid-remote --test hybrid_config \
+            --test config --test hybrid_openrouter -- --list
       - name: Feature-sensitive tests (hybrid-remote only)
         run: |
-          cargo test --locked --features hybrid-remote --test hybrid_config \
+          python3 .github/scripts/observe-tests.py --suite hybrid-remote --phase execute -- \
+            cargo test --locked --features hybrid-remote --test hybrid_config \
             --test config --test hybrid_openrouter
       - name: Default build stays offline (NFR-1, SC-1)
         run: |
@@ -100,6 +140,15 @@ jobs:
             exit 1
           fi
           echo "default build has no network/ML crates"
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-diagnostics-${{ github.job }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            target/ci-observations/
+            target/cargo-timings/
 
   linux-local:
     # Lean/source-build compatibility. Native jobs exercise the shipped CLI.
@@ -118,6 +167,13 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+      - name: Initialize test diagnostics
+        shell: bash
+        run: |
+          # Never publish observations restored from an earlier cache entry.
+          rm -rf target/ci-observations target/cargo-timings
+          echo "CI_RUST_CACHE_HIT=${{ steps.rust-cache.outputs.cache-hit }}" >> "$GITHUB_ENV"
       - name: Feature lints (hybrid-local)
         run: cargo clippy --locked --features hybrid-local --all-targets -- -D warnings
       # Compile matrix for the feature axis: every 1- and 2-feature
@@ -129,14 +185,38 @@ jobs:
       - name: Feature matrix compiles (powerset, depth 2)
         run: cargo hack check --locked --feature-powerset --depth 2 --exclude-features cli-full --all-targets
       # Keep assertions that only a build without the other feature can make.
+      - name: Prepare feature-sensitive tests (hybrid-local only; offline)
+        run: |
+          python3 .github/scripts/observe-tests.py --suite hybrid-local --phase prepare -- \
+            cargo test --locked --features hybrid-local --test cli_models \
+            --test hybrid_config --test hybrid_local --test hybrid_models --test connect --no-run --timings
+      - name: Inventory feature-sensitive tests (hybrid-local only; offline)
+        run: |
+          python3 .github/scripts/observe-tests.py --suite hybrid-local --phase inventory -- \
+            cargo test --locked --features hybrid-local --test cli_models \
+            --test hybrid_config --test hybrid_local --test hybrid_models --test connect -- --list
       - name: Feature-sensitive tests (hybrid-local only; offline)
         run: |
-          cargo test --locked --features hybrid-local --test cli_models \
+          python3 .github/scripts/observe-tests.py --suite hybrid-local --phase execute -- \
+            cargo test --locked --features hybrid-local --test cli_models \
             --test hybrid_config --test hybrid_local --test hybrid_models --test connect
+      - name: Prepare lean Cargo compatibility suite (offline)
+        run: python3 .github/scripts/observe-tests.py --suite lean --phase prepare -- cargo test --locked --no-run --timings
+      - name: Inventory lean Cargo compatibility suite (offline)
+        run: python3 .github/scripts/observe-tests.py --suite lean --phase inventory -- cargo test --locked -- --list
       - name: Lean Cargo compatibility suite (offline)
-        run: cargo test --locked
+        run: python3 .github/scripts/observe-tests.py --suite lean --phase execute -- cargo test --locked
       - name: Combined-feature lints (hybrid-local + hybrid-remote)
         run: cargo clippy --locked --features hybrid-local,hybrid-remote --all-targets -- -D warnings
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-diagnostics-${{ github.job }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            target/ci-observations/
+            target/cargo-timings/
 
   windows:
     runs-on: windows-latest
@@ -147,15 +227,35 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+      - name: Initialize test diagnostics
+        shell: bash
+        run: |
+          # Never publish observations restored from an earlier cache entry.
+          rm -rf target/ci-observations target/cargo-timings
+          echo "CI_RUST_CACHE_HIT=${{ steps.rust-cache.outputs.cache-hit }}" >> "$GITHUB_ENV"
       - name: Lints (ADR-10)
         run: |
           cargo fmt --check
           cargo clippy --locked --features cli-full --all-targets -- -D warnings
+      - name: Prepare functional suite (Windows)
+        run: python .github/scripts/observe-tests.py --suite cli-full --phase prepare -- cargo test --locked --features cli-full --no-run --timings
+      - name: Inventory functional suite (Windows)
+        run: python .github/scripts/observe-tests.py --suite cli-full --phase inventory -- cargo test --locked --features cli-full -- --list
       - name: Functional suite (daemon + CLI + MCP, ADR-10)
-        run: cargo test --locked --features cli-full
+        run: python .github/scripts/observe-tests.py --suite cli-full --phase execute -- cargo test --locked --features cli-full
 
       - name: Full CLI provider capabilities (offline)
         run: python .github/scripts/check-cli-capabilities.py target/debug/docsbase.exe
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-diagnostics-${{ github.job }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            target/ci-observations/
+            target/cargo-timings/
 
   macos:
     # Native shipped CLI profile (macOS aarch64).
@@ -170,11 +270,31 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+      - name: Initialize test diagnostics
+        shell: bash
+        run: |
+          # Never publish observations restored from an earlier cache entry.
+          rm -rf target/ci-observations target/cargo-timings
+          echo "CI_RUST_CACHE_HIT=${{ steps.rust-cache.outputs.cache-hit }}" >> "$GITHUB_ENV"
       - name: Lints (macOS)
         run: |
           cargo fmt --check
           cargo clippy --locked --features cli-full --all-targets -- -D warnings
+      - name: Prepare functional suite (macOS)
+        run: python3 .github/scripts/observe-tests.py --suite cli-full --phase prepare -- cargo test --locked --features cli-full --no-run --timings
+      - name: Inventory functional suite (macOS)
+        run: python3 .github/scripts/observe-tests.py --suite cli-full --phase inventory -- cargo test --locked --features cli-full -- --list
       - name: Functional suite (macOS, aarch64)
-        run: cargo test --locked --features cli-full
+        run: python3 .github/scripts/observe-tests.py --suite cli-full --phase execute -- cargo test --locked --features cli-full
       - name: Full CLI provider capabilities (offline)
         run: python3 .github/scripts/check-cli-capabilities.py target/debug/docsbase
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-diagnostics-${{ github.job }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            target/ci-observations/
+            target/cargo-timings/

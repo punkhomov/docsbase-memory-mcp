@@ -9,6 +9,7 @@
 *.swp
 .vscode/
 .idea/
+__pycache__/
 
 # Local agent harness (review panel prompts, machine-mode config)
 /.pi/
