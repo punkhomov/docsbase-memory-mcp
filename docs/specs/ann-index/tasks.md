@@ -600,3 +600,35 @@ profile.release.panic="abort"` падает с внятным сообщение
   separately.
 - `search_bench` baseline unchanged; no MCP/CLI changes.
 - T1.5 done (14 days), ADR-15 + delta 0.2 + docs + ledger complete.
+
+## Delta 0.4 tasks (2026-11-08)
+
+### T22 — Bound retained digest generations (#77)
+
+**New crates:** none.
+**RED:** generation history, project capacity without resident entries и zero
+capacity regressions падают на исходном коде.
+**GREEN:** одна generation на проект, global project LRU cap, защита от stale
+lookup, cleanup при project eviction/invalidation.
+**Verify:** `cargo test --locked --lib digest_`,
+`cargo test --locked --test hybrid_ann`, fmt и clippy all-targets.
+**Acceptance:** Delta 0.4 FR-7; без изменения ranking/model identities,
+on-disk формата и конфигурационного интерфейса. Полная suite — PR close-out.
+
+## Delta 0.5 tasks (2026-11-08)
+
+### T23 — Retain every live build reservation (#74)
+
+**New crates:** none.
+**RED:** gated replacement/invalidation допускают второй build без учёта
+первого; stale completion заменяет новый entry с тем же ключом.
+**GREEN:** RAII reservation вне entries, aggregate admission под mutex,
+identity-checked publication и streaming exact при исчерпании бюджета.
+Same-key cold lookups переиспользуют worker, а temporary fallback допускает
+повторный admission после снятия давления бюджета.
+**Verify:** dense unit tests, `cargo test --locked --test hybrid_ann`,
+release `build_lifetime_` tests, fmt/clippy; полная suite и platform CI при
+PR close-out. Новый public-path тест проверяет fallback до открытия vectors DB.
+**Acceptance:** Delta 0.5 FR-7 / NFR-4 / SC-6; возврат бюджета после успеха,
+ошибки и stale completion. Delta 0.4 остаётся совместимой: вытеснение metadata
+не означает освобождения рабочего набора живого worker.

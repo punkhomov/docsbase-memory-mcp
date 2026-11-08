@@ -505,3 +505,43 @@ CI:
 - `ouroboros` 0.18.5 docs.
 - Windows `FlushFileBuffers`: требует `GENERIC_WRITE`
   (<https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers>).
+
+## Delta 0.4 (2026-11-08) — Digest lifetime (#77)
+
+Digest cache ограничен существующим project cap отдельно от resident rows:
+вычисление digest предшествует возможной ошибке vector load, поэтому очистки
+только при entry eviction недостаточно. При вставке удаляется прошлое поколение
+того же проекта и при необходимости LRU другого проекта; hit обновляет recency.
+Проверка generation и вставка выполняются под одним digest mutex. Вычисление
+вне mutex допустимо: старый результат не заменяет уже сохранённый новый;
+история не накапливается даже после eviction и запоздавших вычислений.
+
+## Delta 0.5 (2026-11-08) — Reservations outlive entries (#74)
+
+`active_build_bytes` принадлежит общему состоянию DenseCache snapshots,
+отдельно от LRU. `BuildReservation` получает graph+rows charge под entries
+mutex и освобождает его через RAII после drop рабочего набора, включая stale
+completion и unwind. Admission под тем же mutex складывает active reservations
+и bytes всех resident entries, кроме заменяемого проекта. `Building` entry —
+представление уже учтённого worker, повторно его bytes не прибавляются.
+
+Eviction/invalidation не отменяют worker и не освобождают его charge. При
+недостатке бюджета `Ready` rows удаляются, fallback хранит только hashes;
+даже hashes могут остаться uncached, если рядом с live reservations нет места.
+Hash-only fallback, вызванный live reservations, остаётся uncached, даже если
+worker завершился до вставки: причина отказа передаётся через `stream_transient`,
+а не определяется повторным чтением счётчика. `stash` под entries mutex
+повторно проверяет тот же generation/model и возвращает уже установленный
+`Building`/`Ann`; `start_build` также проверяет оба состояния. Stale cold lookup
+не затирает worker своим fallback и не перезапускает только что опубликованный ANN.
+Persisted ANN загружается с повторной проверкой retention budget. Для известной
+model dimension rows+live reservations проверяются до открытия VectorCache.
+Параллельные transient cold allocations не коалесцируются этой дельтой.
+
+Worker проверяет identity исходного `Arc<BuildingAnn>` перед заменой entry;
+одного совпадения generation/model недостаточно. После drop source rows и
+build graph, reload и закрытия vector DB он под entries mutex переводит
+reservation в resident graph bytes. При ошибке сохраняется прежний backoff
+с hash-only состоянием. Per-cache gate и join handles существуют только в
+unit tests: проверки не зависят от времени выполнения соседних тестов и не
+оставляют фоновые потоки за временем жизни временного cache root.

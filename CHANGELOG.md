@@ -32,6 +32,11 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ### Fixed
 
+- Dense-cache memory accounting retains reservations for every live ANN build
+  across generation/model changes, eviction and invalidation. Searches stream
+  exact results when rows cannot fit beside those builds; stale workers cannot
+  replace a newer cache entry. Historical chunk digests are bounded by the
+  existing project capacity instead of growing with every generation (#74, #77).
 - Admission leases close their lock files when dropped or refused, including
   failed state checks. Repeated install/update admission retries no longer
   accumulate file descriptors or handles.

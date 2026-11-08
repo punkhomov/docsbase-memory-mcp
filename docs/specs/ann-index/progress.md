@@ -429,3 +429,51 @@
   with ≤ `SEQUENTIAL_BUILD_MAX` (64) points now use sequential `insert_slice`;
   larger builds keep `parallel_insert_slice`. `ann_recall` passed 20/20 full
   runs afterwards, and the tie-break contract test is the regression guard.
+
+- Task T22: complete (2026-11-08, #77). RED: 3 новые digest-регрессии
+  падают (history grows, project cap ignored, zero capacity ignored).
+  Ruling: bounded project LRU с одной generation на проект, используя текущий
+  max_projects; stale result возвращается caller без накопления истории.
+  Verify: MSRV 1.88.0 — digest tests 4 passed, hybrid_ann 16 passed;
+  fmt и clippy --locked --all-targets -- -D warnings чисты.
+  Ruling: fresh task review — Spec PASS / Quality APPROVED, findings none;
+  full-suite/platform checks remain PR close-out.
+
+
+- Task T23: complete (2026-11-08, #74). RED: 3 gated regressions fail on
+  the original implementation (generation/LRU replacement, invalidation,
+  same-key stale publication); success/error controls pass. Ruling: RAII
+  reservations live outside entries; admission adds every live worker to
+  resident bytes under the entries mutex. Eviction never releases a live
+  worker's charge. Unretainable rows use hash-only streaming exact; known
+  dimensions reject before opening the vector DB. Publication moves graph
+  ownership and charge together and checks the original Building identity.
+  Verify: MSRV 1.88.0 — dense unit tests 37 passed, hybrid_ann 16 passed;
+  lifecycle tests also verified in release. fmt and all-targets clippy clean.
+  Full-suite/platform checks and fresh review recorded at PR close-out below.
+
+- Task T23 review fix round (2026-11-08): fresh reviewer found two Important
+  cases: overlapping same-key cold lookup could retire Building, and pressure
+  fallback remained cached after release. RED: both deterministic regressions
+  fail. Fix: stash reuses matching Building/Ann under the entries mutex, and
+  fallback beside live reservations stays uncached. Known-width early fallback
+  also reuses the worker. Minor: stale-publication guard now tested against a
+  replacement Building with the same key (ABA), not only a Ready entry.
+  Verify: dense tests 37 passed, hybrid_ann 16 passed; fmt/clippy clean.
+
+  Ruling: re-review — both Important findings and the Minor ADDRESSED;
+  no new Critical/Important findings. Release lifecycle regression set: 7 passed.
+
+
+- T22/T23 final branch review fix round (2026-11-08): two Important timing
+  gaps found: start_build could replace a same-key Ann published since the
+  cold miss, and a last reservation released before fallback insertion could
+  make transient TooLarge stick. RED: both delayed-interleaving regressions
+  fail. Fix: recheck Building/Ann at admission; carry transient fallback
+  explicitly through stream_transient independently of the current counter.
+  Verify: dense unit tests 39 passed; fmt/clippy clean. Final full-suite and
+  platform results follow in PR close-out.
+
+  Ruling: final re-review — both Important findings ADDRESSED, no new
+  Critical/Important findings; final verdict converged, deferred minors none.
+  Full-suite and Linux/macOS/Windows/feature checks: PR #83 close-out evidence.
