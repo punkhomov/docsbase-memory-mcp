@@ -800,3 +800,14 @@ rationale в ledger (DELTA-1).
   baseline/scoring и CI нет. Важные наблюдения записываются с ограничениями
   и решением о следующем независимом сете; перенос в frozen — отдельное
   reviewed delta. Успешный synthetic smoke не закрывает реальную приёмку.
+
+
+### Delta 2026-11-08 — EXT-72-5a: natural-query failures in the external track
+
+Первый полный SciFact запуск выявил Error::Query для естественного запроса
+с `Crohn's Disease` (ID 1232). External runner не переписывает запрос и не
+исключает его: сохраняет per-case error, пустые ranks, нулевые hit/recall/
+nDCG, top1=query_error и отдельный query_errors count. Denominator остаётся
+всем positive-qrel split. Только Error::Query допускает продолжение;
+ошибки replay, индекса, I/O и provenance прерывают весь отчёт. Это уточнение
+handling измерений, production parser и frozen gate не меняются.

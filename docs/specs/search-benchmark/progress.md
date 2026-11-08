@@ -434,3 +434,20 @@ Target Clippy/fmt clean. Baseline/ranks/production unchanged. Current counts
 135/141/165/183 hits, 4 separate allowances, 10 common misses documented.
 Ruling: fresh reviewer /root/review_external_t18 — PASS / APPROVED,
 no findings; diagnostics never participate in gate verdict.
+
+Task T19: complete (2026-11-08). BEIR adapter, explicit offline replay,
+advisory report and first SciFact test baseline: 5,183 docs, 300 evaluated,
+809 explicitly excluded queries; 211 hits, 89 misses including 7 query
+syntax errors. Three complete release runs have identical 300-case quality;
+final report pins final harness hash. No production/frozen/CI edits or spend.
+Literal-query policy separately tracked as #87; other observations and
+rotation decisions documented without automatic regression-case promotion.
+RED: absent runner; actual Query::Error reproduction; incomplete matched
+rerank pool. GREEN after review fix: 701 tests passed, 12 ignored, 65 suites;
+external 8 passed/1 manual ignored; remote harness 6 passed/3 ignored;
+all-target Clippy and fmt clean. Bench provenance and gate remain green.
+Ruling: fresh reviewer /root/review_external_t19 independently checked all
+300 cases and qrels. One Important finding (incomplete rerank scores could
+fall back to incoming order) fixed with full unique candidate coverage;
+re-review ADDRESSED, no new Critical/Important findings. No deferred minors.
+Final branch review and hosted CI are recorded in the PR before ready.

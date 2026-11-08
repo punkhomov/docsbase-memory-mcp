@@ -684,24 +684,28 @@ baseline: Option<&Baseline>) -> QualityDiagnostics`.
 ## T19 — Manual BEIR external runner and real report (#72)
 
 **Depends:** T18; #70 merged. **Spec:** EXT-72-3…6.
-**Files:** tests/support/external.rs, tests/search_bench_external.rs,
+**Files:** tests/support/external.rs, tests/support/external/{metrics,replay,execution}.rs,
+tests/search_bench_external.rs,
 tests/support/mod.rs, external-track.md, reports/scifact-test-2026-11-08.json,
 reports/scifact-test-2026-11-08.md; specs/ledger. **New crates:** none.
 **Interfaces:** ExternalDataset::load(dir, split, k), run_external(dataset,
 options) -> ExternalReport. All input datasets stay outside repository.
 
-- [ ] RED: unordered BEIR input with unsafe opaque IDs, multiple positives,
+- [x] RED: unordered BEIR input with unsafe opaque IDs, multiple positives,
   zero/unjudged, unused queries; reject duplicate/missing/unknown IDs,
   malformed qrels, invalid metadata/split/k and negative scores.
-- [ ] GREEN: safe deterministic materialization, independent raw/derived
+- [x] GREEN: safe deterministic materialization, independent raw/derived
   hashes, complete evaluated/excluded inventory, pipeline execution and
   binary document metrics at citation slots with IDCG@k and unique gain.
-- [ ] RED/GREEN: replay opt-in, identity mismatch, missing vectors/pools,
-  swallowed provider errors fail closed; BM25 works without key/recordings.
-- [ ] Synthetic end-to-end run twice: identical quality; no frozen mutations.
-- [ ] Download licensed SciFact manually, pin metadata/hashes; execute all
+- [x] RED/GREEN: replay opt-in, identity mismatch, missing vectors/pools,
+  stage errors fail closed; BM25 works without key/recordings.
+- [x] RED/GREEN: Error::Query сохраняется как failed case с исходным
+  denominator; остальные stage errors прерывают evaluation.
+- [x] Synthetic end-to-end run twice: identical quality; no frozen mutations.
+- [x] Download licensed SciFact manually, pin metadata/hashes; execute all
   300 test queries over full 5,183 corpus with BM25; publish full per-case
   JSON and cautious analysis/rotation decision. No inference calls.
-- [ ] Full default tests, shared remote harness units, fmt, all-target Clippy,
+- [x] Full default tests, shared remote harness units, fmt, all-target Clippy,
   fresh task review, fix findings, ledger and separate task commit.
-- [ ] Final branch review and hosted CI; prepare ready PR, human merges.
+После task commit: final branch review и hosted CI фиксируются в PR;
+агент готовит ready PR, слияние выполняет человек.

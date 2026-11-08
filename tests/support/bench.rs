@@ -1324,7 +1324,10 @@ pub fn run_config_timed_with_query_cache(
     Ok((ConfigRun { cases: out }, latencies_ms))
 }
 
-fn parse_citations(value: &serde_json::Value, case_id: &str) -> anyhow::Result<Vec<Citation>> {
+pub(super) fn parse_citations(
+    value: &serde_json::Value,
+    case_id: &str,
+) -> anyhow::Result<Vec<Citation>> {
     let hits = value
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("case {case_id}: search did not return an array"))?;

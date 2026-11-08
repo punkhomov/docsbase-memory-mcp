@@ -1110,10 +1110,11 @@ Baseline и gate_failures. Новый optional/defaulted report field сохра
 чтение старых отчётов; quality_json включает детерминированную диагностику.
 
 `tests/support/external.rs` отделяет BEIR ingestion/provenance от frozen
-Fixtures. `ExternalDataset::load(dir, split, k)` валидирует metadata/JSONL/TSV
+Fixtures; `external/metrics.rs` задаёт metric contract, `external/replay.rs`
+проверяет identity и загружает записи. `ExternalDataset::load(dir, split, k)` валидирует metadata/JSONL/TSV
 и материализует title+text в собственный temp corpus; hash-based filenames
 исключают traversal. `run_external(dataset, options)` переиспользует
-build_env и run_config_timed, затем считает binary document relevance на
+build_env и тот же search_docs_with seam (execution.rs), затем считает binary document relevance на
 citation slots (IDCG@k, unique gain, исходные document IDs в отчёте).
 ExternalReport — отдельная typed оболочка, а не фиктивный Baseline:
 legacy/discrimination/known allowances к внешней выборке неприменимы.
@@ -1121,7 +1122,10 @@ legacy/discrimination/known allowances к внешней выборке непр
 Replay bundle имеет identity.json (derived corpus hash, raw queries hash,
 TOKENIZER_VERSION, adapter version, embedding/rerank pins) и существующие
 vector/rerank fixtures. Проверяем exact identities, coverage vectors и
-query bytes; checked wrappers запрещают скрытый fallback при ошибке pool.
+query bytes; выбранный режим требует все свои stages. Ошибки replay/pool
+возвращаются search_docs_with (без wrappers). execution.rs сохраняет
+Error::Query как отдельный failed case и продолжает; остальные errors
+прерывают отчёт. Один общий warm-up на mode, как у frozen runner.
 Все режимы offline; cost cap и нулевой spend записываются явно. Online
 recording/покупка inference не добавляются в этот ручной evaluation runner.
 
