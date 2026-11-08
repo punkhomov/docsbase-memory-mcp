@@ -30,6 +30,12 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
   to exact search is visible instead of living only in the daemon log.
 - `docsbase search --explain` prints the same envelope as the MCP tool.
 
+### Fixed
+
+- Admission leases close their lock files when dropped or refused, including
+  failed state checks. Repeated install/update admission retries no longer
+  accumulate file descriptors or handles.
+
 ## [0.1.0-alpha.5] — 2026-10-30
 
 ### Fixed
