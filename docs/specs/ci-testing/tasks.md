@@ -34,10 +34,12 @@ production source, and verify the complete target. Fresh task review before comm
 ### C3 — Run nightly performance budgets once
 
 **New crates/packages:** none.
-**Scope:** release-suite selection helper and its Python checks, `nightly.yml`,
-`docs/ci.md`, CI-testing spec/ledger.
-**Steps:** pin automatic discovery/exclusion/failure behavior; derive remaining
-Cargo test targets from metadata, preserve doctests; retain isolated perf step;
-compare actual release inventories and execute both groups. Fresh task review,
-final branch review and native PR CI; merge remains a human action.
+**Selection revision — 2026-11-09:** Cargo-native opt-in replaces the planned
+metadata helper. **Scope:** Cargo.toml target metadata, `ci.yml` explicit Linux
+perf lint, `nightly.yml`, AGENTS/docs and this spec.
+**Steps:** verify native Cargo selection/compile behavior with controlled probes;
+make perf opt-in while retaining the isolated nightly step; preserve default
+discovery/doctests and pre-merge compile/lint coverage. Compare actual inventories
+and metadata delta; run release perf. Fresh task review, final branch review and
+full native PR functional CI; merge remains a human action.
 **Acceptance:** FR-9–FR-11; SC-5.

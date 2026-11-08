@@ -45,25 +45,35 @@ This delta establishes measurements before changing test semantics or routing.
 - **FR-8 (C2):** No production/dependency/baseline/budget change. Demonstrate
   that accepting invalid queries makes the validation tests fail. Measurements
   compare test execution separately from compilation, without a CI speedup claim.
+
+### C3 selection revision — 2026-11-09
+
+Cargo-native opt-in selection replaces the initially planned metadata selector.
+
 - **FR-9 (C3):** Nightly runs the entire `perf_budget` target exactly once in
   release `cli-full`, with `--test-threads=1`. It must not run again in the
   remaining release suite. Preserve all performance assertions and budgets.
-- **FR-10 (C3):** Preserve all other default release test targets, including
-  library/bin tests and doctests. Discover integration targets from Cargo
-  metadata, so new targets are included without a maintained allowlist.
-  Fail explicitly on unsupported target layouts or missing exclusions rather
-  than silently dropping coverage. Preserve Cargo failure status.
-- **FR-11 (C3):** Keep PR jobs, triggers, required search gate, toolchain,
-  features, scheduling and existing ignore policy unchanged. Document the new
-  nightly selection and verify its inventory against the original full suite.
+- **FR-10 (C3, revised):** Mark only `perf_budget` as opt-in in Cargo.toml.
+  Keep the normal Cargo release invocation for every other default target,
+  including future integration/bin/example targets and doctests. Preserve
+  Cargo failure handling; no custom selector or runner.
+- **FR-11 (C3, revised):** Keep PR jobs/triggers/features/search gate and
+  schedules unchanged. The six performance tests no longer appear as ignored
+  entries in default Linux debug suites; nightly release still executes them.
+  Linux PR CI and nightly explicitly lint `--test perf_budget`, retaining
+  pre-merge checking of that Linux-only code. Preserve test bodies, ignore
+  attributes and all functional executions. Document this selection change.
 
 ### Success criteria for this delta
 
 - **SC-4:** C2's invalid-acceptance mutation fails both named tests; restored
   small-fixture tests and the complete `ann_recall` target pass on Rust 1.88.
   Native PR CI, full clippy and fmt pass.
-- **SC-5:** C3's automated checks cover discovery of a newly added target,
-  exclusion/retention, unsupported layouts and subprocess failure propagation.
-  Actual release inventory partitions into perf exactly once and every other
-  original target exactly once, including doctests. Run isolated perf and the
-  remaining release suite; validate workflow syntax and native PR CI.
+- **SC-5 (C3, revised 2026-11-09):** Verify real default inventories before/after:
+  perf exactly once in its explicit group, every other target/name retained by the
+  ordinary suite. Check the Cargo target-metadata delta (profile-independent),
+  execute all isolated release performance tests, and run the full functional
+  suite in native PR CI. Validate explicit compile/lint coverage and workflow
+  syntax. A controlled MSRV release Cargo probe must confirm new targets
+  still auto-discover and compile errors in the opt-in target are caught by explicit checking. No metadata helper or
+  implementation-mirroring configuration unit tests are required.

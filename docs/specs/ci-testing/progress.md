@@ -39,5 +39,24 @@
   empty. Fresh task review and native CI recorded at PR close-out.
   Ruling: fresh C2 review — Spec PASS / Quality APPROVED; findings none.
   Native PR CI remains pending for final branch close-out.
-- C3: planned after C2; retain isolated perf and preserve the other release
-  targets by automatic Cargo metadata discovery.
+- Task C3: complete (local verification). Use the Cargo-native opt-in target
+  (selection revision dated 2026-11-09), retain
+  explicit isolated perf and add a separate Linux PR/nightly Clippy invocation.
+  Controlled MSRV Cargo probes PASS: default/new targets retained, explicit
+  perf runs, and its deliberate compile error is caught by explicit Clippy;
+  `--all-targets` alone omits it. Initial release-all preparation was stopped
+  after observing expensive LTO across many unchanged targets; it is not a
+  passing full-suite result. Validation uses actual before/after default
+  inventories, the metadata selection delta, isolated release perf and full
+  native PR functional CI, without changing any build profile or budget.
+  Actual inventories PASS: 888 = 882 + 6 names, zero overlap; 64 = 63 + 1 target
+  headers, including empty bin/doctest targets. Cargo metadata differs only at
+  perf_budget.test (true -> false). The isolated release cli-full target runs
+  all six tests: 6 passed/0 failed, 12.62 s execution (309.319 s wall including
+  optimized compilation). Full cli-full Clippy and explicit perf Clippy pass;
+  fmt, actionlint, original six Python observer checks and workflow
+  jobs/triggers/runners/timeouts parity pass. No production/dependency/baseline
+  changes; performance bodies/ignore attributes unchanged. Fresh C3 review,
+  final branch review and native PR CI follow at close-out.
+  Ruling: fresh C3 review — Spec PASS / Quality APPROVED; findings none.
+  Final branch review and native PR functional CI remain pending.

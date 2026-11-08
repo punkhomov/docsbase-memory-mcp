@@ -39,15 +39,19 @@ Large recall/persistence fixtures remain unchanged. Exact-scan ID membership
 uses a `HashSet`; approximate result length, corpus, thresholds and sample counts
 retain their current meaning.
 
-C3 keeps the existing isolated performance step and excludes that integration
-target from the remaining release commands. Stable Cargo cannot exclude a single
-test target from its default selection. A stdlib helper reads root-package Cargo
-metadata, selects library/bin tests and every other integration test, then runs
-library doctests separately. It checks the supported target layout/exclusion,
-includes newly discovered integration targets automatically, and propagates the
-first Cargo failure. It leaves test execution to Cargo and does not add a new
-runner, package, job or feature combination. Unsupported layouts fail closed.
+### C3 selection revision — 2026-11-09
 
-Inventory mode appends `-- --list` to the selected Cargo commands, enabling
-before/after comparison without executing performance measurements. Nightly
-uses normal execution. Test bodies, budgets and the PR suite are unchanged in C3.
+Use Cargo's `[[test]] name = "perf_budget", test = false`. Ordinary Cargo test
+selection includes all other current/future default targets and doctests; the
+existing nightly `--test perf_budget -- --test-threads=1` explicitly opts in.
+This replaces the initially planned metadata selector and retains Cargo's own
+default selection for every other current/future target kind.
+
+MSRV probes showed `--all-targets` also omits this opt-in target, even when
+combined with `--test`. Therefore Linux PR CI and nightly have a separate
+`cargo clippy --features cli-full --test perf_budget -- -D warnings` command.
+It reuses compilation outputs in the same job. The performance test file is
+Linux-only; other native functional checks are unchanged. Six formerly ignored
+debug entries become opt-in; no functional execution or performance budget is
+removed. Real inventories, explicit performance execution and lint checks prove
+the partition. Production code/dependencies remain unchanged.

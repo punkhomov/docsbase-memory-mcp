@@ -48,9 +48,10 @@ jobs:
         # Single-threaded: the 10k RSS delta is process-wide and must not
         # race allocations from the 50k-chunk search budget (T52 review).
         run: cargo test --locked --features cli-full --release --test perf_budget -- --nocapture --test-threads=1
-      - name: Full release suite
+      - name: Functional release suite (performance target is opt-in)
         run: cargo test --locked --features cli-full --release
       - name: Lints
         run: |
           cargo fmt --check
           cargo clippy --locked --features cli-full --all-targets -- -D warnings
+          cargo clippy --locked --features cli-full --test perf_budget -- -D warnings
