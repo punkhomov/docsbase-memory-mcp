@@ -32,6 +32,9 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ### Fixed
 
+- Frontmatter block lists (`tags:` followed by `- api` lines) are indexed for
+  tag filters alongside the existing `tags: api, docs` form. A full sync
+  refreshes metadata in previously indexed, unchanged files (#61).
 - Official CLI builds include both local and remote embedding/reranking providers
   through the shared `cli-full` feature bundle. CI tests this profile on all
   supported platforms, and releases verify provider handlers in the extracted

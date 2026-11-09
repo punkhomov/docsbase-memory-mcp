@@ -142,6 +142,31 @@ fn unchanged_skipped() {
 }
 
 #[test]
+fn incremental_refreshes_legacy_tags_with_a_frontmatter_title() {
+    let mut env = Env::new(&[(
+        "a.md",
+        "---\ntitle: Guide\ntags:\n  - api\n  - docs\n---\n# Guide\n\nwidgets\n",
+    )]);
+    env.full();
+    let conn = Connection::open(env.cache.path().join(DB_FILE)).expect("db");
+    conn.execute(
+        "UPDATE docs SET frontmatter_json = ?1",
+        [r#"{"title":"Guide","tags":[]}"#],
+    )
+    .expect("metadata from old parser");
+    let stats = env.incremental(&[env.path("a.md")]);
+    assert_eq!(stats.docs, 1, "refresh even when source hash matches");
+    let stored: String = conn
+        .query_row("SELECT frontmatter_json FROM docs", [], |row| row.get(0))
+        .expect("metadata");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stored).expect("json"),
+        serde_json::json!({"title":"Guide", "tags":["api", "docs"]})
+    );
+    assert_eq!(env.incremental(&[env.path("a.md")]).skipped, 1);
+}
+
+#[test]
 fn deleted_file_purged() {
     let mut env = Env::new(&[("a.md", alpha()), ("b.md", PLAIN)]);
     env.full();

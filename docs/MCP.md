@@ -73,7 +73,25 @@ All four are opt-in; without them the response is the bare array above, unchange
 | `dedupe: "path"` | Keeps at most `n_per_doc` chunks per document, preserving the relative order of the survivors |
 | `n_per_doc` | Chunks per document when deduping, `1…10`. Defaults to `2`: measured on the `ru_morph` benchmark slice, `1` loses 3 of 11 expected-path hits while `2` loses one and still halves the repetition. Rejected without `dedupe: "path"` |
 | `path_prefix` | Literal, case-sensitive prefix of the project-relative path (`docs/` matches `docs/a.md`, not `Docs/a.md` or `docsx.md`) |
-| `tags` | Frontmatter tags, AND over all of them; a document without frontmatter has no tags. Only the single-line `tags: a, b` form is indexed — a YAML list (`tags:` followed by `- a`) parses to no tags |
+| `tags` | Frontmatter tags, AND over all of them; a document without frontmatter has no tags. Both `tags: a, b` and block lists (`tags:` followed by `- a` lines) are indexed |
+
+For example, both `tags: api, docs` and this frontmatter match
+`"tags": ["api", "docs"]`:
+
+```yaml
+---
+tags:
+  - api
+  - docs
+---
+```
+
+Block-list items accept paired quotes, blank lines and comments. This is a
+limited frontmatter parser; flow lists (`tags: [api, docs]`), nested maps,
+anchors, multiline scalars and YAML escapes are unsupported. After upgrading
+from a build that missed block-list tags, run `docsbase sync` in the project
+or call `sync_start` and wait for `sync_status` to complete. A full sync refreshes
+the old metadata even if the source files have not changed.
 
 Filters apply to a widened candidate window (lexical searches fetch `limit × 4`,
 capped at 1000), so a narrow filter may return fewer than `limit` hits — an empty

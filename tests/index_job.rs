@@ -128,6 +128,83 @@ fn write_file(root: &Path, rel: &str, bytes: &[u8]) {
 const GUIDE: &str = "---\ntitle: Setup Guide\ntags: setup, guide\n---\n\n# Install\n\nRun the installer quickly.\n\n## Example\n\n```rust\nlet x = 1;\n```\n";
 const PLAIN: &str = "# Plain\n\nSome prose about widgets and gadgets.\n";
 
+#[test]
+fn block_and_inline_tags_persist_equivalent_metadata() {
+    let mut env = Env::new(&[
+        (
+            "block.md",
+            "---\ntags:\n  - api\n  - docs\n---\n# Guide\n\nwidgets\n",
+        ),
+        (
+            "inline.md",
+            "---\ntags: api, docs\n---\n# Guide\n\nwidgets\n",
+        ),
+    ]);
+    assert_eq!(env.run().docs, 2);
+    let conn = Connection::open(env.cache.path().join(DB_FILE)).expect("db");
+    let rows: Vec<Option<String>> = conn
+        .prepare("SELECT frontmatter_json FROM docs ORDER BY rel_path")
+        .expect("prepare")
+        .query_map([], |row| row.get(0))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows");
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(
+            row.map(|value| serde_json::from_str::<serde_json::Value>(&value).expect("json")),
+            Some(serde_json::json!({"title": null, "tags": ["api", "docs"]}))
+        );
+    }
+}
+
+#[test]
+fn full_sync_refreshes_legacy_tags_in_unchanged_files() {
+    let mut env = Env::new(&[(
+        "block.md",
+        "---\ntags:\n  - api\n  - docs\n---\n# Guide\n\nwidgets\n",
+    )]);
+    env.run();
+    let conn = Connection::open(env.cache.path().join(DB_FILE)).expect("db");
+    // Older builds stored no metadata for a tags-only block list.
+    conn.execute("UPDATE docs SET frontmatter_json = NULL", [])
+        .expect("legacy metadata");
+    let before: (i64, String) = conn
+        .query_row("SELECT id, content_hash FROM docs", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .expect("before");
+    let generation = index_generation(&env);
+    let stats = env.run();
+    assert_eq!(stats.docs, 1, "refresh unchanged legacy document");
+    assert_eq!(index_generation(&env), generation + 1);
+    let after: (i64, String, String) = conn
+        .query_row(
+            "SELECT id, content_hash, frontmatter_json FROM docs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("after");
+    assert_eq!(
+        (after.0, after.1),
+        before,
+        "identity and source hash preserved"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&after.2).expect("json")["tags"],
+        serde_json::json!(["api", "docs"])
+    );
+    assert_eq!(env.search("widgets").len(), 1, "no duplicate chunks");
+    let unchanged = env.run();
+    assert_eq!(unchanged.docs, 0);
+    assert_eq!(unchanged.skipped, 1);
+    assert_eq!(
+        index_generation(&env),
+        generation + 1,
+        "refresh happens once"
+    );
+}
+
 fn legacy_schema_index(dir: &Path) {
     use tantivy::Index;
     use tantivy::schema::{

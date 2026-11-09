@@ -1,15 +1,18 @@
 //! Flat frontmatter parsing (FR-18).
 //!
-//! Only a leading `---` block of `key: value` pairs is understood; nested YAML
-//! is intentionally out of scope. Malformed content never fails indexing: the
-//! parser returns an empty metadata set instead.
+//! A leading `---` block supports flat `key: value` pairs and a block list of
+//! string tags. General YAML (nested maps, flow lists, escapes) is out of scope.
+//! Malformed content never fails indexing; an unclosed block is left as body.
+
+use std::iter::Peekable;
+use std::str::Lines;
 
 /// Metadata extracted from a leading frontmatter block.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Frontmatter {
     /// `title:` value, if present.
     pub title: Option<String>,
-    /// Comma-separated `tags:` values.
+    /// `tags:` values from a comma-separated line or a block list.
     pub tags: Vec<String>,
 }
 
@@ -52,10 +55,19 @@ fn strip_open(text: &str) -> Option<&str> {
 }
 
 fn parse_block(meta: &mut Frontmatter, block: &str) {
-    for line in block.lines() {
+    let mut lines = block.lines().peekable();
+    let mut root_indent = None;
+    while let Some(line) = lines.next() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
+        let indent = indentation(line);
+        if *root_indent.get_or_insert(indent) != indent {
+            continue;
+        }
         let value = value.trim();
         match key.trim().to_ascii_lowercase().as_str() {
             "title" => {
@@ -65,16 +77,79 @@ fn parse_block(meta: &mut Frontmatter, block: &str) {
                 }
             }
             "tags" => {
-                meta.tags = value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|tag| !tag.is_empty())
-                    .map(unquote)
-                    .collect();
+                meta.tags = if value.is_empty() || value.starts_with('#') {
+                    parse_tag_list(&mut lines, indent)
+                } else {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|tag| !tag.is_empty())
+                        .map(unquote)
+                        .collect()
+                };
             }
             _ => {}
         }
     }
+}
+
+fn indentation(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+fn parse_tag_list(lines: &mut Peekable<Lines<'_>>, key_indent: usize) -> Vec<String> {
+    let mut tags = Vec::new();
+    let mut item_indent = None;
+    while let Some(&line) = lines.peek() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            lines.next();
+            continue;
+        }
+        let indent = indentation(line);
+        if indent < key_indent || item_indent.is_some_and(|expected| indent != expected) {
+            break;
+        }
+        let Some(value) = trimmed.strip_prefix('-') else {
+            break;
+        };
+        if !value.is_empty() && !value.starts_with(char::is_whitespace) {
+            break;
+        }
+        item_indent = Some(indent);
+        let tag = block_tag_value(value.trim());
+        if !tag.is_empty() {
+            tags.push(tag);
+        }
+        lines.next();
+    }
+    tags
+}
+
+fn block_tag_value(value: &str) -> String {
+    // A second sequence indicator starts a nested list, not a string tag.
+    if let Some(rest) = value.strip_prefix('-')
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        return String::new();
+    }
+    // A quoted item may contain commas, colons and hashes. Only paired quotes
+    // are stripped, as for the legacy flat values; YAML escapes are unsupported.
+    for quote in ['"', '\''] {
+        if let Some(rest) = value.strip_prefix(quote)
+            && let Some(end) = rest.find(quote)
+        {
+            return rest[..end].to_owned();
+        }
+    }
+    let mut previous_space = true;
+    for (offset, ch) in value.char_indices() {
+        if ch == '#' && previous_space {
+            return value[..offset].trim_end().to_owned();
+        }
+        previous_space = ch.is_whitespace();
+    }
+    value.to_owned()
 }
 
 fn unquote(value: &str) -> String {

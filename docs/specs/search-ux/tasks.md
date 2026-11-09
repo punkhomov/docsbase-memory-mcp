@@ -240,3 +240,23 @@ cargo fmt --check
 | Подсветка с разметкой | не планируется |
 | query-кэш, стоимость, окно rerank | `search-cost` |
 | Кросс-проектный `scope` | не планируется |
+
+## T7 — #61: блочные tags и обновление старых метаданных (2026-11-09)
+
+**Requirements:** FR-12, FR-13, SC-8 из датированной дельты; прежний AND-фильтр
+FR-4 и строки citation сохраняются. New crates: none.
+
+**Files:** `src/index/frontmatter.rs`, `src/index/job.rs`, `src/store/repo.rs`;
+`tests/frontmatter.rs`, `tests/index_job.rs`, `tests/index_incremental.rs`,
+`tests/mcp_docs.rs`; `docs/MCP.md`, `CHANGELOG.md` и этот спек.
+
+**Steps:** RED для block lists, persisted metadata, legacy refresh и IPC tags;
+минимальный парсер списка; проверка derived metadata перед no-op; документация.
+
+**Acceptance:** две формы дают одинаковые tags; соседние/вложенные списки не
+захватываются; legacy metadata исправляется без изменения исходных файлов;
+повторный sync пропускает документ; `search_docs` находит block-list документ
+и исключает partial/untagged документы по AND. Схема БД и baseline не меняются.
+
+**Verify:** focused frontmatter/index_job/index_incremental/mcp_docs;
+полная cli-full suite; clippy --all-targets; fmt; frozen baseline diff.

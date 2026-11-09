@@ -172,3 +172,28 @@ Ruling фиксируют принятые решения; minor — что от
   (`cli::search::run`, тест `explain` в `hybrid_ranking`).
   Verify: default-сьюта 64 `test result: ok`; combo 64; clippy 0 в обеих
   конфигурациях; fmt чисто; `baseline.json` не изменён.
+
+## Delta 2026-11-09 — #61: блочные tags
+
+- Task T7: complete (FR-12, FR-13, SC-8). Блочные строковые списки дают те же
+  сохранённые tags, что и `tags: api, docs`; поддержаны отступы/indentless,
+  LF/CRLF, кавычки, комментарии и пустые строки. Ключи другого уровня и
+  вложенные элементы не становятся тегами документа.
+- Ruling: без миграции БД/tokenizer bump. `doc_states` загружает сохранённый
+  `frontmatter_json`; no-op требует совпадения hash и заново извлечённых
+  метаданных. Legacy `NULL` и metadata с title/пустыми tags обновляются обычным
+  crash-safe планом при полном sync (или обработке пути инкрементом); doc id
+  и source hash сохраняются, поколение публикуется существующим путём.
+  После refresh повторный sync снова no-op. Это переопределяет исходный запрет
+  повторной обработки документов в шапке tasks.md только для stale metadata.
+- RED → GREEN: parser/persistence/legacy full+incremental/реальный IPC AND-filter;
+  отдельно воспроизведены оба замечания ревью: вложенный ключ `tags` перезаписывал
+  корневые теги, а compact sequence `- - nested` становилась строковым тегом.
+  Оба исправлены и повторно проверены; quoted `"- value"` и plain `-value`
+  остаются строками. Fresh task review + final review: **converged**, открытых
+  Critical/Important и deferred minors нет.
+- Verify (MSRV 1.88.0, base `f51368e`): focused cli-full — **48 passed**;
+  полный `cargo test --locked --features cli-full` — **890 passed, 13 ignored**
+  (63 успешных target-группы). Clippy `--all-targets` и opt-in
+  `--test perf_budget --test artifact` с cli-full/`-D warnings`, fmt и diff checks
+  прошли. `baseline.json` и snapshots не менялись; новых зависимостей нет.
