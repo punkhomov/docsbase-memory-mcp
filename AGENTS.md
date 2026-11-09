@@ -63,6 +63,11 @@ cli-full; secondary source configurations run weekly/manual in one
 feature-compatibility job. The
 cheap lean dependency boundary stays required in Linux.
 
+Component-owned settings and state invalidation design: `docs/specs/component-configuration/`.
+CF0 is a design baseline; runtime adoption and v2 configuration are future tasks,
+not current product capabilities. Start with its inventory and dependency matrix
+before adding a new runtime constant, hidden default or invalidation callback.
+
 Code graph (GitNexus): reindex with
 `gitnexus analyze --force --embeddings --pdg --index-only` — `--embeddings`
 enables semantic search, `--pdg` builds the CFG/PDG layer used by
