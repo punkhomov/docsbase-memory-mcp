@@ -145,6 +145,46 @@ fn index_project(env: &Env) {
 
 const GUIDE: &str = "# Guide\n\nintro MARKINTRO.\n\n## Alpha\n\nalpha MARKALPHA paragraph.\n\n## Beta\n\nbeta MARKBETA paragraph.\n\n## Gamma\n\ngamma MARKGAMMA paragraph.\n";
 
+#[test]
+fn search_docs_filters_block_list_tags() {
+    let mut env = Env::new(&[
+        (
+            "block.md",
+            "---\ntags:\n  - api\n  - docs\n---\n# Tagged\n\nwidgets\n",
+        ),
+        ("inline.md", "---\ntags: api\n---\n# Partial\n\nwidgets\n"),
+        ("plain.md", "# Plain\n\nwidgets\n"),
+    ]);
+    env.start_daemon();
+    index_project(&env);
+    let mut client = env.bound();
+    let hits = client
+        .call_tool(
+            "search_docs",
+            json!({"query":"widgets", "tags":["api", "docs"]}),
+        )
+        .expect("search");
+    let rows = hits.as_array().expect("hits");
+    assert_eq!(
+        rows.len(),
+        1,
+        "AND filter excludes partial and untagged docs: {hits}"
+    );
+    assert_eq!(rows[0]["path"], "block.md");
+    assert_eq!(
+        rows[0]["lines"],
+        json!([6, 8]),
+        "citation uses source file lines"
+    );
+    let missing = client
+        .call_tool(
+            "search_docs",
+            json!({"query":"widgets", "tags":["api", "missing"]}),
+        )
+        .expect("missing tag");
+    assert_eq!(missing, json!([]));
+}
+
 fn page(client: &mut Client, limit: usize, cursor: Option<&str>) -> Value {
     let args = match cursor {
         Some(cursor) => json!({ "limit": limit, "cursor": cursor }),

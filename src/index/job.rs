@@ -72,9 +72,9 @@ struct Pending {
 }
 
 /// Indexes `project` fully: every `.md` under its root is hashed and only
-/// new/changed files are re-chunked; documents whose files disappeared are
-/// purged. Per-file failures are counted in [`JobStats::errors`] and never
-/// abort the job (A4).
+/// new/changed files or files with stale extracted metadata are re-chunked;
+/// documents whose files disappeared are purged. Per-file failures are counted
+/// in [`JobStats::errors`] and never abort the job (A4).
 ///
 /// Order: mark in-flight (allocating ids inside the marker transaction) →
 /// tantivy commit → short `SQLite` write transaction (R2). A crash between the
@@ -435,8 +435,8 @@ fn relative_to_root(path: &Path, root: &Path) -> Option<String> {
         .map(crate::index::walk::portable_rel)
 }
 
-/// Reads and hashes one walked file. Returns `Ok(None)` when the stored hash
-/// matches, `Err` for per-file problems the caller counts as a warning (A4).
+/// Reads and hashes one walked file. Returns `Ok(None)` when both the source
+/// hash and extracted metadata match, `Err` for per-file problems (A4).
 fn prepare_doc(
     path: &Path,
     rel_path: &str,
@@ -456,13 +456,18 @@ fn prepare_doc(
     }
     let text = std::fs::read_to_string(path).map_err(|err| file_error(path, &err))?;
     let content_hash = blake3::hash(text.as_bytes()).to_hex().to_string();
-    if existing
-        .is_some_and(|state| !state.content_hash.is_empty() && state.content_hash == content_hash)
-    {
+    let (meta, body) = frontmatter::parse(&text);
+    let frontmatter_json = serialize_metadata(&meta)?;
+    // Parser fixes must refresh derived metadata even when the source bytes
+    // have not changed since an older build indexed the file.
+    if existing.is_some_and(|state| {
+        !state.content_hash.is_empty()
+            && state.content_hash == content_hash
+            && state.frontmatter_json == frontmatter_json
+    }) {
         return Ok(None);
     }
 
-    let (meta, body) = frontmatter::parse(&text);
     let line_shift = frontmatter_line_shift(&text, body);
     let mut chunks = chunk_markdown(body, MAX_CHUNK_CHARS);
     for chunk in &mut chunks {
@@ -478,7 +483,7 @@ fn prepare_doc(
         rel_path: rel_path.to_owned(),
         abs_path: path.to_string_lossy().into_owned(),
         title,
-        frontmatter_json: serialize_metadata(&meta)?,
+        frontmatter_json,
         size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
         mtime: mtime_seconds(&metadata),
         content_hash,
@@ -722,6 +727,7 @@ mod tests {
             id: 1,
             rel_path: "gone.md".to_owned(),
             content_hash: "abc".to_owned(),
+            frontmatter_json: None,
         };
         let removed = [&removed_state];
 

@@ -10,7 +10,7 @@ use crate::index::tantivy_index::chunk_id;
 use crate::store::models::{SyncJob, SyncState};
 use crate::vector_cache::chunk_hash;
 
-/// Identity and hash of an already indexed document.
+/// Identity, hash and derived metadata of an already indexed document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocState {
     /// Row id.
@@ -19,6 +19,8 @@ pub struct DocState {
     pub rel_path: String,
     /// Hash recorded by the last successful run.
     pub content_hash: String,
+    /// Serialized frontmatter from the last successful run.
+    pub frontmatter_json: Option<String>,
 }
 
 /// Fields written when a document is indexed (new or changed).
@@ -61,13 +63,15 @@ pub struct NewChunk<'a> {
     pub text: &'a str,
 }
 
-/// Loads `(id, rel_path, hash)` for every document of `project_id`.
+/// Loads identity, source hash and frontmatter for every document of `project_id`.
 ///
 /// # Errors
 /// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn doc_states(conn: &Connection, project_id: i64) -> Result<Vec<DocState>> {
     let mut stmt = conn
-        .prepare("SELECT id, rel_path, content_hash FROM docs WHERE project_id = ?1")
+        .prepare(
+            "SELECT id, rel_path, content_hash, frontmatter_json FROM docs WHERE project_id = ?1",
+        )
         .map_err(db_error)?;
     let rows = stmt
         .query_map([project_id], |row| {
@@ -75,6 +79,7 @@ pub fn doc_states(conn: &Connection, project_id: i64) -> Result<Vec<DocState>> {
                 id: row.get(0)?,
                 rel_path: row.get(1)?,
                 content_hash: row.get(2)?,
+                frontmatter_json: row.get(3)?,
             })
         })
         .map_err(db_error)?;
