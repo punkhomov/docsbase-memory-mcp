@@ -226,3 +226,31 @@ cargo clippy --locked --features cli-full --test perf_budget -- -D warnings
 merge. Новый job не добавляется; подготовленные результаты переиспользуются.
 Остальные PR suites, features, required checks, search gate, schedules и
 таймауты сохранены. Дубликат perf устраняется без изменения численных бюджетов.
+
+## Delta 2026-11-09 — завершение daemon refresh и граница ANN (C5)
+
+Приватный refresh возвращает handle своего worker; обычные callers сразу
+отпускают его и сохраняют фоновое выполнение. Завершение этого worker означает
+окончание warm/cleanup orchestration; сам ANN build остаётся отдельной задачей.
+Тесты наблюдают warm через локальный callback на том же config/DB/cleanup пути.
+Production callback — прежний `DenseCache::warm`; глобальных test hooks нет.
+
+Положительный контроль каналами удерживает warm и доказывает, что refresh уже
+вернул handle, а cleanup ещё не начался. Для lexical (default и explicit) и
+disabled hybrid тест дожидается worker и проверяет ноль warm-вызовов плюс
+реальное удаление stale tmp. Фиксированного ожидания30s для отсутствия READY
+больше нет. Ошибка warm и реальная ошибка project cleanup не должны мешать
+disk cleanup; это проверяется с маленьким per-fixture disk budget.
+
+Отдельная интеграция сохраняет default admission: один Markdown-файл сначала
+даёт `ANN_MIN_VECTORS - 1` чанков, затем ровно `ANN_MIN_VECTORS`. Реальные counts
+проверяются в БД. Ниже порога остаётся exact, на границе refresh публикует ANN.
+Ожидание публикации читает READY/`ann_snapshot`, не вызывает `get`, который мог
+бы сам инициировать build. Вместо почти коллинеарных fake embeddings используются
+детерминированные нормированные векторы.
+
+Оставшиеся deadlines — watchdogs реального worker/build, заканчивающиеся на
+событии. Runtime defaults, config resolution, большие recall/scale suites,
+численные бюджеты и структура jobs не меняются. Точечные контролируемые
+мутации проверяют чувствительность новых assertions; это локальная проверка,
+а не дополнительный обязательный mutation job в каждом PR.

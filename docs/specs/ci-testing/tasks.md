@@ -55,3 +55,16 @@ semantics; run the existing install target and lint checks; fresh review.
 Record the initial failure and retain the distinction between better diagnostics
 and an unproven root cause. Native final-head CI completes branch close-out.
 **Acceptance:** FR-12; SC-6.
+
+### C5 — Deterministic daemon refresh and compact default-threshold fixture
+
+**Delta:** 2026-11-09. **New crates/packages:** none.
+**Scope:** private refresh worker boundary/call sites and unit tests in
+src/daemon/server.rs, CI-testing spec/ledger, docs/ci.md.
+**Steps:** measure original refresh tests; expose private worker completion and
+warm injection without changing policy; add gated positive/negative controls
+and real cleanup failure checks; retain default admission boundary using a
+single indexed Markdown file. Prove sensitivity with controlled mutations;
+restore production behavior and run targeted tests/lints/native CI. Fresh task
+and final branch reviews; prepare the PR without merging.
+**Acceptance:** FR-13–FR-17; SC-7–SC-8.

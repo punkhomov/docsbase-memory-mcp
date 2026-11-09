@@ -63,3 +63,24 @@ its index helper. A failed process with empty stderr must still show its exit
 status and stdout. This is diagnostic-only; preserve the real subprocess,
 failure assertion and ETXTBSY-only retry. The observed macOS termination cause
 is unknown because the old message discarded its status.
+
+## Delta 2026-11-09 — C5
+
+Return the existing refresh worker's JoinHandle from the private method; callers
+explicitly drop it to preserve detached execution. Its private generic helper
+accepts a FnOnce warm operation, with DenseCache::warm used in production.
+Config resolution, database open, dense snapshot and both real cleanup calls
+stay on the same path. No global spy or public test configuration.
+
+Small fixtures open Shared before registering/indexing the project, avoiding
+unrelated watcher activity. Policy tests keep real DB/config/vector/cleanup
+work, observe warm through per-test channels, and wait for worker completion
+under a real watchdog. A positive channel gate establishes ordering and releases
+on parent drop. Error tests exercise real directory and disk cleanup with a
+small per-instance disk limit; they do not allocate gigabytes or sleep for mtimes.
+
+A separate real-build test indexes ANN_MIN_VECTORS-1 uniquely headed sections
+in one Markdown file, verifies exact fallback, appends a section and refreshes
+at ANN_MIN_VECTORS. Stored counts are asserted. READY and ann_snapshot are
+passive observations, so the waiting path cannot create a false positive build.
+Well-spread normalized fake vectors avoid incidental degenerate geometry.
