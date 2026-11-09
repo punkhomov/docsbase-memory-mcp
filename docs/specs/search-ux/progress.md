@@ -197,3 +197,24 @@ Ruling фиксируют принятые решения; minor — что от
   (63 успешных target-группы). Clippy `--all-targets` и opt-in
   `--test perf_budget --test artifact` с cli-full/`-D warnings`, fmt и diff checks
   прошли. `baseline.json` и snapshots не менялись; новых зависимостей нет.
+
+## Delta 2026-11-09 — #62: filtered_out и отсутствующий документ
+
+- Task T8: complete (FR-14 / SC-9). `apply_post_filter` исключает кандидата
+  без строки документа до вычисления filter predicate и обновления счётчика.
+  Живой документ, не прошедший path/tag, считается один раз. JSON-форма
+  `trimmed`, выдача и остальные стадии не менялись.
+- Ruling: новый публичный `vanished` counter не нужен; отсутствие документа
+  не приписывается отказу фильтра. Отсутствие tags у существующего документа
+  по-прежнему является отказом tag-фильтра.
+- RED → GREEN: реальный Tantivy-кандидат сохраняется после удаления строки
+  SQLite; до фикса `filtered_out` был 1 вместо 0. Шесть сценариев проверяют
+  path/tag/combined и смешанное окно: точные счётчики 0/1, живые hits и прежнюю
+  JSON-форму. Никаких mocks, sleeps или тестовых production hooks.
+- Fresh task / whole-branch review: PASS / APPROVED, **converged**;
+  Critical/Important/Minor и deferred findings нет.
+- Verify (MSRV 1.88.0, base `a8e1ff0`): `hybrid_ranking` — **32 passed**;
+  полный cli-full `cargo test --locked` — **891 passed, 13 ignored**
+  (63 успешных target-группы). Clippy cli-full `--all-targets` и opt-in
+  `--test perf_budget --test artifact` с `-D warnings`, fmt/diff checks прошли.
+  Схема/tokenizer, зависимости, `baseline.json` и snapshots не менялись.

@@ -340,6 +340,81 @@ fn path_prefix_filters_the_window() {
     assert_eq!(case, json!([]), "the prefix is not case-insensitive");
 }
 
+#[test]
+fn missing_documents_do_not_count_as_filter_rejections() {
+    use docsbase_memory::index::tantivy_index::ReadIndex;
+
+    let (cache, db, project) = project_with_docs();
+    db.connection()
+        .execute(
+            "UPDATE docs SET frontmatter_json = ?1 WHERE rel_path = 'c.md'",
+            [r#"{"tags":["api"]}"#],
+        )
+        .expect("tag surviving document");
+    let gone_id: i64 = db
+        .connection()
+        .query_row("SELECT id FROM docs WHERE rel_path = 'a.md'", [], |row| {
+            row.get(0)
+        })
+        .expect("document id");
+    assert_eq!(
+        db.connection()
+            .execute("DELETE FROM docs WHERE id = ?1", [gone_id])
+            .expect("delete metadata"),
+        1
+    );
+
+    // Keep the actual Tantivy candidate after deleting its SQLite document.
+    let index = ReadIndex::open(
+        &cache
+            .path()
+            .join(format!("projects/{}/tantivy", project.id)),
+    )
+    .expect("index");
+    let candidates = index.search("alpha", 10).expect("raw lexical search");
+    assert_eq!(candidates.len(), 2);
+    assert!(
+        candidates.iter().any(|hit| hit.doc_id == gone_id),
+        "stale candidate must still be retrieved"
+    );
+
+    let dense = DenseCache::new();
+    for (filters, expected_filtered) in [
+        (json!({"path_prefix":"c."}), 0),
+        (json!({"tags":["api"]}), 0),
+        (json!({"path_prefix":"c.", "tags":["api"]}), 0),
+        // Broaden the query to include b.md: a real path/tag rejection must
+        // still count once, even if both filters reject the same document.
+        (json!({"query":"alpha OR synonym", "path_prefix":"c."}), 1),
+        (json!({"query":"alpha OR synonym", "tags":["api"]}), 1),
+        (
+            json!({"query":"alpha OR synonym", "path_prefix":"c.", "tags":["api"]}),
+            1,
+        ),
+    ] {
+        let mut args = json!({"query":"alpha", "limit":10, "explain":true});
+        args.as_object_mut()
+            .expect("args")
+            .extend(filters.as_object().expect("filters").clone());
+        let result = search_docs_with(
+            &HybridStages::default(),
+            &dense,
+            &db,
+            cache.path(),
+            &project,
+            &args,
+            50,
+        )
+        .expect("search");
+        assert_eq!(paths(&result["hits"]), ["c.md"], "{args}");
+        assert_eq!(
+            result["meta"]["trimmed"],
+            json!({"filtered_out":expected_filtered, "deduped":0}),
+            "{args}"
+        );
+    }
+}
+
 /// `tags` is an AND over frontmatter tags; missing frontmatter means no tags
 /// (search-ux FR-4).
 #[test]

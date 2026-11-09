@@ -175,7 +175,8 @@ pub struct FiltersMeta {
 /// the corresponding mechanism was not active: a measured zero, not "unknown".
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TrimmedMeta {
-    /// Candidates dropped by `path_prefix`/`tags`.
+    /// Candidates with stored documents rejected by `path_prefix`/`tags`.
+    /// Missing documents are omitted from this count.
     pub filtered_out: usize,
     /// Candidates dropped by `dedupe`.
     pub deduped: usize,

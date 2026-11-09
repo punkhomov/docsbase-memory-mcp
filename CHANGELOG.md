@@ -32,6 +32,8 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 ### Fixed
 
+- `meta.trimmed.filtered_out` excludes stale search candidates whose document
+  rows are missing; only actual path/tag mismatches count as filter rejections (#62).
 - Frontmatter block lists (`tags:` followed by `- api` lines) are indexed for
   tag filters alongside the existing `tags: api, docs` form. A full sync
   refreshes metadata in previously indexed, unchanged files (#61).
