@@ -195,3 +195,31 @@
   Fresh task/final reviews and native PR CI follow at close-out.
   Ruling: fresh C9 review — Spec PASS / Quality APPROVED; findings none.
   Final branch review and native PR CI remain pending for close-out.
+
+
+## Delta 2026-11-09 — C10
+
+- Task C10: complete (local verification); base6453bac (#95 merged).
+  Original artifact2passed396.41s, dominated by nested static rebuild; both
+  tests request Cargo and contend. Isolated supplied non-ELF predicate probe
+  passes the old filter with stubbed build, proving the new consumer boundary
+  needs ELF checking; no malformed real production build was demonstrated.
+  Opt-in artifact now reads only the prebuilt target path, without Cargo or
+  fallback. Two original gates/names and40MiB preserved. Required Linux gets
+  one explicit locked static build and offline provider smoke; nightly/release
+  use the same build-first contract. Explicit Linux/nightly opt-in lint added.
+  Compile-error probes prove artifact lint selection and build failure despite
+  an existing valid binary; files restored byte-for-byte. Final static build
+  prepare273.317s; checker prepare21.623/inventory0.434/execute0.407s, actual
+  assertions2pass0.01s. Binary20064112bytes; real static linking/providers pass.
+  All11input probes give expected outcomes, no Cargo invocation; includes bad
+  files, dynamic dependencies, missing host fallback, ldd diagnostics/status0/1/2.
+  Default full prepare234.676s/inventory2.101s; only artifact/two cases removed,
+  both retained explicitly. All other test/target/doctest names unchanged.
+  Metadata65targets retained, only artifact.test true->false; deps/features same.
+  Full/perf/artifact Clippy, fmt/diff,6observer regressions and3workflow syntax
+  checks pass. No production/dependency/profile/budget/baseline changes. Build
+  and assertion measurements separated; no whole-CI speedup claim.
+  Ruling: fresh C10 review — Spec PASS / Quality APPROVED; findings none.
+  Final branch review/native CI follow at close-out. Complete nightly/release
+  executions are unverified; syntax and shared local build/check/smoke pass.

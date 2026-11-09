@@ -58,10 +58,7 @@ jobs:
       - name: Platform seam invariant (ADR-9)
         run: cargo test --locked --test platform_boundary
       - name: Artifact checks (NFR-2, NFR-6)
-        run: |
-          cargo test --locked --test artifact
-          ldd target/x86_64-unknown-linux-gnu/release/docsbase
-          stat -c%s target/x86_64-unknown-linux-gnu/release/docsbase
+        run: cargo test --locked --features cli-full --test artifact -- --nocapture
       - name: Package + checksum
         run: |
           VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"

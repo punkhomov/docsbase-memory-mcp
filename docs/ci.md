@@ -132,7 +132,7 @@ doctests; inventory/execute могут выполнять работу rustdoc. 
 | Daemon, admission, IPC, MCP, lifecycle | `admission*`, `cleanup`, `cli_routing`, `ipc_*`, `lifecycle`, `mcp_*`, `platform_*`, `registry`, `status` | native full suites с платформенными cfg |
 | Конфигурация, CLI, providers | `config*`, `cli_models`, `cli_read`, `connect`, `error_*`, `hybrid_config/jobs/local/models/openrouter`, `install` | native full; feature-sensitive selections в compatibility lanes |
 | Качество поиска | `search_bench::metrics_match_baseline` и остальные offline benchmark assertions | остаётся обязательным внутри `linux`; выполняется также там, где его включает full suite |
-| Артефакт и offline-инварианты | `artifact`, `offline` | действующие Linux cfg; artifact пока строит release binary из теста |
+| Артефакт и offline-инварианты | `artifact`, `offline` | `artifact` — opt-in, явный static build/check в required Linux и nightly/release; `offline` сохраняет Linux cfg |
 | Performance и внешние/длительные проверки | `perf_budget`, `soak`, `hybrid_live`, `hybrid_local_live`, `search_bench_live` | `perf_budget` — opt-in target, release nightly; остальные сохраняют ignore/cfg, soak/live — weekly/manual, local live — manual |
 
 Точные selected suites в compatibility lanes остаются в `ci.yml`. C1 не
@@ -168,8 +168,8 @@ Artifact `test-diagnostics-<job>-<attempt>` содержит logs/JSON и
   включает его fixtures/ожидания и параллельное исполнение; суммировать эти
   времена как независимые per-test measurements нельзя;
 - execute wall time включает остаточную работу Cargo, rustdoc и nested builds.
-  В частности, `artifact` всё ещё запускает `cargo release-static`; отдельная
-  явная сборка артефакта будет следующим изменением;
+  До C10 `artifact` запускал `cargo release-static` внутри execute. Теперь
+  static build измеряется отдельно — см. Delta C10 ниже;
 - cache hit — результат cache action, не доказательство отсутствия компиляции.
   Сравнивать нужно actual compile timings, ревизии, features, runner и состояние
   кеша. По этим данным нельзя автоматически объявить прогон cold или warm;
@@ -347,3 +347,48 @@ watchdog и завершаются на наблюдаемом прогресс�
 сохраняет обычное реальное ожидание и wiring,429 smoke проверяет retry/result
 без заявления о доказанной задержке. Recorded fixtures, parsing/request/error
 проверки и blocking guard сохранены. Состав jobs, features и бюджеты прежние.
+
+
+## Delta 2026-11-09 — явная сборка static artifact (C10)
+
+`artifact` теперь opt-in target (`test = false`). Обычный функциональный
+`cargo test` не собирает static release CLI из теста. Required Linux сохраняет
+обе проверки — static linking и40MiB — после отдельного успешного
+`cargo release-static --locked`. Этот alias по-прежнему включает cli-full.
+Оба providers дополнительно проверяются offline именно в static binary;
+прежний smoke debug CLI и проверка packaged release CLI остаются.
+
+Build имеет собственный отчет `static-artifact-build/prepare.json`; checker
+использует отдельные `static-artifact/{prepare,inventory,execute}.json` и logs.
+Все попадают в прежний always-upload diagnostics artifact. Поэтому время
+release-компиляции больше не скрывается во времени функциональных тестов.
+Это разделение фаз и устранение дублирования, не обещание ускорения всех jobs.
+
+Checker читает только `target/x86_64-unknown-linux-gnu/release/docsbase`
+(или соответствующий CARGO_TARGET_DIR), ничего не собирает и не подменяет
+файл host binary. Отсутствующий файл дает инструкцию build-first. Наличие файла
+не доказывает свежесть: workflows всегда сначала успешно запускают Cargo,
+а локально нужен тот же порядок:
+
+```sh
+cargo release-static --locked
+cargo test --locked --features cli-full --test artifact -- --nocapture
+python3 .github/scripts/check-cli-capabilities.py target/x86_64-unknown-linux-gnu/release/docsbase
+```
+
+Static checker требует ELF magic и непустой вывод ldd с допустимым кодом0/1,
+затем исключает динамические зависимости. Код1 нужен для корректного GNU
+static executable. Само сообщение «not a dynamic executable» недостаточно:
+ldd пишет его и для текстового файла. Пустой и oversized файл отклоняет size
+check; размерный бюджет прежний. Реальный build раньше уже давал ELF — это
+защита новой границы потребления готового файла, не дефект production-сборки.
+
+Nightly явно строит и проверяет static CLI; функциональный release suite и
+изолированный perf сохраняются. Release workflow переиспользует свой build,
+checker больше не запускает Cargo повторно. В required Linux и nightly есть
+явный Clippy для artifact: `--all-targets` не включает opt-in tests. Остальные
+native/lean functional tests и doctests обнаруживаются обычным Cargo. Только
+artifact уходит из default inventories, включая два повторных исполнения в
+lean compatibility. На macOS/Windows этот Linux target прежде был пустым.
+Jobs/triggers, profiles, release packaging/attestations, defaults, dependencies,
+остальные проверки и бюджеты не меняются.

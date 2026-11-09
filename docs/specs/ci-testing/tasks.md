@@ -120,3 +120,18 @@ smoke and move two real-wait exhaustion tests into stronger units. Controlled
 mutations, source restoration, inventory accounting and affected suite/lint
 verification. Fresh task/final reviews and native PR CI; never merge.
 **Acceptance:** FR-28–FR-30; SC-12.
+
+
+### C10 — Separate the static artifact build from validation
+
+**Delta:** 2026-11-09. **New crates/packages:** none.
+**Scope:** tests/artifact.rs, its Cargo opt-in metadata, ci/nightly/release
+workflow steps, AGENTS verification guide, CI-testing specs/ledger/docs/ci.md.
+**Steps:** measure old nested builds; establish the supplied-file validator's
+ELF/diagnostic preconditions. Remove hidden build, preserve static/size gates,
+and route one explicit locked static build + checker + provider smoke through
+required Linux. Keep nightly/release validation explicit and opt-in lint covered.
+Verify bad artifacts and no hidden Cargo, default/explicit inventories/metadata,
+MSRV build/functional checks/lints/workflow syntax. Fresh task/final reviews and
+native PR CI; no merge.
+**Acceptance:** FR-31–FR-34; SC-13.

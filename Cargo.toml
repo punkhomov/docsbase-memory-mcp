@@ -91,6 +91,12 @@ tempfile = "3.27.0"
 name = "perf_budget"
 test = false
 
+# Artifact checks consume a separately built static CLI; never build it inside
+# the default functional suites. Linux CI/nightly explicitly run and lint this.
+[[test]]
+name = "artifact"
+test = false
+
 [[bench]]
 name = "search"
 harness = false

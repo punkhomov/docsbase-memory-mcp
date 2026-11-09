@@ -70,8 +70,9 @@ jobs:
         run: |
           cargo fmt --check
           cargo clippy --locked --features cli-full --all-targets -- -D warnings
-          # Opt-in performance tests are not selected by --all-targets.
+          # Opt-in test targets are not selected by --all-targets.
           cargo clippy --locked --features cli-full --test perf_budget -- -D warnings
+          cargo clippy --locked --features cli-full --test artifact -- -D warnings
       - name: Prepare functional suite (Linux)
         run: python3 .github/scripts/observe-tests.py --suite cli-full --phase prepare -- cargo test --locked --features cli-full --no-run --timings
       - name: Inventory functional suite (Linux)
@@ -81,6 +82,15 @@ jobs:
 
       - name: Full CLI provider capabilities (offline)
         run: python3 .github/scripts/check-cli-capabilities.py target/debug/docsbase
+      - name: Build static CLI (NFR-6, ADR-8)
+        run: python3 .github/scripts/observe-tests.py --suite static-artifact-build --phase prepare -- cargo release-static --locked --timings
+      - name: Static artifact checks (NFR-2, NFR-6)
+        run: |
+          python3 .github/scripts/observe-tests.py --suite static-artifact --phase prepare -- cargo test --locked --features cli-full --test artifact --no-run --timings
+          python3 .github/scripts/observe-tests.py --suite static-artifact --phase inventory -- cargo test --locked --features cli-full --test artifact -- --list
+          python3 .github/scripts/observe-tests.py --suite static-artifact --phase execute -- cargo test --locked --features cli-full --test artifact -- --nocapture
+      - name: Static CLI provider capabilities (offline)
+        run: python3 .github/scripts/check-cli-capabilities.py target/x86_64-unknown-linux-gnu/release/docsbase
       - name: Upload test diagnostics
         if: always()
         uses: actions/upload-artifact@v4

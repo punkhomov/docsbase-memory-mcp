@@ -44,14 +44,21 @@ jobs:
         run: cargo test --locked --features cli-full --test offline -- --nocapture
       - name: Platform seam invariant (ADR-9)
         run: cargo test --locked --features cli-full --test platform_boundary
+      - name: Build static CLI (NFR-6, ADR-8)
+        run: cargo release-static --locked
+      - name: Static artifact checks (NFR-2, NFR-6)
+        run: |
+          cargo test --locked --features cli-full --test artifact -- --nocapture
+          python3 .github/scripts/check-cli-capabilities.py target/x86_64-unknown-linux-gnu/release/docsbase
       - name: Performance budgets (NFR-1, SC-7)
         # Single-threaded: the 10k RSS delta is process-wide and must not
         # race allocations from the 50k-chunk search budget (T52 review).
         run: cargo test --locked --features cli-full --release --test perf_budget -- --nocapture --test-threads=1
-      - name: Functional release suite (performance target is opt-in)
+      - name: Functional release suite (artifact/performance targets are opt-in)
         run: cargo test --locked --features cli-full --release
       - name: Lints
         run: |
           cargo fmt --check
           cargo clippy --locked --features cli-full --all-targets -- -D warnings
           cargo clippy --locked --features cli-full --test perf_budget -- -D warnings
+          cargo clippy --locked --features cli-full --test artifact -- -D warnings
