@@ -46,13 +46,19 @@ pub struct Shared {
     global_config_error: Option<String>,
     /// Fingerprint of the global config file at daemon start (OQ-6).
     global_config_stamp: Option<u64>,
-    /// Project configs as of project-open time (OQ-6).
-    project_configs: Mutex<HashMap<i64, Arc<Config>>>,
-    /// Hybrid stages as of the last project open (FR-14: built and validated
-    /// there, reused by search/index paths).
-    stages: Mutex<HashMap<i64, Arc<HybridStages>>>,
+    /// Per-project config/stage slots; the map lock only protects lookup.
+    project_states: Mutex<HashMap<i64, ProjectSlot>>,
     /// Dense candidate cache keyed by project and index generation (FR-16).
     pub dense: DenseCache,
+}
+
+type ProjectSlot = Arc<Mutex<ProjectState>>;
+
+/// A config Arc is its revision identity. Stages always belong to that Arc.
+#[derive(Default)]
+struct ProjectState {
+    config: Option<Arc<Config>>,
+    stages: Option<Arc<HybridStages>>,
 }
 
 impl Shared {
@@ -90,8 +96,7 @@ impl Shared {
             global_config,
             global_config_error,
             global_config_stamp: stamp,
-            project_configs: Mutex::new(HashMap::new()),
-            stages: Mutex::new(HashMap::new()),
+            project_states: Mutex::new(HashMap::new()),
             dense: DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, cache, dense_limits),
         });
         match shared.start_watchers() {
@@ -106,8 +111,14 @@ impl Shared {
         self.db.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn stages_map(&self) -> MutexGuard<'_, HashMap<i64, Arc<HybridStages>>> {
-        self.stages.lock().unwrap_or_else(PoisonError::into_inner)
+    fn project_slot(&self, project_id: i64) -> ProjectSlot {
+        Arc::clone(
+            self.project_states
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(project_id)
+                .or_default(),
+        )
     }
 
     /// Resolved hybrid stages of `project`; built on first use and refreshed
@@ -120,16 +131,56 @@ impl Shared {
         &self,
         project: &crate::store::models::Project,
     ) -> Result<Arc<HybridStages>> {
-        if let Some(stages) = self.stages_map().get(&project.id) {
-            return Ok(Arc::clone(stages));
+        Ok(self.project_runtime(project)?.1)
+    }
+
+    fn project_runtime(
+        &self,
+        project: &crate::store::models::Project,
+    ) -> Result<(Arc<Config>, Arc<HybridStages>)> {
+        self.project_runtime_with(project, |config| {
+            crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)
+        })
+    }
+
+    // Private construction seam: tests can pause a real cache miss without
+    // changing the provider registry or using process-global hooks.
+    fn project_runtime_with<F>(
+        &self,
+        project: &crate::store::models::Project,
+        mut build: F,
+    ) -> Result<(Arc<Config>, Arc<HybridStages>)>
+    where
+        F: FnMut(&Config) -> Result<HybridStages>,
+    {
+        let slot = self.project_slot(project.id);
+        loop {
+            let config = {
+                let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+                let config = self.config_in(&mut state, project)?;
+                if let Some(stages) = &state.stages {
+                    return Ok((config, Arc::clone(stages)));
+                }
+                config
+            };
+            // Construction can load models: do not hold the project lock.
+            let outcome = build(&config);
+            let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+            if !state
+                .config
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &config))
+            {
+                // Neither an obsolete result nor its error may escape.
+                continue;
+            }
+            if let Some(stages) = &state.stages {
+                return Ok((config, Arc::clone(stages)));
+            }
+            let stages = Arc::new(outcome?);
+            state.stages = Some(Arc::clone(&stages));
+            return Ok((config, stages));
         }
-        let config = self.project_config(project)?;
-        let stages = Arc::new(crate::hybrid::from_config(
-            &config.hybrid_cfg,
-            &config.providers,
-        )?);
-        self.stages_map().insert(project.id, Arc::clone(&stages));
-        Ok(stages)
     }
 
     /// Enqueues the open-time backfill sync job when the embedding stage is
@@ -139,14 +190,13 @@ impl Shared {
     /// # Errors
     /// Stage admission errors (propagated to the open) and registry failures.
     fn schedule_backfill(self: &Arc<Self>, project: &crate::store::models::Project) -> Result<()> {
-        let stages = self.project_stages(project)?;
+        let (config, stages) = self.project_runtime(project)?;
         if stages.embedder.is_none()
             || project.status != crate::store::models::ProjectStatus::Indexed
         {
             return Ok(());
         }
         let db = self.db();
-        let config = self.project_config(project)?;
         let Some(coverage) = hybrid_jobs::coverage(&db, &config.hybrid_cfg, project.id)? else {
             return Ok(());
         };
@@ -161,12 +211,6 @@ impl Shared {
             spawn_sync_job(Arc::clone(self), job_id, project.id, config);
         }
         Ok(())
-    }
-
-    fn configs(&self) -> MutexGuard<'_, HashMap<i64, Arc<Config>>> {
-        self.project_configs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn global_error(&self) -> Option<Error> {
@@ -189,18 +233,18 @@ impl Shared {
         Config::for_project(&self.global_config, root)
     }
 
-    fn load_project_config(&self, project: &crate::store::models::Project) -> Result<Arc<Config>> {
-        if let Some(err) = self.global_error() {
-            return Err(err);
+    fn config_in(
+        &self,
+        state: &mut ProjectState,
+        project: &crate::store::models::Project,
+    ) -> Result<Arc<Config>> {
+        if let Some(config) = &state.config {
+            return Ok(Arc::clone(config));
         }
-        let config = Arc::new(Config::for_project(
-            &self.global_config,
-            &project.canonical_root,
-        )?);
+        let config = Arc::new(self.config_for_root(&project.canonical_root)?);
         self.dense
             .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes);
-        let previous = self.configs().insert(project.id, Arc::clone(&config));
-        drop(previous);
+        state.config = Some(Arc::clone(&config));
         Ok(config)
     }
 
@@ -210,10 +254,9 @@ impl Shared {
     /// # Errors
     /// Returns config read/parse errors.
     pub fn project_config(&self, project: &crate::store::models::Project) -> Result<Arc<Config>> {
-        if let Some(config) = self.configs().get(&project.id) {
-            return Ok(Arc::clone(config));
-        }
-        self.load_project_config(project)
+        let slot = self.project_slot(project.id);
+        let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        self.config_in(&mut state, project)
     }
 
     /// Warms the ANN index for `project` after a successful sync/backfill
@@ -276,21 +319,37 @@ impl Shared {
         &self,
         project: &crate::store::models::Project,
     ) -> Result<Arc<Config>> {
-        let previous = self.configs().get(&project.id).map(Arc::clone);
-        let config = self.load_project_config(project)?;
-        // Rebuild and validate stages so a broken hybrid config fails the
-        // open (FR-14) instead of the first search.
-        self.stages_map().remove(&project.id);
-        self.project_stages(project)?;
-        // The watcher must filter with the config the project was reopened
-        // with, otherwise incremental updates keep applying stale ignores
-        // (OQ-6). An existing watcher only swaps its config slot: restarting
-        // it per open would churn notify/threads and flush pending batches
-        // against the writer lease. A failed start is not fatal: indexing
-        // still works.
-        if previous.as_deref() != Some(config.as_ref())
+        self.open_project_config_with(project, |config| {
+            crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)
+        })
+    }
+
+    fn open_project_config_with<F>(
+        &self,
+        project: &crate::store::models::Project,
+        build: F,
+    ) -> Result<Arc<Config>>
+    where
+        F: FnOnce(&Config) -> Result<HybridStages>,
+    {
+        let slot = self.project_slot(project.id);
+        // Serialize the complete reload for this project, including its
+        // watcher/cache policy. No global map lock spans construction.
+        let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        let config = Arc::new(self.config_for_root(&project.canonical_root)?);
+        let stages = Arc::new(build(&config)?);
+        let changed = state.config.as_deref() != Some(config.as_ref());
+        // Both fallible preparation steps precede publication: a rejected
+        // reload leaves the last valid runtime and its policies intact.
+        state.config = Some(Arc::clone(&config));
+        state.stages = Some(stages);
+        self.dense
+            .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes);
+        if changed
             && !self.watchers.revise(project.id, Arc::clone(&config))
-            && let Err(err) = self.ensure_watcher(project)
+            && let Err(err) = self
+                .watchers
+                .ensure(&self.cache, project, Arc::clone(&config))
         {
             eprintln!("warning: cannot watch project {}: {err}", project.id);
         }
@@ -322,7 +381,9 @@ impl Shared {
     /// # Errors
     /// Returns config/spawn errors; a failed start is not fatal to callers.
     pub fn ensure_watcher(&self, project: &crate::store::models::Project) -> Result<bool> {
-        let config = self.project_config(project)?;
+        let slot = self.project_slot(project.id);
+        let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        let config = self.config_in(&mut state, project)?;
         self.watchers.ensure(&self.cache, project, config)
     }
 
@@ -747,8 +808,7 @@ fn route_search(
     args: &Value,
 ) -> Result<Value> {
     let project = bound_project(shared, db, session_id)?;
-    let config = shared.project_config(&project)?;
-    let stages = shared.project_stages(&project)?;
+    let (config, stages) = shared.project_runtime(&project)?;
     let window = config
         .hybrid_cfg
         .reranker
@@ -1195,10 +1255,8 @@ mod tests {
             .expect("valid project config"))
         .clone();
         config.hybrid_cfg.embedding = None;
-        fixture
-            .shared
-            .configs()
-            .insert(fixture.project.id, Arc::new(config));
+        let slot = fixture.shared.project_slot(fixture.project.id);
+        slot.lock().expect("project state").config = Some(Arc::new(config));
         assert!(
             fixture
                 .shared
@@ -1206,7 +1264,7 @@ mod tests {
                 .is_none()
         );
 
-        fixture.shared.configs().remove(&fixture.project.id);
+        slot.lock().expect("project state").config = None;
         fs::write(fixture.root.path().join(".docsbase.toml"), "[invalid toml")
             .expect("invalid config fixture");
         assert!(
@@ -1328,3 +1386,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "project_state_tests.rs"]
+mod project_state_tests;

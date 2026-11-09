@@ -337,3 +337,34 @@ rerank усекается до `fetch = max(limit, window)`, `top_n` = числ�
 без секций ступеней резолвится в пустые ступени без требования feature/ключа.
 `ranking = "rrf"` при программно собранных ступенях без embedder — internal
 error вместо молчаливого BM25 (NFR-2).
+
+
+## Delta 2026-11-09 — issue #76: project state and reload ownership
+
+`Shared` хранит map `project_id -> Arc<Mutex<ProjectState>>`; общий mutex
+защищает только lookup/insert слота. `ProjectState` содержит optional загруженный
+`Arc<Config>` и optional `Arc<HybridStages>` этой конфигурации. Отдельные карты
+config/stages удаляются. Identity удерживаемого `Arc<Config>` служит ревизией:
+у каждой успешной публикации новый Arc, ABA/reuse адреса исключён живой ссылкой.
+
+Первое чтение config и полный reload сериализованы mutex своего проекта.
+Reload сначала читает и валидирует новый config/stages, затем заменяет оба поля,
+применяет vector-cache budget и обновляет/создаёт watcher с тем же config.
+Ошибка до публикации оставляет старое состояние. Watcher startup сохраняет
+существующую nonfatal policy. Прямой `ensure_watcher` также использует этот
+слот, чтобы отложенный ensure не установил старый config после нового reload.
+
+Lazy stage construction берёт config под project mutex, отпускает его на
+время provider construction, затем сравнивает identity config. При смене
+ревизии отбрасывает и stages, и ошибку и повторяет чтение текущего состояния.
+Если другой builder той же ревизии уже опубликовал stages, использует их.
+Private builder seams позволяют тестам управлять чередованием без global hooks.
+
+Search/backfill используют внутренний `project_runtime` с парой config/stages,
+а публичные `project_config` / `project_stages` сохраняют signatures. Внутренний
+порядок locks: краткий map lookup, затем project slot; под slot допустимы
+DenseCache policy lock и Watchers locks, которые не обращаются к Shared/slot.
+Provider-specific locks (например, process-wide local model LOAD_LOCK)
+сохраняются: независимость project slots не обещает независимость загрузки
+одной модели или отсутствие конкуренции за CPU/RAM. Общий DB mutex, request
+deadlines, generation publication, coalescing и async transport остаются в #66/#78/#81; эта правка их не объявляет решёнными.

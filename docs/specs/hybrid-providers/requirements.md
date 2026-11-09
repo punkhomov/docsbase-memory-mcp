@@ -366,3 +366,28 @@ remote-only cfg/feature-off проверки из linux-hybrid перенося�
 но его ошибки могут обнаруживаться после merge; manual --ref доступен для
 ранней проверки. Шифрование/credentials, offline defaults и provider behavior
 не меняются. Детали и верификация: ci-testing C11 / FR-35–FR-39 / SC-14.
+
+
+## Delta 2026-11-09 — issue #76: project runtime publication
+
+- **FR-19.** Конфигурация и построенные по ней stages публикуются как одно
+  состояние проекта. Отложенная lazy-сборка не может заменить stages нового
+  reload; результат и ошибка устаревшей сборки отбрасываются, вызывающий
+  получает актуальное согласованное состояние.
+- **FR-20.** Полный reload (чтение, admission, публикация и применение
+  watcher/cache policy) сериализован внутри проекта. Невалидный TOML или
+  ошибка admission не заменяют предыдущее пригодное состояние. Долгая сборка
+  не удерживает общий map lock; project-state locks разных проектов независимы.
+  Существующие provider-specific locks и конкуренция за ресурсы не меняются.
+- **FR-21.** Поиск и backfill получают config/stages одним захватом состояния;
+  уже полученный immutable snapshot может завершить работу после reload.
+  Это не обещает атомарность SQLite/Tantivy/vector generations (#66/#78).
+- **SC-7.** Gated regression останавливает lazy builder старого конфига,
+  завершает настоящий reload с выключением hybrid и только потом освобождает
+  старый builder. Ни последующий caller, ни кеш не используют старый reranker;
+  отдельно проверяются устаревшая ошибка, failed reload, cache reuse,
+  сериализация двух reload и независимый проект. Успех зависит от событий,
+  watchdog ограничивает только ошибочное зависание.
+
+Новых TOML/CLI/IPC ключей, crates, hidden defaults, provider requests, изменений
+ранжирования, форматов индекса и baseline нет. Исправление независимо от #78.
