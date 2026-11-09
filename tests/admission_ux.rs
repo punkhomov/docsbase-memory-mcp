@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -9,12 +10,14 @@ use tempfile::TempDir;
 
 use docsbase_memory::daemon::admission::Lease;
 use docsbase_memory::daemon::lifecycle::stop_daemon;
+use docsbase_memory::index::tantivy_index::ReadIndex;
 use docsbase_memory::ipc::client::Client;
 use docsbase_memory::ipc::protocol::{
     PROTOCOL_VERSION, Request, Response, build_id, decode_response, encode,
 };
 use docsbase_memory::platform;
 use docsbase_memory::store::migrations::SCHEMA_VERSION;
+use docsbase_memory::store::repo::{self, DocState};
 
 struct Env {
     cache: TempDir,
@@ -148,6 +151,92 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
 }
 
 const DOC: &str = "# Guide\n\ninstaller prose about widgets.\n";
+
+// A failure watchdog, not an expected processing time or a mandatory delay.
+const WATCHER_WATCHDOG: Duration = Duration::from_secs(60);
+
+#[derive(Debug, PartialEq, Eq)]
+struct IndexedState {
+    generation: i64,
+    docs: Vec<DocState>,
+    chunks: Vec<String>,
+}
+
+fn indexed_state(conn: &rusqlite::Connection, project_id: i64) -> IndexedState {
+    IndexedState {
+        generation: repo::index_generation(conn, project_id).expect("generation"),
+        docs: repo::doc_states(conn, project_id).expect("document state"),
+        chunks: repo::chunk_texts(conn, project_id).expect("chunk texts"),
+    }
+}
+
+fn assert_stale_state(conn: &rusqlite::Connection, project_id: i64, expected: &IndexedState) {
+    let schema: u32 = conn
+        .query_row(
+            "SELECT schema_version FROM projects WHERE id = ?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .expect("schema stamp");
+    assert_eq!(schema, 0, "watcher must not restamp a stale schema");
+    assert_eq!(
+        &indexed_state(conn, project_id),
+        expected,
+        "stale watcher must not change indexed data"
+    );
+}
+
+fn wait_for_schema_refusals(
+    conn: &rusqlite::Connection,
+    project_id: i64,
+    after_job: i64,
+    changed: &[PathBuf],
+    expected: &IndexedState,
+) {
+    let wanted: HashSet<PathBuf> = changed
+        .iter()
+        .map(|path| path.canonicalize().expect("canonical changed path"))
+        .collect();
+    let mut seen = HashSet::new();
+    let mut failures = Vec::new();
+    let observed = wait_until(WATCHER_WATCHDOG, || {
+        assert_stale_state(conn, project_id, expected);
+        let mut query = conn
+            .prepare(
+                "SELECT stats_json FROM sync_jobs
+             WHERE project_id = ?1 AND id > ?2 AND state = 'error'
+               AND finished_at IS NOT NULL ORDER BY id",
+            )
+            .expect("prepare failed-batch query");
+        failures = query
+            .query_map([project_id, after_job], |row| row.get::<_, String>(0))
+            .expect("query failed batches")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("failed-batch rows");
+        for raw in &failures {
+            let stats: Value = serde_json::from_str(raw).expect("failed-batch stats");
+            for warning in stats["warnings"].as_array().expect("batch paths") {
+                let path = Path::new(warning["path"].as_str().expect("warning path"));
+                if let Ok(path) = path.canonicalize()
+                    && wanted.contains(&path)
+                {
+                    let error = stats["error"].as_str().expect("batch error");
+                    assert!(
+                        error.contains("full rebuild") && error.contains("docsbase index"),
+                        "watcher refusal must explain the rebuild: {stats}"
+                    );
+                    seen.insert(path);
+                }
+            }
+        }
+        seen == wanted
+    });
+    assert!(
+        observed,
+        "watcher did not acknowledge refused changes: wanted={wanted:?}, seen={seen:?}, jobs={failures:?}"
+    );
+    assert_stale_state(conn, project_id, expected);
+}
 
 #[test]
 fn mismatch_message_actionable() {
@@ -298,32 +387,103 @@ fn stale_schema_survives_file_edit() {
     env.start_daemon();
     let mut client = env.client();
     client.handshake(env.root()).expect("bind session");
-
     let conn = rusqlite::Connection::open(env.cache().join("registry.db")).expect("open db");
-    conn.execute("UPDATE projects SET schema_version = 0", [])
-        .expect("downgrade schema stamp");
-    drop(conn);
+    let project_id: i64 = conn
+        .query_row("SELECT id FROM projects", [], |row| row.get(0))
+        .expect("fixture project");
+    let initial = indexed_state(&conn, project_id);
+    let hits = client
+        .call_tool("search_docs", json!({ "query": "watcherready" }))
+        .expect("initial search control");
+    assert!(hits.as_array().expect("hits").is_empty());
+
+    // Both committed data and search must show a real healthy watcher edit.
+    write_file(
+        env.root(),
+        "README.md",
+        b"# Guide\n\nwatcherready widgets.\n",
+    );
+    assert!(
+        wait_until(WATCHER_WATCHDOG, || {
+            let state = indexed_state(&conn, project_id);
+            if state.generation <= initial.generation
+                || !state
+                    .chunks
+                    .iter()
+                    .any(|text| text.contains("watcherready"))
+            {
+                return false;
+            }
+            match client.call_tool("search_docs", json!({ "query": "watcherready" })) {
+                Ok(hits) => !hits.as_array().expect("hits").is_empty(),
+                Err(err) if err.to_string().contains("needs to be rebuilt") => false,
+                Err(err) => panic!("healthy watcher search failed: {err}"),
+            }
+        }),
+        "healthy watcher edit must reach committed data and search"
+    );
+    let before = indexed_state(&conn, project_id);
+    assert_eq!(before.docs.len(), 1);
+    let witness = env.root().join("stale-edit-witness.md");
+    assert!(
+        !witness.exists(),
+        "witness cannot be an earlier pending path"
+    );
+    let after_job: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM sync_jobs WHERE project_id = ?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .expect("job cursor");
+    conn.execute(
+        "UPDATE projects SET schema_version = 0 WHERE id = ?1",
+        [project_id],
+    )
+    .expect("downgrade schema stamp");
 
     write_file(
         env.root(),
         "README.md",
         b"# Guide\n\ninstaller prose about gizmos.\n",
     );
-    // Let the watcher pick the edit up: an incremental run must not restamp
-    // the schema and silently unlock stale reads.
-    std::thread::sleep(Duration::from_millis(2_500));
+    write_file(
+        env.root(),
+        "stale-edit-witness.md",
+        b"# Witness\n\ngizmos after downgrade.\n",
+    );
+    // Canonical paths and new terminal jobs correlate consumer progress. The
+    // backend may coalesce these paths into one batch or deliver them apart.
+    wait_for_schema_refusals(
+        &conn,
+        project_id,
+        after_job,
+        &[env.root().join("README.md"), witness],
+        &before,
+    );
     let err = client
         .call_tool("search_docs", json!({ "query": "gizmos" }))
-        .expect_err("stale schema must stay refused after a watcher run");
+        .expect_err("stale schema must stay refused after confirmed watcher work");
     assert!(
         err.to_string().contains("docsbase index"),
         "rebuild hint missing: {err}"
     );
-    let conn = rusqlite::Connection::open(env.cache().join("registry.db")).expect("open db");
-    let schema: u32 = conn
-        .query_row("SELECT schema_version FROM projects", [], |row| row.get(0))
-        .expect("schema stamp");
-    assert_eq!(schema, 0, "incremental run must not restamp the schema");
+    // Open after the refusal: an earlier reader could hide an unwanted commit.
+    let index = ReadIndex::open(&env.cache().join(format!("projects/{project_id}/tantivy")))
+        .expect("fresh physical index");
+    assert!(
+        !index
+            .search("watcherready", 10)
+            .expect("healthy content")
+            .is_empty()
+    );
+    assert!(
+        index
+            .search("gizmos", 10)
+            .expect("refused content")
+            .is_empty(),
+        "stale edits must not appear in the physical index"
+    );
 }
 
 #[test]

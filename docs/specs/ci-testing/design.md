@@ -128,3 +128,25 @@ release/reacquire, and release during a retry; no real backoff is consumed.
 The original sleep test writes A before delaying B, so a pre-lock read may
 already see A and incorrectly pass. Record that blind spot as test weakness,
 not a newly demonstrated production defect. Watcher/backoff work is deferred.
+
+## Delta 2026-11-09 — C8
+
+Keep watcher production code untouched. The existing consumer records terminal
+failed batches in sync_jobs with project id, finished state, error and per-path
+warnings. The integration test reads those rows after a captured job-id cursor,
+canonicalizes warning paths, and accumulates acknowledgements across batches.
+A fresh post-downgrade Markdown path disambiguates new work from pre-existing
+README events; the original README edit remains part of the scenario.
+
+A healthy edit first changes committed chunk text/generation and the client
+search result. Snapshot document ids/hashes, chunks and generation only after
+that progress is observed. With the schema downgraded, wait for correlated
+rebuild refusals and check invariants during the wait and after completion.
+A fresh read-only index view verifies old healthy content remains searchable
+and the stale-edit term is absent. Public search must still give the rebuild
+hint. Polling is passive and watchdog-bounded, preserving actual OS notify,
+debounce and schema admission semantics; no fixed quiet period or global clock.
+
+C8 healthy readiness permits the documented temporary rebuild marker during
+commit recovery, as existing MCP watcher tests do; unexpected errors still fail,
+and successful committed data plus search remain mandatory.

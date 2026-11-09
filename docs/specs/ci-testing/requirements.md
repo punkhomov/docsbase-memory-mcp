@@ -173,3 +173,28 @@ Cargo-native opt-in selection replaces the initially planned metadata selector.
   violations by expected assertions. Restore source before final models/config
   lock suites, relevant CLI integrations, full/perf Clippy and fmt. Native CI
   and fresh task/final reviews pass; prepare a green PR, merge human-only.
+
+## Delta 2026-11-09 — C8: observed stale-schema watcher refusal
+
+- **FR-25:** Replace the stale-schema watcher's fixed2.5s absence check with
+  observed progress. Retain a real daemon, native notify backend, existing
+  README edit and actual debounce. First prove a healthy edit updates committed
+  SQLite chunks/generation and searchable content. After downgrading the stamp,
+  add a fresh Markdown witness path and observe new terminal failed watcher
+  jobs for the project/changed paths with the rebuild instruction. The fresh
+  path must not exist before the stale edit; do not assume two paths share one
+  batch or identify a raw OS event beyond the consumer evidence available.
+- **FR-26:** After confirmed refusals, search remains refused with the rebuild
+  hint; schema stays stale. Generation, document identities/hashes and chunk
+  texts remain unchanged, and a newly opened physical index still serves the
+  healthy control but not stale edits. Do not let observers trigger indexing.
+- **FR-27:** Use existing persisted failed-batch diagnostics, no production
+  code, public API, test hooks, dependencies, workflow/default/budget/baseline
+  changes. Normalize diagnostic paths through the filesystem on all native OSes.
+  Poll conditions under a real watchdog; no mandatory sleep proves completion.
+- **SC-11:** Reproduce an old-test false negative with silently ignored stale
+  batches. New test detects ignored work, missing/corrupt path diagnostics,
+  stale admission bypass/restamping and index-data changes via named assertions.
+  Restore mutations before final affected suites/full+perf Clippy/fmt, native
+  CI and fresh task/final reviews. Prepare a green PR; merge human-only.
+  Improved sensitivity is separate from any whole-CI timing claim.

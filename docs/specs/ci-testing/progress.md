@@ -145,3 +145,27 @@
   Ruling: fresh C7 review — Spec PASS / Quality APPROVED. Minor: identify
   d0fbc60 as the base, not C7's completed revision; wording corrected in-task.
   Native CI/final branch review remain pending for PR close-out.
+
+
+## Delta 2026-11-09 — C8
+
+- Task C8: complete (local verification); base revision d983f87 (#93 merged).
+  Original stale-watch test1passed2.99s (Cargo prep17.29s); with silently ignored
+  stale batches it still passes2.74s, demonstrating absent progress evidence.
+  Source restored. New scenario retains README edit and adds healthy committed
+  data/search control plus a fresh post-downgrade path. New terminal jobs after
+  a project-scoped cursor acknowledge canonical paths across batches. Schema,
+  generation/docs/hashes/chunks stay unchanged; fresh physical reader retains
+  healthy content and excludes stale edits. No mandatory2.5s quiet period.
+  New normal case1passed3.41s; stronger controls add a phase, no speedup claim.
+  All5mutants fail expected assertions: silent stale batch, cached admission,
+  restamp, corrupt stored hash, wrong refusal paths. Production watcher restored
+  byte-for-byte; final test unchanged after verification. Healthy poll permits
+  only the existing documented rebuild-marker transient; unexpected errors fail.
+  Existing one-shot commit-fault child probe fires/retries/recovers, then proves
+  stale refusal; its temporary test edits restored. Final affected suites36pass
+  (admission_ux5/mcp_registry18/watch_retry5/watcher8), full/perf Clippy/fmt clean.
+  Production/API/dependency/workflow/default/budget/baseline diff empty.
+  Fresh task/final review and native PR CI follow at close-out.
+  Ruling: fresh C8 review — Spec PASS / Quality APPROVED; findings none.
+  Final branch review and native PR CI remain pending for close-out.

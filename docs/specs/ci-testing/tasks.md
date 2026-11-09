@@ -93,3 +93,15 @@ and cover the default entry. Record lock retry delays with real OS exclusion,
 including exhaustion and acquisition after release. Prove sensitivity with
 controlled mutations, restore source, verify suites/lints/reviews/native CI.
 **Acceptance:** FR-21–FR-24; SC-10. No watchdog tightening or runtime-policy change.
+
+### C8 — Observe stale-schema watcher refusal and unchanged data
+
+**Delta:** 2026-11-09. **New crates/packages:** none.
+**Scope:** tests/admission_ux.rs and CI-testing specs/ledger/docs only.
+**Steps:** measure the old case; demonstrate its false negative with silently
+ignored stale batches. Add healthy watcher control and persisted refusal
+acknowledgements correlated to project/new job ids/canonical paths. Retain the
+README edit plus a fresh witness path; assert schema, committed data and physical
+index invariants without fixed sleeps. Controlled mutations verify sensitivity;
+restore source and run affected tests/lints/reviews/native CI.
+**Acceptance:** FR-25–FR-27; SC-11. No production or CI routing changes.
