@@ -489,12 +489,15 @@ fn apply_post_filter(
         let meta_by_id = repo::doc_meta(conn, &ids)?;
         ordered.retain(|(chunk_id, _)| {
             let doc_id = chunk_id_parts(*chunk_id).0;
-            let keep = meta_by_id.get(&doc_id).is_some_and(|meta| {
-                path_prefix
-                    .as_ref()
-                    .is_none_or(|prefix| meta.rel_path.starts_with(prefix))
-                    && (tags.is_empty() || has_tags(meta.frontmatter_json.as_deref(), tags))
-            });
+            let Some(meta) = meta_by_id.get(&doc_id) else {
+                // A vanished document cannot be returned or evaluated by a
+                // path/tag filter; it is not a filter rejection (issue #62).
+                return false;
+            };
+            let keep = path_prefix
+                .as_ref()
+                .is_none_or(|prefix| meta.rel_path.starts_with(prefix))
+                && (tags.is_empty() || has_tags(meta.frontmatter_json.as_deref(), tags));
             if !keep {
                 trimmed.filtered_out += 1;
             }

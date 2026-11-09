@@ -260,3 +260,19 @@ FR-4 и строки citation сохраняются. New crates: none.
 
 **Verify:** focused frontmatter/index_job/index_incremental/mcp_docs;
 полная cli-full suite; clippy --all-targets; fmt; frozen baseline diff.
+
+## T8 — #62: не считать vanished документы отказами фильтра (2026-11-09)
+
+**Requirements:** FR-14 / SC-9 из датированной дельты. New crates: none.
+
+**Files:** `src/daemon/tools.rs` (`apply_post_filter`), `src/hybrid/meta.rs`
+(комментарий счётчика), `tests/hybrid_ranking.rs`, `docs/MCP.md`, `CHANGELOG.md`
+и этот спек. Search orchestration / concurrency вне этой задачи.
+
+**Steps:** RED через настоящий `search_docs_with`: удалить строку `docs`,
+проверить, что кандидат остаётся в Tantivy; проверить path/tag/combined и
+смешанное окно с настоящим отказом. Затем early-return для missing metadata
+перед вычислением filter predicate и обновлением счётчика.
+
+**Acceptance:** счётчики `0`/`1` по SC-9, прежние hits и JSON-форма trimmed.
+**Verify:** hybrid_ranking; full cli-full suite; clippy/fmt; frozen baseline diff.

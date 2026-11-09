@@ -98,6 +98,10 @@ capped at 1000), so a narrow filter may return fewer than `limit` hits — an em
 result is not an error. With `explain: true`, `meta.filters` echoes what was asked
 and `meta.trimmed` reports how many candidates each stage dropped.
 
+`meta.trimmed.filtered_out` counts path/tag mismatches for stored documents.
+Candidates whose document rows have disappeared are omitted from the results
+without being counted as filter rejections.
+
 `query_cache` reports `{hits, misses, entries, bytes}` for the query-embedding
 cache: a repeated query with the same model is answered without calling the
 provider. It is bounded (256 entries / 4 MiB, least-recently-used eviction) and
