@@ -71,3 +71,24 @@ Plan: [tasks.md](tasks.md). Requirements: [requirements.md](requirements.md).
   показал ошибочное принятие 2147483648ms. Owner bound check исправляет будущую
   rusqlite panic; zero timeout допустим. Focused/full/lean validation и fresh review
   будут зафиксированы после завершения проверок. #78 остаётся открытым.
+
+- Task CF1: complete (local implementation, 2026-11-09; validated source
+  `194cbb1fcda07d9e311557fa33beeb2c6e24d32a`). Новый API compile RED и behavioral
+  busy-timeout RED зафиксированы до соответствующего GREEN. Все восемь именованных
+  CF1 regressions присутствуют; всего19 новых tests. Focused cli-full:31 existing
+  config +19 новых GREEN; lean:25 existing config +19 новых GREEN.
+- Validation: `cargo test --locked --features cli-full` — exit0,908 selected tests
+  passed/13ignored/0failed; вложенный self-test subprocess не прибавлен второй раз.
+  `metrics_match_baseline` GREEN, baseline/snapshots не менялись. Full и lean
+  `cargo clippy --locked [--features cli-full] --all-targets -- -D warnings` GREEN;
+  `cargo fmt --check`, `git diff --check`,6 Python observer tests GREEN. Rust1.88,
+  jobs4; isolated config/temp roots, существующий CI latency slack3.
+- Native evidence (source194cbb1, coordinator-verified Actions artifacts): required
+  docs/linux/macos/windows4/4GREEN; Linux908 selected +2 static artifact tests,
+  macOS904, Windows893,0failed/13ignored. Inventory — exact parent superset +19 на
+  каждой ОС; прежние tests не удалены. Fresh task/final review и delivery состояния
+  ledger commit остаются pending; coordinator закрепит их в PR evidence.
+- Ruling: это завершение CF1 foundation, не всех runtime FR-3/SC-3 и не #78.
+  Db/dense consumers, read pool, env adoption, migration/planner/consent/recovery
+  остаются CF2/CF6/#66/CF13 и последующим задачам; inactive file keys не добавлены.
+  Deferred minors на момент local handoff: none; fresh review ещё не выполнен.
