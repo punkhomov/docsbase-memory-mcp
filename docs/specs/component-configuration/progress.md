@@ -45,3 +45,29 @@ Plan: [tasks.md](tasks.md). Requirements: [requirements.md](requirements.md).
   scoped re-review PASS, все9ADDRESSED, новых Critical/Important нет. Deferred minors:none.
   Native CI/final review pending PR. Runtime FR/SC-3–SC-5 здесь не реализованы;
   #78 остаётся открытым, продолжение — CF1/CF2 и отдельный #66.
+
+## 2026-11-09 — CF1: typed resolution foundation
+
+- Добавлены `schema`, `bootstrap`, `resolve`, storage/dense owner specs и hybrid
+  owner catalog. `Resolution` строит defaults один раз, stages patches atomically,
+  сохраняет scopes/units/origins и выдаёт immutable validated `Resolved<T>`.
+- Legacy Config file entrypoints теперь adapters к typed resolution. v1 bool/table
+  replacement, provider-aware defaults, feature-off parsing и global-before-project
+  validation сохраняются. Plain supplied snapshots явно `ProvidedSnapshot`.
+- Ruling: `hybrid/config.rs` добавлен к planned Modify list для owner locality;
+  common loader не хранит hybrid templates/default callbacks. `fields()` агрегирует
+  descriptors owners; neutral impact DTO не выполняет планирование/inspection.
+- Ruling: storage/dense/read-pool patches typed-only; inactive TOML keys rejected.
+  Production runtime adoption и конфигурируемые budgets остаются CF2/CF6/#66.
+  Dense legacy vector fallback не объявляется strict-v2 global quota; zero disk
+  budget/backoff сохраняет legacy semantics. Новые settings не имеют Default.
+- Ruling: explicit injected bootstrap сохраняет dependency fallback policies;
+  Tokio malformed/zero становится redacted Admission. Никаких env writes,
+  credential reads, home lookup в deterministic Config defaults/overrides или
+  запуска providers/DB/models в resolver. CF13 runtime bootstrap ещё впереди.
+- TDD: unresolved CF1 public API compile RED (`config_resolution`, exit101) до
+  production modules; existing v1 assertions — characterization, не behavioral RED.
+  Затем behavioral RED `oversized_db_busy_timeout_is_admission_before_rusqlite_can_panic`
+  показал ошибочное принятие 2147483648ms. Owner bound check исправляет будущую
+  rusqlite panic; zero timeout допустим. Focused/full/lean validation и fresh review
+  будут зафиксированы после завершения проверок. #78 остаётся открытым.

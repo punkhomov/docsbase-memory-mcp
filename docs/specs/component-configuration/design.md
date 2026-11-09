@@ -304,3 +304,55 @@ search (сохраняет сериализацию), массовый перв�
 Риски: v1/v2 coexistence усложняет adapters; staging требует peak disk/RAM; local
 instance maps пока process-wide и могут удерживать старые модели. Owning tasks
 покрывают reclamation; одна смена cache key не объявляется освобождением памяти.
+
+## Delta 2026-11-09 — CF1: typed foundation и v1 adapters
+
+CF1 вводит pure `Resolution<S>` с одним owner catalog на resolution. Применение
+patch выполняется на staging clone settings/provenance; ошибка не меняет builder.
+`finish` проверяет полный результат и возвращает immutable `Resolved<T>`. Новый
+`SettingsSpec::fields()` агрегирует owner descriptors без копирования их key names
+в composition; `FIELDS` остаётся обычным каталогом одного owner. `impact` пока
+возвращает только data-only local runtime comparison, без fallible inspection,
+artifact invalidation, action graph или apply. Они остаются CF4 и owner adoption.
+
+Legacy `HybridCfg` сохраняет `Default` как compatibility surface; новые
+`DbSettings`, `ReadPoolSettings`, `DenseSettings` implicit `Default` не имеют.
+Гибридный owner catalog и raw optional patches находятся в `hybrid/config.rs`,
+рядом с существующими provider-aware resolver functions. Это расширение списка
+файлов CF1 необходимо, чтобы parsing defaults не оставались у общего loader.
+Три reset profiles отдельны: disabled, enabled-shortcut с обеими default stages,
+и table-base enabled=true без stages. Ни deep merge, ни v2 merge не включены.
+Provider-dependent model/dimension rules выполняются на resolution, без runtime,
+credential lookup, model checks или provisioning. Feature-off files по-прежнему
+структурно разрешаются; capability admission стадии остаётся при construction.
+
+Typed explicit-path `resolve::{global_from,load_from,for_project}` сохраняет реальные
+source paths. Global validation остаётся до project overlay: project не исправляет
+невалидный global. `Config` методы возвращают legacy owned data из этого пути.
+`Config::for_project(&Config, root)` помечает исходную часть `ProvidedSnapshot`,
+поскольку plain `Config` не содержит происхождение; путь с `Resolved<Config>` его
+сохраняет. Whole-value hybrid reset помечает всю заменённую группу источником reset,
+включая template values и исчезнувшие stages. `Config::default` и `with_overrides`
+остаются deterministic/infallible, без env/home lookup; CLI legacy overrides
+проверяются только последующим explicit `validate`, как раньше.
+
+Bootstrap использует injectable whitelist lookup и явные CPU/entrypoint facts.
+Захватываются только `DOCSBASE_CACHE_DIR`, `DOCSBASE_CONFIG_DIR`, `DOCSBASE_DATA_DIR`,
+`DOCSBASE_DAEMON_EXE`, `ORT_DYLIB_PATH`, `TOKIO_WORKER_THREADS`, `RAYON_NUM_THREADS`,
+`RAYON_RS_NUM_CPUS`, `TOKENIZERS_PARALLELISM`. Неиспользуемый Rayon fallback не
+читается. Tokio zero/invalid становится Admission без raw value до runtime;
+Rayon zero выбирает CPU, invalid пробует deprecated fallback, tokenizer сохраняет
+legacy false spellings и true для прочих значений. Credential env не запрашивается.
+Этот новый capture API ещё не заменяет process/runtime bootstrap consumers (CF13).
+Явные `Config::load_from` paths не начинают неявно читать process environment.
+
+Db/read-pool/dense patches пока доступны только typed API. TOML `store`, `read_pool`,
+`dense` по-прежнему отклоняются, пока CF2/CF6/#66 не дадут реальные consumers.
+Db owner отклоняет busy timeout > SQLite signed-millisecond bound до panic внутри
+rusqlite; zero timeout допустим. Dense values равны текущему `DenseCacheLimits` и
+query-cache policy; zero disk budget/backoff и прочие legacy zero limits не получают
+новых запретов. Scope daemon здесь описывает policy общего DenseCache instance;
+`vector_cache_max_bytes` остаётся legacy fallback, а project hybrid cache policy
+сохраняется. Это не вводит strict-v2 global vector-store quota или новую eviction
+семантику. Runtime defaults пока остаются в старых consumers до CF2/CF6; CF1 не
+объявляет эти budgets настраиваемыми для production процесса и не закрывает #78.

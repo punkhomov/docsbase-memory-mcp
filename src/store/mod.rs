@@ -4,6 +4,7 @@ pub mod migrations;
 pub mod models;
 /// Document and chunk repository helpers (part of the public core surface).
 pub mod repo;
+pub mod settings;
 
 pub use repo::MAX_SYNC_JOBS;
 
