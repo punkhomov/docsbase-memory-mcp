@@ -176,3 +176,35 @@ asserts only client retry/result behavior and is named accordingly. Remove two
 redundant slow exhaustion integrations after adding stronger policy units.
 Record the old test's false positive and controlled new-test mutation results;
 this is test sensitivity work, not a demonstrated runtime retry defect.
+
+
+## Delta 2026-11-09 — C10
+
+Keep artifact as a Cargo-native opt-in Linux integration target. Its tests
+resolve the existing target-dir/x86_64-unknown-linux-gnu/release/docsbase path
+and consume it without building. No implicit host-binary fallback or new env
+variable. Document the explicit locked release-static prerequisite; an existing
+file can be stale, so workflows always run Cargo successfully before checks.
+Cargo's normal incremental freshness is authoritative, not mtimes or an ad-hoc
+manifest. Full CLI uses the unchanged alias and offline capability smoke.
+
+Remove ensure_release_binary's child Cargo invocation. Check a regular file,
+read four ELF magic bytes without loading the whole artifact, then retain the
+ldd dependency filter and40MiB size check. ldd must produce diagnostics and exit
+0or1 (GNU static binaries may exit1). A supplied non-ELF must not pass merely
+because ldd says "not a dynamic executable". This validation matters once the
+build/check boundaries are separate; the old real build already supplied ELF.
+
+In required Linux, observe `static-artifact-build/prepare` for the locked static
+build with Cargo timings. A separate `static-artifact` suite records checker
+no-run/inventory/execute, and a smoke invokes that static CLI. Keep all reports
+under the existing always-uploaded observations directory. Ordinary functional
+commands remain unchanged, now omitting only this opt-in target, including the
+lean compatibility duplication. Nightly explicitly builds/checks/smokes static
+before the remaining release suite; release reuses its existing successful
+build and packaged capability smoke. No new jobs or scheduling changes.
+
+Explicit opt-in Clippy covers artifact in Linux and nightly; all-targets alone
+is insufficient as established by C3. Preserve normal Cargo discovery and
+future integration tests. Native inventories verify only artifact routing
+changes; required Linux still executes its two assertions exactly once.

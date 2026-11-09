@@ -226,3 +226,40 @@ Cargo-native opt-in selection replaces the initially planned metadata selector.
   full library/provider-related suites, full/perf Clippy and fmt. Record
   execution separately from preparation and account for test inventory changes.
   Fresh task/final review and native CI pass; prepare a green PR, human merge.
+
+
+## Delta 2026-11-09 — C10: explicit static artifact build and checks
+
+- **FR-31:** Make only the Linux artifact test target opt-in (`test = false`).
+  Retain its two static-link/40MiB checks and target-dir routing, but remove
+  nested Cargo builds and all binary fallbacks. A missing/non-file artifact
+  gives the explicit build-first instruction. The standalone checker consumes
+  a prebuilt file; file existence alone is not proof of source freshness.
+- **FR-32:** Required Linux CI explicitly runs locked `cargo release-static`
+  once before the artifact checks; nightly and Linux release use the same
+  build-before-check contract. Failed builds stop subsequent checks. Preserve
+  canonical cli-full, target/rustflags/release profile and budgets. Verify both
+  providers in the actual static binary offline, retaining the existing debug
+  CLI and packaged release smokes. Keep required job names/triggers and all
+  non-artifact functional/performance selections unchanged. Remove duplicate
+  artifact execution from the default full/lean/release functional suites.
+- **FR-33:** Explicitly lint the opt-in artifact target in required Linux and
+  nightly, alongside the existing opt-in perf lint. Preserve Cargo discovery
+  of every other target and doctest. Artifact validation requires an ELF header,
+  nonempty ldd diagnostics and its documented exit0/1, and rejects dynamic
+  library dependencies; GNU ldd may return1 for a valid static executable.
+  No crates, production changes, configuration knobs, baselines or budgets.
+- **FR-34:** Required Linux records the static release build separately from
+  checker preparation/inventory/execution, using the existing observer. Keep
+  reports/heartbeats/exit propagation and always-uploaded diagnostics; do not
+  overwrite the build report with the checker preparation report.
+- **SC-13:** Record the original nested-build execution and isolated ldd
+  predicate blind spot on non-ELF input (not a production build defect). Verify
+  real static cli-full build, both providers and both artifact checks; controlled
+  missing/empty/oversized/non-ELF/dynamic files must fail, and validators must
+  not invoke Cargo. Prove explicit compile/lint coverage and account for the
+  exact default-vs-opt-in inventory/metadata delta. Restore all probes before
+  final checks. Workflow syntax, affected tests/lints and native PR CI pass;
+  fresh task/final reviews have no unresolved findings. Prepare a green PR;
+  human merge only. Measurements separate build from execution, no overall
+  speedup claim from individual shared-runner observations.
