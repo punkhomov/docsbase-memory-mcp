@@ -208,3 +208,64 @@ Explicit opt-in Clippy covers artifact in Linux and nightly; all-targets alone
 is insufficient as established by C3. Preserve normal Cargo discovery and
 future integration tests. Native inventories verify only artifact routing
 changes; required Linux still executes its two assertions exactly once.
+
+
+## Delta 2026-11-09 — C11
+
+Keep ci.yml's four shipped-profile jobs verbatim and remove only linux-hybrid
+and linux-local. Add the former default dependency boundary as a cheap Linux
+step after diagnostics initialization. Write plain cargo tree output to a file
+before grep; shell errexit then preserves producer errors. Reject an empty
+file, then the original blacklist. The old conditional pipeline could print
+success after a failed producer. Always-upload preserves its graph/diagnostics.
+
+A standalone feature-compatibility.yml runs one Ubuntu job weekly/manual with
+no new-commits gate. Copy all13 expensive Cargo/observer steps unchanged, remote
+then local/powerset/lean/combo; shared target-dir/cache permits normal Cargo reuse.
+Keep suite names hybrid-remote/hybrid-local/lean and one diagnostics upload.
+There is no optional-job stub on PRs, no performance/live rerouting, and no
+continue-on-error. The60minute orchestration cap is the sum of the former two
+30minute jobs; it changes no test budget. Weekly/manual source support accepts
+post-merge detection of feature-off errors; shipped cli-full stays pre-merge.
+
+New workflows may need default-branch registration before GitHub permits a
+manual branch dispatch. Validate the exact consolidated commands locally and
+native PR jobs normally; attempt dispatch and preserve any platform limitation.
+Do not write a workflow to main or bypass human merge. If managed-cloud local
+latency is outside the unchanged budget, an isolated verification ref may mirror
+the candidate job byte-for-byte into registered ci.yml for a manual GitHub run.
+Keep the delivery branch intact; prove identical application/test/job blobs and
+record the driver ref separately. Once merged, manual --ref checks can validate
+a feature-sensitive PR before merging it.
+
+
+### C11 scope revision — framing fixture from local verification
+
+The first lean run times out in index_project before the framing assertion.
+Keep this as failed evidence. Initialize a real project/index with two tiny
+files through CLI while no daemon listens; then replace the indexed control
+file before starting the daemon/watcher. Access events are ignored by the
+existing watcher, so get_doc reads the actual large file without enqueuing its
+indexing. Generate enough escaped bytes to exceed MAX_FRAME_BYTES and set the
+fixture raw cap equal to its size. No index membership/ignore policy change.
+
+Require the existing server's bounded Protocol fallback and reuse that client
+for a small successful get_doc. The old text-only assertion also accepted the
+client's Transport overflow from an oversized wire response. A temporary doubled
+server guard demonstrates old assertions passing/new assertions failing after
+isolating fixture setup; restore production source before final verification.
+Only this test changes; no new daemon seam, production behavior, timeouts or
+retry. Native/compatibility inventories keep identical case names/counts.
+
+
+### C11 verification revision — local latency is retained as red evidence
+
+The corrected framing case passes in the full lean run. That run then fails
+only the Linux latency assertion: RRF71.98ms/RRF+rerank91.00ms versus unchanged
+64.21/67.91ms limits. A focused unchanged gate also fails (73.15/69.87ms), so
+neighbor-test contention is not established. Do not isolate/rewrite the gate,
+raise slack or change baseline from this evidence. Complete remaining local
+functional cases diagnostically, record the local red gate, and require a full
+unchanged compatibility flow on a standard GitHub Ubuntu runner before close-out.
+A temporary ref using registered ci.yml can execute the exact new job before
+its own filename is registered on main; compare source/job blobs explicitly.

@@ -223,3 +223,36 @@
   Ruling: fresh C10 review — Spec PASS / Quality APPROVED; findings none.
   Final branch review/native CI follow at close-out. Complete nightly/release
   executions are unverified; syntax and shared local build/check/smoke pass.
+
+
+## Delta 2026-11-09 — C11
+
+- Task C11: complete (implementation/local functional verification; CI qualification
+  pending); base6297305 (#96 merged). Four existing native/docs jobs/steps
+  preserved, added cheap lean dependency boundary.13Cargo/observer steps moved
+  unchanged into one weekly/manual Ubuntu job. Source support retained with
+  explicit post-merge detection cadence; old linux-local-required ruling
+  superseded. Actual branch metadata confirms four required contexts unchanged.
+  Default tree producer-error/empty/safe/8forbidden controls pass; old conditional
+  pipeline masks exit42. Plain real tree clean; no baseline/budget changes.
+  Local7matrix checks and three feature lints pass; remote53/local48cases pass,
+  all3profile inventories identical to C10 (lean708names). Initial lean failure
+  exposes mcp_docs2MB indexing through2s client and weak Transport acceptance.
+  FR-40 fixture now tiny direct index before daemon startup, bounded Protocol
+  fallback plus same-client positive control. Focused green0.66s; doubled-guard
+  probe old assertions pass/new fail by expected Transport diagnostic. Sources
+  restored byte-for-byte; deadlines and production behavior unchanged.
+  Corrected frame case passes full lean. That run then has only latency failure
+  (RRF71.98/RRF+rerank91.00ms vs64.21/67.91); isolated gate still red73.15/69.87.
+  No neighbor-contention cause established; no gate/slack/baseline/CI skip added.
+  Diagnostic remainder/doctests/combo lint pass;701non-gate functional passes,
+  6ignored. Local red performance evidence retained, not called full green.
+  Observer6/fmt/actionlint/diff pass. Full compatibility qualification on GitHub
+  pending run42629812000 via isolated ref3b901eb (only ci.yml driver differs;
+  same application/test/job blobs). New workflow dispatch404until registration.
+  Four native PR jobs and final independent review remain close-out gates.
+  Ruling: fresh C11 review — Spec PASS (implementation/local-functional scope),
+  Quality APPROVED; findings none. Local latency remains red; diagnostic
+  functional passes are not a green full lean run. Full SC-14 requires pending
+  GitHub compatibility and four native PR checks plus final independent review.
+  No main/environment publication.

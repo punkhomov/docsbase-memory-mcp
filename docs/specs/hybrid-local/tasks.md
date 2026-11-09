@@ -315,3 +315,12 @@ package на всех платформах; lean dependency contract сохра�
 **Verify:** MSRV full-profile suite + clippy/fmt; Linux static size/link checks;
 smoke полного бинарника и извлечённого archive; native platform CI.
 Fresh task review и final branch review; merge и release publication не входят.
+
+
+## Delta 2026-11-09 — C11: T7 CI ruling superseded
+
+T7 шаг4 о добавлении linux-local в required checks заменен согласованным C11
+планом: docs/linux/macos/windows required с полным cli-full, source compatibility
+в одной weekly/manual job. Остальные T7/SC contracts сохранены; default tree
+проверяется в required Linux. Source feature-off ошибки могут обнаруживаться
+после merge. Реализация/верификация отслеживается в ci-testing C11.

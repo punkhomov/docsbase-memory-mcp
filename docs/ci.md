@@ -1,32 +1,43 @@
 # CI: профили сборки и проверки
 
-Дата: 2026-11-08. Delta: shipped CLI использует `cli-full`. Обновлять вместе
-с `.github/workflows/ci.yml` и `.github/workflows/release.yml`.
+Дата: 2026-11-09. Текущая структура — C11; исторические deltas ниже сохраняют
+контекст предыдущих этапов. Обновлять вместе с workflows и ci-testing specs.
 
-## Поставляемый CLI
+## Поставляемый CLI и расписание
 
-Cargo bundle `cli-full` включает `hybrid-local` и `hybrid-remote`. Его используют
-официальные release builds и native PR suites на Linux/macOS/Windows.
-`default = []` — lean/source конфигурация; её dependency gate сохраняется,
-но релизные бинарники должны предоставлять оба provider. Модели и ONNX Runtime
-устанавливаются явно, обычный поиск без hybrid-конфига остаётся offline.
+Cargo bundle `cli-full` включает `hybrid-local` и `hybrid-remote`. Официальные
+release builds и полные native suites на Linux/macOS/Windows используют его.
+`default = []` — поддерживаемая lean/source конфигурация. Модели и ONNX Runtime
+устанавливаются явно; обычный поиск без hybrid-конфига остается offline.
 
-| Job | Проверки | Гарантия |
+| Workflow / job | Когда | Проверки |
 |---|---|---|
-| `docs` | файлы, installers, version | гигиена репозитория |
-| `linux` | fmt, clippy/test `cli-full`, capabilities smoke | полный CLI и обязательный search-quality gate |
-| `macos` | fmt, clippy/test `cli-full`, capabilities smoke | тот же CLI и реальная macOS filesystem/process семантика |
-| `windows` | fmt, clippy/test `cli-full`, capabilities smoke | тот же CLI и реальная Windows filesystem/IPC/handle семантика |
-| `linux-hybrid` | remote-only lint/selected tests, lean dependency tree | feature-off assertions и отсутствие ML/network crates в lean Cargo build |
-| `linux-local` | local-only lint/selected tests, powerset check, lean full suite, combo lint | совместимость исходных feature configurations |
-| `nightly` | release tests `cli-full`, изолированный perf один раз, offline/platform gates | release-профиль и ресурсные бюджеты |
+| `ci / docs` | PR, push main, manual | файлы, installers/version, observer regressions |
+| `ci / linux` | PR, push main, manual | полный cli-full: fmt/Clippy/tests, search-quality gate, lean dependency boundary, static artifact и оба provider smokes |
+| `ci / macos` | PR, push main, manual | полный cli-full и реальные filesystem/process semantics macOS |
+| `ci / windows` | PR, push main, manual | полный cli-full и реальные filesystem/IPC/handle semantics Windows |
+| `feature-compatibility / feature-compatibility` | понедельник 08:17 Europe/Samara (04:17 UTC), manual | remote/local/combined lints, depth2 powerset, feature-off selections, полный lean suite; одна Linux job |
+| `nightly / release-checks` | ежедневно 07:17 Europe/Samara (03:17 UTC), при новых commits; manual всегда | release cli-full, изолированный perf, offline/platform/static gates |
+| `release` | version tag или manual | сборка/упаковка CLI; публикация только для tag |
 
-Compatibility lanes сохранены в этом исправлении поставки. Их дальнейшая
-организация и оптимизация ожиданий/фикстур — отдельная работа. Полная combo
-runtime suite теперь выполняется native jobs через cli-full; повтор в
-linux-local заменён lean suite, чтобы сохранить feature-off runtime coverage.
-Отдельные local-lib/default прогоны на Windows/macOS заменены одним полным
-cli-full прогоном, который включает provisioning-тесты.
+Required checks — ровно `docs`, `linux`, `macos`, `windows`; их имена и настройки
+защиты main сохраняются. Source compatibility workflow не запускается на PR или
+push main и не блокирует merge. Его ошибки остаются видимыми как обычный красный
+run, без `continue-on-error`. Source configurations сохраняют поддержку, но
+feature-off регрессия может обнаружиться после merge, вплоть до недели.
+Дешевый dependency-tree gate продолжает защищать lean dependency boundary на PR.
+
+Новая возможность поставляемого CLI включается в bundle; все три native jobs
+проверяют ее на соответствующей ОС. При правке cfg/features можно вручную
+проверить secondary source configurations до merge:
+
+```sh
+gh workflow run feature-compatibility.yml --ref <branch>
+```
+
+GitHub должен сначала зарегистрировать новый workflow на default branch;
+до первого merge dispatch из ветки может быть недоступен. Команды этого
+первоначального изменения проверяются локально, ограничение фиксируется в PR.
 
 ## Проверка фактического бинарника
 
@@ -45,7 +56,7 @@ Checksum-verified опубликованный alpha.5 воспроизводи�
 ## Feature и platform оси
 
 Один full build не проверяет выключенные cfg branches. Lean/individual feature
-compatibility проверяется существующими Linux lanes. Cargo-hack powerset
+compatibility проверяется одной weekly/manual Linux job. Cargo-hack powerset
 перебирает независимые hybrid-local/hybrid-remote; umbrella cli-full исключён
 из enumeration, поскольку его native jobs проверяют напрямую.
 
@@ -135,8 +146,9 @@ doctests; inventory/execute могут выполнять работу rustdoc. 
 | Артефакт и offline-инварианты | `artifact`, `offline` | `artifact` — opt-in, явный static build/check в required Linux и nightly/release; `offline` сохраняет Linux cfg |
 | Performance и внешние/длительные проверки | `perf_budget`, `soak`, `hybrid_live`, `hybrid_local_live`, `search_bench_live` | `perf_budget` — opt-in target, release nightly; остальные сохраняют ignore/cfg, soak/live — weekly/manual, local live — manual |
 
-Точные selected suites в compatibility lanes остаются в `ci.yml`. C1 не
-переносит дорогие проверки в nightly и не меняет исполнение этих workflows.
+В C1 selected compatibility suites находились в `ci.yml`; C11 переносит те же
+команды в `feature-compatibility.yml`. Nightly/release и performance routing
+при этом остаются прежними.
 
 ### Как читать результаты
 
@@ -392,3 +404,43 @@ artifact уходит из default inventories, включая два повто
 lean compatibility. На macOS/Windows этот Linux target прежде был пустым.
 Jobs/triggers, profiles, release packaging/attestations, defaults, dependencies,
 остальные проверки и бюджеты не меняются.
+
+
+## Delta 2026-11-09 — четыре PR jobs и периодическая compatibility (C11)
+
+Из ci.yml удалены только linux-hybrid/linux-local. Все шаги четырех native/docs
+jobs сохранены; в Linux добавлен дешевый default dependency gate. Он сначала
+сохраняет plain `cargo tree --locked --color never -e normal`, затем проверяет
+непустой граф и прежний blacklist. Исходный pipeline внутри if мог считать
+ошибку Cargo успешным отсутствием forbidden crates. Теперь producer failure
+не маскируется, а граф попадает в прежний diagnostics artifact.
+
+Те же13Cargo/observer шагов перенесены в одну job нового weekly/manual workflow:
+remote-only lint/selected tests; local-only lint/selected tests; прежний powerset
+check depth2 с исключенным umbrella cli-full; полный lean suite; combined lint.
+Один checkout/toolchain/cache и target-dir обслуживают последовательные configs.
+Сохраняются suites hybrid-remote/hybrid-local/lean, prepare/inventory/execute,
+slack3, always-upload и обычное завершение с ошибкой.60минут — суммарный job cap
+двух прежних30минутных jobs; тестовые таймауты и бюджеты не меняются. Отдельного
+gate job нет: workflow запускается каждую неделю даже без новых commits.
+
+Это согласованное изменение срока обнаружения source-only регрессий. Оно явно
+заменяет старый T7 ruling «linux-local должен стать required». Штатный CLI
+по-прежнему проходит полный required native CI на трех ОС; тяжелые ANN,
+watcher/lifecycle, search-quality и artifact assertions сохраняются. Новых
+feature×OS матриц, моделей/API credentials, зависимостей и production changes
+нет. Live/local-model tests остаются manual/ignored; nightly/release/perf
+расписания и команды не меняются. Не делаем вывода об ускорении всего CI из
+одного прогона: меняется структура и устраняется лишняя PR работа.
+
+
+C11 local verification также выявила отдельную слабость get_doc frame-теста:
+перед проверкой он индексировал2MB через короткий2s IPC deadline, а текстовый
+assert принимал и daemon error, и Transport-отказ клиента на слишком большой
+frame. Теперь tiny index готовится CLI до старта демона, большой файл пишется
+до watcher startup, и проверяется bounded daemon Protocol error плюс следующий
+успешный запрос тем же соединением. Escaped data гарантированно превышает wire
+cap; исходный raw size допустим fixture config. Имя/coverage сохранены,
+production и deadlines прежние. Old/new assertions проверены на временно
+ослабленном guard; production восстановлен. Это уточнение теста, не новый
+дефект daemon framing. Детали: FR-40 и ledger.

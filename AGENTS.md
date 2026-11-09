@@ -57,8 +57,11 @@ applies `baseline_p95 × 1.5 × DOCSBASE_BENCH_LATENCY_SLACK + 5 ms` (CI sets th
 factor to 3, locally it is 1.0) with the absolute 500 ms ceiling unscaled —
 see `docs/specs/search-benchmark/requirements.md` FR-22, Delta 2026-10-29.
 
-CI lanes, cache and timing decisions are documented in `docs/ci.md` (why not
-one all-features artifact, why not a 2^n x OS matrix, why per-job caches).
+CI ownership, cache and timing decisions are documented in `docs/ci.md`.
+Required PR/push checks are docs/linux/macos/windows. Native jobs use
+cli-full; secondary source configurations run weekly/manual in one
+feature-compatibility job. The
+cheap lean dependency boundary stays required in Linux.
 
 Code graph (GitNexus): reindex with
 `gitnexus analyze --force --embeddings --pdg --index-only` — `--embeddings`

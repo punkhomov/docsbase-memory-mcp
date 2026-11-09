@@ -355,3 +355,14 @@ per-request `ranking`, квантование/сжатие векторов, п�
 - Qwen3-Embedding model card (MMTEB 64.33 у 0.6B против 59.56 у BGE-M3; 1024d, MRL).
 - EmbeddingGemma (300M, on-device) и Model2Vec (static embeddings) — кандидаты
   локальной итерации; `sqlite-vector-rs`/`hnsw_rs` — кандидаты ANN-ступени.
+
+
+## Delta 2026-11-09 — C11: CI ownership
+
+SC-4 default dependency-tree gate остается required и переезжает в Linux.
+SC-5 recorded-wire/runtime проверки входят в required cli-full на3ОС;
+remote-only cfg/feature-off проверки из linux-hybrid переносятся без изменения
+в единую weekly/manual feature-compatibility job. Source support сохраняется,
+но его ошибки могут обнаруживаться после merge; manual --ref доступен для
+ранней проверки. Шифрование/credentials, offline defaults и provider behavior
+не меняются. Детали и верификация: ci-testing C11 / FR-35–FR-39 / SC-14.

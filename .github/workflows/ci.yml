@@ -66,6 +66,20 @@ jobs:
           # Never publish observations restored from an earlier cache entry.
           rm -rf target/ci-observations target/cargo-timings
           echo "CI_RUST_CACHE_HIT=${{ steps.rust-cache.outputs.cache-hit }}" >> "$GITHUB_ENV"
+      - name: Lean dependency boundary (NFR-1, SC-1)
+        run: |
+          mkdir -p target/ci-observations
+          # Separate the producer so a failed cargo tree cannot look offline.
+          cargo tree --locked --color never -e normal > target/ci-observations/lean-dependency-tree.txt
+          if [ ! -s target/ci-observations/lean-dependency-tree.txt ]; then
+            echo "::error::cargo tree returned an empty dependency graph"
+            exit 1
+          fi
+          if grep -wE 'fastembed|ort|tokenizers|hf-hub|image|native-tls|ureq|reqwest' target/ci-observations/lean-dependency-tree.txt; then
+            echo "::error::forbidden crate leaked into the default build (NFR-1)"
+            exit 1
+          fi
+          echo "default build has no network/ML crates"
       - name: Lints (Linux)
         run: |
           cargo fmt --check
@@ -91,135 +105,6 @@ jobs:
           python3 .github/scripts/observe-tests.py --suite static-artifact --phase execute -- cargo test --locked --features cli-full --test artifact -- --nocapture
       - name: Static CLI provider capabilities (offline)
         run: python3 .github/scripts/check-cli-capabilities.py target/x86_64-unknown-linux-gnu/release/docsbase
-      - name: Upload test diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-diagnostics-${{ github.job }}-${{ github.run_attempt }}
-          retention-days: 14
-          path: |
-            target/ci-observations/
-            target/cargo-timings/
-
-  linux-hybrid:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      # CI runners are shared VMs and ~2-2.5x slower than the host that
-      # calibrated baseline.json (measured 2026-10-29: same gate test 6.5 s
-      # locally vs 12.5-13 s here; Rrf p95 13.16 ms baseline vs 26.7-33.0 ms).
-      # The factor scales only the RELATIVE part of the latency budget
-      # (baseline x 1.5 x slack + 5 ms); the absolute 500 ms ceiling stays.
-      DOCSBASE_BENCH_LATENCY_SLACK: "3"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88.0
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        id: rust-cache
-      - name: Initialize test diagnostics
-        shell: bash
-        run: |
-          # Never publish observations restored from an earlier cache entry.
-          rm -rf target/ci-observations target/cargo-timings
-          echo "CI_RUST_CACHE_HIT=${{ steps.rust-cache.outputs.cache-hit }}" >> "$GITHUB_ENV"
-      - name: Feature lints (hybrid-remote)
-        run: cargo clippy --locked --features hybrid-remote --all-targets -- -D warnings
-      # The remote-only runtime paths are also exercised by the native CLI
-      # suites; what only a single-feature build can prove is that the
-      # crate compiles and links with `hybrid-local` absent, plus the
-      # feature-admission assertions. Rationale: docs/ci.md.
-      - name: Prepare feature-sensitive tests (hybrid-remote only)
-        run: |
-          python3 .github/scripts/observe-tests.py --suite hybrid-remote --phase prepare -- \
-            cargo test --locked --features hybrid-remote --test hybrid_config \
-            --test config --test hybrid_openrouter --no-run --timings
-      - name: Inventory feature-sensitive tests (hybrid-remote only)
-        run: |
-          python3 .github/scripts/observe-tests.py --suite hybrid-remote --phase inventory -- \
-            cargo test --locked --features hybrid-remote --test hybrid_config \
-            --test config --test hybrid_openrouter -- --list
-      - name: Feature-sensitive tests (hybrid-remote only)
-        run: |
-          python3 .github/scripts/observe-tests.py --suite hybrid-remote --phase execute -- \
-            cargo test --locked --features hybrid-remote --test hybrid_config \
-            --test config --test hybrid_openrouter
-      - name: Default build stays offline (NFR-1, SC-1)
-        run: |
-          if cargo tree --locked -e normal | grep -wE 'fastembed|ort|tokenizers|hf-hub|image|native-tls|ureq|reqwest'; then
-            echo "::error::forbidden crate leaked into the default build (NFR-1)"
-            exit 1
-          fi
-          echo "default build has no network/ML crates"
-      - name: Upload test diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-diagnostics-${{ github.job }}-${{ github.run_attempt }}
-          retention-days: 14
-          path: |
-            target/ci-observations/
-            target/cargo-timings/
-
-  linux-local:
-    # Lean/source-build compatibility. Native jobs exercise the shipped CLI.
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      # CI runners are shared VMs and ~2-2.5x slower than the host that
-      # calibrated baseline.json (measured 2026-10-29: same gate test 6.5 s
-      # locally vs 12.5-13 s here; Rrf p95 13.16 ms baseline vs 26.7-33.0 ms).
-      # The factor scales only the RELATIVE part of the latency budget
-      # (baseline x 1.5 x slack + 5 ms); the absolute 500 ms ceiling stays.
-      DOCSBASE_BENCH_LATENCY_SLACK: "3"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88.0
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        id: rust-cache
-      - name: Initialize test diagnostics
-        shell: bash
-        run: |
-          # Never publish observations restored from an earlier cache entry.
-          rm -rf target/ci-observations target/cargo-timings
-          echo "CI_RUST_CACHE_HIT=${{ steps.rust-cache.outputs.cache-hit }}" >> "$GITHUB_ENV"
-      - name: Feature lints (hybrid-local)
-        run: cargo clippy --locked --features hybrid-local --all-targets -- -D warnings
-      # Compile matrix for the feature axis: every 1- and 2-feature
-      # combination, all targets. Catches "compiles only with exactly these
-      # two features on" without a 2^n x OS test matrix (docs/ci.md).
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-hack
-      - name: Feature matrix compiles (powerset, depth 2)
-        run: cargo hack check --locked --feature-powerset --depth 2 --exclude-features cli-full --all-targets
-      # Keep assertions that only a build without the other feature can make.
-      - name: Prepare feature-sensitive tests (hybrid-local only; offline)
-        run: |
-          python3 .github/scripts/observe-tests.py --suite hybrid-local --phase prepare -- \
-            cargo test --locked --features hybrid-local --test cli_models \
-            --test hybrid_config --test hybrid_local --test hybrid_models --test connect --no-run --timings
-      - name: Inventory feature-sensitive tests (hybrid-local only; offline)
-        run: |
-          python3 .github/scripts/observe-tests.py --suite hybrid-local --phase inventory -- \
-            cargo test --locked --features hybrid-local --test cli_models \
-            --test hybrid_config --test hybrid_local --test hybrid_models --test connect -- --list
-      - name: Feature-sensitive tests (hybrid-local only; offline)
-        run: |
-          python3 .github/scripts/observe-tests.py --suite hybrid-local --phase execute -- \
-            cargo test --locked --features hybrid-local --test cli_models \
-            --test hybrid_config --test hybrid_local --test hybrid_models --test connect
-      - name: Prepare lean Cargo compatibility suite (offline)
-        run: python3 .github/scripts/observe-tests.py --suite lean --phase prepare -- cargo test --locked --no-run --timings
-      - name: Inventory lean Cargo compatibility suite (offline)
-        run: python3 .github/scripts/observe-tests.py --suite lean --phase inventory -- cargo test --locked -- --list
-      - name: Lean Cargo compatibility suite (offline)
-        run: python3 .github/scripts/observe-tests.py --suite lean --phase execute -- cargo test --locked
-      - name: Combined-feature lints (hybrid-local + hybrid-remote)
-        run: cargo clippy --locked --features hybrid-local,hybrid-remote --all-targets -- -D warnings
       - name: Upload test diagnostics
         if: always()
         uses: actions/upload-artifact@v4

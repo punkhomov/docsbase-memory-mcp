@@ -360,3 +360,20 @@ succeed".
 **Ruling.** Cleanup that any number of processes may run concurrently must treat
 `NotFound` as success — and a test that asserts on a subprocess must print that
 subprocess's stderr, otherwise a rare failure is unactionable.
+
+
+## Delta 2026-11-09 — get_doc framing fixture (C11)
+
+Локальный lean run на базе6297305 упал в
+mcp_docs::get_doc_escaping_never_overflows_the_frame: index_project превысил
+обычный2s Client read timeout на2MB управляющих символов. Проверка frame еще
+не началась. Дополнительно старый assert("response frame") принимал Transport
+ошибку клиентского ограничения вместо bounded Protocol error самого демона.
+
+Fixture теперь индексирует два tiny документа через реальный CLI до старта
+демона, заменяет control file escaping-heavy данными до watcher startup и
+проверяет настоящий IPC fallback, затем успешный get_doc на том же соединении.
+Raw size равен настроенному cap, JSON escaping превышает MAX_FRAME_BYTES.
+Ни production deadline, ни daemon guard не изменены. Temporary doubled guard
+показывает старый false positive и падение нового assertion; исходник
+восстановлен побайтно. Полная верификация/результаты — ci-testing C11 ledger.
