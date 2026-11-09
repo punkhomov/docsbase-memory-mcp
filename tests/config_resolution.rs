@@ -534,3 +534,183 @@ fn explicit_missing_paths_are_not_created_during_resolution() {
             .is_none()
     );
 }
+
+#[test]
+fn imported_hybrid_snapshot_rejects_unknown_stage_providers() {
+    use docsbase_memory::hybrid::config::{EmbeddingCfg, HybridCfg, RerankerCfg};
+    let snapshots = [
+        HybridCfg {
+            enabled: true,
+            embedding: Some(EmbeddingCfg {
+                provider: "unknown-embedding".into(),
+                ..EmbeddingCfg::default()
+            }),
+            ..HybridCfg::default()
+        },
+        HybridCfg {
+            enabled: true,
+            reranker: Some(RerankerCfg {
+                provider: "unknown-reranker".into(),
+                ..RerankerCfg::default()
+            }),
+            ..HybridCfg::default()
+        },
+    ];
+    for snapshot in snapshots {
+        let error =
+            Resolution::<HybridSpec>::from_provided(&DefaultsContext::standalone(), &snapshot)
+                .finish()
+                .expect_err("snapshot import must validate the provider just like a patch");
+        assert!(error.to_string().contains("unknown provider"));
+    }
+}
+
+#[test]
+fn imported_fastembed_snapshot_rejects_disabled_normalization() {
+    use docsbase_memory::hybrid::config::{EmbeddingCfg, HybridCfg};
+    let snapshot = HybridCfg {
+        enabled: true,
+        embedding: Some(EmbeddingCfg {
+            provider: "fastembed".into(),
+            model: "multilingual-e5-small".into(),
+            dimensions: 384,
+            normalize: false,
+        }),
+        ..HybridCfg::default()
+    };
+    let error = Resolution::<HybridSpec>::from_provided(&DefaultsContext::standalone(), &snapshot)
+        .finish()
+        .expect_err("normalization is a structural provider constraint in every build");
+    assert!(error.to_string().contains("normalize = true"));
+}
+
+#[cfg(feature = "hybrid-local")]
+#[test]
+fn imported_fastembed_snapshot_rejects_registry_shape_mismatches() {
+    use docsbase_memory::hybrid::config::{EmbeddingCfg, HybridCfg, RerankerCfg};
+    let embedding = EmbeddingCfg {
+        provider: "fastembed".into(),
+        model: "multilingual-e5-small".into(),
+        dimensions: 384,
+        normalize: true,
+    };
+    let snapshots = [
+        HybridCfg {
+            enabled: true,
+            embedding: Some(EmbeddingCfg {
+                dimensions: 128,
+                ..embedding.clone()
+            }),
+            ..HybridCfg::default()
+        },
+        HybridCfg {
+            enabled: true,
+            embedding: Some(EmbeddingCfg {
+                model: "jina-reranker-v1-turbo-en".into(),
+                ..embedding.clone()
+            }),
+            ..HybridCfg::default()
+        },
+        HybridCfg {
+            enabled: true,
+            embedding: Some(EmbeddingCfg {
+                model: "unknown-model".into(),
+                ..embedding
+            }),
+            ..HybridCfg::default()
+        },
+        HybridCfg {
+            enabled: true,
+            reranker: Some(RerankerCfg {
+                provider: "fastembed".into(),
+                model: "multilingual-e5-small".into(),
+                window: 50,
+            }),
+            ..HybridCfg::default()
+        },
+        HybridCfg {
+            enabled: true,
+            reranker: Some(RerankerCfg {
+                provider: "fastembed".into(),
+                model: "unknown-model".into(),
+                window: 50,
+            }),
+            ..HybridCfg::default()
+        },
+    ];
+    for snapshot in snapshots {
+        assert!(
+            Resolution::<HybridSpec>::from_provided(&DefaultsContext::standalone(), &snapshot)
+                .finish()
+                .is_err(),
+            "registry validation must reject {snapshot:?}"
+        );
+    }
+}
+
+#[test]
+fn imported_valid_hybrid_snapshots_match_patch_feature_policy() {
+    use docsbase_memory::hybrid::config::{EmbeddingCfg, HybridCfg, RerankerCfg};
+    let context = DefaultsContext::standalone();
+    let openrouter = HybridCfg::enabled_with_defaults();
+    let resolved = Resolution::<HybridSpec>::from_provided(&context, &openrouter)
+        .finish()
+        .expect("pure OpenRouter settings resolve without credentials or runtime capability");
+    assert_eq!(resolved.settings(), &openrouter);
+    let fastembed = HybridCfg {
+        enabled: true,
+        embedding: Some(EmbeddingCfg {
+            provider: "fastembed".into(),
+            model: "multilingual-e5-small".into(),
+            dimensions: 384,
+            normalize: true,
+        }),
+        reranker: Some(RerankerCfg {
+            provider: "fastembed".into(),
+            model: "jina-reranker-v1-turbo-en".into(),
+            window: 50,
+        }),
+        ..HybridCfg::default()
+    };
+    let result = Resolution::<HybridSpec>::from_provided(&context, &fastembed).finish();
+    #[cfg(feature = "hybrid-local")]
+    assert_eq!(
+        result
+            .expect("catalog validation needs neither installed runtime nor model files")
+            .settings(),
+        &fastembed
+    );
+    #[cfg(not(feature = "hybrid-local"))]
+    assert!(
+        result
+            .expect_err("same build-feature admission as explicit fastembed file patches")
+            .to_string()
+            .contains("hybrid-local")
+    );
+}
+
+#[test]
+fn stricter_typed_snapshot_validation_preserves_plain_config_compatibility() {
+    use docsbase_memory::hybrid::config::{EmbeddingCfg, HybridCfg};
+    let snapshot = Config {
+        hybrid: true,
+        hybrid_cfg: HybridCfg {
+            enabled: true,
+            embedding: Some(EmbeddingCfg {
+                provider: "unknown-legacy-provider".into(),
+                ..EmbeddingCfg::default()
+            }),
+            ..HybridCfg::default()
+        },
+        ..Config::default()
+    };
+    snapshot
+        .validate()
+        .expect("legacy Config validation remains structural");
+    let project = TempDir::new().expect("project");
+    assert_eq!(
+        Config::for_project(&snapshot, project.path())
+            .expect("plain legacy snapshot adapter preserves prior acceptance"),
+        snapshot
+    );
+}

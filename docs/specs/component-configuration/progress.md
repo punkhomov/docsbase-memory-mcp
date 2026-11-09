@@ -92,3 +92,20 @@ Plan: [tasks.md](tasks.md). Requirements: [requirements.md](requirements.md).
   Db/dense consumers, read pool, env adoption, migration/planner/consent/recovery
   остаются CF2/CF6/#66/CF13 и последующим задачам; inactive file keys не добавлены.
   Deferred minors на момент local handoff: none; fresh review ещё не выполнен.
+
+- CF1 task review: один Important I1 — public HybridSpec snapshot import принимал
+  unknown providers и malformed provider-specific stage settings. Regression RED
+  на source f133876: full imported tests3failed/1passed, lean3failed/0passed.
+- I1 fix: только strict `HybridSpec::validate` дополнительно использует pure owner
+  provider registry resolution с explicit model/dimensions/normalize/window.
+  Никаких defaults reread, credentials/env/provisioning/model/runtime construction.
+  Ruling: legacy `Config::validate` и private ConfigSpec сохраняют прежнюю structural
+  compatibility; plain `Config::for_project` acceptance закреплена отдельным тестом.
+  Новый public `Resolved<HybridCfg>` проверяет те же provider constraints, что patches.
+- I1 fix GREEN: focused config/config_resolution/hybrid_config — full31/24/13,
+  lean25/23/8; full/lean all-targets Clippy `-D warnings`, fmt/diff-check GREEN.
+  Новые tests покрывают unknown embedding/rerank provider, fastembed normalization,
+  dimensions/model/task mismatch, valid snapshots и прежнюю feature-off admission.
+  Локальный полный suite908 относится к source194cbb1; после fix полный suite
+  проверяется новым native CI на трёх ОС. Scoped re-review/final review и этот
+  новый native proof pending; #78/runtime adoption scope не меняется.

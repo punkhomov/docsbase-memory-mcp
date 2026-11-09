@@ -356,7 +356,22 @@ impl SettingsSpec for HybridSpec {
         origins.replace_group("hybrid.", source)
     }
     fn validate(settings: &HybridCfg, _: &Capabilities) -> Result<()> {
-        validate_settings(settings)
+        validate_settings(settings)?;
+        // Snapshot import has no patch-resolution step. Validate every supplied
+        // stage through the same pure provider rules, using only explicit values
+        // so this boundary neither fills defaults nor probes provisioning.
+        if let Some(embedding) = &settings.embedding {
+            resolve_embedding(
+                &embedding.provider,
+                Some(&embedding.model),
+                Some(embedding.dimensions),
+                embedding.normalize,
+            )?;
+        }
+        if let Some(reranker) = &settings.reranker {
+            resolve_reranker(&reranker.provider, Some(&reranker.model), reranker.window)?;
+        }
+        Ok(())
     }
     fn impact(old: Option<&HybridCfg>, next: &HybridCfg, _: &ArtifactFacts) -> ComponentImpact {
         ComponentImpact::between(old, next)
