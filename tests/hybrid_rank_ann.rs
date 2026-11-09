@@ -1,14 +1,15 @@
 //! End-to-end search through the `search_docs_with` seam with the ANN tier
 //! enabled (spec ann-index T4/T5, Delta 0.3): search must be proven exact
 //! while a background build is in flight (SC-11), the published ANN must
-//! actually serve the read path (counter, not just internal state), and its
-//! neighbours must match the exact scan on the same vectors (T14).
+//! actually serve the read path (counter, not just internal state). High-fetch
+//! recall against the exact scan is covered separately by `ann_recall` (T14).
 
 //! The debug hooks it relies on compile out of release builds, so the whole
 //! target is a no-op there and `cargo test --release` still compiles.
 #![cfg(debug_assertions)]
 #![allow(clippy::cast_precision_loss, clippy::field_reassign_with_default)]
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -33,8 +34,9 @@ use docsbase_memory::vector_cache::Embedder;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-const VECTORS: usize = 600;
-/// Small enough that `MAX_HITS` exceeds its chunk count (~40 chunks).
+// One unique chunk per document: enough distinct candidates for fetch=50.
+const DOCS: usize = 600;
+/// Small enough that `MAX_HITS` exceeds its checked chunk count (20).
 const SMALL_DOCS: usize = 20;
 const DIM: usize = 64;
 
@@ -83,36 +85,24 @@ fn spread(text: &str) -> Vec<f32> {
     vector
 }
 
-fn project_with_docs(count: usize) -> (TempDir, Db, Project) {
-    let cache = TempDir::new().expect("cache");
-    let root = TempDir::new().expect("root");
-    for i in 0..count {
-        let body = "x".repeat(1000 + i * 100);
-        fs::write(root.path().join(format!("d{i:04}.md")), body).expect("write doc");
-    }
-    let mut db = Db::open(cache.path()).expect("db");
-    let canonical = root.path().canonicalize().expect("canonical");
-    let mut project = registry::ensure_project(&mut db, &canonical).expect("project");
-    run_project_index(&mut db, cache.path(), &project, &Config::default()).expect("index");
-    project.status = ProjectStatus::Indexed;
-    (cache, db, project)
-}
-
-fn project_with_many_docs() -> (TempDir, Db, Project) {
-    project_with_docs(VECTORS)
-}
-
-/// Adds a second project to an existing cache and database.
+/// Builds a real indexed project, retaining its root through all searches.
 fn add_project(db: &mut Db, cache: &std::path::Path, count: usize) -> (TempDir, Project) {
     let root = TempDir::new().expect("root");
     for i in 0..count {
-        let body = "x".repeat(1000 + i * 100);
+        let body = format!("document {i:04}.\n");
         fs::write(root.path().join(format!("d{i:04}.md")), body).expect("write doc");
     }
     let canonical = root.path().canonicalize().expect("canonical");
     let mut project = registry::ensure_project(db, &canonical).expect("project");
     run_project_index(db, cache, &project, &Config::default()).expect("index");
     project.status = ProjectStatus::Indexed;
+    let counts = repo::project_counts(db.connection(), project.id).expect("project counts");
+    let expected = i64::try_from(count).expect("fixture count fits");
+    assert_eq!(counts.docs, expected);
+    assert_eq!(counts.chunks, expected, "one chunk per fixture document");
+    let hashes = repo::chunk_hashes(db.connection(), project.id).expect("chunk hashes");
+    let unique: HashSet<&str> = hashes.iter().map(|(_, hash)| hash.as_str()).collect();
+    assert_eq!(unique.len(), count, "fixture chunk texts must be distinct");
     (root, project)
 }
 
@@ -131,6 +121,25 @@ fn search(value: &Value) -> Vec<String> {
         .iter()
         .map(|row| row["path"].as_str().expect("path").to_owned())
         .collect()
+}
+
+/// The exact control never loads/builds ANN, even after a dump is published.
+fn exact_paths(db: &Db, cache: &Path, project: &Project, window: u32) -> Vec<String> {
+    let exact = DenseCache::with_policy(AnnPolicy::Disabled, cache);
+    let paths = search(
+        &search_docs_with(
+            &stages(),
+            &exact,
+            db,
+            cache,
+            project,
+            &json!({ "query": "alpha", "limit": 10 }),
+            window,
+        )
+        .expect("exact control"),
+    );
+    assert_eq!(paths.len(), 10);
+    paths
 }
 
 fn wait_for_ann(dense: &DenseCache, db: &Db, project_id: i64) -> Arc<AnnIndex> {
@@ -167,8 +176,8 @@ impl Drop for GateReset {
 ///
 /// The window is clamped to `MAX_HITS` before the dense stage sees it, so "more
 /// than the graph holds" is only reachable on a corpus smaller than that clamp:
-/// asking a 12k-chunk project for more becomes a request for 1000, which the
-/// graph answers. This runs inside the main test rather than in its own because
+/// a separate small project guarantees the requested window is unsatisfiable.
+/// This runs inside the main test rather than in its own because
 /// the build gate is process-global — a second test would wait on the first
 /// one's gate (it timed out on Windows).
 #[cfg(debug_assertions)]
@@ -176,6 +185,7 @@ fn unsatisfiable_fetch_falls_back_without_counting(db: &mut Db, dense: &DenseCac
     let (small_root, small) = add_project(db, cache, SMALL_DOCS);
     embed_project_chunks_with(db, &SpreadEmbedder, small.id).expect("embed small");
     let small_ann = wait_for_ann(dense, db, small.id);
+    assert_eq!(small_ann.count(), SMALL_DOCS);
     drop(small_ann);
 
     let chunks = repo::project_counts(db.connection(), small.id)
@@ -186,17 +196,29 @@ fn unsatisfiable_fetch_falls_back_without_counting(db: &mut Db, dense: &DenseCac
         "the clamp must exceed this corpus, got {chunks} chunks"
     );
 
+    let expected = exact_paths(
+        db,
+        cache,
+        &small,
+        u32::try_from(MAX_HITS).expect("MAX_HITS fits"),
+    );
     let before = ann_search_count();
-    search_docs_with(
+    let value = search_docs_with(
         &stages(),
         dense,
         db,
         cache,
         &small,
-        &json!({ "query": "alpha", "limit": 10 }),
+        &json!({ "query": "alpha", "limit": 10, "explain": true }),
         u32::try_from(MAX_HITS).expect("MAX_HITS fits"),
     )
     .expect("search with a fetch the graph cannot satisfy");
+    assert_eq!(value["meta"]["degraded"], json!(["ann-insufficient"]));
+    assert_eq!(
+        search(&value["hits"]),
+        expected,
+        "an insufficient ANN must return the exact fallback result"
+    );
     assert_eq!(
         ann_search_count(),
         before,
@@ -211,16 +233,16 @@ fn search_runs_during_the_build_and_ann_serves_the_read_path() {
     // Hold the background build at its start so the exact-fallback search
     // below is guaranteed to run while the build is still in flight (SC-11),
     // however slow this host is. A fixed sleep raced the search on loaded
-    // runners (the same test takes 29.5 s on CI, 11 s locally).
+    // runners; the gate establishes the phase independently of host speed.
     let gate = TestBuildGate::new();
     set_test_build_gate(Some(gate.clone()));
     let _gate_reset = GateReset(gate.clone());
-    let (cache, mut db, project) = project_with_many_docs();
+    let cache = TempDir::new().expect("cache");
+    let mut db = Db::open(cache.path()).expect("db");
+    let (_root, project) = add_project(&mut db, cache.path(), DOCS);
     let stored = embed_project_chunks_with(&db, &SpreadEmbedder, project.id).expect("embed");
-    assert!(
-        stored >= VECTORS as u64,
-        "every doc produced at least one chunk"
-    );
+    assert_eq!(stored, u64::try_from(DOCS).expect("fixture count fits"));
+    let expected = exact_paths(&db, cache.path(), &project, 50);
 
     let mut limits = DenseCacheLimits::default();
     limits.min_vectors = 2;
@@ -251,7 +273,10 @@ fn search_runs_during_the_build_and_ann_serves_the_read_path() {
         "a search during the build says why it streamed exact"
     );
     let during_build = search(&value["hits"]);
-    assert_eq!(during_build.len(), 10);
+    assert_eq!(
+        during_build, expected,
+        "build-time search must return the exact control's paths"
+    );
     assert_eq!(
         ann_search_count(),
         before,
@@ -290,6 +315,7 @@ fn search_runs_during_the_build_and_ann_serves_the_read_path() {
     )
     .expect("search after publish");
     let after_publish = search(&value);
+    assert_eq!(after_publish.len(), 10);
     assert!(
         ann_search_count() > before,
         "a published ANN must serve the read path"

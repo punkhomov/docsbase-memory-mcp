@@ -119,3 +119,29 @@ Cargo-native opt-in selection replaces the initially planned metadata selector.
   Full/explicit-performance Clippy, fmt and native CI pass.
 - **SC-8:** Fresh C5 task and final branch reviews have no unresolved
   Critical/Important findings. Prepare a green PR; merging stays human-only.
+
+## Delta 2026-11-09 — C6: compact ANN search-path fixture
+
+- **FR-18:** Replace growing repeated-text documents in `hybrid_rank_ann` with
+  short unique documents. Retain 600 main documents, 20 small documents and
+  64-dimensional normalized spread embeddings; assert one stored chunk per
+  document and distinct content hashes. Retain real indexing, backfill,
+  background build, persistence/load and search through `search_docs_with`.
+- **FR-19:** Preserve the build gate, RAII release, real watchdog and ANN-served
+  counter controls. While the build is gated, search must return the same ten
+  paths as an ANN-disabled exact control, without increasing the ANN counter.
+  Published ANN must serve repeatable ten-result searches. A small published
+  graph below `MAX_HITS` must report insufficient candidates, return the exact
+  fallback result, and not increase the ANN-served counter.
+- **FR-20:** Keep the single debug test target (global gate isolation), query,
+  fetch/limit, per-fixture admission setting and all numeric production defaults,
+  recall thresholds, large scale/default-boundary suites and CI routing intact.
+  No production changes, new dependencies or global hooks. Retain project roots
+  through searches and release DB handles before cache directories.
+- **SC-9:** Record old/new execution separately from compilation, including
+  temporary fixture/build phase probes. New fixture assertions fail with the
+  old corpus; controlled read-path/fallback mutations fail their expected
+  assertions. Restore source before final target/related tests, full and
+  explicit performance Clippy/fmt and native CI. Fresh task/final reviews have
+  no unresolved Critical/Important findings; prepare a green PR, human-only merge.
+  Shared-runner timings alone establish no overall CI speedup.
