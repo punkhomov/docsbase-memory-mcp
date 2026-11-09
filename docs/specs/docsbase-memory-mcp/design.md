@@ -723,3 +723,18 @@ contracts прежние, feature-off ошибки могут обнаружит
 cli-full остается required на3ОС, docs — четвертый required check. Прежний
 linux-local-required ruling заменен пользовательским C11 решением. Runtime,
 release/static/offline/search/perf contracts не меняются; см. ci-testing C11.
+
+
+## ADDED 2026-11-09 — CF0: component-owned configuration design (#78)
+
+Архитектурный baseline: [component-configuration](../component-configuration/design.md),
+[inventory](../component-configuration/settings-inventory.md) и
+[state dependencies](../component-configuration/state-dependencies.md).
+Компоненты владеют defaults/validation/impact; composition разрешает typed settings,
+planner строит dependency-aware change plan, управляющий CLI владеет consent.
+Старые ADR и v1 whole-value hybrid merge не отменены этим docs-only этапом.
+V2 schema/ownership и новые plan/apply интерфейсы требуют отдельных implementation
+PR/migration; пока не являются существующими возможностями продукта.
+Минимальный CF1/CF2 bootstrap/store foundation предшествует #66, полная #78
+не блокирует исправление глобальной DB contention. #76 уже исправляет только
+config/stages publication; SQLite/Tantivy/vector generation требует своего design.
