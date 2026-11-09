@@ -144,3 +144,17 @@
 сборкой с прежним offline dependency gate; это отдельное понятие от состава
 поставляемого CLI. Оба providers доступны в поставке, использование определяется
 явной конфигурацией. Размерный бюджет 40 MiB и явное provisioning не меняются.
+
+
+## Delta 2026-11-09 — C11: CI ownership and source compatibility
+
+Поставляемый cli-full по-прежнему проходит полный required CI на Linux/macOS/
+Windows; четвертый required check — docs. Эти имена уже заданы защитой main.
+Дорогие проверки lean/individual/combo source builds выполняются одной job
+feature-compatibility еженедельно (понедельник04:17UTC) и вручную, без PR/push
+trigger. Source configurations остаются поддерживаемыми; ошибка выключенного
+cfg может обнаружиться после merge, вплоть до недельного интервала. Для ранней
+проверки есть manual run на ref. Дешевый default dependency-tree gate остается
+required в Linux. Этот согласованный с пользователем delta заменяет прежнее
+указание делать linux-local required; поведение продукта и release/perf/live
+политика не меняются. Детали: ci-testing FR-35–FR-39 / SC-14.

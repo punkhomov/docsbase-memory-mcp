@@ -10,8 +10,10 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use docsbase_memory::daemon::lifecycle::stop_daemon;
+use docsbase_memory::error::Error;
 use docsbase_memory::index::tantivy_index::MAX_HITS;
 use docsbase_memory::ipc::client::Client;
+use docsbase_memory::ipc::protocol::MAX_FRAME_BYTES;
 use docsbase_memory::platform;
 
 struct Env {
@@ -406,19 +408,38 @@ fn get_doc_escaping_never_overflows_the_frame() {
     // JSON escaping expands control characters up to 6x; an accepted
     // max_file_size must still fail cleanly instead of emitting an
     // oversized frame (T45 review finding).
-    let body = "\u{1}".repeat(2_000_000);
-    let mut env = Env::new(&[]);
+    let body = "\u{1}".repeat(MAX_FRAME_BYTES / 6 + 1);
+    assert!(serde_json::to_vec(&body).expect("escaped body").len() > MAX_FRAME_BYTES + 1);
+    let mut env = Env::new(&[
+        ("control.md", "# Placeholder\n\nsmall indexed body\n"),
+        ("small.md", "# Small\n\nconnection still usable\n"),
+    ]);
+    write_file(
+        env.root(),
+        ".docsbase.toml",
+        format!("max_file_size = {}\n", body.len()).as_bytes(),
+    );
+    // Register/index only tiny documents. Replace the file before starting
+    // the watcher: framing does not need to index megabytes of control bytes.
+    let indexed = env.cmd().arg("index").output().expect("index fixture");
+    assert!(indexed.status.success(), "index fixture: {indexed:?}");
     write_file(env.root(), "control.md", body.as_bytes());
-    write_file(env.root(), ".docsbase.toml", b"max_file_size = 2_000_000\n");
     env.start_daemon();
-    index_project(&env);
     let mut client = env.bound();
 
     let err = client
         .call_tool("get_doc", json!({ "path": "control.md" }))
         .expect_err("oversized encoded response must be refused cleanly");
     let text = err.to_string();
+    assert!(
+        matches!(err, Error::Protocol { .. }),
+        "daemon must return a bounded protocol error, got {err:?}"
+    );
     assert!(text.contains("response frame"), "unexpected error: {text}");
+    let small = client
+        .call_tool("get_doc", json!({ "path": "small.md" }))
+        .expect("connection must remain usable after the bounded error");
+    assert_eq!(small["content"], "# Small\n\nconnection still usable\n");
 }
 
 /// Every opt-in `search_docs` key the daemon accepts must be advertised in the

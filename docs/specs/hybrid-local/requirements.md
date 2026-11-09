@@ -485,3 +485,15 @@ Acceptance: из извлечённого release archive `models fetch --help` 
 OPENROUTER_API_KEY, а не до missing-feature ветки. Проверка герметична и не
 скачивает модели/runtime, не отправляет запросы. Linux сохраняет static/40 MiB
 бюджет. Исправление не публикует новый release автоматически.
+
+
+## Delta 2026-11-09 — C11: source-build CI cadence
+
+SC-1/SC-11 и feature-off contracts сохраняются. Полный поставляемый cli-full
+проверяется required native jobs на3ОС; lean dependency tree — required Linux.
+Lean full suite, local-only/remote-only selections, powerset и combo lint теперь
+собраны в одну weekly/manual feature-compatibility job. Ошибка отдельного source
+cfg может попасть в main и обнаружиться позже (до недели); manual --ref позволяет
+проверить ее заранее. Прежнее T7 требование сделать linux-local required явно
+заменено этим пользовательским решением. Модели/live проверки по-прежнему
+manual/ignored, сборка/providers/runtime behavior не меняются. См. ci-testing C11.

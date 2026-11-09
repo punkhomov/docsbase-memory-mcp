@@ -135,3 +135,23 @@ Verify bad artifacts and no hidden Cargo, default/explicit inventories/metadata,
 MSRV build/functional checks/lints/workflow syntax. Fresh task/final reviews and
 native PR CI; no merge.
 **Acceptance:** FR-31–FR-34; SC-13.
+
+
+### C11 — Four required native jobs and one periodic compatibility job
+
+**Delta:** 2026-11-09. **New application crates/packages:** none; existing
+cargo-hack CI tool installed locally for verification.
+**Scope:** ci.yml, new feature-compatibility.yml, docs/ci.md, AGENTS CI index,
+CI-testing ledger and dated source-compatibility rulings in affected specs.
+**Steps:** verify actual protected check names; preserve native steps while
+moving expensive compatibility steps unchanged into one weekly/manual job.
+Retain/fix cheap default dependency gate with producer failure controls. Document
+post-merge feature-off detection and supersede old linux-local-required ruling.
+Prove selectors/metadata/commands/inventories, execute local compatibility flow,
+workflow/observer checks, fresh task/final reviews and native PR CI. Attempt
+manual optional workflow; honestly record registration limits. Human merge only.
+**Scope revision:** the local lean run exposed get_doc framing setup indexing
+2MB through a2s client and a weak assertion accepting client Transport errors.
+Repair only that tests/mcp_docs.rs fixture/assertions under FR-40; sensitivity
+probe and complete final checks, without production or timeout changes.
+**Acceptance:** FR-35–FR-40; SC-14.

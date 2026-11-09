@@ -263,3 +263,61 @@ Cargo-native opt-in selection replaces the initially planned metadata selector.
   fresh task/final reviews have no unresolved findings. Prepare a green PR;
   human merge only. Measurements separate build from execution, no overall
   speedup claim from individual shared-runner observations.
+
+
+## Delta 2026-11-09 — C11: required shipped CLI and periodic source compatibility
+
+- **FR-35:** Keep exactly docs/linux/macos/windows in ci.yml, with its original
+  PR/push-main/manual triggers, required-check names and every existing native
+  step unchanged. Full cli-full functional tests, opt-in artifact/perf lint,
+  static build/check/provider smokes, search gate and diagnostics remain required.
+  Repository protection already requires these four; do not modify settings.
+- **FR-36:** Consolidate former linux-hybrid/linux-local checks into one Ubuntu
+  feature-compatibility job in a separate workflow: Monday04:17UTC and manual,
+  no PR/push trigger. Preserve all13 Cargo/observer steps byte-for-byte in their
+  order: remote/local/combined lints, existing depth2 powerset excluding cli-full,
+  remote/local feature-sensitive selections and the full lean suite. Reuse one
+  checkout/toolchain/cache, Rust1.88, slack3, existing observer suites and always
+  upload. One60minute aggregate job replaces two30minute jobs; test budgets do
+  not change. Fail normally, no continue-on-error, secrets or live models.
+- **FR-37:** Keep the cheap lean dependency boundary in required Linux. Capture
+  plain-color locked normal dependency output before checking the same eight
+  forbidden crates. Producer failure and an empty graph must fail, never print
+  a false success; preserve the graph in always-uploaded diagnostics. Heavy
+  feature-off compilation/runtime regressions may now be discovered after
+  merge, up to the weekly interval; manual runs permit earlier checks.
+- **FR-38:** Record this user-approved cadence tradeoff in constitution and
+  affected provider specs. cli-full remains the shipped profile on all3OS;
+  lean/individual/combo configurations remain source compatibility contracts.
+  Supersede the old T7 linux-local-required instruction explicitly. Preserve
+  runtime behavior, feature manifest/dependencies, ignored/live policy, release,
+  nightly, performance routing, baselines, profiles and numeric test budgets.
+- **FR-39:** Preserve Cargo discovery and exact native/feature test inventories.
+  New compatibility workflow has contents:read only, separate concurrency and
+  one job; it runs weekly even without source changes (no gate job). No new
+  runner framework or cross-platform feature matrix. Build dependencies/tooling
+  may download; model/service tests remain hermetic as before.
+- **FR-40 (scope revision):** Repair the framing fixture exposed by the local
+  lean run: index two tiny documents through real CLI direct mode, replace the
+  target with escaping-heavy data before daemon/watcher startup, and keep the
+  raw size equal to the fixture config cap while escaped data exceeds the public
+  frame cap. Assert a daemon Protocol error and a successful next get_doc on
+  the same connection; a client Transport overflow must fail. Preserve the
+  test name, real daemon/wire path and all production/default timeouts. No
+  production changes. Prove the old assertion blind spot with a weakened
+  server guard, restore it byte-for-byte and rerun final checks.
+- **SC-14:** Structural comparison proves four existing native jobs unchanged
+  except the added cheap gate,13 moved steps identical and nightly/release
+  unchanged. Reproduce the old tree-error false success, verify producer/empty/
+  forbidden/safe controls and a real lean tree. Execute the consolidated feature
+  commands locally on Rust1.88; compare all3profile inventories to the merged
+  base and validate workflow syntax/observer regressions. Final native PR CI has
+  exactly four green jobs and unchanged case inventories/counts, including
+  both explicit Linux artifact checks. Attempt new-workflow manual dispatch if
+  available; record GitHub's default-branch registration limitation without
+  claiming execution. If local latency is red with unchanged production code and
+  also red in isolation, preserve that evidence and validate the full unchanged
+  compatibility job on GitHub hardware (an isolated registered-workflow driver
+  ref is allowed with identical app/test/job blobs, never merged). No baseline,
+  factor, skip or gate change in delivered CI. Fresh task/final reviews pass;
+  ready PR, human merge.

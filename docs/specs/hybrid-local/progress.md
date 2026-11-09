@@ -488,3 +488,12 @@ Ledger: одна запись на таск (что сделано, чем пр�
 
   Ruling: independent fixture-fix review APPROVED; no new Critical/Important
   findings or production behavior change.
+
+
+## Delta 2026-11-09 — C11 ownership ruling
+
+Пользователь одобрил required shipped-profile CI на трех ОС и периодическую
+source compatibility job. Исторические записи T7 о linux-local-required
+сохраняют историю, но заменены этим решением: четыре required checks уже
+подтверждены GitHub metadata. Runtime/source compatibility contracts прежние;
+меняется срок обнаружения feature-off ошибок. Верификация: ci-testing C11.

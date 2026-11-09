@@ -1,0 +1,105 @@
+name: feature-compatibility
+
+# Secondary source configurations; shipped cli-full stays required in ci.yml.
+# Weekly/manual failures stay visible but do not gate pull requests.
+on:
+  schedule:
+    # Weekly, Monday 04:17 UTC. No live models or API credentials.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "feature-compatibility-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: "1.88.0"
+
+jobs:
+  feature-compatibility:
+    runs-on: ubuntu-latest
+    # Sequential work previously split between two 30-minute jobs.
+    timeout-minutes: 60
+    env:
+      DOCSBASE_BENCH_LATENCY_SLACK: "3"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+      - name: Initialize test diagnostics
+        shell: bash
+        run: |
+          # Never publish observations restored from an earlier cache entry.
+          rm -rf target/ci-observations target/cargo-timings
+          echo "CI_RUST_CACHE_HIT=${{ steps.rust-cache.outputs.cache-hit }}" >> "$GITHUB_ENV"
+      - name: Feature lints (hybrid-remote)
+        run: cargo clippy --locked --features hybrid-remote --all-targets -- -D warnings
+      # The remote-only runtime paths are also exercised by the native CLI
+      # suites; what only a single-feature build can prove is that the
+      # crate compiles and links with `hybrid-local` absent, plus the
+      # feature-admission assertions. Rationale: docs/ci.md.
+      - name: Prepare feature-sensitive tests (hybrid-remote only)
+        run: |
+          python3 .github/scripts/observe-tests.py --suite hybrid-remote --phase prepare -- \
+            cargo test --locked --features hybrid-remote --test hybrid_config \
+            --test config --test hybrid_openrouter --no-run --timings
+      - name: Inventory feature-sensitive tests (hybrid-remote only)
+        run: |
+          python3 .github/scripts/observe-tests.py --suite hybrid-remote --phase inventory -- \
+            cargo test --locked --features hybrid-remote --test hybrid_config \
+            --test config --test hybrid_openrouter -- --list
+      - name: Feature-sensitive tests (hybrid-remote only)
+        run: |
+          python3 .github/scripts/observe-tests.py --suite hybrid-remote --phase execute -- \
+            cargo test --locked --features hybrid-remote --test hybrid_config \
+            --test config --test hybrid_openrouter
+      - name: Feature lints (hybrid-local)
+        run: cargo clippy --locked --features hybrid-local --all-targets -- -D warnings
+      # Compile matrix for the feature axis: every 1- and 2-feature
+      # combination, all targets. Catches "compiles only with exactly these
+      # two features on" without a 2^n x OS test matrix (docs/ci.md).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - name: Feature matrix compiles (powerset, depth 2)
+        run: cargo hack check --locked --feature-powerset --depth 2 --exclude-features cli-full --all-targets
+      # Keep assertions that only a build without the other feature can make.
+      - name: Prepare feature-sensitive tests (hybrid-local only; offline)
+        run: |
+          python3 .github/scripts/observe-tests.py --suite hybrid-local --phase prepare -- \
+            cargo test --locked --features hybrid-local --test cli_models \
+            --test hybrid_config --test hybrid_local --test hybrid_models --test connect --no-run --timings
+      - name: Inventory feature-sensitive tests (hybrid-local only; offline)
+        run: |
+          python3 .github/scripts/observe-tests.py --suite hybrid-local --phase inventory -- \
+            cargo test --locked --features hybrid-local --test cli_models \
+            --test hybrid_config --test hybrid_local --test hybrid_models --test connect -- --list
+      - name: Feature-sensitive tests (hybrid-local only; offline)
+        run: |
+          python3 .github/scripts/observe-tests.py --suite hybrid-local --phase execute -- \
+            cargo test --locked --features hybrid-local --test cli_models \
+            --test hybrid_config --test hybrid_local --test hybrid_models --test connect
+      - name: Prepare lean Cargo compatibility suite (offline)
+        run: python3 .github/scripts/observe-tests.py --suite lean --phase prepare -- cargo test --locked --no-run --timings
+      - name: Inventory lean Cargo compatibility suite (offline)
+        run: python3 .github/scripts/observe-tests.py --suite lean --phase inventory -- cargo test --locked -- --list
+      - name: Lean Cargo compatibility suite (offline)
+        run: python3 .github/scripts/observe-tests.py --suite lean --phase execute -- cargo test --locked
+      - name: Combined-feature lints (hybrid-local + hybrid-remote)
+        run: cargo clippy --locked --features hybrid-local,hybrid-remote --all-targets -- -D warnings
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-diagnostics-${{ github.job }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            target/ci-observations/
+            target/cargo-timings/

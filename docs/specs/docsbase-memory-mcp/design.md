@@ -712,3 +712,14 @@ constructor закрывает file при отказе `try_write`; локал�
 при любой последующей ошибке проверки состояния. `Box::leak`, ручной unsafe и
 новые зависимости не нужны. Публичный `Lease::acquire` и admission policy
 сохраняются. Прежнее решение T18 о process-lifetime leak заменено этой дельтой.
+
+
+## Delta 2026-11-09 — C11: default/source CI ownership
+
+Упоминания linux-hybrid как владельца default dependency gate в ADR/source
+истории заменены required Linux step в ci.yml. Тяжелые lean/individual/combo
+проверки теперь в отдельной weekly/manual feature-compatibility job; source
+contracts прежние, feature-off ошибки могут обнаружиться после merge. Полный
+cli-full остается required на3ОС, docs — четвертый required check. Прежний
+linux-local-required ruling заменен пользовательским C11 решением. Runtime,
+release/static/offline/search/perf contracts не меняются; см. ci-testing C11.

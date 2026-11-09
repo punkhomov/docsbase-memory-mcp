@@ -282,3 +282,13 @@ local-lib/default runs на платформах. Umbrella исключён из
 через help handler, remote — через pre-network credential validation. Release
 вызывает проверку после распаковки archive; CI — для своего собранного CLI.
 Windows/macOS модели и shared ORT остаются explicit provisioning.
+
+
+## Delta 2026-11-09 — C11: CI ownership
+
+Вместо linux-local/linux-hybrid в PR flow остаются четыре required native/docs
+jobs. Те же source compatibility команды живут в одной feature-compatibility
+job weekly/manual; default dependency tree остается required в Linux. Это
+изменение cadence, а не отмена lean/local-only/remote-only/combo поддержки:
+feature-off регрессия может быть замечена после merge. T7 required-check ruling
+заменен пользовательским C11 решением; cli-full и live/manual policy прежние.
