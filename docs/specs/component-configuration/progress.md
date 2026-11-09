@@ -109,3 +109,10 @@ Plan: [tasks.md](tasks.md). Requirements: [requirements.md](requirements.md).
   Локальный полный suite908 относится к source194cbb1; после fix полный suite
   проверяется новым native CI на трёх ОС. Scoped re-review/final review и этот
   новый native proof pending; #78/runtime adoption scope не меняется.
+
+- Final review Minor M1: addressed (2026-11-09). Design уточняет сохранённую v1
+  feature policy: ungated provider records и OpenRouter scalar resolution доступны
+  feature-off; fastembed stage resolution требует hybrid-local уже до construction.
+  Ruling: это docs correction, Rust/тесты/поведение не меняются. Coordinator сообщил
+  native4/4GREEN для source5c6818f; scoped final re-review и required checks нового
+  docs HEAD ещё pending. Docs hygiene/diff-check GREEN; новые tests не нужны.

@@ -323,8 +323,12 @@ Legacy `HybridCfg` сохраняет `Default` как compatibility surface; н
 Три reset profiles отдельны: disabled, enabled-shortcut с обеими default stages,
 и table-base enabled=true без stages. Ни deep merge, ни v2 merge не включены.
 Provider-dependent model/dimension rules выполняются на resolution, без runtime,
-credential lookup, model checks или provisioning. Feature-off files по-прежнему
-структурно разрешаются; capability admission стадии остаётся при construction.
+credential lookup, проверки model files или provisioning. Сохранена конкретная v1
+feature policy: ungated provider records разбираются независимо от build features.
+Scalar resolution OpenRouter stages также возможен feature-off; их runtime
+capability admission выполняется при construction. Fastembed stages уже на
+resolution возвращают Admission при отсутствии `hybrid-local`, как в legacy path;
+проверка наличия runtime/model files остаётся отдельной от pure resolution.
 
 Typed explicit-path `resolve::{global_from,load_from,for_project}` сохраняет реальные
 source paths. Global validation остаётся до project overlay: project не исправляет
