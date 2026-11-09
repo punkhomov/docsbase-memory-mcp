@@ -5,7 +5,6 @@
 //! SC-5; I1, I2, I3). No network: everything runs through a mock transport.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use docsbase_memory::error::{Error, Result};
@@ -369,7 +368,7 @@ fn embedder_adapter_reports_the_cache_key() {
 }
 
 #[test]
-fn retry_after_is_honored_on_429() {
+fn client_retries_429_response() {
     let fx = fixture(EMBED_QWEN);
     let mock = MockTransport::default();
     mock.push(429, r#"{"error":{"message":"Rate limited"}}"#, Some(0));
@@ -382,25 +381,6 @@ fn retry_after_is_honored_on_429() {
             .expect("retry after 429 must succeed");
     assert_eq!(vectors.len(), input.len());
     assert_eq!(mock.calls().len(), 2);
-}
-
-#[test]
-fn retryable_errors_after_all_attempts_are_explicit() {
-    let fx = fixture(EMBED_QWEN);
-    let mock = MockTransport::default();
-    for _ in 0..4 {
-        mock.push(503, r#"{"error":{"message":"Service Unavailable"}}"#, None);
-    }
-    let client = make_client(&mock);
-    let input = texts(&fx.request);
-    let error =
-        blocking::enter(|| client.embed_texts("qwen/qwen3-embedding-8b", 1024, true, &input))
-            .expect_err("exhausted retries must fail");
-    assert!(
-        format!("{error}").contains("Service Unavailable"),
-        "{error}"
-    );
-    assert_eq!(mock.calls().len(), 4, "first try plus three retries");
 }
 
 #[test]
@@ -433,46 +413,6 @@ fn non_retryable_error_branches_carry_their_messages() {
         assert!(message.contains(fragment), "{status}: {message}");
         assert_eq!(mock.calls().len(), 1, "{status} must not be retried");
     }
-}
-
-/// Transport that always fails at the transport layer (retried, FR-7).
-struct FailingTransport {
-    calls: Arc<AtomicUsize>,
-}
-
-impl Transport for FailingTransport {
-    fn post_json(
-        &self,
-        _url: &str,
-        _headers: &[(String, String)],
-        _body: &str,
-    ) -> Result<TransportResponse> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(Error::internal("connection reset"))
-    }
-
-    fn get_json(&self, url: &str, headers: &[(String, String)]) -> Result<TransportResponse> {
-        self.post_json(url, headers, "")
-    }
-}
-
-#[test]
-fn transport_failures_are_retried_then_surface() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let transport = FailingTransport {
-        calls: Arc::clone(&calls),
-    };
-    let client = OpenRouterClient::new(BASE_URL, "test-key", Box::new(transport)).expect("client");
-    let error = blocking::enter(|| {
-        client.embed_texts("qwen/qwen3-embedding-8b", 1024, true, &["x".to_owned()])
-    })
-    .expect_err("transport failure must surface");
-    assert!(format!("{error}").contains("connection reset"), "{error}");
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        4,
-        "transport failures get the first-try-plus-three-retries budget"
-    );
 }
 
 #[test]

@@ -120,6 +120,18 @@ pub fn post_with_retry(
     headers: &[(String, String)],
     body: &str,
 ) -> Result<TransportResponse> {
+    post_with_retry_with_timing(transport, url, headers, body, std::thread::sleep, jitter)
+}
+
+// Per-call timing boundary: tests observe policy without consuming real backoff.
+fn post_with_retry_with_timing(
+    transport: &dyn Transport,
+    url: &str,
+    headers: &[(String, String)],
+    body: &str,
+    mut sleep: impl FnMut(Duration),
+    mut jitter: impl FnMut() -> Duration,
+) -> Result<TransportResponse> {
     let mut delay = Duration::from_millis(250);
     let mut last: Option<Error> = None;
     for attempt in 1..=RETRY_ATTEMPTS {
@@ -145,7 +157,7 @@ pub fn post_with_retry(
             }
         }
         let pause = wait.map_or(delay, |after| after.min(MAX_RETRY_AFTER));
-        std::thread::sleep(pause.saturating_add(jitter()));
+        sleep(pause.saturating_add(jitter()));
         delay = delay.saturating_mul(2).min(Duration::from_secs(4));
     }
     Err(last.unwrap_or_else(|| Error::internal("OpenRouter retry loop exhausted")))
@@ -185,7 +197,232 @@ pub fn embed_batches(texts: &[String]) -> Vec<Range<usize>> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
     use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum RetryEvent {
+        Post,
+        Jitter,
+        Sleep(Duration),
+    }
+
+    use RetryEvent::{Jitter, Post, Sleep};
+
+    struct ScriptedTransport {
+        responses: Mutex<VecDeque<Result<TransportResponse>>>,
+        events: Mutex<Vec<RetryEvent>>,
+    }
+
+    impl ScriptedTransport {
+        fn new(responses: impl IntoIterator<Item = Result<TransportResponse>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                events: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn run(&self, jitter_ms: &[u64]) -> Result<TransportResponse> {
+            let mut jitter_ms = jitter_ms.iter();
+            let result = post_with_retry_with_timing(
+                self,
+                "https://example.test/embeddings",
+                &[("Authorization".to_owned(), "Bearer test-key".to_owned())],
+                r#"{"input":["same input"]}"#,
+                |duration| self.events.lock().expect("events").push(Sleep(duration)),
+                || {
+                    self.events.lock().expect("events").push(Jitter);
+                    Duration::from_millis(*jitter_ms.next().expect("unexpected jitter request"))
+                },
+            );
+            assert!(self.responses.lock().expect("responses").is_empty());
+            assert!(jitter_ms.next().is_none(), "all jitter samples used");
+            result
+        }
+
+        fn assert_events(&self, expected: &[RetryEvent]) {
+            assert_eq!(*self.events.lock().expect("events"), expected);
+        }
+    }
+
+    impl Transport for ScriptedTransport {
+        fn post_json(
+            &self,
+            url: &str,
+            headers: &[(String, String)],
+            body: &str,
+        ) -> Result<TransportResponse> {
+            assert_eq!(url, "https://example.test/embeddings");
+            assert_eq!(
+                headers,
+                &[("Authorization".to_owned(), "Bearer test-key".to_owned())]
+            );
+            assert_eq!(body, r#"{"input":["same input"]}"#);
+            self.events.lock().expect("events").push(Post);
+            self.responses
+                .lock()
+                .expect("responses")
+                .pop_front()
+                .expect("unexpected extra POST")
+        }
+
+        fn get_json(&self, _url: &str, _headers: &[(String, String)]) -> Result<TransportResponse> {
+            panic!("retrying a POST must not send a GET");
+        }
+    }
+
+    fn response(status: u16, retry_after: Option<Duration>) -> TransportResponse {
+        TransportResponse {
+            status,
+            body: format!("body {status}"),
+            retry_after,
+        }
+    }
+
+    fn wait(ms: u64) -> RetryEvent {
+        Sleep(Duration::from_millis(ms))
+    }
+
+    #[test]
+    fn retry_after_zero_nonzero_cap_and_fallback() {
+        for (retry_after, expected_ms) in [
+            (None, 257),
+            (Some(Duration::ZERO), 7),
+            (Some(Duration::from_secs(2)), 2007),
+            (Some(Duration::from_secs(29)), 29007),
+            (Some(Duration::from_secs(30)), 30007),
+            (Some(Duration::from_secs(31)), 30007),
+            (Some(Duration::MAX), 30007),
+        ] {
+            let success = response(200, None);
+            let transport =
+                ScriptedTransport::new([Ok(response(429, retry_after)), Ok(success.clone())]);
+            assert_eq!(transport.run(&[7]).expect("retry succeeds"), success);
+            transport.assert_events(&[Post, Jitter, wait(expected_ms), Post]);
+        }
+    }
+
+    #[test]
+    fn retry_backoff_advances_through_header_and_transport_failure() {
+        let success = response(201, None);
+        let transport = ScriptedTransport::new([
+            Ok(response(429, Some(Duration::from_secs(2)))),
+            Err(Error::transport("connection reset")),
+            Ok(response(503, None)),
+            Ok(success.clone()),
+        ]);
+        assert_eq!(
+            transport.run(&[7, 11, 13]).expect("retry succeeds"),
+            success
+        );
+        transport.assert_events(&[
+            Post,
+            Jitter,
+            wait(2007),
+            Post,
+            Jitter,
+            wait(511),
+            Post,
+            Jitter,
+            wait(1013),
+            Post,
+        ]);
+    }
+
+    #[test]
+    fn retryable_statuses_retry_and_only_429_uses_retry_after() {
+        for status in [429, 500, 502, 503, 524, 529] {
+            let success = response(200, None);
+            let transport = ScriptedTransport::new([
+                Ok(response(status, Some(Duration::from_secs(2)))),
+                Ok(success.clone()),
+            ]);
+            assert_eq!(transport.run(&[7]).expect("retry succeeds"), success);
+            let expected_ms = if status == 429 { 2007 } else { 257 };
+            transport.assert_events(&[Post, Jitter, wait(expected_ms), Post]);
+        }
+    }
+
+    #[test]
+    fn retry_success_and_nonretryable_statuses_finish_without_waiting() {
+        for status in [200, 201, 204, 299, 400, 401, 402, 403, 404, 413] {
+            let reply = response(status, Some(Duration::from_secs(2)));
+            let transport = ScriptedTransport::new([Ok(reply.clone())]);
+            let result = transport.run(&[]);
+            if status < 300 {
+                assert_eq!(result.expect("success"), reply);
+            } else {
+                let error = result.expect_err("nonretryable status");
+                assert!(matches!(error, Error::Internal { .. }));
+                assert_eq!(
+                    error.to_string(),
+                    error_for_status(status, &reply.body).to_string()
+                );
+            }
+            transport.assert_events(&[Post]);
+        }
+    }
+
+    #[test]
+    fn retry_http_exhaustion_returns_last_error_without_final_wait() {
+        let transport =
+            ScriptedTransport::new([500, 502, 503, 529].map(|status| Ok(response(status, None))));
+        let error = transport
+            .run(&[1, 2, 3])
+            .expect_err("four failures exhaust budget");
+        assert!(matches!(error, Error::Internal { .. }));
+        assert_eq!(error.inner_message(), "OpenRouter error 529: body 529");
+        transport.assert_events(&[
+            Post,
+            Jitter,
+            wait(251),
+            Post,
+            Jitter,
+            wait(502),
+            Post,
+            Jitter,
+            wait(1003),
+            Post,
+        ]);
+    }
+
+    #[test]
+    fn retry_transport_exhaustion_preserves_last_error_and_source() {
+        let transport = ScriptedTransport::new([
+            Err(Error::transport("first failure")),
+            Err(Error::transport("second failure")),
+            Err(Error::transport("third failure")),
+            Err(Error::transport_with_source(
+                "terminal transport failure",
+                std::io::Error::other("last cause"),
+            )),
+        ]);
+        let error = transport
+            .run(&[1, 2, 3])
+            .expect_err("four failures exhaust budget");
+        assert!(matches!(error, Error::Transport { .. }));
+        assert_eq!(error.inner_message(), "terminal transport failure");
+        assert_eq!(
+            std::error::Error::source(&error)
+                .expect("source retained")
+                .to_string(),
+            "last cause"
+        );
+        transport.assert_events(&[
+            Post,
+            Jitter,
+            wait(251),
+            Post,
+            Jitter,
+            wait(502),
+            Post,
+            Jitter,
+            wait(1003),
+            Post,
+        ]);
+    }
 
     fn texts(count: usize, bytes: usize) -> Vec<String> {
         (0..count).map(|_| "x".repeat(bytes)).collect()

@@ -198,3 +198,31 @@ Cargo-native opt-in selection replaces the initially planned metadata selector.
   Restore mutations before final affected suites/full+perf Clippy/fmt, native
   CI and fresh task/final reviews. Prepare a green PR; merge human-only.
   Improved sensitivity is separate from any whole-CI timing claim.
+
+
+## Delta 2026-11-09 — C9: deterministic HTTP retry policy
+
+- **FR-28:** Keep the public synchronous retry entry, transport/client wiring,
+  four total attempts, 250ms exponential base, 4s backoff cap, existing jitter
+  generation and 30s Retry-After cap unchanged. A private per-call sleep/jitter
+  boundary supplies the actual production functions; no public API, global
+  clock, config, dependency or workflow change.
+- **FR-29:** Record ordered POST/jitter/sleep events without wall-clock waits.
+  Cover absent/zero/nonzero/at/over-cap Retry-After on429, cap before jitter,
+  fallback progression through header overrides and transport failures, every
+  documented retryable status, immediate2xx/nonretryable termination, four-try
+  HTTP/transport exhaustion and the last error category/message/source. Every
+  attempt must retain URL/headers/body. Expected delays are literal values,
+  independent of the implementation's constants/calculation. The4s backoff cap
+  is unreachable in the existing four-attempt budget and stays unchanged.
+- **FR-30:** Move the two real-wait client exhaustion cases into stronger unit
+  policy coverage. Retain ordinary client wiring through a503 retry/success
+  smoke, accurate429 retry smoke, nonretryable errors, recorded provider
+  request/response fixtures and blocking guard. Unit policy tests remain in
+  required cli-full native CI; no budgets/baselines/feature routing changes.
+- **SC-12:** Demonstrate the old zero-header test passing when Retry-After is
+  ignored. New tests detect controlled header/cap/backoff/jitter/wait/budget/
+  last-error violations by their expected failures. Restore source before
+  full library/provider-related suites, full/perf Clippy and fmt. Record
+  execution separately from preparation and account for test inventory changes.
+  Fresh task/final review and native CI pass; prepare a green PR, human merge.

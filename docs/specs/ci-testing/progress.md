@@ -169,3 +169,29 @@
   Fresh task/final review and native PR CI follow at close-out.
   Ruling: fresh C8 review — Spec PASS / Quality APPROVED; findings none.
   Final branch review and native PR CI remain pending for close-out.
+
+
+## Delta 2026-11-09 — C9
+
+- Task C9: complete (local verification); base revision7317eeb (#94 merged).
+  Original hybrid_openrouter20passed1.88s; its zero-header Retry-After case
+  still passes when the header is ignored, demonstrating the old blind spot.
+  Source restored. RED missing private timing helper (E0425); GREEN six new
+  policy tests0.00s. Production delegates to the same loop with actual sleep
+  and existing jitter, retaining defaults/statuses/error mapping and API.
+  Ordered literal traces cover header zero/nonzero/cap/fallback, mixed retries,
+  backoff progression, jitter, immediate terminal paths and four-try exhaustion.
+  The final transport error retains its category/message/source.
+  All8mutants fail at runtime: ignored/uncapped header, frozen backoff,
+  omitted jitter/wait, extra attempt, previous error, wait after exhaustion.
+  Candidate source restored byte-for-byte before final checks.
+  Full library260passed36.99s; related config31/hybrid_config13/hybrid_models4/
+  hybrid_openrouter18passed (326total). Selected prepare52.49s/inventory1.26s/
+  execute38.27s; OpenRouter execution0.33s. Inventory delta exactly six units
+  added, two exhaustion integrations moved, one429 smoke rename; other selected
+  names retained. Default503 production-wait smoke and provider fixtures stay.
+  Full/perf Clippy, fmt and diff checks pass. No new dependencies/public API,
+  workflow/config/default/budget/baseline changes; no whole-CI speedup claim.
+  Fresh task/final reviews and native PR CI follow at close-out.
+  Ruling: fresh C9 review — Spec PASS / Quality APPROVED; findings none.
+  Final branch review and native PR CI remain pending for close-out.
