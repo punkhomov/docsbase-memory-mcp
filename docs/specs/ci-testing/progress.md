@@ -72,3 +72,25 @@
   for a recurrence and does not diagnose/fix the original termination cause.
   Ruling: fresh C4 review — Spec PASS / Quality APPROVED; findings none.
   Final-head native CI remains pending; original macOS cause remains unknown.
+
+## Delta 2026-11-09 — C5
+
+- Task C5: complete (local verification) on29ea686 (#90 merged).
+  Replace the fixed30s lexical
+  non-publication wait with observed warm calls and worker completion. Keep a
+  real default ANN threshold test while reducing file count; no runtime knob,
+  feature/profile, performance-budget or workflow change planned.
+  Baseline original pair:2passed,68.11s execution (2.20s Cargo preparation).
+  Initial four policy/cleanup cases:4passed,0.61s execution. Real below/at-default
+  boundary:1passed,21.07s, with one file and asserted DB chunk counts.
+  Full cli-full Clippy and explicit perf Clippy/fmt pass. All eight controlled
+  mutations are caught by the expected assertions: unconditional/no warm,
+  ignored enabled flag, skipped project/disk cleanup, early returns after warm
+  or project-cleanup error, and lowered constructor threshold. Source restored
+  byte-for-byte. Final restored library suite:254passed/0failed,38.05s.
+  Relevant integration suites pass: config_runtime8, hybrid_jobs4, mcp_registry18.
+  Final restored-source full/explicit-perf Clippy and fmt clean. No dependency,
+  workflow, baseline or numeric runtime-default/budget changes. Fresh C5 and
+  final branch reviews/native PR CI follow at close-out.
+  Ruling: fresh C5 review — Spec PASS / Quality APPROVED; findings none.
+  Native PR CI and final branch review remain pending for PR close-out.

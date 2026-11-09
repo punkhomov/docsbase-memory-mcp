@@ -87,3 +87,35 @@ Cargo-native opt-in selection replaces the initially planned metadata selector.
   neither diagnostics nor a passing rerun may be described as fixing its cause.
 - **SC-6:** Existing install suite, fmt and Clippy pass; fresh task review and
   final-head native CI pass. No production change or new retry/timeout.
+
+## Delta 2026-11-09 — C5: observable daemon ANN refresh
+
+- **FR-13:** Preserve refresh policy and behavior: a configured embedding
+  warms only when hybrid is enabled and ranking is RRF; use the resolved model
+  and project. Configuration errors/missing embedding still skip the worker.
+  Warm and project-cleanup failures must not suppress subsequent cleanup.
+  Existing callers keep detaching the background worker; defaults and config
+  resolution remain unchanged.
+- **FR-14:** Give the private refresh boundary a completion handle and an
+  injectable warm operation. Tests observe the actual worker/config/cleanup
+  path without global hooks. A gated positive control proves the worker runs
+  asynchronously and cleanup follows warm. Negative lexical/default-lexical
+  and disabled-hybrid checks prove zero warm calls after confirmed completion,
+  instead of waiting a fixed interval for absence of READY.
+- **FR-15:** Verify real stale-temp cleanup and disk-budget cleanup, including
+  continuation after injected warm failure and real project-cleanup failure.
+  Use a small per-fixture disk budget, not a public test-only config setting.
+- **FR-16:** Retain real default ANN admission coverage: below ANN_MIN_VECTORS
+  remains exact; at the threshold refresh builds/publishes an ANN. Produce the
+  corpus in one Markdown file and verify actual stored chunk counts. Observe
+  completion passively so the test cannot start the build it claims to detect.
+  Keep existing large recall/scale tests and numeric thresholds unchanged.
+- **FR-17:** No new dependencies, jobs, public API/config knobs or global test
+  state. Any remaining timeouts are real watchdogs that finish on observed
+  progress; no performance-policy or numeric budget relaxation.
+- **SC-7:** MSRV cli-full policy/default-boundary tests pass. Controlled policy
+  and cleanup mutations fail their named tests; restore source before final
+  verification. Record baseline/after execution separately from compilation.
+  Full/explicit-performance Clippy, fmt and native CI pass.
+- **SC-8:** Fresh C5 task and final branch reviews have no unresolved
+  Critical/Important findings. Prepare a green PR; merging stays human-only.
