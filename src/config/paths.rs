@@ -83,8 +83,18 @@ pub(crate) fn with_config_write_lock<T>(
     path: &Path,
     f: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
+    with_config_write_lock_with_wait(path, f, std::thread::sleep)
+}
+
+/// Per-call retry seam; production uses the same real backoff as before.
+/// `wait` runs only after a failed OS-lock attempt, never while holding it.
+pub(crate) fn with_config_write_lock_with_wait<T>(
+    path: &Path,
+    f: impl FnOnce() -> anyhow::Result<T>,
+    wait: impl FnMut(Duration),
+) -> anyhow::Result<T> {
     let lock_dir = data_dir()?.join("locks");
-    with_config_write_lock_in(&lock_dir, path, f)
+    with_config_write_lock_in(&lock_dir, path, f, wait)
 }
 
 /// `with_config_write_lock` with an explicit lock directory (tests pass a
@@ -93,6 +103,7 @@ fn with_config_write_lock_in<T>(
     lock_dir: &Path,
     path: &Path,
     f: impl FnOnce() -> anyhow::Result<T>,
+    mut wait: impl FnMut(Duration),
 ) -> anyhow::Result<T> {
     std::fs::create_dir_all(lock_dir)
         .map_err(|err| anyhow::anyhow!("create {}: {err}", lock_dir.display()))?;
@@ -107,7 +118,7 @@ fn with_config_write_lock_in<T>(
     for _ in 0..CONFIG_LOCK_RETRIES {
         match lock.try_write() {
             Ok(_guard) => return f(),
-            Err(_) => std::thread::sleep(CONFIG_LOCK_RETRY_DELAY),
+            Err(_) => wait(CONFIG_LOCK_RETRY_DELAY),
         }
     }
     Err(anyhow::anyhow!(
@@ -143,11 +154,9 @@ mod tests {
     fn config_write_lock_serializes_and_releases() {
         let dir = tempfile::TempDir::new().expect("tmp");
         let lock_dir = dir.path().join("locks");
-        // Project-scoped target (C1): the lock must not appear next to it.
         let project = dir.path().join("project");
         std::fs::create_dir_all(&project).expect("project dir");
         let path = project.join(".docsbase.toml");
-        // Another writer (simulated) holds the exclusive lock.
         std::fs::create_dir_all(&lock_dir).expect("lock dir");
         let lock_path = config_lock_path(&lock_dir, &path);
         let file = std::fs::OpenOptions::new()
@@ -158,18 +167,65 @@ mod tests {
             .expect("lock open");
         let mut held = FdRwLock::new(file);
         let guard = held.try_write().expect("first writer holds");
-        let err = with_config_write_lock_in(&lock_dir, &path, || Ok(()))
-            .expect_err("contended write fails after bounded retries");
+        let mut waits = Vec::new();
+        let mut writes = 0;
+        let err = with_config_write_lock_in(
+            &lock_dir,
+            &path,
+            || {
+                writes += 1;
+                Ok(())
+            },
+            |delay| waits.push(delay),
+        )
+        .expect_err("contended write fails after bounded retries");
         assert!(
             err.to_string().contains("another docsbase process"),
             "{err}"
         );
+        assert_eq!(writes, 0, "exhausted lock must not execute the write");
+        assert_eq!(
+            waits,
+            vec![CONFIG_LOCK_RETRY_DELAY; CONFIG_LOCK_RETRIES as usize],
+            "every failed attempt must request the configured retry delay"
+        );
         drop(guard);
-        with_config_write_lock_in(&lock_dir, &path, || Ok(())).expect("succeeds after release");
-        // C1: no stray sibling lock in the project root.
+        waits.clear();
+        with_config_write_lock_in(
+            &lock_dir,
+            &path,
+            || {
+                writes += 1;
+                Ok(())
+            },
+            |delay| waits.push(delay),
+        )
+        .expect("succeeds after release");
+        assert_eq!(writes, 1);
+        assert!(waits.is_empty(), "uncontended acquisition must not wait");
+
+        // A wait callback can release a real lock without consuming backoff.
+        let mut guard = Some(held.try_write().expect("hold for retry handoff"));
+        let value = with_config_write_lock_in(
+            &lock_dir,
+            &path,
+            || {
+                writes += 1;
+                Ok(17)
+            },
+            |delay| {
+                waits.push(delay);
+                drop(guard.take().expect("only the first attempt is contended"));
+            },
+        )
+        .expect("acquires after the first retry releases the lock");
+        assert_eq!(value, 17);
+        assert_eq!(writes, 2, "successful retry must execute the write once");
+        assert_eq!(waits, vec![CONFIG_LOCK_RETRY_DELAY]);
+        assert!(guard.is_none());
         assert!(
             !project.join(".docsbase.toml.lock").exists(),
-            "no sibling lock file in the project root"
+            "no sibling lock file"
         );
     }
 

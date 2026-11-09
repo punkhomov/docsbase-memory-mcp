@@ -119,3 +119,29 @@
   Fresh task/final reviews and native CI follow at PR close-out.
   Ruling: fresh C6 review — Spec PASS / Quality APPROVED; findings none.
   Final branch review and native PR CI remain pending for close-out.
+
+
+## Delta 2026-11-09 — C7
+
+- Task C7: complete (local verification); base revision d0fbc60 (#92 merged).
+  Old writer test1passed0.42s; the stale-pre-lock-read mutant also passes
+  it0.42s, proving the old ordering can miss lost updates. Original source
+  restored. RED new tests lack the wait seams (E0425/E0061). GREEN new writer
+  test1passed0.02s; paths group3passed0.01s plus child wrapper verification.
+  A holds a real lock until B confirms failed acquisition, then publishes
+  and releases before B's next attempt. Literal full-TOML expectations retain
+  both stages/values/ranking/unrelated providers; project test uses the default
+  production entry. Per-call FnMut wait callbacks record policy and control
+  retries; production still sleeps with the same50x20ms policy and OS guards.
+  All5mutants fail the expected assertions: stale read, early guard drop,
+  omitted wait, write after exhaustion, wrong delay. Both candidate sources
+  restored byte-for-byte and checked before final verification.
+  Restored full library254passed0failed51.06s; CLI integrations39passed
+  (cli_models23/config_runtime8/connect8). Full/perf Clippy and fmt/diff pass.
+  No dependency/default/budget/workflow/baseline changes; actual CLI writes,
+  data-dir routing and read/merge/fsync/rename behavior preserved. This fixes
+  test sensitivity, not a newly reproduced production lost-update defect.
+  Fresh task/final reviews and native PR CI follow at close-out.
+  Ruling: fresh C7 review — Spec PASS / Quality APPROVED. Minor: identify
+  d0fbc60 as the base, not C7's completed revision; wording corrected in-task.
+  Native CI/final branch review remain pending for PR close-out.

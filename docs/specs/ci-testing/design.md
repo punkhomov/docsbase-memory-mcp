@@ -103,3 +103,28 @@ plus explicit insufficient-candidate diagnostics and exact fallback results.
 Temporary timing probes are local verification evidence, not permanent test
 instrumentation or CI performance gates. Controlled mutations validate the
 oracles, then restore source byte-for-byte. No workflow or production edits.
+
+## Delta 2026-11-09 — C7
+
+Thread a per-call `FnMut(Duration)` wait function through the config-lock
+implementation and private model-write boundary. Production passes
+`std::thread::sleep`, retaining the current retry policy and real fd-lock guard.
+This mirrors the existing watcher retry seam without fake process-global time.
+The lock component owns retry values; the model test only observes contention.
+
+A holds the real lock before publishing. B's first failed lock attempt calls
+its local wait observer, acknowledges contention and waits on a channel. A
+publishes while retaining the lock, exits the critical section, then releases
+B's wait gate. B must acquire and read the new state. Independent literal TOML
+expectations check both complete stages plus unrelated fields/ranking; the
+project write test also exercises the ordinary entry with its real default wait.
+The shared environment guard protects ambient data-dir lookup without adding
+data-dir overrides. Gate sender drop unblocks a failing child; watchdogs and
+completion observation bound waits before joining.
+
+Lock-policy tests supply an explicit fixture lock directory, keep real held
+OS locks and record delays. They test exhaustion without invoking the operation,
+release/reacquire, and release during a retry; no real backoff is consumed.
+The original sleep test writes A before delaying B, so a pre-lock read may
+already see A and incorrectly pass. Record that blind spot as test weakness,
+not a newly demonstrated production defect. Watcher/backoff work is deferred.
