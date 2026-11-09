@@ -45,3 +45,74 @@ Plan: [tasks.md](tasks.md). Requirements: [requirements.md](requirements.md).
   scoped re-review PASS, все9ADDRESSED, новых Critical/Important нет. Deferred minors:none.
   Native CI/final review pending PR. Runtime FR/SC-3–SC-5 здесь не реализованы;
   #78 остаётся открытым, продолжение — CF1/CF2 и отдельный #66.
+
+## 2026-11-09 — CF1: typed resolution foundation
+
+- Добавлены `schema`, `bootstrap`, `resolve`, storage/dense owner specs и hybrid
+  owner catalog. `Resolution` строит defaults один раз, stages patches atomically,
+  сохраняет scopes/units/origins и выдаёт immutable validated `Resolved<T>`.
+- Legacy Config file entrypoints теперь adapters к typed resolution. v1 bool/table
+  replacement, provider-aware defaults, feature-off parsing и global-before-project
+  validation сохраняются. Plain supplied snapshots явно `ProvidedSnapshot`.
+- Ruling: `hybrid/config.rs` добавлен к planned Modify list для owner locality;
+  common loader не хранит hybrid templates/default callbacks. `fields()` агрегирует
+  descriptors owners; neutral impact DTO не выполняет планирование/inspection.
+- Ruling: storage/dense/read-pool patches typed-only; inactive TOML keys rejected.
+  Production runtime adoption и конфигурируемые budgets остаются CF2/CF6/#66.
+  Dense legacy vector fallback не объявляется strict-v2 global quota; zero disk
+  budget/backoff сохраняет legacy semantics. Новые settings не имеют Default.
+- Ruling: explicit injected bootstrap сохраняет dependency fallback policies;
+  Tokio malformed/zero становится redacted Admission. Никаких env writes,
+  credential reads, home lookup в deterministic Config defaults/overrides или
+  запуска providers/DB/models в resolver. CF13 runtime bootstrap ещё впереди.
+- TDD: unresolved CF1 public API compile RED (`config_resolution`, exit101) до
+  production modules; existing v1 assertions — characterization, не behavioral RED.
+  Затем behavioral RED `oversized_db_busy_timeout_is_admission_before_rusqlite_can_panic`
+  показал ошибочное принятие 2147483648ms. Owner bound check исправляет будущую
+  rusqlite panic; zero timeout допустим. Focused/full/lean validation и fresh review
+  будут зафиксированы после завершения проверок. #78 остаётся открытым.
+
+- Task CF1: complete (local implementation, 2026-11-09; validated source
+  `194cbb1fcda07d9e311557fa33beeb2c6e24d32a`). Новый API compile RED и behavioral
+  busy-timeout RED зафиксированы до соответствующего GREEN. Все восемь именованных
+  CF1 regressions присутствуют; всего19 новых tests. Focused cli-full:31 existing
+  config +19 новых GREEN; lean:25 existing config +19 новых GREEN.
+- Validation: `cargo test --locked --features cli-full` — exit0,908 selected tests
+  passed/13ignored/0failed; вложенный self-test subprocess не прибавлен второй раз.
+  `metrics_match_baseline` GREEN, baseline/snapshots не менялись. Full и lean
+  `cargo clippy --locked [--features cli-full] --all-targets -- -D warnings` GREEN;
+  `cargo fmt --check`, `git diff --check`,6 Python observer tests GREEN. Rust1.88,
+  jobs4; isolated config/temp roots, существующий CI latency slack3.
+- Native evidence (source194cbb1, coordinator-verified Actions artifacts): required
+  docs/linux/macos/windows4/4GREEN; Linux908 selected +2 static artifact tests,
+  macOS904, Windows893,0failed/13ignored. Inventory — exact parent superset +19 на
+  каждой ОС; прежние tests не удалены. Fresh task/final review и delivery состояния
+  ledger commit остаются pending; coordinator закрепит их в PR evidence.
+- Ruling: это завершение CF1 foundation, не всех runtime FR-3/SC-3 и не #78.
+  Db/dense consumers, read pool, env adoption, migration/planner/consent/recovery
+  остаются CF2/CF6/#66/CF13 и последующим задачам; inactive file keys не добавлены.
+  Deferred minors на момент local handoff: none; fresh review ещё не выполнен.
+
+- CF1 task review: один Important I1 — public HybridSpec snapshot import принимал
+  unknown providers и malformed provider-specific stage settings. Regression RED
+  на source f133876: full imported tests3failed/1passed, lean3failed/0passed.
+- I1 fix: только strict `HybridSpec::validate` дополнительно использует pure owner
+  provider registry resolution с explicit model/dimensions/normalize/window.
+  Никаких defaults reread, credentials/env/provisioning/model/runtime construction.
+  Ruling: legacy `Config::validate` и private ConfigSpec сохраняют прежнюю structural
+  compatibility; plain `Config::for_project` acceptance закреплена отдельным тестом.
+  Новый public `Resolved<HybridCfg>` проверяет те же provider constraints, что patches.
+- I1 fix GREEN: focused config/config_resolution/hybrid_config — full31/24/13,
+  lean25/23/8; full/lean all-targets Clippy `-D warnings`, fmt/diff-check GREEN.
+  Новые tests покрывают unknown embedding/rerank provider, fastembed normalization,
+  dimensions/model/task mismatch, valid snapshots и прежнюю feature-off admission.
+  Локальный полный suite908 относится к source194cbb1; после fix полный suite
+  проверяется новым native CI на трёх ОС. Scoped re-review/final review и этот
+  новый native proof pending; #78/runtime adoption scope не меняется.
+
+- Final review Minor M1: addressed (2026-11-09). Design уточняет сохранённую v1
+  feature policy: ungated provider records и OpenRouter scalar resolution доступны
+  feature-off; fastembed stage resolution требует hybrid-local уже до construction.
+  Ruling: это docs correction, Rust/тесты/поведение не меняются. Coordinator сообщил
+  native4/4GREEN для source5c6818f; scoped final re-review и required checks нового
+  docs HEAD ещё pending. Docs hygiene/diff-check GREEN; новые tests не нужны.

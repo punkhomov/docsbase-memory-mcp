@@ -55,7 +55,7 @@ pub enum Ranking {
 }
 
 /// Resolved hybrid configuration; the file-level forms (bool shorthand or
-/// table) are parsed in `crate::config`.
+/// table) are resolved by this component owner.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HybridCfg {
     /// Master switch; when false both stages stay off (the default).
@@ -157,6 +157,259 @@ impl Default for RerankerCfg {
             window: DEFAULT_RERANK_WINDOW,
         }
     }
+}
+
+/// Legacy v1 whole-value input. An absent layer is distinct from `Bool(false)`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+pub enum HybridPatch {
+    /// Both default stages when true; neither stage when false.
+    Bool(bool),
+    /// A table replaces the entire hybrid value, including absent stages.
+    Table(HybridTablePatch),
+}
+/// Optional fields in a v1 table; defaults are applied by the owner catalog.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HybridTablePatch {
+    /// Table form defaults to enabled.
+    pub enabled: Option<bool>,
+    /// Absent means no embedding stage in this replacement value.
+    pub embedding: Option<EmbeddingPatch>,
+    /// Absent means no reranker in this replacement value.
+    pub reranker: Option<RerankerPatch>,
+    /// Optional ranking mode.
+    pub ranking: Option<RankingPatch>,
+    /// Optional vector-cache policy.
+    pub cache: Option<CachePatch>,
+}
+/// File spelling of candidate ordering.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RankingPatch {
+    /// Lexical order.
+    Lexical,
+    /// Reciprocal rank fusion.
+    Rrf,
+}
+/// Optional embedding fields resolved using provider-owned model rules.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingPatch {
+    /// Provider name.
+    pub provider: Option<String>,
+    /// Provider model.
+    pub model: Option<String>,
+    /// Output width.
+    pub dimensions: Option<u32>,
+    /// Normalize output vectors.
+    pub normalize: Option<bool>,
+}
+/// Optional reranker fields.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RerankerPatch {
+    /// Provider name.
+    pub provider: Option<String>,
+    /// Provider model.
+    pub model: Option<String>,
+    /// Candidate count.
+    pub window: Option<u32>,
+}
+/// Optional legacy vector-cache policy, not a daemon-wide quota.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CachePatch {
+    /// Vector cache bytes.
+    pub max_bytes: Option<u64>,
+}
+
+use crate::config::bootstrap::DefaultsContext;
+use crate::config::schema::{
+    ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Scope, SettingsSpec,
+    SourceId, Unit,
+};
+
+/// Catalog of the three distinct v1 reset profiles, computed once per resolution.
+pub struct HybridDefaults {
+    disabled: HybridCfg,
+    enabled: HybridCfg,
+    table: HybridCfg,
+    embedding: EmbeddingCfg,
+    reranker: RerankerCfg,
+}
+/// Owner of legacy hybrid resolution; no provider/runtime is constructed here.
+pub struct HybridSpec;
+impl SettingsSpec for HybridSpec {
+    type Patch = HybridPatch;
+    type Settings = HybridCfg;
+    type Defaults = HybridDefaults;
+    const SCOPE: Scope = Scope::Project;
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::new("hybrid.enabled", Scope::Project, Unit::Boolean),
+        FieldSpec::new("hybrid.embedding.provider", Scope::Project, Unit::Name),
+        FieldSpec::new("hybrid.embedding.model", Scope::Project, Unit::Name),
+        FieldSpec::new("hybrid.embedding.dimensions", Scope::Project, Unit::Count),
+        FieldSpec::new("hybrid.embedding.normalize", Scope::Project, Unit::Boolean),
+        FieldSpec::new("hybrid.reranker.provider", Scope::Project, Unit::Name),
+        FieldSpec::new("hybrid.reranker.model", Scope::Project, Unit::Name),
+        FieldSpec::new("hybrid.reranker.window", Scope::Project, Unit::Count),
+        FieldSpec::new("hybrid.ranking", Scope::Project, Unit::Name),
+        FieldSpec::new("hybrid.cache.max_bytes", Scope::Project, Unit::Bytes),
+    ];
+    fn defaults(_: &DefaultsContext) -> Self::Defaults {
+        let embedding = EmbeddingCfg::default();
+        let reranker = RerankerCfg::default();
+        let disabled = HybridCfg::default();
+        let table = HybridCfg {
+            enabled: true,
+            ..disabled.clone()
+        };
+        let enabled = HybridCfg {
+            embedding: Some(embedding.clone()),
+            reranker: Some(reranker.clone()),
+            ..table.clone()
+        };
+        HybridDefaults {
+            disabled,
+            enabled,
+            table,
+            embedding,
+            reranker,
+        }
+    }
+    fn initial(defaults: &Self::Defaults) -> HybridCfg {
+        defaults.disabled.clone()
+    }
+    fn overlay(
+        settings: &mut HybridCfg,
+        patch: HybridPatch,
+        defaults: &Self::Defaults,
+        source: &SourceId,
+        origins: &mut Provenance,
+    ) -> Result<()> {
+        *settings = match patch {
+            HybridPatch::Bool(true) => defaults.enabled.clone(),
+            HybridPatch::Bool(false) => defaults.disabled.clone(),
+            HybridPatch::Table(table) => {
+                let mut value = defaults.table.clone();
+                if let Some(enabled) = table.enabled {
+                    value.enabled = enabled;
+                }
+                if let Some(embedding) = table.embedding {
+                    value.embedding = Some(resolve_embedding(
+                        embedding
+                            .provider
+                            .as_deref()
+                            .unwrap_or(&defaults.embedding.provider),
+                        embedding.model.as_deref().or_else(|| {
+                            (embedding
+                                .provider
+                                .as_deref()
+                                .unwrap_or(&defaults.embedding.provider)
+                                == PROVIDER_OPENROUTER)
+                                .then_some(defaults.embedding.model.as_str())
+                        }),
+                        embedding.dimensions.or_else(|| {
+                            (embedding
+                                .provider
+                                .as_deref()
+                                .unwrap_or(&defaults.embedding.provider)
+                                == PROVIDER_OPENROUTER)
+                                .then_some(defaults.embedding.dimensions)
+                        }),
+                        embedding.normalize.unwrap_or(defaults.embedding.normalize),
+                    )?);
+                }
+                if let Some(reranker) = table.reranker {
+                    value.reranker = Some(resolve_reranker(
+                        reranker
+                            .provider
+                            .as_deref()
+                            .unwrap_or(&defaults.reranker.provider),
+                        reranker.model.as_deref().or_else(|| {
+                            (reranker
+                                .provider
+                                .as_deref()
+                                .unwrap_or(&defaults.reranker.provider)
+                                == PROVIDER_OPENROUTER)
+                                .then_some(defaults.reranker.model.as_str())
+                        }),
+                        reranker.window.unwrap_or(defaults.reranker.window),
+                    )?);
+                }
+                if let Some(ranking) = table.ranking {
+                    value.ranking = match ranking {
+                        RankingPatch::Lexical => Ranking::Lexical,
+                        RankingPatch::Rrf => Ranking::Rrf,
+                    };
+                }
+                if let Some(cache) = table.cache
+                    && let Some(bytes) = cache.max_bytes
+                {
+                    value.cache.max_bytes = bytes;
+                }
+                value
+            }
+        };
+        // Wholesale replacement resets even the provenance of absent stages.
+        origins.replace_group("hybrid.", source)
+    }
+    fn validate(settings: &HybridCfg, _: &Capabilities) -> Result<()> {
+        validate_settings(settings)?;
+        // Snapshot import has no patch-resolution step. Validate every supplied
+        // stage through the same pure provider rules, using only explicit values
+        // so this boundary neither fills defaults nor probes provisioning.
+        if let Some(embedding) = &settings.embedding {
+            resolve_embedding(
+                &embedding.provider,
+                Some(&embedding.model),
+                Some(embedding.dimensions),
+                embedding.normalize,
+            )?;
+        }
+        if let Some(reranker) = &settings.reranker {
+            resolve_reranker(&reranker.provider, Some(&reranker.model), reranker.window)?;
+        }
+        Ok(())
+    }
+    fn impact(old: Option<&HybridCfg>, next: &HybridCfg, _: &ArtifactFacts) -> ComponentImpact {
+        ComponentImpact::between(old, next)
+    }
+}
+/// Structural admission only; stage provisioning belongs to runtime construction.
+///
+/// # Errors
+/// Invalid cache capacity, dimensions, window or stage combination.
+pub fn validate_settings(settings: &HybridCfg) -> Result<()> {
+    if settings.cache.max_bytes == 0 {
+        return Err(Error::Admission {
+            message: "hybrid.cache.max_bytes must be > 0".to_owned(),
+        });
+    }
+    if settings.enabled && settings.ranking == Ranking::Rrf && settings.embedding.is_none() {
+        return Err(Error::Admission {
+            message: "hybrid.ranking = \"rrf\" requires the embedding stage (FR-17)".to_owned(),
+        });
+    }
+    if let Some(embedding) = &settings.embedding
+        && embedding.dimensions == 0
+    {
+        return Err(Error::Admission {
+            message: "hybrid.embedding.dimensions must be > 0".to_owned(),
+        });
+    }
+    if let Some(reranker) = &settings.reranker
+        && !(MIN_RERANK_WINDOW..=MAX_RERANK_WINDOW).contains(&reranker.window)
+    {
+        return Err(Error::Admission {
+            message: format!(
+                "hybrid.reranker.window must be between {MIN_RERANK_WINDOW} and {MAX_RERANK_WINDOW}, got {}",
+                reranker.window
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// One `[providers.<name>]` record, provider-agnostic: the common `enabled`

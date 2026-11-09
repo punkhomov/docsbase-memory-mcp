@@ -309,3 +309,17 @@ SC-3–SC-5 фактически доказаны. Один source scan не з�
 #67/#68 могут идти отдельным потоком. Во время search split #66 implementation
 #67/#68 не меняет тот же pipeline параллельно. CF9 не откладывает их исправления:
 adoption обновляется по фактически merged реализации. #80 не блокирует эту работу.
+
+## Delta 2026-11-09 — границы реализации CF1
+
+- В Modify CF1 добавлен `src/hybrid/config.rs`: owner catalog, optional raw patches
+  и structural validation живут рядом с hybrid/provider resolution.
+- Db/read-pool/dense overrides в CF1 typed-only; новые file keys остаются rejected
+  до реальных consumers CF2/CF6/#66. Scope checks выполняются общим `Resolution`.
+- Legacy plain snapshot получает `ProvidedSnapshot`, typed snapshot сохраняет
+  provenance. Explicit-path adapters валидируют global до project; infallible
+  `with_overrides` не изображается как validated `Resolved`.
+- Дополнительный behavioral RED: busy_timeout выше `i32::MAX` milliseconds должен
+  отклоняться owner validation до будущего вызова rusqlite, который иначе panic.
+- Bootstrap не включает consumer adoption CF13: whitelist capture/validation pure,
+  dependency-specific fallback semantics сохранены; credentials не читаются.
