@@ -150,3 +150,29 @@ debounce and schema admission semantics; no fixed quiet period or global clock.
 C8 healthy readiness permits the documented temporary rebuild marker during
 commit recovery, as existing MCP watcher tests do; unexpected errors still fail,
 and successful committed data plus search remain mandatory.
+
+
+## Delta 2026-11-09 — C9
+
+The public post_with_retry delegates to one private generic helper with local
+FnMut(Duration) sleep and FnMut()->Duration jitter callbacks. The existing loop
+and numeric policy are unchanged; production passes thread::sleep and the
+existing time-derived jitter. No dynamic clock object or public client options.
+
+A scripted Send+Sync transport owns a FIFO of results and an ordered event log
+behind per-fixture mutexes. Every POST checks literal URL, headers and body;
+unexpected GET/extra requests fail. Timing callbacks append jitter/sleep events
+and consume explicit jitter samples. Literal traces check that waits occur
+between requests, including mixed failure types and header overrides, and that
+success/nonretryable/final failures do not request another wait or jitter.
+HTTP and transport exhaustion have distinct final failures; the transport error
+retains its underlying source. No elapsed-time assertion or real sleep is used
+by policy tests. Existing4s backoff cap is preserved, not made reachable by
+inventing a configurable attempt budget.
+
+Client integrations retain the public default entry and recorded responses:
+one503-success case consumes actual production backoff, while the429 case
+asserts only client retry/result behavior and is named accordingly. Remove two
+redundant slow exhaustion integrations after adding stronger policy units.
+Record the old test's false positive and controlled new-test mutation results;
+this is test sensitivity work, not a demonstrated runtime retry defect.

@@ -105,3 +105,18 @@ README edit plus a fresh witness path; assert schema, committed data and physica
 index invariants without fixed sleeps. Controlled mutations verify sensitivity;
 restore source and run affected tests/lints/reviews/native CI.
 **Acceptance:** FR-25–FR-27; SC-11. No production or CI routing changes.
+
+
+### C9 — Deterministic HTTP retry policy and accurate client smoke
+
+**Delta:** 2026-11-09. **New crates/packages:** none.
+**Scope:** src/hybrid/wire.rs private timing seam/unit tests,
+tests/hybrid_openrouter.rs, CI-testing specs/ledger and docs/ci.md.
+**Steps:** measure existing integrations and demonstrate the zero-header test's
+blind spot; RED/GREEN a private sleep/jitter seam with unchanged production
+policy. Assert ordered requests/delays/jitter, header cap/overrides, retryable
+statuses, terminal paths and last-error source. Retain default client wiring
+smoke and move two real-wait exhaustion tests into stronger units. Controlled
+mutations, source restoration, inventory accounting and affected suite/lint
+verification. Fresh task/final reviews and native PR CI; never merge.
+**Acceptance:** FR-28–FR-30; SC-12.
