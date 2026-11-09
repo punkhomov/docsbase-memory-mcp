@@ -519,17 +519,31 @@ fn apply_stage_locked(
     stage_key: &str,
     stage: toml::map::Map<String, toml::Value>,
 ) -> anyhow::Result<toml::Value> {
-    crate::config::paths::with_config_write_lock(path, || {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| {
-                Error::internal_with_source(format!("create {}", parent.display()), err)
-            })?;
-        }
-        let current = read_config_table(path)?;
-        let table = merge_stage(current.as_ref(), stage_key, stage)?;
-        write_project_toml(path, current.as_ref(), &table)?;
-        Ok(table)
-    })
+    apply_stage_locked_with_wait(path, stage_key, stage, std::thread::sleep)
+}
+
+/// Uses the real write-lock path with a per-call retry observer for tests.
+fn apply_stage_locked_with_wait(
+    path: &std::path::Path,
+    stage_key: &str,
+    stage: toml::map::Map<String, toml::Value>,
+    wait: impl FnMut(std::time::Duration),
+) -> anyhow::Result<toml::Value> {
+    crate::config::paths::with_config_write_lock_with_wait(
+        path,
+        || {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    Error::internal_with_source(format!("create {}", parent.display()), err)
+                })?;
+            }
+            let current = read_config_table(path)?;
+            let table = merge_stage(current.as_ref(), stage_key, stage)?;
+            write_project_toml(path, current.as_ref(), &table)?;
+            Ok(table)
+        },
+        wait,
+    )
 }
 
 /// Reads a config file as an untyped table by path (project or global).
@@ -1576,6 +1590,7 @@ mod tests {
 
     #[test]
     fn project_write_roundtrip_keeps_unrelated_keys_and_other_stage() {
+        let _env_guard = env_guard();
         let dir = tempfile::TempDir::new().expect("tmp");
         let path = dir.path().join(".docsbase.toml");
         std::fs::write(
@@ -1583,15 +1598,12 @@ mod tests {
             "max_file_size = 1\n[hybrid]\nranking = \"rrf\"\n[hybrid.reranker]\nprovider = \"openrouter\"\nmodel = \"old/r\"\nwindow = 20\n",
         )
         .expect("seed");
-        let existing = read_project_toml(&path).expect("read").expect("some");
-        // Default project scope: write only the embedding stage.
-        let table = merge_stage(
-            Some(&existing),
+        apply_stage_locked(
+            &path,
             "embedding",
             embedding_stage("openrouter", "new/e", 256),
         )
-        .expect("merge");
-        write_project_toml(&path, Some(&existing), &table).expect("write");
+        .expect("write under the default lock policy");
         let reloaded: toml::Value =
             toml::from_str(&std::fs::read_to_string(&path).expect("read back")).expect("reparse");
         assert_eq!(
@@ -1630,47 +1642,68 @@ mod tests {
 
     #[test]
     fn concurrent_global_writers_both_survive() {
-        // Round-2 P1 regression: a slow writer holding the config lock must
-        // not cause a second writer to drop its stage. Writer A takes its
-        // snapshot, writes `embedding`, then deliberately holds the lock;
-        // writer B starts after A's snapshot (so its own stale snapshot
-        // misses `embedding`) and must re-read under the lock — the final
-        // file keeps both stages. (Old code: B wrote from its pre-lock
-        // snapshot and erased A's stage.)
+        use std::sync::mpsc;
         use std::time::Duration;
+
+        let _env_guard = env_guard();
+        let watchdog = Duration::from_secs(300);
         let dir = tempfile::TempDir::new().expect("tmp");
         let path = dir.path().join("config.toml");
-        let path_a = path.clone();
-        let writer_a = std::thread::spawn(move || {
-            crate::config::paths::with_config_write_lock(&path_a, || {
-                let current = read_config_table(&path_a)?;
-                let table = merge_stage(
-                    current.as_ref(),
-                    "embedding",
-                    embedding_stage("fastembed", "bge", 384),
-                )?;
-                write_project_toml(&path_a, current.as_ref(), &table)?;
-                // Hold the lock so B (below) must wait and re-read.
-                std::thread::sleep(Duration::from_millis(400));
-                Ok(())
-            })
-            .expect("writer A");
-        });
-        // Start B after A's snapshot, while A holds the lock.
-        std::thread::sleep(Duration::from_millis(50));
-        apply_stage_locked(&path, "reranker", rerank_stage("fastembed", "jina", 50))
-            .expect("writer B");
-        writer_a.join().expect("join A");
-        let reloaded = parse(&std::fs::read_to_string(&path).expect("read back"));
-        let hybrid = reloaded.get("hybrid").expect("hybrid table");
-        assert!(
-            hybrid.get("embedding").is_some(),
-            "embedding stage survives: {reloaded:?}"
+        let seed = "max_file_size = 1\n[providers.fastembed]\nenabled = true\n[hybrid]\nranking = \"rrf\"\n";
+        std::fs::write(&path, seed).expect("seed");
+        let (contended, observe_contention) = mpsc::channel();
+        let (resume, proceed) = mpsc::channel();
+        let (completed, observe_completion) = mpsc::channel();
+
+        // A owns the real lock but cannot publish until B has tried it.
+        let writer_b = crate::config::paths::with_config_write_lock(&path, || {
+            let current = read_config_table(&path)?;
+            let table = merge_stage(
+                current.as_ref(),
+                "embedding",
+                embedding_stage("fastembed", "bge", 384),
+            )?;
+            let path_b = path.clone();
+            let writer_b = std::thread::spawn(move || {
+                let mut waiting = false;
+                let result = apply_stage_locked_with_wait(
+                    &path_b,
+                    "reranker",
+                    rerank_stage("fastembed", "jina", 50),
+                    |_| {
+                        assert!(!waiting, "B must acquire after A releases the lock");
+                        waiting = true;
+                        contended.send(()).expect("ack contention");
+                        // Sender drop also releases this gate if A panics.
+                        proceed.recv_timeout(watchdog).expect("A released its lock");
+                    },
+                );
+                let _ = completed.send(());
+                result
+            });
+            observe_contention
+                .recv_timeout(watchdog)
+                .expect("B must contend before A publishes");
+            assert_eq!(read_config_table(&path)?, Some(parse(seed)));
+            write_project_toml(&path, current.as_ref(), &table)?;
+            Ok(writer_b)
+        })
+        .expect("writer A");
+        // with_config_write_lock has returned: A's OS guard is now gone.
+        resume.send(()).expect("resume B");
+        observe_completion
+            .recv_timeout(watchdog)
+            .expect("B completes");
+        let finalized = writer_b.join().expect("join B").expect("writer B");
+        let expected = parse(
+            "max_file_size = 1\n[providers.fastembed]\nenabled = true\n[hybrid]\nenabled = true\nranking = \"rrf\"\n[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge\"\ndimensions = 384\nnormalize = true\n[hybrid.reranker]\nprovider = \"fastembed\"\nmodel = \"jina\"\nwindow = 50\n",
         );
-        assert!(
-            hybrid.get("reranker").is_some(),
-            "reranker stage survives: {reloaded:?}"
+        assert_eq!(
+            read_config_table(&path).expect("read back"),
+            Some(expected.clone()),
+            "both complete stages and unrelated config must survive contention"
         );
+        assert_eq!(finalized.get("hybrid"), expected.get("hybrid"));
     }
 
     #[test]

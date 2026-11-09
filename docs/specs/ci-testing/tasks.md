@@ -80,3 +80,16 @@ retaining document counts/dimensions/search windows and real build/load/search.
 Check controlled build-time/read-path/fallback mutations, restore source and
 verify target/related suites/lints. Fresh task/final review and native PR CI.
 **Acceptance:** FR-18–FR-20; SC-9. No whole-CI speedup claim without comparable data.
+
+### C7 — Deterministic config-writer interleaving and lock retries
+
+**Delta:** 2026-11-09. **New crates/packages:** none.
+**Scope:** src/cli/models.rs and src/config/paths.rs private lock/wait seams and
+unit tests; CI-testing specs/ledger and docs/ci.md.
+**Steps:** measure the old writer test and demonstrate its stale-read blind
+spot; thread a local wait callback with unchanged production sleeping/retries.
+Force real lock contention before A publishes; assert complete preserved TOML
+and cover the default entry. Record lock retry delays with real OS exclusion,
+including exhaustion and acquisition after release. Prove sensitivity with
+controlled mutations, restore source, verify suites/lints/reviews/native CI.
+**Acceptance:** FR-21–FR-24; SC-10. No watchdog tightening or runtime-policy change.

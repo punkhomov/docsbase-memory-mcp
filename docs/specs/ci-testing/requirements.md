@@ -145,3 +145,31 @@ Cargo-native opt-in selection replaces the initially planned metadata selector.
   explicit performance Clippy/fmt and native CI. Fresh task/final reviews have
   no unresolved Critical/Important findings; prepare a green PR, human-only merge.
   Shared-runner timings alone establish no overall CI speedup.
+
+## Delta 2026-11-09 — C7: deterministic config-writer and lock tests
+
+- **FR-21:** Preserve config-lock behavior: real fd-lock exclusion, data-dir
+  lock location/path naming, bounded retry count/delay, error propagation and
+  guard lifetime. A private/internal per-call wait seam uses `thread::sleep`
+  in production; tests may observe retries and advance by releasing a held
+  lock without waiting real time. No public configuration knob/global hook.
+- **FR-22:** Replace model-writer sleep ordering with an observed interleaving:
+  A owns the real lock and has not published its embedding; B attempts that
+  same lock and confirms contention; only then A publishes and releases; B
+  resumes, re-reads under the lock and preserves both stages. Verify complete
+  persisted values, unrelated sections and ranking, not mere stage presence.
+  Keep project/global write behavior and exercise the default production entry.
+  Channels/joins are per-fixture; errors/panics release gates, with real watchdogs.
+- **FR-23:** Lock-policy tests keep real OS locks but record requested waits.
+  Exhaustion must not run the write; every failed attempt requests the existing
+  delay; releasing the held lock during a retry permits the write exactly once.
+  Assert lock placement remains outside the project root. No fixed test sleep
+  or elapsed-time assertion establishes ordering or retry correctness.
+- **FR-24:** Keep read/merge/write/fsync/rename, provider validation and actual
+  CLI behavior unchanged. No dependencies, numeric defaults, performance-budget,
+  workflow or baseline changes. Watcher/HTTP-backoff audits remain separate.
+- **SC-10:** Reproduce the old test's blind spot with a pre-lock-read mutation;
+  the replacement detects stale-read, missing exclusion and retry-policy
+  violations by expected assertions. Restore source before final models/config
+  lock suites, relevant CLI integrations, full/perf Clippy and fmt. Native CI
+  and fresh task/final reviews pass; prepare a green PR, merge human-only.
