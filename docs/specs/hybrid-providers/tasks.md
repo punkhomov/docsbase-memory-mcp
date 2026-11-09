@@ -222,3 +222,15 @@ byte limit + per-project lease/pin.
 `cargo test --locked --test hybrid_ann`; ann-index scale test.
 
 **Depends:** T4/T9; blocks ann-index T9/T10.
+
+
+## Delta 2026-11-09 — T14: fix project runtime publication (#76)
+
+**Goal:** FR-19–FR-21 / SC-7: discard stale lazy stage work, serialize per-project
+reload, retain valid state on failure, consume paired config/stages.
+**New crates:** none. **Depends:** existing T7/T10; not blocked by #78.
+**Files:** `src/daemon/server.rs`, new `src/daemon/project_state_tests.rs`;
+`docs/CONFIG.md`; this spec requirements/design/tasks/progress.
+**Verify:** RED/GREEN event-controlled unit regressions; cli-full and lean
+unit/config/runtime/IPC/hybrid tests, required native CI, Clippy/fmt. Fresh task
+review, then whole-change final review. No baseline regeneration or live API.

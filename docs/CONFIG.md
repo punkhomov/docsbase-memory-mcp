@@ -16,6 +16,15 @@ Environment overrides (highest-priority directory resolution, used by tests):
 - `DOCSBASE_DATA_DIR` — installed binary + `install.json`
 - `DOCSBASE_CONFIG_DIR` — global `config.toml` location
 
+## Reloading configuration
+
+The daemon reads global configuration at startup; changing it requires a daemon
+restart. Project configuration is read again when a session opens that project.
+A successful reopen publishes the configuration and its validated hybrid stages
+together. A parse or stage-admission failure rejects the reopen and leaves the
+previous valid configuration, stages and watcher policy active. Requests that
+already captured the previous runtime can finish using it.
+
 ## Keys
 
 | Key | Default | Meaning |

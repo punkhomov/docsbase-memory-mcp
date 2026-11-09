@@ -255,3 +255,21 @@
   `READY` on success; a failed build keeps them for retry. Test
   `pinned_vectors_survive_the_byte_cap_until_unpinned`. ANN disk budget
   (ann-index T9) is separate: 4 GiB default.
+
+- Task T14: complete (implementation, 2026-11-09), issue #76, FR-19–FR-21 / SC-7.
+  Per-project state slots replace separate config/stage maps. Full reload is
+  serialized within a project; lazy builders validate the captured Config Arc
+  identity before using either their result or error. Search/backfill capture
+  the pair once; failed parse/admission preserves the previous runtime, watcher
+  config and cache policy. Watcher ensure participates in the project slot.
+  Two behavioral RED tests against the old publication path; five event-driven
+  regressions GREEN (0.07s), including 11/23/31 config transitions, cache reuse,
+  immutable captures, failed reload/recovery and independent project slots.
+  Full cli-full Clippy and fmt GREEN. Full functional/lean/native validation
+  is running/pending at this task commit; final evidence belongs to the PR.
+  Fresh task review: one Minor FR-20 overclaim corrected; scoped re-review
+  ADDRESSED, no code findings or deferred minors. Final review pending CI.
+  Ruling: project-slot isolation does not remove the local provider LOAD_LOCK;
+  active captured snapshots may finish after reload. No claim of cross-storage
+  generation atomicity, global DB isolation or singleflight (#66/#78). No new
+  dependencies/settings/formats, live calls, ranking or baseline changes.
