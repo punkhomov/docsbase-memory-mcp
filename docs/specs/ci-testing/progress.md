@@ -94,3 +94,28 @@
   final branch reviews/native PR CI follow at close-out.
   Ruling: fresh C5 review — Spec PASS / Quality APPROVED; findings none.
   Native PR CI and final branch review remain pending for PR close-out.
+
+
+## Delta 2026-11-09 — C6
+
+- Task C6: complete (local verification) on6f8a74a (#91 merged).
+  The old600-document fixture yields12660chunks/18,570,000body bytes;
+  instrumented original test passes in55.87s (Cargo prepare15.33s).
+  RED: new one-chunk-per-document oracle rejects12660vs600. Compact unique
+  documents retain600paths/600chunks/64dimensions,9,000body bytes; small
+  project20docs/chunks. Real build gate/persistence/read-path controls remain;
+  add ANN-disabled exact oracles for gated search and insufficient fallback,
+  ten published hits, checked fallback diagnostics and zero served-counter delta.
+  Initial after8.08s; temporary phase probe7.07s (main indexing/setup0.401s,
+  build/persist/load wait1.230s; old16.849s/9.895s). Phase boundaries differ in
+  DB-open placement; no controlled A/B or whole-CI speedup claim.
+  All5mutants fail their expected assertions: reordered build-time candidates,
+  ANN bypass, counted/empty insufficient fallback, duplicate fixture text.
+  Both sources restored byte-for-byte; subsequent exact-helper extraction
+  fixes Clippy110lines without an allow or changed oracle logic.
+  Full/explicit-perf Clippy and fmt pass. Restored related suites: ann_e2e1pass
+  /1ignored104.54s, ann_recall10pass77.16s, hybrid_rank_ann1pass6.88s.
+  No production/workflow/dependency/default/budget/large-quality-test changes.
+  Fresh task/final reviews and native CI follow at PR close-out.
+  Ruling: fresh C6 review — Spec PASS / Quality APPROVED; findings none.
+  Final branch review and native PR CI remain pending for close-out.

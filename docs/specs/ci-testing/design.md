@@ -84,3 +84,22 @@ in one Markdown file, verifies exact fallback, appends a section and refreshes
 at ANN_MIN_VECTORS. Stored counts are asserted. READY and ann_snapshot are
 passive observations, so the waiting path cannot create a false positive build.
 Well-spread normalized fake vectors avoid incidental degenerate geometry.
+
+## Delta 2026-11-09 — C6
+
+Use one shared project helper for both corpora. Each fixed-size unique document
+creates one chunk; verify document/chunk counts and distinct hashes rather than
+assuming a file count is a vector count. Main search retains 600 distinct paths
+and dimension64; the 20-document project remains below the fetch clamp. Keep
+roots alive through searches and declare the cache before DB handles.
+
+Keep the existing real build gate and persisted ANN read-path counter. An
+independent DenseCache with AnnPolicy::Disabled supplies the exact path oracle
+for gated search and insufficient-candidate fallback; approximate ANN output
+is not required to equal exact output. Existing large recall tests own those
+quality thresholds. Check ten published results and repeatability as before,
+plus explicit insufficient-candidate diagnostics and exact fallback results.
+
+Temporary timing probes are local verification evidence, not permanent test
+instrumentation or CI performance gates. Controlled mutations validate the
+oracles, then restore source byte-for-byte. No workflow or production edits.

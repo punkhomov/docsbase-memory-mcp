@@ -68,3 +68,15 @@ single indexed Markdown file. Prove sensitivity with controlled mutations;
 restore production behavior and run targeted tests/lints/native CI. Fresh task
 and final branch reviews; prepare the PR without merging.
 **Acceptance:** FR-13–FR-17; SC-7–SC-8.
+
+### C6 — Compact ANN search-path fixture
+
+**Delta:** 2026-11-09. **New crates/packages:** none.
+**Scope:** tests/hybrid_rank_ann.rs, CI-testing specs/ledger, docs/ci.md.
+**Steps:** measure the original test with temporary phase probes; add checked
+fixture counts and exact-path controls; demonstrate RED on the old growing
+corpus. Replace repeated growing bodies with short unique documents while
+retaining document counts/dimensions/search windows and real build/load/search.
+Check controlled build-time/read-path/fallback mutations, restore source and
+verify target/related suites/lints. Fresh task/final review and native PR CI.
+**Acceptance:** FR-18–FR-20; SC-9. No whole-CI speedup claim without comparable data.
