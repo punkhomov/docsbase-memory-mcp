@@ -78,3 +78,25 @@ Reuse Flights, admit before full metadata/hash/vector copies, provide lazy
 metadata-loader API for S3 pool ownership, preserve ANN slot/accounting contracts.
 Settle generation/config publication authority in a dated design/task delta
 before code. Existing S3/S4 boundaries remain in force.
+
+## Delta 2026-11-10 — S2b concrete execution contract
+
+- Create `src/hybrid/dense_metadata.rs`; modify `src/hybrid/{mod,dense}.rs`;
+  add dense cold tests under `src/hybrid/` or existing dense tests module.
+- Consumes S2a Flights/Cancellation, CF2 Db and existing repo/vector/ANN owners.
+- Produces private-data `DenseMetadata::capture(&Db, i64)`, explicit
+  `DenseRequest`, `get_with_metadata` / `warm_with_metadata` lazy loader APIs;
+  existing get/warm remain source-compatible adapters. No direct metadata open.
+- RED first: real SQLite coherent capture, identity validation/no vector IO, four
+  gated misses one loader/Arc, error/cancel/retry, warm Ready refresh and late old
+  generation cannot replace/new-build. Run filtered unit targets and confirm
+  missing API/old behavior failures before implementing each behavior.
+- Refactor cold resolve from Db reference to owned metadata; bind canonical
+  cache identity and share cold registry only with shared row snapshots.
+- Preserve reservation refusal, ANN live-slot/worker cleanup, max-project
+  disablement and all existing cache counter/quality contracts.
+- Verify focused units + existing dense/ANN/worker tests, full cli-full, lean
+  hybrid and relevant integrations, full/lean all-target+opt-in Clippy/fmt/diff,
+  then fresh task/final reviews and latest-head four required native checks.
+- FR-5 cold/generation subset complete only; config revision publication and
+  coherent Tantivy/citation capture remain S3. #66 stays open.

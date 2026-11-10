@@ -81,3 +81,28 @@ breakage; consolidated Spec compliance PASS / Quality APPROVED, no deferred mino
 Ruling: pre-provider abandonment is an internal retry signal for active callers,
 not a provider error. Paid work remains one-shot; actual provider Admission is
 terminal. Final whole-slice review and required latest-head native CI remain gates.
+
+S2a delivery: PR108 merged as2498711; #107 complete. Reviewed2f8d32b native
+CI42813054338 passed all four required checks: Linux976 +2artifact/macOS972/
+Windows957, zero failures/13ignored, +18 each OS/no removed tests; squash tree
+equals tested tree. #66 remains open.
+Ruling: GitHub interpreted a negated closing-keyword phrase in PR text as a
+closing reference; #66 was immediately reopened and text corrected. Future
+milestone descriptions use the unambiguous phrase "remains open".
+Task S2b: design ready, before implementation. Generation publication ordering
+and owned SQL snapshot/lazy cold coalescing are scoped here; config revision
+authority remains S3 before parallel dispatch. No new runtime numeric default.
+Ruling: the existing ANN retry fixture used a different ANN constructor root
+from its Db root solely to force a dump failure. Under the explicit one-root
+contract this correctly fails admission before the build. Keep the same dump
+failure/recovery assertion by blocking the actual project ANN directory with a
+file inside its real cache root; retry backoff and quality thresholds are unchanged.
+Task S2b: complete (base2498711..this task commit; lazy cold initialization and
+owned metadata). Fresh task review: Spec compliance PASS / Quality APPROVED,
+no findings or deferred minors. Final local cli-full996/0/13ignored across65
+targets; focused dense/metadata68 and ANN16; lean hybrid107 +integrations42;
+full/lean all-target and opt-in Clippy, fmt/diff all exit0 on frozen source.
+Ruling: identical-work coalescing and generation ordering are delivered here;
+config-revision authority, coherent cross-store payload ownership and daemon
+concurrency remain S3/S4. Latest-head native CI and whole-slice final review
+are still delivery gates. #66 remains open.

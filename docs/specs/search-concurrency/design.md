@@ -160,3 +160,76 @@ flight безопасна: caller читает опубликованный `Aba
 mutex не удерживаются через provider. Детерминированные instance-local gates
 проверяют admission после no-active decision, выбор до регистрации, регистрацию
 после retirement, cache recheck и отсутствие вызова при полной отмене.
+
+## Delta 2026-11-10 — S2b cold dense initialization
+
+This settles S2b before code (FR-5 cold subset, FR-3 metadata-resource foundation).
+Daemon dispatch and cross-store/config-revision guarantees remain S3/S4. It
+supersedes the earlier S2b sentence that left both publication authorities in one
+step: generation ordering is S2b; current config/model publication authority is
+S3 before enabling parallel daemon search. No new capacity/default is introduced.
+
+### Owned metadata and lazy admission
+
+- New `hybrid::dense_metadata::DenseMetadata` has private root/project/generation
+  and owned `(chunk_id, content_hash)` rows. `capture(&Db, project_id)` reads
+  generation and hashes in one SQL read snapshot, then ends the transaction
+  before returning. If the caller already owns a transaction, reuse that snapshot
+  without committing/rolling back it; its lifetime remains caller responsibility.
+  The daemon pool adapter in S3 must own/drop its lease wholly inside this loader.
+- `DenseRequest<'a>` contains explicit cache_root, project_id, generation and
+  model_id; it has no default or config lookup.
+- `DenseCache::get_with_metadata(request, &Cancellation, loader)` and
+  `warm_with_metadata(...)` accept a one-shot `FnOnce()->Result<DenseMetadata>`
+  loader. They never open a metadata connection. Complete cached state returns
+  without invoking the loader. On a miss, shared Flights admission occurs BEFORE
+  full hash copies or vector IO/materialization. The loader's identity must match
+  every request identity before any vector/ANN IO; mismatch is explicit retryable
+  Project/Admission error, not a result labelled with an obsolete generation.
+- `get(&Db,...)` / `warm(&Db,...)` remain adapters: cheap generation read, explicit
+  request/token, lazy DenseMetadata capture. They no longer retain a transaction
+  through cold IO/wait. Their externally borrowed Db can still live as before;
+  S3 production uses the lazy pool adapter, not a held pool lease.
+- A DenseCache serves one cache root: bind its explicit ANN-store root when
+  available, otherwise its first explicitly supplied metadata root. Reject a
+  different root before cache reuse. Snapshots share that identity and cold-flight
+  registry; sharing_query_cache creates fresh row/cold state while retaining its
+  existing ANN-store scope and shared pure query cache. This is instance identity,
+  not a fallback path/default setting.
+
+### Flights, refresh and publication
+
+Cold flight key is `(root, project, generation, model)`. Getter/warm share active
+work. Getter accepts current Ready/Ann/TooLarge/Building or non-expired Failed.
+Warm keeps its existing stronger refresh condition: Ready/TooLarge must reload
+coverage; Ann/Building and non-expired Failed are already warm. Recheck these
+conditions during flight admission. Different generation/model work stays
+separate. Use S2a cancellation/abandonment/error/unwind cleanup unchanged.
+
+Refactor resolve to consume owned metadata/root, never `&Db`, during ANN/vector
+load and CPU work. Do not change vector-cache policy, ANN selection, fallback
+ranking, retry backoff, resident/build accounting or existing live-slot guards.
+Generation ordering is checked under the entries mutex: an older completion
+never replaces a newer entry, and an obsolete build never installs Building or
+starts a background worker. The old caller may still receive its own coherent
+state; existing byte/reservation/disabled-cache refusal takes priority and keeps
+its streaming fallback. No return value may be relabelled as the newer generation.
+
+Config replacement at the same generation is a declared S3 authority boundary.
+S2b keys isolate different models and return their own data, but it does not
+claim that last-finishing same-generation model work is the active config.
+General executor/admission budgets and total process/RSS accounting remain
+#79/#78; coalescing identical cold work is not an unlimited-concurrency guarantee.
+
+### Verification
+
+Use real SQLite/VectorCache and per-instance gate/join observers: four cold
+callers (including shared cache snapshots) call one metadata loader and receive
+one shared row state. While loader waits, the independent writer/control reader
+remains usable. Force metadata-generation change between generation/hash reads
+and prove one SQLite snapshot; validate wrong root/project/generation before
+vector artifact creation. Error/cancel/unwind wake/remove/retry cases reuse the
+S2a lifecycle. Verify warm rechecks Ready coverage and stays idempotent for
+Building/Ann. Pause old generation work, install newer state, then finish old:
+new cache slot remains; no obsolete background build. Preserve #69/#73 tests,
+golden/offline/replay and full/lean/native gates. No sleep/performance SLA.

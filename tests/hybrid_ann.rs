@@ -456,7 +456,9 @@ fn failed_build_retries_after_backoff() {
     let (db, project_id) = project_with_files(cache.path(), &["a.md", "b.md", "c.md"]);
     embed_project_chunks_with(&db, &FakeEmbedder, project_id).expect("embed");
 
-    let blocker = cache.path().join("ann-store");
+    // Fail persistence inside the actual cache root. A different constructor
+    // root would test identity admission instead of a background dump failure.
+    let blocker = AnnStore::new(cache.path().to_path_buf()).project_ann_root(project_id);
     fs::write(&blocker, b"block the ann tree").expect("blocker");
     let mut limits = limits_with_min_vectors(2);
     // The Failed window must be observable under a loaded CI runner: `get`
@@ -464,7 +466,7 @@ fn failed_build_retries_after_backoff() {
     // backoff races the poll and flakes. Five seconds is a wide window and
     // still keeps the test fast.
     limits.build_backoff = Duration::from_secs(5);
-    let dense = DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, &blocker, limits);
+    let dense = DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, cache.path(), limits);
 
     let first = dense
         .get(&db, project_id, FakeEmbedder.model_id())
