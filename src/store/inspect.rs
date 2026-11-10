@@ -207,4 +207,149 @@ mod tests {
         assert_eq!(facts.artifacts[0].state, ArtifactState::Unknown);
         assert!(facts.artifacts[0].identity.is_none());
     }
+
+    #[cfg(unix)]
+    mod fifo {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        use std::process::{Child, Command, Stdio};
+        use std::sync::mpsc;
+        use std::thread::JoinHandle;
+        use std::time::Duration;
+
+        use super::*;
+
+        struct InspectionChild {
+            process: Child,
+            output: Option<JoinHandle<std::io::Result<String>>>,
+        }
+
+        impl Drop for InspectionChild {
+            fn drop(&mut self) {
+                let _ = self.process.kill();
+                let _ = self.process.wait();
+                if let Some(output) = self.output.take() {
+                    let _ = output.join();
+                }
+            }
+        }
+
+        fn make_fifo(path: &Path) {
+            assert!(
+                Command::new("mkfifo")
+                    .arg(path)
+                    .status()
+                    .expect("mkfifo")
+                    .success()
+            );
+        }
+
+        fn fifo_metadata(path: &Path) -> (u64, u32, u64, SystemTime) {
+            let metadata = std::fs::symlink_metadata(path).expect("FIFO metadata");
+            assert!(metadata.file_type().is_fifo(), "FIFO must remain intact");
+            (
+                metadata.ino(),
+                metadata.mode(),
+                metadata.len(),
+                metadata.modified().expect("FIFO mtime"),
+            )
+        }
+
+        #[test]
+        fn inspection_child() {
+            let Some(cache) = std::env::var_os("DOCSBASE_TEST_FIFO_CACHE") else {
+                return;
+            };
+            let cache = std::path::PathBuf::from(cache);
+            let path = cache.join(super::super::super::DB_FILE);
+            let replacing = std::env::var_os("DOCSBASE_TEST_FIFO_REPLACE").is_some();
+            let settings = crate::store::settings::standalone().expect("settings");
+            let mut before = (!replacing).then(|| fifo_metadata(&path));
+            println!("fifo-inspection-start");
+            std::io::stdout().flush().expect("flush readiness");
+            let facts = schema_with(&cache, &settings, || {
+                assert!(
+                    replacing,
+                    "an initial FIFO must be rejected on first observation"
+                );
+                std::fs::remove_file(&path).expect("replace observed DB");
+                make_fifo(&path);
+                before = Some(fifo_metadata(&path));
+                println!("fifo-replaced");
+                std::io::stdout().flush().expect("flush replacement");
+            })
+            .expect("FIFO facts");
+            assert_eq!(facts.artifacts.len(), 1);
+            assert_eq!(facts.artifacts[0].state, ArtifactState::Unknown);
+            assert!(facts.artifacts[0].identity.is_none());
+            assert_eq!(fifo_metadata(&path), before.expect("FIFO fixture"));
+            assert_eq!(std::fs::read_dir(&cache).expect("cache entries").count(), 1);
+        }
+
+        fn inspect_fifo(replacing: bool) {
+            let cache = if replacing {
+                closed_db().0
+            } else {
+                let cache = tempfile::tempdir().expect("cache");
+                make_fifo(&cache.path().join(super::super::super::DB_FILE));
+                cache
+            };
+            let mut command = Command::new(std::env::current_exe().expect("test binary"));
+            command
+                .args([
+                    "--exact",
+                    "store::inspect::tests::fifo::inspection_child",
+                    "--nocapture",
+                ])
+                .env("DOCSBASE_TEST_FIFO_CACHE", cache.path())
+                .env_remove("DOCSBASE_TEST_FIFO_REPLACE")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+            if replacing {
+                command.env("DOCSBASE_TEST_FIFO_REPLACE", "1");
+            }
+            let mut child = InspectionChild {
+                process: command.spawn().expect("FIFO inspection child"),
+                output: None,
+            };
+            let mut stdout = child.process.stdout.take().expect("child stdout");
+            let (completed_tx, completed_rx) = mpsc::channel();
+            child.output = Some(std::thread::spawn(move || {
+                let mut output = String::new();
+                let result = stdout.read_to_string(&mut output).map(|_| output);
+                let _ = completed_tx.send(());
+                result
+            }));
+            // X11 test-control watchdog: detect deadlock, not processing latency.
+            let completed = completed_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+            if !completed {
+                let _ = child.process.kill();
+            }
+            let status = child.process.wait().expect("reap FIFO inspection child");
+            let output = child
+                .output
+                .take()
+                .expect("stdout reader")
+                .join()
+                .expect("join reader")
+                .expect("read child output");
+            assert!(
+                completed,
+                "FIFO inspection blocked without a writer; child killed and reaped:\n{output}"
+            );
+            assert!(status.success(), "FIFO inspection failed:\n{output}");
+            assert!(output.contains("fifo-inspection-start"));
+            assert!(fifo_metadata(&cache.path().join(super::super::super::DB_FILE)).2 == 0);
+        }
+
+        #[test]
+        fn schema_inspection_of_fifo_without_writer_is_unknown() {
+            inspect_fifo(false);
+        }
+
+        #[test]
+        fn schema_inspection_of_replacement_fifo_is_unknown() {
+            inspect_fifo(true);
+        }
+    }
 }

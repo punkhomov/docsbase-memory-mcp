@@ -161,3 +161,16 @@ baseline/timing/config wire changes. Native proof — после всей CF2 в
 Ruling: CF2a завершает API/inspection, не production adoption. До CF2b старые
 callers ещё идут через documented compatibility policy resolver. Fresh CF2a task
 review pending; CF2b wiring/adapter audit и T55 M1 cleanup следуют после него.
+CF2a task review FAIL/CHANGES (I1): Unix readonly no-follow open мог зависнуть
+на FIFO до проверки regular-file type, включая replacement race. Scoped
+implementer добавил O_NONBLOCK в platform seam и две subprocess regressions
+(initial FIFO / DB→FIFO перед повторным наблюдением) с kill/wait/join cleanup.
+RED: обе завершились только deadlock watchdog; GREEN inspector7/0, symlink guard
+сохранён, FIFO inode/mode/length/mtime не меняются, fact Unknown/no identity.
+Scoped re-review: I1 ADDRESSED, новых Critical/Important нет.
+Task CF2a: fix validation complete (2026-11-10,99f098c + I1): full943/0/13,
+64targets; full focused integrations83/0 + units16/0, lean integrations76/0 +
+units16/0. Full/lean all-target Clippy + full opt-in lint, fmt/diff GREEN.
+Все10 команд завершились exit0; child stdout не удваивает counters. Native CI
+остаётся gate после CF2b. Test watchdog10s — deadlock containment X11, не SLA;
+нет fixed sleeps или production budget changes. No new crates/unsafe/scanner changes.
