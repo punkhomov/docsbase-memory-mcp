@@ -217,3 +217,26 @@ uses --no-fail-fast to collect every target in one pass, preserving all checks.
   перед commit; source findings только через отдельного implementer.
 - Actual search pool/cross-store/cancellation/dispatch/timing и whole-feature
   required native CI остаются отдельными шагами до delivery.
+
+## Delta 2026-11-10 — S3.6a: one request budget, before pool adoption
+
+- Base4a5c28f. Modify src/search/{settings,mod}.rs, src/config/mod.rs doc,
+  tests/search_payload_budget.rs and explicit payload-test policy fixtures;
+  add src/search/operation.rs and operation_tests.rs. Update owned settings
+  inventory. No new crates, transport/schema/ranking/baseline changes.
+- API: SearchSettings/SearchPatch.request_timeout_ms; SearchOperation::new(
+  &SearchSettings, original_start:Instant, Cancellation)->Result<Self>.
+  Accessors started_at/deadline/cancellation, check/remaining/elapsed.
+- RED missing policy/context API. Inject Instant values in private check_at/
+  remaining_at/elapsed_at helpers: exact deadline, queued elapsed time, clones
+  cannot reset budget, cancellation wakes request token, independent requests,
+  checked overflow and invalid imported policy. No sleeps or timing SLA.
+- Real config tests: default30000/Daemon/Milliseconds provenance, timeout-only
+  override preserves byte defaults, partial byte policy preserves timeout,
+  project file/typed patch rejects daemon override; inherited global snapshot,
+  zero/negative/unknown rejection and unchanged legacy config JSON.
+- Verify focused operation/policy/config, full cli-full, lean operation/config/
+  existing consumers, full/lean all-target+opt-in Clippy/fmt/diff. Fresh task
+  reviewer required before commit; controller delegates reviewer fixes.
+- Pool/core adoption and S4 timer/transport/dispatcher/telemetry plus native
+  acceptance remain pending. Primitive alone is not independently shippable.

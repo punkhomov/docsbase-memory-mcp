@@ -219,3 +219,29 @@ are identical. Raw pre-format manifests retain their original hashes. Current
 targeted GREEN/scopes and lint/format checks were rerun; no redundant full run.
 Actual search pool/cross-store phases and S4 deadlines/dispatch/cancellation/
 timing plus whole-feature review/native gates remain mandatory before delivery.
+
+Task S3.6a: design ready, before implementation (base4a5c28f). Add one
+SearchSpec-owned request timeout and immutable original-start operation context
+before the pooled phase consumer. Existing quick-call30s supplies the initial
+policy; no hidden per-acquire fallback or per-stage budget reset. Actual runtime
+adoption/transport cancellation remain future tasks in the same draft PR.
+
+Task S3.6a: complete (base4a5c28f..this task commit; deadline primitive only).
+SearchSpec owns global request_timeout_ms30000 with Daemon/Milliseconds
+provenance and positive validation; partial config preserves other owner defaults
+and project overrides are rejected. SearchOperation consumes the complete policy,
+original start and explicit token, retains one checked deadline across clones,
+counts queue/phase time and cancels this token on expiry. It starts no timer and
+does not claim sync-provider preemption. Nine injected-time regressions and three
+new file-resolution tests cover the contract without waits or timing budgets.
+Fresh task review Spec PASS / Quality APPROVED, no findings or deferred minors.
+Final13 stages exit0 and match all157 current Rust inputs: cli-full1074/0/13
+across66targets, operation9/policy16/config68, lean operation9/config74/consumers10,
+full/lean all-target and opt-in Clippy/fmt/diff all0. Own test-only lint correction
+preceded final sequence; original RED/preflight preserved, no format exception.
+Ruling: draft PR112 native preflight at previous reviewed4a5c28f passed all four
+required checks; Linux1062+2artifact/macOS1058/Windows1043, 0failed13ignored.
+Inventory adds66 per platform against merged110 with none removed. This evidence
+does not cover this newer task commit or replace final-head acceptance.
+Actual core/pool adoption and S4 timer/transport/dispatcher/timing plus final
+whole-feature review/native gates remain pending; #66 remains open.

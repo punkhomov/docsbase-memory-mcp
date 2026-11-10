@@ -215,3 +215,14 @@ The channel capacity1 coalesces completion/cancellation wakeups; published state
 is authoritative and is checked after waking. This is message-protocol cardinality,
 not a configurable request/work/memory budget. Active subscriptions/flights retire
 on drop/completion; no persistent failed-flight cache or hidden deadline is added.
+
+## Delta 2026-11-10 — #66 S3.6a request deadline owner
+
+`search.request_timeout_ms` adopts the deadline-context portion of I66 under
+`search::settings::SearchSpec` (daemon scope, Milliseconds). Default30000 matches
+the existing MCP quick-call budget for search. Positive u64, global-only config
+and typed provenance; construction checks platform Instant overflow. The initial
+value has exactly one owner. No per-stage/reconnect reset, index/vector
+invalidation or new provider timeout. Active/pending/provider scheduling in I66
+remains future work. Global changes require restart under the existing policy;
+S3.6a primitive alone does not activate transport cancellation.

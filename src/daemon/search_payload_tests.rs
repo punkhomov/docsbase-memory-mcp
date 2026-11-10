@@ -119,6 +119,9 @@ fn budget(bytes: u64) -> PayloadBudget {
     PayloadBudget::new(SearchSettings {
         max_request_payload_bytes: bytes,
         max_retained_payload_bytes: bytes,
+        ..crate::search::settings::standalone()
+            .expect("owner policy")
+            .into_settings()
     })
     .expect("policy")
 }

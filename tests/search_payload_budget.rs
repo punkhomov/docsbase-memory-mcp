@@ -13,6 +13,7 @@ use docsbase_memory::search::settings::{SearchPatch, SearchSettings, SearchSpec}
 
 fn settings(request: u64, retained: u64) -> SearchSettings {
     SearchSettings {
+        request_timeout_ms: 30_000,
         max_request_payload_bytes: request,
         max_retained_payload_bytes: retained,
     }
@@ -39,6 +40,88 @@ fn missing_search_fields_are_resolved_by_the_config_owner() {
         assert_eq!(origin.scope, Scope::Daemon);
         assert_eq!(origin.unit, Unit::Bytes);
     }
+    let origin = resolved
+        .provenance()
+        .get("search.request_timeout_ms")
+        .expect("declared timeout");
+    assert_eq!(origin.source, SourceId::Defaults);
+    assert_eq!(origin.scope, Scope::Daemon);
+    assert_eq!(origin.unit, Unit::Milliseconds);
+}
+
+#[test]
+fn timeout_only_override_preserves_byte_defaults_and_reaches_an_operation() {
+    use docsbase_memory::hybrid::work::Cancellation;
+    use docsbase_memory::search::operation::SearchOperation;
+    use std::time::Instant;
+
+    let config_dir = tempfile::tempdir().expect("config");
+    let path = config_dir.path().join("config.toml");
+    std::fs::write(&path, "[search]\nrequest_timeout_ms = 37\n").expect("config");
+    let resolved = global_from(config_dir.path()).expect("config");
+    assert_eq!(
+        resolved.settings().search,
+        SearchSettings {
+            request_timeout_ms: 37,
+            ..settings(64 * 1024 * 1024, 256 * 1024 * 1024)
+        }
+    );
+    let origin = resolved
+        .provenance()
+        .get("search.request_timeout_ms")
+        .expect("origin");
+    assert_eq!(origin.source, SourceId::Global(path));
+    assert_eq!(origin.scope, Scope::Daemon);
+    assert_eq!(origin.unit, Unit::Milliseconds);
+    let start = Instant::now();
+    let operation = SearchOperation::new(&resolved.settings().search, start, Cancellation::new())
+        .expect("configured operation");
+    assert_eq!(operation.deadline() - start, Duration::from_millis(37));
+}
+
+#[test]
+fn project_resolution_inherits_the_exact_global_search_policy() {
+    let config_dir = tempfile::tempdir().expect("config");
+    let project = tempfile::tempdir().expect("project");
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        "[search]\nrequest_timeout_ms = 41\n",
+    )
+    .expect("global");
+    std::fs::write(
+        project.path().join(".docsbase.toml"),
+        "max_file_size = 4096\n",
+    )
+    .expect("project");
+    let global = Config::global_from(config_dir.path()).expect("global");
+    let local = Config::for_project(&global, project.path()).expect("local");
+    assert_eq!(local.search, global.search);
+    assert_eq!(local.search.request_timeout_ms, 41);
+}
+
+#[test]
+fn project_cannot_supply_request_timeout_through_file_or_typed_patch() {
+    let config_dir = tempfile::tempdir().expect("config");
+    let project = tempfile::tempdir().expect("project");
+    std::fs::write(
+        project.path().join(".docsbase.toml"),
+        "[search]\nrequest_timeout_ms = 37\n",
+    )
+    .expect("config");
+    assert!(Config::load_from(config_dir.path(), Some(project.path())).is_err());
+    assert!(
+        resolve_component::<SearchSpec>(
+            &DefaultsContext::standalone(),
+            [(
+                SourceId::Project(project.path().into()),
+                SearchPatch {
+                    request_timeout_ms: Some(37),
+                    ..SearchPatch::default()
+                }
+            )],
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -117,6 +200,8 @@ fn unknown_search_keys_and_invalid_values_are_rejected() {
     for table in [
         "max_payload_bytes = 8",
         "max_request_payload_bytes = -1",
+        "request_timeout_ms = -1",
+        "request_timeout_ms = 0",
         "max_request_payload_bytes = 0",
         "max_retained_payload_bytes = 0",
         "max_request_payload_bytes = 12\nmax_retained_payload_bytes = 8",

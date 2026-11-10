@@ -31,7 +31,7 @@ pub struct Config {
     pub max_file_size: u64,
     /// Maximum number of documents per project.
     pub max_docs_per_project: usize,
-    /// Global-only policy for owned search payload admission.
+    /// Global-only policy for request deadlines and owned search payload admission.
     pub search: SearchSettings,
     /// Register and index a project automatically on first connection (ADR-6: off).
     pub auto_index: bool,

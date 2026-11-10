@@ -460,3 +460,34 @@ Challenge: прежний #76 test утверждал state mutex contention п�
 same-project reload order, atomic pair/failure semantics и independence других
 проектов остаются обязательными. Никаких provider/SQL lifetime completion или
 завершения #66 этим шагом не объявляется; whole-S3/S4/native gates сохраняются.
+
+## Delta 2026-11-10 — S3.6a: owner-resolved request deadline
+
+FR-2/FR-6/FR-7 foundation, before pooled search adoption. SearchSpec adds
+`search.request_timeout_ms`: daemon scope, Milliseconds, positive u64, global-only
+TOML/typed patch/provenance. Default30000 preserves the existing MCP quick-call
+budget for search; the value is declared only in this owner, never in a consumer.
+There is no arbitrary universal upper cap; conversion to a platform Instant uses
+checked arithmetic and refuses an unrepresentable deadline explicitly.
+
+`search::operation::SearchOperation` consumes complete SearchSettings, a caller-
+supplied original start Instant and existing Cancellation. It captures exactly
+one deadline. Clones retain start/deadline and share only their cancellation
+token; another independently constructed request is unaffected. Methods expose
+original start/deadline, elapsed time, remaining budget and cooperative check.
+Checks at/after deadline return Admission and cancel this request token so any
+existing flight subscribers can wake. Explicit cancellation also refuses work.
+Construction validates the full imported policy without IO/default resolution;
+checks never reset the budget on a stage boundary, queue or reconnect.
+
+Challenge: a synchronous waiter/provider is not preempted by a timestamp. This
+task adds only the policy/context primitive; S4 must wire a cancellation timer
+and transport lifetime, and S3.6b must pass the same deadline to pool acquisition.
+A shared cold-flight factory must not inherit the leader's personal deadline or
+abort live peers; its admission policy is specified before production adoption.
+No transport timeout is changed in this primitive task, no parallel dispatch is
+claimed, and all remaining S3/S4 still ship in one completed PR. A draft may run
+native CI preflight while implementation continues; it stays draft until whole-
+feature review and final-head required checks pass. Legacy config JSON remains
+unchanged until #78's versioned effective view. Product docs before delivery
+will explain restart semantics and the boundary of sync-provider cancellation.
