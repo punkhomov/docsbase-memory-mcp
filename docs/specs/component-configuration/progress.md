@@ -116,3 +116,48 @@ Plan: [tasks.md](tasks.md). Requirements: [requirements.md](requirements.md).
   Ruling: это docs correction, Rust/тесты/поведение не меняются. Coordinator сообщил
   native4/4GREEN для source5c6818f; scoped final re-review и required checks нового
   docs HEAD ещё pending. Docs hygiene/diff-check GREEN; новые tests не нужны.
+
+CF1 delivery reconciliation (2026-11-10): PR #102 merged as8fd4308; final source
+c370fc5 had required docs/Linux/macOS/Windows4/4GREEN, 914/910/899 selected tests,
+13ignored/0failed (Linux +2 static artifact). Task/final reviews completed before
+merge; earlier pending handoff lines above are historical. CF1 runtime adoption
+claims remain partial. Subsequent #103 fix PR #104 merged c1fe915; its final head
+28b5c49 passed native4/4 with923/919/908, Linux+2artifact, parent inventory+9/no removed.
+
+CF2 start (2026-11-10, basec1fe915): source Db::open/open_readonly inventory captured
+before code. Production metadata opens: Shared initial/register/index/ANN worker,
+execute_sync_job, watcher consumer, CLI index/status/read_project/uninstall peek.
+Source tests/fixtures keep compatibility APIs until owning migration. CLI search
+and lifecycle carry policy despite not directly opening DB themselves.
+Ruling: no TOML activation in this bounded store adoption; explicit typed overrides
+reach runtime, production bootstrap resolves owner defaults once. File/version/
+startup policy activation remains CF3/CF5; no ignored public keys added. Pure
+inspector reports bounded schema identity only, not a query snapshot. CF2a/CF2b
+and dated requirements/design deltas make these boundaries reviewable before code.
+CF2a RED evidence: новые explicit constructors отсутствуют на basec1fe915 (E0599).
+После первых API overrides17/29ms и defaults30000/5000ms подтверждены реальным
+PRAGMA. Inspector сначала не давал schema identity и ошибочно считал orphan WAL
+Missing: обе deterministic regressions RED, затем GREEN. WAL policy RED на
+provisional API с legacy3×100ms: waits [100,100] вместо [] при attempts1 и [100]
+вместо [43] после controlled unlock. Теперь точные attempts/delay берутся из owner.
+CF2a partial verify: store unit13/0 (включая7 новых), store_settings10/0; config,
+config_resolution и legacy store focused GREEN. Snapshot cases включают committed
+WAL после killed child + отсутствующий SHM; никакого восстановления sidecar или
+main-only identity. Full/lean validation и свежий task review ещё pending.
+CF2a full validation caught ADR-9 boundary violation: no-follow platform flags
+находились в store/inspect.rs. Existing platform_boundary regression RED показала
+OpenOptionsExt/unix/windows imports вне seam. Ruling: вынести функцию открытия
+в platform::fs с Unix/Windows implementations, не ослаблять scanner/allowlist.
+Это расширяет CF2a files до platform/{mod,unix,windows}.rs; inspector сохраняет
+read-only/no-follow semantics и не содержит OS API.
+Task CF2a: complete (2026-11-10, basec1fe915; local implementation gate).
+Final Rust1.88 cli-full suite exit0:940passed/0failed/13ignored,64targets
+(parent923 +17 новых, child helper summaries не удвоены). Lean unfiltered
+integration:58/0 (config25/config_resolution23/store_settings10); separate store
+unit filter13/0. Full/lean all-target Clippy `-D warnings`, full opt-in
+perf_budget/artifact Clippy, fmt/diff-check GREEN. Platform boundary2/0 после
+вынесения no-follow open в seam; scanner не менялся. No new crates/unsafe,
+baseline/timing/config wire changes. Native proof — после всей CF2 в PR.
+Ruling: CF2a завершает API/inspection, не production adoption. До CF2b старые
+callers ещё идут через documented compatibility policy resolver. Fresh CF2a task
+review pending; CF2b wiring/adapter audit и T55 M1 cleanup следуют после него.

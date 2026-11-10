@@ -1,14 +1,23 @@
-//! Pure storage settings. File activation and DB consumers belong to CF2/#66.
+//! Component-owned storage settings and explicit compatibility resolution.
 
 use crate::config::bootstrap::DefaultsContext;
 use crate::config::schema::{
-    ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Scope, SettingsSpec,
-    SourceId, Unit,
+    ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Resolved, Scope,
+    SettingsSpec, SourceId, Unit,
 };
 use crate::error::{Error, Result};
 use std::time::Duration;
 
-/// Complete db policy; runtime adoption follows in the owning task.
+/// Resolves the deterministic legacy/bootstrap policy through its sole owner.
+/// Runtime consumers receive the result explicitly; they never fill fields.
+///
+/// # Errors
+/// Returns an admission error if the owner defaults are invalid.
+pub fn standalone() -> Result<Resolved<DbSettings>> {
+    crate::config::resolve::resolve_component::<DbSpec>(&DefaultsContext::standalone(), [])
+}
+
+/// Complete metadata DB policy, passed explicitly to connection constructors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbSettings {
     /// Busy timeout for write-capable connections; zero means immediate failure.

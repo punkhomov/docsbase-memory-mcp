@@ -388,3 +388,16 @@ fn path_to_wide(path: &Path) -> io::Result<Vec<u16>> {
 pub fn open_private_log(path: &Path) -> io::Result<File> {
     OpenOptions::new().create(true).append(true).open(path)
 }
+
+/// Opens an existing path read-only, opening a final reparse point itself.
+/// Does not create or truncate; callers reject symlink/non-regular handles.
+///
+/// # Errors
+/// Returns the raw IO error when the path cannot be opened without following it.
+pub fn open_readonly_nofollow(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}

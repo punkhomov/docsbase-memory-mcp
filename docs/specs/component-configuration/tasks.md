@@ -323,3 +323,42 @@ adoption обновляется по фактически merged реализа�
   отклоняться owner validation до будущего вызова rusqlite, который иначе panic.
 - Bootstrap не включает consumer adoption CF13: whitelist capture/validation pure,
   dependency-specific fallback semantics сохранены; credentials не читаются.
+
+## Delta 2026-11-10 — CF2 session tasks
+
+CF2 сохраняет scope typed consumption/read ownership; TOML activation — CF3/CF5,
+полный read pool/snapshot/singleflight — #66. New crates: none. Вся поставка —
+один PR, #78 остаётся открытым. Runtime FR/SC всего umbrella не объявляются готовыми.
+
+### CF2a — explicit storage constructors and pure schema inspection
+
+Modify `src/store/{mod,settings}.rs`; Create `src/store/inspect.rs` и
+`tests/store_settings.rs`; private store tests для controlled WAL wait и invalid
+imported snapshots. Обязательные settings до FS, writer/read timeout30s/5s явно,
+WAL attempts3/delay100ms от owner. Compatibility adapters используют единый resolver.
+RED: отсутствующие explicit APIs; actual PRAGMA override/default, missing/old schema
+readonly no migration, invalid settings no files, real lock с injected wait и
+точным budget, filesystem snapshot around missing/schema mismatch/WAL sidecar cases.
+Inspector Ready относится лишь к schema header identity; WAL/hot journal/race не
+маскируются main-only identity. Native formats/invariants не становятся knobs.
+Verify: store/config/admission focused + cli-full full suite, lean store/config,
+full/lean Clippy/fmt. Fresh task review, Critical/Important fixes via implementer.
+
+### CF2b — production policy propagation and adapter audit
+
+Depends CF2a. Modify только реальные callsites: CLI composition/direct commands,
+daemon lifecycle/Shared/jobs, watcher consumer. Добавить explicit with-settings
+пути там, где нужно сохранить публичный compatibility wrapper. Shared удерживает
+policy и передаёт её каждому child open; consumer не разрешает собственный default.
+Обновить fixtures и закрыть T55 Minor M1 при изменении watcher Env wiring: Db должен
+уничтожаться до cache TempDir. Проверить actual overrides на initial/child handles,
+выполнить source callsite audit (учесть wrappers, не только Db::open grep).
+Verify: store/config_runtime/ipc_server/admission/index/watcher + full cli-full,
+lean focused; Clippy/fmt, fresh task review, fresh final whole-branch review и
+required docs/Linux/macOS/Windows CI. Native inventory сохраняет прежние tests.
+
+CF2a file expansion (2026-11-10, ADR-9): Modify
+`src/platform/{mod,unix,windows}.rs` для minimal no-follow read-only open;
+`store/inspect.rs` вызывает только facade. Existing platform_boundary regression
+остаётся без изменений/исключений. Verify platform_boundary и store_settings
+без name-filter; private store unit filter выполняется отдельной командой.

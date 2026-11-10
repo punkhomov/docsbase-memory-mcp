@@ -360,3 +360,44 @@ query-cache policy; zero disk budget/backoff и прочие legacy zero limits 
 сохраняется. Это не вводит strict-v2 global vector-store quota или новую eviction
 семантику. Runtime defaults пока остаются в старых consumers до CF2/CF6; CF1 не
 объявляет эти budgets настраиваемыми для production процесса и не закрывает #78.
+
+## Delta 2026-11-10 — CF2 implementation slice
+
+1. `Db::open_with_settings` и `open_readonly_with_settings` принимают обязательный
+   `&Resolved<DbSettings>`. До любого filesystem action выполняется pure DbSpec
+   validation: generic `Resolved<T>` сам по себе не доказывает, что именно DbSpec
+   проверял импортированный snapshot. Db хранит immutable policy для дальнейшей
+   явной передачи. Writer задаёт свой busy timeout и WAL attempts/delay; prepared
+   readonly задаёт отдельный timeout, не включает WAL и не мигрирует. Operational
+   mismatch сохраняет прежние admission/conflict diagnostics.
+2. Один standalone resolver в store/settings используется только composition
+   boundaries и compatibility wrappers; в нём нет второй копии defaults. CLI run
+   передаёт policy direct index/search/status/uninstall/serve, lifecycle — Shared,
+   Shared — background jobs/ANN/watchers. Дополнительные with-settings входы
+   сохраняют старые source signatures; production не вызывает старые adapters.
+   Deprecation пока documentary: массовые Rust `#[deprecated]` warnings в старых
+   fixtures не вводятся; финальный adapter audit остаётся CF14. TOML activation
+   отложена явно, а не превращена в ignored section; прежние unknown-key errors
+   сохраняются. Полный BootstrapContext/env adoption остаётся CF13.
+3. WAL negotiation выделяет private wait seam: production передаёт thread::sleep,
+   тест держит настоящий SQLite lock и освобождает его на заданном retry. Проверяются
+   число attempts и переданная Duration; wall-clock latency не является контрактом.
+4. `inspect_readonly` не вызывает никакой SQLite constructor или diagnostic sink.
+   ArtifactId `metadata_db_schema` имеет opaque identity
+   `sqlite-schema-v1:<user_version>:<schema_cookie>` только при стабильном валидном
+   main header и отсутствии recovery sidecars до/после чтения. Это observed schema
+   identity, не proof наличия таблиц/согласованности content rows. Header size100,
+   magic и offsets user_version/schema_cookie — фиксированный SQLite file format,
+   не resource defaults. Изменение/ошибка/неоднозначность → Unknown без identity;
+   main absent + sidecars → NeedsRecovery, полностью absent → Missing. File-open
+   остаётся read-only; inspector не создаёт cache/locks/logs/sidecars. Symlink main
+   не обходится. Concurrent изменения после observation проверяет CF11; слабое
+   наблюдение не объявляется full generation snapshot.
+
+Challenge/rulings: operational readonly может создавать WAL/SHM, поэтому он не
+подходит planner-у. Sidecar existence check перед SQLite open оставляет TOCTOU;
+immutable=1 на active/WAL DB может скрыть committed WAL и запрещён. Custom VFS,
+новый global lock protocol или копирование большой DB ради inspection расширяли
+бы scope/unsafe/dependencies и не нужны для bounded schema facts. Консервативный
+Unknown допустим, если стабильное наблюдение невозможно. Schema mismatch — facts,
+а не вызов conflict::record; Query-ready проверка остаётся отдельной.
