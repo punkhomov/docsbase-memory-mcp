@@ -144,6 +144,12 @@ Literal retrieval defaults в `parse_search_args` и CLI — один будущ
 SQL/pipeline consumers обязательны до whole-S3 delivery. Старый config JSON
 остаётся legacy view; versioned full effective view принадлежит #78.
 
+### Delta 2026-11-10 — S3.3 вычисляемый payload charge
+
+| ID | Значение / источник | Почему fixed/computed |
+|---|---|---|
+| X15 | std::mem::size_of для owned payload/record headers; SQL octet_length direct columns; UTF-16→UTF-8 upper bound 3*ceil(bytes/2) | Размер Rust representation и Unicode code-unit bound — вычисляемые свойства формата, не memory policy. Лимиты I70/I71 настраиваемы; logical charge не равен всему RSS. BATCH_KEYS/MAX_HITS переиспользуют прежние bounded query domains |
+
 Источники: [runtime](../../../src/hybrid/runtime.rs), [models](../../../src/hybrid/models.rs),
 [local](../../../src/hybrid/local.rs), `daemon/lifecycle.rs::run_daemon`,
 `hybrid/ann.rs::AnnIndex::build`. I63/I64 — видимый dependency-default debt,

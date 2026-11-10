@@ -303,3 +303,58 @@ S3.2 не публикуется отдельно: до whole-S3 PR обязат
 для SQL preflight/capture и production search/warm phase ownership. Нельзя
 выпустить принятые, но не применяемые настройки. S3.3 до реализации фиксирует
 состав/учёт payload, SQL snapshot/preflight и отсутствие provider text truncation.
+
+## Delta 2026-11-10 — S3.3: owned SQL payload
+
+Новый `search::payload` предоставляет `PayloadRequest<'a>` с обязательными
+cache_root/project_id/generation/chunk_ids/include_text/include_filter_metadata
+и `OwnedPayload::capture(&Db, request, &PayloadBudget, &Cancellation)`.
+Нет открытия metadata connection или consumer defaults. Caller отдельно
+проверяет indexed project/ReadIndex schema и удерживает cooperative project
+read lease вокруг candidate generation + capture. Сам capture даёт согласованный
+SQL payload, не атомарность с произвольным внешним writer/Tantivy snapshot.
+
+До копирования данных: cancellation/root identity, bounded unique chunk_ids
+(существующий MAX_HITS), затем generation и отсутствие pending markers в одном
+коротком read transaction. Собственный transaction заканчивается до возврата;
+caller-owned transaction используется без commit/rollback и остаётся его
+ответственностью. Несовпадение generation/pending — явный retry/rebuild Project
+error; wrong root — Admission; недопустимый internal candidate set — отказ.
+Все row queries ограничены project_id, включая ошибочно чужие chunk ids.
+
+Preflight и copy относятся к тому же SQL snapshot. До reserve читаются только
+length/identity scalars, без Rust копий больших текстовых полей. Использовать
+`octet_length(column)` непосредственно: bundled SQLite3.53.2 поддерживает
+OPFLAG_BYTELENARG без загрузки текста. CAST вокруг column убирает эту оптимизацию.
+PRAGMA encoding читается без изменения: UTF-8 byte length точен, для UTF-16
+консервативная UTF-8 граница — checked `3 * ceil(bytes / 2)`. Не считать
+валидную UTF-16 БД corrupt и не вводить молчаливый UTF-8 fallback.
+
+Charge включает encoded root bytes, UTF-8 upper bounds всех копируемых strings
+и fixed record bookkeeping через std::mem::size_of: общий owned struct, ids,
+id->position entries, citation entries, text String slots при include_text,
+distinct doc-meta entries при include_filter_metadata. Это логическая верхняя
+оценка payload data/records, не allocator/hash-table control bytes, SQL work
+buffers, protocol output buffers или полный RSS. Все суммы/произведения checked;
+overflow — Admission до allocation. Временные SQL parameters/id sets ограничены
+MAX_HITS и прежним BATCH_KEYS; новых числовых batch defaults нет.
+
+Private data: root/project/generation, исходный порядок ids и positions,
+citations keyed chunk_id, optional Vec<String> texts в исходном порядке,
+doc_meta keyed distinct doc_id. Полный текст копируется только для rerank/snippet,
+без truncation provider documents. Missing citation/text остаётся отсутствующим
+для snippet/rendering; `rerank_documents()` требует text mode и полноту всех
+исходных ids, сохраняя прежнюю ошибку missing rerank text. Getters citation,
+chunk_text, doc_meta, root/project/generation/charged_bytes работают без SQL.
+Missing doc/filter semantics #62 и порядок ranking/post-filter здесь не меняются.
+
+`OwnedPayload` не содержит SQL/index/file handles, Send+Sync+'static. Его data
+поле объявлено раньше финального private PayloadPermit: сначала освобождаются
+данные, затем charge. При construction permit local объявляется до data local,
+чтобы error/unwind имели тот же порядок. Cancellation проверяется перед фазами
+и batches; query/transaction/permit cleanup обязателен при отказе/error/unwind.
+Instance-local test hooks разрешены только для детерминированного interleaving/
+drop ordering, без process-global flags или production callback API.
+
+S3.3 не активирует dispatcher и не завершает #66: config revision authority,
+actual pipeline/pool consumers и S4 по-прежнему обязательны до delivery.

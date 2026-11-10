@@ -137,3 +137,18 @@ final lint/format pin current source. SearchSpec impact and project inheritance
 also verified by source review using the existing common resolver contract.
 Actual SQL capture, data-before-permit drop order, production ownership and
 config authority remain future tasks; S3.2 is not independently shippable.
+Task S3.3: design ready, before implementation (base56cd4a1). SQL byte preflight
+опирается на проверенный bundled SQLite/direct-column octet_length, UTF-16
+upper bound и checked charge; data освобождается раньше финального permit.
+Код capture ещё отсутствует, production adoption/S4 не объявлены выполненными.
+Task S3.3: complete (base56cd4a1..this task commit; owned SQL capture only).
+Fresh task review PASS / APPROVED, no findings or deferred minors. Final
+cli-full1035/0/13ignored across66targets; capture18/policy13/metadata4;
+lean capture18/config71; full/lean all-target+opt-in Clippy/fmt/diff exit0,
+all12 manifests match current153 Rust inputs. Strong UTF-16 CJK-heavy cases
+exercise the byte upper bound; actual data-drop gates cover success/error/
+unwind before permit release, real SQLite decode failure preserves txn ownership.
+Ruling: preflight uses direct octet_length columns in the pinned bundled SQLite,
+not CAST materialization; i64 SQL lengths convert with checked unsigned range.
+Production consumers/config authority, coherent cross-store preparation and
+S4 remain outstanding. No partial delivery of unapplied search keys.

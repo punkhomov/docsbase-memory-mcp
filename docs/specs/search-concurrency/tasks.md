@@ -136,3 +136,24 @@ before code. Existing S3/S4 boundaries remain in force.
 - Verify focused config/budget, полный cli-full, lean config/budget и нужные
   integrations, full/lean all-target+opt-in Clippy/fmt/diff; свежий task review.
   S3.3 owned SQL capture и последующая revision/pipeline adoption ещё не готовы.
+
+## Delta 2026-11-10 — S3.3: preflight, owned capture и lifetime
+
+- Создать `src/search/{payload,payload_tests}.rs`, подключить модуль. Consumes
+  S3.2 PayloadBudget/Permit, Db/repo и S3.1 pending predicate. API/data/charge
+  formula — dated S3.3 design; без defaults/connection opens/provider calls.
+- RED: missing PayloadRequest/OwnedPayload API. Настоящий SQLite: identity и
+  порядок текста/citations/meta, flags без лишних полей, missing-doc/rerank
+  behavior, wrong root/gen/pending/foreign keys, cancellation, bound/duplicates.
+- SQL preflight/copy snapshot: gated writer commit между ними возвращает целиком
+  old payload/charge; success/error/unwind заканчивают только свой transaction.
+  UTF-8 multibyte/NUL byte count и UTF-16 CJK/emoji upper bound, request/aggregate
+  refusal before large copies, error/cancel cleanup и повторная capture.
+- Проверить actual payload data-drop gate: пока destructor данных удерживается,
+  второй reserve ещё отклоняется. После release весь charge доступен. Permit
+  last field и construction locals order подтверждаются реальными объектами.
+- Тесты не закрепляют platform-dependent numeric struct sizes: boundary charge
+  берётся из captured payload, а значения/идентичности — из SQL fixture.
+- Verify focused payload/policy/metadata, полный cli-full, lean relevant suites,
+  full/lean all-target+opt-in Clippy/fmt/diff; свежий task reviewer. Whole feature
+  final/native gates сохраняются. Actual consumers/revision/dispatch ещё pending.
