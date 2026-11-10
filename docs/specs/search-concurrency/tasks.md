@@ -308,3 +308,22 @@ focused benchmark/external and lean benchmark validate this changed harness.
   before commit; controller delegates findings.
 - Remaining S4 and whole-feature final/current-head native gates still pending;
   PR112 remains draft. Source helper reuse does not complete cancellation.
+
+## Delta 2026-11-10 — S4.1: shared phase interest
+
+- Base84c4134. Modify src/hybrid/flight.rs, dense.rs and existing
+  dense_admission_tests.rs. No new files/crates/unsafe/defaults/public API.
+- Before production code: gated real cold metadata with two callers, cancel
+  both before release, join/release before asserting no cache publication and
+  no retained flight; original code must fail for materializing cancelled work.
+  A later active request must actually initialize successfully.
+- Add private group-interest/typed-abandonment checked-work API; preserve run
+  adapter. Carry it through cold metadata and vector/ANN phase boundaries.
+  Ordinary errors are shared without retry, no per-leader cancellation.
+- Deterministic late-admission test at between-phase retirement covers caller
+  joining before retirement and caller selected before but registered after it;
+  both retry, exactly one live work execution and no leaked flight/listeners.
+- Verify focused flight/query/dense and daemon phases/refresh, full cli-full,
+  relevant lean hybrid/routing/integration/config and full/lean all-target plus
+  opt-in Clippy/fmt/diff. Frozen113 inputs unchanged. Fresh task review before
+  commit; delegate findings. Remaining S4/final/native gates stay pending.

@@ -249,3 +249,76 @@ fn revision_admission_never_runs_under_flight_registry_mutex() {
         .expect("cold work");
     assert_eq!(ready(rows).rows().len(), 2);
 }
+
+#[test]
+fn all_cancelled_during_metadata_skip_dense_materialization() {
+    let fixture = MetadataFixture::new();
+    seed(&fixture);
+    let request = request(&fixture);
+    let cache = DenseCache::new();
+    let pool = pool(&fixture);
+    let leader_token = Cancellation::new();
+    let follower_token = Cancellation::new();
+    let loads = AtomicUsize::new(0);
+    let (joined, joins) = mpsc::channel();
+    cache.cold_flights.observe_joins(joined);
+    let (captured, observed) = mpsc::channel();
+    let (release, proceed) = mpsc::channel();
+    let proceed = Mutex::new(proceed);
+    let (leader, follower, observed_both) = std::thread::scope(|scope| {
+        let leader = scope.spawn(|| {
+            cache.get_with_metadata(request, &leader_token, || {
+                loads.fetch_add(1, AtomicOrdering::SeqCst);
+                let metadata = {
+                    let reader = pool.try_acquire()?;
+                    DenseMetadata::capture(&reader, request.project_id)?
+                };
+                captured.send(()).expect("owned metadata");
+                proceed
+                    .lock()
+                    .expect("metadata gate")
+                    .recv_timeout(WATCHDOG)
+                    .expect("release metadata");
+                Ok(metadata)
+            })
+        });
+        let capture = observed.recv_timeout(WATCHDOG);
+        let first = joins.recv_timeout(WATCHDOG);
+        let follower = scope.spawn(|| {
+            cache.get_with_metadata(request, &follower_token, || {
+                loads.fetch_add(1, AtomicOrdering::SeqCst);
+                panic!("follower must not load metadata")
+            })
+        });
+        let second = joins.recv_timeout(WATCHDOG);
+        leader_token.cancel();
+        follower_token.cancel();
+        // A cancelled follower leaves before the non-preemptible leader phase.
+        let follower = follower.join().expect("cancelled follower");
+        let _ = release.send(());
+        (
+            leader.join().expect("cancelled leader"),
+            follower,
+            capture.is_ok() && first.is_ok() && second.is_ok(),
+        )
+    });
+    assert!(observed_both);
+    assert!(matches!(leader, Err(Error::Admission { .. })));
+    assert!(matches!(follower, Err(Error::Admission { .. })));
+    assert_eq!(loads.load(AtomicOrdering::SeqCst), 1);
+    assert!(
+        cache.lock_entries().is_empty(),
+        "cancelled metadata must not start dense materialization or publication"
+    );
+    assert_eq!(cache.cold_flights.active(), 0);
+    assert_eq!(leader_token.subscriber_count(), 0);
+    assert_eq!(follower_token.subscriber_count(), 0);
+    let retry = cache
+        .get_with_metadata(request, &Cancellation::new(), || {
+            loads.fetch_add(1, AtomicOrdering::SeqCst);
+            DenseMetadata::capture(&fixture.writer, fixture.project)
+        })
+        .expect("live retry initializes");
+    assert_eq!(ready(retry).rows().len(), 2);
+    assert_eq!(loads.load(AtomicOrdering::SeqCst), 2);
+}

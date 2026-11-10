@@ -312,3 +312,29 @@ inputs unchanged. Ruling: runtime accessor still returns &ReadPool; const
 qualifier removed explicitly because Rust1.88 Arc deref is nonconst.
 S4 and whole-feature final review/current-head native gates remain pending;
 PR112 stays draft and #66 remains open.
+
+Task S4.1: complete (base84c4134..this task commit). Private checked Flights
+work uses all registered live participants, with typed ordinary failure versus
+abandonment. Dense checks before/after revision admission, after metadata and
+around vector/ANN phases; no leader personal budget enters shared work. Explicit
+abandonment retires/wakes with retry for late live joins/retained selections;
+ordinary Admission remains shared failure without replay. Already-running sync
+phases are not forcibly interrupted or rolled back. Public APIs/run adapter and
+background participation remain unchanged. Real all-cancelled metadata RED0/1
+in0.01s proves old unnecessary resident publication; final regression leaves no
+entries/flight/listeners and a real live retry initializes. Two additional
+deterministic retirement races preserve one live work and cleanup.
+Fresh review Spec PASS / Quality APPROVED, no findings. All20 final stages0
+match160 Rust inputs: full1094passed/0failed/13ignored/66targets; flight9/dense
+admission5/query9/dense75/core8/server14/ranking60; lean9/9/75/28/42/74. Full/
+lean all-target+opt-in Clippy/fmt/diff pass, frozen113 unchanged. No deferred
+findings. Prior C84c4134 native42899966719 passed all4 checks, +2 tests per OS
+versus B437 with none removed; does not replace this/final-head native gates.
+S4 transport/timer/EOF/original retry budget/actual-job+reply+connection accounting,
+queue diagnostics/product docs and whole-feature final review/native remain;
+PR112 stays draft and #66 remains open.
+
+Task S4.1: design ready, before implementation (base84c4134). Checked shared
+phase interest uses all participants and typed abandonment. Cold work stops at
+the next boundary after all cancel; late live arrivals retry normal admission.
+No transport/timer delivery claim; remaining S4/final/native gates mandatory.

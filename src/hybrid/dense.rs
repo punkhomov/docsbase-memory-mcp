@@ -21,7 +21,7 @@ use crate::error::{Error, Result};
 use crate::hybrid::ann::{self, ANN_MIN_VECTORS, AnnIndex};
 use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore};
 use crate::hybrid::dense_metadata::DenseMetadata;
-use crate::hybrid::flight::Flights;
+use crate::hybrid::flight::{Flights, WorkResult};
 use crate::hybrid::meta::{AnnOutcome, AnnState};
 use crate::hybrid::work::Cancellation;
 use crate::store::Db;
@@ -918,13 +918,16 @@ impl DenseCache {
             generation: request.generation,
             model_id: request.model_id.to_owned(),
         };
-        let rows = self.cold_flights.run(
+        let rows = self.cold_flights.run_checked(
             &key,
             cancellation,
             || self.cached_rows(request, lookup),
-            || {
+            |interest| {
+                interest.check()?;
                 let _revision = admit()?;
+                interest.check()?;
                 let metadata = load()?;
+                interest.check()?;
                 if metadata.cache_root() != request.cache_root
                     || metadata.project_id() != request.project_id
                     || metadata.generation() != request.generation
@@ -932,9 +935,10 @@ impl DenseCache {
                     return Err(Error::Admission {
                         message: "dense metadata snapshot does not match the requested identity"
                             .to_owned(),
-                    });
+                    }
+                    .into());
                 }
-                self.resolve(request, metadata.into_chunks())
+                self.resolve(request, metadata.into_chunks(), &|| interest.check())
             },
         )?;
         // The registry's cached callback must never block on configuration:
@@ -945,7 +949,13 @@ impl DenseCache {
     }
 
     /// Full lookup path: exact rows, ANN load or background build.
-    fn resolve(&self, request: DenseRequest<'_>, chunks: Vec<(u64, String)>) -> Result<DenseRows> {
+    fn resolve(
+        &self,
+        request: DenseRequest<'_>,
+        chunks: Vec<(u64, String)>,
+        check: &impl Fn() -> WorkResult<()>,
+    ) -> WorkResult<DenseRows> {
+        check()?;
         let DenseRequest {
             project_id,
             generation,
@@ -953,6 +963,7 @@ impl DenseCache {
             ..
         } = request;
         let digest = self.digest_for(project_id, generation, &chunks);
+        check()?;
         if chunks.len() > self.limits.max_vectors {
             return Ok(self.stash_too_large(project_id, generation, model_id, chunks));
         }
@@ -998,11 +1009,14 @@ impl DenseCache {
                 chunks.len(),
                 digest.clone(),
             );
+            check()?;
             if let Some(store) = &self.store
                 && let Ok(Some(slot)) = store.load(&key)
             {
+                check()?;
                 match AnnIndex::load(&slot) {
                     Ok(ann) => {
+                        check()?;
                         let state = DenseRows::Ann(Arc::new(ann));
                         if let Some(retained) =
                             self.stash(project_id, generation, model_id, state.clone())
@@ -1023,7 +1037,9 @@ impl DenseCache {
                 }
             }
         }
+        check()?;
         let input = self.load_rows(request, chunks, digest)?;
+        check()?;
         Ok(self.resolve_rows(project_id, generation, model_id, input))
     }
 
@@ -2024,6 +2040,7 @@ mod tests {
                 DenseMetadata::capture(&db, project_id)
                     .expect("metadata")
                     .into_chunks(),
+                &|| Ok(()),
             )
             .expect("resolve");
         assert!(

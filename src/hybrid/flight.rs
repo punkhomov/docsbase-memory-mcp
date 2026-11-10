@@ -10,6 +10,35 @@ use crate::hybrid::work::{Cancellation, Wake};
 
 type SharedResult<T> = std::result::Result<T, SharedFailure>;
 
+pub(crate) type WorkResult<T> = std::result::Result<T, WorkError>;
+
+#[derive(Debug)]
+pub(crate) enum WorkError {
+    Failed(Error),
+    Abandoned,
+}
+
+impl From<Error> for WorkError {
+    fn from(error: Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// Interest in shared work, never the initiating caller's personal budget.
+pub(crate) struct Interest<'a> {
+    active: &'a dyn Fn() -> bool,
+}
+
+impl Interest<'_> {
+    pub(crate) fn check(&self) -> WorkResult<()> {
+        if (self.active)() {
+            Ok(())
+        } else {
+            Err(WorkError::Abandoned)
+        }
+    }
+}
+
 #[derive(Clone)]
 enum Completion<T> {
     Finished(SharedResult<T>),
@@ -54,8 +83,18 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
         &self,
         key: &K,
         cancellation: &Cancellation,
-        mut cached: impl FnMut() -> Option<T>,
+        cached: impl FnMut() -> Option<T>,
         work: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.run_checked(key, cancellation, cached, |_| work().map_err(Into::into))
+    }
+
+    pub(crate) fn run_checked(
+        &self,
+        key: &K,
+        cancellation: &Cancellation,
+        mut cached: impl FnMut() -> Option<T>,
+        work: impl FnOnce(&Interest<'_>) -> WorkResult<T>,
     ) -> Result<T> {
         cancellation.check()?;
         let listener = cancellation.listen();
@@ -108,7 +147,23 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
                 #[cfg(test)]
                 self.observe_boundary(Boundary::BeforeStart);
                 if flight.has_active() {
-                    let result = work().map_err(SharedFailure::new);
+                    let active = || flight.has_active();
+                    let interest = Interest { active: &active };
+                    let result = match work(&interest) {
+                        Ok(value) => Ok(value),
+                        Err(WorkError::Failed(error)) => Err(SharedFailure::new(error)),
+                        Err(WorkError::Abandoned) => {
+                            #[cfg(test)]
+                            self.observe_boundary(Boundary::Inactive);
+                            // A live caller can register after the decision.
+                            // Retire with retry semantics, not a shared error.
+                            leader.finish(Completion::Abandoned);
+                            cancellation.check()?;
+                            return Err(Error::Admission {
+                                message: "shared work has no interested callers".to_owned(),
+                            });
+                        }
+                    };
                     leader.finish(Completion::Finished(result.clone()));
                     cancellation.check()?;
                     return result.map_err(SharedFailure::into_error);
@@ -351,10 +406,35 @@ mod tests {
         UsesCompletedCacheAfterRetirement,
     }
 
-    fn pre_provider_cancellation_race(admission: LiveAdmission) {
+    fn cancellation_observer(
+        admission: LiveAdmission,
+        during_work: bool,
+        before_start: Arc<impl Fn() + Send + Sync + 'static>,
+        inactive: impl Fn() + Send + Sync + 'static,
+        selected: impl Fn() + Send + Sync + 'static,
+    ) -> BoundaryObserver {
+        let selections = AtomicUsize::new(0);
+        let starts = AtomicUsize::new(0);
+        Arc::new(move |boundary| match boundary {
+            Boundary::Selected => {
+                if selections.fetch_add(1, Ordering::SeqCst) == 1
+                    && !matches!(admission, LiveAdmission::AfterInactiveDecision)
+                {
+                    selected();
+                }
+            }
+            Boundary::BeforeStart => {
+                if starts.fetch_add(1, Ordering::SeqCst) == 0 && !during_work {
+                    before_start();
+                }
+            }
+            Boundary::Inactive => inactive(),
+        })
+    }
+
+    fn pre_provider_cancellation_race(admission: LiveAdmission, during_work: bool) {
         let flights = Flights::<u8, u8>::default();
-        let cancelled = Cancellation::new();
-        let live = Cancellation::new();
+        let (cancelled, live) = (Cancellation::new(), Cancellation::new());
         let calls = AtomicUsize::new(0);
         let cached = Mutex::new(None);
         let cache_checks = AtomicUsize::new(0);
@@ -364,28 +444,31 @@ mod tests {
             // Controllers drop before scoped joins on assertion unwind, so no
             // worker can remain stuck on a fixture gate.
             let (before_start, start_entry, start_release) = gate();
+            let before_start = Arc::new(before_start);
             let (inactive, inactive_entry, inactive_release) = gate();
             let (selected, selected_entry, selected_release) = gate();
-            let selections = AtomicUsize::new(0);
-            let starts = AtomicUsize::new(0);
-            *flights.boundary_observer.lock().expect("observer") =
-                Some(Arc::new(move |boundary| match boundary {
-                    Boundary::Selected => {
-                        if selections.fetch_add(1, Ordering::SeqCst) == 1
-                            && !matches!(admission, LiveAdmission::AfterInactiveDecision)
-                        {
-                            selected();
-                        }
-                    }
-                    Boundary::BeforeStart => {
-                        if starts.fetch_add(1, Ordering::SeqCst) == 0 {
+            *flights.boundary_observer.lock().expect("observer") = Some(cancellation_observer(
+                admission,
+                during_work,
+                Arc::clone(&before_start),
+                inactive,
+                selected,
+            ));
+            let (flight_registry, leader_token) = (&flights, &cancelled);
+            let leader = scope.spawn(move || {
+                flight_registry.run_checked(
+                    &1,
+                    leader_token,
+                    || None,
+                    |interest| {
+                        if during_work {
                             before_start();
+                            interest.check()?;
                         }
-                    }
-                    Boundary::Inactive => inactive(),
-                }));
-            let leader = scope
-                .spawn(|| flights.run(&1, &cancelled, || None, || panic!("cancelled provider")));
+                        panic!("cancelled provider")
+                    },
+                )
+            });
             receive(&start_entry);
             receive(&joins);
             let run_live = || {
@@ -456,22 +539,32 @@ mod tests {
 
     #[test]
     fn live_admission_after_inactive_decision_retries_abandoned_work() {
-        pre_provider_cancellation_race(LiveAdmission::AfterInactiveDecision);
+        pre_provider_cancellation_race(LiveAdmission::AfterInactiveDecision, false);
     }
 
     #[test]
     fn live_selection_before_inactive_decision_retries_abandoned_work() {
-        pre_provider_cancellation_race(LiveAdmission::SelectedBeforeDecision);
+        pre_provider_cancellation_race(LiveAdmission::SelectedBeforeDecision, false);
     }
 
     #[test]
     fn live_registration_after_retirement_retries_abandoned_work() {
-        pre_provider_cancellation_race(LiveAdmission::RegistersAfterRetirement);
+        pre_provider_cancellation_race(LiveAdmission::RegistersAfterRetirement, false);
     }
 
     #[test]
     fn live_retry_rechecks_completed_cache_before_provider() {
-        pre_provider_cancellation_race(LiveAdmission::UsesCompletedCacheAfterRetirement);
+        pre_provider_cancellation_race(LiveAdmission::UsesCompletedCacheAfterRetirement, false);
+    }
+
+    #[test]
+    fn live_join_after_phase_abandonment_retries_work() {
+        pre_provider_cancellation_race(LiveAdmission::AfterInactiveDecision, true);
+    }
+
+    #[test]
+    fn live_registration_after_phase_retirement_retries_work() {
+        pre_provider_cancellation_race(LiveAdmission::RegistersAfterRetirement, true);
     }
 
     #[test]

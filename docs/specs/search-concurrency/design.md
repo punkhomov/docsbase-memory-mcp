@@ -635,3 +635,36 @@ accounting/telemetry and whole-feature final/native acceptance remain mandatory.
 S3.6c API note: read_pool() still returns &ReadPool, but no longer has a const
 qualifier: Rust1.88 cannot dereference Arc in a const function. Shared is a
 runtime-only constructed service; runtime calls and capacity identity stay.
+
+## Delta 2026-11-10 — S4.1: interest between shared cold phases
+
+FR-5/FR-6, SC-3/SC-5. Flights expose a private checked-work variant with a
+group-interest view, derived from all registered live participants rather than
+the leader's token/deadline. Its private typed outcome distinguishes ordinary
+work failure from abandonment. The existing run adapter and public dense/query
+APIs stay unchanged. Checks run outside registry/state locks; provider work and
+configuration admission never run while a flight mutex is held.
+
+Cold dense initialization checks group interest before/after revision admission,
+after owned metadata returns, before vector/ANN IO and after those synchronous
+phases before publication or starting ANN CPU work. A phase already executing
+may finish; cancellation is cooperative, without forced interruption or rollback
+of already published state. No personal request token is consulted by the shared
+factory. Background warm has its own live participant as before.
+
+On an explicit no-interest outcome retire the flight with Abandoned, release
+the leader's guard/metadata, wake followers and return cancellation to its now
+cancelled leader. Live callers that joined/selected around the decision retry
+normal admission and recheck completed cache; they must not inherit an obsolete
+group-cancellation error. An ordinary Admission from a loader/provider remains a
+shared error and is not silently retried. Leader unwind still completes/wakes.
+
+Challenge: a live caller can arrive after the last interest check but before
+retirement. Preserve the earlier atomic-retirement/retry semantics for this
+new between-phase decision, not just the existing before-start decision.
+Tests gate metadata and retirement, cancel all original participants and verify
+no resident state/vector materialization, retry recovery, and late live caller
+success. Existing leader-cancel/live-follower and error/unwind tests remain.
+No new timers, sleeps, defaults, crates, ranking/window/baseline or transport
+changes here. S4 transport/caller timer/actual-job accounting and queue telemetry
+plus final whole-feature/native gates remain mandatory; PR112 remains draft.
