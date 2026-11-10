@@ -338,9 +338,8 @@ async fn accept_loop(
                 let shutdown = shutdown_tx.clone();
                 let shared = Arc::clone(&shared);
                 tokio::spawn(async move {
-                    let _permit = permit;
-                    crate::daemon::server::handle_connection(
-                        shared, stream, in_flight, events, shutdown,
+                    crate::daemon::server::handle_admitted_connection(
+                        shared, stream, in_flight, events, shutdown, permit,
                     )
                     .await;
                 });

@@ -238,6 +238,69 @@ fn start_search(fixture: &Fixture) -> tokio::task::JoinHandle<Result<Value>> {
     })
 }
 
+struct CountingReranker(Arc<AtomicUsize>);
+
+impl Reranker for CountingReranker {
+    fn rerank(&self, _: &str, documents: &[String], top_n: usize) -> Result<Vec<(usize, f32)>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(documents
+            .iter()
+            .enumerate()
+            .take(top_n)
+            .map(|(index, _)| (index, 1.0))
+            .collect())
+    }
+}
+
+#[test]
+fn abandoning_dispatch_during_embedding_skips_rerank() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (fixture, entered, aborted) = runtime.block_on(async {
+        let (entered, observed) = std_mpsc::channel();
+        let (release, proceed) = std_mpsc::channel();
+        let fixture = Fixture::new(HybridStages {
+            embedder: Some(Arc::new(TestEmbedder {
+                entered: Some(entered),
+                release: Mutex::new(proceed),
+                calls: Arc::default(),
+            })),
+            ranking: Ranking::Rrf,
+            reranker: Some(Arc::new(CountingReranker(Arc::clone(&calls)))),
+        });
+        let shared = Arc::clone(&fixture.shared);
+        let session = fixture.session;
+        let blocked = tokio::spawn(async move {
+            call_tool(
+                &shared,
+                Some(session),
+                "search_docs",
+                json!({"query":"widgets", "rerank":true}),
+            )
+            .await
+        });
+        let entered = observed.recv_timeout(WATCHDOG).is_ok();
+        blocked.abort();
+        let aborted = blocked.await.is_err_and(|err| err.is_cancelled());
+        let _ = release.send(());
+        (fixture, entered, aborted)
+    });
+    // Dropping this runtime waits for the actual blocking worker after release,
+    // rather than assuming aborting its async waiter ended provider work.
+    drop(runtime);
+    assert!(entered && aborted);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "abandoned caller ran rerank"
+    );
+    assert!(fixture.shared.readers.try_acquire().is_ok());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embedding_releases_reader_preparation_file_and_global_database() {
     let (fixture, observed, release) = embedding_fixture();

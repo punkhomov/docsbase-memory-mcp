@@ -365,3 +365,34 @@ Task S4.1: design ready, before implementation (base84c4134). Checked shared
 phase interest uses all participants and typed abandonment. Cold work stops at
 the next boundary after all cancel; late live arrivals retry normal admission.
 No transport/timer delivery claim; remaining S4/final/native gates mandatory.
+
+Task S4.2b: design ready, before implementation (base76b0c0b). Original absolute
+deadline driver/cancellation-on-drop plus shared actual-job/reply/connection
+activity. Gated actual dispatcher abandonment RED precedes production edits;
+injected expiry tests avoid clock/sleep assumptions. Remaining S4.3/final/native
+mandatory, PR112 remains draft and #66 remains open.
+
+Task S4.2b: complete (base76b0c0b..this task commit). Async dispatcher retains
+one original SearchOperation deadline; expiry or abandoned waiter cancels that
+caller and prevents its next stage, without preempting an executing provider.
+Normal completion disarms cancellation and rechecks the original budget even
+when a completed worker wins the ready race. Activity increments once and is
+shared through actual blocking work and wire reply; actual admitted connection
+capacity survives caller timeout until both owners finish. Last drop releases
+its capacity reference before counter/event notification. Expired searches
+close after their error reply; legacy hello/session/half-close policy preserved.
+Actual gated dispatcher RED0/1in0.07s proved old post-abandonment rerank; expired
+completed-worker RED0/1in0.00s proved the ready-race budget hole before correction.
+Fresh task review Spec PASS / Quality APPROVED, no Critical/Important findings.
+Minor M1 safety watchdogs corrected by a dedicated agent only in request.rs
+cfg(test); production prefix byte-identical and all other161 Rust files unchanged.
+Final post-fix9 commands exit0 matching all162 current hashes: full cli-full1099
+passed/0failed/13ignored across66targets, full/lean driver3, full/lean all-target
+and opt-in Clippy/fmt/diff pass; all113 frozen inputs unchanged. Prior19-stage
+evidence retained honestly for pre-watchdog source, including core9/server14/
+wire28/lifecycle25 and lean9/14/28/25/42/74. No deferred findings or baseline/
+provider/window/default changes. Prior76 native42905527539 all4green/+1eachOS/
+none removed is prior-head evidence, not final acceptance.
+Remaining S4.3 scoped active EOF/capabilities/reply deadline/original frontend
+queue+retry budget/rmcp cancellation/queue diagnostics/docs/wholefinal/native
+remain mandatory. PR112 stays draft and #66 remains open.

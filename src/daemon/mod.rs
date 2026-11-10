@@ -3,6 +3,7 @@
 pub mod admission;
 pub mod lifecycle;
 pub mod registry;
+mod request;
 pub mod server;
 pub mod session;
 pub mod tools;

@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::config::schema::Resolved;
 use crate::config::{Config, paths};
+use crate::daemon::request::{self, Activity};
 use crate::daemon::session::SessionRegistry;
 use crate::daemon::tools;
 use crate::daemon::{lifecycle, registry};
@@ -591,7 +592,14 @@ fn ipc_debug(message: &str) {
     }
 }
 
-/// Serves one connection until EOF, cleanup included (FR-8, I2).
+#[derive(Default)]
+struct Peer {
+    session_id: Option<u64>,
+    cancel_rx: Option<oneshot::Receiver<()>>,
+    hello_done: bool,
+}
+
+/// Serves an explicitly unadmitted compatibility connection.
 pub async fn handle_connection(
     shared: Arc<Shared>,
     stream: Stream,
@@ -599,14 +607,43 @@ pub async fn handle_connection(
     events: mpsc::Sender<()>,
     shutdown: watch::Sender<bool>,
 ) {
+    handle_connection_in(shared, stream, in_flight, events, shutdown, None).await;
+}
+
+/// Real accept retains its existing connection slot through actual work.
+pub(super) async fn handle_admitted_connection(
+    shared: Arc<Shared>,
+    stream: Stream,
+    in_flight: Arc<AtomicUsize>,
+    events: mpsc::Sender<()>,
+    shutdown: watch::Sender<bool>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    handle_connection_in(
+        shared,
+        stream,
+        in_flight,
+        events,
+        shutdown,
+        Some(Arc::new(permit)),
+    )
+    .await;
+}
+
+async fn handle_connection_in(
+    shared: Arc<Shared>,
+    stream: Stream,
+    in_flight: Arc<AtomicUsize>,
+    events: mpsc::Sender<()>,
+    shutdown: watch::Sender<bool>,
+    connection: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+) {
     let (read_half, mut writer) = tokio::io::split(stream);
     let mut reader = FrameReader::new(BufReader::new(read_half));
-    let mut session_id: Option<u64> = None;
-    let mut cancel_rx: Option<oneshot::Receiver<()>> = None;
-    let mut hello_done = false;
+    let mut peer = Peer::default();
 
     loop {
-        let next_frame = match cancel_rx.as_mut() {
+        let next_frame = match peer.cancel_rx.as_mut() {
             Some(cancel) => tokio::select! {
                 frame = reader.read_frame() => frame,
                 // The janitor reaped this session: stop holding the socket.
@@ -617,8 +654,9 @@ pub async fn handle_connection(
         let line = match next_frame {
             Ok(Frame::Line(line)) => {
                 ipc_debug(&format!(
-                    "frame {} bytes on session {session_id:?}",
-                    line.len()
+                    "frame {} bytes on session {:?}",
+                    line.len(),
+                    peer.session_id
                 ));
                 line
             }
@@ -645,23 +683,18 @@ pub async fn handle_connection(
                 break;
             }
         };
-        let guard = InFlightGuard::new(&in_flight);
-        let (response, close) = handle_request(
-            &shared,
-            &shutdown,
-            &in_flight,
-            &mut hello_done,
-            &mut session_id,
-            &mut cancel_rx,
-            &line,
-        )
-        .await;
+        let guard = Activity::new(&in_flight, &events, connection.as_ref());
+        let (response, close) = match protocol::decode_request(&line) {
+            Ok(decoded) => {
+                handle_request(&shared, &shutdown, &in_flight, &mut peer, decoded, &guard).await
+            }
+            Err(err) => (error_response(&err), false),
+        };
         // The request is only settled once its response is on the wire:
         // otherwise an armed grace deadline could tear the socket down
         // between completing the work and delivering the reply.
         let Ok(bytes) = protocol::encode(&response) else {
             drop(guard);
-            let _ = events.try_send(());
             break;
         };
         // JSON escaping can expand a document up to 6x, so the config-level
@@ -677,7 +710,6 @@ pub async fn handle_connection(
             };
             let Ok(fallback) = protocol::encode(&error_response(&err)) else {
                 drop(guard);
-                let _ = events.try_send(());
                 break;
             };
             fallback
@@ -686,19 +718,16 @@ pub async fn handle_connection(
         };
         if writer.write_all(&bytes).await.is_err() {
             drop(guard);
-            let _ = events.try_send(());
             break;
         }
         drop(guard);
-        // Any request may change liveness accounting (registration, EOF of a
-        // session, completion of a request).
-        let _ = events.try_send(());
+        // Last activity owner announces completion; the real worker may remain.
         if close {
             break;
         }
     }
 
-    if let Some(id) = session_id {
+    if let Some(id) = peer.session_id {
         ipc_debug(&format!("leaving session {id}"));
         shared.sessions.leave(id);
     }
@@ -709,15 +738,10 @@ async fn handle_request(
     shared: &Arc<Shared>,
     shutdown: &watch::Sender<bool>,
     in_flight: &Arc<AtomicUsize>,
-    hello_done: &mut bool,
-    session_id: &mut Option<u64>,
-    cancel_rx: &mut Option<oneshot::Receiver<()>>,
-    line: &[u8],
+    peer: &mut Peer,
+    request: Request,
+    activity: &Arc<Activity>,
 ) -> (Response, bool) {
-    let request = match protocol::decode_request(line) {
-        Ok(request) => request,
-        Err(err) => return (error_response(&err), false),
-    };
     match request {
         Request::Hello {
             protocol_version,
@@ -756,7 +780,7 @@ async fn handle_request(
                 };
                 return (error_response(&err), true);
             }
-            *hello_done = true;
+            peer.hello_done = true;
             (
                 Response::Hello {
                     protocol_version: PROTOCOL_VERSION,
@@ -767,26 +791,38 @@ async fn handle_request(
             )
         }
         Request::RegisterSession { pid, cwd } => {
-            if !*hello_done {
+            if !peer.hello_done {
                 return (hello_required(), true);
             }
-            register_and_respond(shared, session_id, cancel_rx, pid, &cwd, false).await
+            register_and_respond(
+                shared,
+                &mut peer.session_id,
+                &mut peer.cancel_rx,
+                pid,
+                &cwd,
+                false,
+            )
+            .await
         }
         Request::RegisterUnbound { pid, cwd } => {
-            if !*hello_done {
+            if !peer.hello_done {
                 return (hello_required(), true);
             }
-            register_and_respond(shared, session_id, cancel_rx, pid, &cwd, true).await
+            register_and_respond(
+                shared,
+                &mut peer.session_id,
+                &mut peer.cancel_rx,
+                pid,
+                &cwd,
+                true,
+            )
+            .await
         }
         Request::CallTool { name, args } => {
-            if !*hello_done {
+            if !peer.hello_done {
                 return (hello_required(), true);
             }
-            let value = call_tool(shared, *session_id, &name, args).await;
-            match value {
-                Ok(value) => (Response::ToolResult { value }, false),
-                Err(err) => (error_response(&err), false),
-            }
+            call_and_respond(shared, peer.session_id, &name, args, activity).await
         }
         Request::StopDaemon => {
             // Idempotent: only the first stop drains and signals shutdown, so
@@ -799,6 +835,35 @@ async fn handle_request(
             }
             (Response::ToolResult { value: Value::Null }, false)
         }
+    }
+}
+
+async fn call_and_respond(
+    shared: &Arc<Shared>,
+    session_id: Option<u64>,
+    name: &str,
+    args: Value,
+    activity: &Arc<Activity>,
+) -> (Response, bool) {
+    let operation = match search_operation(shared, name) {
+        Ok(operation) => operation,
+        Err(err) => return (error_response(&err), false),
+    };
+    let value = call_tool_in(
+        shared,
+        session_id,
+        name,
+        args,
+        operation.clone(),
+        Some(Arc::clone(activity)),
+    )
+    .await;
+    let close = operation
+        .as_ref()
+        .is_some_and(|operation| operation.cancellation().is_cancelled());
+    match value {
+        Ok(value) => (Response::ToolResult { value }, close),
+        Err(err) => (error_response(&err), close),
     }
 }
 
@@ -920,26 +985,57 @@ async fn register_session(
     }
 }
 
+fn search_operation(
+    shared: &Shared,
+    name: &str,
+) -> Result<Option<crate::search::operation::SearchOperation>> {
+    if name == "search_docs" {
+        crate::search::operation::SearchOperation::new(
+            &shared.global_config.search,
+            Instant::now(),
+            crate::hybrid::work::Cancellation::new(),
+        )
+        .map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
 async fn call_tool(
     shared: &Arc<Shared>,
     session_id: Option<u64>,
     name: &str,
     args: Value,
 ) -> Result<Value> {
-    let operation = if name == "search_docs" {
-        Some(crate::search::operation::SearchOperation::new(
-            &shared.global_config.search,
-            Instant::now(),
-            crate::hybrid::work::Cancellation::new(),
-        )?)
-    } else {
-        None
-    };
+    call_tool_in(
+        shared,
+        session_id,
+        name,
+        args,
+        search_operation(shared, name)?,
+        None,
+    )
+    .await
+}
+
+async fn call_tool_in(
+    shared: &Arc<Shared>,
+    session_id: Option<u64>,
+    name: &str,
+    args: Value,
+    operation: Option<crate::search::operation::SearchOperation>,
+    activity: Option<Arc<Activity>>,
+) -> Result<Value> {
     let shared = Arc::clone(shared);
     let name = name.to_owned();
-    tokio::task::spawn_blocking(move || route_tool(&shared, session_id, &name, &args, operation))
-        .await
-        .map_err(|err| Error::internal_with_source("tool task join", err))?
+    let worker_operation = operation.clone();
+    let worker = tokio::task::spawn_blocking(move || {
+        let result = route_tool(&shared, session_id, &name, &args, worker_operation);
+        drop(activity);
+        result
+    });
+    request::run(worker, operation.as_ref()).await
 }
 
 /// `search_docs` with the project's hybrid stages, dense cache and window.
@@ -1180,22 +1276,6 @@ fn session_cwd(shared: &Arc<Shared>, session_id: Option<u64>) -> Result<PathBuf>
             message: "session is not bound to a project".to_owned(),
             instruction: Some("index_project needs a path or a bound session".to_owned()),
         })
-}
-
-/// Keeps `in_flight` balanced even if request handling ever panics.
-struct InFlightGuard<'a>(&'a AtomicUsize);
-
-impl<'a> InFlightGuard<'a> {
-    fn new(counter: &'a AtomicUsize) -> Self {
-        counter.fetch_add(1, Ordering::SeqCst);
-        Self(counter)
-    }
-}
-
-impl Drop for InFlightGuard<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
 }
 
 fn hello_required() -> Response {

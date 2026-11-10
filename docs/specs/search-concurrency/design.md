@@ -695,3 +695,45 @@ real IPC exact-limit/oversize and frontend suites remain authoritative for wire
 compatibility. Incomplete-frame classification is preserved by code inspection;
 no dedicated partial-EOF test is claimed. No timing sleeps/watchdog loosening or
 new crates.
+
+## Delta 2026-11-10 — S4.2b: deadline driver and actual-work ownership
+
+FR-6/SC-5, without claiming the later scoped-wire/frontend delivery. Each search
+has its existing original SearchOperation before spawn_blocking. The async
+dispatcher races its actual worker against the same absolute Tokio deadline.
+Expiry cancels that caller token and returns Admission; dropping the dispatch
+future also cancels it. A running sync provider may finish, but operation checks
+prevent the next expensive stage. Shared flights still use group interest,
+never the initiating request's personal budget. No new timeout/default.
+
+Each actual connection request has one shared RAII activity: increment in_flight
+once, retain its counter/events and an optional Arc of the already acquired
+connection semaphore permit. The async handler holds the activity through reply
+delivery, while the actual blocking closure independently holds a clone until
+completion/unwind. Last drop decrements and emits a lifecycle event. A timed-out
+search attempts its error reply and closes that connection rather than starting
+more detached work under one permit. The existing graceful drain and signal
+escalation count actual still-running jobs as well as replies.
+
+Real accept uses an admitted connection entry with its existing permit;
+handle_connection's public compatibility signature remains an explicit adapter
+without an externally admitted permit. Ordinary tools also capture activity in
+their blocking closures, preserving accounting on future abandonment. A private
+peer state groups hello/session/janitor fields to pass dispatch state coherently.
+Legacy CallTool/session/half-close semantics otherwise stay unchanged.
+
+The driver has a private injected-expiry seam for deterministic tests; production
+always supplies sleep_until(operation.deadline). An expiry signal cancels the
+token explicitly, without assuming Tokio virtual time advances std::Instant.
+No timer polling, sleeps for ordering, hard provider preemption, new crates or
+test clock feature is needed. Test actual dispatcher abandonment during gated
+embedding: abort and await the caller future, release the provider, drain its
+runtime, then assert no reranker call. Original code wrongly runs the next stage.
+Activity/expiry tests gate actual blocking work and reply ownership, verify one
+count/permit survives caller expiry and drops only after both owners finish,
+including error/unwind; ordinary successful dispatch preserves response behavior.
+
+This is not yet active transport EOF/capability negotiation, a deadline over a
+blocked reply write, original frontend queue/reconnect budget or queue telemetry.
+Those remain mandatory S4.3 in the same draft PR before whole-feature review and
+final-head native acceptance; an intermediate task is never a deliverable.

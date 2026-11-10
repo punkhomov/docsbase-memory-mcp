@@ -343,3 +343,27 @@ focused benchmark/external and lean benchmark validate this changed harness.
   and refresh, full cli-full; relevant lean scopes and full/lean all-target+
   opt-in Clippy/fmt/diff, frozen113 inputs. Fresh review before commit, delegate
   findings. S4 driver/accounting/frontend/telemetry/final/native still mandatory.
+
+## Delta 2026-11-10 — S4.2b: deadline and actual job accounting
+
+- Base76b0c0b. Modify daemon/{server,lifecycle}.rs; create private daemon request
+  driver/activity module with unit tests; extend daemon/search_phase_tests.rs.
+  No crates/unsafe/new timeout/default/wire/config or provider/ranking changes.
+- RED actual call_tool dispatcher: pause embedding, abort/await caller task,
+  release provider, drain runtime before assertions. Existing code runs a real
+  counting reranker despite caller abandonment; new code must not.
+- Add original-deadline driver with cancellation-on-drop and private injected
+  expiry future. Production uses original absolute sleep_until, no per-phase
+  timeout/retry reset. Keep compatibility call_tool entry for existing tests.
+- Shared request activity owns counter/event sender/admitted permit Arc; outer
+  connection retains through reply and actual blocking worker retains through
+  completion/error/unwind. One in_flight increment per request, one connection
+  permit; timer does not free actual-job charge. Close after timed-out search.
+- Deterministic gates/injected expiry verify live sync work survives timeout
+  while token cancels, counter/permit stays until actual work AND reply finish,
+  cleanup on error/unwind, and no leaked event/accounting. Group live follower
+  behavior remains covered. Preserve legacy session/wire/half-close semantics.
+- Verify focused driver/core/refresh/wire/lifecycle, full cli-full and relevant
+  lean scopes/full+lean all-target/opt-in Clippy/fmt/diff; frozen inputs. Fresh
+  review before commit, delegate findings. Scoped active EOF/wire deadline/
+  frontend original budget+retry/queue/docs/wholefinal/native remain S4.3.
