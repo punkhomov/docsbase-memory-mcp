@@ -36,6 +36,10 @@ mod query_flight_tests;
 #[path = "dense_cold_tests.rs"]
 mod cold_tests;
 
+#[cfg(test)]
+#[path = "dense_admission_tests.rs"]
+mod admission_tests;
+
 /// Hard per-project cap on cached vectors (DELTA-7): above it the cache
 /// refuses to build and callers stream the scan instead.
 pub const DENSE_CACHE_MAX_VECTORS: usize = 1_000_000;
@@ -839,7 +843,22 @@ impl DenseCache {
         cancellation: &Cancellation,
         load: impl FnOnce() -> Result<DenseMetadata>,
     ) -> Result<DenseRows> {
-        self.access(request, cancellation, Lookup::Get, load)
+        self.get_with_metadata_admitted(request, cancellation, load, || Ok(()))
+    }
+
+    /// Lazy lookup whose actual initializer and publication require a current
+    /// configuration lease. Followers never retain a lease while waiting.
+    ///
+    /// # Errors
+    /// Admission/revision failures, cancellation, identity mismatch or IO.
+    pub fn get_with_metadata_admitted<Guard>(
+        &self,
+        request: DenseRequest<'_>,
+        cancellation: &Cancellation,
+        load: impl FnOnce() -> Result<DenseMetadata>,
+        admit: impl Fn() -> Result<Guard>,
+    ) -> Result<DenseRows> {
+        self.access(request, cancellation, Lookup::Get, load, admit)
     }
 
     fn bind_root(&self, root: &Path) -> Result<()> {
@@ -876,18 +895,22 @@ impl DenseCache {
         ready.then(|| entry.state.clone())
     }
 
-    fn access(
+    fn access<Guard>(
         &self,
         request: DenseRequest<'_>,
         cancellation: &Cancellation,
         lookup: Lookup,
         load: impl FnOnce() -> Result<DenseMetadata>,
+        admit: impl Fn() -> Result<Guard>,
     ) -> Result<DenseRows> {
         cancellation.check()?;
         self.bind_root(request.cache_root)?;
-        if let Some(rows) = self.cached_rows(request, lookup) {
-            cancellation.check()?;
-            return Ok(rows);
+        {
+            let _revision = admit()?;
+            if let Some(rows) = self.cached_rows(request, lookup) {
+                cancellation.check()?;
+                return Ok(rows);
+            }
         }
         let key = ColdKey {
             root: request.cache_root.to_path_buf(),
@@ -895,11 +918,12 @@ impl DenseCache {
             generation: request.generation,
             model_id: request.model_id.to_owned(),
         };
-        self.cold_flights.run(
+        let rows = self.cold_flights.run(
             &key,
             cancellation,
             || self.cached_rows(request, lookup),
             || {
+                let _revision = admit()?;
                 let metadata = load()?;
                 if metadata.cache_root() != request.cache_root
                     || metadata.project_id() != request.project_id
@@ -912,7 +936,12 @@ impl DenseCache {
                 }
                 self.resolve(request, metadata.into_chunks())
             },
-        )
+        )?;
+        // The registry's cached callback must never block on configuration:
+        // a leader completing under READ may need that registry mutex.
+        let _revision = admit()?;
+        cancellation.check()?;
+        Ok(rows)
     }
 
     /// Full lookup path: exact rows, ANN load or background build.
@@ -1286,7 +1315,21 @@ impl DenseCache {
         cancellation: &Cancellation,
         load: impl FnOnce() -> Result<DenseMetadata>,
     ) -> Result<()> {
-        self.access(request, cancellation, Lookup::Warm, load)
+        self.warm_with_metadata_admitted(request, cancellation, load, || Ok(()))
+    }
+
+    /// Lazy warm with the same leader-only revision admission as a lookup.
+    ///
+    /// # Errors
+    /// Admission/revision failures, cancellation, identity mismatch or IO.
+    pub fn warm_with_metadata_admitted<Guard>(
+        &self,
+        request: DenseRequest<'_>,
+        cancellation: &Cancellation,
+        load: impl FnOnce() -> Result<DenseMetadata>,
+        admit: impl Fn() -> Result<Guard>,
+    ) -> Result<()> {
+        self.access(request, cancellation, Lookup::Warm, load, admit)
             .map(|_| ())
     }
 

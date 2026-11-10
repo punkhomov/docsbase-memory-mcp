@@ -19,6 +19,12 @@ pub struct PayloadBudget {
 }
 
 impl PayloadBudget {
+    /// Complete policy supplied by the composition root; no values are filled.
+    #[must_use]
+    pub fn settings(&self) -> &SearchSettings {
+        &self.retained.policy
+    }
+
     /// Constructs admission from complete settings; never resolves defaults.
     ///
     /// # Errors

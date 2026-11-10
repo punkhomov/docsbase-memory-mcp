@@ -165,6 +165,11 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
     }
 
     #[cfg(test)]
+    pub(crate) fn registry_available(&self) -> bool {
+        self.active.try_lock().is_ok()
+    }
+
+    #[cfg(test)]
     pub(crate) fn observe_joins(&self, observer: std::sync::mpsc::Sender<()>) {
         *self.observer.lock().unwrap_or_else(PoisonError::into_inner) = Some(observer);
     }

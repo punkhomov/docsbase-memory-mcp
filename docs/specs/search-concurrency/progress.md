@@ -245,3 +245,50 @@ Inventory adds66 per platform against merged110 with none removed. This evidence
 does not cover this newer task commit or replace final-head acceptance.
 Actual core/pool adoption and S4 timer/transport/dispatcher/timing plus final
 whole-feature review/native gates remain pending; #66 remains open.
+
+Task S3.6b: design ready, before implementation (basebf450f1). Actual pooled
+core uses BM25+original G before embedding and validates G/config at owned
+payload capture; no double query parse or SQL/lease through provider calls.
+Shared cold factory has fail-fast prepared admission, no leader personal budget.
+Existing fail-fast writer policy is explicit; no hidden priority queue. Persist
+real indexed fixture state rather than trusting an in-memory status shortcut.
+
+Task S3.6b: Ruling: focused cli_read exposed an old read-success assertion while
+the exclusive project writer lease is held. Keep committed-index reads under a
+Tantivy writer handle, require Project/retry under actual project WRITE, retain
+list/status availability and prove content recovery after lease release. Raw
+pre-correction failure retained in core/preflight. Native prior-head bf450f1
+macOS installer SIGKILL is separately tracked in #113 after all112-record
+duplicate check; no installer change or blind rerun in this core task.
+
+Task S3.6b: Ruling: full suite exposed19 benchmark/external failures from
+build_env's in-memory-only status. Persist and re-read real indexed registry
+state; frozen input hashes captured, no score/recording/baseline change. Full
+failed evidence retained before-bench-status; no successful full run claimed.
+
+Task S3.6b: complete (basebf450f1..this task commit; actual pooled search core).
+Daemon routes search before global Db and captures its original operation before
+spawn_blocking. Binding/metadata use prepared readers with explicit deadlines;
+SQL drops before Tantivy/vector CPU, providers and flight follower waits.
+BM25 captures original G, query embedding owns no preparation resources, cold
+leader uses guarded lazy metadata, final guarded payload validates G/config.
+Owned finish checks cancellation/deadline and preserves provider/ranking/window/
+response contracts; explain total includes original time even for limit0.
+Cap1 gates prove status/list/same-project lexical complete during paused rerank;
+embedding releases SQL/config/file/global Db, sync/reload cause explicit retry.
+Fresh task review Spec PASS / Quality APPROVED, no Critical/Important findings.
+Minor M1 was a scratch report count typo; dedicated correction changed only
+its final1088 entry to1089, preserving historical disclosure and all source/raw
+evidence. No deferred findings; no functional rerun for that report-only fix.
+Final23 stages exit0 and match all160 Rust inputs: cli-full1089passed/0failed/
+13ignored across66targets; admission4/phases8/pool6+unit4/consumers10/ranking60/
+visibility37/benchmark88; lean8/4/6/74/10/28/37/88, all0failed. Full/lean
+all-target and opt-in Clippy/fmt/diff pass; all113 frozen inputs unchanged.
+Ruling: documented writer-lease refusal/recovery replaces unsafe old read-success
+assertion; fixtures persist actual Indexed state. Prior full19 benchmark failures
+and zero-limit timing RED retained honestly, no baseline/recording relaxation.
+A final extra cleanup-result quarantine test covers both pool admission paths;
+its predecessor1088-pass package remains historical, final1089 is authoritative.
+S3.6c refresh prepared-pool adoption, S4 transport/timer/group cancellation/
+actual-job accounting/queue telemetry and whole-feature final/native gates remain
+mandatory. PR112 stays draft and #66 remains open.

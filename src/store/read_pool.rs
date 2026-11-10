@@ -1,7 +1,7 @@
 //! Prepared operational metadata readers. No connection is opened on checkout.
 
 use std::ops::Deref;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
@@ -12,6 +12,7 @@ use crate::store::settings::{DbSettings, DbSpec, ReadPoolSettings, ReadPoolSpec}
 
 /// A bounded set of independently borrowed read-only metadata connections.
 pub struct ReadPool {
+    cache_root: PathBuf,
     slots: Vec<Mutex<Db>>,
     state: Mutex<State>,
     returned: Condvar,
@@ -52,6 +53,7 @@ impl ReadPool {
             idle.push(index);
         }
         Ok(Self {
+            cache_root: cache.to_path_buf(),
             slots,
             state: Mutex::new(State {
                 idle,
@@ -66,6 +68,52 @@ impl ReadPool {
     #[must_use]
     pub const fn settings(&self) -> &Resolved<ReadPoolSettings> {
         &self.settings
+    }
+
+    /// Exact cache identity supplied when these readers were prepared.
+    #[must_use]
+    pub fn cache_root(&self) -> &Path {
+        &self.cache_root
+    }
+
+    /// Immediately borrows an idle prepared reader, without starting a wait.
+    /// Shared cold work uses this admission independently of any one caller's
+    /// personal deadline. No connection is opened or replaced here.
+    ///
+    /// # Errors
+    /// Admission when all slots are borrowed or the pool is quarantined.
+    pub fn try_acquire(&self) -> Result<ReadLease<'_>> {
+        let index = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            Self::ensure_usable(&state)?;
+            state.idle.pop().ok_or_else(|| Error::Admission {
+                message: "all prepared metadata readers are busy; retry search".to_owned(),
+            })?
+        };
+        Ok(self.checkout(index))
+    }
+
+    fn ensure_usable(state: &State) -> Result<()> {
+        if state.unusable {
+            return Err(Error::Admission {
+                message: "metadata read pool is unusable after transaction cleanup failure; restart the daemon".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn checkout(&self, index: usize) -> ReadLease<'_> {
+        let db = self.slots[index]
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        ReadLease {
+            db,
+            returned: ReturnSlot {
+                pool: self,
+                index,
+                clean: false,
+            },
+        }
     }
 
     /// Borrows one prepared reader until the lease drops. The caller owns the
@@ -88,11 +136,7 @@ impl ReadPool {
     ) -> Result<ReadLease<'_>> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
-            if state.unusable {
-                return Err(Error::Admission {
-                    message: "metadata read pool is unusable after transaction cleanup failure; restart the daemon".to_owned(),
-                });
-            }
+            Self::ensure_usable(&state)?;
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 return Err(Error::Admission {
                     message: "metadata read pool acquisition deadline elapsed".to_owned(),
@@ -105,17 +149,7 @@ impl ReadPool {
             }
             if let Some(index) = state.idle.pop() {
                 drop(state);
-                let db = self.slots[index]
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                return Ok(ReadLease {
-                    db,
-                    returned: ReturnSlot {
-                        pool: self,
-                        index,
-                        clean: false,
-                    },
-                });
+                return Ok(self.checkout(index));
             }
             before_wait();
             (state, _) = self
@@ -255,5 +289,34 @@ mod tests {
         let absent = cache.path().join("absent");
         assert!(ReadPool::prepare(&absent, &db, &valid).is_err());
         assert!(!absent.exists());
+    }
+    #[test]
+    fn unclean_return_quarantines_other_idle_readers_for_both_admission_paths() {
+        let cache = tempfile::tempdir().expect("cache");
+        let db = crate::store::settings::standalone().expect("DB policy");
+        let _writer = Db::open_with_settings(cache.path(), &db).expect("writer");
+        let valid = crate::store::settings::standalone_read_pool().expect("pool policy");
+        let mut raw = valid.settings().clone();
+        raw.max_connections = 2;
+        let policy = Resolved::new(raw, valid.provenance().clone());
+        let pool = ReadPool::prepare(cache.path(), &db, &policy).expect("pool");
+        let index = pool
+            .state
+            .lock()
+            .expect("state")
+            .idle
+            .pop()
+            .expect("one borrowed slot");
+        // ReturnSlot is the RAII cleanup completion seam: report failed cleanup.
+        drop(ReturnSlot {
+            pool: &pool,
+            index,
+            clean: false,
+        });
+        assert!(matches!(pool.try_acquire(), Err(Error::Admission { .. })));
+        assert!(matches!(
+            pool.acquire(deadline()),
+            Err(Error::Admission { .. })
+        ));
     }
 }

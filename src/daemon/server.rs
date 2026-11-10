@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
+use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
 
@@ -31,6 +31,10 @@ use crate::store::migrations;
 use crate::store::read_pool::ReadPool;
 use crate::store::settings::{DbSettings, ReadPoolSettings};
 use crate::watch::Watchers;
+
+#[cfg(test)]
+#[path = "search_phase_tests.rs"]
+mod search_phase_tests;
 
 /// Daemon state shared by all connections.
 pub struct Shared {
@@ -76,7 +80,12 @@ impl ProjectCell {
         expected: &Arc<Config>,
         work: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
-        let _preparation = self
+        let _preparation = self.preparation_lease(expected)?;
+        work()
+    }
+
+    fn preparation_lease(&self, expected: &Arc<Config>) -> Result<RwLockReadGuard<'_, ()>> {
+        let preparation = self
             .preparation
             .read()
             .unwrap_or_else(PoisonError::into_inner);
@@ -93,7 +102,7 @@ impl ProjectCell {
                 instruction: Some("retry search".to_owned()),
             });
         }
-        work()
+        Ok(preparation)
     }
 }
 
@@ -934,9 +943,18 @@ async fn call_tool(
     name: &str,
     args: Value,
 ) -> Result<Value> {
+    let operation = if name == "search_docs" {
+        Some(crate::search::operation::SearchOperation::new(
+            &shared.global_config.search,
+            Instant::now(),
+            crate::hybrid::work::Cancellation::new(),
+        )?)
+    } else {
+        None
+    };
     let shared = Arc::clone(shared);
     let name = name.to_owned();
-    tokio::task::spawn_blocking(move || route_tool(&shared, session_id, &name, &args))
+    tokio::task::spawn_blocking(move || route_tool(&shared, session_id, &name, &args, operation))
         .await
         .map_err(|err| Error::internal_with_source("tool task join", err))?
 }
@@ -944,12 +962,19 @@ async fn call_tool(
 /// `search_docs` with the project's hybrid stages, dense cache and window.
 fn route_search(
     shared: &Arc<Shared>,
-    db: &crate::store::Db,
     session_id: Option<u64>,
     args: &Value,
+    operation: crate::search::operation::SearchOperation,
 ) -> Result<Value> {
-    let project = bound_project(shared, db, session_id)?;
+    operation.check()?;
+    let project = {
+        let reader = shared.readers.acquire(operation.deadline())?;
+        operation.check()?;
+        bound_project(shared, &reader, session_id)?
+    };
     let (config, stages) = shared.project_runtime(&project)?;
+    operation.check()?;
+    let slot = shared.project_slot(project.id);
     let window = config
         .hybrid_cfg
         .reranker
@@ -957,7 +982,7 @@ fn route_search(
         .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |reranker| {
             reranker.window
         });
-    tools::search_docs_in(
+    tools::search_docs_from(
         &tools::SearchContext {
             stages: &stages,
             dense: &shared.dense,
@@ -965,14 +990,33 @@ fn route_search(
             project: &project,
             window,
             payload_budget: &shared.payload_budget,
-            cancellation: &crate::hybrid::work::Cancellation::new(),
+            operation,
         },
-        db,
+        crate::search::metadata::MetadataSource::Prepared(&shared.readers),
         args,
+        || slot.preparation_lease(&config),
     )
 }
 
 fn route_tool(
+    shared: &Arc<Shared>,
+    session_id: Option<u64>,
+    name: &str,
+    args: &Value,
+    operation: Option<crate::search::operation::SearchOperation>,
+) -> Result<Value> {
+    if name == "search_docs" {
+        return route_search(
+            shared,
+            session_id,
+            args,
+            operation.ok_or_else(|| Error::internal("search request context missing"))?,
+        );
+    }
+    route_metadata_tool(shared, session_id, name, args)
+}
+
+fn route_metadata_tool(
     shared: &Arc<Shared>,
     session_id: Option<u64>,
     name: &str,
@@ -1001,7 +1045,6 @@ fn route_tool(
             )
         }
         "list_projects" => tools::list_projects(&db),
-        "search_docs" => route_search(shared, &db, session_id, args),
         "list_docs" => {
             let project = bound_project(shared, &db, session_id)?;
             tools::list_docs(&db, &project, args)

@@ -244,6 +244,8 @@ fn read_path_needs_no_writer() {
 
     let writer = IndexHandle::open_or_create(&env.cache.path().join("projects/1/tantivy"))
         .expect("writer handle locks tantivy");
+    // Reading a committed index does not require its Tantivy writer lock.
+    env.cmd().args(["search", "widgets"]).assert().success();
     let lock_path = env.cache.path().join("projects/1/.writer.lock");
     let file = fs::OpenOptions::new()
         .create(true)
@@ -254,11 +256,35 @@ fn read_path_needs_no_writer() {
     let mut lock = RwLock::new(file);
     let lease = lock.write().expect("hold lease");
 
-    env.cmd().args(["search", "widgets"]).assert().success();
+    // The cooperative project lease protects an actual multi-store update.
+    let refused = env
+        .cmd()
+        .args(["search", "widgets"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert!(
+        refused.stdout.is_empty(),
+        "refusal must not look like empty success"
+    );
+    let message = stderr_text(&refused);
+    assert!(message.contains("another writer holds"), "{message}");
+    assert!(message.contains("retry search"), "{message}");
     env.cmd().arg("list").assert().success();
     env.cmd().arg("status").assert().success();
 
     drop(lease);
+    let recovered = env
+        .cmd()
+        .args(["search", "widgets"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let hits = stdout_json(&recovered);
+    assert_eq!(hits.as_array().expect("hits").len(), 1);
+    assert_eq!(hits[0]["path"], "docs/a.md");
     drop(writer);
 }
 

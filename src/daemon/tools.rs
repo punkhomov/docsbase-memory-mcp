@@ -13,7 +13,8 @@ use crate::hybrid::HybridStages;
 use crate::hybrid::Ranking;
 use crate::hybrid::blocking;
 use crate::hybrid::config::DEFAULT_RERANK_WINDOW;
-use crate::hybrid::dense::{self, DenseCache, DenseRows};
+use crate::hybrid::dense::{self, DenseCache, DenseRequest, DenseRows};
+use crate::hybrid::dense_metadata::DenseMetadata;
 use crate::hybrid::jobs::{self as hybrid_jobs, Coverage};
 use crate::hybrid::meta::{
     self, AnnState, Degraded, FiltersMeta, ScoreScale, SearchMeta, Stage, TrimmedMeta,
@@ -24,6 +25,8 @@ use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
 use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
 use crate::search::budget::PayloadBudget;
+use crate::search::metadata::{MetadataReader, MetadataSource};
+use crate::search::operation::SearchOperation;
 use crate::search::payload::{OwnedPayload, PayloadRequest};
 use crate::store::migrations;
 use crate::store::models::{Project, ProjectStatus, SyncJob, SyncState};
@@ -97,18 +100,25 @@ fn apply_rerank(
 /// Dense candidate list for the RRF stage (FR-15): the query embedding plus
 /// cached per-chunk vectors. `Ready` scans the in-memory rows; `TooLarge`
 /// streams the cache with a bounded heap, so memory stays flat above the cap.
-fn dense_candidates(
-    context: &SearchContext<'_>,
-    db: &Db,
-    query: &str,
+#[derive(Clone, Copy)]
+struct DenseQuery<'a> {
+    text: &'a str,
+    generation: i64,
     fetch: usize,
+}
+
+fn dense_candidates<Guard>(
+    context: &SearchContext<'_>,
+    source: MetadataSource<'_>,
+    admit: &impl Fn() -> Result<Guard>,
+    query: DenseQuery<'_>,
     degraded: &mut Vec<Degraded>,
 ) -> Result<Vec<(u64, f32)>> {
     let SearchContext {
         stages,
         dense,
         project,
-        cancellation,
+        operation,
         ..
     } = context;
     let Some(embedder) = stages.embedder.as_deref() else {
@@ -120,10 +130,21 @@ fn dense_candidates(
     // is a pure function of both, so this cannot change the answer
     // (`search-cost` FR-1/FR-3).
     let model_id = embedder.model_id();
-    let vector = dense.query_embedding(embedder, query, cancellation)?;
-    cancellation.check()?;
-    let rows = dense.get(db, project.id, model_id)?;
-    cancellation.check()?;
+    let vector = dense.query_embedding(embedder, query.text, operation.cancellation())?;
+    operation.check()?;
+    let rows = dense.get_with_metadata_admitted(
+        DenseRequest {
+            cache_root: context.cache,
+            project_id: project.id,
+            generation: query.generation,
+            model_id,
+        },
+        operation.cancellation(),
+        || capture_dense(source, project, query.generation),
+        admit,
+    )?;
+    operation.check()?;
+    let fetch = query.fetch;
     match rows {
         DenseRows::Ready(index) => {
             dense.record_outcome(project.id, AnnState::Ready, None);
@@ -147,13 +168,15 @@ fn dense_candidates(
                     AnnState::Fallback,
                     Some("ann returned fewer candidates than the window"),
                 );
-                stream_exact(db, model_id, project.id, &vector, fetch)
+                operation.check()?;
+                stream_exact(source, project, query.generation, model_id, &vector, fetch)
             }
             Err(err) => {
                 eprintln!("warning: ann search failed: {err}; falling back to exact");
                 degrade(degraded, Degraded::AnnError);
                 dense.record_outcome(project.id, AnnState::Fallback, Some("ann search failed"));
-                stream_exact(db, model_id, project.id, &vector, fetch)
+                operation.check()?;
+                stream_exact(source, project, query.generation, model_id, &vector, fetch)
             }
         },
         DenseRows::TooLarge(hashes) => {
@@ -165,7 +188,7 @@ fn dense_candidates(
                 AnnState::TooLarge,
                 Some("above the resident cap"),
             );
-            stream_hashes(db, model_id, &hashes, &vector, fetch)
+            stream_hashes(context.cache, model_id, &hashes, &vector, fetch)
         }
         DenseRows::Building(building) => {
             degrade(degraded, Degraded::AnnBuilding);
@@ -174,7 +197,7 @@ fn dense_candidates(
                 AnnState::Building,
                 Some("background build in flight"),
             );
-            stream_hashes(db, model_id, &building.hashes, &vector, fetch)
+            stream_hashes(context.cache, model_id, &building.hashes, &vector, fetch)
         }
         DenseRows::Failed(failed) => {
             degrade(degraded, Degraded::AnnError);
@@ -183,7 +206,7 @@ fn dense_candidates(
                 AnnState::Fallback,
                 Some("the last build failed"),
             );
-            stream_hashes(db, model_id, &failed.hashes, &vector, fetch)
+            stream_hashes(context.cache, model_id, &failed.hashes, &vector, fetch)
         }
     }
 }
@@ -204,24 +227,31 @@ pub fn ann_search_count() -> u64 {
 }
 
 fn stream_exact(
-    db: &Db,
+    source: MetadataSource<'_>,
+    project: &Project,
+    generation: i64,
     model_id: &str,
-    project_id: i64,
     vector: &[f32],
     fetch: usize,
 ) -> Result<Vec<(u64, f32)>> {
-    let chunks = repo::chunk_hashes(db.connection(), project_id)?;
-    stream_hashes(db, model_id, &chunks, vector, fetch)
+    let metadata = capture_dense(source, project, generation)?;
+    stream_hashes(
+        source.cache_root(),
+        model_id,
+        metadata.chunks(),
+        vector,
+        fetch,
+    )
 }
 
 fn stream_hashes(
-    db: &Db,
+    root: &Path,
     model_id: &str,
     hashes: &[(u64, String)],
     vector: &[f32],
     fetch: usize,
 ) -> Result<Vec<(u64, f32)>> {
-    let mut cache = crate::vector_cache::VectorCache::open(db.cache_root())?;
+    let mut cache = crate::vector_cache::VectorCache::open(root)?;
     let rows = hashes
         .iter()
         .filter_map(move |(chunk_id, hash)| match cache.get(model_id, hash) {
@@ -253,6 +283,11 @@ pub fn search_docs_with(
     // shared admission via search_docs_in instead of constructing a budget here.
     let policy = crate::search::settings::standalone()?;
     let budget = PayloadBudget::new(policy.settings().clone())?;
+    let operation = SearchOperation::new(
+        policy.settings(),
+        std::time::Instant::now(),
+        Cancellation::new(),
+    )?;
     search_docs_in(
         &SearchContext {
             stages,
@@ -261,7 +296,7 @@ pub fn search_docs_with(
             project,
             window,
             payload_budget: &budget,
-            cancellation: &Cancellation::new(),
+            operation,
         },
         db,
         args,
@@ -282,8 +317,8 @@ pub struct SearchContext<'a> {
     pub window: u32,
     /// Daemon-shared or direct invocation payload allowance.
     pub payload_budget: &'a PayloadBudget,
-    /// Cooperative cancellation for this invocation.
-    pub cancellation: &'a Cancellation,
+    /// Original deadline and cooperative cancellation for this invocation.
+    pub operation: SearchOperation,
 }
 
 /// Search using explicit admission and cancellation. Response stages consume
@@ -293,23 +328,48 @@ pub struct SearchContext<'a> {
 /// Returns query/project/protocol errors as in [`search_docs_with`], payload
 /// admission failures, storage errors and cooperative cancellation.
 pub fn search_docs_in(context: &SearchContext<'_>, db: &Db, args: &Value) -> Result<Value> {
-    context.cancellation.check()?;
+    search_docs_from(context, MetadataSource::Borrowed(db), args, || Ok(()))
+}
+
+/// Search through short metadata phases and explicit configuration admission.
+/// Providers and flight followers never retain an SQL/preparation/file lease.
+///
+/// # Errors
+/// As [`search_docs_in`], including stale revision/generation and pool admission.
+pub fn search_docs_from<Guard>(
+    context: &SearchContext<'_>,
+    source: MetadataSource<'_>,
+    args: &Value,
+    admit: impl Fn() -> Result<Guard>,
+) -> Result<Value> {
+    context.operation.check()?;
+    if source.cache_root() != context.cache {
+        return Err(Error::Admission {
+            message: "search metadata belongs to a different cache root".to_owned(),
+        });
+    }
     ensure_indexed(context.project)?;
     let arguments = parse_search_args(args)?;
     if arguments.limit == 0 {
-        return empty_response(
-            db,
-            context.project,
-            arguments.explain,
-            filters_of(
-                arguments.dedupe,
-                arguments.n_per_doc,
-                arguments.path_prefix.as_deref(),
-                &arguments.tags,
-            ),
-        );
+        if !arguments.explain {
+            return Ok(Value::Array(Vec::new()));
+        }
+        return in_read_phase(context, source, &admit, |reader| {
+            snapshot_info(&reader, context.project, None)?;
+            empty_response(
+                &reader,
+                context.project,
+                filters_of(
+                    arguments.dedupe,
+                    arguments.n_per_doc,
+                    arguments.path_prefix.as_deref(),
+                    &arguments.tags,
+                ),
+                &context.operation,
+            )
+        });
     }
-    prepare_search(context, db, arguments)?.finish(context.stages, context.cancellation)
+    prepare_search(context, source, &admit, arguments)?.finish(context.stages)
 }
 
 /// No Db, SQL transaction, index handle or filesystem lease can escape capture.
@@ -320,13 +380,13 @@ struct PreparedSearch {
     active: ActiveStages,
     stage_ms: Vec<(Stage, u64)>,
     degraded: Vec<Degraded>,
-    started: std::time::Instant,
+    operation: SearchOperation,
     fetch: usize,
 }
 
 impl PreparedSearch {
-    fn finish(mut self, stages: &HybridStages, cancellation: &Cancellation) -> Result<Value> {
-        cancellation.check()?;
+    fn finish(mut self, stages: &HybridStages) -> Result<Value> {
+        self.operation.check()?;
         if self.active.rerank_active {
             let started = std::time::Instant::now();
             apply_rerank(
@@ -337,7 +397,7 @@ impl PreparedSearch {
             )?;
             self.stage_ms.push((Stage::Rerank, elapsed_ms(started)));
         }
-        cancellation.check()?;
+        self.operation.check()?;
         let post = apply_post_filter(
             &self.payload,
             &mut self.ordered,
@@ -348,7 +408,7 @@ impl PreparedSearch {
         );
         self.ordered.truncate(self.arguments.limit);
         let rows = build_rows(&self.payload, self.ordered, self.arguments.snippet);
-        cancellation.check()?;
+        self.operation.check()?;
         if !self.arguments.explain {
             return Ok(Value::Array(rows));
         }
@@ -357,7 +417,7 @@ impl PreparedSearch {
             self.stage_ms,
             self.degraded,
             post,
-            elapsed_ms(self.started),
+            elapsed_ms(self.operation.started_at()),
             self.fetch,
             self.payload.generation(),
         );
@@ -405,51 +465,156 @@ fn search_plan(
     ))
 }
 
-fn prepare_search(
+fn snapshot_info(db: &Db, project: &Project, expected: Option<i64>) -> Result<i64> {
+    let current = registry::project_by_id(db, project.id)?.ok_or_else(|| Error::Project {
+        message: format!("project {} disappeared from the registry", project.id),
+        instruction: Some("retry search".to_owned()),
+    })?;
+    ensure_indexed(&current)?;
+    if current.canonical_root != project.canonical_root {
+        return Err(Error::Project {
+            message: "project binding changed before search preparation".to_owned(),
+            instruction: Some("register the session again".to_owned()),
+        });
+    }
+    let generation = repo::index_generation(db.connection(), project.id)?;
+    if expected.is_some_and(|expected| expected != generation) {
+        return Err(Error::Project {
+            message: "project generation changed during search preparation".to_owned(),
+            instruction: Some("retry search".to_owned()),
+        });
+    }
+    if repo::has_pending_docs(db.connection(), project.id)? {
+        return Err(Error::Project {
+            message: "project has an incomplete index update".to_owned(),
+            instruction: Some(
+                "run `docsbase index` to complete the index before searching".to_owned(),
+            ),
+        });
+    }
+    Ok(generation)
+}
+
+fn in_read_phase<'a, T, Guard>(
     context: &SearchContext<'_>,
-    db: &Db,
+    source: MetadataSource<'a>,
+    admit: &impl Fn() -> Result<Guard>,
+    work: impl FnOnce(MetadataReader<'a>) -> Result<T>,
+) -> Result<T> {
+    context.operation.check()?;
+    let reader = source.acquire(context.operation.deadline())?;
+    context.operation.check()?;
+    let _revision = admit()?;
+    context.operation.check()?;
+    lifecycle::with_project_read_lease(context.cache, context.project.id, || {
+        context.operation.check()?;
+        work(reader)
+    })
+}
+
+// Shared cold/fallback metadata has no caller deadline/token. Its immediate
+// prepared admission cannot cancel live peers when a flight leader expires.
+fn capture_dense(
+    source: MetadataSource<'_>,
+    project: &Project,
+    generation: i64,
+) -> Result<DenseMetadata> {
+    let reader = source.try_acquire()?;
+    lifecycle::with_project_read_lease(source.cache_root(), project.id, || {
+        snapshot_info(&reader, project, Some(generation))?;
+        DenseMetadata::capture(&reader, project.id)
+    })
+}
+
+struct LexicalSnapshot {
+    generation: i64,
+    hits: Vec<(u64, f32)>,
+    elapsed_ms: u64,
+}
+
+fn lexical_snapshot<Guard>(
+    context: &SearchContext<'_>,
+    source: MetadataSource<'_>,
+    admit: &impl Fn() -> Result<Guard>,
+    query: &str,
+    fetch: usize,
+) -> Result<LexicalSnapshot> {
+    in_read_phase(context, source, admit, |reader| {
+        let generation = snapshot_info(&reader, context.project, None)?;
+        drop(reader);
+        let started = std::time::Instant::now();
+        let index = ReadIndex::open(&lifecycle::index_dir(context.cache, context.project.id))?;
+        let hits = index.search(query, fetch)?;
+        context.operation.check()?;
+        Ok(LexicalSnapshot {
+            generation,
+            hits: hits
+                .into_iter()
+                .map(|hit| (hit.chunk_id, hit.score))
+                .collect(),
+            elapsed_ms: elapsed_ms(started),
+        })
+    })
+}
+
+fn prepare_search<Guard>(
+    context: &SearchContext<'_>,
+    source: MetadataSource<'_>,
+    admit: &impl Fn() -> Result<Guard>,
     arguments: SearchArgs,
 ) -> Result<PreparedSearch> {
-    context.cancellation.check()?;
+    context.operation.check()?;
     let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
-    let started = std::time::Instant::now();
+    let lexical = lexical_snapshot(context, source, admit, &arguments.query, fetch)?;
     let mut stage_ms = Vec::with_capacity(4);
+    stage_ms.push((Stage::Bm25, lexical.elapsed_ms));
     let mut degraded = Vec::new();
     if !active.rerank_active && context.stages.reranker.is_some() {
         degrade(&mut degraded, Degraded::NoRerankStage);
     }
-    let index = ReadIndex::open(&lifecycle::index_dir(context.cache, context.project.id))?;
-    let hits = index.search(&arguments.query, fetch)?;
-    stage_ms.push((Stage::Bm25, elapsed_ms(started)));
-    context.cancellation.check()?;
-    let bm25: Vec<(u64, f32)> = hits.iter().map(|hit| (hit.chunk_id, hit.score)).collect();
+    context.operation.check()?;
     let ordered = if active.rrf_active {
         let dense_started = std::time::Instant::now();
-        let dense_hits = dense_candidates(context, db, &arguments.query, fetch, &mut degraded)?;
+        let dense_hits = dense_candidates(
+            context,
+            source,
+            admit,
+            DenseQuery {
+                text: &arguments.query,
+                generation: lexical.generation,
+                fetch,
+            },
+            &mut degraded,
+        )?;
         stage_ms.push((Stage::Dense, elapsed_ms(dense_started)));
-        context.cancellation.check()?;
+        context.operation.check()?;
         let fuse_started = std::time::Instant::now();
-        let mut fused = rrf_merge(&bm25, &dense_hits);
+        let mut fused = rrf_merge(&lexical.hits, &dense_hits);
         fused.truncate(fetch);
         stage_ms.push((Stage::Rrf, elapsed_ms(fuse_started)));
         fused
     } else {
-        bm25
+        lexical.hits
     };
     let ids: Vec<_> = ordered.iter().map(|(id, _)| *id).collect();
-    let payload = OwnedPayload::capture(
-        db,
-        PayloadRequest {
-            cache_root: context.cache,
-            project_id: context.project.id,
-            generation: repo::index_generation(db.connection(), context.project.id)?,
-            chunk_ids: &ids,
-            include_text: active.rerank_active || arguments.snippet,
-            include_filter_metadata: arguments.path_prefix.is_some() || !arguments.tags.is_empty(),
-        },
-        context.payload_budget,
-        context.cancellation,
-    )?;
+    let payload = in_read_phase(context, source, admit, |reader| {
+        snapshot_info(&reader, context.project, Some(lexical.generation))?;
+        OwnedPayload::capture(
+            &reader,
+            PayloadRequest {
+                cache_root: context.cache,
+                project_id: context.project.id,
+                generation: lexical.generation,
+                chunk_ids: &ids,
+                include_text: active.rerank_active || arguments.snippet,
+                include_filter_metadata: arguments.path_prefix.is_some()
+                    || !arguments.tags.is_empty(),
+            },
+            context.payload_budget,
+            context.operation.cancellation(),
+        )
+    })?;
+    context.operation.check()?;
     Ok(PreparedSearch {
         payload,
         arguments,
@@ -457,7 +622,7 @@ fn prepare_search(
         active,
         stage_ms,
         degraded,
-        started,
+        operation: context.operation.clone(),
         fetch,
     })
 }
@@ -834,19 +999,18 @@ fn parse_search_args(args: &Value) -> Result<SearchArgs> {
 fn empty_response(
     db: &Db,
     project: &Project,
-    explain: bool,
     filters: FiltersMeta,
+    operation: &SearchOperation,
 ) -> Result<Value> {
-    if !explain {
-        return Ok(Value::Array(Vec::new()));
-    }
+    let generation = repo::index_generation(db.connection(), project.id)?;
+    operation.check()?;
     let meta = SearchMeta {
         score_scale: ScoreScale::Bm25,
         stages: Vec::new(),
-        total_ms: 0,
+        total_ms: elapsed_ms(operation.started_at()),
         stage_ms: Vec::new(),
         window: 0,
-        index_generation: repo::index_generation(db.connection(), project.id)?,
+        index_generation: generation,
         degraded: Vec::new(),
         filters: Some(filters),
         trimmed: Some(TrimmedMeta::default()),
@@ -1518,7 +1682,8 @@ mod tests {
             IndexHandle::open_or_create(&lifecycle::index_dir(cache.path(), project.id))
                 .expect("index");
         run_full(&mut db, &mut index, &project, &Config::default()).expect("index run");
-        // search only needs the status; avoid the full mark_indexed bookkeeping.
+        // Persist the same indexed state that production binding reads.
+        registry::mark_indexed(&db, project.id).expect("persist indexed status");
         project.status = ProjectStatus::Indexed;
         (cache, db, project)
     }
@@ -1581,10 +1746,26 @@ mod tests {
             project: &project,
             window: 10,
             payload_budget: &budget,
-            cancellation: &Cancellation::new(),
+            operation: SearchOperation::new(
+                policy.settings(),
+                std::time::Instant::now(),
+                Cancellation::new(),
+            )
+            .expect("operation"),
         };
-        let hits = dense_candidates(&context, &db, "widgets", 10, &mut degraded)
-            .expect("dense candidates");
+        let hits = dense_candidates(
+            &context,
+            MetadataSource::Borrowed(&db),
+            &|| Ok(()),
+            DenseQuery {
+                text: "widgets",
+                generation: repo::index_generation(db.connection(), project.id)
+                    .expect("generation"),
+                fetch: 10,
+            },
+            &mut degraded,
+        )
+        .expect("dense candidates");
         // The query path must go through `embed_query` (registry prefixes),
         // never through the passage `embed`.
         assert_eq!(spy.query_calls.load(Ordering::SeqCst), 1);

@@ -28,7 +28,7 @@ use docsbase_memory::index::job::run_full;
 use docsbase_memory::index::tantivy_index::IndexHandle;
 use docsbase_memory::index::tokenizer::IdentifierTokenizer;
 use docsbase_memory::store::Db;
-use docsbase_memory::store::models::{Project, ProjectStatus};
+use docsbase_memory::store::models::Project;
 use docsbase_memory::store::repo;
 use docsbase_memory::vector_cache::{Embedder, VectorCache};
 
@@ -641,8 +641,10 @@ pub fn build_env(
             chunk_texts.len()
         );
     }
-    let mut project = project;
-    project.status = ProjectStatus::Indexed;
+    registry::mark_indexed(&db, project.id).context("publish indexed bench project")?;
+    let project = registry::project_by_id(&db, project.id)
+        .context("read indexed bench project")?
+        .context("indexed bench project disappeared")?;
     Ok(BenchEnv {
         cache,
         root,

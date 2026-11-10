@@ -14,6 +14,9 @@ use docsbase_memory::platform::{self, BlockingStream};
 use fd_lock::RwLock;
 use tempfile::TempDir;
 
+#[path = "support/search_visibility.rs"]
+mod search_visibility;
+
 struct Env {
     cache: TempDir,
     root: TempDir,
@@ -125,6 +128,42 @@ fn read_response(reader: &mut BufReader<BlockingStream>) -> Response {
 }
 
 const DOC: &str = "---\ntitle: Guide\n---\n\n# Install\n\ninstaller prose about widgets.\n";
+
+#[test]
+fn project_writer_refuses_search_then_recovers_without_blocking_registry_tools() {
+    let mut env = Env::new(&[("a.md", DOC)]);
+    env.index();
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake(env.root()).expect("bound session");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(env.cache().join("projects/1/.writer.lock"))
+        .expect("project lease");
+    let mut lock = RwLock::new(file);
+    let writer = lock.write().expect("active project writer");
+    let error = client
+        .call_tool("search_docs", serde_json::json!({"query":"widgets"}))
+        .expect_err("cannot mix stores during project WRITE");
+    assert!(matches!(&error, Error::Project { message, instruction }
+        if message.starts_with("another writer holds ")
+            && instruction.as_deref().is_some_and(|hint| hint.contains("retry search"))));
+    assert!(search_visibility::temporarily_unavailable(&error));
+    client
+        .call_tool("status", serde_json::json!({}))
+        .expect("status during write");
+    client
+        .call_tool("list_projects", serde_json::json!({}))
+        .expect("list during write");
+    drop(writer);
+    let hits = client
+        .call_tool("search_docs", serde_json::json!({"query":"widgets"}))
+        .expect("coherent read after release");
+    assert_eq!(hits.as_array().expect("hits").len(), 1);
+    assert_eq!(hits[0]["path"], "a.md");
+}
 
 #[test]
 fn hello_version_mismatch_rejected() {

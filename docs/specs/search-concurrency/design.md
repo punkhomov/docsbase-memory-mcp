@@ -491,3 +491,103 @@ native CI preflight while implementation continues; it stays draft until whole-
 feature review and final-head required checks pass. Legacy config JSON remains
 unchanged until #78's versioned effective view. Product docs before delivery
 will explain restart semantics and the boundary of sync-provider cancellation.
+
+## Delta 2026-11-10 — S3.6b: actual pooled search phases
+
+FR-2/FR-3/FR-4/FR-5/FR-6/FR-7, SC-2/SC-4. SearchContext owns one explicit
+SearchOperation instead of a bare token; the compatibility search_docs_with
+adapter constructs it from the existing pure owner resolution. Production CLI
+passes Config.search and its original invocation start. Daemon constructs the
+operation before spawn_blocking and routes search before taking Shared.db.
+Binding reads use a short prepared lease; project-runtime construction has no
+SQL/global Db/state lock. Other tool routes retain their current behavior.
+
+`search::metadata::MetadataSource::{Borrowed,Prepared}` identifies the exact
+cache root and yields a short MetadataReader. ReadPool records its supplied root
+and adds try_acquire: immediately borrow one prepared slot or return Admission,
+without waiting/opening/migration/default timeout. Existing acquire uses the
+original absolute operation deadline. Both share rollback/quarantine/return
+semantics and never advertise a locked slot. Imported policy validation and
+capacity remain unchanged. Borrowed compatibility handles stay caller-owned;
+the higher-level search adapter refuses an already active caller transaction
+before index/provider work, because its old SQL snapshot could disagree with
+new Tantivy commits. Lower-level DenseMetadata/OwnedPayload retain their
+existing caller-transaction contract.
+
+Search_docs_from(context, source, args, admission:Fn()->Result<Guard>) executes:
+1. Validate explicit identities/project/args/plan. Limit0 keeps the old array/
+   explain shape and no payload reservation. Acquire a short reader, config
+   preparation READ and cooperative OS project READ; read current project
+   status/schema, generation G and pending marker. Release SQL before opening
+   and searching Tantivy. Return owned BM25 hits+G and release index/file/config
+   guards. Invalid lexical query fails before any paid embedding, as before.
+2. Query embedding with only immutable stages and request cancellation. No SQL
+   lease/transaction/global Db/config preparation/file guard survives this call.
+3. Dense lookup uses the original G. Only a cold-flight leader lazily captures
+   owned DenseMetadata through try_acquire and a short OS read lease, checking
+   current status/pending/G. No leader's personal deadline/token is captured in
+   this shared factory: live followers must survive leader cancellation. Drop
+   SQL/file resources before vector IO/CPU. ANN fallback also captures owned
+   hashes before streaming, whose API needs a root rather than Db.
+4. Fusion/truncation preserve current order/window. Under a new short reader,
+   current config preparation and OS read lease, check status and capture the
+   bounded OwnedPayload at expected original G. Changed G/config or pending
+   state returns explicit Project retry before response; no automatic replay.
+5. Release every preparation resource before rerank/filter/render. PreparedSearch
+   owns the original operation and checks it before/after providers and before
+   later phases. Explain total_ms begins at original request start, including
+   worker/pool queue; existing stage names/default array/provider ordering remain.
+
+ProjectCell exposes a checked preparation lease; with_preparation delegates to
+it. DenseCache adds guarded get/warm adapters accepting admission Fn()->Guard.
+Initial hot lookup has a short guard; actual flight leader retains its guard
+through resolve/publication; followers wait without it. Validate after flight
+return outside the flight registry. NEVER take a blocking preparation guard in
+Flights.cached callback (it executes under registry mutex); keep its pure cache
+recheck. Leader may retain preparation READ across vector CPU, but no SQL/file
+lease or provider call. This prevents obsolete config work republishing after
+memory invalidation without blocking reload on follower waits.
+
+Challenges/rulings: cooperative writer try_write remains fail-fast in this task;
+a short search read may cause explicit writer admission refusal, before project
+status mutation. No hidden writer queue, priority/default or destructive state
+change is introduced. Production coordination covers the cooperating full-index
+and watcher writers, not arbitrary raw SQL/library writes. Readiness test polls
+may retry only the documented Project generation/config changes and lease-busy
+message in addition to prior states, preserving their original absolute deadline
+and success/content assertions. New actual lock contention regression covers it.
+
+Fixture correction: several old tests set only the in-memory Project.status to
+Indexed while SQLite remained NotIndexed (tools::tests::env, owned payload
+consumer fixture and search_golden; fixtures using run_project_index already
+persist correct state). Real production binding reads
+SQLite; fixtures must persist mark_indexed as well. Preserve every ranking/golden/
+provider expectation; this does not authorize a baseline/threshold change.
+
+Background refresh still needs prepared-pool/lazy adoption in S3.6c. S4 timer/
+transport EOF cancellation, active-group checks, actual-job accounting and queue
+telemetry plus whole-feature final/native acceptance remain mandatory. This
+task enables concurrent search resource ownership, not whole #66 delivery.
+
+S3.6b validation ruling: cli_read::read_path_needs_no_writer previously conflated
+a live Tantivy writer handle (which does not prohibit reading a committed index)
+with the exclusive cooperative project lease (which protects an active multi-
+store update). Preserve success while only the Tantivy writer handle is held;
+under the project writer lease search must return explicit retry, while list/
+status succeed; after releasing that lease search succeeds with the original
+content even before the Tantivy writer handle is dropped. The old unconditional
+search-success assertion under the project WRITE lease contradicts FR-4 and is
+corrected explicitly, not removed. Real IPC refusal/recovery tests the same rule.
+
+S3.6b telemetry ruling: original-start explain timing also applies to limit0.
+Keep zero hits/window/stages and no payload/provider work, but report actual
+request time in the existing meta.stage_ms.total field rather than hardcoded0.
+The injected-start test covers both nonzero and zero limits without sleeping.
+Self-review caught the omitted zero branch before full functional tests began.
+
+S3.6b full-suite ruling: tests/support/bench.rs::build_env used the same
+in-memory-only Indexed shortcut as the smaller fixtures; the new real SQL
+status check rejected19 benchmark/external cases before retrieval. Persist
+mark_indexed and read back the registry Project. Corpus, recordings/model pins,
+reports, expected quality/legacy parity and latency thresholds remain unchanged.
+The prior full failure is retained as diagnostic evidence, not a passing run.

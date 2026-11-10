@@ -240,3 +240,46 @@ uses --no-fail-fast to collect every target in one pass, preserving all checks.
   reviewer required before commit; controller delegates reviewer fixes.
 - Pool/core adoption and S4 timer/transport/dispatcher/telemetry plus native
   acceptance remain pending. Primitive alone is not independently shippable.
+
+## Delta 2026-11-10 — S3.6b: pooled core and guarded dense admission
+
+- Basebf450f1. Modify src/store/read_pool.rs; add src/search/metadata.rs;
+  modify search/mod.rs, daemon/{tools,server}.rs, hybrid/dense.rs, cli/search.rs;
+  add daemon/search_phase_tests.rs and hybrid/dense_admission_tests.rs. Adapt
+  existing owned-consumer Context constructors and persisted-status fixtures;
+  tests/read_pool.rs, tests/ipc_server.rs and shared readiness classifier.
+- Consumes complete operation/payload policy, prepared ReadPool, ProjectCell
+  revision gate and OS read lease. Produces MetadataSource/MetadataReader,
+  pool.try_acquire/cache_root, checked preparation guard, guarded lazy dense
+  get/warm and search_docs_from. Compatibility signatures search_docs_with and
+  search_docs_in remain; new Context is unpublished within this branch.
+- First meaningful RED on existing production: pause real reranker through
+  async call_tool dispatcher, observe Shared.db.try_lock fails, release/join
+  before assertion. After implementation same-project lexical/status/list must
+  complete before release; cap1 pool, config gate and writer lease are free.
+- MissingAPI RED for try_acquire/metadata/guarded dense; actual SQLite readonly,
+  exhaustion/release/error/unwind/quarantine without elapsed wall-time tests.
+- Gate embedding with cap1: no SQL/global Db/preparation/file hostage; actual
+  sync generation change or config reload before resumption gives retry, no
+  mixed payload/obsolete resident publication. Invalid BM25 query calls no
+  embedding. Existing rerank-time old-payload result remains unchanged.
+- Dense leader/follower gates prove follower holds no admission guard while
+  waiting, one cold loader, leader cancellation retains work for live follower,
+  obsolete admission refuses before loader and no registry/gate deadlock.
+- Real cooperative writer/IPC refusal and recovery; narrow transient-test
+  classification keeps original deadlines, fatal categories and actual success.
+- Explicitly persist Indexed in existing inconsistent fixtures; retain counts,
+  assertions/golden/provider windows/budgets. Source identity, limit0 and exact
+  fallback behavior preserved. No new crates/unsafe/global hooks/defaults.
+- Verify focused new phase/dense/pool suites, existing ranking/visibility/config
+  integration, full cli-full, relevant lean scopes, full/lean all-target+opt-in
+  Clippy/fmt/diff. Fresh task review before commit, delegated reviewer fixes.
+- S3.6c refresh adoption and S4/final/native requirements remain separate and
+  mandatory before the one whole-S3/S4 draft PR becomes deliverable.
+
+S3.6b timing regression also covers limit0: existing envelope/window/stages stay,
+but total includes injected original queue history, with no real wait/SLA.
+
+S3.6b full-suite addition: correct tests/support/bench.rs::build_env persisted
+index status (same fixture shortcut), preserve frozen inputs/recordings/baseline;
+focused benchmark/external and lean benchmark validate this changed harness.

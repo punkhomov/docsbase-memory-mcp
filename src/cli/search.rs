@@ -70,6 +70,7 @@ pub(crate) fn run_with_settings(
     options: &Options,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
     if let Some(value) = crate::cli::try_daemon("search_docs", options.args(query), true)? {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
@@ -110,7 +111,11 @@ pub(crate) fn run_with_settings(
             project: &project,
             window,
             payload_budget: &budget,
-            cancellation: &crate::hybrid::work::Cancellation::new(),
+            operation: crate::search::operation::SearchOperation::new(
+                &config.search,
+                started,
+                crate::hybrid::work::Cancellation::new(),
+            )?,
         },
         &db,
         // Every search argument, including explain, reaches the same pipeline.

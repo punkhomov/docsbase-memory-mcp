@@ -44,6 +44,7 @@ impl Fixture {
             IndexHandle::open_or_create(&lifecycle::index_dir(cache.path(), project.id))
                 .expect("index");
         run_full(&mut db, &mut index, &project, &Config::default()).expect("index run");
+        registry::mark_indexed(&db, project.id).expect("persist indexed status");
         project.status = ProjectStatus::Indexed;
         Self {
             db,
@@ -67,7 +68,12 @@ impl Fixture {
             project: &self.project,
             window: 3,
             payload_budget: budget,
-            cancellation,
+            operation: SearchOperation::new(
+                budget.settings(),
+                std::time::Instant::now(),
+                cancellation.clone(),
+            )
+            .expect("explicit operation"),
         }
     }
 }
@@ -139,7 +145,8 @@ fn prepare(
 ) -> PreparedSearch {
     prepare_search(
         &fixture.context(stages, &DenseCache::new(), budget, cancellation),
-        &fixture.db,
+        MetadataSource::Borrowed(&fixture.db),
+        &|| Ok(()),
         parse_search_args(&args()).expect("arguments"),
     )
     .expect("prepare")
@@ -176,9 +183,7 @@ fn prepared_response_outlives_database_and_preserves_provider_input_order() {
     let generation =
         repo::index_generation(fixture.db.connection(), fixture.project.id).expect("generation");
     drop(fixture.db);
-    let value = prepared
-        .finish(&stages, &cancellation)
-        .expect("owned finish");
+    let value = prepared.finish(&stages).expect("owned finish");
     assert_eq!(value["meta"]["index_generation"], generation);
     assert_eq!(value["hits"].as_array().expect("hits").len(), 2);
     assert_eq!(
@@ -299,7 +304,12 @@ fn aggregate_budget_stays_charged_through_provider_then_allows_retry() {
                     project: &project,
                     window: 3,
                     payload_budget: policy_ref,
-                    cancellation: &Cancellation::new(),
+                    operation: SearchOperation::new(
+                        policy_ref.settings(),
+                        std::time::Instant::now(),
+                        Cancellation::new(),
+                    )
+                    .expect("explicit operation"),
                 },
                 &reader,
                 &args(),
@@ -355,7 +365,7 @@ fn cancellation_between_capture_and_finish_skips_rerank() {
     let cancellation = Cancellation::new();
     let prepared = prepare(&fixture, &stages, &policy, &cancellation);
     cancellation.cancel();
-    assert!(prepared.finish(&stages, &cancellation).is_err());
+    assert!(prepared.finish(&stages).is_err());
     assert_eq!(spy.calls.load(Ordering::SeqCst), 0);
     assert_released(&policy, CAP);
 }
