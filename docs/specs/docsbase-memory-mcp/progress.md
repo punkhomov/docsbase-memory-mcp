@@ -358,3 +358,32 @@ path after v2 publication and indexes betawidget9 (expected0, actual1). Instance
 local gate is a populated channel before consumer spawn; join is terminal proof,
 with no sleeps or process-global hook. GREEN: 8 new deterministic tests pass;
 full suite/lints/native CI and independent reviews still pending.
+Task T55: fix round I1 — fresh task review FAIL/CHANGES: после stale full
+preparation ignored-only retry ошибочно завершался с rebuild marker, оставляя
+allowed документы вне batch недоступными. Новая regression RED на d6c28c2:
+marker не очищен. Scoped implementer перенёс empty-filter no-op после проверки
+состояния IndexHandle; recreated index проходит checked full recovery. GREEN:
+9 детерминированных regressions; healthy ignored-only batch сохраняет SQL и
+index_generation. Scoped re-review: I1 ADDRESSED, новых Critical/Important нет.
+Task T55: final local validation (2026-11-10, d6c28c2 + I1 fix): Rust1.88,
+`cargo test --locked --features cli-full` → exit0, 923 passed / 0 failed /
+13 ignored, 63 targets; nested helper summaries не посчитаны дважды. Full
+all-target Clippy и explicit perf_budget/artifact Clippy `-D warnings`, fmt,
+diff-check GREEN. Shared-host slack3 и прежний isolated TMPDIR; baseline,
+deadlines, config/schema/public API и dependencies не менялись. До I1 исправления
+native run42775614725 был docs/Linux/macOS/Windows4/4GREEN (Linux922+2artifact,
+macOS918, Windows907); это предварительное evidence. Required CI final HEAD
+и merge SHA фиксируются в PR #104, не подменяются этим предварительным run.
+Task T55: minor (deferred): final reviewer отметил порядок drop в test-only
+`watch::tests::Env`: cache TempDir объявлен раньше Db, поэтому Windows cleanup
+может оставить временные файлы до очистки runner. Будущая fixture cleanup должна
+закрывать Db перед TempDir. На production lifecycle/index correctness не влияет;
+это не блокер merge и не повод менять проверенный product diff.
+Task T55: complete (2026-11-10, PR #104; base8fd4308, final product blobs
+watch/mod.rs da7b68dcad31a51bbddd10f57b210fb0532f481f + checked job path).
+Final local verify: cli-full923/0/13, focused9, Clippy/fmt/diff-check GREEN.
+Ruling: task review Spec compliance PASS / Quality APPROVED after I1 fix;
+fresh whole-branch final review converged, Critical/Important none. M1 fixture
+cleanup deferred above. Completion here records implementation/local verification;
+delivery still requires final-head docs/linux/macos/windows success and pinned-SHA
+squash merge, with native artifact inventories and merged SHA recorded in PR #104.

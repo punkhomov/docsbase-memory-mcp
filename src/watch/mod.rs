@@ -893,11 +893,14 @@ fn run_batch(
                 ))
             }
         };
-        if filtered.is_empty() {
+        let mut index = IndexHandle::open_or_create(&lifecycle::index_dir(cache, project.id))?;
+        // A rejected stale attempt may have recreated the index. Even an
+        // ignored-only retry must finish that full rebuild for allowed files
+        // outside its raw batch before reporting success.
+        if filtered.is_empty() && !index.was_recreated() {
             check_config()?;
             return Ok(JobStats::default());
         }
-        let mut index = IndexHandle::open_or_create(&lifecycle::index_dir(cache, project.id))?;
         let stats =
             run_incremental_checked(db, &mut index, project, &filtered, &config, check_config)?;
         registry::set_status(db, project.id, ProjectStatus::Indexed)?;
@@ -1142,6 +1145,54 @@ mod tests {
         env.assert_search_count("alphawidget9", 1);
         env.assert_search_count("betawidget9", 0);
         assert_eq!(env.states().len(), 1);
+    }
+
+    #[test]
+    fn ignored_only_retry_finishes_full_recovery() {
+        use crate::index::tantivy_index::REBUILD_MARKER;
+
+        let mut env = Env::new();
+        let old = Arc::new(Config::default());
+        let new = ignoring_bbb();
+        let allowed = env.path("a.md");
+        fs::write(&allowed, "alphawidget9").expect("allowed bytes");
+        assert_eq!(env.run(&[allowed], &old).docs, 1);
+        let before = env.states();
+        let generation = env.generation();
+        let queued = [env.path("bbb/b.md")];
+        fs::write(&queued[0], "betawidget9").expect("new ignored bytes");
+        let index_dir = lifecycle::index_dir(env.cache.path(), env.project.id);
+        fs::write(index_dir.join(REBUILD_MARKER), "").expect("force recovery");
+        let reads = Cell::new(0);
+        let err = run_batch(&mut env.db, env.cache.path(), &env.project, &queued, || {
+            let read = reads.get();
+            reads.set(read + 1);
+            Arc::clone(if read == 0 { &old } else { &new })
+        })
+        .expect_err("reject obsolete full payload");
+        assert!(
+            err.to_string()
+                .contains("config changed while preparing batch")
+        );
+        assert_eq!(reads.get(), 2);
+        assert_eq!(env.states(), before, "rejected recovery preserves SQL");
+        assert_eq!(env.generation(), generation);
+        assert!(index_dir.join(REBUILD_MARKER).exists());
+
+        let stats = env.run(&queued, &new);
+        assert!(
+            !index_dir.join(REBUILD_MARKER).exists(),
+            "an ignored-only retry must finish the outstanding rebuild"
+        );
+        assert_eq!(
+            stats.docs, 1,
+            "recover the allowed document outside the batch"
+        );
+        env.assert_search_count("alphawidget9", 1);
+        env.assert_search_count("betawidget9", 0);
+        let documents = env.states();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].rel_path, "a.md");
     }
 
     #[test]
