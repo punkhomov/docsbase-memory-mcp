@@ -21,7 +21,7 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use crate::config::Config;
 use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
-use crate::index::job::{JobStats, run_incremental_with};
+use crate::index::job::{JobStats, run_incremental_checked};
 use crate::index::tantivy_index::IndexHandle;
 use crate::index::walk;
 use crate::store::Db;
@@ -792,13 +792,11 @@ fn spawn_consumer(
                         if let Some(err) = injected_watch_fault(&project.canonical_root, &cache) {
                             return Err(err);
                         }
-                        // Clone and release the slot: a reopen must not stall
-                        // behind a long incremental batch.
-                        let config = config
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .clone();
-                        run_batch(&mut db, &cache, &project, &config, paths)
+                        run_batch(&mut db, &cache, &project, paths, || {
+                            // Hold the slot only while cloning: reopen must
+                            // not stall behind filesystem or provider work.
+                            config.lock().unwrap_or_else(PoisonError::into_inner).clone()
+                        })
                     },
                     |pending| {
                         while let Ok(extra) = rx.try_recv() {
@@ -845,8 +843,8 @@ fn run_batch(
     db: &mut Db,
     cache: &Path,
     project: &Project,
-    config: &Config,
     batch: &[PathBuf],
+    mut current_config: impl FnMut() -> Arc<Config>,
 ) -> Result<crate::index::job::JobStats> {
     // Incremental chunks are only valid for an index built with the current
     // schema; a stale or errored project must be rebuilt by a full index
@@ -869,9 +867,367 @@ fn run_batch(
     // The writer handle is opened per batch: holding it between batches would
     // block full index jobs on the tantivy lock.
     lifecycle::with_writer_lease(cache, project.id, || {
+        let config = current_config();
+        // The producer may have admitted these paths before a reopen. Retry
+        // from the original pending paths, with no cached directory verdicts.
+        let mut raw = Batch::new();
+        for path in batch {
+            raw.push(path.clone());
+        }
+        let filtered = finalize(
+            &mut IndexFilter::new(
+                project.canonical_root.clone(),
+                canonicalize_allow_missing(cache),
+                &config,
+            ),
+            raw,
+        );
+        let mut check_config = || {
+            if Arc::ptr_eq(&config, &current_config()) {
+                Ok(())
+            } else {
+                // Existing bounded transient retry keeps the raw pending
+                // paths and releases the lease before preparing them again.
+                Err(Error::internal(
+                    "watcher config changed while preparing batch",
+                ))
+            }
+        };
+        if filtered.is_empty() {
+            check_config()?;
+            return Ok(JobStats::default());
+        }
         let mut index = IndexHandle::open_or_create(&lifecycle::index_dir(cache, project.id))?;
-        let stats = run_incremental_with(db, &mut index, project, batch, config)?;
+        let stats =
+            run_incremental_checked(db, &mut index, project, &filtered, &config, check_config)?;
         registry::set_status(db, project.id, ProjectStatus::Indexed)?;
         Ok(stats)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::job::run_full;
+    use crate::store::repo;
+    use std::cell::Cell;
+    use std::fs;
+    use std::sync::mpsc::sync_channel;
+    use tempfile::TempDir;
+
+    struct Env {
+        cache: TempDir,
+        _root: TempDir,
+        db: Db,
+        project: Project,
+    }
+
+    impl Env {
+        fn new() -> Self {
+            let cache = TempDir::new().expect("cache");
+            let root = TempDir::new().expect("root");
+            fs::create_dir(root.path().join(".git")).expect("project boundary");
+            fs::create_dir(root.path().join("bbb")).expect("bbb");
+            fs::write(root.path().join("bbb/b.md"), "betawidget").expect("seed");
+            let mut db = Db::open(cache.path()).expect("db");
+            let project = registry::ensure_project(&mut db, root.path()).expect("project");
+            let mut index =
+                IndexHandle::open_or_create(&lifecycle::index_dir(cache.path(), project.id))
+                    .expect("index");
+            run_full(&mut db, &mut index, &project, &Config::default()).expect("seed index");
+            registry::mark_indexed(&db, project.id).expect("indexed");
+            drop(index); // Windows needs the writer released before consumer open.
+            Self {
+                cache,
+                _root: root,
+                db,
+                project,
+            }
+        }
+
+        fn path(&self, rel: &str) -> PathBuf {
+            self.project.canonical_root.join(rel)
+        }
+
+        fn producer_batch(&self, paths: &[PathBuf], config: &Config) -> Vec<PathBuf> {
+            let mut raw = Batch::new();
+            for path in paths {
+                raw.push(path.clone());
+            }
+            finalize(
+                &mut IndexFilter::new(
+                    self.project.canonical_root.clone(),
+                    self.cache.path().canonicalize().expect("cache root"),
+                    config,
+                ),
+                raw,
+            )
+        }
+
+        fn assert_search_count(&self, query: &str, expected: usize) {
+            let index = IndexHandle::open_or_create(&lifecycle::index_dir(
+                self.cache.path(),
+                self.project.id,
+            ))
+            .expect("open search index");
+            assert_eq!(index.search(query, 10).expect("search").len(), expected);
+        }
+
+        fn run(&mut self, paths: &[PathBuf], config: &Arc<Config>) -> JobStats {
+            run_batch(
+                &mut self.db,
+                self.cache.path(),
+                &self.project,
+                paths,
+                || Arc::clone(config),
+            )
+            .expect("batch")
+        }
+
+        fn states(&self) -> Vec<repo::DocState> {
+            repo::doc_states(self.db.connection(), self.project.id).expect("states")
+        }
+
+        fn generation(&self) -> i64 {
+            repo::index_generation(self.db.connection(), self.project.id).expect("generation")
+        }
+    }
+
+    fn ignoring_bbb() -> Arc<Config> {
+        Arc::new(Config {
+            ignores: vec!["bbb/**".to_owned()],
+            ..Config::default()
+        })
+    }
+
+    #[test]
+    fn queued_paths_use_reopened_config() {
+        let env = Env::new();
+        let seed = repo::doc_states(env.db.connection(), env.project.id).expect("seed state");
+        let old = Arc::new(Config::default());
+        let paths = env.producer_batch(&[env.path("bbb/b.md")], &old);
+        assert_eq!(paths, vec![env.path("bbb/b.md")], "v1 admitted the path");
+        let (tx, rx) = sync_channel(2);
+        tx.send(paths).expect("queue old batch");
+
+        // The not-yet-started consumer is an instance-local gate: the queued
+        // v1 verdict is guaranteed to precede config publication and new bytes.
+        let slot = Arc::new(Mutex::new(old));
+        *slot.lock().expect("slot") = ignoring_bbb();
+        fs::write(env.path("bbb/b.md"), "betawidget9").expect("new ignored bytes");
+        fs::write(env.path("a.md"), "alphawidget9").expect("allowed bytes");
+        tx.send(vec![env.path("a.md")]).expect("coalesced update");
+        drop(tx);
+        let consumer = spawn_consumer(
+            env.cache.path().to_path_buf(),
+            env.project.clone(),
+            slot,
+            rx,
+            Weak::new(),
+        )
+        .expect("consumer");
+        consumer.join().expect("batch terminal");
+
+        env.assert_search_count("alphawidget9", 1);
+        env.assert_search_count("betawidget9", 0);
+        env.assert_search_count("betawidget", 1);
+        let states = repo::doc_states(env.db.connection(), env.project.id).expect("states");
+        assert!(
+            states.contains(&seed[0]),
+            "ignored row/hash must remain unchanged"
+        );
+    }
+
+    #[test]
+    fn newly_ignored_file_creates_no_pending_row() {
+        let mut env = Env::new();
+        let path = env.path("bbb/new.md");
+        fs::write(&path, "newwidget9").expect("new file");
+        let queued = env.producer_batch(&[path], &Config::default());
+        assert_eq!(queued.len(), 1);
+        let before = env.states();
+        let generation = env.generation();
+        assert_eq!(env.run(&queued, &ignoring_bbb()), JobStats::default());
+        assert_eq!(env.states(), before);
+        assert_eq!(env.generation(), generation);
+        env.assert_search_count("newwidget9", 0);
+    }
+
+    #[test]
+    fn missing_ignored_file_is_purged() {
+        let mut env = Env::new();
+        let path = env.path("bbb/b.md");
+        fs::remove_file(&path).expect("delete");
+        assert_eq!(env.run(&[path], &ignoring_bbb()).removed, 1);
+        assert!(env.states().is_empty());
+        env.assert_search_count("betawidget", 0);
+    }
+
+    #[test]
+    fn missing_ignored_directory_is_purged() {
+        let mut env = Env::new();
+        let extra = env.path("bbb/c.md");
+        fs::write(&extra, "secondwidget").expect("extra file");
+        assert_eq!(env.run(&[extra], &Arc::new(Config::default())).docs, 1);
+        let dir = env.path("bbb");
+        fs::remove_dir_all(&dir).expect("delete subtree");
+        assert_eq!(env.run(&[dir], &ignoring_bbb()).removed, 2);
+        assert!(env.states().is_empty());
+        env.assert_search_count("betawidget", 0);
+        env.assert_search_count("secondwidget", 0);
+    }
+
+    #[test]
+    fn config_change_during_preparation_leaves_state_untouched() {
+        let mut env = Env::new();
+        let before = env.states();
+        let generation = env.generation();
+        let path = env.path("bbb/b.md");
+        fs::write(&path, "betawidget9").expect("new bytes");
+        let old = Arc::new(Config::default());
+        let new = ignoring_bbb();
+        let reads = Cell::new(0);
+        let err = run_batch(&mut env.db, env.cache.path(), &env.project, &[path], || {
+            let read = reads.get();
+            reads.set(read + 1);
+            Arc::clone(if read == 0 { &old } else { &new })
+        })
+        .expect_err("reopen overtook preparation");
+        assert!(
+            err.to_string()
+                .contains("config changed while preparing batch")
+        );
+        assert_eq!(reads.get(), 2);
+        assert_eq!(env.states(), before, "no stale pending hash or rows");
+        assert_eq!(env.generation(), generation);
+        env.assert_search_count("betawidget", 1);
+        env.assert_search_count("betawidget9", 0);
+    }
+
+    #[test]
+    fn stale_full_recovery_preserves_sql_until_retry() {
+        use crate::index::tantivy_index::REBUILD_MARKER;
+        let mut env = Env::new();
+        let before = env.states();
+        let generation = env.generation();
+        let paths = [env.path("bbb/b.md"), env.path("a.md")];
+        fs::write(&paths[0], "betawidget9").expect("new ignored bytes");
+        fs::write(&paths[1], "alphawidget9").expect("new allowed bytes");
+        let index_dir = lifecycle::index_dir(env.cache.path(), env.project.id);
+        fs::write(index_dir.join(REBUILD_MARKER), "").expect("force recovery");
+        let old = Arc::new(Config::default());
+        let new = ignoring_bbb();
+        let reads = Cell::new(0);
+        let err = run_batch(&mut env.db, env.cache.path(), &env.project, &paths, || {
+            let read = reads.get();
+            reads.set(read + 1);
+            Arc::clone(if read == 0 { &old } else { &new })
+        })
+        .expect_err("reject obsolete full payload");
+        assert!(
+            err.to_string()
+                .contains("config changed while preparing batch")
+        );
+        assert_eq!(
+            reads.get(),
+            2,
+            "full recovery also validates after preparation"
+        );
+        assert_eq!(env.states(), before, "SQL wipe must wait for admission");
+        assert_eq!(env.generation(), generation);
+        assert!(index_dir.join(REBUILD_MARKER).exists());
+
+        assert_eq!(env.run(&paths, &new).docs, 1);
+        assert!(!index_dir.join(REBUILD_MARKER).exists());
+        env.assert_search_count("alphawidget9", 1);
+        env.assert_search_count("betawidget9", 0);
+        assert_eq!(env.states().len(), 1);
+    }
+
+    #[test]
+    fn config_retry_refilters_raw_pending_and_coalesces_new_paths() {
+        let mut env = Env::new();
+        let seed = env.states();
+        let ignored = env.path("bbb/b.md");
+        let allowed = env.path("a.md");
+        fs::write(&ignored, "betawidget9").expect("ignored edit");
+        fs::write(&allowed, "alphawidget9").expect("allowed edit");
+        let old = Arc::new(Config::default());
+        let new = ignoring_bbb();
+        let reads = Cell::new(0);
+        let drains = Cell::new(0);
+        let attempts = Cell::new(0);
+        let mut events = Vec::new();
+        let mut pending = Batch::new();
+        pending.push(ignored.clone());
+        let outcome = run_pending_batch(
+            &mut pending,
+            &BatchRetryPolicy::default(),
+            |paths| {
+                attempts.set(attempts.get() + 1);
+                run_batch(&mut env.db, env.cache.path(), &env.project, paths, || {
+                    let read = reads.get();
+                    reads.set(read + 1);
+                    Arc::clone(if read == 0 { &old } else { &new })
+                })
+            },
+            |pending| {
+                if drains.get() == 1 {
+                    pending.push(allowed.clone());
+                }
+                drains.set(drains.get() + 1);
+            },
+            |_| {}, // Logical retry; no wall-clock backoff in this regression.
+            || false,
+            &mut |event| events.push(event),
+        );
+        let BatchOutcome::Done(stats) = outcome else {
+            panic!("retry must succeed");
+        };
+        assert_eq!(stats.docs, 1);
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(pending.paths(), &[ignored, allowed]);
+        assert!(matches!(
+            events.as_slice(),
+            [BatchEvent::TransientRetry { attempt: 1, .. }]
+        ));
+        assert!(env.states().contains(&seed[0]));
+        env.assert_search_count("alphawidget9", 1);
+        env.assert_search_count("betawidget9", 0);
+    }
+
+    #[test]
+    fn admitted_payload_keeps_bytes_prepared_before_reopen() {
+        let mut env = Env::new();
+        let path = env.path("bbb/b.md");
+        fs::write(&path, "betawidget8").expect("pre-reopen bytes");
+        let old = Arc::new(Config::default());
+        let new = ignoring_bbb();
+        let slot = Mutex::new(Arc::clone(&old));
+        let reads = Cell::new(0);
+        let stats = run_batch(
+            &mut env.db,
+            env.cache.path(),
+            &env.project,
+            std::slice::from_ref(&path),
+            || {
+                // Model a reopen immediately after the guard cloned v1.
+                let captured = Arc::clone(&slot.lock().expect("snapshot"));
+                if reads.get() == 1 {
+                    *slot.lock().expect("publish") = Arc::clone(&new);
+                    fs::write(&path, "betawidget9").expect("post-reopen bytes");
+                }
+                reads.set(reads.get() + 1);
+                captured
+            },
+        )
+        .expect("admitted payload may finish");
+        assert_eq!(stats.docs, 1);
+        assert_eq!(reads.get(), 2);
+        assert!(Arc::ptr_eq(&slot.into_inner().expect("slot"), &new));
+        env.assert_search_count("betawidget8", 1);
+        env.assert_search_count("betawidget9", 0);
+        assert_eq!(env.run(&[path], &new), JobStats::default());
+        env.assert_search_count("betawidget8", 1);
+    }
 }

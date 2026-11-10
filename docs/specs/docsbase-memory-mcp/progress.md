@@ -346,3 +346,15 @@ clippy --locked --all-targets -- -D warnings и fmt --check чисты.
 Ruling: fresh task review — Spec compliance PASS / Quality APPROVED, findings
 none; owner/guard cleanup при constructor/state-check errors и test hygiene
 проверены независимо. Windows/macOS runtime остаётся проверкой PR CI.
+
+Task T55: Ruling (2026-11-10, #103): bounded fix W103 uses per-attempt refilter
+and a post-preparation config snapshot check; already admitted payload can finish
+with its captured bytes after reopen. Full generation publication remains CF11/#78.
+Reopen never holds a config mutex through filesystem/provider/index work. Existing
+transient retry budget applies under sustained configuration churn; exhausted work
+keeps the existing warning/conflict record rather than an unbounded retry loop.
+Task T55: RED verified on 8fd4308 + regression: real consumer applies queued v1
+path after v2 publication and indexes betawidget9 (expected0, actual1). Instance
+local gate is a populated channel before consumer spawn; join is terminal proof,
+with no sleeps or process-global hook. GREEN: 8 new deterministic tests pass;
+full suite/lints/native CI and independent reviews still pending.

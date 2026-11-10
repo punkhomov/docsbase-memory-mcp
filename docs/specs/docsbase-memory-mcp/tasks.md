@@ -974,3 +974,21 @@ T49–T52 и наоборот; каждая задача верифицируе�
 **Acceptance:** delta FR-4/FR-9 выше; existing admission, install/update,
 lifecycle и kill/recovery tests зелёные; нет новых dependencies, unsafe,
 изменений wire/state/config и несвязанных fixes.
+
+## T55 — Watcher config-aware pending batches (#103)
+
+**Goal:** W103 / SC-W103; per-attempt admission and checked prepared payload.
+**Architecture:** design delta 2026-11-10; preserve public job APIs and retry policy.
+**Files:** Modify `src/watch/mod.rs`, `src/index/job.rs`; tests in their private
+modules; existing `tests/config_runtime.rs`, `tests/watcher.rs`,
+`tests/index_incremental.rs` remain acceptance coverage. New crates: none.
+**RED:** queue v1-admitted bbb path before starting real consumer, swap to v2
+ignoring bbb, write new marker, start/join consumer; marker must not be indexed.
+**GREEN:** refilter under writer lease, snapshot guard before mutation; guard
+full recovery too. Preserve deletion markers and retain raw pending paths on retry.
+**Acceptance:** mixed allowed/ignored coalesced work, new ignored file admission,
+file/subtree purge, preparation overtaken by reopen and retry, no stale SQL
+markers/provider execution; prepared-old-payload boundary documented and tested.
+**Verify:** Rust1.88 `cargo test --locked --features cli-full` (shared-host slack3),
+`cargo clippy --locked --features cli-full --all-targets -- -D warnings`, fmt;
+fresh task/final reviews and docs/Linux/macOS/Windows PR CI before squash merge.

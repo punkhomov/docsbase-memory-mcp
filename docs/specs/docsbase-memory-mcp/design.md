@@ -713,6 +713,31 @@ constructor закрывает file при отказе `try_write`; локал�
 новые зависимости не нужны. Публичный `Lease::acquire` и admission policy
 сохраняются. Прежнее решение T18 о process-lifetime leak заменено этой дельтой.
 
+## Delta 2026-11-10 — Watcher attempt admission (#103, W103)
+
+Consumer получает snapshot supplier из своего `Arc<Mutex<Arc<Config>>>`, берёт
+snapshot внутри writer lease и создаёт свежий `IndexFilter` для pending paths.
+Filter не переиспользует directory verdicts producer; missing paths остаются
+purge markers. На retry исходный batch не изменяется, новые paths коалесцируются
+существующим `run_pending_batch`.
+
+Crate-private checked indexing entry point принимает `FnOnce() -> Result<()>`:
+проверка `Arc::ptr_eq` выполняется после filesystem/hash/chunk preparation, до
+`finish_plan`. Incremental→full fallback также проходит эту проверку. При
+recreated index очистка старых SQLite rows откладывается до проверки; подготовка
+использует пустой prior-state view, как и после прежней очистки. Отказ возвращает
+`Error::Internal` и использует существующий bounded transient retry. Mutex живёт
+только при клонировании snapshot; filesystem, SQLite и providers идут вне него.
+Публичные indexing API, config/wire/schema и retry budget не меняются.
+
+Граница линеаризации — успешная проверка полностью подготовленного payload.
+Повторная фильтрация сама по себе не закрывает reopen во время read/hash;
+проверка только перед чтением оставляет ту же гонку. Держать slot lock до commit
+блокировало бы reopen на provider I/O, поэтому это отклонено. Проверка не является
+атомарной generation publication, не отменяет payload после этой границы и не
+обещает filesystem snapshot при произвольных параллельных правках ignore files.
+Создание/recovery файлов Tantivy при open также сохраняет прежнее поведение.
+
 
 ## Delta 2026-11-09 — C11: default/source CI ownership
 

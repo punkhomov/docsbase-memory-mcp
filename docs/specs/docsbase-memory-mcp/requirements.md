@@ -359,3 +359,26 @@ install/update не накапливают descriptors/handles. Формат с�
 при повторных success/drop и отказах; portable-тест проверяет отказ второму
 процессу при живом lease и успешный запуск после drop. Существующие lifecycle
 и install/update тесты продолжают проходить.
+
+## Delta 2026-11-10 — Watcher queued paths and reopen (#103)
+
+Уточнение FR-15/FR-16 и OQ-6 (W103): каждый consumer attempt заново проверяет
+pending/coalesced пути по текущему project config после получения writer lease.
+Существующий файл, ставший ignored, не обновляется и не создаёт pending row;
+отсутствующие пути сохраняют purge semantics. Старый producer verdict не является
+разрешением на чтение нового содержимого после reopen.
+
+Перед первым применением подготовленного плана consumer проверяет, что config
+snapshot ещё текущий. Если reopen обогнал подготовку, план отбрасывается без
+marker rows, provider calls и index commit; исходные пути остаются для обычного
+bounded transient retry с новым config. При непрерывных reopen действует прежний
+retry budget с явным dropped-batch warning/conflict record. Если проверка прошла,
+уже подготовленные bytes могут завершить применение после reopen: reopen не ждёт
+провайдеров/индексирования. Полная generation publication/cancellation — CF11/#78.
+
+SC-W103: детерминированные тесты реального consumer с заполненной до запуска
+очередью проверяют old admission → config swap → новые bytes → terminal batch;
+разрешённый update проходит, newly ignored marker отсутствует в SQLite/Tantivy.
+Отдельно покрываются retry/coalescing, missing-file/directory purge и config swap
+между подготовкой и применением, включая incremental→full recovery. Без sleeps,
+расширения deadlines, отключения существующего Windows regression или baseline delta.
