@@ -15,6 +15,7 @@ pub mod ann;
 pub mod ann_store;
 pub mod config;
 pub mod dense;
+pub mod dense_metadata;
 pub mod dense_settings;
 mod flight;
 pub mod jobs;
