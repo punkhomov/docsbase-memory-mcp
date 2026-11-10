@@ -90,17 +90,23 @@ pub fn run_full(
     project: &Project,
     config: &Config,
 ) -> Result<JobStats> {
-    if index.was_recreated() {
-        // The index was rebuilt from an upgraded schema: SQLite rows still
-        // describe the previous index, so every document must be re-added
-        // instead of being skipped as unchanged (T27).
-        let dropped = repo::delete_project_docs(db.connection(), project.id)?;
-        eprintln!(
-            "index schema upgraded for project {}; reindexing {dropped} document(s)",
-            project.id
-        );
-    }
-    let existing = repo::doc_states(db.connection(), project.id)?;
+    run_full_checked(db, index, project, config, || Ok(()))
+}
+
+fn run_full_checked(
+    db: &mut Db,
+    index: &mut IndexHandle,
+    project: &Project,
+    config: &Config,
+    before_apply: impl FnOnce() -> Result<()>,
+) -> Result<JobStats> {
+    // A recreated index needs every document re-added (T27). Delay the SQL
+    // wipe until the prepared payload has passed the caller's config check.
+    let existing = if index.was_recreated() {
+        Vec::new()
+    } else {
+        repo::doc_states(db.connection(), project.id)?
+    };
     let by_path: HashMap<&str, &DocState> = existing
         .iter()
         .map(|state| (state.rel_path.as_str(), state))
@@ -181,6 +187,14 @@ pub fn run_full(
         }
     }
 
+    before_apply()?;
+    if index.was_recreated() {
+        let dropped = repo::delete_project_docs(db.connection(), project.id)?;
+        eprintln!(
+            "index schema upgraded for project {}; reindexing {dropped} document(s)",
+            project.id
+        );
+    }
     finish_plan(
         db, index, project.id, &mut plan, &removed, &mut stats, config,
     )?;
@@ -221,10 +235,24 @@ pub fn run_incremental_with(
     changed: &[PathBuf],
     config: &Config,
 ) -> Result<JobStats> {
+    run_incremental_checked(db, index, project, changed, config, || Ok(()))
+}
+
+/// Prepares the complete payload before asking the caller to admit its
+/// application. A rejected plan has no marker rows or provider calls. This
+/// check is also used when incremental indexing falls back to a full rebuild.
+pub(crate) fn run_incremental_checked(
+    db: &mut Db,
+    index: &mut IndexHandle,
+    project: &Project,
+    changed: &[PathBuf],
+    config: &Config,
+    before_apply: impl FnOnce() -> Result<()>,
+) -> Result<JobStats> {
     if index.was_recreated() {
         // Incremental batches cannot repopulate a freshly recreated index;
         // rebuild everything under the same writer lease instead (T27).
-        return run_full(db, index, project, config);
+        return run_full_checked(db, index, project, config, before_apply);
     }
     let existing = repo::doc_states(db.connection(), project.id)?;
     let by_path: HashMap<&str, &DocState> = existing
@@ -330,12 +358,10 @@ pub fn run_incremental_with(
     let planned_ids: HashSet<i64> = plan.iter().filter_map(|pending| pending.id).collect();
     removed.retain(|state| !planned_ids.contains(&state.id) && !still_present.contains(&state.id));
 
+    before_apply()?;
     finish_plan(
         db, index, project.id, &mut plan, &removed, &mut stats, config,
     )?;
-    if index.was_recreated() {
-        index.mark_rebuilt()?;
-    }
     Ok(stats)
 }
 
