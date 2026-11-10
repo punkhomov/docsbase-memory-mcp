@@ -137,9 +137,32 @@ pub fn run_daemon_with_settings(
     grace: Duration,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> Result<()> {
+    run_daemon_with_policies(
+        cache,
+        grace,
+        settings,
+        &crate::store::settings::standalone_read_pool()?,
+    )
+}
+
+/// Runs a daemon with explicit storage and prepared reader policies.
+///
+/// # Errors
+/// Invalid policy is rejected before admission/state creation. Other errors
+/// match [`run_daemon_with_settings`].
+pub fn run_daemon_with_policies(
+    cache: &Path,
+    grace: Duration,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
+) -> Result<()> {
     use crate::config::schema::SettingsSpec;
     crate::store::settings::DbSpec::validate(
         settings.settings(),
+        &crate::config::schema::Capabilities::current(),
+    )?;
+    crate::store::settings::ReadPoolSpec::validate(
+        pool_settings.settings(),
         &crate::config::schema::Capabilities::current(),
     )?;
     let _lease = crate::daemon::admission::Lease::acquire(
@@ -151,7 +174,7 @@ pub fn run_daemon_with_settings(
         .enable_all()
         .build()
         .map_err(|err| Error::internal_with_source("build tokio runtime", err))?;
-    runtime.block_on(serve(cache, grace, settings))
+    runtime.block_on(serve(cache, grace, settings, pool_settings))
 }
 
 /// Asks a running daemon to stop and waits for it to exit (FR-6).
@@ -227,6 +250,7 @@ async fn serve(
     cache: &Path,
     grace: Duration,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
 ) -> Result<()> {
     create_state_dir(cache)?;
     if is_running(cache) {
@@ -235,6 +259,9 @@ async fn serve(
         });
     }
     cleanup_stale(cache)?;
+
+    // Prepare resources before advertising a listener or daemon state.
+    let shared = crate::daemon::server::Shared::open_with_policies(cache, settings, pool_settings)?;
 
     let endpoint = platform::daemon_endpoint(cache);
     if platform::exists(&endpoint) {
@@ -248,7 +275,6 @@ async fn serve(
         .map_err(|err| Error::internal_with_source("chmod 0600 socket", err))?;
     write_state(cache)?;
 
-    let shared = crate::daemon::server::Shared::open_with_settings(cache, settings)?;
     let result = accept_loop(shared, &listener, grace).await;
 
     if let Err(err) = platform::remove(&endpoint) {
@@ -660,6 +686,19 @@ mod tests {
 #[cfg(test)]
 mod store_policy_tests {
     use super::*;
+
+    #[test]
+    fn invalid_pool_policy_leaves_admission_and_state_absent() {
+        let root = tempfile::tempdir().expect("root");
+        let cache = root.path().join("cache");
+        let db = crate::store::settings::standalone().expect("db policy");
+        let valid = crate::store::settings::standalone_read_pool().expect("pool policy");
+        let mut raw = valid.settings().clone();
+        raw.max_connections = 0;
+        let imported = crate::config::schema::Resolved::new(raw, valid.provenance().clone());
+        assert!(run_daemon_with_policies(&cache, Duration::ZERO, &db, &imported).is_err());
+        assert!(!cache.exists());
+    }
 
     #[test]
     fn invalid_store_policy_leaves_admission_and_state_absent() {

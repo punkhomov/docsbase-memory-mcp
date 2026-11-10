@@ -177,6 +177,7 @@ pub enum DaemonCommand {
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let db_settings = crate::store::settings::standalone()?;
+    let pool_settings = crate::store::settings::standalone_read_pool()?;
     match cli.command {
         Command::Index { path } => index::run_with_settings(path.as_deref(), &db_settings),
         Command::Search {
@@ -205,7 +206,9 @@ pub fn run() -> anyhow::Result<()> {
         Command::Sync { path } => sync(path.as_deref(), &db_settings),
         Command::Config => show_config(),
         Command::Status => status::status_with_settings(&db_settings),
-        Command::Serve { detached, grace_ms } => serve(detached, grace_ms, &db_settings),
+        Command::Serve { detached, grace_ms } => {
+            serve(detached, grace_ms, &db_settings, &pool_settings)
+        }
         Command::Mcp => crate::mcp::frontend::run_blocking(),
         Command::Daemon { command } => match command {
             DaemonCommand::Stop => daemon_stop(),
@@ -250,12 +253,14 @@ fn serve(
     _detached: bool,
     grace_ms: u64,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
 ) -> anyhow::Result<()> {
     let cache = paths::cache_dir()?;
-    crate::daemon::lifecycle::run_daemon_with_settings(
+    crate::daemon::lifecycle::run_daemon_with_policies(
         &cache,
         std::time::Duration::from_millis(grace_ms),
         settings,
+        pool_settings,
     )?;
     Ok(())
 }
