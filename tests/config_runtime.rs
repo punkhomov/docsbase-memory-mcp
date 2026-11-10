@@ -1,3 +1,6 @@
+#[path = "support/search_visibility.rs"]
+mod search_visibility;
+
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,6 +11,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 use docsbase_memory::daemon::lifecycle::stop_daemon;
+use docsbase_memory::error::Error;
 use docsbase_memory::ipc::client::Client;
 use docsbase_memory::ipc::protocol::{FRAME_OVERHEAD, MAX_FRAME_BYTES};
 use docsbase_memory::platform;
@@ -143,9 +147,16 @@ fn index(client: &mut Client, env: &Env) -> Value {
 }
 
 fn search(client: &mut Client, query: &str) -> Vec<String> {
-    let hits = client
-        .call_tool("search_docs", serde_json::json!({ "query": query }))
-        .expect("search_docs");
+    search_before(client, query, Instant::now() + watcher_deadline())
+}
+
+fn search_before(client: &mut Client, query: &str, deadline: Instant) -> Vec<String> {
+    let hits = search_response_before(
+        deadline,
+        || client.call_tool("search_docs", serde_json::json!({ "query": query })),
+        Instant::now,
+        || std::thread::sleep(Duration::from_millis(20)),
+    );
     let mut paths: Vec<String> = hits
         .as_array()
         .expect("hits array")
@@ -155,6 +166,224 @@ fn search(client: &mut Client, query: &str) -> Vec<String> {
     paths.sort();
     paths.dedup();
     paths
+}
+
+fn search_response_before(
+    deadline: Instant,
+    mut attempt: impl FnMut() -> Result<Value, Error>,
+    mut now: impl FnMut() -> Instant,
+    mut pause: impl FnMut(),
+) -> Value {
+    // Watcher/index publication may temporarily refuse an incoherent project.
+    // Require an actual success: an error must never stand in for empty hits.
+    // Every retry and the successful response share the caller's deadline.
+    let mut last_project_error = None;
+    while now() < deadline {
+        match attempt() {
+            Ok(hits) => {
+                assert!(
+                    now() < deadline,
+                    "search_docs completed after watcher deadline: {last_project_error:?}"
+                );
+                return hits;
+            }
+            Err(error) if search_visibility::temporarily_unavailable(&error) => {
+                last_project_error = Some(error);
+            }
+            Err(error) => panic!("search_docs: {error:?}"),
+        }
+        pause();
+    }
+    panic!("project did not become searchable before watcher deadline: {last_project_error:?}");
+}
+
+#[test]
+fn search_readiness_rejects_success_at_or_after_deadline() {
+    use std::cell::Cell;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    for elapsed in [Duration::from_secs(1), Duration::from_secs(2)] {
+        let start = Instant::now();
+        let clock = Cell::new(start);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            search_response_before(
+                start + Duration::from_secs(1),
+                || {
+                    clock.set(start + elapsed);
+                    Ok(serde_json::json!([{"path": "aaa/a.md"}]))
+                },
+                || clock.get(),
+                || panic!("a successful response must not retry"),
+            )
+        }));
+        assert!(result.is_err(), "late hits must not satisfy a watcher poll");
+    }
+}
+
+#[test]
+fn search_readiness_stops_at_original_deadline() {
+    use std::cell::Cell;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let deadline = Instant::now() + watcher_deadline();
+    let clock = Cell::new(
+        deadline
+            .checked_sub(Duration::from_secs(1))
+            .expect("one second before deadline"),
+    );
+    let attempts = Cell::new(0);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        search_response_before(
+            deadline,
+            || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    Err(Error::Project {
+                        message: "project has an incomplete index update".into(),
+                        instruction: None,
+                    })
+                } else {
+                    Ok(serde_json::json!([{"path": "aaa/a.md"}]))
+                }
+            },
+            || clock.get(),
+            || clock.set(deadline),
+        )
+    }));
+    let failure = result.expect_err("readiness must not start another watcher budget");
+    assert_eq!(attempts.get(), 1, "no attempt after the original deadline");
+    assert!(
+        failure
+            .downcast_ref::<String>()
+            .expect("timeout diagnostic")
+            .contains("project has an incomplete index update"),
+        "timeout must retain the last refusal"
+    );
+}
+
+#[test]
+fn search_readiness_does_not_attempt_after_deadline() {
+    use std::cell::Cell;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let deadline = Instant::now();
+    let attempts = Cell::new(0);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        search_response_before(
+            deadline,
+            || {
+                attempts.set(attempts.get() + 1);
+                Ok(serde_json::json!([]))
+            },
+            || deadline,
+            || panic!("an expired poll must not sleep"),
+        )
+    }));
+    assert!(result.is_err(), "an expired deadline cannot return hits");
+    assert_eq!(attempts.get(), 0);
+}
+
+#[test]
+fn search_readiness_requires_successful_empty_response() {
+    use std::cell::Cell;
+
+    let start = Instant::now();
+    let clock = Cell::new(start);
+    let attempts = Cell::new(0);
+    let hits = search_response_before(
+        start + watcher_deadline(),
+        || {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 {
+                Err(Error::Project {
+                    message: "project has an incomplete index update".into(),
+                    instruction: None,
+                })
+            } else {
+                Ok(serde_json::json!([]))
+            }
+        },
+        || clock.get(),
+        || clock.set(start + Duration::from_secs(1)),
+    );
+    assert_eq!(attempts.get(), 2, "refusal cannot become an empty success");
+    assert_eq!(hits, serde_json::json!([]));
+}
+
+#[test]
+fn search_readiness_rejects_other_errors_immediately() {
+    use std::cell::Cell;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let errors = [
+        Error::Admission {
+            message: "fixture admission".into(),
+        },
+        Error::Protocol {
+            message: "fixture protocol".into(),
+        },
+        Error::Project {
+            message: "fixture unknown project error".into(),
+            instruction: None,
+        },
+        Error::internal("fixture internal"),
+        Error::transport("fixture transport"),
+    ];
+    for error in errors {
+        let expected = format!("search_docs: {error:?}");
+        let mut error = Some(error);
+        let attempts = Cell::new(0);
+        let start = Instant::now();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            search_response_before(
+                start + watcher_deadline(),
+                || {
+                    attempts.set(attempts.get() + 1);
+                    Err(error.take().expect("one attempt"))
+                },
+                || start,
+                || panic!("fatal errors must not retry"),
+            )
+        }));
+        let failure = result.expect_err("other errors must fail immediately");
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(failure.downcast_ref::<String>(), Some(&expected));
+    }
+}
+
+#[test]
+fn search_refuses_pending_payload_and_recovers_after_completion() {
+    let mut env = Env::new(&[("ready.md", &doc("readywidget"))]);
+    env.start_daemon();
+    let mut registry_client = env.client();
+    registry_client
+        .handshake_registry()
+        .expect("registry handshake");
+    index(&mut registry_client, &env);
+    let mut bound = env.client();
+    bound.handshake(env.root()).expect("bound session");
+    let db = docsbase_memory::store::Db::open(env.cache()).expect("control writer");
+    let projects = docsbase_memory::daemon::registry::list_projects(&db).expect("projects");
+    let pending = docsbase_memory::store::repo::insert_pending_doc(
+        db.connection(),
+        projects[0].id,
+        "pending.md",
+        "pending.md",
+    )
+    .expect("crash marker");
+    let error = bound
+        .call_tool("search_docs", serde_json::json!({"query":"readywidget"}))
+        .expect_err("incomplete project cannot produce a mixed payload");
+    assert!(matches!(error, Error::Project { .. }), "{error:?}");
+    assert!(
+        error.to_string().contains("incomplete index update"),
+        "{error}"
+    );
+    assert!(search_visibility::temporarily_unavailable(&error));
+    db.connection()
+        .execute("DELETE FROM docs WHERE id=?1", [pending])
+        .expect("complete marker");
+    assert_eq!(search(&mut bound, "readywidget"), vec!["ready.md"]);
 }
 
 #[test]
@@ -346,13 +575,17 @@ fn watcher_uses_reopened_config() {
     // the v2 swap must invalidate that cache too.
     write_file(env.root(), "bbb/seed.md", doc("seedwidget").as_bytes());
     let deadline = Instant::now() + watcher_deadline();
-    while Instant::now() < deadline && search(&mut first, "seedwidget").is_empty() {
+    let mut found = false;
+    while Instant::now() < deadline {
+        if !search_before(&mut first, "seedwidget", deadline).is_empty()
+            && Instant::now() < deadline
+        {
+            found = true;
+            break;
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(
-        !search(&mut first, "seedwidget").is_empty(),
-        "v1 watcher must index bbb/seed.md"
-    );
+    assert!(found, "v1 watcher must index bbb/seed.md");
 
     fs::write(env.project_config(), "ignores = [\"bbb/**\"]\n").expect("project config v2");
     let mut second = env.client();
@@ -365,7 +598,9 @@ fn watcher_uses_reopened_config() {
     let deadline = Instant::now() + watcher_deadline();
     let mut found = false;
     while Instant::now() < deadline {
-        if search(&mut second, "alphawidget9") == vec!["aaa/a.md"] {
+        if search_before(&mut second, "alphawidget9", deadline) == vec!["aaa/a.md"]
+            && Instant::now() < deadline
+        {
             found = true;
             break;
         }

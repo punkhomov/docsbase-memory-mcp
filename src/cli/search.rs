@@ -8,8 +8,8 @@ use crate::daemon::tools;
 /// Runs `docsbase search <query> [--limit N] [--explain] [--snippet] [--dedupe …]`,
 /// printing a JSON array
 /// of `{path, heading_path, lines, score}` (FR-20) or, with `--explain`, the
-/// `{hits, meta}` envelope (spec `search-telemetry`, FR-1). Hits whose citation row
-/// vanished during an R2 crash window are dropped from the snapshot.
+/// `{hits, meta}` envelope (spec `search-telemetry`, FR-1). Response stages use
+/// one bounded owned SQL payload; incomplete index updates require rebuilding.
 ///
 /// # Errors
 /// Returns an error when the project is unregistered/not indexed, the snapshot
@@ -79,7 +79,7 @@ pub(crate) fn run_with_settings(
     let cache = paths::cache_dir()?;
     // Direct mode honors the project's hybrid configuration exactly like the
     // daemon route: stages resolved up front (explicit admission on failure,
-    // FR-14) and the same `search_docs_with` seam (FR-11/12).
+    // FR-14) and the same explicit search context (FR-11/12).
     let config = Config::load(Some(&project.canonical_root))?;
     let stages = crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)?;
     let window = config
@@ -101,18 +101,20 @@ pub(crate) fn run_with_settings(
         &cache,
         limits,
     );
-    let value = tools::search_docs_with(
-        &stages,
-        &dense,
+    let budget = crate::search::budget::PayloadBudget::new(config.search.clone())?;
+    let value = tools::search_docs_in(
+        &tools::SearchContext {
+            stages: &stages,
+            dense: &dense,
+            cache: &cache,
+            project: &project,
+            window,
+            payload_budget: &budget,
+            cancellation: &crate::hybrid::work::Cancellation::new(),
+        },
         &db,
-        &cache,
-        &project,
-        //
-        // Direct mode forwards every search argument, `explain` included: it used
-        // to drop it, so `--explain` worked only with a daemon running
-        // (search-ux FR-8, T0).
+        // Every search argument, including explain, reaches the same pipeline.
         &options.args(query),
-        window,
     )?;
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())

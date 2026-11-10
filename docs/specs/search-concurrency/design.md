@@ -358,3 +358,58 @@ drop ordering, без process-global flags или production callback API.
 
 S3.3 не активирует dispatcher и не завершает #66: config revision authority,
 actual pipeline/pool consumers и S4 по-прежнему обязательны до delivery.
+
+## Delta 2026-11-10 — S3.4: owned post-candidate pipeline
+
+FR-3/FR-4 foundation: rerank, post-filter и rendering получают один
+`OwnedPayload`; после capture эти функции не принимают Db/Connection и не
+дочитывают generation. `PreparedSearch` владеет parsed args, candidate order,
+active stages/timings и payload; `finish(&HybridStages, &Cancellation)` потребляет
+его без SQL/index/file handles. Исходный candidate order задаёт provider documents
+и top_n, затем сохраняются прежние rerank/filter/dedupe/truncate/snippet rules.
+Explain generation берётся из payload. Bare-array wire format не меняется.
+
+Production boundary `SearchContext` содержит stages/dense/cache/project/window,
+явные PayloadBudget и Cancellation. `search_docs_in(&SearchContext,&Db,&Value)`
+готовит owned результат и вызывает finish. Shared владеет одним budget из
+полного global_config.search; direct CLI создаёт budget из полного config.search.
+Ни один consumer не подставляет отсутствующие поля. Старый search_docs_with —
+явный standalone compatibility adapter: owner SearchSpec разрешается через
+pure resolver на boundary, один budget на standalone invocation, не daemon.
+Новый settings::standalone не читает environment/filesystem.
+
+Cancellation проверяется до работы, перед capture/provider и после provider
+перед дальнейшими стадиями. Ошибка/отмена/unwind освобождает payload/permit;
+provider получает borrowed полные texts без второй Vec<String> copy. Маленькие
+ranking/response buffers остаются вне logical payload charge, как в S3.3.
+Limit0 сохраняет прежнюю раннюю empty response и не требует payload admission.
+
+Challenge: внешняя Db reference у caller ещё существует — это промежуточный
+этап, а не заявление о FR-3 dispatcher completion. До production delivery S3.5
+обязан перевести capture на short prepared reader phases, добавить config
+revision authority и удерживать cooperative read barrier вокруг cross-store
+candidate/capture, но не provider/flight waits. S4 остаётся обязательным.
+Remaining S3 и S4 поставляются одной reviewed PR: это исключает временный
+consumer pool timeout и публичные настройки без полной production semantics.
+Синхронные provider, ranking/window/baseline budgets не меняются.
+
+### S3.4 validation ruling — readiness while watcher writes
+
+Full suite exposed config_runtime::watcher_uses_reopened_config calling
+search.expect during a real pending SQL update. S3.3 deliberately rejects
+incomplete capture. The runtime integration helper now waits for a successful
+search response while Project state is transient, within the existing watcher
+watchdog. Admission/Protocol/Internal/Transport errors remain immediate failures;
+a persistent Project error fails the watchdog with its last diagnostic. No
+refusal maps to an empty result, so negative filter assertions still require a
+real successful response. No product retry or deadline change. Add explicit IPC
+pending-marker refusal/recovery coverage; real watcher test retains its content
+and reopened-ignore assertions. This is a contract correction, not a test removal.
+
+S3.4 same-shape audit: mcp_registry has three rebuild-only polling guards,
+admission_ux one, and nightly soak accepts only indexing status. All move to a
+small test-only search_visibility predicate: Project status/rebuild/pending
+states only; every other error stays fatal. config_runtime uses the same narrow
+predicate, retaining the last refusal on timeout. Successful content assertions
+are unchanged, with no extra test deadline or production retries. Real IPC
+pending refusal is also checked against this predicate before actual recovery.

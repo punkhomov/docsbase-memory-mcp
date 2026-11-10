@@ -19,12 +19,19 @@ use crate::hybrid::meta::{
     self, AnnState, Degraded, FiltersMeta, ScoreScale, SearchMeta, Stage, TrimmedMeta,
 };
 use crate::hybrid::rrf::rrf_merge;
+use crate::hybrid::work::Cancellation;
 use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
 use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
+use crate::search::budget::PayloadBudget;
+use crate::search::payload::{OwnedPayload, PayloadRequest};
 use crate::store::migrations;
 use crate::store::models::{Project, ProjectStatus, SyncJob, SyncState};
 use crate::store::{Db, repo};
+
+#[cfg(test)]
+#[path = "search_payload_tests.rs"]
+mod search_payload_tests;
 
 /// `search_docs`: top-k chunks with citation (FR-20).
 ///
@@ -49,7 +56,7 @@ pub fn search_docs(db: &Db, cache: &Path, project: &Project, args: &Value) -> Re
 /// the ranked ones.
 fn apply_rerank(
     stages: &HybridStages,
-    db: &Db,
+    payload: &OwnedPayload,
     query: &str,
     ordered: &mut Vec<(u64, f32)>,
 ) -> Result<()> {
@@ -59,19 +66,12 @@ fn apply_rerank(
     let Some(reranker) = stages.reranker.as_deref() else {
         return Ok(());
     };
-    let mut documents = Vec::with_capacity(ordered.len());
-    for (chunk_id, _) in ordered.iter() {
-        let (doc_id, seq) = chunk_id_parts(*chunk_id);
-        let text = repo::chunk_text(db.connection(), doc_id, seq)?.ok_or_else(|| {
-            Error::internal(format!("chunk text missing for rerank (chunk {chunk_id})"))
-        })?;
-        documents.push(text);
-    }
+    let documents = payload.rerank_documents()?;
     // `documents` is already bounded by the fetch window (`max(limit,
     // window)`, truncated after fusion): the provider ranks exactly the
     // candidates it received (FR-11); every ranked score is a
     // `relevance_score`, so the tail can never mix score scales.
-    let ranked = blocking::enter(|| reranker.rerank(query, &documents, documents.len()))?;
+    let ranked = blocking::enter(|| reranker.rerank(query, documents, documents.len()))?;
     let mut reordered: Vec<(u64, f32)> = Vec::with_capacity(ordered.len());
     let mut ranked_flags = vec![false; ordered.len()];
     for (index, score) in ranked {
@@ -98,14 +98,19 @@ fn apply_rerank(
 /// cached per-chunk vectors. `Ready` scans the in-memory rows; `TooLarge`
 /// streams the cache with a bounded heap, so memory stays flat above the cap.
 fn dense_candidates(
-    stages: &HybridStages,
-    dense: &DenseCache,
+    context: &SearchContext<'_>,
     db: &Db,
-    project: &Project,
     query: &str,
     fetch: usize,
     degraded: &mut Vec<Degraded>,
 ) -> Result<Vec<(u64, f32)>> {
+    let SearchContext {
+        stages,
+        dense,
+        project,
+        cancellation,
+        ..
+    } = context;
     let Some(embedder) = stages.embedder.as_deref() else {
         return Ok(Vec::new());
     };
@@ -115,11 +120,10 @@ fn dense_candidates(
     // is a pure function of both, so this cannot change the answer
     // (`search-cost` FR-1/FR-3).
     let model_id = embedder.model_id();
-    // Legacy search entry points start a fresh operation; daemon cancellation
-    // wiring follows in #66 S4. No new timeout/default is selected here.
-    let vector =
-        dense.query_embedding(embedder, query, &crate::hybrid::work::Cancellation::new())?;
+    let vector = dense.query_embedding(embedder, query, cancellation)?;
+    cancellation.check()?;
     let rows = dense.get(db, project.id, model_id)?;
+    cancellation.check()?;
     match rows {
         DenseRows::Ready(index) => {
             dense.record_outcome(project.id, AnnState::Ready, None);
@@ -228,9 +232,9 @@ fn stream_hashes(
     dense::top_k_iter(vector, rows, fetch)
 }
 
-/// [`search_docs`] with resolved hybrid stages, the dense cache and the
-/// project's rerank window; the shared seam for the daemon route, the direct
-/// CLI mode and the integration tests (FR-11, FR-12, FR-16, SC-2).
+/// Compatibility search with resolved hybrid stages and candidate window.
+/// Resolves the standalone owner's payload policy for this invocation; the
+/// daemon and direct CLI use [`search_docs_in`] with their explicit policy.
 ///
 /// # Errors
 /// Returns [`Error::Query`] for invalid queries, [`Error::Project`] when the
@@ -245,120 +249,217 @@ pub fn search_docs_with(
     args: &Value,
     window: u32,
 ) -> Result<Value> {
-    ensure_indexed(project)?;
-    let SearchArgs {
-        query,
-        limit,
-        explain,
-        rerank: requested,
-        snippet,
-        dedupe,
-        n_per_doc,
-        path_prefix,
-        tags,
-    } = parse_search_args(args)?;
-    let filtering = dedupe != Dedupe::None || path_prefix.is_some() || !tags.is_empty();
-    if limit == 0 {
+    // Explicit standalone adapter. Production passes its resolved policy and
+    // shared admission via search_docs_in instead of constructing a budget here.
+    let policy = crate::search::settings::standalone()?;
+    let budget = PayloadBudget::new(policy.settings().clone())?;
+    search_docs_in(
+        &SearchContext {
+            stages,
+            dense,
+            cache,
+            project,
+            window,
+            payload_budget: &budget,
+            cancellation: &Cancellation::new(),
+        },
+        db,
+        args,
+    )
+}
+
+/// Explicit resources for a search; no component fills missing policy fields.
+pub struct SearchContext<'a> {
+    /// Stages belonging to the captured project configuration.
+    pub stages: &'a HybridStages,
+    /// Shared query/vector cache.
+    pub dense: &'a DenseCache,
+    /// Owning cache root.
+    pub cache: &'a Path,
+    /// Bound project snapshot.
+    pub project: &'a Project,
+    /// Complete resolved candidate window.
+    pub window: u32,
+    /// Daemon-shared or direct invocation payload allowance.
+    pub payload_budget: &'a PayloadBudget,
+    /// Cooperative cancellation for this invocation.
+    pub cancellation: &'a Cancellation,
+}
+
+/// Search using explicit admission and cancellation. Response stages consume
+/// one owned SQL payload; the caller currently controls the preparation Db.
+///
+/// # Errors
+/// Returns query/project/protocol errors as in [`search_docs_with`], payload
+/// admission failures, storage errors and cooperative cancellation.
+pub fn search_docs_in(context: &SearchContext<'_>, db: &Db, args: &Value) -> Result<Value> {
+    context.cancellation.check()?;
+    ensure_indexed(context.project)?;
+    let arguments = parse_search_args(args)?;
+    if arguments.limit == 0 {
         return empty_response(
             db,
-            project,
-            explain,
-            filters_of(dedupe, n_per_doc, path_prefix.as_deref(), &tags),
+            context.project,
+            arguments.explain,
+            filters_of(
+                arguments.dedupe,
+                arguments.n_per_doc,
+                arguments.path_prefix.as_deref(),
+                &arguments.tags,
+            ),
         );
     }
-    // The rerank and RRF stages need a wider candidate window than the
-    // requested limit (FR-11, FR-16); plain BM25 fetches exactly the limit.
-    // `HybridStages` is a public type: rrf with no embedder is an invariant
-    // violation, not a silent BM25 fallback (NFR-2).
+    prepare_search(context, db, arguments)?.finish(context.stages, context.cancellation)
+}
+
+/// No Db, SQL transaction, index handle or filesystem lease can escape capture.
+struct PreparedSearch {
+    payload: OwnedPayload,
+    arguments: SearchArgs,
+    ordered: Vec<(u64, f32)>,
+    active: ActiveStages,
+    stage_ms: Vec<(Stage, u64)>,
+    degraded: Vec<Degraded>,
+    started: std::time::Instant,
+    fetch: usize,
+}
+
+impl PreparedSearch {
+    fn finish(mut self, stages: &HybridStages, cancellation: &Cancellation) -> Result<Value> {
+        cancellation.check()?;
+        if self.active.rerank_active {
+            let started = std::time::Instant::now();
+            apply_rerank(
+                stages,
+                &self.payload,
+                &self.arguments.query,
+                &mut self.ordered,
+            )?;
+            self.stage_ms.push((Stage::Rerank, elapsed_ms(started)));
+        }
+        cancellation.check()?;
+        let post = apply_post_filter(
+            &self.payload,
+            &mut self.ordered,
+            self.arguments.dedupe,
+            self.arguments.n_per_doc,
+            self.arguments.path_prefix.as_deref(),
+            &self.arguments.tags,
+        );
+        self.ordered.truncate(self.arguments.limit);
+        let rows = build_rows(&self.payload, self.ordered, self.arguments.snippet);
+        cancellation.check()?;
+        if !self.arguments.explain {
+            return Ok(Value::Array(rows));
+        }
+        let meta = build_meta(
+            self.active,
+            self.stage_ms,
+            self.degraded,
+            post,
+            elapsed_ms(self.started),
+            self.fetch,
+            self.payload.generation(),
+        );
+        Ok(meta::envelope(&rows, &meta))
+    }
+}
+
+fn search_plan(
+    stages: &HybridStages,
+    args: &SearchArgs,
+    window: u32,
+) -> Result<(ActiveStages, usize)> {
     let rrf_active = stages.ranking == Ranking::Rrf;
     if rrf_active && stages.embedder.is_none() {
         return Err(Error::internal(
             "search_docs: rrf ranking requires the embedding stage (FR-17)",
         ));
     }
-    let rerank_active = requested.unwrap_or(stages.reranker.is_some());
-    if requested == Some(true) && stages.reranker.is_none() {
+    let rerank_active = args.rerank.unwrap_or(stages.reranker.is_some());
+    if args.rerank == Some(true) && stages.reranker.is_none() {
         return Err(Error::Protocol {
             message: "search_docs: rerank=true but hybrid rerank is not enabled for this project"
                 .to_owned(),
         });
     }
+    let filtering =
+        args.dedupe != Dedupe::None || args.path_prefix.is_some() || !args.tags.is_empty();
     let fetch = if rerank_active || rrf_active {
-        // The window already holds `window` candidates for `limit` slots;
-        // widening it would only cost rerank work (FR-2).
-        limit.max(window as usize).min(MAX_HITS)
+        // Preserve the exact provider window; fusion is truncated to this size.
+        args.limit.max(window as usize).min(MAX_HITS)
     } else if filtering {
-        // Lexical fetch == limit, so the post-filter would have nothing to
-        // backfill from without this overscan.
-        limit
+        args.limit
             .saturating_mul(SEARCH_UX_OVERSCAN)
-            .max(limit)
+            .max(args.limit)
             .min(MAX_HITS)
     } else {
-        limit
+        args.limit
     };
-    // Spans are sequential and nested inside `started`, so
-    // `sum(stage_ms) <= total` holds by construction (design §2).
+    Ok((
+        ActiveStages {
+            rerank_active,
+            rrf_active,
+        },
+        fetch,
+    ))
+}
+
+fn prepare_search(
+    context: &SearchContext<'_>,
+    db: &Db,
+    arguments: SearchArgs,
+) -> Result<PreparedSearch> {
+    context.cancellation.check()?;
+    let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
     let started = std::time::Instant::now();
-    let mut stage_ms: Vec<(Stage, u64)> = Vec::with_capacity(4);
-    let mut degraded: Vec<Degraded> = Vec::new();
-    if !rerank_active && stages.reranker.is_some() {
-        // The project has a rerank stage; this request opted out of it.
+    let mut stage_ms = Vec::with_capacity(4);
+    let mut degraded = Vec::new();
+    if !active.rerank_active && context.stages.reranker.is_some() {
         degrade(&mut degraded, Degraded::NoRerankStage);
     }
-    let index = ReadIndex::open(&lifecycle::index_dir(cache, project.id))?;
-    let hits = index.search(&query, fetch)?;
+    let index = ReadIndex::open(&lifecycle::index_dir(context.cache, context.project.id))?;
+    let hits = index.search(&arguments.query, fetch)?;
     stage_ms.push((Stage::Bm25, elapsed_ms(started)));
-
+    context.cancellation.check()?;
     let bm25: Vec<(u64, f32)> = hits.iter().map(|hit| (hit.chunk_id, hit.score)).collect();
-    let mut ordered: Vec<(u64, f32)> = if rrf_active {
+    let ordered = if active.rrf_active {
         let dense_started = std::time::Instant::now();
-        let dense_hits =
-            dense_candidates(stages, dense, db, project, &query, fetch, &mut degraded)?;
+        let dense_hits = dense_candidates(context, db, &arguments.query, fetch, &mut degraded)?;
         stage_ms.push((Stage::Dense, elapsed_ms(dense_started)));
+        context.cancellation.check()?;
         let fuse_started = std::time::Instant::now();
         let mut fused = rrf_merge(&bm25, &dense_hits);
-        // The union of two fetch-sized lists can reach 2x fetch; the rerank
-        // stage must not see more candidates than the configured window
-        // (FR-11, FR-16).
         fused.truncate(fetch);
         stage_ms.push((Stage::Rrf, elapsed_ms(fuse_started)));
         fused
     } else {
         bm25
     };
-    if rerank_active {
-        let rerank_started = std::time::Instant::now();
-        apply_rerank(stages, db, &query, &mut ordered)?;
-        stage_ms.push((Stage::Rerank, elapsed_ms(rerank_started)));
-    }
-    let PostFilterOutcome { filters, trimmed } = apply_post_filter(
-        db.connection(),
-        &mut ordered,
-        dedupe,
-        n_per_doc,
-        path_prefix.as_deref(),
-        &tags,
-    )?;
-    ordered.truncate(limit);
-
-    let rows = build_rows(db.connection(), ordered, snippet)?;
-    if !explain {
-        return Ok(Value::Array(rows));
-    }
-    let meta = build_meta(
-        ActiveStages {
-            rerank_active,
-            rrf_active,
+    let ids: Vec<_> = ordered.iter().map(|(id, _)| *id).collect();
+    let payload = OwnedPayload::capture(
+        db,
+        PayloadRequest {
+            cache_root: context.cache,
+            project_id: context.project.id,
+            generation: repo::index_generation(db.connection(), context.project.id)?,
+            chunk_ids: &ids,
+            include_text: active.rerank_active || arguments.snippet,
+            include_filter_metadata: arguments.path_prefix.is_some() || !arguments.tags.is_empty(),
         },
+        context.payload_budget,
+        context.cancellation,
+    )?;
+    Ok(PreparedSearch {
+        payload,
+        arguments,
+        ordered,
+        active,
         stage_ms,
         degraded,
-        PostFilterOutcome { filters, trimmed },
-        elapsed_ms(started),
+        started,
         fetch,
-        repo::index_generation(db.connection(), project.id)?,
-    );
-    Ok(meta::envelope(&rows, &meta))
+    })
 }
 
 /// Global query-vector cache counters (`search-cost` FR-4). A caller that
@@ -415,78 +516,50 @@ fn degrade(degraded: &mut Vec<Degraded>, reason: Degraded) {
     }
 }
 
-/// Citation rows for the final hits. With `snippet` the text comes from one
-/// JOIN for the whole answer (FR-1/NFR-1); without it the previous per-hit path
-/// is kept so the default response is untouched.
-fn build_rows(
-    conn: &rusqlite::Connection,
-    ordered: Vec<(u64, f32)>,
-    snippet: bool,
-) -> Result<Vec<Value>> {
+/// Citation rows use only the captured payload, in final ranking order.
+fn build_rows(payload: &OwnedPayload, ordered: Vec<(u64, f32)>, snippet: bool) -> Vec<Value> {
     let mut rows = Vec::with_capacity(ordered.len());
-    if snippet {
-        let keys: Vec<(i64, u32)> = ordered
-            .iter()
-            .map(|(chunk_id, _)| chunk_id_parts(*chunk_id))
-            .collect();
-        let mut texts = repo::citations_with_text(conn, &keys)?;
-        for (chunk_id, score) in ordered {
-            let (doc_id, seq) = chunk_id_parts(chunk_id);
-            if let Some((citation, text)) = texts.remove(&(doc_id, seq)) {
-                let (snippet_text, truncated) = snippet_of(&text);
-                rows.push(json!({
-                    "chunk_id": chunk_id,
-                    "path": citation.path,
-                    "heading_path": citation.heading_path,
-                    "lines": [citation.line_start, citation.line_end],
-                    "score": score,
-                    "snippet": snippet_text,
-                    "snippet_truncated": truncated,
-                }));
-            }
-        }
-        return Ok(rows);
-    }
     for (chunk_id, score) in ordered {
-        let (doc_id, seq) = chunk_id_parts(chunk_id);
-        if let Some(citation) = repo::citation_for(conn, doc_id, seq)? {
-            rows.push(json!({
-                "chunk_id": chunk_id,
-                "path": citation.path,
-                "heading_path": citation.heading_path,
-                "lines": [citation.line_start, citation.line_end],
-                "score": score,
-            }));
+        let Some(citation) = payload.citation(chunk_id) else {
+            continue;
+        };
+        let mut row = json!({
+            "chunk_id": chunk_id,
+            "path": citation.path,
+            "heading_path": citation.heading_path,
+            "lines": [citation.line_start, citation.line_end],
+            "score": score,
+        });
+        if snippet {
+            let Some(text) = payload.chunk_text(chunk_id) else {
+                continue;
+            };
+            let (text, truncated) = snippet_of(text);
+            row["snippet"] = json!(text);
+            row["snippet_truncated"] = json!(truncated);
         }
+        rows.push(row);
     }
-    Ok(rows)
+    rows
 }
 
 /// Post-filter over the candidate window (`search-ux` FR-2…FR-5): path prefix,
 /// then frontmatter tags, then the per-document cap. Order of the survivors is
 /// preserved because `retain` only drops.
 fn apply_post_filter(
-    conn: &rusqlite::Connection,
+    payload: &OwnedPayload,
     ordered: &mut Vec<(u64, f32)>,
     dedupe: Dedupe,
     n_per_doc: usize,
     path_prefix: Option<&str>,
     tags: &[String],
-) -> Result<PostFilterOutcome> {
+) -> PostFilterOutcome {
     let filters = filters_of(dedupe, n_per_doc, path_prefix, tags);
     let mut trimmed = TrimmedMeta::default();
     if path_prefix.is_some() || !tags.is_empty() {
-        // Paths and frontmatter for the whole window, one query per batch.
-        let ids: Vec<i64> = ordered
-            .iter()
-            .map(|(chunk_id, _)| chunk_id_parts(*chunk_id).0)
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let meta_by_id = repo::doc_meta(conn, &ids)?;
         ordered.retain(|(chunk_id, _)| {
             let doc_id = chunk_id_parts(*chunk_id).0;
-            let Some(meta) = meta_by_id.get(&doc_id) else {
+            let Some(meta) = payload.doc_meta(doc_id) else {
                 // A vanished document cannot be returned or evaluated by a
                 // path/tag filter; it is not a filter rejection (issue #62).
                 return false;
@@ -515,7 +588,7 @@ fn apply_post_filter(
             }
         });
     }
-    Ok(PostFilterOutcome { filters, trimmed })
+    PostFilterOutcome { filters, trimmed }
 }
 
 /// Requested post-filters, as reported in `meta.filters` (FR-5).
@@ -1499,7 +1572,18 @@ mod tests {
         };
         let dense = DenseCache::new();
         let mut degraded = Vec::new();
-        let hits = dense_candidates(&stages, &dense, &db, &project, "widgets", 10, &mut degraded)
+        let policy = crate::search::settings::standalone().expect("search policy");
+        let budget = PayloadBudget::new(policy.settings().clone()).expect("budget");
+        let context = SearchContext {
+            stages: &stages,
+            dense: &dense,
+            cache: db.cache_root(),
+            project: &project,
+            window: 10,
+            payload_budget: &budget,
+            cancellation: &Cancellation::new(),
+        };
+        let hits = dense_candidates(&context, &db, "widgets", 10, &mut degraded)
             .expect("dense candidates");
         // The query path must go through `embed_query` (registry prefixes),
         // never through the passage `embed`.

@@ -202,6 +202,31 @@ fn call_tool_requires_hello() {
 }
 
 #[test]
+fn daemon_search_honors_configured_payload_limit() {
+    let mut env = Env::new(&[("docs/a.md", DOC)]);
+    env.index();
+    write_file(
+        env.cache(),
+        "config/config.toml",
+        b"[search]\nmax_request_payload_bytes = 1\nmax_retained_payload_bytes = 1\n",
+    );
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake(env.root()).expect("bound session");
+    let error = client
+        .call_tool("search_docs", serde_json::json!({"query":"widgets"}))
+        .expect_err("configured payload refusal");
+    assert!(matches!(error, Error::Admission { .. }), "{error:?}");
+    assert!(
+        error.to_string().contains("max_request_payload_bytes=1"),
+        "{error}"
+    );
+    client
+        .call_tool("status", serde_json::json!({}))
+        .expect("daemon remains available");
+}
+
+#[test]
 fn session_bound_to_project_by_cwd() {
     let mut env = Env::new(&[("docs/a.md", DOC)]);
     env.index();

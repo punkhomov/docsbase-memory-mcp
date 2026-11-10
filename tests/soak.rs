@@ -5,6 +5,9 @@
 //! Ignored by default: nightly runs it for an hour (`SOAK_SECS=3600`), a
 //! short local run uses e.g. `SOAK_SECS=10 cargo test --test soak -- --ignored`.
 
+#[path = "support/search_visibility.rs"]
+mod search_visibility;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -162,8 +165,8 @@ fn index_with_retry(client: &mut Client, root: &Path) {
     }
 }
 
-/// Search results, or `None` while another agent's full index flips the
-/// project to `indexing` (read commands refuse transiently by design).
+/// Successful hits, or `None` while indexing/pending/rebuild state explicitly
+/// refuses a coherent read. No refusal stands in for a successful empty result.
 fn search_paths(client: &mut Client, query: &str) -> Option<Vec<String>> {
     match client.call_tool("search_docs", json!({ "query": query })) {
         Ok(hits) => Some(
@@ -173,11 +176,7 @@ fn search_paths(client: &mut Client, query: &str) -> Option<Vec<String>> {
                 .filter_map(|hit| hit["path"].as_str().map(str::to_owned))
                 .collect(),
         ),
-        Err(docsbase_memory::error::Error::Project { message, .. })
-            if message.contains("(status:") =>
-        {
-            None
-        }
+        Err(err) if search_visibility::temporarily_unavailable(&err) => None,
         Err(err) => panic!("search_docs failed: {err}"),
     }
 }

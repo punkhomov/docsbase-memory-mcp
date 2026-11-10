@@ -41,6 +41,7 @@ pub struct Shared {
     // just to obtain its startup policy.
     db_settings: Resolved<DbSettings>,
     readers: ReadPool,
+    payload_budget: crate::search::budget::PayloadBudget,
     /// Live sessions.
     pub sessions: SessionRegistry,
     /// Per-project filesystem watchers (FR-15).
@@ -128,11 +129,14 @@ impl Shared {
             vector_cache_max_bytes: global_config.hybrid_cfg.cache.max_bytes,
             ..DenseCacheLimits::default()
         };
+        let payload_budget =
+            crate::search::budget::PayloadBudget::new(global_config.search.clone())?;
         let shared = Arc::new(Self {
             cache: cache.to_path_buf(),
             db: Mutex::new(db),
             db_settings: settings.clone(),
             readers,
+            payload_budget,
             sessions: SessionRegistry::new(),
             watchers: Arc::new(Watchers::new()),
             stopping: AtomicBool::new(false),
@@ -871,14 +875,18 @@ fn route_search(
         .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |reranker| {
             reranker.window
         });
-    tools::search_docs_with(
-        &stages,
-        &shared.dense,
+    tools::search_docs_in(
+        &tools::SearchContext {
+            stages: &stages,
+            dense: &shared.dense,
+            cache: &shared.cache,
+            project: &project,
+            window,
+            payload_budget: &shared.payload_budget,
+            cancellation: &crate::hybrid::work::Cancellation::new(),
+        },
         db,
-        &shared.cache,
-        &project,
         args,
-        window,
     )
 }
 

@@ -157,3 +157,40 @@ before code. Existing S3/S4 boundaries remain in force.
 - Verify focused payload/policy/metadata, полный cli-full, lean relevant suites,
   full/lean all-target+opt-in Clippy/fmt/diff; свежий task reviewer. Whole feature
   final/native gates сохраняются. Actual consumers/revision/dispatch ещё pending.
+
+## Delta 2026-11-10 — S3.4: owned response consumers
+
+- Изменить src/daemon/tools.rs, src/daemon/server.rs, src/cli/search.rs,
+  src/search/settings.rs; создать src/daemon/search_payload_tests.rs;
+  расширить tests/cli_read.rs и tests/ipc_server.rs реальной global-policy
+  admission через CLI subprocess/daemon wire (isolated per-process config).
+- Consumes OwnedPayload/PayloadBudget/Cancellation. Produces SearchContext,
+  search_docs_in и private owned PreparedSearch/finish без metadata handles.
+- RED: missing new context/prepare API; real SQL/Tantivy fixture и fake reranker.
+  После prepare закрыть Db и получить прежние texts/citations/filter/generation.
+  Изменить SQL во время provider и проверить целиком прежний payload.
+- Проверить explicit tiny request refusal до provider, actual aggregate
+  contention при gated rerank, release+retry после success/error/unwind,
+  cancellation до/после prepare и после provider. Только gates/watchdogs.
+- Production daemon использует один shared global search policy budget; CLI
+  direct использует config.search. Compat adapter разрешает SearchSpec явно.
+- Сохранить exact provider candidate order/top_n, фильтры/dedupe/snippet,
+  missing-doc behavior и legacy wire; limit0 не резервирует payload.
+- Verify focused owned consumers и existing ranking/search-ux/config suites,
+  full cli-full, lean relevant tests, full/lean all-target+opt-in Clippy/fmt/diff.
+  Fresh task review перед commit. S3.5/S4 и whole-branch/native gates ещё pending.
+
+S3.4 validation addition: tests/config_runtime.rs readiness helper accepts only
+transient Project states until a real success under the existing watchdog;
+explicit pending-marker IPC refusal/recovery added. Preserve all watcher/reopen
+assertions. Full-pending-contract-red.log is the actual prior failure evidence.
+
+S3.4 same-shape validation audit: tests/support/search_visibility.rs is included
+by config_runtime, mcp_registry, admission_ux and soak; adapt existing polling
+refusal classification without dropping assertions or increasing watchdogs.
+Actual MCP full-suite pending-marker failure retained as additional RED evidence.
+
+S3.4 additional validation: run existing nightly soak with SOAK_SECS=10 to
+exercise its changed search-readiness classification; this does not change the
+nightly job, ignored status or its acceptance thresholds. Local full command
+uses --no-fail-fast to collect every target in one pass, preserving all checks.

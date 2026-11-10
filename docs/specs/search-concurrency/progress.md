@@ -152,3 +152,42 @@ Ruling: preflight uses direct octet_length columns in the pinned bundled SQLite,
 not CAST materialization; i64 SQL lengths convert with checked unsigned range.
 Production consumers/config authority, coherent cross-store preparation and
 S4 remain outstanding. No partial delivery of unapplied search keys.
+
+Task S3.4: Ruling: owned response consumers first, before revision/pool adoption
+— a bounded SQL-free tail can be tested without prematurely enabling parallel
+search. Remaining S3/S4 ship together only after resource/deadline authority and
+native acceptance; #66 remains open until all requirements are met. Pre-code
+contract recorded on base71a3746; no tail/context implementation exists yet.
+
+Task S3.4: Ruling: config_runtime polling waits for an actual successful search
+through temporary Project state instead of asserting success during a pending
+watcher update — old helper failed in the full suite after safe capture adoption.
+Never convert an error to empty hits; preserve other error failures and existing
+watchdog. This test contract change is explicit and gets a new wire regression.
+
+Task S3.4: Ruling (2026-11-10, review I1): readiness retries share the enclosing
+watcher poll's absolute deadline and reject success at/after it; the seed-file
+assertion uses its recorded in-budget result. Standalone searches retain the
+existing watchdog, known Project-only retries and actual-success requirement.
+Injected-clock regressions cover deadline exhaustion, late success, recovery
+and immediate fatal errors without sleeps or elapsed wall-time assertions.
+
+Task S3.4: complete (base71a3746..this task commit; owned response consumers).
+SearchContext/search_docs_in explicitly receive admission/cancellation; daemon
+owns one global Config.search allowance, CLI passes its resolved policy, old
+signature is a pure owner-resolved standalone adapter. PreparedSearch rerank,
+filters/rendering and explain generation consume captured data without SQL.
+Ten gated/SQLite ownership tests plus3CLI/IPC regressions; five deterministic
+clock tests fix I1 without actual waiting or extending the watcher watchdog.
+Fresh task review I1 fixed by a separate implementer; scoped re-review ADDRESSED,
+consolidated Spec PASS / Quality APPROVED, no remaining findings/minors.
+Final cargo test --locked --features cli-full --no-fail-fast:1053passed/0failed/
+13ignored across66targets; deadline5/runtime14, lean runtime14/visibility37/
+consumers10/integrations42/routing27/config71, all0failed. Full/lean all-target
+and opt-in Clippy/fmt/diff exit0; all15 final manifests match155 current Rust
+inputs. Original pre-I1 evidence remains unchanged; final I1 evidence is the
+current authority. Earlier existing10-second soak smoke1pass; no nightly settings,
+ignore markers, quality fixtures, provider windows or latency thresholds changed.
+Ruling: S3.5 config/preparation authority and actual short pool/cross-store phases,
+S4 caller deadlines/dispatch/cancellation/timing and whole-feature native gates
+remain mandatory; this task does not complete #66. No partial delivery claim.

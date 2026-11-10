@@ -80,6 +80,28 @@ fn search_without_daemon() {
     assert!(first["score"].as_f64().expect("score") > 0.0);
 }
 
+#[test]
+fn direct_search_honors_configured_payload_limit() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    env.index();
+    write_file(
+        env.cache.path(),
+        "config/config.toml",
+        b"[search]\nmax_request_payload_bytes = 1\nmax_retained_payload_bytes = 1\n",
+    );
+    let output = env
+        .cmd()
+        .args(["search", "widgets"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert!(
+        stderr_text(&output).contains("max_request_payload_bytes=1"),
+        "{output:?}"
+    );
+}
+
 /// `--explain` must work in direct mode too: the daemon path forwards it, the
 /// direct path used to drop it (search-ux FR-8, T0 RED).
 #[test]

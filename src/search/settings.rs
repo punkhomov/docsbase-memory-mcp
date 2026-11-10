@@ -7,6 +7,15 @@ use crate::config::schema::{
 };
 use crate::error::{Error, Result};
 
+/// Resolves standalone search policy at a compatibility composition boundary.
+/// Runtime consumers receive complete settings and never fill absent fields.
+///
+/// # Errors
+/// Returns an admission error if the owner's default policy is invalid.
+pub fn standalone() -> Result<crate::config::schema::Resolved<SearchSettings>> {
+    crate::config::resolve::resolve_component::<SearchSpec>(&DefaultsContext::standalone(), [])
+}
+
 /// Complete daemon-wide policy for owned candidate payloads, not process RSS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchSettings {
