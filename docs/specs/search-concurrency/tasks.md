@@ -367,3 +367,28 @@ focused benchmark/external and lean benchmark validate this changed harness.
   lean scopes/full+lean all-target/opt-in Clippy/fmt/diff; frozen inputs. Fresh
   review before commit, delegate findings. Scoped active EOF/wire deadline/
   frontend original budget+retry/queue/docs/wholefinal/native remain S4.3.
+
+## Delta 2026-11-10 — S4.3a: scoped daemon transport and diagnostics
+
+- Base507f223. Modify ipc/protocol.rs, search/{operation,operation_tests,
+  metadata}.rs, hybrid/meta.rs, daemon/{server,tools}.rs; create scoped daemon
+  tests, adapt Hello constructors/tests and add only necessary async platform
+  connect seam in platform/{mod,unix,windows}.rs. No crates/unsafe/new policy.
+- First RED actual daemon Hello lacks search-context-v1; no API-typo failure or
+  waiting on a provider for an unsupported method. Then budget/context and wire
+  tests precede their production changes. Existing CallTool helpers stay valid.
+- Add explicit scoped context, default-empty advertised capabilities and owner-
+  clamped operation/queue state. Refuse invalid/expired before provider. Reuse
+  Activity, existing absolute timer and persistent bounded framing.
+- Scoped EOF/session/deadline cancels only caller; pending second complete frame
+  refuses/closes, no new job. Bound response write by the same deadline with no
+  extra error-delivery timeout. Preserve legacy half-close and shutdown drain.
+- Explain queue_ms and original total, including limit0, via additive metadata
+  adapters; no SearchMeta struct/signature break or default array/ranking change.
+- Test real transport/provider gates, capacity/reply ownership, clock-injected
+  original context/queue and old-peer compatibility. All waits have safety
+  watchdogs, no new ordering sleeps or host-relative performance assumptions.
+- Verify focused new operation/scoped/wire/metadata and existing daemon/flights/
+  lifecycle, full cli-full, relevant lean and full/lean all-target+opt-in lint/
+  fmt/diff, frozen113. Fresh review before commit; delegate findings. S4.3b and
+  whole-feature final/current-head native gates remain mandatory before delivery.

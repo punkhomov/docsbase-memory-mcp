@@ -229,6 +229,15 @@ pub fn connect_blocking(endpoint: &Endpoint) -> io::Result<BlockingStream> {
         .map(BlockingStream)
 }
 
+/// Connects a cancellable async named-pipe stream through the IO runtime.
+///
+/// # Errors
+/// Returns invalid endpoint and raw connect errors.
+pub async fn connect_async(endpoint: &Endpoint) -> io::Result<Stream> {
+    let options = ConnectOptions::new().name(ns_name(endpoint)?);
+    options.connect_tokio().await.map(Stream)
+}
+
 /// Liveness probe: a pipe has no persistent name, so probing means connecting
 /// once and closing (`None`-byte EOF on the server side, ADR-10).
 #[must_use]

@@ -12,16 +12,16 @@ use std::sync::mpsc as std_mpsc;
 
 const WATCHDOG: Duration = Duration::from_secs(300);
 
-struct Fixture {
-    shared: Arc<Shared>,
+pub(super) struct Fixture {
+    pub(super) shared: Arc<Shared>,
     project: Project,
-    session: u64,
+    pub(super) session: u64,
     _cache: tempfile::TempDir,
     _root: tempfile::TempDir,
 }
 
 impl Fixture {
-    fn new(stages: HybridStages) -> Self {
+    pub(super) fn new(stages: HybridStages) -> Self {
         let cache = tempfile::tempdir().expect("cache");
         let root = tempfile::tempdir().expect("project");
         std::fs::write(
@@ -178,10 +178,10 @@ async fn gated_rerank_does_not_own_global_database() {
     );
 }
 
-struct TestEmbedder {
-    entered: Option<std_mpsc::Sender<()>>,
-    release: Mutex<std_mpsc::Receiver<()>>,
-    calls: Arc<AtomicUsize>,
+pub(super) struct TestEmbedder {
+    pub(super) entered: Option<std_mpsc::Sender<()>>,
+    pub(super) release: Mutex<std_mpsc::Receiver<()>>,
+    pub(super) calls: Arc<AtomicUsize>,
 }
 
 impl Embedder for TestEmbedder {
@@ -238,7 +238,7 @@ fn start_search(fixture: &Fixture) -> tokio::task::JoinHandle<Result<Value>> {
     })
 }
 
-struct CountingReranker(Arc<AtomicUsize>);
+pub(super) struct CountingReranker(pub(super) Arc<AtomicUsize>);
 
 impl Reranker for CountingReranker {
     fn rerank(&self, _: &str, documents: &[String], top_n: usize) -> Result<Vec<(usize, f32)>> {

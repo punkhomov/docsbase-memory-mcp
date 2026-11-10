@@ -74,6 +74,7 @@ fn spawn_fake_daemon(cache: &Path) -> thread::JoinHandle<()> {
                         protocol_version: PROTOCOL_VERSION,
                         build_id: "test-daemon".to_owned(),
                         schema_version: 1,
+                        capabilities: Vec::new(),
                     },
                     Request::RegisterSession { .. } | Request::RegisterUnbound { .. } => {
                         Response::ToolResult {
@@ -82,6 +83,11 @@ fn spawn_fake_daemon(cache: &Path) -> thread::JoinHandle<()> {
                     }
                     Request::CallTool { name, .. } => Response::ToolResult {
                         value: serde_json::json!({ "routed_tool": name }),
+                    },
+                    Request::Search { .. } => Response::Error {
+                        code: -32011,
+                        message: "legacy fake daemon does not support scoped search".to_owned(),
+                        instruction: None,
                     },
                     Request::StopDaemon => break,
                 };
@@ -176,6 +182,7 @@ fn sync_via_daemon_polls_until_done() {
                         protocol_version: PROTOCOL_VERSION,
                         build_id: "test-daemon".to_owned(),
                         schema_version: 1,
+                        capabilities: Vec::new(),
                     },
                     Request::RegisterSession { .. } | Request::RegisterUnbound { .. } => {
                         Response::ToolResult {
@@ -198,6 +205,11 @@ fn sync_via_daemon_polls_until_done() {
                     }
                     Request::CallTool { name, .. } => Response::ToolResult {
                         value: serde_json::json!({ "routed_tool": name }),
+                    },
+                    Request::Search { .. } => Response::Error {
+                        code: -32011,
+                        message: "legacy fake daemon does not support scoped search".to_owned(),
+                        instruction: None,
                     },
                     Request::StopDaemon => break,
                 };

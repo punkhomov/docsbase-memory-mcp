@@ -206,6 +206,14 @@ pub struct SearchMeta {
 }
 
 impl SearchMeta {
+    /// Additive admission diagnostics supplied explicitly by the request owner.
+    #[must_use]
+    pub fn to_json_with_queue(&self, queue_ms: u64) -> Value {
+        let mut meta = self.to_json();
+        meta["queue_ms"] = json!(queue_ms);
+        meta
+    }
+
     /// Wire form. Field names and token values are the contract.
     #[must_use]
     pub fn to_json(&self) -> Value {
@@ -243,7 +251,19 @@ impl SearchMeta {
 /// The envelope returned when the caller asks for telemetry (FR-1).
 #[must_use]
 pub fn envelope(hits: &[Value], meta: &SearchMeta) -> Value {
-    json!({ "hits": hits, "meta": meta.to_json() })
+    envelope_data(hits, meta.to_json())
+}
+
+/// Queue-aware envelope without changing legacy metadata construction.
+#[must_use]
+pub fn envelope_with_queue(hits: &[Value], meta: &SearchMeta, queue_ms: u64) -> Value {
+    envelope_data(hits, meta.to_json_with_queue(queue_ms))
+}
+
+fn envelope_data(hits: &[Value], meta: Value) -> Value {
+    let mut value = json!({ "hits": hits });
+    value["meta"] = meta;
+    value
 }
 
 #[cfg(test)]
@@ -352,5 +372,29 @@ mod tests {
         assert_eq!(value["filters"]["n_per_doc"], 2);
         assert_eq!(value["trimmed"]["filtered_out"], 4);
         assert_eq!(value["trimmed"]["deduped"], 3);
+    }
+
+    #[test]
+    fn queue_envelope_adds_only_explicit_diagnostics() {
+        let meta = SearchMeta {
+            score_scale: ScoreScale::Bm25,
+            stages: vec![Stage::Bm25],
+            total_ms: 19,
+            stage_ms: vec![(Stage::Bm25, 2)],
+            window: 1,
+            index_generation: 3,
+            degraded: Vec::new(),
+            filters: None,
+            trimmed: None,
+        };
+        let hits = [serde_json::json!({"path":"guide.md", "score":1.0})];
+        let legacy = super::envelope(&hits, &meta);
+        assert!(legacy["meta"].get("queue_ms").is_none());
+        let mut expected = legacy.clone();
+        expected["meta"]["queue_ms"] = serde_json::json!(7);
+        let queued = super::envelope_with_queue(&hits, &meta, 7);
+        assert_eq!(queued, expected);
+        assert_eq!(meta.to_json_with_queue(7), queued["meta"]);
+        assert_eq!(super::envelope(&hits, &meta), legacy);
     }
 }

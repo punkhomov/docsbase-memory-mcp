@@ -39,6 +39,9 @@ use crate::watch::Watchers;
 #[path = "search_phase_tests.rs"]
 mod search_phase_tests;
 
+#[path = "scoped.rs"]
+mod scoped;
+
 /// Daemon state shared by all connections.
 pub struct Shared {
     /// Cache root being served.
@@ -684,44 +687,43 @@ async fn handle_connection_in(
             }
         };
         let guard = Activity::new(&in_flight, &events, connection.as_ref());
-        let (response, close) = match protocol::decode_request(&line) {
-            Ok(decoded) => {
-                handle_request(&shared, &shutdown, &in_flight, &mut peer, decoded, &guard).await
+        let decoded = protocol::decode_request(&line);
+        let scope = match &decoded {
+            Ok(request) => scoped::Scope::new(&shared, request, Arc::clone(&guard)),
+            Err(_) => Ok(scoped::Scope {
+                activity: Arc::clone(&guard),
+                operation: None,
+            }),
+        };
+        let immediate = scope.is_err()
+            || decoded
+                .as_ref()
+                .is_err_and(|error| matches!(error, Error::Admission { .. }));
+        let (response, close) = match (decoded, &scope) {
+            (Ok(request), Ok(scope)) => {
+                handle_request(
+                    &shared,
+                    &shutdown,
+                    &in_flight,
+                    &mut peer,
+                    request,
+                    scope,
+                    &mut reader,
+                )
+                .await
             }
-            Err(err) => (error_response(&err), false),
+            (Err(error), _) => (error_response(&error), immediate),
+            (_, Err(error)) => (error_response(error), true),
         };
-        // The request is only settled once its response is on the wire:
-        // otherwise an armed grace deadline could tear the socket down
-        // between completing the work and delivering the reply.
-        let Ok(bytes) = protocol::encode(&response) else {
-            drop(guard);
-            break;
-        };
-        // JSON escaping can expand a document up to 6x, so the config-level
-        // reserve is not enough on adversarial content: never emit a frame
-        // the peers would reject (T45 review finding).
-        let bytes = if bytes.len() > protocol::MAX_FRAME_BYTES + 1 {
-            let err = Error::Protocol {
-                message: format!(
-                    "response frame is {} bytes, over {}; reduce max_file_size or the document size",
-                    bytes.len(),
-                    protocol::MAX_FRAME_BYTES
-                ),
-            };
-            let Ok(fallback) = protocol::encode(&error_response(&err)) else {
-                drop(guard);
-                break;
-            };
-            fallback
-        } else {
-            bytes
-        };
-        if writer.write_all(&bytes).await.is_err() {
-            drop(guard);
+        let operation = scope
+            .as_ref()
+            .ok()
+            .and_then(|scope| scope.operation.as_ref());
+        let delivered = scoped::reply(&mut writer, response, operation, immediate).await;
+        drop(guard);
+        if !delivered {
             break;
         }
-        drop(guard);
-        // Last activity owner announces completion; the real worker may remain.
         if close {
             break;
         }
@@ -734,13 +736,14 @@ async fn handle_connection_in(
     let _ = events.try_send(());
 }
 
-async fn handle_request(
+async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
     shared: &Arc<Shared>,
     shutdown: &watch::Sender<bool>,
     in_flight: &Arc<AtomicUsize>,
     peer: &mut Peer,
     request: Request,
-    activity: &Arc<Activity>,
+    scope: &scoped::Scope,
+    reader: &mut FrameReader<R>,
 ) -> (Response, bool) {
     match request {
         Request::Hello {
@@ -786,6 +789,7 @@ async fn handle_request(
                     protocol_version: PROTOCOL_VERSION,
                     build_id: protocol::build_id(),
                     schema_version: migrations::SCHEMA_VERSION,
+                    capabilities: vec![protocol::SEARCH_CONTEXT_CAPABILITY.to_owned()],
                 },
                 false,
             )
@@ -822,7 +826,13 @@ async fn handle_request(
             if !peer.hello_done {
                 return (hello_required(), true);
             }
-            call_and_respond(shared, peer.session_id, &name, args, activity).await
+            call_and_respond(shared, peer.session_id, &name, args, scope).await
+        }
+        Request::Search { args, .. } => {
+            if !peer.hello_done {
+                return (hello_required(), true);
+            }
+            scoped::call(shared, peer, args, scope, reader).await
         }
         Request::StopDaemon => {
             // Idempotent: only the first stop drains and signals shutdown, so
@@ -843,19 +853,16 @@ async fn call_and_respond(
     session_id: Option<u64>,
     name: &str,
     args: Value,
-    activity: &Arc<Activity>,
+    scope: &scoped::Scope,
 ) -> (Response, bool) {
-    let operation = match search_operation(shared, name) {
-        Ok(operation) => operation,
-        Err(err) => return (error_response(&err), false),
-    };
+    let operation = scope.operation.clone();
     let value = call_tool_in(
         shared,
         session_id,
         name,
         args,
         operation.clone(),
-        Some(Arc::clone(activity)),
+        Some(Arc::clone(&scope.activity)),
     )
     .await;
     let close = operation
@@ -1030,7 +1037,11 @@ async fn call_tool_in(
     let shared = Arc::clone(shared);
     let name = name.to_owned();
     let worker_operation = operation.clone();
+    let queued_at = Instant::now();
     let worker = tokio::task::spawn_blocking(move || {
+        if let Some(operation) = &worker_operation {
+            operation.record_queue(queued_at.elapsed());
+        }
         let result = route_tool(&shared, session_id, &name, &args, worker_operation);
         drop(activity);
         result
@@ -1047,7 +1058,7 @@ fn route_search(
 ) -> Result<Value> {
     operation.check()?;
     let project = {
-        let reader = shared.readers.acquire(operation.deadline())?;
+        let reader = MetadataSource::Prepared(&shared.readers).acquire(&operation)?;
         operation.check()?;
         bound_project(shared, &reader, session_id)?
     };

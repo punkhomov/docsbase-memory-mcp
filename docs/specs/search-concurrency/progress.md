@@ -396,3 +396,30 @@ none removed is prior-head evidence, not final acceptance.
 Remaining S4.3 scoped active EOF/capabilities/reply deadline/original frontend
 queue+retry budget/rmcp cancellation/queue diagnostics/docs/wholefinal/native
 remain mandatory. PR112 stays draft and #66 remains open.
+
+Task S4.3a: design ready, before implementation (base507f223). Scoped capability/
+context, active transport cancellation, original reply deadline and explicit
+queue diagnostics. Actual Hello RED precedes production code. Legacy framing/
+half-close, physical job ownership and old public metadata signatures preserved;
+S4.3b/final/native remain mandatory, PR112 draft and #66 open.
+
+Task S4.3a: Ruling: place scoped call/reply helpers in daemon/scoped.rs as a
+private child of server, with its focused tests. This keeps the connection loop
+and legacy dispatcher readable without expanding public APIs; it consumes the
+same planned Scope/Activity/operation/framing contracts. No scope reduction.
+
+Task S4.3a: complete (base507f223, scoped protocol/server lifetime and queue
+telemetry; tests:20 sequential commands all exit0, full cli-full1116passed/
+0failed/13ignored across66targets,163tested Rust hashes; scoped7/operation12/
+meta5/wire34 full+lean, phases9/flight9/lifecycle25, full+lean all-target and
+opt-in Clippy/fmt/diff pass; frozen113 unchanged). Fresh review PASS/APPROVED,
+no Critical/Important. Sole Minor M1 public error rustdoc fixed by dedicated
+agent; exact comment-only diff verified, other162Rust/113frozen unchanged,
+post-fix fmt/diff0. Functional evidence applies to unchanged executable/test
+code; the one rustdoc hash differs from the20-stage map. No functional rerun
+for a documentation-only correction, no deferred minors.
+Task S4.3a: Ruling: original raw reviews/maps remain immutable; m1 addendum
+records final163 source identity and precise comment-only equivalence. Prior
+reviews/full regressions cover unchanged S1–S4.2b seams. Current native checks,
+mandatory S4.3b canonical callers and whole-feature final acceptance remain;
+PR112 stays draft, #66 remains open. No hard synchronous preemption promised.

@@ -737,3 +737,59 @@ This is not yet active transport EOF/capability negotiation, a deadline over a
 blocked reply write, original frontend queue/reconnect budget or queue telemetry.
 Those remain mandatory S4.3 in the same draft PR before whole-feature review and
 final-head native acceptance; an intermediate task is never a deliverable.
+
+## Delta 2026-11-10 — S4.3a: scoped server transport
+
+Add Request::Search { args, context: SearchCallContext } with required u64
+remaining_ms/elapsed_ms/queue_ms. Response::Hello advertises a Vec<String>
+capabilities field (serde default empty, omit when empty for legacy fixtures).
+The fixed search-context-v1 identifier and one-outstanding-call rule are
+protocol identity/framing invariants, not configurable operational limits.
+No timeout/default is added to the protocol. Old CallTool/Hello decoding remains.
+
+The composition root checks positive remaining and queue<=elapsed, reconstructs
+local original start/caller deadline with checked Instant subtraction/addition,
+then SearchOperation::constrained(complete policy, original start, caller
+deadline, token) clamps to the owner deadline and checks expiry. Existing new()
+primitive semantics remain. A shared private atomic queue accumulator records
+explicit upstream duration, actual blocking-worker queue and personal prepared
+reader admission; shared cold factories remain independent of caller budgets.
+No arbitrary upper time cap or store->hybrid cancellation dependency is added.
+
+A private request scope groups Activity and optional SearchOperation. One decode
+selects legacy dispatch or scoped search. Scoped dispatch concurrently observes
+the persistent FrameReader, per-session janitor signal and original deadline.
+EOF cancels/closes; another complete request while scoped work is pending is a
+protocol refusal/close, not a second job. An incomplete next read remains owned
+by FrameReader if work finishes first. Graceful global shutdown retains its
+existing drain behavior; it is not an extra cancellation source.
+
+The same absolute deadline bounds reply waiting. On expiry, cancel the caller
+and close after a best-effort immediately writable error frame; never start a
+fresh delivery timeout or wait indefinitely for that error. Already-partially
+written replies may end at EOF and clients must discard their connection.
+Activity stays owned through actual work and delivery/closure. Legacy search
+also retains its original daemon budget; its read half is not monitored during
+work, preserving successful write-half-close/reply semantics.
+
+SearchOperation queue methods take explicit durations; no public settings are
+read by the consumer. Metadata owner adds to_json_with_queue/envelope_with_queue
+adapters, preserving existing SearchMeta struct and old serialization signatures.
+Actual search and limit0 use the queue-aware envelope; default arrays, score,
+windows, snippets, citations and stage names stay unchanged.
+
+Tests first prove missing capability on an actual daemon Hello, then cover
+legacy empty-capability decode, scoped serialization, malformed/expired context,
+original budget clamp and explicit queue propagation. Gate actual providers and
+real byte streams for scoped disconnect, leader/live-follower separation,
+physical activity/permit retention, legacy half-close, reply backpressure and
+partial-frame preservation. Generous explicit test policy/watchdogs establish
+ordering without asserting host performance. OS async connect, when needed,
+stays in platform (Tokio UnixStream, existing ConnectOptions::connect_tokio on
+Windows); no new crate. Native tests must distinguish logical duplex behavior
+from actual platform EOF behavior and must not silently skip Windows failures.
+
+S4.3b still owns canonical async MCP/CLI clients, capability refusal, original
+queue/retry budget, rmcp cancellation and product docs. The same draft PR stays
+unmergeable until that work, whole-feature final review and final-head native
+checks complete. No remote async provider rewrite, HTTP adapter or v2 config.

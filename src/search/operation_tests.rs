@@ -17,6 +17,67 @@ fn policy() -> SearchSettings {
 fn owned<T: Send + Sync + 'static>() {}
 
 #[test]
+fn constrained_budget_keeps_original_start_and_the_smaller_deadline() {
+    let start = Instant::now();
+    let now = start + Duration::from_millis(5);
+    for (peer, expected) in [(20, 20), (100, 37)] {
+        let operation = SearchOperation::constrained_at(
+            &policy(),
+            start,
+            start + Duration::from_millis(peer),
+            Cancellation::new(),
+            now,
+        )
+        .expect("live constrained operation");
+        assert_eq!(operation.started_at(), start);
+        assert_eq!(
+            operation.deadline(),
+            start + Duration::from_millis(expected)
+        );
+        assert_eq!(
+            operation
+                .remaining_at(now)
+                .expect("original remaining budget"),
+            Duration::from_millis(expected - 5)
+        );
+    }
+}
+
+#[test]
+fn constrained_budget_refuses_expiry_at_either_original_boundary() {
+    let start = Instant::now();
+    for (peer, elapsed) in [(20, 20), (100, 37)] {
+        let token = Cancellation::new();
+        let result = SearchOperation::constrained_at(
+            &policy(),
+            start,
+            start + Duration::from_millis(peer),
+            token.clone(),
+            start + Duration::from_millis(elapsed),
+        );
+        assert!(matches!(result, Err(Error::Admission { .. })));
+        assert!(token.is_cancelled());
+    }
+}
+
+#[test]
+fn queue_observations_follow_the_original_operation_across_clones() {
+    let start = Instant::now();
+    let operation = SearchOperation::new(&policy(), start, Cancellation::new()).expect("operation");
+    operation.record_queue(Duration::from_millis(7));
+    let worker = operation.clone();
+    worker.record_queue(Duration::from_millis(11));
+    assert_eq!(operation.queue_ms(), 18);
+    assert_eq!(worker.started_at(), start);
+    assert_eq!(
+        operation.elapsed_at(start + Duration::from_millis(25)),
+        Duration::from_millis(25)
+    );
+    let independent = SearchOperation::new(&policy(), start, Cancellation::new()).expect("other");
+    assert_eq!(independent.queue_ms(), 0);
+}
+
+#[test]
 fn original_start_and_exact_budget_are_retained() {
     owned::<SearchOperation>();
     let start = Instant::now();

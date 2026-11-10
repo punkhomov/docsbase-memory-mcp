@@ -94,3 +94,29 @@ Typed overrides доступны composition root. Совместимые constr
 published generations (#78). S1 только готовит pool, старый dispatcher пока
 сохранён. Открытых вопросов для S1 нет; detailed S2–S4 interfaces фиксируются
 датированным design/task delta после проверки действующего кода.
+
+## Delta 2026-11-10 — S4.3 scoped transport and queue diagnostics
+
+FR-6/FR-7/SC-5: protocol1 gains an additive capability-advertised search request
+with explicit remaining/elapsed/queue milliseconds. Clients must discover its
+versioned capability before using it; missing capability means actionable
+restart/refusal, not an unchecked fallback. Package version alone cannot prove
+capability because development daemon/frontend builds share the same build_id.
+Legacy CallTool and its write-half-close/reply behavior remain supported within
+the configured request budget. Scoped search opts into one outstanding call
+and EOF cancellation; no multiplexing/correlation extension is promised.
+
+One original request budget includes queueing and reconnect, and the server
+clamps received remaining time to its own complete policy and original elapsed
+time. Expired/malformed context is refused before paid work. Active scoped EOF,
+session cancellation or deadline cancels only that caller; actual job/reply/
+connection charges retain S4.2b semantics. A blocked reply write receives no fresh
+budget; closure may prevent a complete error frame after expiry. Synchronous
+providers are still not forcibly preempted. Frontend/CLI propagation, bounded
+retry and MCP cancellation integration are S4.3b before whole-feature delivery.
+
+Explain gains additive queue_ms for admission waiting, while stage_ms.total
+retains original elapsed time and default array responses stay unchanged.
+Queue accumulation starts at structural zero, not a consumer setting default.
+Existing public metadata constructors/serialization helpers retain their
+signatures; producers use an explicit queue-aware envelope adapter.

@@ -166,6 +166,138 @@ fn project_writer_refuses_search_then_recovers_without_blocking_registry_tools()
 }
 
 #[test]
+fn hello_advertises_scoped_search_capability() {
+    let mut env = Env::new(&[]);
+    env.start_daemon();
+    let reply = env
+        .client()
+        .call(Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            build_id: docsbase_memory::ipc::protocol::build_id(),
+            client: "scoped-search-test".to_owned(),
+        })
+        .expect("hello exchange");
+    let reply = serde_json::to_value(reply).expect("hello wire value");
+    assert_eq!(reply["kind"], "Hello");
+    assert!(
+        reply["data"]["capabilities"]
+            .as_array()
+            .is_some_and(|values| values.iter().any(|value| value == "search-context-v1")),
+        "daemon did not advertise scoped search: {reply}"
+    );
+}
+
+const SCOPED_WATCHDOG: Duration = Duration::from_secs(300);
+
+async fn async_exchange(
+    client: &mut tokio::io::BufReader<platform::Stream>,
+    request: &Request,
+) -> Response {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    tokio::time::timeout(SCOPED_WATCHDOG, async {
+        client
+            .get_mut()
+            .write_all(&encode(request).expect("request bytes"))
+            .await
+            .expect("send request");
+        let mut line = Vec::new();
+        client
+            .read_until(b'\n', &mut line)
+            .await
+            .expect("read response");
+        decode_response(&line).expect("response frame")
+    })
+    .await
+    .expect("async daemon exchange watchdog")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scoped_search_preserves_upstream_time_and_default_arrays() {
+    let mut env = Env::new(&[("guide.md", "# Guide\n\nwidgets text\n")]);
+    let config = env.cache().join("config");
+    fs::create_dir_all(&config).expect("config directory");
+    let budget = u64::try_from((SCOPED_WATCHDOG * 2).as_millis()).expect("test policy");
+    fs::write(
+        config.join("config.toml"),
+        format!("[search]\nrequest_timeout_ms = {budget}\n"),
+    )
+    .expect("explicit generous fixture policy");
+    env.index();
+    env.start_daemon();
+    let stream = tokio::time::timeout(
+        SCOPED_WATCHDOG,
+        platform::connect_async(&platform::daemon_endpoint(env.cache())),
+    )
+    .await
+    .expect("connect watchdog")
+    .expect("connect");
+    let mut client = tokio::io::BufReader::new(stream);
+    let hello = async_exchange(
+        &mut client,
+        &Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            build_id: docsbase_memory::ipc::protocol::build_id(),
+            client: "scoped-search-test".to_owned(),
+        },
+    )
+    .await;
+    assert!(matches!(hello, Response::Hello { .. }));
+    let registered = async_exchange(
+        &mut client,
+        &Request::RegisterSession {
+            pid: std::process::id(),
+            cwd: env.root().to_path_buf(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(registered, Response::ToolResult { .. }),
+        "{registered:?}"
+    );
+    for limit in [0, 1] {
+        let response = async_exchange(
+            &mut client,
+            &Request::Search {
+                args: serde_json::json!({"query":"widgets", "limit":limit, "explain":true}),
+                context: docsbase_memory::ipc::protocol::SearchCallContext {
+                    remaining_ms: budget,
+                    elapsed_ms: 11,
+                    queue_ms: 3,
+                },
+            },
+        )
+        .await;
+        let Response::ToolResult { value } = response else {
+            panic!("search failed: {response:?}")
+        };
+        assert_eq!(value["hits"].as_array().expect("hits").len(), limit);
+        assert!(
+            value["meta"]["stage_ms"]["total"]
+                .as_u64()
+                .expect("original total")
+                >= 11
+        );
+        assert!(value["meta"]["queue_ms"].as_u64().expect("admission delay") >= 3);
+    }
+    let response = async_exchange(
+        &mut client,
+        &Request::Search {
+            args: serde_json::json!({"query":"widgets"}),
+            context: docsbase_memory::ipc::protocol::SearchCallContext {
+                remaining_ms: budget,
+                elapsed_ms: 11,
+                queue_ms: 3,
+            },
+        },
+    )
+    .await;
+    assert!(
+        matches!(response, Response::ToolResult { value } if value.as_array().is_some_and(|hits| hits.len() == 1))
+    );
+}
+
+#[test]
 fn hello_version_mismatch_rejected() {
     let mut env = Env::new(&[]);
     env.start_daemon();

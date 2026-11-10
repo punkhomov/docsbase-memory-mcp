@@ -1,5 +1,7 @@
 //! One caller's original search deadline and cooperative cancellation.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::config::schema::{Capabilities, SettingsSpec};
@@ -20,6 +22,7 @@ pub struct SearchOperation {
     started_at: Instant,
     deadline: Instant,
     cancellation: Cancellation,
+    queue_ms: Arc<AtomicU64>,
 }
 
 impl SearchOperation {
@@ -41,7 +44,55 @@ impl SearchOperation {
                 Duration::from_millis(policy.request_timeout_ms),
             )?,
             cancellation,
+            queue_ms: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// Clamps an explicit caller deadline to this owner's original budget.
+    ///
+    /// # Errors
+    /// Invalid policy, clock range, cancellation or an already-expired budget.
+    pub fn constrained(
+        policy: &SearchSettings,
+        started_at: Instant,
+        caller_deadline: Instant,
+        cancellation: Cancellation,
+    ) -> Result<Self> {
+        Self::constrained_at(
+            policy,
+            started_at,
+            caller_deadline,
+            cancellation,
+            Instant::now(),
+        )
+    }
+
+    fn constrained_at(
+        policy: &SearchSettings,
+        started_at: Instant,
+        caller_deadline: Instant,
+        cancellation: Cancellation,
+        now: Instant,
+    ) -> Result<Self> {
+        let mut operation = Self::new(policy, started_at, cancellation)?;
+        operation.deadline = operation.deadline.min(caller_deadline);
+        operation.check_at(now)?;
+        Ok(operation)
+    }
+
+    /// Admission delay accumulated by all clones of this one operation.
+    #[must_use]
+    pub fn queue_ms(&self) -> u64 {
+        self.queue_ms.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn record_queue(&self, duration: Duration) {
+        let millis = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+        let _ = self
+            .queue_ms
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(millis))
+            });
     }
 
     /// Original ingress time, before queueing or a reconnect attempt.

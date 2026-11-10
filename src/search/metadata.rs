@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::error::{Error, Result};
+use crate::search::operation::SearchOperation;
 use crate::store::Db;
 use crate::store::read_pool::{ReadLease, ReadPool};
 
@@ -27,10 +28,15 @@ impl<'a> MetadataSource<'a> {
         }
     }
 
-    pub(crate) fn acquire(self, deadline: Instant) -> Result<MetadataReader<'a>> {
+    pub(crate) fn acquire(self, operation: &SearchOperation) -> Result<MetadataReader<'a>> {
         match self {
             Self::Borrowed(db) => borrowed(db),
-            Self::Prepared(pool) => pool.acquire(deadline).map(MetadataReader::Prepared),
+            Self::Prepared(pool) => {
+                let started = Instant::now();
+                let reader = pool.acquire(operation.deadline());
+                operation.record_queue(started.elapsed());
+                reader.map(MetadataReader::Prepared)
+            }
         }
     }
 

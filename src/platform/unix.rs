@@ -232,6 +232,16 @@ pub fn connect_blocking(endpoint: &Endpoint) -> io::Result<BlockingStream> {
     UnixStream::connect(checked_path(endpoint)?).map(BlockingStream)
 }
 
+/// Connects through the async IO runtime so callers can bound waiting.
+///
+/// # Errors
+/// Returns invalid/over-long endpoint and raw connect errors.
+pub async fn connect_async(endpoint: &Endpoint) -> io::Result<Stream> {
+    tokio::net::UnixStream::connect(checked_path(endpoint)?)
+        .await
+        .map(Stream)
+}
+
 /// Liveness probe: `true` when something accepts on `endpoint`.
 #[must_use]
 pub fn connect_probe(endpoint: &Endpoint) -> bool {

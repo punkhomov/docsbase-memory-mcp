@@ -173,6 +173,7 @@ fn serve_fake_connection(
                 protocol_version: PROTOCOL_VERSION,
                 build_id: docsbase_memory::ipc::protocol::build_id(),
                 schema_version: 1,
+                capabilities: Vec::new(),
             },
             Request::RegisterSession { .. } | Request::RegisterUnbound { .. } => {
                 Response::ToolResult { value: Value::Null }
@@ -187,6 +188,11 @@ fn serve_fake_connection(
                 stop.store(true, Ordering::SeqCst);
                 Response::ToolResult { value: Value::Null }
             }
+            Request::Search { .. } => Response::Error {
+                code: -32011,
+                message: "legacy fake daemon does not support scoped search".to_owned(),
+                instruction: None,
+            },
         };
         writer
             .write_all(&encode(&response).expect("encode"))

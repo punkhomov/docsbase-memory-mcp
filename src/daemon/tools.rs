@@ -421,7 +421,11 @@ impl PreparedSearch {
             self.fetch,
             self.payload.generation(),
         );
-        Ok(meta::envelope(&rows, &meta))
+        Ok(meta::envelope_with_queue(
+            &rows,
+            &meta,
+            self.operation.queue_ms(),
+        ))
     }
 }
 
@@ -502,7 +506,7 @@ fn in_read_phase<'a, T, Guard>(
     work: impl FnOnce(MetadataReader<'a>) -> Result<T>,
 ) -> Result<T> {
     context.operation.check()?;
-    let reader = source.acquire(context.operation.deadline())?;
+    let reader = source.acquire(&context.operation)?;
     context.operation.check()?;
     let _revision = admit()?;
     context.operation.check()?;
@@ -1015,7 +1019,7 @@ fn empty_response(
         filters: Some(filters),
         trimmed: Some(TrimmedMeta::default()),
     };
-    Ok(meta::envelope(&[], &meta))
+    Ok(meta::envelope_with_queue(&[], &meta, operation.queue_ms()))
 }
 
 /// Which ranking stages actually ran this search.
