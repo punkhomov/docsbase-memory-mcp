@@ -16,6 +16,13 @@ use crate::store::Db;
 /// Returns an error when the path/config/database cannot be opened, another
 /// writer holds the project lease (I5), or indexing fails.
 pub fn run(path: Option<&Path>) -> anyhow::Result<()> {
+    run_with_settings(path, &crate::store::settings::standalone()?)
+}
+
+pub(crate) fn run_with_settings(
+    path: Option<&Path>,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let target = path.map_or(cwd, Path::to_path_buf);
     let target = target.canonicalize().map_err(|err| {
@@ -29,7 +36,7 @@ pub fn run(path: Option<&Path>) -> anyhow::Result<()> {
         }
     })?;
 
-    let mut db = Db::open(&paths::cache_dir()?)?;
+    let mut db = Db::open_with_settings(&paths::cache_dir()?, settings)?;
     let project = registry::ensure_project(&mut db, &target)?;
     let config = Config::load(Some(&project.canonical_root))?;
     // Fail fast (FR-14): a hybrid misconfiguration must surface on command

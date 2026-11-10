@@ -176,8 +176,9 @@ pub enum DaemonCommand {
 /// Propagates command failures to the `anyhow` CLI boundary.
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let db_settings = crate::store::settings::standalone()?;
     match cli.command {
-        Command::Index { path } => index::run(path.as_deref()),
+        Command::Index { path } => index::run_with_settings(path.as_deref(), &db_settings),
         Command::Search {
             query,
             limit,
@@ -187,7 +188,7 @@ pub fn run() -> anyhow::Result<()> {
             n_per_doc,
             path_prefix,
             tags,
-        } => search::run(
+        } => search::run_with_settings(
             &query,
             &search::Options {
                 limit,
@@ -198,12 +199,13 @@ pub fn run() -> anyhow::Result<()> {
                 path_prefix,
                 tags,
             },
+            &db_settings,
         ),
-        Command::List => status::list(),
-        Command::Sync { path } => sync(path.as_deref()),
+        Command::List => status::list_with_settings(&db_settings),
+        Command::Sync { path } => sync(path.as_deref(), &db_settings),
         Command::Config => show_config(),
-        Command::Status => status::status(),
-        Command::Serve { detached, grace_ms } => serve(detached, grace_ms),
+        Command::Status => status::status_with_settings(&db_settings),
+        Command::Serve { detached, grace_ms } => serve(detached, grace_ms, &db_settings),
         Command::Mcp => crate::mcp::frontend::run_blocking(),
         Command::Daemon { command } => match command {
             DaemonCommand::Stop => daemon_stop(),
@@ -238,13 +240,23 @@ pub fn run() -> anyhow::Result<()> {
             version,
             from,
         }),
-        Command::Uninstall { yes, dry_run } => install::uninstall(yes, dry_run),
+        Command::Uninstall { yes, dry_run } => {
+            install::uninstall_with_settings(yes, dry_run, &db_settings)
+        }
     }
 }
 
-fn serve(_detached: bool, grace_ms: u64) -> anyhow::Result<()> {
+fn serve(
+    _detached: bool,
+    grace_ms: u64,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> anyhow::Result<()> {
     let cache = paths::cache_dir()?;
-    crate::daemon::lifecycle::run_daemon(&cache, std::time::Duration::from_millis(grace_ms))?;
+    crate::daemon::lifecycle::run_daemon_with_settings(
+        &cache,
+        std::time::Duration::from_millis(grace_ms),
+        settings,
+    )?;
     Ok(())
 }
 
@@ -254,7 +266,10 @@ fn serve(_detached: bool, grace_ms: u64) -> anyhow::Result<()> {
 /// The sync job is started and polled over one bound connection: an idle
 /// daemon arms its grace deadline when no session is live, so a long job
 /// would otherwise outlive the accept loop mid-poll (final review N1).
-fn sync(path: Option<&std::path::Path>) -> anyhow::Result<()> {
+fn sync(
+    path: Option<&std::path::Path>,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> anyhow::Result<()> {
     let cache = paths::cache_dir()?;
     if let Some(mut client) = Client::connect(&cache) {
         let cwd = std::env::current_dir().context("resolve current directory")?;
@@ -282,7 +297,7 @@ fn sync(path: Option<&std::path::Path>) -> anyhow::Result<()> {
             Err(err) => return Err(err.into()),
         }
     }
-    index::run(path)
+    index::run_with_settings(path, settings)
 }
 
 /// Runs `docsbase config`: effective values for the current directory

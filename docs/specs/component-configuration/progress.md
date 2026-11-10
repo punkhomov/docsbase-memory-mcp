@@ -174,3 +174,29 @@ units16/0. Full/lean all-target Clippy + full opt-in lint, fmt/diff GREEN.
 Все10 команд завершились exit0; child stdout не удваивает counters. Native CI
 остаётся gate после CF2b. Test watchdog10s — deadlock containment X11, не SLA;
 нет fixed sleeps или production budget changes. No new crates/unsafe/scanner changes.
+CF2a consolidated task review: Spec compliance PASS / Quality APPROVED after I1,
+no remaining findings. Source99f098c + reviewed fix09c7193; CF2b begins next.
+CF2b Ruling: ANN refresh metadata work only reads repo generation/chunk hashes;
+его child connection становится prepared readonly с read policy (default5s),
+вместо прежнего writer-open30s/WAL negotiation. Override тест проверяет actual
+PRAGMA и отказ записи через существующий private warm seam. Shared удерживает
+immutable policy вне глобального DB mutex; это не реализация pool/snapshot #66.
+Task CF2b: complete (2026-11-10, base09c7193; local implementation gate).
+CLI composition разрешает policy один раз; direct index/search/list/status/sync
+fallback/uninstall/serve передают её явно. Lifecycle проверяет imported policy до
+admission/state и передаёт её Shared. Shared хранит immutable policy вне Db mutex;
+registration/index/sync/watchers получают writer policy, ANN metadata — prepared
+readonly с read policy. Actual overrides writer17ms/reader29ms и запрет записи
+через ANN reader GREEN. Invalid policy не создаёт admission/state или watcher.
+Source audit:10 explicit metadata opens,0 production calls legacy Db/Shared/job/
+CLI wrappers; standalone resolution только composition/compatibility boundaries.
+T55 Minor M1 resolved by scoped implementer при fixture migration: Db объявлен
+раньше cache/root TempDirs, named initializer сохранён; full/lean watcher10/10.
+Final verify Rust1.88: cli-full947passed/0failed/13ignored,64targets; lean
+integration43/0 (5targets), server9/0, lifecycle1/0; full/lean all-target Clippy,
+full opt-in perf/artifact lint, fmt/diff GREEN. Source freezes соблюдены; TMPDIR
+/var/tmp и прежний shared-host slack3, без budget/snapshot/dependency changes.
+Ruling: первый targeted server run ошибочно использовал /tmp с cloud .git marker
+и получил fixture root0-docs; он не засчитан. Корректный /var/tmp run server9/0 и
+финальный полный suite подтверждают реализацию. Fresh CF2b task review pending;
+final whole-branch review и native required CI остаются delivery gates.

@@ -1191,6 +1191,7 @@ pub fn enqueue_sync(db: &Db, project: &Project) -> Result<(i64, bool)> {
 
 /// Runs a queued job to completion on its own database connection (daemon
 /// background task, FR-17); job state survives restarts.
+/// Compatibility adapter; runtime uses [`execute_sync_job_with_settings`].
 ///
 /// Setup failures (missing project, unreadable config) also record `error`,
 /// so the project never keeps a stuck `queued` job that would block FR-17
@@ -1204,7 +1205,27 @@ pub fn execute_sync_job(
     project_id: i64,
     config: &Config,
 ) -> Result<Project> {
-    let mut db = Db::open(cache)?;
+    execute_sync_job_with_settings(
+        cache,
+        job_id,
+        project_id,
+        config,
+        &crate::store::settings::standalone()?,
+    )
+}
+
+/// Runs a background job with the owning daemon's resolved storage policy.
+///
+/// # Errors
+/// Returns the setup/indexing errors described by [`execute_sync_job`].
+pub fn execute_sync_job_with_settings(
+    cache: &Path,
+    job_id: i64,
+    project_id: i64,
+    config: &Config,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> Result<Project> {
+    let mut db = Db::open_with_settings(cache, settings)?;
     let setup = (|| -> Result<Project> {
         registry::project_by_id(&db, project_id)?.ok_or_else(|| Error::Project {
             message: format!("project {project_id} disappeared from the registry"),

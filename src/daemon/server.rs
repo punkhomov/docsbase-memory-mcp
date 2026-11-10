@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, watch};
 
+use crate::config::schema::Resolved;
 use crate::config::{Config, paths};
 use crate::daemon::registry;
 use crate::daemon::session::SessionRegistry;
@@ -27,6 +28,7 @@ use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 use crate::platform::Stream;
 use crate::store::Db;
 use crate::store::migrations;
+use crate::store::settings::DbSettings;
 use crate::watch::Watchers;
 
 /// Daemon state shared by all connections.
@@ -34,6 +36,9 @@ pub struct Shared {
     /// Cache root being served.
     pub cache: PathBuf,
     db: Mutex<Db>,
+    // Independent of the DB mutex: child construction never waits for a query
+    // just to obtain its startup policy.
+    db_settings: Resolved<DbSettings>,
     /// Live sessions.
     pub sessions: SessionRegistry,
     /// Per-project filesystem watchers (FR-15).
@@ -63,11 +68,20 @@ struct ProjectState {
 
 impl Shared {
     /// Opens the registry database and prepares shared state.
+    /// Compatibility adapter; production passes policy to [`Self::open_with_settings`].
     ///
     /// # Errors
     /// Returns [`Error::Internal`]/[`Error::Admission`] from [`Db::open`].
     pub fn open(cache: &Path) -> Result<Arc<Self>> {
-        let db = Db::open(cache)?;
+        Self::open_with_settings(cache, &crate::store::settings::standalone()?)
+    }
+
+    /// Constructs shared state with a complete caller-supplied storage policy.
+    ///
+    /// # Errors
+    /// Returns storage, configuration and startup errors as in [`Self::open`].
+    pub fn open_with_settings(cache: &Path, settings: &Resolved<DbSettings>) -> Result<Arc<Self>> {
+        let db = Db::open_with_settings(cache, settings)?;
         let orphans = crate::store::repo::fail_orphan_sync_jobs(db.connection())?;
         if orphans > 0 {
             eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
@@ -90,6 +104,7 @@ impl Shared {
         let shared = Arc::new(Self {
             cache: cache.to_path_buf(),
             db: Mutex::new(db),
+            db_settings: settings.clone(),
             sessions: SessionRegistry::new(),
             watchers: Arc::new(Watchers::new()),
             stopping: AtomicBool::new(false),
@@ -293,9 +308,10 @@ impl Shared {
         let model_id = embedding_model_id(embed_cfg);
         let cache_path = self.cache.clone();
         let dense = self.dense.snapshot();
+        let db_settings = self.db_settings.clone();
         let project_id = project.id;
         Some(std::thread::spawn(move || {
-            let Ok(db) = Db::open(&cache_path) else {
+            let Ok(db) = Db::open_readonly_with_settings(&cache_path, &db_settings) else {
                 return;
             };
             if warm && let Err(err) = warm_ann(&dense, &db, project_id, &model_id) {
@@ -347,9 +363,12 @@ impl Shared {
             .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes);
         if changed
             && !self.watchers.revise(project.id, Arc::clone(&config))
-            && let Err(err) = self
-                .watchers
-                .ensure(&self.cache, project, Arc::clone(&config))
+            && let Err(err) = self.watchers.ensure_with_settings(
+                &self.cache,
+                project,
+                Arc::clone(&config),
+                &self.db_settings,
+            )
         {
             eprintln!("warning: cannot watch project {}: {err}", project.id);
         }
@@ -384,7 +403,8 @@ impl Shared {
         let slot = self.project_slot(project.id);
         let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
         let config = self.config_in(&mut state, project)?;
-        self.watchers.ensure(&self.cache, project, config)
+        self.watchers
+            .ensure_with_settings(&self.cache, project, config, &self.db_settings)
     }
 
     /// Message for `status` when the global config on disk differs from the
@@ -715,7 +735,7 @@ async fn register_session(
     let outcome = tokio::task::spawn_blocking(move || -> Result<crate::store::models::Project> {
         // Own connection: the shared read connection must stay free while a
         // full index runs (F4/NFR-1).
-        let mut db = Db::open(&shared_for_task.cache)?;
+        let mut db = Db::open_with_settings(&shared_for_task.cache, &shared_for_task.db_settings)?;
         let project_err = match registry::resolve_by_cwd(&db, &cwd_for_task) {
             Ok(project) => {
                 shared_for_task.open_project_config(&project)?;
@@ -884,7 +904,7 @@ fn route_tool(
                 None => session_cwd(shared, session_id)?,
             };
             let root = registry::project_root_for(&path, &shared.cache)?;
-            let mut job_db = Db::open(&shared.cache)?;
+            let mut job_db = Db::open_with_settings(&shared.cache, &shared.db_settings)?;
             let project = registry::ensure_project(&mut job_db, &root)?;
             let config = shared.project_config(&project)?;
             let (job_id, created) = tools::enqueue_sync(&job_db, &project)?;
@@ -960,7 +980,13 @@ fn spawn_sync_job(shared: Arc<Shared>, job_id: i64, project_id: i64, config: Arc
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
             handle.spawn_blocking(move || {
-                match tools::execute_sync_job(&shared.cache, job_id, project_id, &config) {
+                match tools::execute_sync_job_with_settings(
+                    &shared.cache,
+                    job_id,
+                    project_id,
+                    &config,
+                    &shared.db_settings,
+                ) {
                     Ok(project) => {
                         if let Err(err) = shared.ensure_watcher(&project) {
                             eprintln!("warning: cannot watch project {}: {err}", project.id);
@@ -1105,10 +1131,24 @@ mod tests {
 
     impl RefreshFixture {
         fn new(enabled: bool, ranking: Option<&str>, chunks: usize) -> Self {
+            Self::with_db_settings(
+                enabled,
+                ranking,
+                chunks,
+                &crate::store::settings::standalone().expect("policy"),
+            )
+        }
+
+        fn with_db_settings(
+            enabled: bool,
+            ranking: Option<&str>,
+            chunks: usize,
+            policy: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+        ) -> Self {
             let cache = tempfile::TempDir::new().expect("cache");
             let root = tempfile::TempDir::new().expect("root");
             // Open an empty registry: this fixture tests refresh, not watchers.
-            let shared = Shared::open(cache.path()).expect("shared");
+            let shared = Shared::open_with_settings(cache.path(), policy).expect("shared");
             let ranking = ranking.map_or(String::new(), |value| format!("ranking = \"{value}\"\n"));
             fs::write(
                 root.path().join(".docsbase.toml"),
@@ -1117,7 +1157,7 @@ mod tests {
                 ),
             )
             .expect("write config");
-            let mut db = Db::open(cache.path()).expect("db");
+            let mut db = Db::open_with_settings(cache.path(), policy).expect("db");
             let canonical = root.path().canonicalize().expect("canonical");
             let project = registry::ensure_project(&mut db, &canonical).expect("project");
             let mut fixture = Self {
@@ -1173,6 +1213,55 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         worker.join().expect("refresh worker must not panic");
+    }
+
+    fn configured_db_policy() -> crate::config::schema::Resolved<crate::store::settings::DbSettings>
+    {
+        crate::config::resolve::resolve_component::<crate::store::settings::DbSpec>(
+            &crate::config::bootstrap::DefaultsContext::standalone(),
+            [(
+                crate::config::schema::SourceId::Cli,
+                crate::store::settings::DbPatch {
+                    write_busy_timeout: Some(Duration::from_millis(17)),
+                    read_busy_timeout: Some(Duration::from_millis(29)),
+                    ..crate::store::settings::DbPatch::default()
+                },
+            )],
+        )
+        .expect("policy")
+    }
+
+    #[test]
+    fn configured_store_policy_reaches_initial_writer() {
+        let cache = tempfile::tempdir().expect("cache");
+        let policy = configured_db_policy();
+        let shared = Shared::open_with_settings(cache.path(), &policy).expect("shared");
+        let timeout: u32 = shared
+            .db()
+            .connection()
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .expect("timeout");
+        assert_eq!(timeout, 17);
+    }
+
+    #[test]
+    fn ann_refresh_uses_configured_readonly_connection() {
+        let policy = configured_db_policy();
+        let fixture = RefreshFixture::with_db_settings(true, Some("rrf"), 1, &policy);
+        let (called, observed) = std_mpsc::channel();
+        finish_refresh(fixture.shared.refresh_ann_after_sync_with(&fixture.project,
+            move |_, db, _, _| {
+                let timeout: u32 = db.connection()
+                    .pragma_query_value(None, "busy_timeout", |row| row.get(0)).expect("timeout");
+                assert_eq!(timeout, 29, "child reader must receive the same supplied policy");
+                let error = db.connection().execute("CREATE TABLE forbidden_refresh_write (id INTEGER)", [])
+                    .expect_err("ANN metadata connection must be read-only");
+                assert!(matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::ReadOnly));
+                called.send(()).map_err(|error| Error::internal(error.to_string()))
+            }));
+        observed
+            .try_recv()
+            .expect("actual refresh must observe the connection");
     }
 
     #[test]

@@ -30,6 +30,8 @@ pub struct Db {
 
 impl Db {
     /// Opens (creating if needed) the database in `cache_dir` and migrates it.
+    /// Compatibility adapter resolving owner defaults; runtime composition uses
+    /// [`Self::open_with_settings`] with an explicit policy.
     ///
     /// The cache directory is created with mode `0700`: the database contains
     /// document text and absolute paths (design §3 runtime layout).
@@ -118,6 +120,8 @@ impl Db {
     }
 
     /// Opens the database read-only; never migrates or creates.
+    /// Compatibility adapter resolving owner defaults. Runtime composition uses
+    /// [`Self::open_readonly_with_settings`]; pure planning uses the inspector.
     ///
     /// # Errors
     /// Returns [`Error::Internal`] when the file is missing or unreadable, and

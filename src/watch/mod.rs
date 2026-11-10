@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::config::Config;
+use crate::config::schema::{Capabilities, Resolved, SettingsSpec};
 use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
 use crate::index::job::{JobStats, run_incremental_checked};
@@ -26,6 +27,7 @@ use crate::index::tantivy_index::IndexHandle;
 use crate::index::walk;
 use crate::store::Db;
 use crate::store::models::{Project, ProjectStatus};
+use crate::store::settings::{DbSettings, DbSpec};
 use serde_json::json;
 
 /// Quiet window after the last event; extends while events keep coming, so a
@@ -684,6 +686,7 @@ impl Watchers {
     /// Starts a watcher for `project` when it is indexed and not yet watched;
     /// returns `true` when a new watcher was started. `config` is the project
     /// configuration as of open time (OQ-6).
+    /// Compatibility adapter; runtime callers use [`Self::ensure_with_settings`].
     ///
     /// # Errors
     /// Returns spawn errors; a failed start is not fatal to callers.
@@ -693,6 +696,27 @@ impl Watchers {
         project: &Project,
         config: Arc<Config>,
     ) -> Result<bool> {
+        self.ensure_with_settings(
+            cache,
+            project,
+            config,
+            &crate::store::settings::standalone()?,
+        )
+    }
+
+    /// Starts a watcher with the owning process's complete storage policy.
+    ///
+    /// # Errors
+    /// Invalid policy is rejected before watcher resources are created. Other
+    /// errors match [`Self::ensure`].
+    pub fn ensure_with_settings(
+        self: &Arc<Self>,
+        cache: &Path,
+        project: &Project,
+        config: Arc<Config>,
+        db_settings: &Resolved<DbSettings>,
+    ) -> Result<bool> {
+        DbSpec::validate(db_settings.settings(), &Capabilities::current())?;
         if project.status != ProjectStatus::Indexed {
             return Ok(false);
         }
@@ -714,6 +738,7 @@ impl Watchers {
             cache.to_path_buf(),
             project.clone(),
             Arc::clone(&slot),
+            db_settings.clone(),
             rx,
             Arc::downgrade(self),
         )?;
@@ -757,6 +782,7 @@ fn spawn_consumer(
     cache: PathBuf,
     project: Project,
     config: Arc<Mutex<Arc<Config>>>,
+    db_settings: Resolved<DbSettings>,
     rx: Receiver<Vec<PathBuf>>,
     watchers: Weak<Watchers>,
 ) -> Result<std::thread::JoinHandle<()>> {
@@ -764,7 +790,7 @@ fn spawn_consumer(
     std::thread::Builder::new()
         .name(format!("docsbase-watch-{project_id}"))
         .spawn(move || {
-            let mut db = match Db::open(&cache) {
+            let mut db = match Db::open_with_settings(&cache, &db_settings) {
                 Ok(db) => db,
                 Err(err) => {
                     eprintln!(
@@ -919,9 +945,9 @@ mod tests {
     use tempfile::TempDir;
 
     struct Env {
+        db: Db,
         cache: TempDir,
         _root: TempDir,
-        db: Db,
         project: Project,
     }
 
@@ -1004,6 +1030,26 @@ mod tests {
     }
 
     #[test]
+    fn invalid_store_policy_does_not_start_watcher_resources() {
+        let env = Env::new();
+        let valid = env.db.settings();
+        let mut raw = valid.settings().clone();
+        raw.wal_attempts = 0;
+        let imported = Resolved::new(raw, valid.provenance().clone());
+        let watchers = Arc::new(Watchers::new());
+        let error = watchers
+            .ensure_with_settings(
+                env.cache.path(),
+                &env.project,
+                Arc::new(Config::default()),
+                &imported,
+            )
+            .expect_err("reject before watcher creation");
+        assert!(matches!(error, Error::Admission { .. }));
+        assert_eq!(watchers.count(), 0);
+    }
+
+    #[test]
     fn queued_paths_use_reopened_config() {
         let env = Env::new();
         let seed = repo::doc_states(env.db.connection(), env.project.id).expect("seed state");
@@ -1025,6 +1071,7 @@ mod tests {
             env.cache.path().to_path_buf(),
             env.project.clone(),
             slot,
+            env.db.settings().clone(),
             rx,
             Weak::new(),
         )

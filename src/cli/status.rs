@@ -12,7 +12,9 @@ use crate::store::{DB_FILE, Db};
 /// # Errors
 /// Returns [`Error::Project`] when the registry is missing or the cwd is not
 /// covered by a registered root (C8).
-pub(crate) fn read_project() -> Result<(Db, Project)> {
+pub(crate) fn read_project_with_settings(
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> Result<(Db, Project)> {
     let cache = paths::cache_dir()?;
     if !cache.join(DB_FILE).exists() {
         return Err(Error::Project {
@@ -20,7 +22,7 @@ pub(crate) fn read_project() -> Result<(Db, Project)> {
             instruction: Some("run `docsbase index` in your project".to_owned()),
         });
     }
-    let db = Db::open_readonly(&cache)?;
+    let db = Db::open_readonly_with_settings(&cache, settings)?;
     let cwd = std::env::current_dir().map_err(|err| {
         Error::internal_with_source(format!("resolve current directory: {err}"), err)
     })?;
@@ -33,6 +35,12 @@ pub(crate) fn read_project() -> Result<(Db, Project)> {
 /// # Errors
 /// Returns an error when the read-only snapshot cannot be opened.
 pub fn status() -> anyhow::Result<()> {
+    status_with_settings(&crate::store::settings::standalone()?)
+}
+
+pub(crate) fn status_with_settings(
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> anyhow::Result<()> {
     if let Some(value) = crate::cli::try_daemon("status", serde_json::json!({}), false)? {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
@@ -50,7 +58,7 @@ pub fn status() -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    let db = Db::open_readonly(&cache)?;
+    let db = Db::open_readonly_with_settings(&cache, settings)?;
     // Direct mode has no daemon: sessions/fd/threads are not applicable.
     // Direct mode reloads the config every run, so there is no stale snapshot
     // to warn about (OQ-6).
@@ -74,6 +82,12 @@ pub fn status() -> anyhow::Result<()> {
 /// Returns an error when the project is unregistered/not indexed or the
 /// snapshot cannot be opened.
 pub fn list() -> anyhow::Result<()> {
+    list_with_settings(&crate::store::settings::standalone()?)
+}
+
+pub(crate) fn list_with_settings(
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> anyhow::Result<()> {
     const PAGE: usize = 500;
     let mut cursor: Option<String> = None;
     let mut docs: Vec<serde_json::Value> = Vec::new();
@@ -88,7 +102,7 @@ pub fn list() -> anyhow::Result<()> {
         let value = if let Some(value) = daemon_value {
             value
         } else {
-            let (db, project) = read_project()?;
+            let (db, project) = read_project_with_settings(settings)?;
             let value = crate::daemon::tools::list_docs(&db, &project, &args)?;
             project_name.get_or_insert_with(|| project.name.clone());
             value
