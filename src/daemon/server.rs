@@ -16,16 +16,17 @@ use tokio::sync::{mpsc, watch};
 
 use crate::config::schema::Resolved;
 use crate::config::{Config, paths};
-use crate::daemon::registry;
 use crate::daemon::session::SessionRegistry;
 use crate::daemon::tools;
+use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
 use crate::hybrid::HybridStages;
 use crate::hybrid::config::{Ranking, embedding_model_id};
-use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits};
+use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits, DenseRequest};
 use crate::hybrid::jobs as hybrid_jobs;
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 use crate::platform::Stream;
+use crate::search::metadata::MetadataSource;
 use crate::store::Db;
 use crate::store::migrations;
 use crate::store::read_pool::ReadPool;
@@ -44,7 +45,7 @@ pub struct Shared {
     // Independent of the DB mutex: child construction never waits for a query
     // just to obtain its startup policy.
     db_settings: Resolved<DbSettings>,
-    readers: ReadPool,
+    readers: Arc<ReadPool>,
     payload_budget: crate::search::budget::PayloadBudget,
     /// Live sessions.
     pub sessions: SessionRegistry,
@@ -153,7 +154,7 @@ impl Shared {
             &Capabilities::current(),
         )?;
         let db = Db::open_with_settings(cache, settings)?;
-        let readers = ReadPool::prepare(cache, settings, pool_settings)?;
+        let readers = Arc::new(ReadPool::prepare(cache, settings, pool_settings)?);
         let orphans = crate::store::repo::fail_orphan_sync_jobs(db.connection())?;
         if orphans > 0 {
             eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
@@ -198,10 +199,10 @@ impl Shared {
         Ok(shared)
     }
 
-    /// Prepared metadata readers, independent of the writer mutex. Search
-    /// adoption follows the request-snapshot/singleflight work in #66.
+    /// Prepared metadata readers shared by search phases and ANN refresh,
+    /// independent of the writer mutex.
     #[must_use]
-    pub const fn read_pool(&self) -> &ReadPool {
+    pub fn read_pool(&self) -> &ReadPool {
         &self.readers
     }
 
@@ -368,20 +369,19 @@ impl Shared {
         self: &Arc<Self>,
         project: &crate::store::models::Project,
     ) -> Option<std::thread::JoinHandle<()>> {
-        self.refresh_ann_after_sync_with(project, DenseCache::warm)
+        self.refresh_ann_after_sync_with(project, |_, _, _| Ok(()))
     }
 
-    /// Private operation seam: tests observe/fail warm on the real config and
-    /// cleanup path, without a process-global hook or public runtime setting.
+    /// Private metadata observation seam; production performs the actual warm.
     fn refresh_ann_after_sync_with<F>(
         self: &Arc<Self>,
         project: &crate::store::models::Project,
-        warm_ann: F,
+        before_metadata: F,
     ) -> Option<std::thread::JoinHandle<()>>
     where
-        F: FnOnce(&DenseCache, &Db, i64, &str) -> Result<()> + Send + 'static,
+        F: FnOnce(&Db, i64, &str) -> Result<()> + Send + 'static,
     {
-        self.refresh_ann_after_sync_before_with(project, || {}, warm_ann)
+        self.refresh_ann_after_sync_before_with(project, || {}, before_metadata)
     }
 
     // Private scheduling seam for deterministic delayed-revision tests.
@@ -389,35 +389,53 @@ impl Shared {
         self: &Arc<Self>,
         project: &crate::store::models::Project,
         before_admission: B,
-        warm_ann: F,
+        before_metadata: F,
     ) -> Option<std::thread::JoinHandle<()>>
     where
         B: FnOnce() + Send + 'static,
-        F: FnOnce(&DenseCache, &Db, i64, &str) -> Result<()> + Send + 'static,
+        F: FnOnce(&Db, i64, &str) -> Result<()> + Send + 'static,
     {
         let config = self.project_config(project).ok()?;
         let slot = self.project_slot(project.id);
         let embed_cfg = config.hybrid_cfg.embedding.as_ref()?;
-        // Warm only a project whose dense channel is actually read:
-        // `rrf_active` gates `dense_candidates`, and the `hybrid = true`
-        // shorthand keeps `Ranking::Lexical` (Delta 0.3). Cleanup stays
-        // unconditional: a ranking flip must still reclaim old dumps.
         let warm = config.hybrid_cfg.enabled && config.hybrid_cfg.ranking == Ranking::Rrf;
         let model_id = embedding_model_id(embed_cfg);
         let cache_path = self.cache.clone();
         let dense = self.dense.snapshot();
-        let db_settings = self.db_settings.clone();
+        let readers = Arc::clone(&self.readers);
+        let project = project.clone();
         let project_id = project.id;
         Some(std::thread::spawn(move || {
             before_admission();
-            let Ok(db) = Db::open_readonly_with_settings(&cache_path, &db_settings) else {
-                return;
-            };
-            if warm
-                && let Err(err) =
-                    slot.with_preparation(&config, || warm_ann(&dense, &db, project_id, &model_id))
-            {
-                eprintln!("warning: ann warm failed for project {project_id}: {err}");
+            if warm {
+                let result = (|| {
+                    let generation = {
+                        let reader = readers.try_acquire()?;
+                        slot.with_preparation(&config, || {
+                            lifecycle::with_project_read_lease(&cache_path, project_id, || {
+                                before_metadata(&reader, project_id, &model_id)?;
+                                tools::snapshot_info(&reader, &project, None)
+                            })
+                        })?
+                    };
+                    // The scalar lease is gone before entering the shared flight.
+                    // Its factory has no personal query budget or outer READ gate.
+                    let source = MetadataSource::Prepared(&readers);
+                    dense.warm_with_metadata_admitted(
+                        DenseRequest {
+                            cache_root: &cache_path,
+                            project_id,
+                            generation,
+                            model_id: &model_id,
+                        },
+                        &crate::hybrid::work::Cancellation::new(),
+                        || tools::capture_dense(source, &project, generation),
+                        || slot.preparation_lease(&config),
+                    )
+                })();
+                if let Err(err) = result {
+                    eprintln!("warning: ann warm failed for project {project_id}: {err}");
+                }
             }
             if let Err(err) = dense.cleanup(project_id) {
                 eprintln!("warning: ann cleanup failed for project {project_id}: {err}");
@@ -1313,10 +1331,26 @@ mod tests {
             chunks: usize,
             policy: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
         ) -> Self {
+            Self::with_policies(
+                enabled,
+                ranking,
+                chunks,
+                policy,
+                &crate::store::settings::standalone_read_pool().expect("pool policy"),
+            )
+        }
+
+        fn with_policies(
+            enabled: bool,
+            ranking: Option<&str>,
+            chunks: usize,
+            policy: &Resolved<DbSettings>,
+            pool: &Resolved<ReadPoolSettings>,
+        ) -> Self {
             let cache = tempfile::TempDir::new().expect("cache");
             let root = tempfile::TempDir::new().expect("root");
             // Open an empty registry: this fixture tests refresh, not watchers.
-            let shared = Shared::open_with_settings(cache.path(), policy).expect("shared");
+            let shared = Shared::open_with_policies(cache.path(), policy, pool).expect("shared");
             let ranking = ranking.map_or(String::new(), |value| format!("ranking = \"{value}\"\n"));
             fs::write(
                 root.path().join(".docsbase.toml"),
@@ -1462,12 +1496,99 @@ mod tests {
     }
 
     #[test]
+    fn refresh_refuses_exhausted_prepared_pool_and_still_cleans() {
+        let fixture = RefreshFixture::new(true, Some("rrf"), 1);
+        let stale = fixture.stale_tmp();
+        let readers: Vec<_> = (0..fixture
+            .shared
+            .read_pool()
+            .settings()
+            .settings()
+            .max_connections)
+            .map(|_| {
+                fixture
+                    .shared
+                    .read_pool()
+                    .try_acquire()
+                    .expect("hold every reader")
+            })
+            .collect();
+        let (called, observed) = std_mpsc::channel();
+        finish_refresh(fixture.shared.refresh_ann_after_sync_with(
+            &fixture.project,
+            move |_, _, _| {
+                called
+                    .send(())
+                    .map_err(|err| Error::internal(err.to_string()))
+            },
+        ));
+        let attempted = observed.try_recv();
+        drop(readers);
+        assert_eq!(
+            attempted,
+            Err(TryRecvError::Disconnected),
+            "refresh must not open a replacement outside the prepared pool"
+        );
+        assert!(
+            !stale.exists(),
+            "cleanup must run after reader admission refusal"
+        );
+    }
+
+    #[test]
+    fn refresh_releases_single_scalar_reader_before_lazy_warm() {
+        use crate::config::bootstrap::DefaultsContext;
+        use crate::config::resolve::resolve_component;
+        use crate::config::schema::SourceId;
+        use crate::store::settings::{ReadPoolPatch, ReadPoolSpec};
+        let pool = resolve_component::<ReadPoolSpec>(
+            &DefaultsContext::standalone(),
+            [(
+                SourceId::Cli,
+                ReadPoolPatch {
+                    max_connections: Some(1),
+                },
+            )],
+        )
+        .expect("one reader");
+        let mut fixture =
+            RefreshFixture::with_policies(true, Some("rrf"), 1, &configured_db_policy(), &pool);
+        // Isolate metadata ownership from ANN tier/threshold selection.
+        Arc::get_mut(&mut fixture.shared)
+            .expect("unique fixture state")
+            .dense = DenseCache::with_cap(2);
+        finish_refresh(fixture.shared.refresh_ann_after_sync(&fixture.project));
+        let generation =
+            crate::store::repo::index_generation(fixture.db.connection(), fixture.project.id)
+                .expect("generation");
+        let rows = fixture
+            .shared
+            .dense
+            .get_with_metadata(
+                DenseRequest {
+                    cache_root: fixture.cache.path(),
+                    project_id: fixture.project.id,
+                    generation,
+                    model_id: FakeEmbedder.model_id(),
+                },
+                &crate::hybrid::work::Cancellation::new(),
+                || panic!("warm must materialize and retain rows using the single reader"),
+            )
+            .expect("warm populated resident state");
+        match rows {
+            crate::hybrid::dense::DenseRows::Ready(index) => assert_eq!(index.rows().len(), 1),
+            _ => panic!("explicit exact-only fixture must retain its one vector"),
+        }
+        assert!(fixture.shared.read_pool().try_acquire().is_ok());
+    }
+
+    #[test]
     fn ann_refresh_uses_configured_readonly_connection() {
         let policy = configured_db_policy();
         let fixture = RefreshFixture::with_db_settings(true, Some("rrf"), 1, &policy);
         let (called, observed) = std_mpsc::channel();
         finish_refresh(fixture.shared.refresh_ann_after_sync_with(&fixture.project,
-            move |_, db, _, _| {
+            move |db, _, _| {
                 let timeout: u32 = db.connection()
                     .pragma_query_value(None, "busy_timeout", |row| row.get(0)).expect("timeout");
                 assert_eq!(timeout, 29, "child reader must receive the same supplied policy");
@@ -1489,7 +1610,7 @@ mod tests {
         let (release, proceed) = std_mpsc::channel();
         let worker = fixture
             .shared
-            .refresh_ann_after_sync_with(&fixture.project, move |dense, db, project, model| {
+            .refresh_ann_after_sync_with(&fixture.project, move |_, project, model| {
                 called
                     .send((project, model.to_owned()))
                     .map_err(|err| Error::internal(err.to_string()))?;
@@ -1497,7 +1618,7 @@ mod tests {
                 proceed
                     .recv_timeout(REFRESH_WATCHDOG)
                     .map_err(|err| Error::internal(err.to_string()))?;
-                dense.warm(db, project, model)
+                Ok(())
             })
             .expect("worker");
         assert_eq!(
@@ -1521,11 +1642,11 @@ mod tests {
         let (called, observed) = std_mpsc::channel();
         finish_refresh(fixture.shared.refresh_ann_after_sync_with(
             &fixture.project,
-            move |dense, db, project, model| {
+            move |_, _, _| {
                 called
                     .send(())
                     .map_err(|err| Error::internal(err.to_string()))?;
-                dense.warm(db, project, model)
+                Ok(())
             },
         ));
         assert_eq!(
@@ -1628,7 +1749,7 @@ mod tests {
         let (called, observed) = std_mpsc::channel();
         finish_refresh(fixture.shared.refresh_ann_after_sync_with(
             &fixture.project,
-            move |_, _, project, model| {
+            move |_, project, model| {
                 called
                     .send((project, model.to_owned()))
                     .map_err(|err| Error::internal(err.to_string()))?;
@@ -1707,7 +1828,7 @@ mod tests {
                     .recv_timeout(REFRESH_WATCHDOG)
                     .expect("release delayed scheduling");
             },
-            move |_, _, _, _| {
+            move |_, _, _| {
                 called_tx.send(()).expect("warm called");
                 Ok(())
             },

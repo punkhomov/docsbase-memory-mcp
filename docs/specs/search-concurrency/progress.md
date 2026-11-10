@@ -292,3 +292,23 @@ its predecessor1088-pass package remains historical, final1089 is authoritative.
 S3.6c refresh prepared-pool adoption, S4 transport/timer/group cancellation/
 actual-job accounting/queue telemetry and whole-feature final/native gates remain
 mandatory. PR112 stays draft and #66 remains open.
+
+Task S3.6c: design ready, before implementation (base437242b). Background
+refresh shares prepared capacity and checked lazy metadata; scalar lease drops
+before warm, no per-worker Db/default. Busy-pool RED and capacity1 actual warm
+verify resource ownership while preserving cleanup and prior refresh contracts.
+
+Task S3.6c: complete (base437242b..this task commit). Shared and background
+refresh share the startup-prepared Arc<ReadPool>; short checked scalar capture
+releases its reader/config/file guards before guarded lazy warm. Real leader
+metadata uses the same prepared-source helper; no unpooled open or personal
+query budget. Cleanup still runs on skipped/stale/busy/failed warm. Actual
+pool-exhaustion RED0/1 in0.06s and capacity1 seeded warm regressions retained.
+Fresh review Spec PASS / Quality APPROVED, no findings. All20 final stages
+exit0 and match all160 Rust inputs: full1091passed/0failed/13ignored/66targets;
+focused server14/state11/phases8/dense74/ranking60/visibility37; lean14/11/74/
+37/28/42/74. Full/lean all-target+opt-in Clippy/fmt/diff pass, all113 frozen
+inputs unchanged. Ruling: runtime accessor still returns &ReadPool; const
+qualifier removed explicitly because Rust1.88 Arc deref is nonconst.
+S4 and whole-feature final review/current-head native gates remain pending;
+PR112 stays draft and #66 remains open.

@@ -591,3 +591,47 @@ status check rejected19 benchmark/external cases before retrieval. Persist
 mark_indexed and read back the registry Project. Corpus, recordings/model pins,
 reports, expected quality/legacy parity and latency thresholds remain unchanged.
 The prior full failure is retained as diagnostic evidence, not a passing run.
+
+## Delta 2026-11-10 — S3.6c: prepared-reader background ANN refresh
+
+FR-1/FR-3/FR-4/FR-5 completion for the refresh consumer. Shared stores the
+already prepared ReadPool in Arc; clones share the same capacity/connections,
+not a new pool. Refresh captures only this Arc, its config/cell, project/model
+identity and dense snapshot, without retaining all Shared. No per-thread Db
+open, migrating path, fallback policy or personal query timeout is introduced.
+
+A warm-enabled worker obtains G through try_acquire plus current preparation
+and OS project READ, using the same checked SQL status/root/schema/pending
+helper as search. A private before-metadata observer sees this real readonly
+reader for policy/failure/gate tests. Scalar reader and both guards drop before
+calling warm_with_metadata_admitted. Its actual cold leader lazily captures owned
+metadata through the same prepared-source helper; only its revision guard spans
+resolve/publication. Followers retain no outer preparation/SQL/file lease.
+Making those two tools helpers pub(super) shares daemon implementation without
+a public API or new duplicate status/error/default logic.
+
+Existing refresh gates stay: enabled + Ranking::Rrf only, usable embedding config,
+recipe-qualified model/G, Ready/TooLarge coverage refresh, ANN threshold/backoff
+and worker charge. Cleanup runs after skipped, stale, busy-pool or failed warm,
+even when no reader was available. No ANN/query outcome reset or destructive
+invalidation. Background metadata admission is fail-fast and independent of any
+interactive caller's budget/cancellation, preserving shared work for live peers.
+
+Challenge: a worker holding the scalar reader while the lazy factory starts
+would fail at capacity1. A real warm/cache-hit regression configures capacity1
+and exact-only fixture cache to isolate this ownership requirement. Another
+regression holds every prepared reader: old per-thread open still invokes its
+callback, while the new worker refuses without an unpooled replacement and
+still cleans stale artifacts. The existing refresh fixture already indexes and
+reads back persisted Indexed state; it needs no status shortcut correction.
+
+Private test callback changes from whole warm replacement (DenseCache+Db+IDs)
+to actual scalar metadata observation (Db+IDs); production performs the real
+warm after it. Preserve readonly29ms, cleanup-on-error, gate order, disabled/
+lexical skip, threshold and obsolete delayed-revision assertions. No sleep for
+ordering or increased watchdog/threshold. S4 timer/transport/group cancellation/
+accounting/telemetry and whole-feature final/native acceptance remain mandatory.
+
+S3.6c API note: read_pool() still returns &ReadPool, but no longer has a const
+qualifier: Rust1.88 cannot dereference Arc in a const function. Shared is a
+runtime-only constructed service; runtime calls and capacity identity stay.

@@ -283,3 +283,28 @@ but total includes injected original queue history, with no real wait/SLA.
 S3.6b full-suite addition: correct tests/support/bench.rs::build_env persisted
 index status (same fixture shortcut), preserve frozen inputs/recordings/baseline;
 focused benchmark/external and lean benchmark validate this changed harness.
+
+## Delta 2026-11-10 — S3.6c: background refresh source adoption
+
+- Base437242b. Modify src/daemon/server.rs and its inline refresh fixture/tests,
+  plus pub(super) visibility of tools snapshot_info/capture_dense. No new crate,
+  policy/default, schema/protocol/ranking/provider/threshold change.
+- Shared.readers becomes Arc<ReadPool>, read_pool() signature remains &ReadPool.
+  Refresh captures this pool, current cell/config, owned project/model and dense
+  snapshot. Scalar try_acquire scope ends before guarded lazy warm; loader uses
+  the shared checked prepared-source helper. Cleanup on skip/stale/busy/error.
+- First meaningful RED on existing code: exhaust actual prepared pool and
+  refresh; old unpooled open calls the observer. Release/join before assertions;
+  new code must not call metadata observer and must clean stale artifacts.
+- Capacity1 actual warm regression, explicit exact-only cache and one seeded
+  vector: result retained without invoking a later fallback loader, proving
+  scalar lease released before lazy metadata. Private fixture policy constructor
+  may receive both complete resolved policies; wrappers use owner defaults.
+- Adapt existing private warm callbacks to actual Db metadata observation,
+  return Ok rather than performing a duplicate warm. Preserve every existing
+  config/readonly/error/gate/skip/threshold/stale cleanup assertion.
+- Verify focused refresh/state/core/dense/visibility, full cli-full, relevant
+  lean scopes and full/lean all-target+opt-in Clippy/fmt/diff. Fresh task review
+  before commit; controller delegates findings.
+- Remaining S4 and whole-feature final/current-head native gates still pending;
+  PR112 remains draft. Source helper reuse does not complete cancellation.

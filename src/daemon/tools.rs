@@ -465,7 +465,7 @@ fn search_plan(
     ))
 }
 
-fn snapshot_info(db: &Db, project: &Project, expected: Option<i64>) -> Result<i64> {
+pub(super) fn snapshot_info(db: &Db, project: &Project, expected: Option<i64>) -> Result<i64> {
     let current = registry::project_by_id(db, project.id)?.ok_or_else(|| Error::Project {
         message: format!("project {} disappeared from the registry", project.id),
         instruction: Some("retry search".to_owned()),
@@ -514,7 +514,7 @@ fn in_read_phase<'a, T, Guard>(
 
 // Shared cold/fallback metadata has no caller deadline/token. Its immediate
 // prepared admission cannot cancel live peers when a flight leader expires.
-fn capture_dense(
+pub(super) fn capture_dense(
     source: MetadataSource<'_>,
     project: &Project,
     generation: i64,
