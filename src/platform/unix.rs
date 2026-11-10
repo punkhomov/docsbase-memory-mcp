@@ -440,6 +440,19 @@ pub fn secure_dir(dir: &Path) -> io::Result<()> {
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
+/// Opens an existing path read-only without following a final symlink.
+/// Does not create, truncate or change permissions; callers check file type.
+/// Nonblocking open lets callers reject FIFOs without waiting for a writer.
+///
+/// # Errors
+/// Returns the raw IO error when the path cannot be opened without following it.
+pub fn open_readonly_nofollow(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
 /// Restricts an existing path to `0600` (sockets, manifests, logs).
 ///
 /// # Errors

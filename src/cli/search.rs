@@ -1,6 +1,6 @@
 //! `docsbase search` — read-only snapshot search (FR-20, FR-30).
 
-use crate::cli::status::read_project;
+use crate::cli::status::read_project_with_settings;
 use crate::config::Config;
 use crate::config::paths;
 use crate::daemon::tools;
@@ -62,12 +62,20 @@ impl Options {
 /// Returns an error when the project is unregistered or not indexed, the
 /// snapshot cannot be opened, or the query or an argument is invalid.
 pub fn run(query: &str, options: &Options) -> anyhow::Result<()> {
+    run_with_settings(query, options, &crate::store::settings::standalone()?)
+}
+
+pub(crate) fn run_with_settings(
+    query: &str,
+    options: &Options,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> anyhow::Result<()> {
     if let Some(value) = crate::cli::try_daemon("search_docs", options.args(query), true)? {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
 
-    let (db, project) = read_project()?;
+    let (db, project) = read_project_with_settings(settings)?;
     let cache = paths::cache_dir()?;
     // Direct mode honors the project's hybrid configuration exactly like the
     // daemon route: stages resolved up front (explicit admission on failure,

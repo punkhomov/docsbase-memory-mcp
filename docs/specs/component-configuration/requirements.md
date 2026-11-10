@@ -156,3 +156,27 @@ CF0 закрывает только SC-1/SC-2. #78 остаётся открыт
 Блокирующих продуктовых вопросов для CF0 нет. Нагрузочные бюджеты сайта, внешние
 Rust bindings и изменения supported provider registry определяются их owning
 issues до появления соответствующих настроек; CF0 не назначает им выдуманные SLA.
+
+## Delta 2026-11-10 — CF2 store consumption boundary
+
+CF2 реализует runtime-потребление typed `Resolved<DbSettings>`: переданные override
+и defaults доходят до реальных writer/read connections без повторного выбора
+значений внутри Db. Управляющая CLI/daemon boundary разрешает policy один раз и
+передаёт её дочерним jobs/watchers/ANN workers. Старые публичные методы остаются
+compatibility adapters; production использует только explicit-settings путь.
+Это частичная SC-3 для store, не завершение SC-3/SC-5 всего #78.
+
+В CF2 не активируются TOML `store`/`read_pool`: v1 startup и формат `config`
+сохраняются, production boundary пока получает owner defaults из resolver.
+Typed callers могут передавать overrides уже в CF2. File activation входит в
+CF3/CF5 с определёнными schema/startup/error semantics; pool consumer — #66.
+Неработающие public keys и per-consumer fallback не добавляются.
+
+Pure inspector сообщает **identity схемы заголовка**, а не готовый SQL reader или
+snapshot документов. `Ready` означает подтверждённую identity этого наблюдаемого
+артефакта; проверка таблиц/rows/query consistency принадлежит operational readers.
+Inspector читает ограниченный SQLite header без Connection/immutable/VFS tricks,
+повторно проверяет header/file metadata и отсутствие WAL/SHM/journal. Sidecars,
+меняющееся/нечитаемое/невалидное состояние дают Unknown/NeedsRecovery без пригодной
+identity. Missing допускается только без main DB и recovery sidecars. Наблюдение
+не заменяет повторную проверку inputs перед apply (CF11).

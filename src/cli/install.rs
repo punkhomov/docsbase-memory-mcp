@@ -159,6 +159,14 @@ fn remove_hybrid_artifacts(
 /// # Errors
 /// Fails when the manifest cannot be read or a removal fails.
 pub fn uninstall(yes: bool, dry_run: bool) -> anyhow::Result<()> {
+    uninstall_with_settings(yes, dry_run, &crate::store::settings::standalone()?)
+}
+
+pub(crate) fn uninstall_with_settings(
+    yes: bool,
+    dry_run: bool,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> anyhow::Result<()> {
     let data = paths::data_dir()?;
     let data = if data.exists() {
         data.canonicalize().context("canonicalize data dir")?
@@ -217,7 +225,7 @@ pub fn uninstall(yes: bool, dry_run: bool) -> anyhow::Result<()> {
         )
     );
     println!("indexed projects:");
-    let projects = list_projects(&manifest.cache_root);
+    let projects = list_projects(&manifest.cache_root, settings);
     if projects.is_empty() {
         println!("  (none)");
     }
@@ -449,11 +457,14 @@ fn clear_stale_state(cache: &Path) {
     let _ = crate::platform::remove(&crate::platform::daemon_endpoint(cache));
 }
 
-fn list_projects(cache: &Path) -> Vec<String> {
+fn list_projects(
+    cache: &Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> Vec<String> {
     if !cache.join(crate::store::DB_FILE).exists() {
         return Vec::new();
     }
-    let Ok(db) = Db::open_readonly(cache) else {
+    let Ok(db) = Db::open_readonly_with_settings(cache, settings) else {
         return vec![format!("(cannot read {})", cache.display())];
     };
     match registry::list_projects(&db) {

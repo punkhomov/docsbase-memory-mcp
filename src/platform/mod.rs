@@ -37,7 +37,8 @@ pub use windows::{
 #[cfg(unix)]
 pub mod fs {
     pub use super::unix::{
-        available_space, open_private_log, secure_dir, secure_executable, secure_file,
+        available_space, open_private_log, open_readonly_nofollow, secure_dir, secure_executable,
+        secure_file,
     };
 }
 /// Private-path policy on Windows is best-effort (ADR-10: `%LOCALAPPDATA%`
@@ -45,7 +46,8 @@ pub mod fs {
 #[cfg(windows)]
 pub mod fs {
     pub use super::windows::{
-        available_space, open_private_log, secure_dir, secure_executable, secure_file,
+        available_space, open_private_log, open_readonly_nofollow, secure_dir, secure_executable,
+        secure_file,
     };
 }
 

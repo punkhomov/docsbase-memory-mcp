@@ -124,6 +124,24 @@ fn admission_lock_held(cache: &Path) -> bool {
 /// Returns [`Error::Admission`] when another daemon owns the cache, and
 /// IO/protocol errors otherwise.
 pub fn run_daemon(cache: &Path, grace: Duration) -> Result<()> {
+    run_daemon_with_settings(cache, grace, &crate::store::settings::standalone()?)
+}
+
+/// Runs a daemon with the controlling boundary's resolved storage policy.
+///
+/// # Errors
+/// Invalid policy is rejected before admission/state creation. Other errors
+/// match [`run_daemon`].
+pub fn run_daemon_with_settings(
+    cache: &Path,
+    grace: Duration,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> Result<()> {
+    use crate::config::schema::SettingsSpec;
+    crate::store::settings::DbSpec::validate(
+        settings.settings(),
+        &crate::config::schema::Capabilities::current(),
+    )?;
     let _lease = crate::daemon::admission::Lease::acquire(
         cache,
         &protocol::build_id(),
@@ -133,7 +151,7 @@ pub fn run_daemon(cache: &Path, grace: Duration) -> Result<()> {
         .enable_all()
         .build()
         .map_err(|err| Error::internal_with_source("build tokio runtime", err))?;
-    runtime.block_on(serve(cache, grace))
+    runtime.block_on(serve(cache, grace, settings))
 }
 
 /// Asks a running daemon to stop and waits for it to exit (FR-6).
@@ -205,7 +223,11 @@ pub fn daemon_pid(cache: &Path) -> Option<u32> {
     (pid_alive(state.pid) && socket_connectable(cache)).then_some(state.pid)
 }
 
-async fn serve(cache: &Path, grace: Duration) -> Result<()> {
+async fn serve(
+    cache: &Path,
+    grace: Duration,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> Result<()> {
     create_state_dir(cache)?;
     if is_running(cache) {
         return Err(Error::Admission {
@@ -226,7 +248,7 @@ async fn serve(cache: &Path, grace: Duration) -> Result<()> {
         .map_err(|err| Error::internal_with_source("chmod 0600 socket", err))?;
     write_state(cache)?;
 
-    let shared = crate::daemon::server::Shared::open(cache)?;
+    let shared = crate::daemon::server::Shared::open_with_settings(cache, settings)?;
     let result = accept_loop(shared, &listener, grace).await;
 
     if let Err(err) = platform::remove(&endpoint) {
@@ -632,5 +654,24 @@ mod tests {
             start_lock_path(cache).file_name().expect("name"),
             "daemon.start.lock"
         );
+    }
+}
+
+#[cfg(test)]
+mod store_policy_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_store_policy_leaves_admission_and_state_absent() {
+        let root = tempfile::tempdir().expect("root");
+        let cache = root.path().join("cache");
+        let valid = crate::store::settings::standalone().expect("policy");
+        let mut raw = valid.settings().clone();
+        raw.wal_attempts = 0;
+        let imported = crate::config::schema::Resolved::new(raw, valid.provenance().clone());
+        let error = run_daemon_with_settings(&cache, Duration::ZERO, &imported)
+            .expect_err("invalid settings must fail before admission");
+        assert!(matches!(error, Error::Admission { .. }));
+        assert!(!cache.exists());
     }
 }
