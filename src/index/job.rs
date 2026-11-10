@@ -362,9 +362,6 @@ pub(crate) fn run_incremental_checked(
     finish_plan(
         db, index, project.id, &mut plan, &removed, &mut stats, config,
     )?;
-    if index.was_recreated() {
-        index.mark_rebuilt()?;
-    }
     Ok(stats)
 }
 
