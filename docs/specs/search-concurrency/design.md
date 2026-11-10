@@ -266,3 +266,40 @@ delivery PR. S3.1 даёт основу FR-4: file lease и обнаружени
 citations/filter metadata, config/stages authority и warm/search adoption.
 S3.1 не выбирает числовую payload policy. S4 сохраняет ответственность за
 dispatcher cancellation/deadline/timing и включение параллелизма.
+
+## Delta 2026-11-10 — S3.2: owner policy и byte admission для payload
+
+Перед owned capture вводится отдельный чистый owner в `search::settings`:
+`SearchSettings`, `SearchPatch`, `SearchSpec: SettingsSpec`. Поля типа u64:
+`max_request_payload_bytes` и `max_retained_payload_bytes`, scope Daemon,
+unit Bytes. Оба положительны, первый не больше второго. Owner defaults:
+64MiB на один payload, 256MiB на удерживаемые payload одного budget instance.
+64MiB оставляет место для metadata при обычном window50 и default max_file_size
+1MiB, включая atomic fences; 256MiB — самостоятельная policy, не формула от
+capacity read pool. Это настраиваемые defaults, не fixed invariants или RSS SLA.
+
+`Config.search: SearchSettings` всегда полон. ConfigSpec один раз получает
+SearchSpec defaults при resolution, агрегирует owner field descriptors и
+делегирует overlay/validation. Только global `config.toml` принимает `[search]`
+с двумя optional patch fields; project table и typed project override
+отклоняются до runtime. Неизвестные поля/неверные числа отклоняются. Whole-value
+v1 hybrid merge и legacy JSON `docsbase config` не меняются: этот view пока
+показывает прежние поля; versioned effective view/provenance UI остаётся #78.
+Typed resolution сохраняет реальные provenance двух новых fields уже сейчас.
+Global policy меняется через существующий daemon restart; artifacts/vector
+identity и project invalidation от этих budgets не зависят.
+
+`search::budget::PayloadBudget::new(SearchSettings) -> Result<Self>` принимает
+полные settings, повторно валидирует imported value и не читает TOML/env/
+defaults. Clone разделяет один aggregate counter. `reserve(bytes)` проверяет
+request cap, checked sum и aggregate cap, возвращая private-field RAII
+`PayloadPermit`; ошибка — Admission без ожидания и без изменения counter.
+Permit не Clone/Copy, освобождается при drop/error/unwind, включая другой thread.
+Callbacks и providers не выполняются под mutex counter; ноль bytes допустим
+для пустого payload. Гарантия — charged owned bytes, не весь RSS/allocator,
+protocol buffers, ANN working sets, serde temporaries или executor (#79/#78).
+
+S3.2 не публикуется отдельно: до whole-S3 PR обязательны реальные consumers
+для SQL preflight/capture и production search/warm phase ownership. Нельзя
+выпустить принятые, но не применяемые настройки. S3.3 до реализации фиксирует
+состав/учёт payload, SQL snapshot/preflight и отсутствие provider text truncation.

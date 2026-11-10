@@ -1,0 +1,98 @@
+//! Pure owner of search payload limits; runtime consumers receive complete data.
+
+use crate::config::bootstrap::DefaultsContext;
+use crate::config::schema::{
+    ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Scope, SettingsSpec,
+    SourceId, Unit,
+};
+use crate::error::{Error, Result};
+
+/// Complete daemon-wide policy for owned candidate payloads, not process RSS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchSettings {
+    /// Maximum charged bytes for one captured request payload.
+    pub max_request_payload_bytes: u64,
+    /// Maximum charged bytes retained by concurrent payloads in one daemon.
+    pub max_retained_payload_bytes: u64,
+}
+
+/// Optional overrides in the global `[search]` table or a typed resolution.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchPatch {
+    /// Maximum charged bytes for one captured request payload.
+    pub max_request_payload_bytes: Option<u64>,
+    /// Maximum charged bytes retained by concurrent payloads in one daemon.
+    pub max_retained_payload_bytes: Option<u64>,
+}
+
+/// Owner of defaults, validation, field provenance and local policy impact.
+pub struct SearchSpec;
+
+impl SettingsSpec for SearchSpec {
+    type Patch = SearchPatch;
+    type Settings = SearchSettings;
+    type Defaults = SearchSettings;
+    const SCOPE: Scope = Scope::Daemon;
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::new(
+            "search.max_request_payload_bytes",
+            Scope::Daemon,
+            Unit::Bytes,
+        ),
+        FieldSpec::new(
+            "search.max_retained_payload_bytes",
+            Scope::Daemon,
+            Unit::Bytes,
+        ),
+    ];
+
+    fn defaults(_: &DefaultsContext) -> Self::Defaults {
+        SearchSettings {
+            max_request_payload_bytes: 64 * 1024 * 1024,
+            max_retained_payload_bytes: 256 * 1024 * 1024,
+        }
+    }
+
+    fn initial(defaults: &Self::Defaults) -> Self::Settings {
+        defaults.clone()
+    }
+
+    fn overlay(
+        settings: &mut Self::Settings,
+        patch: Self::Patch,
+        _: &Self::Defaults,
+        source: &SourceId,
+        origins: &mut Provenance,
+    ) -> Result<()> {
+        if let Some(value) = patch.max_request_payload_bytes {
+            settings.max_request_payload_bytes = value;
+            origins.set("search.max_request_payload_bytes", source)?;
+        }
+        if let Some(value) = patch.max_retained_payload_bytes {
+            settings.max_retained_payload_bytes = value;
+            origins.set("search.max_retained_payload_bytes", source)?;
+        }
+        Ok(())
+    }
+
+    fn validate(settings: &Self::Settings, _: &Capabilities) -> Result<()> {
+        if settings.max_request_payload_bytes == 0
+            || settings.max_retained_payload_bytes == 0
+            || settings.max_request_payload_bytes > settings.max_retained_payload_bytes
+        {
+            return Err(Error::Admission {
+                message: "search payload limits must be positive and max_request_payload_bytes must not exceed max_retained_payload_bytes".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn impact(
+        old: Option<&Self::Settings>,
+        next: &Self::Settings,
+        _: &ArtifactFacts,
+    ) -> ComponentImpact {
+        ComponentImpact::between(old, next)
+    }
+}

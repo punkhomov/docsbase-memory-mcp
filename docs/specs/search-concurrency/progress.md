@@ -121,3 +121,19 @@ passed, all13 stage hashes match. Ruling: test harness now always supplies the
 isolated fixture root; /tmp cloud .git markers must not merge test projects.
 Owned payload, byte policies, config authority and actual search/warm adoption
 remain future S3 tasks. One whole-S3 final review/native CI gate before its PR.
+Task S3.2: design ready, before implementation (basef2e762a). Новые budgets
+принадлежат SearchSpec и global parser; отдельный S3.2 PR не создаётся, до
+whole-S3 delivery должны появиться реальные consumers. Legacy config JSON
+сохраняется, versioned effective UI остаётся #78.
+Task S3.2: complete (basef2e762a..this task commit; owner/parser/byte permits).
+Fresh review PASS / APPROVED, no Critical/Important findings. Minor M1
+(duplicate inventory ID) fixed by separate implementer: payload rows I70/I71,
+all83 inventory IDs unique, earlier lexical I68/reference preserved; Rust
+unchanged. No outstanding minors. Full1017/0/13ignored across66targets,
+focused13/config68, lean71; full/lean all-target+opt-in Clippy/fmt/diff pass.
+Ruling: one final source documentation-line correction has exact full-file
+equivalence proof; functional tests were not repeated for a comment-only edit,
+final lint/format pin current source. SearchSpec impact and project inheritance
+also verified by source review using the existing common resolver contract.
+Actual SQL capture, data-before-permit drop order, production ownership and
+config authority remain future tasks; S3.2 is not independently shippable.

@@ -132,6 +132,18 @@ Literal retrieval defaults в `parse_search_args` и CLI — один будущ
 | I67 | local instance maps / model VERIFY_MEMO без отдельного size/TTL setting | local manager; D/Pr | закрытый registry ограничивает нынешние identities; перед hot reload расширенных settings нужны retained-handle accounting и bounded retention; R/E/I |
 | I66 | search active/pending, provider in-flight, interactive/background priorities, deadline context сейчас не определены как settings | executor/providers; D/Pr | owning #66/#79/#81 задают и тестируют до ввода consumers; не притворяться, что MAX_CONNECTIONS уже решает это |
 
+### Delta 2026-11-10 — #66 S3 owned payload policy
+
+| ID | Новые defaults / источник | Owner; scope | Validation / последствия |
+|---|---|---|---|
+| I70 | search.max_request_payload_bytes64MiB | search::settings::SearchSpec; D | >0, <=aggregate; global-only TOML/defaults/provenance, byte admission; без vector/index invalidation |
+| I71 | search.max_retained_payload_bytes256MiB | search::settings::SearchSpec; D | >0; shared RAII charge, checked sum; global restart по существующей policy; не RSS cap |
+
+Это сознательно введённые runtime policies, не заимствование wire frame limit.
+Они не вычисляются из read_pool capacity. S3.2 готовит owner/budget, реальные
+SQL/pipeline consumers обязательны до whole-S3 delivery. Старый config JSON
+остаётся legacy view; versioned full effective view принадлежит #78.
+
 Источники: [runtime](../../../src/hybrid/runtime.rs), [models](../../../src/hybrid/models.rs),
 [local](../../../src/hybrid/local.rs), `daemon/lifecycle.rs::run_daemon`,
 `hybrid/ann.rs::AnnIndex::build`. I63/I64 — видимый dependency-default debt,

@@ -118,3 +118,21 @@ before code. Existing S3/S4 boundaries remain in force.
   task reviewer. Whole-S3 final review и required native CI перед одним PR.
 - После S3.1 не объявлять FR-4/SC-4 или #66 завершёнными: owned payload,
   config authority, production adoption и S4 остаются отдельными шагами.
+
+## Delta 2026-11-10 — S3.2: component policy и shared byte permits
+
+- Создать `src/search/{mod,settings,budget}.rs`, подключить в `src/lib.rs`;
+  изменить `src/config/{mod,resolve}.rs`; дополнить settings inventory.
+- API/числа/scope — dated S3.2 design: owner defaults64MiB/256MiB,
+  `Config.search`, global-only table, pure owner/provenance и shared RAII budget.
+- RED до production: missing SearchSpec/SearchSettings/Config.search/budget API.
+  Проверить omitted/partial/full global policy, project/unknown/invalid отказ,
+  source/unit/scope, impact и неизменность legacy hybrid/config JSON.
+- Budget tests: на границе/за границей, aggregate contention с удерживаемыми
+  permits, clone sharing, release на error/unwind/other thread, checked overflow
+  без allocation, imported invalid settings и отсутствие изменения после отказа.
+- Consumer не выбирает defaults и не выполняет filesystem/network actions.
+  Новые payload settings применяются реальным pipeline до delivery whole S3.
+- Verify focused config/budget, полный cli-full, lean config/budget и нужные
+  integrations, full/lean all-target+opt-in Clippy/fmt/diff; свежий task review.
+  S3.3 owned SQL capture и последующая revision/pipeline adoption ещё не готовы.
