@@ -200,3 +200,15 @@ Ruling: первый targeted server run ошибочно использовал
 и получил fixture root0-docs; он не засчитан. Корректный /var/tmp run server9/0 и
 финальный полный suite подтверждают реализацию. Fresh CF2b task review pending;
 final whole-branch review и native required CI остаются delivery gates.
+CF2b fresh task review: Spec compliance PASS / Quality APPROVED; findings none.
+Reviewer проверил actual source всех10 opens/12 resolution sites, source hashes,
+64 full targets и lean counters без повторного прогона тестов. T55 M1 закрыт.
+Final whole-branch review и native final-head required CI следуют перед merge.
+CF2 final whole-branch review (2026-11-10): converged for scoped CF2,
+no unmet scoped requirements, Critical/Important/Minor none. Actual policy flows,
+all12 resolver sites/10 metadata opens, taskA/B evidence and product hashes checked
+independently; no tests rerun by reviewers. File activation/read pool/whole-generation
+publication remain explicitly future scope, so #78/#66 are not closed by this PR.
+Final product equals validated74de58d; this commit adds factual ledger only.
+Delivery gate: latest-head docs/linux/macos/windows must all succeed; native artifact
+inventories and pinned squash SHA are recorded in the PR before/after merge.
