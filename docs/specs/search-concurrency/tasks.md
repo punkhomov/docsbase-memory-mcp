@@ -49,3 +49,32 @@ strategy, bounds and regression tests require dated delta before implementation.
 FR-6/FR-7/SC-5 plus all native regression gates. Document synchronous provider
 boundary honestly; integrate request deadline and additive explain telemetry.
 Concrete wire fields/accounting/tests require dated delta before implementation.
+
+## Delta 2026-11-10 — S2a and S2b execution order
+
+### S2a — coalesce query embeddings
+
+- Create `src/hybrid/{work,flight}.rs`; modify `src/hybrid/{mod,dense}.rs` and
+  `src/daemon/tools.rs`; append fixed wake-cardinality exception to settings inventory.
+- Consumes existing completed QueryCache/model identity, Embedder and blocking seam.
+- Produces `Cancellation::{new,cancel,check}`, internal Flights run/cache-recheck
+  API, `DenseCache::query_embedding(&dyn Embedder, &str, &Cancellation)` returning
+  shared Arc<[f32]>. Cold dense rows and daemon routing are unchanged.
+- RED first: four gated misses one provider call/Arc identity; error wakes
+  waiters and retry succeeds; cancellation of one waiter/leader preserves live
+  participant result; panic wakes/removes/retries; different model keys do not
+  coalesce. Confirm `blocking::enter` leaks its flag on unwind, then fix via RAII.
+- Test-only per-instance join observer confirms registration without sleep.
+  Unit tests inspect no retired flights/subscriptions after completion/cancel.
+- Verify focused flight/query/blocking tests and actual dense search core, full
+  cli-full, lean hybrid/config tests, full/lean Clippy/fmt/diff. Cargo feature
+  builds execute sequentially when sharing target/debug/docsbase.
+- Fresh task review; final source review and required CI before its PR merge.
+  FR-5 query subset/SC-3 subset only; #66 stays open.
+
+### S2b — coalesce cold dense initialization (after S2a)
+
+Reuse Flights, admit before full metadata/hash/vector copies, provide lazy
+metadata-loader API for S3 pool ownership, preserve ANN slot/accounting contracts.
+Settle generation/config publication authority in a dated design/task delta
+before code. Existing S3/S4 boundaries remain in force.

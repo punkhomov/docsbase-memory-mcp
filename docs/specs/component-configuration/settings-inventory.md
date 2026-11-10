@@ -189,3 +189,11 @@ provenance проходят CLI/lifecycle/Shared; file keys по-прежнем�
 Pool acquisition не имеет hidden constant: caller передаёт абсолютный deadline.
 Read handles используют I19 explicit read_busy_timeout; dispatcher adoption и
 request deadline policy остаются следующими task #66.
+
+## Delta 2026-11-10 — S2a wake protocol invariant
+
+X14: a singleflight participant has at most one pending wake notification.
+The channel capacity1 coalesces completion/cancellation wakeups; published state
+is authoritative and is checked after waking. This is message-protocol cardinality,
+not a configurable request/work/memory budget. Active subscriptions/flights retire
+on drop/completion; no persistent failed-flight cache or hidden deadline is added.
