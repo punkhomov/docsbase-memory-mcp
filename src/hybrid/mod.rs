@@ -16,10 +16,12 @@ pub mod ann_store;
 pub mod config;
 pub mod dense;
 pub mod dense_settings;
+mod flight;
 pub mod jobs;
 pub mod meta;
 pub mod provider;
 pub mod rrf;
+pub mod work;
 
 #[cfg(feature = "hybrid-local")]
 pub mod local;
@@ -68,6 +70,17 @@ pub mod blocking {
 
     use super::IN_BLOCKING;
 
+    struct ContextReset<'a> {
+        flag: &'a Cell<bool>,
+        previous: bool,
+    }
+
+    impl Drop for ContextReset<'_> {
+        fn drop(&mut self) {
+            self.flag.set(self.previous);
+        }
+    }
+
     /// Runs `f` marked as a blocking context.
     ///
     /// Call this from a plain thread or from inside `spawn_blocking`; never
@@ -79,10 +92,11 @@ pub mod blocking {
     /// Propagates `f`'s error unchanged.
     pub fn enter<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
         IN_BLOCKING.with(|flag| {
-            let outer = flag.replace(true);
-            let result = f();
-            flag.set(outer);
-            result
+            let _reset = ContextReset {
+                flag,
+                previous: flag.replace(true),
+            };
+            f()
         })
     }
 
@@ -93,5 +107,44 @@ pub mod blocking {
     #[must_use]
     pub fn in_context() -> bool {
         IN_BLOCKING.with(Cell::get)
+    }
+}
+
+#[cfg(test)]
+mod blocking_tests {
+    use super::blocking;
+    use crate::error::Result;
+
+    #[test]
+    fn blocking_context_is_restored_after_provider_unwind() {
+        // Isolate the old leaked thread-local flag from the test harness.
+        std::thread::spawn(|| {
+            assert!(!blocking::in_context());
+            let failed = std::panic::catch_unwind(|| {
+                let _: Result<()> = blocking::enter(|| panic!("provider unwind"));
+            });
+            assert!(failed.is_err());
+            assert!(
+                !blocking::in_context(),
+                "provider unwind must restore context"
+            );
+        })
+        .join()
+        .expect("context test");
+    }
+
+    #[test]
+    fn nested_provider_unwind_restores_outer_context() {
+        blocking::enter(|| {
+            assert!(blocking::in_context());
+            let failed = std::panic::catch_unwind(|| {
+                let _: Result<()> = blocking::enter(|| panic!("nested provider unwind"));
+            });
+            assert!(failed.is_err());
+            assert!(blocking::in_context());
+            Ok(())
+        })
+        .expect("outer context");
+        assert!(!blocking::in_context());
     }
 }

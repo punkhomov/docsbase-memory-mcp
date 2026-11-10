@@ -86,3 +86,77 @@ including explicit sync/rebuild consistency choice. S4: cancellation and queue
 telemetry at actual async dispatch boundary, same-project integration and native
 acceptance. These tasks require dated concrete interface deltas before code;
 S1 alone is not feature convergence or issue closure.
+
+## Delta 2026-11-10 — S2a query embedding singleflight
+
+S2 is split into S2a (query embeddings/cancellation primitive) and S2b (cold dense
+loads). This delta settles S2a before code; daemon search remains serial until S3.
+FR-5/SC-3 apply to identical query work, FR-6 applies to explicit waiter cancellation.
+Request deadlines/dispatch cancellation remain S4, cold rows remain S2b.
+
+- `hybrid::work::Cancellation` is a cloneable request-state token, initially
+  active; `cancel` is permanent and wakes subscribed waiters. It has no timing
+  budget/default. Request timeout ownership and deadline-aware dispatch remain S4.
+- Private `hybrid::flight::Flights<K,T:Clone>` owns only active flights. Key
+  admission and cache recheck are short mutex phases; work runs outside all
+  registry/cache locks. Leader and waiters share one result without cloning
+  vectors. There is no persistent error cache or retired-key history.
+- Each participant owns an Arc wake node with a one-slot coalescing notification
+  channel. Completion and cancellation publish state before nonblocking wake;
+  waiters recheck both states after wake. Channel capacity1 is the invariant
+  "one pending wake", not a tunable work/memory budget. Weak subscriptions are
+  removed on drop; cancel/remove cannot leave an accumulating waiter list.
+- A leader RAII guard publishes failure and removes its matching flight during
+  unwind. Provider panic keeps unwinding for its caller; other waiters receive an
+  explicit failure and a later call can retry. Normal failures preserve category,
+  message, instruction and source chain via a shared original Error wrapper.
+- Cancelling one participant does not cancel remaining participants. Before
+  starting shared work, the flight checks that at least one participant is active.
+  Already running synchronous provider work may finish and populate the pure
+  query cache for live waiters; a cancelled caller receives cancellation and
+  starts no following phase through the controlled API. No provider interrupt
+  or absolute end-to-end deadline is claimed by S2a.
+- `DenseCache::query_embedding(embedder, text, &Cancellation)` checks the
+  completed LRU, then joins/creates flight `(model_id, blake3(text))`. Recheck the
+  completed cache while admitting a leader so a delayed miss cannot duplicate a
+  just-finished call. Only the leader calls `blocking::enter(embed_query)` and
+  stores the vector. Existing cache limits, keys, hit/miss lookup semantics and
+  eviction remain unchanged; all coalesced misses still count as lookup misses.
+- Query flights are shared alongside the query cache by `sharing_query_cache`
+  and snapshots; cold row flights are separate S2b work. Model identity is the
+  existing stable recipe/width/normalization identity contract; generation does
+  not alter a pure query embedding. Model replacement uses a distinct key.
+- `tools::dense_candidates` adopts this API with a fresh operation token under
+  its existing legacy search entry point. S4 will wire actual request cancellation
+  into the controlled pipeline. There is no new config timeout selected here.
+- `blocking::enter` becomes RAII so panic cannot leave a reused worker thread
+  permanently marked as sanctioned. Test the existing defect RED before fixing.
+
+Tests use gated fake Embedders and instance-local flight join observers (test-only)
+to prove four simultaneous misses are already admitted before releasing one
+provider call. Verify identical Arc results, errors/retry, cancelled waiter/leader,
+unwind wake/retry, distinct models, completed-cache sharing and no retired flights.
+No new crates/unsafe, provider/window/ranking/baseline change or CI sleep/SLA.
+Cold generation/config publication authorization is not claimed here; S2b/S3
+must settle it before daemon concurrency. Active flight cardinality follows
+active callers, not a new persistent cache; S4 retains daemon admission ownership
+through detached blocking work before parallel dispatch is enabled.
+
+## Delta 2026-11-10 — S2a I1: отмена перед provider admission
+
+Терминальное состояние `Completion::Abandoned` отделено от результата provider:
+если leader до начала work не видит активных участников, flight снимается с
+registry без provider call. Live caller, уже выбравший этот flight или
+зарегистрировавшийся до его удаления, повторяет admission, проверку своей отмены
+и completed-cache recheck. Поэтому отмена прежних участников не превращается в
+ошибку нового live caller; настоящий `Error::Admission` от provider остаётся
+обычным общим результатом и автоматически не повторяется.
+
+Внутренний `run` заимствует key, cache callback допускает повторный вызов
+(`FnMut`), expensive work остаётся `FnOnce`. Регистрация wake после удаления
+flight безопасна: caller читает опубликованный `Abandoned` без ожидания
+пропущенного notification.
+Повторное admission не держит старый membership; registry/cache/notification
+mutex не удерживаются через provider. Детерминированные instance-local gates
+проверяют admission после no-active decision, выбор до регистрации, регистрацию
+после retirement, cache recheck и отсутствие вызова при полной отмене.

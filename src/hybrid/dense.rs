@@ -20,10 +20,16 @@ use std::time::{Duration, Instant};
 use crate::error::{Error, Result};
 use crate::hybrid::ann::{self, ANN_MIN_VECTORS, AnnIndex};
 use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore};
+use crate::hybrid::flight::Flights;
 use crate::hybrid::meta::{AnnOutcome, AnnState};
+use crate::hybrid::work::Cancellation;
 use crate::store::Db;
 use crate::store::repo;
 use crate::vector_cache::{CacheLimits, VectorCache};
+
+#[cfg(test)]
+#[path = "query_flight_tests.rs"]
+mod query_flight_tests;
 
 /// Hard per-project cap on cached vectors (DELTA-7): above it the cache
 /// refuses to build and callers stream the scan instead.
@@ -409,6 +415,7 @@ struct QueryCache {
     bytes: u64,
     hits: u64,
     misses: u64,
+    flights: Arc<Flights<QueryKey, Arc<[f32]>>>,
 }
 
 /// Per-project dense cache keyed by `(index generation, model_id)` with an
@@ -436,7 +443,7 @@ pub struct DenseCache {
 pub struct QueryCacheStats {
     /// Lookups served without the provider.
     pub hits: u64,
-    /// Lookups that had to call the provider.
+    /// Lookups not served by the completed cache (including coalesced misses).
     pub misses: u64,
     /// Cached vectors.
     pub entries: usize,
@@ -582,22 +589,71 @@ impl DenseCache {
         None
     }
 
+    /// A completed cached query vector or one shared in-flight embedding.
+    /// Cancellation affects this caller, not other live participants; an
+    /// already running synchronous provider call is allowed to finish.
+    ///
+    /// # Errors
+    /// Returns caller cancellation or the provider error with its category and
+    /// source chain. Leader unwind wakes waiters but keeps unwinding itself.
+    pub fn query_embedding(
+        &self,
+        embedder: &dyn crate::vector_cache::Embedder,
+        text: &str,
+        cancellation: &Cancellation,
+    ) -> Result<Arc<[f32]>> {
+        cancellation.check()?;
+        let model_id = embedder.model_id();
+        if let Some(cached) = self.query_vector(model_id, text) {
+            cancellation.check()?;
+            return Ok(cached);
+        }
+        let key = (model_id.to_owned(), crate::vector_cache::chunk_hash(text));
+        let flights = Arc::clone(&self.lock_query_cache().flights);
+        flights.run(
+            &key,
+            cancellation,
+            || {
+                self.lock_query_cache()
+                    .entries
+                    .get(&key)
+                    .map(|(vector, _)| Arc::clone(vector))
+            },
+            || {
+                let vector: Arc<[f32]> = Arc::from(crate::hybrid::blocking::enter(|| {
+                    embedder.embed_query(text)
+                })?);
+                let bytes =
+                    u64::try_from(std::mem::size_of_val(vector.as_ref())).unwrap_or(u64::MAX);
+                Ok(self
+                    .cache_query(key.clone(), bytes, || Arc::clone(&vector))
+                    .unwrap_or(vector))
+            },
+        )
+    }
+
     /// Stores a query vector, evicting least-recently-used entries until both
     /// limits hold (`search-cost` FR-2).
     pub fn store_query_vector(&self, model_id: &str, text: &str, vector: &[f32]) {
-        if vector.is_empty() {
-            return;
-        }
         let key = (model_id.to_owned(), crate::vector_cache::chunk_hash(text));
         let bytes = u64::try_from(std::mem::size_of_val(vector)).unwrap_or(u64::MAX);
-        if bytes > QUERY_CACHE_MAX_BYTES {
-            return;
+        self.cache_query(key, bytes, || Arc::from(vector));
+    }
+
+    fn cache_query(
+        &self,
+        key: QueryKey,
+        bytes: u64,
+        make: impl FnOnce() -> Arc<[f32]>,
+    ) -> Option<Arc<[f32]>> {
+        if bytes == 0 || bytes > QUERY_CACHE_MAX_BYTES {
+            return None;
         }
         let mut cache = self.lock_query_cache();
-        if cache.entries.contains_key(&key) {
-            return;
+        if let Some((vector, _)) = cache.entries.get(&key) {
+            return Some(Arc::clone(vector));
         }
-        let arc: std::sync::Arc<[f32]> = std::sync::Arc::from(vector);
+        let arc = make();
         while (!cache.entries.is_empty() && cache.entries.len() >= QUERY_CACHE_MAX_ENTRIES)
             || cache.bytes.saturating_add(bytes) > QUERY_CACHE_MAX_BYTES
         {
@@ -610,7 +666,8 @@ impl DenseCache {
         }
         cache.bytes = cache.bytes.saturating_add(bytes);
         cache.order.push_back(key.clone());
-        cache.entries.insert(key, (arc, bytes));
+        cache.entries.insert(key, (Arc::clone(&arc), bytes));
+        Some(arc)
     }
 
     /// A cache with fresh row/ANN state that **shares** this one's query cache

@@ -115,13 +115,10 @@ fn dense_candidates(
     // is a pure function of both, so this cannot change the answer
     // (`search-cost` FR-1/FR-3).
     let model_id = embedder.model_id();
-    let vector = if let Some(cached) = dense.query_vector(model_id, query) {
-        cached.to_vec()
-    } else {
-        let fresh = blocking::enter(|| embedder.embed_query(query))?;
-        dense.store_query_vector(model_id, query, &fresh);
-        fresh
-    };
+    // Legacy search entry points start a fresh operation; daemon cancellation
+    // wiring follows in #66 S4. No new timeout/default is selected here.
+    let vector =
+        dense.query_embedding(embedder, query, &crate::hybrid::work::Cancellation::new())?;
     let rows = dense.get(db, project.id, model_id)?;
     match rows {
         DenseRows::Ready(index) => {
