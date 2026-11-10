@@ -620,6 +620,21 @@ pub fn project_counts(conn: &Connection, project_id: i64) -> Result<ProjectCount
     .map_err(db_error)
 }
 
+/// Whether an unfinished index publication left document crash markers for
+/// this project. Callers must separately resolve/validate the project and own
+/// the cooperative project read lease when using this as a search admission gate.
+///
+/// # Errors
+/// Returns the underlying query error; does not open a connection or transaction.
+pub fn has_pending_docs(conn: &Connection, project_id: i64) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM docs WHERE project_id = ?1 AND content_hash = '')",
+        [project_id],
+        |row| row.get(0),
+    )
+    .map_err(db_error)
+}
+
 /// Finished sync jobs retained per project (T46).
 pub const MAX_SYNC_JOBS: usize = 50;
 
@@ -832,6 +847,45 @@ mod tests {
     use crate::daemon::registry;
     use crate::store::Db;
     use tempfile::TempDir;
+
+    #[test]
+    fn pending_docs_follow_the_crash_marker_lifecycle() {
+        let cache = TempDir::new().expect("cache");
+        let root = TempDir::new().expect("root");
+        let mut db = Db::open(cache.path()).expect("db");
+        let project = registry::ensure_project(&mut db, root.path())
+            .expect("project")
+            .id;
+        assert!(!has_pending_docs(db.connection(), project).expect("empty"));
+        let doc = insert_pending_doc(db.connection(), project, "a.md", "a.md").expect("pending");
+        assert!(has_pending_docs(db.connection(), project).expect("pending marker"));
+        db.connection()
+            .execute("UPDATE docs SET content_hash='ready' WHERE id=?1", [doc])
+            .expect("published");
+        assert!(!has_pending_docs(db.connection(), project).expect("published"));
+        invalidate_doc(db.connection(), doc).expect("invalidate");
+        assert!(has_pending_docs(db.connection(), project).expect("invalidated marker"));
+        delete_doc(db.connection(), doc).expect("delete");
+        assert!(!has_pending_docs(db.connection(), project).expect("removed marker"));
+    }
+
+    #[test]
+    fn pending_docs_are_scoped_to_the_requested_project() {
+        let cache = TempDir::new().expect("cache");
+        let first = TempDir::new().expect("first root");
+        let second = TempDir::new().expect("second root");
+        let mut db = Db::open(cache.path()).expect("db");
+        let first = registry::ensure_project(&mut db, first.path())
+            .expect("first project")
+            .id;
+        let second = registry::ensure_project(&mut db, second.path())
+            .expect("second project")
+            .id;
+        insert_pending_doc(db.connection(), second, "a.md", "a.md").expect("pending");
+        assert!(!has_pending_docs(db.connection(), first).expect("unaffected project"));
+        assert!(has_pending_docs(db.connection(), second).expect("pending project"));
+        assert!(!has_pending_docs(db.connection(), second + 1).expect("no such project"));
+    }
 
     #[test]
     fn sync_jobs_retention_keeps_recent() {

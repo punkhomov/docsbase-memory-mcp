@@ -106,3 +106,18 @@ Ruling: identical-work coalescing and generation ordering are delivered here;
 config-revision authority, coherent cross-store payload ownership and daemon
 concurrency remain S3/S4. Latest-head native CI and whole-slice final review
 are still delivery gates. #66 remains open.
+Task S3.1: design ready, before implementation (base d7bb9dc, S2b PR110 CI
+pending). Local tasks compose one eventual S3 PR; rebase onto the S2b squash
+before delivery. No S3.1 implementation or coherent response claim yet.
+S2b delivery: PR110 squash feb8df2, tree equal to reviewed d7bb9dc. Native
+CI42823301698 passed docs/linux/macOS/Windows: 996+2artifact/992/977,
+zero failures/13ignored, +20 tests each OS/no removed. Post-merge main
+CI42825623847 also passed. #66 remains open.
+Task S3.1: complete (basefeb8df2..this task commit; shared project lease and
+pending-doc predicate only). Fresh review PASS / APPROVED, no findings/minors.
+Final cli-full1004/0/13ignored across65targets; focused readers6/pending2/
+writer integrations23; lean6+2+11. Full/lean all-target+opt-in Clippy and fmt/diff
+passed, all13 stage hashes match. Ruling: test harness now always supplies the
+isolated fixture root; /tmp cloud .git markers must not merge test projects.
+Owned payload, byte policies, config authority and actual search/warm adoption
+remain future S3 tasks. One whole-S3 final review/native CI gate before its PR.

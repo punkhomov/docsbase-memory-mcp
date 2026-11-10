@@ -100,3 +100,21 @@ before code. Existing S3/S4 boundaries remain in force.
   then fresh task/final reviews and latest-head four required native checks.
 - FR-5 cold/generation subset complete only; config revision publication and
   coherent Tantivy/citation capture remain S3. #66 stays open.
+
+## Delta 2026-11-10 — S3.1: read barrier и crash-marker predicate
+
+- Изменить `src/daemon/lifecycle.rs`, `src/store/repo.rs`; добавить локальные
+  lease tests в `src/daemon/project_read_tests.rs`. FR-4 foundation only.
+- API: `with_project_read_lease(cache, project_id, FnOnce()->Result<T>)` и
+  `repo::has_pending_docs(&Connection, project_id)->Result<bool>`.
+- RED: реальные shared/shared, shared/exclusive, exclusive/shared locks;
+  освобождение reader при error/unwind и независимость разных проектов.
+  Настоящий SQLite: empty/ready/pending, изоляция проектов, cleanup/удаление
+  marker. Сначала подтвердить ошибки отсутствующего API.
+- GREEN: fail-fast shared lock по существующему writer path, без provider/
+  migration/default timeout. Predicate только читает переданный connection.
+- Проверки: focused units, существующие writer admission/watch retry tests,
+  полный cli-full, lean relevant tests, full/lean Clippy и fmt/diff. Свежий
+  task reviewer. Whole-S3 final review и required native CI перед одним PR.
+- После S3.1 не объявлять FR-4/SC-4 или #66 завершёнными: owned payload,
+  config authority, production adoption и S4 остаются отдельными шагами.

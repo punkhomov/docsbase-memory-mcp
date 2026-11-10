@@ -233,3 +233,36 @@ S2a lifecycle. Verify warm rechecks Ready coverage and stays idempotent for
 Building/Ann. Pause old generation work, install newer state, then finish old:
 new cache slot remains; no obsolete background build. Preserve #69/#73 tests,
 golden/offline/replay and full/lean/native gates. No sleep/performance SLA.
+
+## Delta 2026-11-10 — S3.1: общая read-аренда проекта
+
+S3 состоит из нескольких локальных задач с отдельным review перед одним
+delivery PR. S3.1 даёт основу FR-4: file lease и обнаружение незавершённой
+публикации. Поисковый pipeline, ownership provider-фаз и dispatcher пока прежние;
+готового согласованного ответа и параллельного поиска этот шаг не обещает.
+
+- `lifecycle::with_project_read_lease(cache, project_id, work) -> Result<T>`
+  открывает тот же `projects/<id>/.writer.lock`, что production full index и
+  watcher. fd_lock shared guard существует только во время `work`. Несколько
+  readers совместимы; writer вызывает немедленный Project error с retry hint.
+  Нет очереди, sleep или скрытого timeout. Guard/file освобождаются при success,
+  error и unwind. Provider нельзя вызывать внутри `work`.
+- Writer lease и его прежняя классификация конфликтов сохраняются. Проверка
+  использует настоящие OS locks с отдельными handles, включая один процесс;
+  daemon-only mutex не заменяет межпроцессную координацию.
+- `repo::has_pending_docs(connection, project_id) -> Result<bool>` использует
+  SQL EXISTS для docs этого проекта с пустым content_hash. Не открывает
+  connection/transaction. Отсутствующий проект не считается проиндексированным:
+  будущая preparation сначала проверяет project/status, затем этот predicate
+  и существующие ReadIndex schema/rebuild gates под общей read-арендой.
+- Marker нужен после crash, освобождающего writer lock: production выполняет
+  marker SQL -> provider -> Tantivy -> final SQL. SQLite snapshot не делает
+  эти commits атомарными. S3.1 лишь предоставляет predicate; применение будет
+  в owned preparation. Произвольный writer, обходящий lease, вне cooperative
+  protocol; низкоуровневые public index jobs требуют координации от caller,
+  как уже делают production wrappers.
+
+Следующие S3-задачи до реализации фиксируют byte limits owned candidate text,
+citations/filter metadata, config/stages authority и warm/search adoption.
+S3.1 не выбирает числовую payload policy. S4 сохраняет ответственность за
+dispatcher cancellation/deadline/timing и включение параллелизма.
