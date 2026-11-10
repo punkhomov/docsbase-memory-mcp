@@ -28,7 +28,8 @@ use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 use crate::platform::Stream;
 use crate::store::Db;
 use crate::store::migrations;
-use crate::store::settings::DbSettings;
+use crate::store::read_pool::ReadPool;
+use crate::store::settings::{DbSettings, ReadPoolSettings};
 use crate::watch::Watchers;
 
 /// Daemon state shared by all connections.
@@ -39,6 +40,7 @@ pub struct Shared {
     // Independent of the DB mutex: child construction never waits for a query
     // just to obtain its startup policy.
     db_settings: Resolved<DbSettings>,
+    readers: ReadPool,
     /// Live sessions.
     pub sessions: SessionRegistry,
     /// Per-project filesystem watchers (FR-15).
@@ -68,7 +70,7 @@ struct ProjectState {
 
 impl Shared {
     /// Opens the registry database and prepares shared state.
-    /// Compatibility adapter; production passes policy to [`Self::open_with_settings`].
+    /// Compatibility adapter; production passes policies to [`Self::open_with_policies`].
     ///
     /// # Errors
     /// Returns [`Error::Internal`]/[`Error::Admission`] from [`Db::open`].
@@ -76,12 +78,37 @@ impl Shared {
         Self::open_with_settings(cache, &crate::store::settings::standalone()?)
     }
 
-    /// Constructs shared state with a complete caller-supplied storage policy.
+    /// Compatibility adapter with explicit DB policy and owner-resolved pool policy.
     ///
     /// # Errors
     /// Returns storage, configuration and startup errors as in [`Self::open`].
     pub fn open_with_settings(cache: &Path, settings: &Resolved<DbSettings>) -> Result<Arc<Self>> {
+        Self::open_with_policies(
+            cache,
+            settings,
+            &crate::store::settings::standalone_read_pool()?,
+        )
+    }
+
+    /// Constructs writer and prepared readers using explicit owner policies.
+    /// Compatibility adapters resolve omitted policies; production calls here.
+    ///
+    /// # Errors
+    /// Invalid policies are rejected before filesystem access. Other failures
+    /// match [`Self::open_with_settings`], including reader preparation errors.
+    pub fn open_with_policies(
+        cache: &Path,
+        settings: &Resolved<DbSettings>,
+        pool_settings: &Resolved<ReadPoolSettings>,
+    ) -> Result<Arc<Self>> {
+        use crate::config::schema::{Capabilities, SettingsSpec};
+        crate::store::settings::DbSpec::validate(settings.settings(), &Capabilities::current())?;
+        crate::store::settings::ReadPoolSpec::validate(
+            pool_settings.settings(),
+            &Capabilities::current(),
+        )?;
         let db = Db::open_with_settings(cache, settings)?;
+        let readers = ReadPool::prepare(cache, settings, pool_settings)?;
         let orphans = crate::store::repo::fail_orphan_sync_jobs(db.connection())?;
         if orphans > 0 {
             eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
@@ -105,6 +132,7 @@ impl Shared {
             cache: cache.to_path_buf(),
             db: Mutex::new(db),
             db_settings: settings.clone(),
+            readers,
             sessions: SessionRegistry::new(),
             watchers: Arc::new(Watchers::new()),
             stopping: AtomicBool::new(false),
@@ -120,6 +148,13 @@ impl Shared {
             Err(err) => eprintln!("warning: cannot start watchers: {err}"),
         }
         Ok(shared)
+    }
+
+    /// Prepared metadata readers, independent of the writer mutex. Search
+    /// adoption follows the request-snapshot/singleflight work in #66.
+    #[must_use]
+    pub const fn read_pool(&self) -> &ReadPool {
+        &self.readers
     }
 
     fn db(&self) -> MutexGuard<'_, Db> {
@@ -1242,6 +1277,55 @@ mod tests {
             .pragma_query_value(None, "busy_timeout", |row| row.get(0))
             .expect("timeout");
         assert_eq!(timeout, 17);
+    }
+
+    #[test]
+    fn configured_pool_policy_reaches_prepared_readers() {
+        use crate::config::bootstrap::DefaultsContext;
+        use crate::config::resolve::resolve_component;
+        use crate::config::schema::SourceId;
+        use crate::store::settings::{ReadPoolPatch, ReadPoolSpec};
+        let cache = tempfile::tempdir().expect("cache");
+        let policy = configured_db_policy();
+        let pool = resolve_component::<ReadPoolSpec>(
+            &DefaultsContext::standalone(),
+            [(
+                SourceId::Cli,
+                ReadPoolPatch {
+                    max_connections: Some(1),
+                },
+            )],
+        )
+        .expect("pool policy");
+        let shared = Shared::open_with_policies(cache.path(), &policy, &pool).expect("shared");
+        assert_eq!(shared.read_pool().settings(), &pool);
+        let reader = shared
+            .read_pool()
+            .acquire(Instant::now() + Duration::from_secs(300))
+            .expect("reader");
+        let timeout: u32 = reader
+            .connection()
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .expect("timeout");
+        assert_eq!(timeout, 29);
+        assert!(
+            reader
+                .connection()
+                .execute_batch("CREATE TABLE denied (id INTEGER)")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn invalid_pool_policy_does_not_open_shared_writer() {
+        let root = tempfile::tempdir().expect("root");
+        let cache = root.path().join("cache");
+        let valid = crate::store::settings::standalone_read_pool().expect("pool policy");
+        let mut raw = valid.settings().clone();
+        raw.max_connections = 0;
+        let imported = Resolved::new(raw, valid.provenance().clone());
+        assert!(Shared::open_with_policies(&cache, &configured_db_policy(), &imported).is_err());
+        assert!(!cache.exists());
     }
 
     #[test]

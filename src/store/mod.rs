@@ -3,6 +3,7 @@
 mod inspect;
 pub mod migrations;
 pub mod models;
+pub mod read_pool;
 /// Document and chunk repository helpers (part of the public core surface).
 pub mod repo;
 pub mod settings;

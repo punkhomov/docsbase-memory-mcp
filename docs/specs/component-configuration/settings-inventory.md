@@ -180,3 +180,12 @@ constructors — compatibility path к одному resolver, не вторая 
 | ID | Значения / источник | Почему fixed |
 |---|---|---|
 | X13 | SQLite main header100B, magic, user_version offset60/schema_cookie40, page-size encoding1=65536, legal512..65536 powers-of-two, payload fractions64/32/32; `sqlite-schema-v1` identity prefix | SQLite file-format invariants и versioned observation identity. Это не work/memory budget: inspector читает ровно header, не всю DB. WAL/SHM/journal filenames — storage compatibility X09. Их наличие не даёт trust main-only identity |
+
+## Delta 2026-11-10 — #66 S1 reader pool
+
+`read_pool.max_connections` (owner ReadPoolSpec, daemon scope, count >0, default4)
+теперь ограничивает startup prepared readonly connections. Typed overrides и
+provenance проходят CLI/lifecycle/Shared; file keys по-прежнему отвергаются.
+Pool acquisition не имеет hidden constant: caller передаёт абсолютный deadline.
+Read handles используют I19 explicit read_busy_timeout; dispatcher adoption и
+request deadline policy остаются следующими task #66.

@@ -17,6 +17,14 @@ pub fn standalone() -> Result<Resolved<DbSettings>> {
     crate::config::resolve::resolve_component::<DbSpec>(&DefaultsContext::standalone(), [])
 }
 
+/// Resolves the standalone reader policy at an explicit composition boundary.
+///
+/// # Errors
+/// Returns an admission error if owner defaults are invalid.
+pub fn standalone_read_pool() -> Result<Resolved<ReadPoolSettings>> {
+    crate::config::resolve::resolve_component::<ReadPoolSpec>(&DefaultsContext::standalone(), [])
+}
+
 /// Complete metadata DB policy, passed explicitly to connection constructors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbSettings {
@@ -123,16 +131,16 @@ impl SettingsSpec for DbSpec {
     }
 }
 
-/// Complete readpool policy; runtime adoption follows in the owning task.
+/// Complete prepared metadata reader policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadPoolSettings {
-    /// Maximum connections in the future #66 bounded read pool.
+    /// Maximum prepared connections in the #66 bounded read pool.
     pub max_connections: usize,
 }
 /// Explicit typed overrides; these are not accepted TOML keys yet.
 #[derive(Debug, Clone, Default)]
 pub struct ReadPoolPatch {
-    /// Maximum connections in the future #66 bounded read pool.
+    /// Maximum prepared connections in the #66 bounded read pool.
     pub max_connections: Option<usize>,
 }
 /// Component owner of defaults, scope and admission.

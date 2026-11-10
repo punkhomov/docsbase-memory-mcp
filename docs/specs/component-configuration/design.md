@@ -401,3 +401,14 @@ immutable=1 на active/WAL DB может скрыть committed WAL и запр
 бы scope/unsafe/dependencies и не нужны для bounded schema facts. Консервативный
 Unknown допустим, если стабильное наблюдение невозможно. Schema mismatch — facts,
 а не вызов conflict::record; Query-ready проверка остаётся отдельной.
+
+## Delta 2026-11-10 — #66 S1 prepared reader adoption
+
+ReadPoolSpec теперь потребляется startup pool `store::read_pool::ReadPool`: ровно
+resolved max_connections operational readonly handles, без query-time opens или
+миграций. CLI передаёт DbSettings + ReadPoolSettings явно через lifecycle/Shared;
+старые public signatures — compatibility adapters. Owner default4 не дублируется.
+Acquire получает абсолютный deadline caller, собственного wait default нет.
+S1 не меняет dispatcher/search concurrency: short phases/snapshot/singleflight
+принадлежат оставшимся task #66. TOML activation остаётся CF3/CF5. Детали и
+acceptance: `../search-concurrency/{requirements,design,tasks}.md`, S1/SC-1.
