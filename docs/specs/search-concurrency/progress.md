@@ -334,6 +334,33 @@ S4 transport/timer/EOF/original retry budget/actual-job+reply+connection account
 queue diagnostics/product docs and whole-feature final review/native remain;
 PR112 stays draft and #66 remains open.
 
+Task S4.2a: design ready, before implementation (basea2b03c5). Persistent private
+bounded frame state is required before selecting cancellation against reads;
+manual-poll/drop regression must demonstrate actual old partial-byte loss.
+Wire behavior and protocol bound remain, remaining S4/final/native mandatory.
+
+Task S4.2a: complete (basea2b03c5..this task commit). Private FrameReader owns
+bounded pending bytes across dropped read futures; daemon uses it in the idle
+janitor select. Copy and consume have no cancellation point, existing protocol
+cap/line/EOF/incomplete/error/close behavior preserved. Real duplex manual-poll/
+drop RED0/1in0.00s demonstrates old prefix loss; moved regression retains exact
+expected bytes/cancellation sequence with only reader API adaptations.
+Fresh review Spec PASS / Quality APPROVED, no Critical/Important findings.
+Minor M1 corrected by a dedicated agent in design wording only: actual existing
+tests cover exact-limit/oversize/frontend behavior, while partial-EOF semantic
+preservation is established by inspection. All161 Rust hashes and113 frozen
+inputs unchanged by this correction; no functional rerun for a docs-only fix.
+No deferred findings. All17 same-source stages exit0: full1095passed/0failed/
+13ignored across66targets; framing1/wire28/core8/server14, lean1/28/8/14/42/74;
+full/lean all-target+opt-in Clippy/fmt/diff pass, all113 frozen inputs unchanged.
+Already-passing focused stages reused across two sequential same-source runners.
+Prior a2b03c5 native42902721351 passed all4 checks, +3 tests per OS with none
+removed versus C84; Linux1094+2artifact/macOS1090/Windows1075,0failed13ignored.
+That prior-head evidence does not replace this/final-head native acceptance.
+Remaining S4 active-call timer/EOF/scoped capabilities/original frontend budget/
+retry/actual-job+reply+connection accounting/queue/docs/wholefinal/native remain;
+PR112 stays draft and #66 remains open.
+
 Task S4.1: design ready, before implementation (base84c4134). Checked shared
 phase interest uses all participants and typed abandonment. Cold work stops at
 the next boundary after all cancel; late live arrivals retry normal admission.

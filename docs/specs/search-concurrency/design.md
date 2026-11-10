@@ -668,3 +668,30 @@ success. Existing leader-cancel/live-follower and error/unwind tests remain.
 No new timers, sleeps, defaults, crates, ranking/window/baseline or transport
 changes here. S4 transport/caller timer/actual-job accounting and queue telemetry
 plus final whole-feature/native gates remain mandatory; PR112 remains draft.
+
+## Delta 2026-11-10 — S4.2a: cancellation-safe bounded IPC framing
+
+FR-6 prerequisite. Before adding concurrent EOF/deadline observation, move the
+existing daemon NDJSON reader into private ipc::framing::FrameReader<R> for
+AsyncBufRead. The per-connection object owns its pending bytes; read_frame()
+may be dropped and polled again without losing consumed partial input. Its
+fill_buf/consume loop copies only up to the existing protocol cap plus framing
+lookahead. No await separates copying bytes and consuming those same bytes.
+
+Preserve Frame Line/Eof/Incomplete/TooLarge semantics, exact accepted payload
+limit, delimiter handling and the daemon's existing error replies/connection
+closing policy. This private helper can later serve the async frontend client;
+it introduces no public wire/API/config key or new bound/default. Janitor idle
+select uses the persistent reader. Timer/EOF during active search, scoped wire
+capabilities, accounting and original frontend budget remain future S4 tasks.
+
+TDD: write a prefix into a real Tokio duplex stream, manually poll the actual
+old read_frame future until Pending, prove the prefix was consumed, drop that
+future, append the suffix and verify the full original frame. Existing local
+Vec loses the prefix and fails without a real-time wait. Adapt only reader
+construction/call to the new helper and move this regression into its private
+unit module; expected bytes and cancellation sequence stay identical. Existing
+real IPC exact-limit/oversize and frontend suites remain authoritative for wire
+compatibility. Incomplete-frame classification is preserved by code inspection;
+no dedicated partial-EOF test is claimed. No timing sleeps/watchdog loosening or
+new crates.

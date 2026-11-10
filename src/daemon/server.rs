@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, watch};
 
 use crate::config::schema::Resolved;
@@ -24,6 +24,7 @@ use crate::hybrid::HybridStages;
 use crate::hybrid::config::{Ranking, embedding_model_id};
 use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits, DenseRequest};
 use crate::hybrid::jobs as hybrid_jobs;
+use crate::ipc::framing::{Frame, FrameReader};
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 use crate::platform::Stream;
 use crate::search::metadata::MetadataSource;
@@ -590,42 +591,6 @@ fn ipc_debug(message: &str) {
     }
 }
 
-/// One bounded NDJSON frame from a connection.
-#[derive(Debug)]
-enum Frame {
-    /// Complete line, delimiter included.
-    Line(Vec<u8>),
-    /// Peer closed the stream.
-    Eof,
-    /// Stream ended without a delimiter before the cap.
-    Incomplete,
-    /// No delimiter within [`protocol::MAX_FRAME_BYTES`].
-    TooLarge,
-}
-
-/// Reads one frame, capping the buffer at the protocol limit (I-2; T45).
-async fn read_frame<R>(reader: &mut R) -> std::io::Result<Frame>
-where
-    R: tokio::io::AsyncBufRead + Unpin,
-{
-    let limit = protocol::MAX_FRAME_BYTES as u64 + 2;
-    let mut line = Vec::new();
-    let read = reader.take(limit).read_until(b'\n', &mut line).await?;
-    if read == 0 {
-        return Ok(Frame::Eof);
-    }
-    let complete = line.ends_with(b"\n");
-    if line.len() > protocol::MAX_FRAME_BYTES + 1
-        || (u64::try_from(read).unwrap_or(u64::MAX) >= limit && !complete)
-    {
-        return Ok(Frame::TooLarge);
-    }
-    if !complete {
-        return Ok(Frame::Incomplete);
-    }
-    Ok(Frame::Line(line))
-}
-
 /// Serves one connection until EOF, cleanup included (FR-8, I2).
 pub async fn handle_connection(
     shared: Arc<Shared>,
@@ -635,7 +600,7 @@ pub async fn handle_connection(
     shutdown: watch::Sender<bool>,
 ) {
     let (read_half, mut writer) = tokio::io::split(stream);
-    let mut reader = BufReader::new(read_half);
+    let mut reader = FrameReader::new(BufReader::new(read_half));
     let mut session_id: Option<u64> = None;
     let mut cancel_rx: Option<oneshot::Receiver<()>> = None;
     let mut hello_done = false;
@@ -643,11 +608,11 @@ pub async fn handle_connection(
     loop {
         let next_frame = match cancel_rx.as_mut() {
             Some(cancel) => tokio::select! {
-                frame = read_frame(&mut reader) => frame,
+                frame = reader.read_frame() => frame,
                 // The janitor reaped this session: stop holding the socket.
                 _ = cancel => break,
             },
-            None => read_frame(&mut reader).await,
+            None => reader.read_frame().await,
         };
         let line = match next_frame {
             Ok(Frame::Line(line)) => {

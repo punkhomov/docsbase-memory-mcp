@@ -327,3 +327,19 @@ focused benchmark/external and lean benchmark validate this changed harness.
   relevant lean hybrid/routing/integration/config and full/lean all-target plus
   opt-in Clippy/fmt/diff. Frozen113 inputs unchanged. Fresh task review before
   commit; delegate findings. Remaining S4/final/native gates stay pending.
+
+## Delta 2026-11-10 — S4.2a: persistent bounded frame reader
+
+- Basea2b03c5. Create src/ipc/framing.rs, register private module in ipc/mod.rs;
+  replace local daemon Frame/read_frame with the helper in daemon/server.rs.
+- Before production edits, manually-poll/drop a partial actual old read and
+  resume it on the same buffered duplex transport. Must fail because the prefix
+  was lost, not timeout/compile. Move regression to new helper module, changing
+  only construction/call to own per-connection frame state; retain expected bytes.
+- Preserve exact protocol cap, newline/EOF/incomplete/error behavior. Pending
+  bytes survive every future drop; copying/consume has no cancellation point.
+  No public API/default/config/crate/unsafe or active-call cancellation yet.
+- Verify framing regression, actual IPC/framing/frontend/routing, daemon core
+  and refresh, full cli-full; relevant lean scopes and full/lean all-target+
+  opt-in Clippy/fmt/diff, frozen113 inputs. Fresh review before commit, delegate
+  findings. S4 driver/accounting/frontend/telemetry/final/native still mandatory.
