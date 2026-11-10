@@ -1316,15 +1316,22 @@ impl DenseCache {
     /// # Errors
     /// Filesystem failures while removing the ANN tree.
     pub fn invalidate(&self, project_id: i64) -> Result<()> {
+        self.invalidate_memory(project_id);
+        if let Some(store) = &self.store {
+            store.invalidate(project_id)?;
+        }
+        Ok(())
+    }
+
+    /// Drops resident identity during coordinated configuration publication.
+    /// Caller excludes active preparation; worker charge lives until work ends.
+    /// Pure query cache, last-query outcomes and persisted ANN remain intact.
+    pub(crate) fn invalidate_memory(&self, project_id: i64) {
         self.lock_entries().remove(&project_id);
         self.digests
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|(project, _), _| *project != project_id);
-        if let Some(store) = &self.store {
-            store.invalidate(project_id)?;
-        }
-        Ok(())
     }
 
     /// Best-effort cleanup of old ANN generations (design §9).
@@ -2701,5 +2708,81 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn memory_invalidation_preserves_pure_queries_outcomes_and_persisted_artifacts() {
+        let root = tempfile::tempdir().expect("cache");
+        let dense = DenseCache::with_policy(AnnPolicy::BuildOrLoad, root.path());
+        assert!(matches!(
+            dense.resolve_rows(1, 1, "m@d128", small_input()),
+            DenseRows::Ready(_)
+        ));
+        assert!(matches!(
+            dense.resolve_rows(2, 1, "m@d128", small_input()),
+            DenseRows::Ready(_)
+        ));
+        dense.digest_for(1, 1, &[(1, "first".to_owned())]);
+        dense.digest_for(2, 1, &[(2, "other".to_owned())]);
+        let marker = dense
+            .store
+            .as_ref()
+            .expect("ANN store")
+            .project_ann_root(1)
+            .join("retained-artifact");
+        std::fs::create_dir_all(marker.parent().expect("parent")).expect("ANN directory");
+        std::fs::write(&marker, b"recipe-qualified data").expect("artifact");
+        dense.record_outcome(1, AnnState::Ready, None);
+        let embedder = FakeEmbedder {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let vector = dense
+            .query_embedding(&embedder, "query", &Cancellation::new())
+            .expect("query");
+        dense.invalidate_memory(1);
+        assert!(!dense.lock_entries().contains_key(&1));
+        assert!(dense.lock_entries().contains_key(&2));
+        let digests = dense.digests.lock().expect("digests");
+        assert!(!digests.contains_key(&(1, 1)));
+        assert!(digests.contains_key(&(2, 1)));
+        drop(digests);
+        assert!(
+            marker.exists(),
+            "memory invalidation preserves persisted ANN artifacts"
+        );
+        assert_eq!(
+            dense.outcome(1).expect("last query outcome").state,
+            AnnState::Ready
+        );
+        let cached = dense
+            .query_embedding(&embedder, "query", &Cancellation::new())
+            .expect("pure query hit");
+        assert!(Arc::ptr_eq(&vector, &cached));
+        assert_eq!(embedder.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn build_lifetime_survives_memory_invalidation() {
+        let root = tempfile::tempdir().expect("cache");
+        let paused = PausedBuilds::new(root.path(), 2, 1);
+        let dense = &paused.cache;
+        assert!(matches!(
+            dense.resolve_rows(1, 1, "m@d128", small_input()),
+            DenseRows::Building(_)
+        ));
+        dense.invalidate_memory(1);
+        assert!(matches!(
+            dense.resolve_rows(2, 1, "m@d128", small_input()),
+            DenseRows::TooLarge(_)
+        ));
+        paused.finish();
+        assert!(
+            dense.ann_snapshot(1).is_none(),
+            "obsolete worker cannot publish"
+        );
+        assert!(matches!(
+            dense.resolve_rows(3, 1, "m@d128", small_input()),
+            DenseRows::Building(_)
+        ));
     }
 }

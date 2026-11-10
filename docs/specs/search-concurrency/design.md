@@ -413,3 +413,50 @@ states only; every other error stays fatal. config_runtime uses the same narrow
 predicate, retaining the last refusal on timeout. Successful content assertions
 are unchanged, with no extra test deadline or production retries. Real IPC
 pending refusal is also checked against this predicate before actual recovery.
+
+## Delta 2026-11-10 — S3.5: project revision и preparation authority
+
+FR-3/FR-4/FR-5 foundation. Stable `ProjectSlot = Arc<ProjectCell>` содержит
+`state: Mutex<ProjectState>`, `reload: Mutex<()>`, `preparation: RwLock<()>`.
+Map mutex нужен только для lookup; cell не заменяется при reopen. Config Arc
+остаётся revision identity, stages принадлежат ему; прежняя защита #76 от
+obsolete lazy build result/error сохраняется.
+
+Reload serializer покрывает полный per-project reload. Parse и provider/model
+construction выполняются без state/preparation locks. После двух fallible
+подготовок reload получает preparation WRITE **до** state mutex, затем публикует
+config/stages и vector policy, обновляя watcher прежним способом. Отказ/unwind
+при parse/build сохраняет последнюю valid пару и policies. Семантически равный
+config по-прежнему создаёт свежие stages/Config Arc; resident cache не очищается.
+Другие проекты и чтение старой пары доступны во время model construction.
+
+`ProjectCell::with_preparation(&Arc<Config>, FnOnce()->Result<T>)` берёт READ,
+кратко проверяет текущую Config Arc под state mutex и отпускает state до work.
+Stale revision даёт Project/retry до work. RAII освобождает gate при error/unwind.
+Порядок locks: reload -> preparation -> state; state-only reads/lazy publication
+не берут preparation, пока держат state. Active preparation задерживает новую
+публикацию; уже owned response/rerank может завершиться после reload. Это ещё
+не actual search adoption: она обязательна в следующем request-phase task.
+
+`DenseCache::invalidate_memory(project_id)` (crate-private) очищает только
+resident entry/digest. Pure query cache/flights, last-query outcomes и persisted
+recipe-qualified ANN остаются. Existing delete-oriented invalidate делегирует
+memory cleanup перед прежним disk removal, сохраняя его эффекты. При semantic
+Config change composition root вызывает memory cleanup под preparation WRITE.
+Это явная консервативная политика до dependency/impact planner #78; persisted
+rebuild/consent здесь не вводится. Active ANN worker сохраняет charge до actual
+completion; existing Building Arc identity запрещает obsolete publication.
+
+Background ANN refresh проверяет захваченную revision под тем же READ перед
+warm. Scheduled old warm после reload не заполняет cleared state; cleanup
+сохраняется при skipped/stale/failed warm. Настройки readonly Db передаются
+прежним explicit способом; pool/lazy-loader adoption остаётся следующему task.
+Для delayed scheduling test разрешён private instance-local before-admission
+hook, аналогично существующим private seams; публичного callback/settings нет.
+
+Challenge: прежний #76 test утверждал state mutex contention при model build.
+Это был механизм сериализации, не пользовательский контракт. Assertion явно
+переносится на reload mutex; state/preparation должны быть свободны. Полный
+same-project reload order, atomic pair/failure semantics и independence других
+проектов остаются обязательными. Никаких provider/SQL lifetime completion или
+завершения #66 этим шагом не объявляется; whole-S3/S4/native gates сохраняются.

@@ -194,3 +194,26 @@ S3.4 additional validation: run existing nightly soak with SOAK_SECS=10 to
 exercise its changed search-readiness classification; this does not change the
 nightly job, ignored status or its acceptance thresholds. Local full command
 uses --no-fail-fast to collect every target in one pass, preserving all checks.
+
+## Delta 2026-11-10 — S3.5: stable runtime cell и memory invalidation
+
+- Base: S3.4 commit22019f7. Изменить src/daemon/server.rs,
+  src/daemon/project_state_tests.rs, src/hybrid/dense.rs и их local tests.
+- API: ProjectCell state/reload/preparation и with_preparation, crate-private
+  DenseCache::invalidate_memory. Contract — dated S3.5 design, без новых defaults.
+- RED до production: missing cell fields/with_preparation/invalidate_memory.
+  Проверить obsolete revision без work, current revision, error/unwind release,
+  state/preparation free при gated model construction, reload serialisation и
+  active preparation blocking publication без state-mutex hostage.
+- Preserve failure/obsolete-lazy-builder tests #76; добавить reload panic/recovery.
+  Семантически changed reload очищает resident identity, unchanged сохраняет;
+  query cache/last outcome/persisted ANN и worker reservation сохраняются.
+  Late invalidated worker не публикует graph и не освобождает charge раньше конца.
+- Gated delayed old ANN refresh отвергается после реального reload до warm;
+  cleanup и configured readonly policy tests сохраняются. Только private hooks,
+  channels/gates и watchdog на failure, без sleeps для ordering.
+- Verify focused state/dense/refresh + old integrations, full cli-full, lean
+  relevant scopes, full/lean all-target+opt-in Clippy/fmt/diff. Fresh task review
+  перед commit; source findings только через отдельного implementer.
+- Actual search pool/cross-store/cancellation/dispatch/timing и whole-feature
+  required native CI остаются отдельными шагами до delivery.

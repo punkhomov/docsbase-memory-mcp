@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -60,7 +60,42 @@ pub struct Shared {
     pub dense: DenseCache,
 }
 
-type ProjectSlot = Arc<Mutex<ProjectState>>;
+type ProjectSlot = Arc<ProjectCell>;
+
+/// Stable per-project authority; model construction uses only the reload lock.
+#[derive(Default)]
+struct ProjectCell {
+    state: Mutex<ProjectState>,
+    reload: Mutex<()>,
+    preparation: RwLock<()>,
+}
+
+impl ProjectCell {
+    fn with_preparation<T>(
+        &self,
+        expected: &Arc<Config>,
+        work: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let _preparation = self
+            .preparation
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .config
+            .as_ref()
+            .is_some_and(|config| Arc::ptr_eq(config, expected));
+        if !current {
+            return Err(Error::Project {
+                message: "project configuration changed before search preparation".to_owned(),
+                instruction: Some("retry search".to_owned()),
+            });
+        }
+        work()
+    }
+}
 
 /// A config Arc is its revision identity. Stages always belong to that Arc.
 #[derive(Default)]
@@ -210,7 +245,7 @@ impl Shared {
         let slot = self.project_slot(project.id);
         loop {
             let config = {
-                let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
                 let config = self.config_in(&mut state, project)?;
                 if let Some(stages) = &state.stages {
                     return Ok((config, Arc::clone(stages)));
@@ -219,7 +254,7 @@ impl Shared {
             };
             // Construction can load models: do not hold the project lock.
             let outcome = build(&config);
-            let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
             if !state
                 .config
                 .as_ref()
@@ -309,7 +344,7 @@ impl Shared {
     /// Returns config read/parse errors.
     pub fn project_config(&self, project: &crate::store::models::Project) -> Result<Arc<Config>> {
         let slot = self.project_slot(project.id);
-        let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
         self.config_in(&mut state, project)
     }
 
@@ -337,7 +372,22 @@ impl Shared {
     where
         F: FnOnce(&DenseCache, &Db, i64, &str) -> Result<()> + Send + 'static,
     {
+        self.refresh_ann_after_sync_before_with(project, || {}, warm_ann)
+    }
+
+    // Private scheduling seam for deterministic delayed-revision tests.
+    fn refresh_ann_after_sync_before_with<B, F>(
+        self: &Arc<Self>,
+        project: &crate::store::models::Project,
+        before_admission: B,
+        warm_ann: F,
+    ) -> Option<std::thread::JoinHandle<()>>
+    where
+        B: FnOnce() + Send + 'static,
+        F: FnOnce(&DenseCache, &Db, i64, &str) -> Result<()> + Send + 'static,
+    {
         let config = self.project_config(project).ok()?;
+        let slot = self.project_slot(project.id);
         let embed_cfg = config.hybrid_cfg.embedding.as_ref()?;
         // Warm only a project whose dense channel is actually read:
         // `rrf_active` gates `dense_candidates`, and the `hybrid = true`
@@ -350,10 +400,14 @@ impl Shared {
         let db_settings = self.db_settings.clone();
         let project_id = project.id;
         Some(std::thread::spawn(move || {
+            before_admission();
             let Ok(db) = Db::open_readonly_with_settings(&cache_path, &db_settings) else {
                 return;
             };
-            if warm && let Err(err) = warm_ann(&dense, &db, project_id, &model_id) {
+            if warm
+                && let Err(err) =
+                    slot.with_preparation(&config, || warm_ann(&dense, &db, project_id, &model_id))
+            {
                 eprintln!("warning: ann warm failed for project {project_id}: {err}");
             }
             if let Err(err) = dense.cleanup(project_id) {
@@ -387,13 +441,41 @@ impl Shared {
     where
         F: FnOnce(&Config) -> Result<HybridStages>,
     {
+        self.open_project_config_observing_contention(project, build, || {})
+    }
+
+    fn open_project_config_observing_contention<F, O>(
+        &self,
+        project: &crate::store::models::Project,
+        build: F,
+        on_publication_contention: O,
+    ) -> Result<Arc<Config>>
+    where
+        F: FnOnce(&Config) -> Result<HybridStages>,
+        O: FnOnce(),
+    {
         let slot = self.project_slot(project.id);
-        // Serialize the complete reload for this project, including its
-        // watcher/cache policy. No global map lock spans construction.
-        let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        // Only same-project reloads wait for construction. Existing runtime
+        // reads and unrelated projects keep their last coherent state.
+        let _reload = slot.reload.lock().unwrap_or_else(PoisonError::into_inner);
         let config = Arc::new(self.config_for_root(&project.canonical_root)?);
         let stages = Arc::new(build(&config)?);
+        // Never wait for active preparation while retaining the state mutex.
+        let _publication = match slot.preparation.try_write() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                on_publication_contention();
+                slot.preparation
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner)
+            }
+        };
+        let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
         let changed = state.config.as_deref() != Some(config.as_ref());
+        if changed {
+            self.dense.invalidate_memory(project.id);
+        }
         // Both fallible preparation steps precede publication: a rejected
         // reload leaves the last valid runtime and its policies intact.
         state.config = Some(Arc::clone(&config));
@@ -440,7 +522,7 @@ impl Shared {
     /// Returns config/spawn errors; a failed start is not fatal to callers.
     pub fn ensure_watcher(&self, project: &crate::store::models::Project) -> Result<bool> {
         let slot = self.project_slot(project.id);
-        let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
         let config = self.config_in(&mut state, project)?;
         self.watchers
             .ensure_with_settings(&self.cache, project, config, &self.db_settings)
@@ -1437,7 +1519,7 @@ mod tests {
         .clone();
         config.hybrid_cfg.embedding = None;
         let slot = fixture.shared.project_slot(fixture.project.id);
-        slot.lock().expect("project state").config = Some(Arc::new(config));
+        slot.state.lock().expect("project state").config = Some(Arc::new(config));
         assert!(
             fixture
                 .shared
@@ -1445,7 +1527,7 @@ mod tests {
                 .is_none()
         );
 
-        slot.lock().expect("project state").config = None;
+        slot.state.lock().expect("project state").config = None;
         fs::write(fixture.root.path().join(".docsbase.toml"), "[invalid toml")
             .expect("invalid config fixture");
         assert!(
@@ -1565,6 +1647,46 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn delayed_old_ann_refresh_is_rejected_after_reload_and_still_cleans_up() {
+        let fixture = RefreshFixture::new(true, Some("rrf"), 1);
+        let stale = fixture.stale_tmp();
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let (called_tx, called_rx) = std_mpsc::channel();
+        let worker = fixture.shared.refresh_ann_after_sync_before_with(
+            &fixture.project,
+            move || {
+                entered_tx.send(()).expect("revision captured");
+                release_rx
+                    .recv_timeout(REFRESH_WATCHDOG)
+                    .expect("release delayed scheduling");
+            },
+            move |_, _, _, _| {
+                called_tx.send(()).expect("warm called");
+                Ok(())
+            },
+        );
+        entered_rx
+            .recv_timeout(REFRESH_WATCHDOG)
+            .expect("old refresh scheduled");
+        fs::write(
+            fixture.root.path().join(".docsbase.toml"),
+            "hybrid = false\n",
+        )
+        .expect("new config");
+        let reloaded = fixture.shared.open_project_config(&fixture.project);
+        release_tx.send(()).expect("release old refresh");
+        finish_refresh(worker);
+        assert!(!reloaded.expect("reload before old warm").hybrid_cfg.enabled);
+        assert_eq!(
+            called_rx.try_recv(),
+            Err(TryRecvError::Disconnected),
+            "old revision cannot warm"
+        );
+        assert!(!stale.exists(), "cleanup runs when stale warm is refused");
     }
 }
 

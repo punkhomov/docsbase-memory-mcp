@@ -250,9 +250,17 @@ fn project_reload_serializes_one_project_without_locking_the_global_map() {
             .expect("first constructing");
         let slot = fixture.shared.project_slot(fixture.project.id);
         assert!(matches!(
-            slot.try_lock(),
+            slot.reload.try_lock(),
             Err(std::sync::TryLockError::WouldBlock)
         ));
+        assert!(
+            slot.state.try_lock().is_ok(),
+            "state is free during model construction"
+        );
+        assert!(
+            slot.preparation.try_write().is_ok(),
+            "preparation is free during model construction"
+        );
         assert!(
             fixture.shared.project_states.try_lock().is_ok(),
             "global map is free during construction"
@@ -291,5 +299,242 @@ fn project_reload_serializes_one_project_without_locking_the_global_map() {
             .expect("current runtime");
         assert!(Arc::ptr_eq(&newest, &current.0));
         assert!(current.1.reranker.is_none());
+    });
+}
+
+#[test]
+fn preparation_rejects_obsolete_revision_before_running_work() {
+    let fixture = Fixture::new();
+    fixture.write_config("hybrid = false\nmax_docs_per_project = 11\n");
+    let before = fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .expect("initial revision");
+    let slot = fixture.shared.project_slot(fixture.project.id);
+    fixture.write_config("hybrid = false\nmax_docs_per_project = 23\n");
+    fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .expect("reload");
+    assert!(
+        Arc::ptr_eq(&slot, &fixture.shared.project_slot(fixture.project.id)),
+        "stable cell"
+    );
+    let ran = AtomicBool::new(false);
+    let error = slot
+        .with_preparation(&before, || {
+            ran.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .expect_err("obsolete revision");
+    assert!(matches!(error, Error::Project { .. }), "{error}");
+    assert!(!ran.load(Ordering::SeqCst));
+}
+
+#[test]
+fn preparation_retains_only_its_read_gate_and_releases_after_error() {
+    let fixture = Fixture::new();
+    fixture.write_config("hybrid = false\n");
+    let config = fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .expect("revision");
+    let slot = fixture.shared.project_slot(fixture.project.id);
+    let value = slot
+        .with_preparation(&config, || {
+            assert!(slot.state.try_lock().is_ok(), "no state mutex over work");
+            assert!(
+                slot.reload.try_lock().is_ok(),
+                "no reload serializer over work"
+            );
+            assert!(matches!(
+                slot.preparation.try_write(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            Ok("owned result".to_owned())
+        })
+        .expect("prepared value");
+    assert_eq!(value, "owned result");
+    assert!(
+        slot.preparation.try_write().is_ok(),
+        "success releases read gate"
+    );
+    let error = slot
+        .with_preparation(&config, || {
+            Err::<(), _>(Error::internal("prepared failure"))
+        })
+        .expect_err("closure failure");
+    assert!(error.to_string().contains("prepared failure"));
+    assert!(
+        slot.preparation.try_write().is_ok(),
+        "error releases read gate"
+    );
+}
+
+#[test]
+fn preparation_releases_its_gate_after_unwind() {
+    let fixture = Fixture::new();
+    fixture.write_config("hybrid = false\n");
+    let config = fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .expect("revision");
+    let slot = fixture.shared.project_slot(fixture.project.id);
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        slot.with_preparation(&config, || -> Result<()> { panic!("prepared unwind") })
+    }));
+    assert!(unwind.is_err());
+    assert!(
+        slot.preparation.try_write().is_ok(),
+        "unwind releases read gate"
+    );
+    assert!(slot.state.try_lock().is_ok(), "work did not poison state");
+    fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .expect("later reload");
+}
+
+#[test]
+fn reload_panic_preserves_last_pair_and_allows_later_recovery() {
+    let fixture = Fixture::new();
+    fixture.write_config("hybrid = false\nmax_docs_per_project = 11\n");
+    fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .expect("initial open");
+    let before = fixture
+        .shared
+        .project_runtime(&fixture.project)
+        .expect("initial pair");
+    fixture.write_config("hybrid = false\nmax_docs_per_project = 23\n");
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fixture
+            .shared
+            .open_project_config_with(&fixture.project, |_| panic!("model admission unwind"))
+    }));
+    assert!(panic.is_err());
+    let retained = fixture
+        .shared
+        .project_runtime(&fixture.project)
+        .expect("retained pair");
+    assert!(Arc::ptr_eq(&before.0, &retained.0));
+    assert!(Arc::ptr_eq(&before.1, &retained.1));
+    assert_eq!(retained.0.max_docs_per_project, 11);
+    let recovered = fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .expect("recovered reload");
+    assert_eq!(recovered.max_docs_per_project, 23);
+}
+
+#[test]
+fn semantic_reload_invalidates_resident_rows_but_unchanged_reload_keeps_them() {
+    let fixture = Fixture::new();
+    fixture.write_config("hybrid = false\nmax_docs_per_project = 11\n");
+    let before = fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .expect("initial open");
+    let load = || {
+        let db = Db::open(fixture.cache.path()).expect("metadata");
+        match fixture
+            .shared
+            .dense
+            .get(&db, fixture.project.id, "test/reload@d3@l2")
+            .expect("rows")
+        {
+            crate::hybrid::dense::DenseRows::Ready(rows) => rows,
+            _ => panic!("empty project has exact rows"),
+        }
+    };
+    let rows = load();
+    let same = fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .expect("same config reopen");
+    assert!(
+        !Arc::ptr_eq(&before, &same),
+        "reopen still publishes a fresh revision"
+    );
+    assert!(
+        Arc::ptr_eq(&rows, &load()),
+        "semantic equality preserves resident rows"
+    );
+    fixture.write_config("hybrid = false\nmax_docs_per_project = 23\n");
+    fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .expect("changed config");
+    assert!(
+        !Arc::ptr_eq(&rows, &load()),
+        "changed revision clears resident identity"
+    );
+}
+
+#[test]
+fn active_preparation_blocks_publication_without_blocking_state_reads() {
+    let fixture = Fixture::new();
+    fixture.write_config("hybrid = false\nmax_docs_per_project = 11\n");
+    fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .expect("initial open");
+    let before = fixture
+        .shared
+        .project_runtime(&fixture.project)
+        .expect("initial pair");
+    fixture.write_config("hybrid = false\nmax_docs_per_project = 23\n");
+    let slot = fixture.shared.project_slot(fixture.project.id);
+    let (entered_tx, entered_rx) = sync_mpsc::channel();
+    let (release_tx, release_rx) = sync_mpsc::channel();
+    let (contended_tx, contended_rx) = sync_mpsc::channel();
+    std::thread::scope(|scope| {
+        let slot_ref = &slot;
+        let before_ref = &before.0;
+        let preparation = scope.spawn(move || {
+            slot_ref.with_preparation(before_ref, || {
+                entered_tx.send(()).expect("preparation entered");
+                release_rx
+                    .recv_timeout(WATCHDOG)
+                    .expect("release active preparation");
+                Ok(())
+            })
+        });
+        entered_rx
+            .recv_timeout(WATCHDOG)
+            .expect("active read phase");
+        let reload = scope.spawn(|| {
+            fixture.shared.open_project_config_observing_contention(
+                &fixture.project,
+                |_| Ok(HybridStages::default()),
+                || contended_tx.send(()).expect("publication WRITE contended"),
+            )
+        });
+        let contended = contended_rx.recv_timeout(WATCHDOG);
+        let observed = slot
+            .state
+            .try_lock()
+            .map(|state| state.config.clone().zip(state.stages.clone()))
+            .map_err(|error| error.to_string());
+        // Release all workers before inspecting a failure, including wrong lock order.
+        release_tx.send(()).expect("release preparation");
+        preparation
+            .join()
+            .expect("preparation thread")
+            .expect("preparation result");
+        let after = reload
+            .join()
+            .expect("reload thread")
+            .expect("reload result");
+        contended.expect("reload attempted publication WRITE during preparation");
+        let observed = observed
+            .expect("state read before preparation release")
+            .expect("old pair");
+        assert!(
+            Arc::ptr_eq(&before.0, &observed.0) && Arc::ptr_eq(&before.1, &observed.1),
+            "publication waits for preparation"
+        );
+        assert_eq!(after.max_docs_per_project, 23);
     });
 }

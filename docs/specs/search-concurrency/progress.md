@@ -191,3 +191,31 @@ ignore markers, quality fixtures, provider windows or latency thresholds changed
 Ruling: S3.5 config/preparation authority and actual short pool/cross-store phases,
 S4 caller deadlines/dispatch/cancellation/timing and whole-feature native gates
 remain mandatory; this task does not complete #66. No partial delivery claim.
+
+Task S3.5: Ruling: separate reload serialiser and preparation revision gate,
+with model construction outside state/preparation locks — preserve ordered
+atomic reopen while allowing old coherent reads. Runtime memory invalidation
+clears entry/digest only, preserving last-query outcomes and persisted artifacts;
+no destructive invalidation. Pre-code contract recorded on base22019f7.
+
+Task S3.5: complete (base22019f7..this task commit; revision authority only).
+Stable ProjectCell separates reload serialisation, preparation gate and state;
+model construction holds neither state nor preparation. Semantic config change
+clears resident entry/digest under publication WRITE; query cache/outcomes,
+persisted ANN and actual worker reservation remain intact. Delayed old warm
+validates its captured revision before work, preserving cleanup on rejection.
+Fresh task review Spec PASS / Quality APPROVED; minor M1 fixed in-task by a
+separate implementer, scoped re-review ADDRESSED with no remaining findings.
+Ruling: the publication test observes actual preparation try_write contention,
+probes both old config/stages Arcs without blocking, then releases/joins before
+assertions. Controlled state-before-preparation mutation fails in0.01s; restored
+GREEN passes. No ordering sleeps or watchdog changes.
+Final functional cli-full1062passed/0failed/13ignored across66targets; focused
+state11/memory2/server12/dense70/ranking59/visibility37, lean11/12/70/42/27/37/71.
+All full/lean all-target and opt-in Clippy/fmt/diff checks pass. Explicit evidence
+exception: the full/lean functional run precedes one test-only whitespace reflow;
+saved rustfmt output equals current bytes, other154 Rust files (all production)
+are identical. Raw pre-format manifests retain their original hashes. Current
+targeted GREEN/scopes and lint/format checks were rerun; no redundant full run.
+Actual search pool/cross-store phases and S4 deadlines/dispatch/cancellation/
+timing plus whole-feature review/native gates remain mandatory before delivery.
