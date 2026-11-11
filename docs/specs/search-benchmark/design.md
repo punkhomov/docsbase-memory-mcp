@@ -1214,3 +1214,31 @@ inner query method under its shared document/query pacer; inherited default
 would otherwise route live measurement queries through document encoding.
 An actual fake OpenRouter transport test pins the4s free-recording interval;
 the mixed-role wrapper regression uses120ms and distinct role outputs.
+
+## Delta 2026-11-11 — T22: occurrence-safe candidate census (#71)
+
+The preflight gains collect_candidates(env,cases,vectors,corpus_hash,revision)
+->Result<Value>. It constructs ReplayEmbedder and a capturing identity
+Reranker only; external providers cannot be supplied. prepare_with_pins
+keeps explicit supplied embedding identity in derived research keys while
+prepare retains the existing default-pin API. The target reranker pin remains
+the documented preflight target, not evidence that its model was invoked.
+
+Each query runs Bm25Rerank and RrfRerank with limit=window50 and no filters/
+dedupe. Original k≤50 means the same search_plan fetch as original k. The
+identity reranker returns indices0..len so complete response citations expose
+the exact ordered provider pool. Capture query/top_n/body order must match
+those citations and SQL metadata; missing rows or mixed order is an error.
+No copied BM25/RRF scoring or body→context dictionary is used. Metadata
+resolution uses chunk_id_parts plus project-local doc paths and seq, then
+selects that occurrence's preflight raw/context row. Duplicate bodies survive.
+
+Output nests the existing full preflight inventory and adds candidate pools,
+source vector provenance, phase and harness hash. Pool addresses use original
+query plus ordered actual input keys and top_n for each raw/context rerank
+recipe; separate occurrence keys preserve membership even when raw provider
+inputs repeat. Empty lexical pools stay explicit and imply no rerank call.
+Recorded-v1 pools describe historical memberships; transformed dense pools
+are unknown until new vectors exist. Input-byte sums do not estimate tokens
+or cost. Scores/quality are null, requests0. Existing external no-clobber
+writer/clean-source check are reused; no new runtime defaults or APIs.

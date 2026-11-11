@@ -549,3 +549,39 @@ Critical findings; hosted CI pending. Its Minor timing-boundary finding is
 fixed in-task: measure before first document invocation so scheduler delay
 before the query cannot shorten the observed120ms interval. No deferred
 minors. Focused pacing regression/lint rerun and final fix review follow.
+
+
+## Delta 2026-11-11 — T22: offline candidate census (#71)
+
+Task T22: complete (implementation and task review). RED: real indexed
+candidate-census tests fail because collect_candidates is absent. GREEN:
+ReplayEmbedder plus identity-capturing Reranker through real search_docs_with,
+limit50 exposes the same pre-provider pool as original k≤50. Actual chunk IDs
+resolve to occurrence-specific path/seq metadata; duplicate bodies retain
+separate locations/context inputs and original citation spans. No independent
+ranking implementation or body→context dictionary. Empty lexical observations
+remain explicit; missing vectors/query/dimension mismatch fail before output.
+
+Verify Rust1.88: representation6passed/2manual ignored on default and cli-full;
+search_bench84passed/2manual ignored, unchanged gate. All-target cli-full Clippy,
+fmt/diff clean. All386case/source observations validated against historical
+frozen rerank pool membership/top_n, with the complete nonempty key set retained.
+Source vector provenance is explicit v1-role-unknown or v2-role-aware; no new
+quality, tokens/cost or context-dense candidate claims.0provider requests,
+no production/dependency/CI/frozen/baseline writes. New manual export is offline
+and requires clean source/outside-checkout no-clobber publication; its artifact,
+fresh task/final reviews and required hosted CI follow before integration.
+
+Ruling: fresh task reviewer /root/review_representation_census_t22 —
+PASS / APPROVED, no findings or deferred minors. Manual export/full artifact
+audit, final review and required native CI are integration close-out steps.
+
+T22 clean-source manual verification0740bf1:81docs/327chunks/193cases,
+386observations=364nonempty+22empty. All12553candidate occurrences exactly
+match the independent T20 inventory; all193original cases/qrels preserved.
+The observed nonempty query/ordered-body/top_n keys equal all364historical
+rerank recordings. Raw/context maximum string sums27028/32354UTF8bytes;
+not tokens/cost or future context-dense pool bounds. Artifact18629920bytes,
+created outside checkout with requests0/qualitynull and explicit unknown-role
+legacy provenance. Worktree remained clean. Final-source artifact identity,
+fresh final review and required native checks are recorded in PR close-out.

@@ -8,6 +8,10 @@ use anyhow::Context;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+#[path = "representation_census.rs"]
+mod census;
+pub use census::collect_candidates;
+
 use super::support::bench::{self, BenchEnv, QueryCase};
 use docsbase_memory::hybrid::config::{EmbeddingCfg, RerankerCfg, embedding_model_id};
 use docsbase_memory::index::tokenizer::TOKENIZER_VERSION;
@@ -28,12 +32,33 @@ fn input_key(role: &str, model: &str, recipe: &str, input: &str) -> anyhow::Resu
 
 /// Builds research identities, without changing production cache keys.
 /// Location-dependent chunk membership is distinct from reusable vector blobs.
-#[allow(clippy::too_many_lines)] // one serializable preflight, no execution path
 pub fn prepare(
     env: &BenchEnv,
     cases: &[QueryCase],
     expected_corpus_hash: &str,
     revision: &str,
+) -> anyhow::Result<Value> {
+    let embedding_pin = embedding_model_id(&EmbeddingCfg::default());
+    let rerank_cfg = RerankerCfg::default();
+    let rerank_pin = format!("{}/{}", rerank_cfg.provider, rerank_cfg.model);
+    prepare_with_pins(
+        env,
+        cases,
+        expected_corpus_hash,
+        revision,
+        &embedding_pin,
+        &rerank_pin,
+    )
+}
+
+#[allow(clippy::too_many_lines)] // one serializable preflight, no execution path
+fn prepare_with_pins(
+    env: &BenchEnv,
+    cases: &[QueryCase],
+    expected_corpus_hash: &str,
+    revision: &str,
+    embedding_pin: &str,
+    rerank_pin: &str,
 ) -> anyhow::Result<Value> {
     let actual_hash = bench::corpus_hash(env.root.path())?;
     anyhow::ensure!(
@@ -47,9 +72,6 @@ pub fn prepare(
         anyhow::ensure!(case_ids.insert(&case.id), "duplicate case ID {}", case.id);
         anyhow::ensure!(!case.query.is_empty(), "empty query {}", case.id);
     }
-    let embedding_pin = embedding_model_id(&EmbeddingCfg::default());
-    let rerank_cfg = RerankerCfg::default();
-    let rerank_pin = format!("{}/{}", rerank_cfg.provider, rerank_cfg.model);
     let mut statement = env.db.connection().prepare(
         "SELECT d.rel_path,c.seq,c.heading_path,c.kind,c.line_start,c.line_end,c.text \
          FROM chunks c JOIN docs d ON d.id=c.doc_id WHERE d.project_id=?1 \
@@ -78,8 +100,8 @@ pub fn prepare(
         let path = path.replace('\\', "/");
         documents.insert(path.clone());
         let context = format!("Path: {path}\nHeading: {heading}\n\n{body}");
-        let raw_key = input_key("document", &embedding_pin, RAW, &body)?;
-        let context_key = input_key("document", &embedding_pin, CONTEXT, &context)?;
+        let raw_key = input_key("document", embedding_pin, RAW, &body)?;
+        let context_key = input_key("document", embedding_pin, CONTEXT, &context)?;
         raw_bytes += body.len();
         context_bytes += context.len();
         unique_raw.insert(raw_key.clone());
@@ -100,8 +122,8 @@ pub fn prepare(
             "raw_input_hash":blake3::hash(body.as_bytes()).to_hex().to_string(),
             "context_input_hash":blake3::hash(context.as_bytes()).to_hex().to_string(),
             "raw_key":raw_key, "context_key":context_key,
-            "raw_rerank_key":input_key("rerank-document", &rerank_pin, RAW, &body)?,
-            "context_rerank_key":input_key("rerank-document", &rerank_pin, CONTEXT, &context)?,
+            "raw_rerank_key":input_key("rerank-document", rerank_pin, RAW, &body)?,
+            "context_rerank_key":input_key("rerank-document", rerank_pin, CONTEXT, &context)?,
         }));
     }
     anyhow::ensure!(!chunks.is_empty(), "indexed corpus has no chunks");
@@ -111,7 +133,7 @@ pub fn prepare(
             Ok(json!({
                 "case":case, "input":case.query,
                 "input_hash":blake3::hash(case.query.as_bytes()).to_hex().to_string(),
-                "key":input_key("query", &embedding_pin, QUERY, &case.query)?,
+                "key":input_key("query", embedding_pin, QUERY, &case.query)?,
             }))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;

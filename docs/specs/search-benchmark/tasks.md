@@ -746,3 +746,22 @@ requirements/design/tasks/progress. No production/frozen/CI edits.
 - [x] Focused/default/cli-full harness, unchanged gate, fmt/all-target Clippy.
 - [x] Fresh task review/fix findings, ledger+commit. Final review/native CI
   and integration evidence follow in the PR close-out.
+
+## Delta 2026-11-11 — T22: offline candidate census (#71)
+
+**Spec:** CENSUS-71-1…4. **New crates:** none. **Files:**
+tests/support/representation{,_census}.rs, tests/search_representation.rs,
+representation-census-plan.md, dated specs/ledger. No src/frozen/CI edits.
+
+- [x] RED: real duplicate-body corpus must export both locations/contexts
+  and the actual ordered pools; collector absent before implementation.
+- [x] GREEN: explicit-pin preflight, replay-only search/identity capture,
+  chunk occurrence lookup, pool/citation checks, full provenance and counts.
+- [x] Test original-k equivalence, empty lexical pool, missing query/document
+  coverage, malformed provenance, full frozen pool agreement; no mocks of
+  expected search behavior. Default/cli-full targeted tests and unchanged
+  gate, fmt/all-target Clippy.
+- [x] Fresh task review/fix/ledger+commit.
+- [x] Clean-source manual full export outside checkout; audit386case/source
+  observations and agreement of all nonempty historical pools. Final review,
+  required native CI and squash integration follow in PR close-out.

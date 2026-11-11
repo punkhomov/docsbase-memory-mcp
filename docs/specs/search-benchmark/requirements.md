@@ -858,3 +858,29 @@ existing FREE_MODEL_PACE before each unique query call and prints unique
 input/method-call counts before inference (provider splitting/retries are
 not claimed as counted). PacingEmbedder must preserve embed_query dispatch
 and the same pacing timeline across document/query methods. No live run.
+
+## Delta 2026-11-11 — CENSUS-71: offline historical candidate inventory
+
+- **CENSUS-71-1:** T22 collects the exact ordered pre-provider pools for
+  Bm25Rerank/RrfRerank through current search_docs_with with an identity
+  capturing reranker and explicit recorded query/document vectors only.
+  No provider clients/network/inference, new ranking implementation, quality
+  scores, production/source metadata writes, or frozen-data changes.
+- **CENSUS-71-2:** each candidate maps by actual chunk_id→doc_id/seq to the
+  indexed location and preflight input. Preserve path/heading/lines/body,
+  occurrence cardinality/order and original cases/qrels/k. Equal bodies
+  under different locations retain distinct context/rerank identities.
+  Missing metadata/vector/query coverage or capture/citation mismatch fails.
+- **CENSUS-71-3:** manifest records supplied vector model/role provenance,
+  corpus/cases/source/harness identity, candidate window and exact ordered
+  raw/context input keys and bytes. Legacy-v1 is explicitly historical with
+  unknown-role provenance; this is not a fresh raw control. Context-embedding
+  candidate pools and quality/tokens/live costs remain unmeasured.
+- **CENSUS-71-4:** original k must be≤the existing50candidate window. The
+  collector requests limit50 to expose all identity-reranked candidates;
+  this does not change the prepared pool for eligible original k. Verify
+  this against actual original-k capture, duplicate-body locations, empty
+  lexical pools, missing coverage, and every nonempty frozen recorded pool.
+  Manual export requires a clean commit, output outside checkout and atomic
+  no-clobber publication. Rust1.88/default/cli-full, fmt/Clippy, fresh reviews
+  and required native CI. #71 remains open; no live execution authorized.
