@@ -68,7 +68,7 @@ Files: product docs/CHANGELOG, reports/dedupe-refill-2026-11-11.md, ledger.
 Process clarification 2026-11-11: native CI requires a published commit; R2
 local evidence and R3 forge delivery have distinct completion records.
 
-- [ ] Fresh final whole-branch review, fix findings, commit final ledger.
+- [x] Fresh final whole-branch review, fix findings, commit final ledger.
 - [ ] Push PR closes #68 only; docs/linux/macos/windows green on final HEAD.
   Squash merge exact checked HEAD, verify issue closure and main commit.
   Final forge outcomes go in the PR evidence comment without a new CI-only

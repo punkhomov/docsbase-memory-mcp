@@ -330,3 +330,16 @@ Ruling фиксируют принятые решения; minor — что от
   no Critical/Important/Minor findings or deferred minors. R1 runtime unchanged.
   R3 owns whole-branch review/native CI and authorized squash merge; those
   delivery conditions remain pending until checked on the published final HEAD.
+
+
+- Task R3: review complete; forge delivery in progress (2026-11-11). Fresh
+  whole-branch review061b353..f844576 found implementation convergence,
+  no Critical/Important/Minor findings or deferred minors. All FR-21..25/SC-13
+  and SC-14 local evidence mapped to code/tests/logs.
+- Ruling: final review verdict is partial solely because required native
+  docs/linux/macos/windows on the final published HEAD, squash merge and #68
+  closure are not yet observed. This commit changes only the ledger/checklist;
+  runtime and measurement tree match f844576. Before merge, all four checks
+  must pass for this exact final head. Final forge outcomes and R3 completion
+  are recorded in the PR evidence comment as specified by the plan, avoiding
+  repeated CI-only ledger commits. User-authorized squash merge follows checks.
