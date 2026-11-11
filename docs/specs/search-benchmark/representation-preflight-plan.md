@@ -28,7 +28,7 @@ original cases, source/model/tokenizer pins и counts. Входные query stri
 - [x] Проверить independent-index determinism, relocation/raw reuse,
   wrong corpus rejection, no-clobber и output вне checkout.
 - [x] Focused tests, frozen gate, fmt/clippy, fresh task review, ledger/commit.
-- [ ] Manual ignored export на clean commit вне checkout; проверить полный
+- [x] Manual ignored export на clean commit вне checkout; проверить полный
   frozen corpus/cases/bytes, source identity и отсутствие fixture mutations.
 - [ ] Fresh final review и required native CI, отдельный PR; #71 остаётся
   открытой до измеренных results. Inference scope не расширяется.

@@ -725,6 +725,6 @@ spec deltas, `representation-preflight-plan.md`, progress ledger.
   preserves raw blob/query reuse; corpus mismatch and overwrite rejected.
 - [x] Verify focused cli-full tests, unchanged frozen gate, fmt/all-targets
   Clippy; fresh task review/fix findings and task commit/ledger.
-- [ ] On clean reachable source commit, run manual offline frozen preflight;
+- [x] On clean reachable source commit, run manual offline frozen preflight;
   inspect81docs/327chunks/193cases and new artifact without fixture changes.
   Final review/native CI and integration evidence follow in PR close-out.

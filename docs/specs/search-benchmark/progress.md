@@ -496,3 +496,10 @@ fixture/baseline/provider/CI changes.
 Ruling: fresh task reviewer PASS / APPROVED, no findings. Clean-commit
 manual artifact verification/final review/native CI remain PR delivery
 close-out; #71 remains open.
+
+T20 manual verification on clean source491a61e:81docs/327chunks/193cases,
+raw84710/context111123 UTF8 bytes, unique raw/context327/327. All327
+path/heading/spans/body/context records match the independent earlier audit;
+all193 cases/qrels preserve existing QueryCase semantics (omitted optional
+lines serializes as null). Output outside checkout, tree stays clean;
+provider_requests0 and qualitynull. Final/native evidence remains in PR.
