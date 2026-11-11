@@ -557,3 +557,10 @@ previous single-final-push optimization, without weakening any gate. The new
 Windows regression is expected RED; no production fix is included and this
 intermediate head cannot be merged. Test formatting preflight was corrected
 before this head (no behavior change).
+
+Task S4.3c: native RED observed on3fa6ae7/run42948263954/job130286191228:
+actual adapter Pending versus Ready(Some(TimedOut)),449other lib tests pass;
+no production correction existed at that run. Runtime cleanup completed.
+#115 filed after RED and all114records/32issues duplicate check. Minimal raw
+zero-wait connection/probe correction and four real endpoint controls added;
+validation/fresh review pending. This candidate stays draft, not mergeable.

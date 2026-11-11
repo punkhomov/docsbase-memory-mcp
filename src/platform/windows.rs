@@ -13,6 +13,7 @@ use std::process::Command;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use interprocess::ConnectWaitMode;
 use interprocess::local_socket::tokio::{Listener as TokioListener, Stream as TokioStream};
 use interprocess::local_socket::traits::Listener as _;
 use interprocess::local_socket::traits::tokio::Listener as _;
@@ -20,6 +21,8 @@ use interprocess::local_socket::{
     ConnectOptions, GenericNamespaced, Listener as SyncListener, ListenerNonblockingMode,
     ListenerOptions, Name, Stream as SyncStream, ToNsName as _,
 };
+use interprocess::os::windows::named_pipe::tokio::DuplexPipeStream as AsyncPipeStream;
+use interprocess::os::windows::named_pipe::{DuplexPipeStream, pipe_mode::Bytes};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::signal::windows::{CtrlC, CtrlClose, ctrl_c, ctrl_close};
 use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
@@ -229,20 +232,49 @@ pub fn connect_blocking(endpoint: &Endpoint) -> io::Result<BlockingStream> {
         .map(BlockingStream)
 }
 
-/// Connects a cancellable async named-pipe stream through the IO runtime.
+/// Makes one nonblocking connection attempt through the IO runtime.
 ///
 /// # Errors
-/// Returns invalid endpoint and raw connect errors.
+/// Returns invalid endpoint and raw connect errors, or `TimedOut` when busy.
 pub async fn connect_async(endpoint: &Endpoint) -> io::Result<Stream> {
-    let options = ConnectOptions::new().name(ns_name(endpoint)?);
-    options.connect_tokio().await.map(Stream)
+    let path = pipe_path(endpoint)?;
+    // interprocess 2.4.4 local-socket adapters ignore the wait mode. Their
+    // default busy-pipe path spawns an unbounded blocking worker, which can
+    // survive future cancellation and delay runtime Drop. ZERO selects the
+    // raw API's single OS attempt; retry/budget ownership stays with callers.
+    AsyncPipeStream::<Bytes>::connect_by_path_with_wait_mode(
+        path.as_str(),
+        ConnectWaitMode::Timeout(Duration::ZERO),
+    )
+    .await
+    .map(|pipe| Stream(TokioStream::NamedPipe(pipe.into())))
 }
 
-/// Liveness probe: a pipe has no persistent name, so probing means connecting
-/// once and closing (`None`-byte EOF on the server side, ADR-10).
+// Match GenericNamespaced's local \\.\pipe\ mapping used by our listeners.
+fn pipe_path(endpoint: &Endpoint) -> io::Result<String> {
+    match endpoint {
+        Endpoint::Pipe(name) => Ok(format!(r"\\.\pipe\{name}")),
+        Endpoint::Unix(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unix endpoint submitted to the Windows backend",
+        )),
+    }
+}
+
+/// Probes once without waiting for a free instance. A busy pipe is present;
+/// an available pipe is connected and closed (byte EOF on the server, ADR-10).
 #[must_use]
 pub fn connect_probe(endpoint: &Endpoint) -> bool {
-    connect_blocking(endpoint).is_ok()
+    let Ok(path) = pipe_path(endpoint) else {
+        return false;
+    };
+    match DuplexPipeStream::<Bytes>::connect_by_path_with_wait_mode(
+        path.as_str(),
+        ConnectWaitMode::Timeout(Duration::ZERO),
+    ) {
+        Ok(_) => true,
+        Err(error) => error.kind() == io::ErrorKind::TimedOut,
+    }
 }
 
 /// Same as [`connect_probe`]: named pipes have no file to check.
@@ -466,5 +498,66 @@ mod tests {
         runtime.block_on(reserved).expect("reserved worker joined");
         drop(runtime);
         assert_eq!(outcome, Poll::Ready(Some(io::ErrorKind::TimedOut)));
+    }
+
+    #[tokio::test]
+    async fn busy_pipe_probe_reports_presence() {
+        let cache = tempfile::TempDir::new().expect("cache");
+        let endpoint = daemon_endpoint(cache.path());
+        let path = pipe_path(&endpoint).expect("pipe path");
+        let server = ServerOptions::new()
+            .max_instances(1)
+            .first_pipe_instance(true)
+            .create(&path)
+            .expect("single pipe instance");
+        let client = ClientOptions::new().open(&path).expect("occupy pipe");
+        server.connect().await.expect("occupied connection");
+        let present = connect_probe(&endpoint);
+        drop(client);
+        drop(server);
+        assert!(present, "busy endpoint is still present");
+        assert!(!connect_probe(&endpoint), "last handle removed");
+    }
+
+    #[tokio::test]
+    async fn available_pipe_async_connect_preserves_byte_stream() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let cache = tempfile::TempDir::new().expect("cache");
+        let endpoint = daemon_endpoint(cache.path());
+        let listener = bind(&endpoint).expect("bind");
+        let (mut client, mut server) =
+            tokio::try_join!(connect_async(&endpoint), listener.accept()).expect("connect/accept");
+        client.write_all(b"ping\n").await.expect("client write");
+        client.flush().await.expect("client flush");
+        let mut bytes = [0; 5];
+        server.read_exact(&mut bytes).await.expect("server read");
+        assert_eq!(&bytes, b"ping\n");
+        server.write_all(b"pong\n").await.expect("server write");
+        server.flush().await.expect("server flush");
+        client.read_exact(&mut bytes).await.expect("client read");
+        assert_eq!(&bytes, b"pong\n");
+    }
+
+    #[tokio::test]
+    async fn absent_pipe_async_connect_returns_not_found() {
+        let cache = tempfile::TempDir::new().expect("cache");
+        let endpoint = daemon_endpoint(cache.path());
+        let error = connect_async(&endpoint)
+            .await
+            .err()
+            .expect("absent endpoint");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(!connect_probe(&endpoint));
+    }
+
+    #[tokio::test]
+    async fn unix_endpoint_async_connect_is_invalid_on_windows() {
+        let endpoint = Endpoint::Unix(std::path::PathBuf::from("invalid-unix-endpoint"));
+        let error = connect_async(&endpoint)
+            .await
+            .err()
+            .expect("invalid endpoint");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(!connect_probe(&endpoint));
     }
 }
