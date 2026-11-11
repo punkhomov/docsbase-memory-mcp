@@ -867,3 +867,33 @@ Normal MCP startup parses Config::global before creating the service, so invalid
 global configuration fails explicitly rather than supplying a hidden search
 policy. The compatibility constructor uses SearchSpec defaults explicitly; the
 complete-policy constructor validates on each search before any startup/IO.
+
+## Delta 2026-11-11 — B3 CLI composition and product contract
+
+CLI search captures ingress, resolves one global Config snapshot and constructs
+SearchOperation before any connection/provider. The async attempt wraps native
+connect, Hello/project binding and scoped Search in within_operation. Only an
+initial failed connect while the operation remains live returns None for direct
+mode. Connected errors and expired/cancelled operation propagate, without CLI
+transport retry or local fallback. The existing generic CLI try_daemon and
+blocking Client remain non-search compatibility paths.
+
+The synchronous CLI bridge creates/runs/drops a current-thread runtime on a
+plain thread. If already inside a multithread Tokio runtime, use its sanctioned
+block_in_place context for the bridge; inside an existing current-thread runtime
+return explicit Admission instead of panicking/nesting or blocking its sole
+executor. This is a sync CLI API, not an async library embedding promise.
+No new threadpool, crate, timeout or implicit policy is added.
+
+Direct fallback uses Config::for_project with that same global snapshot and
+keeps the same operation/start. Check before/after synchronous provider creation;
+direct sync providers remain cooperative, not forcibly preempted. Payload policy
+and deadline derive from the same owner configuration. Do not reopen global
+configuration and silently reset either elapsed time or policy at fallback.
+
+Update docs/ARCHITECTURE.md, docs/MCP.md, docs/CONFIG.md and README.md where
+applicable: prepared read phases, coalescing/consistency, configured search budget,
+original queue/total, scoped capability/context, old-client limitations, EOF/
+request cancellation, physical charging/nonpreemption, CLI initial-connect-only
+fallback and legacy half-close. #79/#81/#78 remain separate future capabilities;
+no official 20k capacity/HTTP/remote-async/configv2 claim.

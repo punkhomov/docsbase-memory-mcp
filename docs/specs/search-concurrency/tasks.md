@@ -442,3 +442,23 @@ constructor for tests and Config::global at normal startup; compatibility new()
 explicitly obtains owner SearchSpec defaults. No global test environment hooks.
 Non-search tools retain existing catalogue budgets/queue behavior; async control
 operations use that same owner quick budget, not a new local timeout constant.
+
+## Delta 2026-11-11 — S4.3b3 CLI and documentation execution
+
+Base8312ed6. Modify src/cli/search.rs, add private src/cli/search_tests.rs,
+adapt tests/cli_routing.rs only as needed for scoped/native/legacy fixtures.
+Preserve generic cli/mod.rs routing API and blockingClient. TDD actual CLI old-
+capability refusal/no direct fallback on an indexed project before production;
+then missing bridge API tests for original operation, runtime safety and initial
+connection behavior. Retain explicit legacy fake; upgraded normal fake must
+advertise/serve Search and reject legacy CallTool search.
+
+Verify actualCLI scoped routing, connected errors/no fallback, no-daemon direct
+search, original expired admission before IO, plain/multithread/current-thread
+runtime behavior and complete owner policy without host-latency assertions.
+All new waits use generous watchdogs/ordering gates. Add no new sleeps/thresholds.
+Update the four named product docs; check references/commands and all frozen113.
+Full cli-full, relevant full/lean CLI/wire/operation and all-target+opt-in lint/
+fmt/diff; fresh task review, delegate findings. Then fresh whole-branch final
+review with FR/SC/task mapping and four final-head native checks before ready/
+squash merge. No intermediate native success replaces final acceptance.

@@ -490,3 +490,35 @@ read-boundary-dependent framing failure, not a claim of unlimited memory growth.
 B3 CLI/original policy/direct fallback/product docs and whole-feature final
 review/latest-head4native remain mandatory; PR112 stays draft, #66/#114 open
 until actual delivery/merge. No environment changes or hard preemption promise.
+
+Task S4.3b3: design ready before code, base8312ed6. CLI async scoped composition,
+one global policy/operation across initial connect/direct fallback, safe sync
+runtime bridge and product contract documentation. Explicit current-thread
+runtime error avoids unsupported sync nesting; normal CLI remains a plain thread.
+Actual old-capability CLI regression precedes production changes. B2 source has
+clean scoped re-review and was committed; current B2 native gates pending.
+
+Task S4.3b2: native preflight8312ed6/run42937123060 complete docs/linux/macos/
+windows SUCCESS. Diagnostic inventories independently add16tests perOS versus
+ca2c6db, none removed; Linux1140+2artifact/macOS1136/Windows1121,0failed13ignored.
+This verifies MCP/frame/rebind changes on allOS, not the final B3/feature head.
+
+Task S4.3b3: complete (base8312ed6; CLI scoped async bridge, original complete
+owner policy/same direct snapshot, initial-connect-only fallback, product docs).
+Actual legacyCLI on indexeddata RED0/1in0.07 unexpectedly succeeds; bridge API
+compileRED follows. Four exact saved source/test snapshots verify raw inputs.
+Five unit cases cover plain/multithread/current-thread runtime behavior and
+expired/live original operation on missing endpoint. Two nativeCLI additions
+preserve refusal/error rather than hiding it behind valid direct results.
+Final16 sequential stages all exit0/current168Rust: full cli-full1147passed/
+0failed/13ignored across66targets; full+lean CLIunit5/routing+read18/IPC+MCP34/
+operation12; all-target+opt-in Clippy/fmt/diff0, docs hygiene/5newanchors/request
+JSON0. All113 frozen inputs unchanged. Own first-green let-else lint preflight
+retained separately. Fresh task review Spec PASS/Quality APPROVED, no findings
+or deferred minors. Generic CLI helper/blocking Client/Options preserved.
+Task S4.3b3: Ruling: commit the approved task locally, perform mandatory fresh
+whole-feature review on that committed head, then push the final reviewed head
+once for required native checks. No gate is skipped; this avoids starting an
+intermediate native workflow before the final review ledger is committed.
+Whole-feature convergence/latest-head4native remain pending; PR112 stays draft,
+#66/#114 remain open until actual completion/merge. No environment changes.

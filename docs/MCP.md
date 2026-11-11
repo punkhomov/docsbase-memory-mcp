@@ -38,7 +38,8 @@ clients must allow the 600 s IPC timeout; `sync_*` only enqueue/read rows.
 
 ## Scores
 
-`score` is not one scale, and the response does not label which one it is yet:
+`score` has different scales. The default array does not label the scale;
+`explain: true` reports it in `meta.score_scale`:
 
 - lexical config — raw BM25, unbounded and corpus-relative;
 - `ranking = "rrf"` — the fused value (`1/(k+rank)` magnitudes);
@@ -58,7 +59,8 @@ is the bare array above, unchanged.
 |---|---|
 | `score_scale` | `bm25`, `rrf` or `rerank` — which scale `score` is on, derived from the path that actually ran (`rerank: false` on a project with a stage answers `rrf`) |
 | `stages` | Stages that executed, in order: `bm25`, `dense`, `rrf`, `rerank` |
-| `stage_ms` | Milliseconds per executed stage plus `total`; a stage that did not run has no key |
+| `stage_ms` | Milliseconds per executed stage plus original end-to-end `total`, including startup, queueing and transport through reply receipt; a stage that did not run has no key |
+| `queue_ms` | Admission delay already included in `stage_ms.total`: frontend/worker/metadata-reader waiting; do not add it to total again |
 | `window` | Candidate window actually fetched: `limit` for a lexical search, `max(limit, window)` when fused or reranked, clamped to 1000 |
 | `index_generation` | Index generation the answer was served from |
 | `degraded` | Reasons the tier did not serve in full: `ann-building`, `ann-insufficient`, `ann-error`, `exact-fallback`, `no-rerank-stage`. Empty is the normal answer |
@@ -114,11 +116,32 @@ except `ready`. The record is kept by the daemon, so `docsbase status` without a
 running daemon reports `unknown` with `reason: "daemon not running"` rather than
 claiming the tier is off.
 
-## Timeouts
+## Timeouts and cancellation
 
-- Fast tools: 30 s IPC read timeout.
-- `index_project`: 600 s.
+- `search_docs`: one global `search.request_timeout_ms` budget (default 30 s),
+  shared by daemon startup, connection admission, search, reply and at most one
+  MCP reconnect. Configure it in [global config](CONFIG.md#search-request-policy-global-only).
+- Other quick tools: the existing 30 s exchange budget; `index_project`: 600 s.
 - CLI `sync` polls `sync_status` up to ~610 s.
+
+MCP request cancellation closes that caller's active scoped search connection.
+Cancelling a request still waiting for the shared connection leaves the active
+call alone. Expired/cancelled searches cannot replay paid work. The frontend
+uses asynchronous local IO on Linux, macOS and Windows; search does not depend
+on blocking socket timeout setters.
+
+A synchronous provider or already-running startup operation can still finish
+after its caller stops waiting. Cooperative checks prevent subsequent paid
+stages, and shared work continues for other live callers. Actual daemon work
+and pending reply delivery retain their request/connection charges until they
+settle. An expired backpressured reply can end at EOF or a partial frame; a
+complete timeout error is not guaranteed on that connection.
+
+New MCP/CLI search requires the daemon's `search-context-v1` capability. Restart
+an older daemon when prompted; matching package versions alone do not prove
+support. Legacy `CallTool` clients remain compatible, including write-half-close
+and reply behavior, but do not gain scoped EOF cancellation or propagated caller
+budgets. See [the IPC contract](ARCHITECTURE.md#scoped-search-ipc).
 
 ## Guarantees
 

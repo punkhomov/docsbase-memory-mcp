@@ -175,6 +175,14 @@ docsbase uninstall [--yes]  # dry-run without --yes; deletes owned artifacts wit
 
 Details: [`docs/CONFIG.md`](docs/CONFIG.md), `docsbase --help`.
 
+Search uses one [configured original budget](docs/CONFIG.md#search-request-policy-global-only).
+It uses scoped IPC with a running daemon and falls back to a local snapshot only
+when the initial connection cannot be established. A connected failure or older
+daemon requiring restart is reported rather than hidden by local results.
+`--explain` includes original total and admission queue timing; synchronous
+providers remain cooperative on cancellation. See [MCP timing](docs/MCP.md#timeouts-and-cancellation).
+
+
 ## MCP setup
 
 `docsbase mcp` is a stdio server. Register it once per agent client:

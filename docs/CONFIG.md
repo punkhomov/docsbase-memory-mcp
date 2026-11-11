@@ -37,9 +37,43 @@ already captured the previous runtime can finish using it.
 
 Unknown keys are rejected (`deny_unknown_fields`) — typos fail loudly.
 
+## Search request policy (global only)
+
+The optional global `[search]` table controls one search operation and its
+captured payload. Project files cannot override these daemon-scoped fields.
+Missing keys are initialized by the search configuration owner during parsing;
+search components receive complete settings.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `request_timeout_ms` | `30000` | Original search budget, including startup, admission, transport and reconnect |
+| `max_request_payload_bytes` | `67108864` (64 MiB) | Accounted candidate/citation/filter/text payload retained by one request |
+| `max_retained_payload_bytes` | `268435456` (256 MiB) | Shared allowance for those live payloads in one daemon |
+
+```toml
+[search]
+request_timeout_ms = 30000
+max_request_payload_bytes = 67108864
+max_retained_payload_bytes = 268435456
+```
+
+All values must be positive and the per-request allowance cannot exceed the
+shared allowance. Payload admission refuses an oversized request or exhausted
+allowance explicitly; it does not truncate provider text or wait indefinitely
+for memory. These are accounted payload limits, not a process RSS limit: model
+weights, ANN structures and allocator overhead have separate lifetimes.
+
+Restart the daemon **and MCP frontend processes** after changing global search
+policy. CLI search reads its global policy on each invocation; direct fallback
+uses that same snapshot for project configuration and retains the original
+operation. A running daemon still clamps client time to its startup policy.
+Invalid global configuration prevents MCP startup instead of selecting another
+policy. See [search timing and cancellation](MCP.md#timeouts-and-cancellation).
+
 ## Hybrid stages (opt-in, spec `docs/specs/hybrid-providers`)
 
-Hybrid search is opt-in per project. Two providers exist:
+Hybrid search is opt-in per project. Official `cli-full` binaries include both
+providers; feature flags below describe custom source builds. Two providers exist:
 
 - `openrouter` (spec `docs/specs/hybrid-providers`): remote embeddings +
   rerank; needs a build with `--features hybrid-remote` and

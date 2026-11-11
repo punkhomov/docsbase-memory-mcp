@@ -53,6 +53,18 @@ fn stdout_text(output: &std::process::Output) -> String {
 
 /// Minimal daemon: answers the handshake and echoes the tool name back.
 fn spawn_fake_daemon(cache: &Path) -> thread::JoinHandle<()> {
+    spawn_fake_daemon_with_capability(cache, true)
+}
+
+fn spawn_fake_daemon_with_capability(cache: &Path, capable: bool) -> thread::JoinHandle<()> {
+    spawn_fake_daemon_with_reply(cache, capable, None)
+}
+
+fn spawn_fake_daemon_with_reply(
+    cache: &Path,
+    capable: bool,
+    search_reply: Option<Response>,
+) -> thread::JoinHandle<()> {
     let endpoint = platform::daemon_endpoint(cache);
     fs::create_dir_all(cache.join("state")).expect("mkdir state");
     let listener = platform::bind_blocking(&endpoint).expect("bind socket");
@@ -74,16 +86,37 @@ fn spawn_fake_daemon(cache: &Path) -> thread::JoinHandle<()> {
                         protocol_version: PROTOCOL_VERSION,
                         build_id: "test-daemon".to_owned(),
                         schema_version: 1,
-                        capabilities: Vec::new(),
+                        capabilities: if capable {
+                            vec![
+                                docsbase_memory::ipc::protocol::SEARCH_CONTEXT_CAPABILITY
+                                    .to_owned(),
+                            ]
+                        } else {
+                            Vec::new()
+                        },
                     },
                     Request::RegisterSession { .. } | Request::RegisterUnbound { .. } => {
                         Response::ToolResult {
                             value: serde_json::Value::Null,
                         }
                     }
+                    Request::CallTool { name, .. } if name == "search_docs" && capable => {
+                        Response::Error {
+                            code: -32011,
+                            message: "fake daemon expects scoped search".to_owned(),
+                            instruction: None,
+                        }
+                    }
                     Request::CallTool { name, .. } => Response::ToolResult {
                         value: serde_json::json!({ "routed_tool": name }),
                     },
+                    Request::Search { .. } if capable => {
+                        search_reply
+                            .clone()
+                            .unwrap_or_else(|| Response::ToolResult {
+                                value: serde_json::json!({"routed_tool":"search_docs"}),
+                            })
+                    }
                     Request::Search { .. } => Response::Error {
                         code: -32011,
                         message: "legacy fake daemon does not support scoped search".to_owned(),
@@ -272,4 +305,46 @@ fn daemon_errors_surface() {
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(stderr.contains("no project registered"), "{stderr}");
     let _ = handle.join();
+}
+
+#[test]
+fn search_refuses_legacy_daemon_without_direct_fallback() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    env.index(); // A successful direct result must not hide incompatibility.
+    let _daemon = spawn_fake_daemon_with_capability(env.cache.path(), false);
+    let output = env
+        .cmd()
+        .timeout(Duration::from_secs(300))
+        .args(["search", "widgets"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("restart"), "{stderr}");
+}
+
+#[test]
+fn connected_search_failure_does_not_fall_back_to_valid_local_index() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    env.index();
+    let _daemon = spawn_fake_daemon_with_reply(
+        env.cache.path(),
+        true,
+        Some(Response::Error {
+            code: -32014,
+            message: "backend rejected this search".to_owned(),
+            instruction: None,
+        }),
+    );
+    let output = env
+        .cmd()
+        .timeout(Duration::from_secs(300))
+        .args(["search", "widgets"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("backend rejected this search"), "{stderr}");
 }
