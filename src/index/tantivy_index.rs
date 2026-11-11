@@ -11,6 +11,8 @@ use tantivy::schema::{
 };
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 
+use super::query::{QueryMode, prepare_query};
+
 use crate::error::{Error, Result};
 use crate::index::chunk::{CHUNK_OVERLAP, Chunk};
 use crate::index::job::MAX_CHUNK_CHARS;
@@ -383,7 +385,16 @@ impl IndexHandle {
     /// Returns [`Error::Query`] for an unparsable query and [`Error::Internal`]
     /// for search failures.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
-        search_reader(&self.reader, &self.parser, &self.fields, query, limit)
+        self.search_with_mode(query, limit, QueryMode::Syntax)
+    }
+
+    /// Searches with an explicit query interpretation and existing field boosts.
+    ///
+    /// # Errors
+    /// Returns [`Error::Query`] for invalid syntax or literal input without
+    /// searchable terms, and [`Error::Internal`] for index/search failures.
+    pub fn search_with_mode(&self, query: &str, limit: usize, mode: QueryMode) -> Result<Vec<Hit>> {
+        search_reader(&self.reader, &self.parser, &self.fields, query, limit, mode)
     }
 }
 
@@ -455,7 +466,16 @@ impl ReadIndex {
     /// Returns [`Error::Query`] for an unparsable query and [`Error::Internal`]
     /// for search failures.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
-        search_reader(&self.reader, &self.parser, &self.fields, query, limit)
+        self.search_with_mode(query, limit, QueryMode::Syntax)
+    }
+
+    /// Searches with an explicit query interpretation and existing field boosts.
+    ///
+    /// # Errors
+    /// Returns [`Error::Query`] for invalid syntax or literal input without
+    /// searchable terms, and [`Error::Internal`] for index/search failures.
+    pub fn search_with_mode(&self, query: &str, limit: usize, mode: QueryMode) -> Result<Vec<Hit>> {
+        search_reader(&self.reader, &self.parser, &self.fields, query, limit, mode)
     }
 }
 
@@ -465,6 +485,7 @@ fn search_reader(
     fields: &Fields,
     query: &str,
     limit: usize,
+    mode: QueryMode,
 ) -> Result<Vec<Hit>> {
     if query.trim().is_empty() {
         return Err(Error::Query {
@@ -475,9 +496,7 @@ fn search_reader(
         return Ok(Vec::new());
     }
     let limit = limit.min(MAX_HITS);
-    let parsed = parser.parse_query(query).map_err(|err| Error::Query {
-        message: format!("parse query {query:?}: {err}"),
-    })?;
+    let parsed = prepare_query(parser, query, mode)?;
     let searcher = reader.searcher();
     // Over-fetch so the long-chunk penalty can reorder before truncation, and
     // widen while an unseen document could still beat the k-th final score

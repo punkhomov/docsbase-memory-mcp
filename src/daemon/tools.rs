@@ -21,6 +21,7 @@ use crate::hybrid::meta::{
 };
 use crate::hybrid::rrf::rrf_merge;
 use crate::hybrid::work::Cancellation;
+use crate::index::QueryMode;
 use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
 use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
@@ -541,6 +542,7 @@ fn lexical_snapshot<Guard>(
     source: MetadataSource<'_>,
     admit: &impl Fn() -> Result<Guard>,
     query: &str,
+    query_mode: QueryMode,
     fetch: usize,
 ) -> Result<LexicalSnapshot> {
     in_read_phase(context, source, admit, |reader| {
@@ -548,7 +550,7 @@ fn lexical_snapshot<Guard>(
         drop(reader);
         let started = std::time::Instant::now();
         let index = ReadIndex::open(&lifecycle::index_dir(context.cache, context.project.id))?;
-        let hits = index.search(query, fetch)?;
+        let hits = index.search_with_mode(query, fetch, query_mode)?;
         context.operation.check()?;
         Ok(LexicalSnapshot {
             generation,
@@ -569,7 +571,14 @@ fn prepare_search<Guard>(
 ) -> Result<PreparedSearch> {
     context.operation.check()?;
     let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
-    let lexical = lexical_snapshot(context, source, admit, &arguments.query, fetch)?;
+    let lexical = lexical_snapshot(
+        context,
+        source,
+        admit,
+        &arguments.query,
+        arguments.query_mode,
+        fetch,
+    )?;
     let mut stage_ms = Vec::with_capacity(4);
     stage_ms.push((Stage::Bm25, lexical.elapsed_ms));
     let mut degraded = Vec::new();
@@ -913,6 +922,7 @@ fn parse_post_filter(args: &Value) -> Result<PostFilterArgs> {
 /// stays about searching.
 struct SearchArgs {
     query: String,
+    query_mode: QueryMode,
     limit: usize,
     explain: bool,
     rerank: Option<bool>,
@@ -933,6 +943,7 @@ enum Dedupe {
 }
 
 fn parse_search_args(args: &Value) -> Result<SearchArgs> {
+    let query_mode = QueryMode::from_argument(args.get("query_mode"))?;
     let query = args
         .get("query")
         .and_then(Value::as_str)
@@ -987,6 +998,7 @@ fn parse_search_args(args: &Value) -> Result<SearchArgs> {
     } = parse_post_filter(args)?;
     Ok(SearchArgs {
         query,
+        query_mode,
         limit,
         explain,
         rerank,
