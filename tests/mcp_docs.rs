@@ -516,3 +516,31 @@ fn search_docs_schema_advertises_every_post_filter_key() {
         );
     }
 }
+
+#[test]
+fn ipc_scope_finds_a_match_beyond_the_old_global_window() {
+    let mut env = Env::new(&[(
+        "guide/answer.md",
+        "---\ntags: api, docs\n---\n# Guide\n\nalpha filler filler filler filler filler filler filler filler\n",
+    )]);
+    for id in 0..12 {
+        write_file(
+            env.root.path(),
+            &format!("outside-{id}.md"),
+            b"# alpha\n\nalpha alpha alpha\n",
+        );
+    }
+    env.start_daemon();
+    index_project(&env);
+    let mut client = env.bound();
+    for mut args in [
+        json!({"path_prefix":"guide/"}),
+        json!({"tags":["api","docs"]}),
+    ] {
+        args["query"] = json!("alpha");
+        args["limit"] = json!(1);
+        let hits = client.call_tool("search_docs", args).expect("search");
+        assert_eq!(hits.as_array().expect("hits").len(), 1);
+        assert_eq!(hits[0]["path"], "guide/answer.md");
+    }
+}

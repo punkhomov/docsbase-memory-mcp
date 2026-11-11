@@ -29,6 +29,7 @@ use crate::search::budget::PayloadBudget;
 use crate::search::metadata::{MetadataReader, MetadataSource};
 use crate::search::operation::SearchOperation;
 use crate::search::payload::{OwnedPayload, PayloadRequest};
+use crate::search::scope::{DocumentScope, ScopeRequest, has_tags};
 use crate::store::migrations;
 use crate::store::models::{Project, ProjectStatus, SyncJob, SyncState};
 use crate::store::{Db, repo};
@@ -225,6 +226,67 @@ static ANN_SEARCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 #[must_use]
 pub fn ann_search_count() -> u64 {
     ANN_SEARCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Exact scoped dense scan: SQL is reacquired only to capture bounded hash
+/// pages, and is dropped before any vector-cache IO. The original generation
+/// is checked even for pages whose vectors are missing.
+fn scoped_dense<Guard>(
+    context: &SearchContext<'_>,
+    source: MetadataSource<'_>,
+    admit: &impl Fn() -> Result<Guard>,
+    query: DenseQuery<'_>,
+    scope: &DocumentScope,
+) -> Result<Vec<(u64, f32)>> {
+    if scope.documents().is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(embedder) = context.stages.embedder.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let vector =
+        context
+            .dense
+            .query_embedding(embedder, query.text, context.operation.cancellation())?;
+    context.operation.check()?;
+    let mut cache = crate::vector_cache::VectorCache::open(context.cache)?;
+    let mut top = dense::TopK::new(&vector, query.fetch)?;
+    for documents in scope.documents().chunks(repo::BATCH_KEYS) {
+        let mut after = (0_i64, 0_u32);
+        loop {
+            context.operation.check()?;
+            let hashes = in_read_phase(context, source, admit, |reader| {
+                let transaction = reader
+                    .connection()
+                    .unchecked_transaction()
+                    .map_err(repo::db_error)?;
+                snapshot_info(&reader, context.project, Some(query.generation))?;
+                let hashes = crate::search::scope::hash_page(
+                    &transaction,
+                    context.project.id,
+                    documents,
+                    after,
+                    &context.operation,
+                )?;
+                transaction.commit().map_err(repo::db_error)?;
+                Ok(hashes)
+            })?;
+            if let Some((id, _)) = hashes.chunks.last() {
+                after = chunk_id_parts(*id);
+            }
+            cache.visit_page(embedder.model_id(), &hashes.chunks, |id, vector| {
+                context.operation.check()?;
+                if let Some(vector) = vector {
+                    top.push(id, vector)?;
+                }
+                Ok(())
+            })?;
+            if !hashes.more {
+                break;
+            }
+        }
+    }
+    Ok(top.finish())
 }
 
 fn stream_exact(
@@ -448,8 +510,7 @@ fn search_plan(
                 .to_owned(),
         });
     }
-    let filtering =
-        args.dedupe != Dedupe::None || args.path_prefix.is_some() || !args.tags.is_empty();
+    let filtering = args.dedupe != Dedupe::None;
     let fetch = if rerank_active || rrf_active {
         // Preserve the exact provider window; fusion is truncated to this size.
         args.limit.max(window as usize).min(MAX_HITS)
@@ -535,22 +596,51 @@ struct LexicalSnapshot {
     generation: i64,
     hits: Vec<(u64, f32)>,
     elapsed_ms: u64,
+    scope: Option<DocumentScope>,
 }
 
 fn lexical_snapshot<Guard>(
     context: &SearchContext<'_>,
     source: MetadataSource<'_>,
     admit: &impl Fn() -> Result<Guard>,
-    query: &str,
-    query_mode: QueryMode,
+    arguments: &SearchArgs,
     fetch: usize,
 ) -> Result<LexicalSnapshot> {
     in_read_phase(context, source, admit, |reader| {
-        let generation = snapshot_info(&reader, context.project, None)?;
-        drop(reader);
         let started = std::time::Instant::now();
+        let transaction = reader
+            .connection()
+            .unchecked_transaction()
+            .map_err(repo::db_error)?;
+        let generation = snapshot_info(&reader, context.project, None)?;
+        let scope = if arguments.path_prefix.is_some() || !arguments.tags.is_empty() {
+            Some(DocumentScope::capture(
+                &transaction,
+                ScopeRequest {
+                    project: context.project.id,
+                    prefix: arguments.path_prefix.as_deref(),
+                    tags: &arguments.tags,
+                    dense: context.stages.ranking == Ranking::Rrf,
+                },
+                context.payload_budget,
+                &context.operation,
+            )?)
+        } else {
+            None
+        };
+        transaction.commit().map_err(repo::db_error)?;
+        drop(reader);
         let index = ReadIndex::open(&lifecycle::index_dir(context.cache, context.project.id))?;
-        let hits = index.search_with_mode(query, fetch, query_mode)?;
+        let hits = if let Some(scope) = &scope {
+            index.search_scoped(
+                &arguments.query,
+                fetch,
+                arguments.query_mode,
+                scope.documents(),
+            )?
+        } else {
+            index.search_with_mode(&arguments.query, fetch, arguments.query_mode)?
+        };
         context.operation.check()?;
         Ok(LexicalSnapshot {
             generation,
@@ -559,6 +649,7 @@ fn lexical_snapshot<Guard>(
                 .map(|hit| (hit.chunk_id, hit.score))
                 .collect(),
             elapsed_ms: elapsed_ms(started),
+            scope,
         })
     })
 }
@@ -571,14 +662,7 @@ fn prepare_search<Guard>(
 ) -> Result<PreparedSearch> {
     context.operation.check()?;
     let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
-    let lexical = lexical_snapshot(
-        context,
-        source,
-        admit,
-        &arguments.query,
-        arguments.query_mode,
-        fetch,
-    )?;
+    let lexical = lexical_snapshot(context, source, admit, &arguments, fetch)?;
     let mut stage_ms = Vec::with_capacity(4);
     stage_ms.push((Stage::Bm25, lexical.elapsed_ms));
     let mut degraded = Vec::new();
@@ -588,17 +672,16 @@ fn prepare_search<Guard>(
     context.operation.check()?;
     let ordered = if active.rrf_active {
         let dense_started = std::time::Instant::now();
-        let dense_hits = dense_candidates(
-            context,
-            source,
-            admit,
-            DenseQuery {
-                text: &arguments.query,
-                generation: lexical.generation,
-                fetch,
-            },
-            &mut degraded,
-        )?;
+        let query = DenseQuery {
+            text: &arguments.query,
+            generation: lexical.generation,
+            fetch,
+        };
+        let dense_hits = if let Some(scope) = &lexical.scope {
+            scoped_dense(context, source, admit, query, scope)?
+        } else {
+            dense_candidates(context, source, admit, query, &mut degraded)?
+        };
         stage_ms.push((Stage::Dense, elapsed_ms(dense_started)));
         context.operation.check()?;
         let fuse_started = std::time::Instant::now();
@@ -609,6 +692,8 @@ fn prepare_search<Guard>(
     } else {
         lexical.hits
     };
+    // Preparation and final payload allowances never overlap per request.
+    drop(lexical.scope);
     let ids: Vec<_> = ordered.iter().map(|(id, _)| *id).collect();
     let payload = in_read_phase(context, source, admit, |reader| {
         snapshot_info(&reader, context.project, Some(lexical.generation))?;
@@ -789,22 +874,6 @@ pub const SEARCH_UX_OVERSCAN: usize = 4;
 
 /// Upper bound for `n_per_doc` (`search-ux` FR-2).
 pub const MAX_CHUNKS_PER_DOC: u64 = 10;
-
-/// True when the document's frontmatter carries every requested tag. Garbage in
-/// the stored JSON means "no tags", never an error (`search-ux` FR-4).
-fn has_tags(frontmatter_json: Option<&str>, required: &[String]) -> bool {
-    let Some(raw) = frontmatter_json else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<Value>(raw) else {
-        return false;
-    };
-    let Some(stored) = value.get("tags").and_then(Value::as_array) else {
-        return false;
-    };
-    let stored: Vec<&str> = stored.iter().filter_map(Value::as_str).collect();
-    required.iter().all(|tag| stored.contains(&tag.as_str()))
-}
 
 /// Longest snippet returned to a caller (`search-ux` FR-1).
 pub const SNIPPET_MAX_CHARS: usize = 240;

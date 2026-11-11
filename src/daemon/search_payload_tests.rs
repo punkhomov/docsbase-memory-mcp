@@ -7,6 +7,7 @@ use crate::index::tantivy_index::IndexHandle;
 use crate::search::budget::PayloadBudget;
 use crate::search::settings::SearchSettings;
 use crate::store::models::ProjectStatus;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -19,7 +20,7 @@ struct Fixture {
     db: Db,
     project: Project,
     cache: tempfile::TempDir,
-    _root: tempfile::TempDir,
+    root: tempfile::TempDir,
 }
 
 impl Fixture {
@@ -50,7 +51,7 @@ impl Fixture {
             db,
             project,
             cache,
-            _root: root,
+            root,
         }
     }
 
@@ -188,7 +189,7 @@ fn prepared_response_outlives_database_and_preserves_provider_input_order() {
     assert_eq!(value["hits"].as_array().expect("hits").len(), 2);
     assert_eq!(
         spy.seen.lock().expect("seen").as_slice(),
-        &[(expected_documents, 3)]
+        &[(expected_documents, 2)]
     );
     assert_released(&budget, CAP);
 }
@@ -273,6 +274,8 @@ fn aggregate_budget_stays_charged_through_provider_then_allows_retry() {
     let charge = sample.payload.charged_bytes();
     drop(sample);
     let policy = budget(charge);
+    let mut arguments = args();
+    arguments["tags"] = json!([]); // Isolate payload aggregation from JSON preparation charge.
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Mutex::new(release_rx);
@@ -290,6 +293,7 @@ fn aggregate_budget_stays_charged_through_provider_then_allows_retry() {
     std::thread::scope(|scope| {
         let policy_ref = &policy;
         let blocked_ref = &blocked;
+        let arguments_ref = &arguments;
         let task = scope.spawn(move || {
             let reader = Db::open_readonly_with_settings(
                 &cache,
@@ -312,7 +316,7 @@ fn aggregate_budget_stays_charged_through_provider_then_allows_retry() {
                     .expect("explicit operation"),
                 },
                 &reader,
-                &args(),
+                arguments_ref,
             )
         });
         entered_rx.recv_timeout(WATCHDOG).expect("provider entered");
@@ -320,7 +324,7 @@ fn aggregate_budget_stays_charged_through_provider_then_allows_retry() {
         let refused = search_docs_in(
             &fixture.context(&other.stages(), &DenseCache::new(), &policy, &cancellation),
             &fixture.db,
-            &args(),
+            &arguments,
         );
         assert!(matches!(refused, Err(Error::Admission { .. })));
         assert_eq!(other.calls.load(Ordering::SeqCst), 0);
@@ -329,7 +333,7 @@ fn aggregate_budget_stays_charged_through_provider_then_allows_retry() {
         search_docs_in(
             &fixture.context(&other.stages(), &DenseCache::new(), &policy, &cancellation),
             &fixture.db,
-            &args(),
+            &arguments,
         )
         .expect("retry after release");
         assert_eq!(other.calls.load(Ordering::SeqCst), 1);
@@ -450,4 +454,147 @@ fn zero_limit_preserves_empty_wire_without_payload_reservation() {
     .expect("empty response");
     assert_eq!(value, json!([]));
     assert_eq!(spy.calls.load(Ordering::SeqCst), 0);
+}
+
+struct ScopeEmbedder {
+    effect: Box<dyn Fn() -> Result<()> + Send + Sync>,
+}
+
+impl crate::vector_cache::Embedder for ScopeEmbedder {
+    fn model_id(&self) -> &'static str {
+        "scoped-test@d2@l2"
+    }
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+    }
+    fn embed_query(&self, _: &str) -> Result<Vec<f32>> {
+        (self.effect)()?;
+        Ok(vec![1.0, 0.0])
+    }
+}
+
+#[test]
+fn scoped_dense_rejects_generation_change_after_embedding_without_retaining_sql() {
+    let fixture = Fixture::new();
+    let cache = fixture.cache.path().to_path_buf();
+    let project = fixture.project.id;
+    let embedder = ScopeEmbedder {
+        effect: Box::new(move || {
+            // Acquiring the writer here would deadlock if preparation retained
+            // a project read lease or SQLite snapshot through the provider.
+            lifecycle::with_writer_lease(&cache, project, || {
+                let writer = Db::open(&cache)?;
+                repo::bump_index_generation(writer.connection(), project)?;
+                Ok(())
+            })
+        }),
+    };
+    let stages = HybridStages {
+        embedder: Some(Arc::new(embedder)),
+        ranking: Ranking::Rrf,
+        reranker: None,
+    };
+    let policy = budget(CAP);
+    let result = search_docs_in(
+        &fixture.context(&stages, &DenseCache::new(), &policy, &Cancellation::new()),
+        &fixture.db,
+        &args(),
+    );
+    assert!(
+        matches!(result,Err(Error::Project { ref message,.. }) if message.contains("generation changed")),
+        "{result:?}"
+    );
+    assert!(fixture.db.connection().is_autocommit());
+    assert_released(&policy, CAP);
+}
+
+#[test]
+fn scoped_dense_cancellation_after_embedding_releases_admission() {
+    let fixture = Fixture::new();
+    let cancellation = Cancellation::new();
+    let token = cancellation.clone();
+    let stages = HybridStages {
+        embedder: Some(Arc::new(ScopeEmbedder {
+            effect: Box::new(move || {
+                token.cancel();
+                Ok(())
+            }),
+        })),
+        ranking: Ranking::Rrf,
+        reranker: None,
+    };
+    let policy = budget(CAP);
+    let result = search_docs_in(
+        &fixture.context(&stages, &DenseCache::new(), &policy, &cancellation),
+        &fixture.db,
+        &args(),
+    );
+    assert!(matches!(result, Err(Error::Admission { .. })), "{result:?}");
+    assert!(fixture.db.connection().is_autocommit());
+    assert_released(&policy, CAP);
+}
+
+#[test]
+fn scoped_dense_reads_late_pages_and_rejects_changes_between_pages() {
+    let mut fixture = Fixture::new();
+    let mut body = String::new();
+    for id in 0..405 {
+        write!(body, "# Part {id}\n\nsemantic passage {id}\n\n").expect("fixture text");
+    }
+    std::fs::write(fixture.root.path().join("guide/a.md"), body).expect("long document");
+    run_project_index(
+        &mut fixture.db,
+        fixture.cache.path(),
+        &fixture.project,
+        &Config::default(),
+    )
+    .expect("publish chunks");
+    let (doc,seq,text):(i64,u32,String) = fixture.db.connection().query_row(
+        "SELECT c.doc_id,c.seq,c.text FROM chunks c JOIN docs d ON d.id=c.doc_id WHERE d.rel_path='guide/a.md' ORDER BY c.seq DESC LIMIT 1",[],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).expect("late chunk");
+    assert!(seq > 400, "fixture crosses a hash page");
+    let mut vectors =
+        crate::vector_cache::VectorCache::open(fixture.cache.path()).expect("vectors");
+    vectors
+        .put(
+            "scoped-test@d2@l2",
+            &crate::vector_cache::chunk_hash(&text),
+            &[1.0, 0.0],
+        )
+        .expect("only late vector");
+    let stages = HybridStages {
+        embedder: Some(Arc::new(ScopeEmbedder {
+            effect: Box::new(|| Ok(())),
+        })),
+        ranking: Ranking::Rrf,
+        reranker: None,
+    };
+    let policy = budget(CAP);
+    let dense = DenseCache::new();
+    let cancellation = Cancellation::new();
+    let context = fixture.context(&stages, &dense, &policy, &cancellation);
+    let arguments = json!({"query":"unmatched","path_prefix":"guide/a.md","limit":1});
+    let result = search_docs_in(&context, &fixture.db, &arguments).expect("dense-only late hit");
+    assert_eq!(result[0]["chunk_id"], chunk_id(doc, seq));
+    let phases = AtomicUsize::new(0);
+    let changed = search_docs_from(
+        &context,
+        MetadataSource::Borrowed(&fixture.db),
+        &arguments,
+        || {
+            if phases.fetch_add(1, Ordering::SeqCst) == 2 {
+                assert!(
+                    fixture.db.connection().is_autocommit(),
+                    "no SQL snapshot between pages"
+                );
+                repo::bump_index_generation(fixture.db.connection(), fixture.project.id)?;
+            }
+            Ok(())
+        },
+    );
+    assert!(
+        matches!(changed,Err(Error::Project { ref message,.. }) if message.contains("generation changed")),
+        "{changed:?}"
+    );
+    assert_released(&policy, CAP);
 }

@@ -218,3 +218,73 @@ Ruling фиксируют принятые решения; minor — что от
   (63 успешных target-группы). Clippy cli-full `--all-targets` и opt-in
   `--test perf_budget --test artifact` с `-D warnings`, fmt/diff checks прошли.
   Схема/tokenizer, зависимости, `baseline.json` и snapshots не менялись.
+
+## Delta 2026-11-11 — #67 scoped retrieval
+
+- Task S1: complete (FR-15…19 / SC-10). Real SQLite/Tantivy/vector-cache
+  regressions: eligible rank>1000, all four lexical/RRF/rerank combinations,
+  scoped source ranks, dense-only matches, ignored corrupt excluded vectors,
+  unchanged BM25 scores, metadata refresh, invalid queries in empty scope,
+  cancellation/generation changes and a late >400-chunk hash page. CLI/direct
+  and daemon IPC now cover candidates beyond the former global window.
+- RED → GREEN: `scoped_candidates_survive_global_windows` returned `[]` before
+  the fix. Extra UTF-16 regression exposed BINARY ordering at ÿ/Ā; UTF-8 keeps
+  the indexed range, UTF-16 uses Rust prefix comparison. Tests cover all three
+  database encodings, NUL/wildcards/case/Unicode/malformed tags.
+- Ruling: request-owned scope; existing byte admission, no shared scope cache,
+  schema/tokenizer/dependency/baseline changes. Exact scoped dense avoids cold
+  whole-project cache initialization; source ranks are scoped before RRF.
+  Scope and payload permits do not overlap. Final `filtered_out` is normally
+  zero; #62 missing-document semantics remain intact. #68 remains separate.
+- Fresh task reviewer: one Important (UTF-16 range) and two Minor (product doc
+  wording/anchor and byte-limit docs); all fixed. Fix re-review: ADDRESSED for
+  all three, no new Critical/Important findings. No deferred minors.
+- Verification: MSRV1.88 cli-full suite **1184 passed, 14 ignored**, 70 target
+  groups; Clippy all-targets `-D warnings` passed. UTF-16 RED/GREEN rerun passed
+  after the suite. Debug symbols disabled for test artifacts to fit disk.
+- S2 in progress: release 20k/two-folder diagnostic completed. Initial broad
+  scoped RRF took 1.8–2.1s: per-vector LRU autocommit dominates. The measured
+  follow-up is page-local vector-cache transactions while streaming one vector
+  at a time; no whole-scope vector materialization. Final numbers and all
+  delivery gates follow after this measured correction.
+
+- Task S2: complete (FR-20 / SC-11/12). Same 20k release diagnostic repeated:
+  broad scoped RRF **163.629–212.639ms**, initial **1796.817–2079.110ms**.
+  Exact heap shared with the iterator path; vector pages use one IMMEDIATE
+  transaction, reused statements and one decoded vector at a time. LRU/model/
+  missing-row/order/rollback/reuse behavior has real cache tests.
+- Ruling: retain exact scoped dense for this first slice; broad-scope/rare-query
+  eager planning costs and synthetic-vector/OS-cache caveats are explicit in
+  `reports/scoped-retrieval-2026-11-11.md`. No optimal-planner or p95 claim.
+  #117 retains adaptive planner/filtered ANN work; #68 remains separate.
+- Fresh S2 reviewer: PASS / APPROVED, no outstanding findings. Logical admission
+  prose corrected to match `size_of<Term>` (480kB broad, 48B narrow, plus38400B
+  dense hash page). No deferred minors. Final native/cold/RSS acceptance is not
+  inferred from synthetic tests.
+- Verify: cli-full **1186 passed, 14 ignored** (70 groups), unchanged quality
+  gate green. Post-lint helper extraction: **521 passed** across lib, hybrid,
+  direct CLI and IPC. Clippy all-targets + opt-in artifact/perf, fmt, fresh
+  static artifact and provider capability checks passed. Late S1 UTF-16 fix
+  exceeded Clippy's line limit; pure preparation-charge helper extraction in
+  S2 resolved it, and the final scoped tests above cover all three encodings.
+  Remaining resource/lean/offline and native CI gates belong to S3.
+
+- Task S3: complete (final review and implementation verification, 2026-11-11).
+  Fresh whole-branch review of `498753e..9b2ad65`: runtime/spec convergence,
+  no Critical/Important/Minor findings. Its only outstanding delivery item was
+  native CI/S3 recording; required run **43022238707** then passed **docs,
+  linux, macos, windows** for implementation commit `9b2ad65`.
+- Final evidence: cli-full **1186 passed / 14 ignored**; **521 focused passed**
+  after the pure preflight-helper extraction; unchanged benchmark gate green;
+  fmt/Clippy all-targets plus explicit artifact/perf lint; fresh static CLI
+  **20522880 bytes** with static linkage + both provider-capability checks;
+  **6 release resource checks**, lean dependency boundary, offline workflow,
+  **6 Python CI-observer regression checks** all passed. The 20k report records
+  individual release runs and logical admission, not peak RSS/real-corpus p95.
+- Ruling: PR **#118** contains #67 only. No schema/tokenizer/dependency,
+  baseline/threshold/model/recording changes. No deferred minors. #117 retains
+  adaptive planning/filtered ANN; #68 diversity/refill remains a separate PR
+  after human merge. Merging remains a human action.
+- This final commit changes only this ledger. Required checks must also be
+  green on its final PR head before marking ready; final head/run outcomes are
+  recorded in PR #118 to avoid modifying the ledger after every CI run.

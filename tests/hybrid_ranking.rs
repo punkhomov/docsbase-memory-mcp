@@ -383,13 +383,13 @@ fn missing_documents_do_not_count_as_filter_rejections() {
         (json!({"path_prefix":"c."}), 0),
         (json!({"tags":["api"]}), 0),
         (json!({"path_prefix":"c.", "tags":["api"]}), 0),
-        // Broaden the query to include b.md: a real path/tag rejection must
-        // still count once, even if both filters reject the same document.
-        (json!({"query":"alpha OR synonym", "path_prefix":"c."}), 1),
-        (json!({"query":"alpha OR synonym", "tags":["api"]}), 1),
+        // Broaden the query to include b.md: eager exclusions are outside
+        // the observed final window and do not increment filtered_out (#67).
+        (json!({"query":"alpha OR synonym", "path_prefix":"c."}), 0),
+        (json!({"query":"alpha OR synonym", "tags":["api"]}), 0),
         (
             json!({"query":"alpha OR synonym", "path_prefix":"c.", "tags":["api"]}),
-            1,
+            0,
         ),
     ] {
         let mut args = json!({"query":"alpha", "limit":10, "explain":true});
@@ -1602,4 +1602,255 @@ fn rrf_without_a_stage_is_an_internal_error() {
     )
     .expect_err("invariant violation");
     assert!(err.to_string().contains("rrf"), "{err}");
+}
+
+/// Scope must be applied before every global candidate/window ceiling (#67).
+#[test]
+fn scoped_candidates_survive_global_windows() {
+    let cache = TempDir::new().expect("cache");
+    let root = TempDir::new().expect("root");
+    for index in 0..1010 {
+        fs::write(
+            root.path().join(format!("denied-{index}.md")),
+            "# alpha\n\nalpha alpha\n",
+        )
+        .expect("denied document");
+    }
+    fs::create_dir(root.path().join("guide")).expect("directory");
+    fs::write(
+        root.path().join("guide/answer.md"),
+        format!(
+            "---\ntags: api, docs\n---\n# Guide\n\nalpha {}\n",
+            "padding ".repeat(80)
+        ),
+    )
+    .expect("eligible document");
+    let mut db = Db::open(cache.path()).expect("db");
+    let mut project = registry::ensure_project(&mut db, root.path()).expect("project");
+    docsbase_memory::daemon::tools::run_project_index(
+        &mut db,
+        cache.path(),
+        &project,
+        &Config::default(),
+    )
+    .expect("index");
+    project.status = ProjectStatus::Indexed;
+    embed_all(&db, project.id);
+    let dense = DenseCache::new();
+    let reranker = Arc::new(ReverseReranker::default());
+    for filters in [
+        json!({"path_prefix":"guide/"}),
+        json!({"tags":["api", "docs"]}),
+        json!({"path_prefix":"guide/", "tags":["api", "docs"]}),
+    ] {
+        for (rrf, rerank) in [(false, false), (false, true), (true, false), (true, true)] {
+            let stages = HybridStages {
+                reranker: rerank.then(|| reranker.clone() as Arc<dyn Reranker>),
+                embedder: rrf.then(|| Arc::new(FakeEmbedder) as Arc<dyn Embedder>),
+                ranking: if rrf { Ranking::Rrf } else { Ranking::Lexical },
+            };
+            let mut args = json!({"query":"alpha", "limit":1, "explain":true});
+            args.as_object_mut()
+                .expect("args")
+                .extend(filters.as_object().expect("filters").clone());
+            let result = search_docs_with(&stages, &dense, &db, cache.path(), &project, &args, 40)
+                .expect("scoped search");
+            assert_eq!(
+                paths(&result["hits"]),
+                ["guide/answer.md"],
+                "{args}, rerank={rerank}"
+            );
+        }
+    }
+    assert_eq!(reranker.calls.load(Ordering::SeqCst), 6);
+    assert!(
+        dense.ann_snapshot(project.id).is_none(),
+        "scoped search must not initialize a project-wide dense index"
+    );
+    assert!(
+        reranker
+            .documents
+            .lock()
+            .expect("documents")
+            .iter()
+            .all(|text| text.contains("padding"))
+    );
+}
+
+#[test]
+fn scope_preserves_scores_and_refreshes_metadata_without_a_scope_cache() {
+    use docsbase_memory::index::tantivy_index::ReadIndex;
+    let (cache, db, project) = project_with_docs();
+    let dense = DenseCache::new();
+    let index = ReadIndex::open(
+        &cache
+            .path()
+            .join(format!("projects/{}/tantivy", project.id)),
+    )
+    .expect("index");
+    let global = index.search("alpha", 10).expect("global");
+    for prefix in ["a.", "c."] {
+        let result = search_docs_with(
+            &HybridStages::default(),
+            &dense,
+            &db,
+            cache.path(),
+            &project,
+            &json!({"query":"alpha","limit":1,"path_prefix":prefix}),
+            50,
+        )
+        .expect("scoped");
+        let hit = &result[0];
+        let raw = global
+            .iter()
+            .find(|row| hit["chunk_id"] == row.chunk_id)
+            .expect("same candidate");
+        assert_eq!(
+            hit["score"].as_f64(),
+            Some(f64::from(raw.score)),
+            "scope must not add a constant score or recompute IDF"
+        );
+    }
+    for selected in ["a.md", "c.md"] {
+        db.connection().execute("UPDATE docs SET frontmatter_json=CASE WHEN rel_path=?1 THEN '{\"tags\":[\"selected\"]}' ELSE NULL END",[selected]).expect("update tags");
+        docsbase_memory::store::repo::bump_index_generation(db.connection(), project.id)
+            .expect("publish");
+        let result = search_docs_with(
+            &HybridStages::default(),
+            &dense,
+            &db,
+            cache.path(),
+            &project,
+            &json!({"query":"alpha","limit":1,"tags":["selected"]}),
+            50,
+        )
+        .expect("fresh scope");
+        assert_eq!(paths(&result), [selected]);
+    }
+    for args in [
+        json!({"query":"(","path_prefix":"absent/"}),
+        json!({"query":"!!!","query_mode":"literal","tags":["absent"]}),
+    ] {
+        assert!(matches!(
+            search_docs_with(
+                &HybridStages::default(),
+                &dense,
+                &db,
+                cache.path(),
+                &project,
+                &args,
+                50
+            ),
+            Err(docsbase_memory::error::Error::Query { .. })
+        ));
+    }
+}
+
+struct ScopedGeometry;
+impl Embedder for ScopedGeometry {
+    fn model_id(&self) -> &'static str {
+        "scope-geometry@d2@l2"
+    }
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        Ok(texts
+            .iter()
+            .map(|text| {
+                if text.contains("target_a") {
+                    vec![1.0, 0.0]
+                } else if text.contains("target_c") {
+                    vec![0.9, 0.1]
+                } else if text.contains("target_b") {
+                    vec![0.7, 0.3]
+                } else if text.contains("dense_only") {
+                    vec![0.2, 0.8]
+                } else {
+                    vec![0.0, 1.0]
+                }
+            })
+            .collect())
+    }
+    fn embed_query(&self, _: &str) -> Result<Vec<f32>> {
+        Ok(vec![1.0, 0.0])
+    }
+}
+
+#[test]
+fn scoped_rrf_uses_source_ranks_and_includes_dense_only_matches() {
+    let cache = TempDir::new().expect("cache");
+    let root = TempDir::new().expect("root");
+    fs::create_dir(root.path().join("scope")).expect("scope");
+    for (path, text) in [
+        (
+            "scope/a.md",
+            format!("target_a alpha alpha {}", "padding ".repeat(50)),
+        ),
+        (
+            "scope/b.md",
+            "# alpha\n\ntarget_b alpha alpha alpha".to_owned(),
+        ),
+        (
+            "scope/c.md",
+            format!("target_c alpha {}", "padding ".repeat(50)),
+        ),
+        ("scope/d.md", "dense_only semantic answer".to_owned()),
+    ] {
+        fs::write(root.path().join(path), text).expect("eligible");
+    }
+    for id in 0..98 {
+        fs::write(
+            root.path().join(format!("outside-{id}.md")),
+            "alpha alpha alpha alpha",
+        )
+        .expect("outside");
+    }
+    let mut db = Db::open(cache.path()).expect("db");
+    let mut project = registry::ensure_project(&mut db, root.path()).expect("project");
+    docsbase_memory::daemon::tools::run_project_index(
+        &mut db,
+        cache.path(),
+        &project,
+        &Config::default(),
+    )
+    .expect("index");
+    project.status = ProjectStatus::Indexed;
+    embed_project_chunks_with(&db, &ScopedGeometry, project.id).expect("vectors");
+    // A corrupt out-of-scope vector must never be decoded by this request.
+    let vector_db = rusqlite::Connection::open(
+        cache
+            .path()
+            .join(docsbase_memory::vector_cache::VECTOR_DB_FILE),
+    )
+    .expect("vectors");
+    assert_eq!(
+        vector_db
+            .execute(
+                "UPDATE vector_cache SET vector=x'00' WHERE chunk_hash=?1",
+                [docsbase_memory::vector_cache::chunk_hash(
+                    "alpha alpha alpha alpha"
+                )]
+            )
+            .expect("corrupt excluded"),
+        1
+    );
+    let dense = DenseCache::new();
+    let stages = HybridStages {
+        embedder: Some(Arc::new(ScopedGeometry)),
+        ranking: Ranking::Rrf,
+        reranker: None,
+    };
+    let result = search_docs_with(
+        &stages,
+        &dense,
+        &db,
+        cache.path(),
+        &project,
+        &json!({"query":"alpha","path_prefix":"scope/","limit":4}),
+        40,
+    )
+    .expect("scoped RRF");
+    assert_eq!(
+        paths(&result),
+        ["scope/a.md", "scope/b.md", "scope/c.md", "scope/d.md"]
+    );
+    assert!(dense.ann_snapshot(project.id).is_none());
 }

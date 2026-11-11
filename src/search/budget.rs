@@ -1,4 +1,4 @@
-//! Shared byte admission for owned search payloads; no payload allocation or IO.
+//! Shared byte admission for search preparation and owned payloads; no payload allocation or IO.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -12,7 +12,7 @@ struct Retained {
     bytes: Mutex<u64>,
 }
 
-/// One daemon's payload allowance. Clones share the same retained charge.
+/// One daemon's search byte allowance. Clones share the same retained charge.
 #[derive(Clone)]
 pub struct PayloadBudget {
     retained: Arc<Retained>,

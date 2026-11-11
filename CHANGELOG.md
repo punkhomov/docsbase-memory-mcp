@@ -16,7 +16,7 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 - `search_docs` accepts `snippet: true` (a ≤240-character fragment of each hit's
   chunk, cut on a character boundary), `dedupe: "path"` with `n_per_doc` (at most
   N chunks per document, default 2 — measured on the benchmark's `ru_morph` slice),
-  and `path_prefix`/`tags` post-filters (literal prefix, frontmatter tags ANDed).
+  and `path_prefix`/`tags` search scopes (literal prefix, frontmatter tags ANDed).
   All are opt-in: without them the response is unchanged. `meta.filters` and
   `meta.trimmed` report what was applied and how many candidates were dropped.
   `docsbase search` gained `--snippet`, `--dedupe`, `--n-per-doc`, `--path-prefix`
@@ -31,6 +31,13 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 - `docsbase search --explain` prints the same envelope as the MCP tool.
 
 ### Fixed
+- Path/tag search scopes now apply before lexical/dense candidate limits and
+  RRF, so eligible matches beyond the former global window are retrieved.
+  BM25 scores and unfiltered ranking stay unchanged. Filtered dense streams
+  exact eligible vectors without loading a whole-project dense/ANN index.
+  Scope preparation shares search byte admission; `filtered_out` counts only
+  observed final rejections (normally zero), not eagerly excluded documents.
+  No index migration or manual reindex is required (#67).
 
 - `meta.trimmed.filtered_out` excludes stale search candidates whose document
   rows are missing; only actual path/tag mismatches count as filter rejections (#62).

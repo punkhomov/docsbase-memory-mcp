@@ -14,6 +14,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Error, Result};
 
+#[cfg(test)]
+#[path = "vector_cache_batch_tests.rs"]
+mod batch_tests;
+
 /// Separate `SQLite` file in the cache root; one cache per machine user.
 pub const VECTOR_DB_FILE: &str = "vectors.db";
 
@@ -161,6 +165,62 @@ impl VectorCache {
         let dim = usize::try_from(dim)
             .map_err(|_| Error::internal(format!("vector dim {dim} does not fit usize")))?;
         Ok(Some(decode_vector(dim, &bytes)?))
+    }
+
+    /// Visits a caller-bounded hash page, decoding one vector at a time.
+    /// Missing vectors reach the visitor as None; model/hash identity matches
+    /// `get`. Reuses statements and commits LRU touches once per page. No
+    /// metadata resources/providers may be held or invoked by the visitor.
+    /// Callback failure/unwind rolls back touches and releases the transaction.
+    pub(crate) fn visit_page(
+        &mut self,
+        model_id: &str,
+        hashes: &[(u64, String)],
+        mut visitor: impl FnMut(u64, Option<&[f32]>) -> Result<()>,
+    ) -> Result<()> {
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        // Take the write reservation before reading to avoid WAL read->write
+        // upgrade races between concurrent page visitors/embedding writers.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|err| Error::internal_with_source("begin vector access page", err))?;
+        {
+            let mut select = tx
+                .prepare_cached(
+                    "SELECT dim,vector FROM vector_cache WHERE model_id=?1 AND chunk_hash=?2",
+                )
+                .map_err(|err| Error::internal_with_source("prepare vector page read", err))?;
+            let mut touch = tx
+                .prepare_cached(
+                    "UPDATE vector_cache SET used_at=?3 WHERE model_id=?1 AND chunk_hash=?2",
+                )
+                .map_err(|err| Error::internal_with_source("prepare vector page touch", err))?;
+            for (id, hash) in hashes {
+                let row = select
+                    .query_row(params![model_id, hash], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .optional()
+                    .map_err(|err| Error::internal_with_source("read vector page", err))?;
+                let Some((dim, bytes)) = row else {
+                    visitor(*id, None)?;
+                    continue;
+                };
+                let dim = usize::try_from(dim)
+                    .map_err(|_| Error::internal(format!("vector dim {dim} does not fit usize")))?;
+                let vector = decode_vector(dim, &bytes)?;
+                self.sequence = self.sequence.saturating_add(1);
+                touch
+                    .execute(params![model_id, hash, self.sequence])
+                    .map_err(|err| Error::internal_with_source("touch vector page", err))?;
+                visitor(*id, Some(&vector))?;
+            }
+        }
+        tx.commit()
+            .map_err(|err| Error::internal_with_source("commit vector access page", err))
     }
 
     /// Stores one vector and evicts least-recently-used rows over the limits.
