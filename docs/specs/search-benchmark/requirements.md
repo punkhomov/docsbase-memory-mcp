@@ -884,3 +884,28 @@ and the same pacing timeline across document/query methods. No live run.
   Manual export requires a clean commit, output outside checkout and atomic
   no-clobber publication. Rust1.88/default/cli-full, fmt/Clippy, fresh reviews
   and required native CI. #71 remains open; no live execution authorized.
+
+## Delta 2026-11-11 — MATRIX-71: offline factorial runner
+
+- **MATRIX-71-1:** test-only sequential kernel выполняет raw/context document
+  embeddings × raw/context reranker inputs через настоящий search_docs_with,
+  Bm25Rerank/RrfRerank, исходные k/qrels/citations. Перед любым stage method
+  проверяет неоднозначность body→context; разные contexts одного body дают
+  явную ошибку. T20/T22 occurrence support сохраняется. SQLite/Tantivy не
+  переписываются ради transformed inputs.
+- **MATRIX-71-2:** document banks разделены recipe/model/full-membership
+  namespace; неизменённые queries записываются через embed_query один раз
+  на unique query и разделяются между banks. Count/dim/finite validation до
+  cache publication. Это временная coarse research identity, не #78 runtime
+  policy и не общий контракт дубликатов.
+- **MATRIX-71-3:** rerank получает точные ordered inputs выбранной recipe;
+  memo identity включает model/query/recipe/ordered inputs/top_n. Полное
+  unique/finite покрытие результатов обязательно; stage errors прерывают
+  отчёт. Повторный warm поиск не вызывает stage методы снова. Mutex не
+  удерживается через provider method; kernel строго последовательный.
+- **MATRIX-71-4:** fake-only regressions проверяют inputs/role dispatch,
+  независимость axes, citations, reuse и failures. Нет live entrypoint,
+  clients/key lookup, production/frozen/baseline/CI/dependency edits. Отчёт
+  различает method calls и неизвестные wire requests; quality/tokens/cost
+  null. Fake scores не измеряют качество моделей. Rust1.88/default/cli-full,
+  unchanged gate, fmt/Clippy, fresh reviews и native CI; #71 остаётся открытым.

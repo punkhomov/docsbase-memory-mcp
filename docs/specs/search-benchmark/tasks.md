@@ -765,3 +765,16 @@ representation-census-plan.md, dated specs/ledger. No src/frozen/CI edits.
 - [x] Clean-source manual full export outside checkout; audit386case/source
   observations and agreement of all nonempty historical pools. Final review,
   required native CI and squash integration follow in PR close-out.
+
+## Delta 2026-11-11 — T23: offline representation matrix (#71)
+
+**Spec:** MATRIX-71-1…4. **New crates:** none. **Plan:**
+representation-matrix-plan.md. **Files:** tests/support/representation{,_matrix}.rs,
+tests/search_representation.rs, dated specs/progress. No production/live edits.
+
+- [x] Guard mapping and metadata before first stage method; real RED/GREEN.
+- [x] Complete per-recipe vectors and shared role-aware query bank; research
+  cache namespaces; actual pipeline with exact memoized rerank inputs.
+- [x] Test independent axes/citations/reuse and fail-closed error cases.
+- [x] Default/cli-full, unchanged gate, fmt/Clippy; fresh review/fixes/ledger.
+- [ ] Final review/native CI/guarded squash integration; #71 remains open.
