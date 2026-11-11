@@ -218,3 +218,32 @@ Ruling фиксируют принятые решения; minor — что от
   (63 успешных target-группы). Clippy cli-full `--all-targets` и opt-in
   `--test perf_budget --test artifact` с `-D warnings`, fmt/diff checks прошли.
   Схема/tokenizer, зависимости, `baseline.json` и snapshots не менялись.
+
+## Delta 2026-11-11 — #67 scoped retrieval
+
+- Task S1: complete (FR-15…19 / SC-10). Real SQLite/Tantivy/vector-cache
+  regressions: eligible rank>1000, all four lexical/RRF/rerank combinations,
+  scoped source ranks, dense-only matches, ignored corrupt excluded vectors,
+  unchanged BM25 scores, metadata refresh, invalid queries in empty scope,
+  cancellation/generation changes and a late >400-chunk hash page. CLI/direct
+  and daemon IPC now cover candidates beyond the former global window.
+- RED → GREEN: `scoped_candidates_survive_global_windows` returned `[]` before
+  the fix. Extra UTF-16 regression exposed BINARY ordering at ÿ/Ā; UTF-8 keeps
+  the indexed range, UTF-16 uses Rust prefix comparison. Tests cover all three
+  database encodings, NUL/wildcards/case/Unicode/malformed tags.
+- Ruling: request-owned scope; existing byte admission, no shared scope cache,
+  schema/tokenizer/dependency/baseline changes. Exact scoped dense avoids cold
+  whole-project cache initialization; source ranks are scoped before RRF.
+  Scope and payload permits do not overlap. Final `filtered_out` is normally
+  zero; #62 missing-document semantics remain intact. #68 remains separate.
+- Fresh task reviewer: one Important (UTF-16 range) and two Minor (product doc
+  wording/anchor and byte-limit docs); all fixed. Fix re-review: ADDRESSED for
+  all three, no new Critical/Important findings. No deferred minors.
+- Verification: MSRV1.88 cli-full suite **1184 passed, 14 ignored**, 70 target
+  groups; Clippy all-targets `-D warnings` passed. UTF-16 RED/GREEN rerun passed
+  after the suite. Debug symbols disabled for test artifacts to fit disk.
+- S2 in progress: release 20k/two-folder diagnostic completed. Initial broad
+  scoped RRF took 1.8–2.1s: per-vector LRU autocommit dominates. The measured
+  follow-up is page-local vector-cache transactions while streaming one vector
+  at a time; no whole-scope vector materialization. Final numbers and all
+  delivery gates follow after this measured correction.

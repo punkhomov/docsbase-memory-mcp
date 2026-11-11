@@ -40,15 +40,15 @@ Unknown keys are rejected (`deny_unknown_fields`) — typos fail loudly.
 ## Search request policy (global only)
 
 The optional global `[search]` table controls one search operation and its
-captured payload. Project files cannot override these daemon-scoped fields.
+preparation scope and captured payload. Project files cannot override these daemon-scoped fields.
 Missing keys are initialized by the search configuration owner during parsing;
 search components receive complete settings.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `request_timeout_ms` | `30000` | Original search budget, including startup, admission, transport and reconnect |
-| `max_request_payload_bytes` | `67108864` (64 MiB) | Accounted candidate/citation/filter/text payload retained by one request |
-| `max_retained_payload_bytes` | `268435456` (256 MiB) | Shared allowance for those live payloads in one daemon |
+| `max_request_payload_bytes` | `67108864` (64 MiB) | Logical allowance for one preparation scope or captured candidate/citation/filter/text payload; the two phases do not overlap |
+| `max_retained_payload_bytes` | `268435456` (256 MiB) | Shared allowance for concurrent live scopes/payloads in one daemon; not process RSS |
 
 ```toml
 [search]

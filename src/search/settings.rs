@@ -16,14 +16,14 @@ pub fn standalone() -> Result<crate::config::schema::Resolved<SearchSettings>> {
     crate::config::resolve::resolve_component::<SearchSpec>(&DefaultsContext::standalone(), [])
 }
 
-/// Complete daemon-wide request policy; payload limits do not measure process RSS.
+/// Complete daemon-wide request policy; byte limits do not measure process RSS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchSettings {
     /// Total request budget in milliseconds, including queues and retries.
     pub request_timeout_ms: u64,
-    /// Maximum charged bytes for one captured request payload.
+    /// Maximum charged bytes for one preparation scope or captured request payload.
     pub max_request_payload_bytes: u64,
-    /// Maximum charged bytes retained by concurrent payloads in one daemon.
+    /// Maximum charged bytes retained by concurrent scopes/payloads in one daemon.
     pub max_retained_payload_bytes: u64,
 }
 
@@ -33,9 +33,9 @@ pub struct SearchSettings {
 pub struct SearchPatch {
     /// Total request budget in milliseconds, including queues and retries.
     pub request_timeout_ms: Option<u64>,
-    /// Maximum charged bytes for one captured request payload.
+    /// Maximum charged bytes for one preparation scope or captured request payload.
     pub max_request_payload_bytes: Option<u64>,
-    /// Maximum charged bytes retained by concurrent payloads in one daemon.
+    /// Maximum charged bytes retained by concurrent scopes/payloads in one daemon.
     pub max_retained_payload_bytes: Option<u64>,
 }
 

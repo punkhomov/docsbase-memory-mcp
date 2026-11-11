@@ -276,3 +276,10 @@ FR-4 и строки citation сохраняются. New crates: none.
 
 **Acceptance:** счётчики `0`/`1` по SC-9, прежние hits и JSON-форма trimmed.
 **Verify:** hybrid_ranking; full cli-full suite; clippy/fmt; frozen baseline diff.
+
+## Delta 2026-11-11 — #67
+
+Implementation contracts: [S1 / S2](scoped-retrieval-plan.md).
+S1 owns FR-15…19 / SC-10 (scope/candidates/state/regressions); S2 owns SC-11,
+product docs, quality/portability evidence, final review and ready PR.
+New crates: none. No baseline/snapshot/tokenizer/schema changes. #68 is separate.

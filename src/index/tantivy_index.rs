@@ -5,7 +5,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{BooleanQuery, ConstScoreQuery, Occur, QueryParser, TermSetQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, Value,
 };
@@ -394,7 +394,15 @@ impl IndexHandle {
     /// Returns [`Error::Query`] for invalid syntax or literal input without
     /// searchable terms, and [`Error::Internal`] for index/search failures.
     pub fn search_with_mode(&self, query: &str, limit: usize, mode: QueryMode) -> Result<Vec<Hit>> {
-        search_reader(&self.reader, &self.parser, &self.fields, query, limit, mode)
+        search_reader(
+            &self.reader,
+            &self.parser,
+            &self.fields,
+            query,
+            limit,
+            mode,
+            None,
+        )
     }
 }
 
@@ -454,6 +462,29 @@ impl ReadIndex {
         })
     }
 
+    /// Searches within an explicit document set before top-k collection.
+    /// The scope contributes zero score; BM25 statistics remain corpus-wide.
+    ///
+    /// # Errors
+    /// Same query/index failures as [`Self::search_with_mode`].
+    pub fn search_scoped(
+        &self,
+        query: &str,
+        limit: usize,
+        mode: QueryMode,
+        documents: &[i64],
+    ) -> Result<Vec<Hit>> {
+        search_reader(
+            &self.reader,
+            &self.parser,
+            &self.fields,
+            query,
+            limit,
+            mode,
+            Some(documents),
+        )
+    }
+
     /// Reader for the snapshot.
     #[must_use]
     pub fn reader(&self) -> &IndexReader {
@@ -475,7 +506,15 @@ impl ReadIndex {
     /// Returns [`Error::Query`] for invalid syntax or literal input without
     /// searchable terms, and [`Error::Internal`] for index/search failures.
     pub fn search_with_mode(&self, query: &str, limit: usize, mode: QueryMode) -> Result<Vec<Hit>> {
-        search_reader(&self.reader, &self.parser, &self.fields, query, limit, mode)
+        search_reader(
+            &self.reader,
+            &self.parser,
+            &self.fields,
+            query,
+            limit,
+            mode,
+            None,
+        )
     }
 }
 
@@ -486,6 +525,7 @@ fn search_reader(
     query: &str,
     limit: usize,
     mode: QueryMode,
+    documents: Option<&[i64]>,
 ) -> Result<Vec<Hit>> {
     if query.trim().is_empty() {
         return Err(Error::Query {
@@ -497,6 +537,25 @@ fn search_reader(
     }
     let limit = limit.min(MAX_HITS);
     let parsed = prepare_query(parser, query, mode)?;
+    let parsed = if let Some(documents) = documents {
+        let terms = documents
+            .iter()
+            .map(|id| Term::from_field_i64(fields.doc_id, *id));
+        // TermSetQuery has constant score 1; explicitly zero it to preserve
+        // lexical scores and the long-chunk penalty's stopping bound.
+        Box::new(BooleanQuery::new(vec![
+            (Occur::Must, parsed),
+            (
+                Occur::Must,
+                Box::new(ConstScoreQuery::new(
+                    Box::new(TermSetQuery::new(terms)),
+                    0.0,
+                )),
+            ),
+        ])) as Box<dyn tantivy::query::Query>
+    } else {
+        parsed
+    };
     let searcher = reader.searcher();
     // Over-fetch so the long-chunk penalty can reorder before truncation, and
     // widen while an unseen document could still beat the k-th final score

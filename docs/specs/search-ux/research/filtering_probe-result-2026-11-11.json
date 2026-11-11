@@ -1,0 +1,67 @@
+{
+  "python": "3.14.10",
+  "sqlite": "3.46.1",
+  "fixture": "20k docs, interleaved ids, two equal folders; in-memory warm DB; execute+fetch ids, 11 samples",
+  "queries": {
+    "range": {
+      "rows": 10000,
+      "median_ms": 1.6839,
+      "plan": [
+        "SEARCH docs USING COVERING INDEX sqlite_autoindex_docs_1 (project_id=? AND rel_path>? AND rel_path<?)"
+      ]
+    },
+    "substr": {
+      "rows": 10000,
+      "median_ms": 2.3745,
+      "plan": [
+        "SEARCH docs USING COVERING INDEX sqlite_autoindex_docs_1 (project_id=?)"
+      ]
+    },
+    "like": {
+      "rows": 10000,
+      "median_ms": 2.2709,
+      "plan": [
+        "SEARCH docs USING COVERING INDEX sqlite_autoindex_docs_1 (project_id=?)"
+      ]
+    }
+  },
+  "prefix_equivalence_cases": 13,
+  "like_counterexample": {
+    "prefix": "docs/",
+    "like_matches_Docs_a": true,
+    "literal_startswith": false
+  },
+  "rrf_global_then_filter": [
+    [
+      "B",
+      0.032266458
+    ],
+    [
+      "A",
+      0.022643443
+    ],
+    [
+      "C",
+      0.022340212
+    ]
+  ],
+  "rrf_scoped_lists": [
+    [
+      "A",
+      0.032522475
+    ],
+    [
+      "B",
+      0.032266458
+    ],
+    [
+      "C",
+      0.032002048
+    ]
+  ],
+  "memory_arithmetic_bytes": {
+    "u64_10k_ids_payload_only": 80000,
+    "20k_dense_ordinal_bitmap_only": 2500,
+    "bitmap_by_sparse_chunk_id_for_doc20k": 10737418240001
+  }
+}

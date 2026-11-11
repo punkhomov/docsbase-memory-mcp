@@ -212,3 +212,63 @@ frontmatter перед проверкой no-op: пропуск возможен
 отказе любого из них. Отсутствующие/некорректные tags остаются отказом
 tag-предиката. Дополнительных SQL-запросов, публичного counter и нового
 degradation reason нет; дедуп и построение цитат используют прежние пути.
+
+## Delta 2026-11-11 — #67 scoped retrieval
+
+This supersedes window-only path/tag filtering. Execution plan and completion
+contracts: [scoped-retrieval-plan.md](scoped-retrieval-plan.md); research and
+alternatives: [#117](https://github.com/punkhomov/docsbase-memory-mcp/issues/117).
+
+1. The existing short lexical phase begins a deferred metadata transaction.
+   Status/root/generation/pending validation and scope preflight/copy share that
+   snapshot. The project read lease still spans opening/searching Tantivy, but
+   SQL is released first (same #66 ownership boundary). Scope is request-owned.
+2. SQLite `UNIQUE(project_id, rel_path)` serves a BINARY `[prefix, successor)`
+   range, preserving literal UTF-8 prefix semantics including NUL, `%`, `_`,
+   maximum Unicode suffixes and the surrogate gap. No `LIKE`, path
+   normalization, assumptions about clustered IDs or schema changes. For UTF-8 databases without
+   tag filtering both scope queries are covering-index reads. UTF-16 databases
+   use a project scan and Rust `starts_with`, since their BINARY ordering does
+   not follow UTF-8 successors. Tag AND uses the
+   existing tolerant serde_json predicate; duplicate JSON keys are last-wins.
+3. Before allocating IDs, reserve a logical preparation allowance through
+   `PayloadBudget`: range count × (`i64` ID + `Term` slot + encoded `i64` key),
+   maximum stored JSON row × `size_of<Value>` when parsing tags, and one
+   `BATCH_KEYS` page of `(chunk_id, String)` plus 64-byte BLAKE3 hex hashes for
+   dense requests. UTF-16 text lengths are bounded after UTF-8 conversion.
+   This bounds admitted logical work/data, not allocator/FST/SQLite RSS. No
+   independent default/budget/cache is added. Scope is dropped before final
+   payload admission, so these two phases never evade the per-request limit
+   via simultaneous independent permits. Concurrent phases share the aggregate
+   retained allowance. Oversized scope fails explicitly, without truncation.
+4. `ReadIndex::search_scoped` intersects the parsed query with `TermSetQuery`
+   on existing indexed `doc_id`. `ConstScoreQuery(0)` prevents a +1 score from
+   changing BM25 or long-chunk penalties. The original query validates even
+   when the ID set is empty. Corpus statistics and raw/final score stopping
+   logic stay unchanged. The lexical window expands ×4 only for document caps.
+5. Filtered dense searches bypass whole-project `DenseCache`/ANN loading and
+   use existing query-embedding singleflight, then exact streaming top-k over
+   eligible chunks. IDs are sorted and partitioned into batches of 400;
+   `(doc_id, seq)` keyset pages retain at most 400 hashes, with one sentinel row
+   to detect exhaustion without an empty trailing query. Every page validates
+   original generation/pending/config under short admission/SQL/project leases.
+   SQL text is borrowed while hashing; only hashes leave the phase. Vector IO,
+   missing-vector handling, cosine scoring and the bounded heap retain no
+   metadata/lease. Generation change fails explicitly before response capture.
+6. RRF consumes scoped source ranks; truncate eligible fusion to the existing
+   provider window, capture payload, rerank once, defensive final predicate,
+   document cap, limit, citations. `meta.window` is planned window size;
+   `filtered_out` counts observed final rejections, normally zero. Empty scope
+   is not a degradation. Exact scoped dense is deliberate, not ANN failure.
+
+No scope/result cache means tag/path changes are read anew on every request.
+Query-vector identity remains model/query: scope cannot change an embedding.
+No per-scope graph, bitmap mapping or cross-generation mutable state is created.
+The existing unfiltered dense cache/generation/digest lifecycle is unchanged.
+
+Tradeoffs: eager document term sets cost O(path range size) preparation even for
+rare queries; tag-only scope parses project metadata. Broad filtered dense is
+O(eligible chunks × vector dimension) plus eligible vector IO and can be slower
+than ANN. Measurements belong in the ledger; a measured adaptive/lazy planner
+and bounded filtered ANN remain follow-ups under #117. A short response due to
+per-document caps remains possible: diversity/refill belongs to separate #68.

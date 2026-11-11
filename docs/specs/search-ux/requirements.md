@@ -329,3 +329,36 @@
   документы и `filtered_out == 0` при активном path/tag/combined фильтре.
   При добавлении реально не подходящего живого кандидата счётчик равен `1`,
   независимо от количества несовпавших фильтров. JSON-форма счётчиков прежняя.
+
+### Delta 2026-11-11 — #67: top-k within path/tag scope
+
+- **FR-15:** path prefix and tag AND define eligible documents before each
+  source limit. Preserve corpus BM25 statistics; dense top-k is exact over
+  eligible cached vectors, including dense-only matches. RRF uses scoped
+  per-source ranks. Rerank receives the eligible bounded window once.
+  Validate syntax/literal queries even when the scope is empty.
+- **FR-16:** preserve literal case-sensitive UTF-8 `starts_with` semantics,
+  including `%`, `_`, NUL and Unicode; tolerant stored JSON tags; query errors
+  and existing dedupe. No index migration or tokenizer change.
+- **FR-17:** scope and candidates use one metadata generation. Revalidate
+  generation/pending/config in later read phases. Admit logical preparation
+  bytes before allocating IDs using existing search byte limits, then release
+  scope before payload admission. No scope cache/new hidden default. Check
+  cancellation/deadline between rows/pages. Limits are allowances, not RSS.
+- **FR-18:** filtered dense streams eligible chunk hashes in bounded pages,
+  with no SQL/project/config lease over vector IO/provider work and no
+  whole-project dense cache initialization or per-scope ANN graph. This first
+  path trades broad-scope ANN latency for exactness; filtered ANN is deferred.
+- **FR-19:** `meta.window` is the planned eligible chunk window (possibly
+  larger than the actual list). `trimmed.filtered_out` counts only observed
+  final defensive post-filter rejections, normally zero with eager scopes;
+  excluded corpus documents are not counted. Missing metadata is not a
+  rejection (#62). This supersedes the old post-window filter/SQL-count
+  guarantees (FR-3/4, NFR-1, SC-7/9). Dedupe stays bounded pending #68.
+- **SC-10:** real lexical/dense searches find eligible candidates beyond old
+  ×4/40/1000 windows, preserve BM25 scores/scoped RRF, and pass the unchanged
+  quality gate. Cover empty/malformed scope, stale generations, cancellation
+  and admission cleanup.
+- **SC-11:** measure 20k two-folder broad/narrow scopes vs a query-first
+  reference, cold/warm latency and memory accounting. No optimal-planner or
+  filtered-ANN-recall claim.

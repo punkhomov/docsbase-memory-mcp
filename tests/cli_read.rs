@@ -385,3 +385,35 @@ fn direct_literal_mode_accepts_natural_punctuation_and_preserves_syntax_default(
         .assert()
         .failure();
 }
+
+#[test]
+fn direct_scope_finds_a_match_beyond_the_old_global_window() {
+    let env = Env::new(&[(
+        "guide/answer.md",
+        "---\ntags: api, docs\n---\n# Guide\n\nalpha filler filler filler filler filler filler filler filler\n",
+    )]);
+    for id in 0..12 {
+        write_file(
+            env.root.path(),
+            &format!("outside-{id}.md"),
+            b"# alpha\n\nalpha alpha alpha\n",
+        );
+    }
+    env.index();
+    for filters in [
+        vec!["--path-prefix", "guide/"],
+        vec!["--tag", "api", "--tag", "docs"],
+    ] {
+        let output = env
+            .cmd()
+            .args(["search", "alpha", "--limit", "1"])
+            .args(filters)
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let hits = stdout_json(&output);
+        assert_eq!(hits.as_array().expect("hits").len(), 1);
+        assert_eq!(hits[0]["path"], "guide/answer.md");
+    }
+}

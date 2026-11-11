@@ -21,7 +21,7 @@ tools bind correctly.
 
 | Tool | Scope | Input | Notes |
 |---|---|---|---|
-| `search_docs` | project | `{query: string, query_mode?: "syntax"\|"literal", limit?: int ≥ 1 (default 10), scope?: "project", rerank?: bool, explain?: bool, snippet?: bool, dedupe?: "none"\|"path", n_per_doc?: int 1…10, path_prefix?: string, tags?: [string]}` | Lexical BM25 over chunks, or hybrid when the project enables it; returns `{chunk_id, path, heading_path, lines, score}` citations. `scope` is reserved: v1 serves the current project only. `rerank` overrides the project setting per request; `true` requires a rerank stage. `explain` returns `{hits, meta}` — see [Telemetry](#telemetry). `snippet`, `dedupe`, `path_prefix` and `tags` are post-filters — see [Post-filters](#post-filters) |
+| `search_docs` | project | `{query: string, query_mode?: "syntax"\|"literal", limit?: int ≥ 1 (default 10), scope?: "project", rerank?: bool, explain?: bool, snippet?: bool, dedupe?: "none"\|"path", n_per_doc?: int 1…10, path_prefix?: string, tags?: [string]}` | Lexical BM25 over chunks, or hybrid when the project enables it; returns `{chunk_id, path, heading_path, lines, score}` citations. `scope` is reserved: v1 serves the current project only. `rerank` overrides the project setting per request; `true` requires a rerank stage. `explain` returns `{hits, meta}` — see [Telemetry](#telemetry). `path_prefix`/`tags` define the search scope; `dedupe` caps documents — see [Scope, snippets and document caps](#scope-snippets-and-document-caps) |
 | `get_doc` | project | `{path: string}` | Full document by project-relative path |
 | `read_neighbors` | project | `{chunk_id: int, before?: int (default 1), after?: int (default 1)}` | Adjacent chunks for progressive disclosure |
 | `list_docs` | project | `{limit?: int (default 50), cursor?: string}` | Keyset-paginated `{title, size, chunks}` |
@@ -94,11 +94,11 @@ is the bare array above, unchanged.
 | `stages` | Stages that executed, in order: `bm25`, `dense`, `rrf`, `rerank` |
 | `stage_ms` | Milliseconds per executed stage plus original end-to-end `total`, including startup, queueing and transport through reply receipt; a stage that did not run has no key |
 | `queue_ms` | Admission delay already included in `stage_ms.total`: frontend/worker/metadata-reader waiting; do not add it to total again |
-| `window` | Candidate window actually fetched: `limit` for a lexical search, `max(limit, window)` when fused or reranked, clamped to 1000 |
+| `window` | Planned eligible candidate window: `limit` for lexical search (×4 with a document cap), `max(limit, window)` when fused or reranked, clamped to 1000. Actual candidates may be fewer |
 | `index_generation` | Index generation the answer was served from |
 | `degraded` | Reasons the tier did not serve in full: `ann-building`, `ann-insufficient`, `ann-error`, `exact-fallback`, `no-rerank-stage`. Empty is the normal answer |
 
-## Post-filters
+## Scope, snippets and document caps
 
 All four are opt-in; without them the response is the bare array above, unchanged.
 
@@ -128,14 +128,27 @@ from a build that missed block-list tags, run `docsbase sync` in the project
 or call `sync_start` and wait for `sync_status` to complete. A full sync refreshes
 the old metadata even if the source files have not changed.
 
-Filters apply to a widened candidate window (lexical searches fetch `limit × 4`,
-capped at 1000), so a narrow filter may return fewer than `limit` hits — an empty
-result is not an error. With `explain: true`, `meta.filters` echoes what was asked
-and `meta.trimmed` reports how many candidates each stage dropped.
+Path and tag filters define the search scope **before** each source's top-k.
+BM25 keeps corpus-wide statistics; dense search selects the best cached vectors
+within the scope. RRF combines ranks within these scoped source lists, and the
+reranker receives only eligible candidates, once. Empty scope returns an empty
+result. No reindex or configuration change is needed after upgrading.
 
-`meta.trimmed.filtered_out` counts path/tag mismatches for stored documents.
-Candidates whose document rows have disappeared are omitted from the results
-without being counted as filter rejections.
+Filtered dense currently uses exact streaming over eligible chunks, avoiding
+whole-project vector/ANN loading. Broad scopes may be slower than unfiltered
+ANN. Hash pages and candidate heaps are bounded; scope preparation uses the
+configured search byte allowance and can fail explicitly if it exceeds it.
+This allowance measures logical retained data/preparation, not process RSS.
+No scope cache is retained; sync/tag/path changes are observed on the next
+request, and a generation change during preparation asks the caller to retry.
+
+Document caps still apply after ranking over a bounded window (lexical ×4,
+maximum 1000); they can produce fewer than `limit` hits. Diversity/refill is
+separate work. `explain` echoes the requested scope/cap in `meta.filters`.
+`meta.trimmed.filtered_out` counts only rejections observed by the final
+check, normally zero because scope exclusion happened before collection;
+it does not count excluded corpus documents. Missing document metadata never
+counts as a filter rejection. `deduped` counts observed document-cap drops.
 
 `query_cache` reports `{hits, misses, entries, bytes}` for the query-embedding
 cache: a repeated query with the same model is answered without calling the
