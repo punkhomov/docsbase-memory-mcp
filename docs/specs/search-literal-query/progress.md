@@ -78,3 +78,30 @@ source identity. Frozen113,2historical reports,Cargo and original RED/GREEN
 records unchanged; core9/native7/previousMCP9 preserved. No deferred minors.
 Evidence scratch/issue-87/lq2/null-fix/{report,verification,root-audit,re-review}.
 Native CI and measured external reports remain final/LQ3 obligations.
+
+Task LQ3a: in progress. Dated design/task delta records actual existing external
+execution seam; bench.rs remains byte-identical, no unused wrapper added.
+Actual API RED E0560 proved missing ExternalOptions.query_mode before production.
+After owner field/provenance, runtime RED8passed/1failed/1ignored proved merely
+labelling Literal still left its parser error. Separate child-process env RED
+showed invalid auto silently generated a report. Then explicit mode was passed
+to warm-up/every query and env parsing added through owner FromStr. GREEN external
+10passed/0failed/1manual ignored; default/explicitSyntax/Literal provenance,
+raw-input hashes/full denominator, original query bytes, actual hits, no-provider
+cost and separate-process valid/invalid env paths covered. Existing Syntax error
+measurement remains explicit and valid; report no-overwrite/replay guards intact.
+Ruling: initial runner inherited duplicate red-api key and ran old core9test target
+successfully; archived as preflight, never counted as RED. Unique external-key
+actual failing logs supply TDD evidence. No production before its actual RED.
+Full/relevant lean/quality/lints and fresh review pending. No actual SciFact pair
+has been run yet: clean reviewed source commit is mandatory first.
+
+Task LQ3a: complete (base92fe57a; task commit contains this line). Final actual
+cli-full1174passed/0failed/13ignored,68targets. External10/0/1; focused and lean
+external/benchmark/golden pass; full/lean all-target+opt-in Clippy/fmt/diff pass.
+All10GREEN records match171Rust source/Cargo hashes. Frozen113,2historical reports,
+bench.rs unchanged; production/Cargo byte-identical to reviewed LQ2. Fresh reviewer
+specPASS/qualityAPPROVED/no findings or deferred minors. Evidence scratch/issue-87/lq3a.
+Ruling: this clean reviewed source/harness commit is the measurement pin. Real
+SciFact300case Syntax/Literal report pair starts only after committing this task;
+query counts/error IDs/input/profile/source hashes will be checked independently.

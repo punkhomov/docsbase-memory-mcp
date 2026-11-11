@@ -35,7 +35,7 @@ zero qrel — **явное nonrelevant**, отсутствие строки — 
 mkdir -p target/search-bench
 DOCSBASE_EXTERNAL_DIR=/absolute/path/to/scifact \
 DOCSBASE_EXTERNAL_REPORT="$PWD/target/search-bench/scifact-test.json" \
-RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --release --no-default-features \
+RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --release --features cli-full \
   --test search_bench_external external_measurement -- --ignored --exact --nocapture
 ```
 
@@ -56,6 +56,28 @@ Hash bytes имеют смысл вместе с adapter/tokenizer versions и s
 cap `DOCSBASE_BENCH_COST_CAP_USD` (default $2, finite nonnegative) записывается,
 но **этот runner никогда не делает provider requests**, spend всегда $0.
 Online recording/оплата inference не входит в evaluation runner.
+
+## Delta 2026-11-11 — explicit query mode (#87)
+
+`DOCSBASE_EXTERNAL_QUERY_MODE=syntax|literal` выбирает request interpretation;
+без переменной действует owner default Syntax. Пустое/неизвестное значение
+или не-Unicode строка — явная ошибка, без отчёта. Режим записывается в
+`provenance.query_mode` и передаётся в product search и для warm-up, и для
+каждого исходного запроса. Строки запросов и provider/replay identities не
+переписываются; отсутствующее recording по-прежнему прерывает replay.
+
+Для сравнения режимов запускаются два отдельных процесса на одном чистом
+зафиксированном runtime/harness, одинаковых raw input hashes, split, IDs и k;
+у каждого новый output path. Официальный профиль выше включает cli-full,
+а выбранный Bm25 остаётся офлайн (spend0). Например, добавить перед командой
+`DOCSBASE_EXTERNAL_QUERY_MODE=literal`; повторить с `syntax` и другим именем
+отчёта. Не редактировать исходные запросы и не исключать query_error cases.
+
+Парный SciFact замер #87 намеренно сохраняет полные300cases в обоих новых
+JSON для проверки mode/error-count delta. Исторический отчёт остаётся прежним.
+Это отдельный audit режима, без переноса SciFact qrels в frozen gate и без
+тюнинга ranking. ADAPTER_VERSION1 прежний: raw→Markdown conversion не менялся;
+execution определяется mode, engine revision/source hash и harness hash.
 
 ## Replay contract
 

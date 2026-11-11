@@ -68,3 +68,11 @@ Whole-feature most-capable review maps every FR/SC/task. Push final reviewed
 head and require docs/linux/macos/windows all0 with inventories/identity;
 normal ready/squashmerge only after convergence. Fixes87/111 only on completion.
 If new confirmed bug, duplicate-check/issue/reprioritize; no silent gate relaxation.
+
+## Delta 2026-11-11 — LQ3a file scope refinement
+
+После чтения actual execution seam tests/support/bench.rs не меняется:
+external/execution.rs уже непосредственно вызывает общий product tool. Новый
+mode передаётся туда из ExternalOptions и включается в provenance. Это
+исключает неиспользуемый Runtime wrapper и сохраняет frozen harness byte-identical.
+Остальные LQ3a/LQ3b acceptance/TDD/review/clean-commit требования прежние.

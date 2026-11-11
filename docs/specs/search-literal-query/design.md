@@ -85,3 +85,15 @@ Literal AST устраняет повторные идентичные raw white
 нормализуем raw words сверх existing analyzer и не меняем query для providers.
 Обычные запросы без operators должны сохранять scores, в том числе повторные
 слова; отдельный public retrieval regression сравнивает результаты режимов.
+
+### Delta 2026-11-11 — LQ3a actual external execution seam
+
+Проверка исходников: external/execution.rs напрямую вызывает search_docs_with
+для warm-up и каждой строки; frozen bench Runtime helper в этом пути не
+используется. Поэтому QueryMode передаётся в existing external execution;
+не добавляем неиспользуемый mode-aware helper в tests/support/bench.rs.
+Frozen helper/default и файл bench.rs остаются прежними. Provenance получает
+mode, raw query/provider identities не меняются. ADAPTER_VERSION остаётся1:
+raw→Markdown conversion прежний, новый execution contract различается mode,
+engine/harness hashes и датированным delta. Отчётная пара хранит все300cases
+для независимого сравнения режимов, не заменяя исторический отчёт.

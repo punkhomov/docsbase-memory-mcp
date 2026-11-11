@@ -1,5 +1,6 @@
 //! Manual external evaluation; regular tests use only tiny local BEIR inputs.
 mod support;
+use docsbase_memory::index::QueryMode;
 use std::path::Path;
 use support::external::{ExternalOptions, evaluate_directory};
 
@@ -367,7 +368,12 @@ fn query_syntax_errors_remain_in_denominator_with_explicit_case_errors() {
     let p = dir.path().join("qrels/test.tsv");
     let text = std::fs::read_to_string(&p).unwrap();
     std::fs::write(p, format!("{text}broken\tz\t1\n")).unwrap();
-    let report = run(dir.path()).unwrap();
+    let options = ExternalOptions {
+        query_mode: QueryMode::Syntax,
+        ..ExternalOptions::default()
+    };
+    let report = serde_json::to_value(evaluate_directory(dir.path(), &options).unwrap()).unwrap();
+    assert_eq!(report["provenance"]["query_mode"], "syntax");
     let summary = &report["quality"]["Bm25"]["summary"];
     assert_eq!(summary["queries"], 3);
     assert_eq!(summary["query_errors"], 1);
@@ -445,4 +451,125 @@ fn assert_incomplete_scores_rejected(
         );
     }
     std::fs::write(rerank, original).unwrap();
+}
+
+#[test]
+fn literal_measurement_keeps_original_query_and_full_denominator_without_parser_errors() {
+    let dir = tiny_dataset();
+    let query =
+        "The minor G allele of FOXO3 is related to more severe symptoms of Crohn's Disease.";
+    let p = dir.path().join("queries.jsonl");
+    let queries = std::fs::read_to_string(&p).unwrap();
+    let row = serde_json::json!({"_id":"broken","text":query});
+    std::fs::write(&p, format!("{queries}\n{row}\n")).unwrap();
+    let p = dir.path().join("qrels/test.tsv");
+    let qrels = std::fs::read_to_string(&p).unwrap();
+    std::fs::write(&p, format!("{qrels}broken\tz\t1\n")).unwrap();
+    let p = dir.path().join("corpus.jsonl");
+    let documents: Vec<String> = std::fs::read_to_string(&p)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut doc: serde_json::Value = serde_json::from_str(line).unwrap();
+            if doc["_id"] == "z" {
+                doc["text"] = serde_json::json!(format!("granite mineral {query}"));
+            }
+            doc.to_string()
+        })
+        .collect();
+    std::fs::write(&p, documents.join("\n")).unwrap();
+    let raw_queries = std::fs::read(dir.path().join("queries.jsonl")).unwrap();
+    let syntax = run(dir.path()).unwrap();
+    assert_eq!(syntax["provenance"]["query_mode"], "syntax");
+    assert_eq!(syntax["quality"]["Bm25"]["summary"]["query_errors"], 1);
+    let options = ExternalOptions {
+        query_mode: QueryMode::Literal,
+        ..ExternalOptions::default()
+    };
+    let literal = serde_json::to_value(evaluate_directory(dir.path(), &options).unwrap()).unwrap();
+    assert_eq!(literal["provenance"]["query_mode"], "literal");
+    for field in [
+        "corpus_hash",
+        "queries_hash",
+        "qrels_hash",
+        "derived_corpus_hash",
+        "evaluated_query_ids",
+    ] {
+        assert_eq!(
+            syntax["provenance"][field], literal["provenance"][field],
+            "{field}"
+        );
+    }
+    let summary = &literal["quality"]["Bm25"]["summary"];
+    assert_eq!(summary["queries"], 3);
+    assert_eq!(summary["query_errors"], 0);
+    assert_eq!(summary["hits"], 3);
+    assert_eq!(summary["misses"], 0);
+    let cases = literal["quality"]["Bm25"]["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 3);
+    assert_eq!(cases[0]["id"], "broken");
+    assert!(cases.iter().all(|case| case["error"].is_null()));
+    assert_eq!(literal["cost"]["spent_usd"], 0.0);
+    assert_eq!(literal["cost"]["provider_requests"], 0);
+    assert_eq!(
+        raw_queries,
+        std::fs::read(dir.path().join("queries.jsonl")).unwrap()
+    );
+}
+
+#[test]
+fn measurement_environment_selects_mode_and_rejects_invalid_values() {
+    // A child process exercises the real manual entry point without mutating
+    // process-wide environment in a parallel test process.
+    let data = tiny_dataset();
+    let output = tempfile::tempdir().unwrap();
+    for (id, mode) in [
+        Some("auto"),
+        Some(""),
+        None,
+        Some("syntax"),
+        Some("literal"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let report = output.path().join(format!("report-{id}.json"));
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "external_measurement",
+                "--nocapture",
+            ])
+            .env("DOCSBASE_EXTERNAL_DIR", data.path())
+            .env("DOCSBASE_EXTERNAL_REPORT", &report)
+            .env("DOCSBASE_EXTERNAL_CONFIGS", "Bm25")
+            .env("DOCSBASE_EXTERNAL_SPLIT", "test")
+            .env("DOCSBASE_EXTERNAL_K", "10")
+            .env("DOCSBASE_BENCH_COST_CAP_USD", "0")
+            .env_remove("DOCSBASE_EXTERNAL_REPLAY_DIR")
+            .env_remove("DOCSBASE_EXTERNAL_QUERY_MODE");
+        if let Some(mode) = mode {
+            command.env("DOCSBASE_EXTERNAL_QUERY_MODE", mode);
+        }
+        let result = command.output().unwrap();
+        if matches!(mode, Some("auto" | "")) {
+            assert!(
+                !result.status.success(),
+                "invalid mode must fail: {result:?}"
+            );
+            let error = String::from_utf8_lossy(&result.stderr);
+            assert!(error.contains("invalid external query mode"), "{error}");
+            assert!(!report.exists(), "no misleading report after invalid mode");
+        } else {
+            assert!(result.status.success(), "{result:?}");
+            let report: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+            assert_eq!(report["provenance"]["query_mode"], mode.unwrap_or("syntax"));
+            assert_eq!(report["quality"]["Bm25"]["summary"]["queries"], 2);
+            assert_eq!(report["cost"]["provider_requests"], 0);
+            assert_eq!(report["cost"]["spent_usd"], 0.0);
+        }
+    }
 }

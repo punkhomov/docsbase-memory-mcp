@@ -5,15 +5,18 @@ use anyhow::Context;
 use docsbase_memory::daemon::tools::search_docs_with;
 use docsbase_memory::error::Error;
 use docsbase_memory::hybrid::{HybridStages, dense::DenseCache};
+use docsbase_memory::index::QueryMode;
 
 pub fn run(
     env: &BenchEnv,
     data: &ExternalDataset,
     stages: &HybridStages,
+    mode: QueryMode,
 ) -> anyhow::Result<(Vec<ExternalCase>, Vec<f64>)> {
     let dense = DenseCache::new();
     let first = data.cases.first().context("external runner has no cases")?;
-    let args = |query: &str, k: usize| serde_json::json!({"query":query,"limit":k});
+    let args =
+        |query: &str, k: usize| serde_json::json!({"query":query,"query_mode":mode,"limit":k});
     // One discarded warm-up, identical to the frozen runner's convention.
     let _ = search_docs_with(
         stages,

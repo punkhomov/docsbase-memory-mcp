@@ -5,6 +5,7 @@ pub mod metrics;
 mod replay;
 use super::bench::{self, ConfigId, ExpectedHit, QueryCase};
 use anyhow::{Context, ensure};
+use docsbase_memory::index::QueryMode;
 use metrics::ExternalCase;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,6 +37,7 @@ struct Query {
 }
 
 pub struct ExternalOptions {
+    pub query_mode: QueryMode,
     pub split: String,
     pub k: usize,
     pub configs: Vec<ConfigId>,
@@ -45,6 +47,7 @@ pub struct ExternalOptions {
 impl Default for ExternalOptions {
     fn default() -> Self {
         Self {
+            query_mode: QueryMode::default(),
             split: "test".into(),
             k: 10,
             configs: vec![ConfigId::Bm25],
@@ -279,6 +282,7 @@ pub struct Provenance {
     #[serde(flatten)]
     pub dataset: DatasetMeta,
     pub split: String,
+    pub query_mode: QueryMode,
     pub k: usize,
     pub document_count: usize,
     pub query_count: usize,
@@ -370,7 +374,7 @@ pub fn run_external(
             replay.stages.embedder.clone(),
             replay.stages.reranker.clone(),
         );
-        let (cases, times) = execution::run(&env, dataset, &stages)?;
+        let (cases, times) = execution::run(&env, dataset, &stages, options.query_mode)?;
         let summary = metrics::summarize(&cases);
         quality.insert(*cfg, ExternalConfig { cases, summary });
         latency.insert(
@@ -436,6 +440,7 @@ fn provenance(
     Ok(Provenance {
         dataset: dataset.meta.clone(),
         split: options.split.clone(),
+        query_mode: options.query_mode,
         k: options.k,
         document_count: dataset.path_to_id.len(),
         query_count: dataset.query_ids.len(),
@@ -468,6 +473,15 @@ pub fn measurement_from_env() -> anyhow::Result<()> {
             .context("DOCSBASE_EXTERNAL_REPORT is required")?,
     );
     let mut options = ExternalOptions::default();
+    if let Some(raw) = std::env::var_os("DOCSBASE_EXTERNAL_QUERY_MODE") {
+        let raw = raw.into_string().map_err(|_| {
+            anyhow::anyhow!("invalid external query mode: expected Unicode syntax or literal")
+        })?;
+        options.query_mode = raw
+            .parse()
+            .map_err(anyhow::Error::msg)
+            .context("invalid external query mode")?;
+    }
     if let Ok(raw) = std::env::var("DOCSBASE_EXTERNAL_SPLIT") {
         options.split = raw;
     }
