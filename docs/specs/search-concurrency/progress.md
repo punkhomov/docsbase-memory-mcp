@@ -522,3 +522,23 @@ once for required native checks. No gate is skipped; this avoids starting an
 intermediate native workflow before the final review ledger is committed.
 Whole-feature convergence/latest-head4native remain pending; PR112 stays draft,
 #66/#114 remain open until actual completion/merge. No environment changes.
+
+Task S4.final.I1: complete (basea012723; second ANN load checks shared interest
+before publication/fallback/build, preserving typed abandonment and live peers).
+Dedicated finding-fix agent first observed meaningful RED: 2 live controls pass,
+3 canceled cases fail on unwanted resident/build state. Actual SQLite, vector
+cache and persisted graph IO are gated per instance; no global hook or timer.
+Final24 sequential commands all exit0/current168Rust: cli-full1152passed/0failed/
+13ignored across66targets; full/lean dense/flight/phases/scoped/client/wire and
+all-target+opt-in Clippy, fmt/diff; full query/server/ANN also pass. All113frozen
+inputs unchanged. Final tests differ from RED solely by a documented redundant
+reference lint correction. Root independently checked raw maps, stage ordering,
+full last-summary totals, exact correction diff and frozen inputs. Original
+whole-feature reviewer scoped re-review: I1 ADDRESSED, no new Critical/Important;
+no code gap remains from that review. Final-head native SC-4 is still pending.
+Task S4.final.I1: Ruling: late read-only dependency audit separately identified
+Windows busy-pipe connection paths using unbounded blocking waits. This is a
+new bounded native-compatibility task, not a reopening of the closed ANN finding.
+Confirm exact dependency behavior and meaningful native regression before its
+production fix. Final convergence/PR readiness waits for that task review and
+latest-head docs/linux/macos/windows; #66/#114 remain open.

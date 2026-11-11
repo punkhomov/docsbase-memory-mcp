@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 use crate::hybrid::ann::{self, ANN_MIN_VECTORS, AnnIndex};
+#[cfg(test)]
+use crate::hybrid::ann_store;
 use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore};
 use crate::hybrid::dense_metadata::DenseMetadata;
 use crate::hybrid::flight::{Flights, WorkResult};
@@ -55,7 +57,7 @@ const BUILD_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Whether a background ANN build for `count` vectors of width `dim` fits the
 /// resident cap: the graph estimate plus the exact rows the build thread keeps
-/// alive. Mirrors the admission check in [`DenseCache::resolve_rows`].
+/// alive. Mirrors the admission check in [`DenseCache::resolve_rows_checked`].
 #[must_use]
 pub fn ann_build_admitted(count: usize, dim: usize, max_bytes: u64) -> bool {
     let exact = u64::try_from(count.saturating_mul(dim).saturating_mul(4)).unwrap_or(u64::MAX);
@@ -456,6 +458,9 @@ enum Lookup {
     Warm,
 }
 
+#[cfg(test)]
+type AnnLoadObserver = Arc<dyn Fn(&ann_store::AnnSlot, bool) + Send + Sync>;
+
 /// Per-project dense cache keyed by `(index generation, model_id)` with an
 /// optional ANN tier (spec ann-index): a new generation or embedding model
 /// replaces the entry, a no-op sync keeps it.
@@ -474,6 +479,8 @@ pub struct DenseCache {
     clock: Arc<AtomicU64>,
     #[cfg(test)]
     test_build_gate: Option<TestBuildGate>,
+    #[cfg(test)]
+    test_ann_load: Option<AnnLoadObserver>,
     #[cfg(test)]
     test_workers: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
 }
@@ -560,6 +567,8 @@ impl DenseCache {
             clock: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             test_build_gate: None,
+            #[cfg(test)]
+            test_ann_load: None,
             #[cfg(test)]
             test_workers: Arc::new(Mutex::new(Vec::new())),
         }
@@ -740,6 +749,8 @@ impl DenseCache {
             clock: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             test_build_gate: None,
+            #[cfg(test)]
+            test_ann_load: None,
             #[cfg(test)]
             test_workers: Arc::new(Mutex::new(Vec::new())),
         }
@@ -1014,7 +1025,10 @@ impl DenseCache {
                 && let Ok(Some(slot)) = store.load(&key)
             {
                 check()?;
-                match AnnIndex::load(&slot) {
+                let loaded = AnnIndex::load(&slot);
+                #[cfg(test)]
+                self.observe_ann_load(&slot, loaded.is_ok());
+                match loaded {
                     Ok(ann) => {
                         check()?;
                         let state = DenseRows::Ann(Arc::new(ann));
@@ -1040,7 +1054,7 @@ impl DenseCache {
         check()?;
         let input = self.load_rows(request, chunks, digest)?;
         check()?;
-        Ok(self.resolve_rows(project_id, generation, model_id, input))
+        self.resolve_rows_checked(project_id, generation, model_id, input, check)
     }
 
     fn load_rows(
@@ -1077,14 +1091,22 @@ impl DenseCache {
         })
     }
 
+    #[cfg(test)]
+    fn observe_ann_load(&self, slot: &ann_store::AnnSlot, succeeded: bool) {
+        if let Some(observe) = &self.test_ann_load {
+            observe(slot, succeeded);
+        }
+    }
+
     /// ANN/exact decision for already-loaded rows.
-    fn resolve_rows(
+    fn resolve_rows_checked(
         &self,
         project_id: i64,
         generation: i64,
         model_id: &str,
         input: DenseInput,
-    ) -> DenseRows {
+        check: &impl Fn() -> WorkResult<()>,
+    ) -> WorkResult<DenseRows> {
         let DenseInput {
             chunks,
             digest,
@@ -1121,42 +1143,49 @@ impl DenseCache {
             && building_bytes <= self.limits.max_bytes
             && building_bytes.saturating_add(other_resident) <= self.limits.max_bytes
             && ann_build_admitted(chunks.len(), dim, self.limits.max_bytes);
+        check()?;
         if !seek_ann {
             if exact_bytes > self.limits.max_bytes {
-                return self.stash_too_large(project_id, generation, model_id, chunks);
+                return Ok(self.stash_too_large(project_id, generation, model_id, chunks));
             }
-            return self.stash_ready(project_id, generation, model_id, rows, Arc::new(chunks));
+            return Ok(self.stash_ready(project_id, generation, model_id, rows, Arc::new(chunks)));
         }
         let key = ann_key(project_id, generation, model_id, dim, chunks.len(), digest);
         if let Some(store) = &self.store
             && let Ok(Some(slot)) = store.load(&key)
         {
-            match AnnIndex::load(&slot) {
+            check()?;
+            let loaded = AnnIndex::load(&slot);
+            #[cfg(test)]
+            self.observe_ann_load(&slot, loaded.is_ok());
+            check()?;
+            match loaded {
                 Ok(ann) => {
                     let state = DenseRows::Ann(Arc::new(ann));
                     drop(rows);
                     if let Some(retained) =
                         self.stash(project_id, generation, model_id, state.clone())
                     {
-                        return retained;
+                        return Ok(retained);
                     }
                     drop(state);
-                    return self.stream_transient(
+                    return Ok(self.stream_transient(
                         project_id,
                         generation,
                         model_id,
                         Arc::new(chunks),
-                    );
+                    ));
                 }
                 Err(err) => {
                     eprintln!("warning: ann load failed: {err}; falling back to exact");
                 }
             }
         }
+        check()?;
         if self.policy == AnnPolicy::BuildOrLoad {
             let hashes = Arc::new(chunks);
             let store_root = self.store.as_ref().map(|store| store.root().to_path_buf());
-            self.start_build(BuildJob {
+            Ok(self.start_build(BuildJob {
                 project_id,
                 generation,
                 model_id: model_id.to_owned(),
@@ -1166,10 +1195,22 @@ impl DenseCache {
                 building_bytes,
                 dim,
                 store_root,
-            })
+            }))
         } else {
-            self.stash_ready(project_id, generation, model_id, rows, Arc::new(chunks))
+            Ok(self.stash_ready(project_id, generation, model_id, rows, Arc::new(chunks)))
         }
+    }
+
+    #[cfg(test)]
+    fn resolve_rows(
+        &self,
+        project_id: i64,
+        generation: i64,
+        model_id: &str,
+        input: DenseInput,
+    ) -> DenseRows {
+        self.resolve_rows_checked(project_id, generation, model_id, input, &|| Ok(()))
+            .expect("unchecked test lookup cannot be abandoned")
     }
 
     fn stash_ready(
@@ -1562,6 +1603,8 @@ impl DenseCache {
             clock: Arc::clone(&self.clock),
             #[cfg(test)]
             test_build_gate: self.test_build_gate.clone(),
+            #[cfg(test)]
+            test_ann_load: self.test_ann_load.clone(),
             #[cfg(test)]
             test_workers: Arc::clone(&self.test_workers),
         }
