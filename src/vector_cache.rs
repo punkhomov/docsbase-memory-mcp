@@ -21,6 +21,14 @@ mod batch_tests;
 /// Separate `SQLite` file in the cache root; one cache per machine user.
 pub const VECTOR_DB_FILE: &str = "vectors.db";
 
+/// Strict source-preview identity. Runtime adoption remains a separate migration.
+pub(crate) const V2_MAX_BYTES_FIELD: crate::config::schema::FieldSpec =
+    crate::config::schema::FieldSpec::new(
+        "vector_cache.max_bytes",
+        crate::config::schema::Scope::Daemon,
+        crate::config::schema::Unit::Bytes,
+    );
+
 /// Cache size bounds; eviction drops the least recently used rows first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheLimits {

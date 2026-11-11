@@ -180,3 +180,39 @@ Inspector читает ограниченный SQLite header без Connection/
 меняющееся/нечитаемое/невалидное состояние дают Unknown/NeedsRecovery без пригодной
 identity. Missing допускается только без main DB и recovery sidecars. Наблюдение
 не заменяет повторную проверку inputs перед apply (CF11).
+
+## Delta 2026-11-11 — CF3: preview версий и проект миграции
+
+- **CF3-1:** ограниченные caller-supplied sources имеют независимые версии v1/v2.
+  V1 сохраняет замену hybrid целиком; v2 наследует отсутствующие вложенные поля.
+  Bool reset использует те же owner templates; stage false отключает, stage table
+  включает/обновляет. Неверные version/key/scope отклоняются до побочных эффектов.
+  Provenance различает унаследованные, явно переданные и сброшенные поля.
+- **CF3-2:** v2 допускает только global vector_cache.max_bytes; project vector_cache
+  и v2 hybrid.cache запрещены. Прежний пример ADR-CFG-2 с project-v2 cache override
+  заменяется примером reranker.window. Preview global2/project1 явно сообщает
+  конфликты scope для legacy project cache.
+- **CF3-3:** pure MigrationDraft получает список зарегистрированных проектов и
+  loaded/observed-missing sources; необследованные проекты блокируют полный draft.
+  Legacy budgets показаны отдельно; maximum — предложение, не согласие.
+  Выбор global budget явный. Файлы/state/providers не затрагиваются; отказ от
+  миграции сохраняет рабочее v1 поведение.
+- **CF3-4:** source edits содержат исходную identity/hash и before/after text;
+  предупреждают о canonical formatting, потере комментариев и materialized defaults.
+  Proposed sources разрешаются повторно; non-resource effective settings должны
+  совпадать. Различия budgets явные. Сохраняются v2 inheritance и bool resets;
+  отсутствующие project files не создаются.
+- **CF3-5:** preview/draft явно сообщает о незавершённом runtime adoption.
+  Обычные loaders не активируют v2 до consent/strict shared-store ownership
+  CF5/CF7. Новые CLI commands, public no-op settings, provider construction и
+  implicit migration запрещены. Проверки: Rust1.88/default/cli-full, native CI,
+  fresh task/final review.
+
+
+CF3 budget survey clarification (2026-11-11): при global-v1 учитываются effective
+legacy budgets всех обследованных проектов. При global-v2 уже выбранный global
+cap действует для отсутствующих/v2/reset источников; explicit legacy project
+cache override остаётся отдельным конфликтующим наблюдением. Неиспользуемый
+legacy default не увеличивает suggested maximum. Ошибки preview сохраняют
+категорию слоя (base/hybrid/effective), но не включают исходные значения; обычные
+v1 runtime diagnostics не меняются.

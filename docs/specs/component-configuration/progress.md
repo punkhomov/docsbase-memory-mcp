@@ -212,3 +212,33 @@ publication remain explicitly future scope, so #78/#66 are not closed by this PR
 Final product equals validated74de58d; this commit adds factual ledger only.
 Delivery gate: latest-head docs/linux/macos/windows must all succeed; native artifact
 inventories and pinned squash SHA are recorded in the PR before/after merge.
+
+CF3 implementation/local validation (2026-11-11, base0b2b5df): pure versioned
+SourceLayer/preview и MigrationDraft без runtime activation. v1 replacement,
+v2 nested inheritance/disable/reset, mixed scopes/provenance и explicit budget
+survey реализованы; proposed TOML roundtrip проверяет non-resource equivalence.
+No-write проверяется реальными source files + полный snapshot файлов/directories.
+Ruling: global-v2 reset не возвращает legacy default в suggested budget;
+explicit v1 project override остаётся отдельным conflict/budget observation.
+RED поймал увеличение4096→1073741824 и утечку значения provider в ошибке preview;
+исправления подтверждены GREEN. Обычный v1 loader/diagnostics не изменены.
+Rust1.88: cli-full1230passed/0failed/18existing ignored (72targets включая doc),
+lean config/config_resolution/config_migration/config_runtime/hybrid_config82/0/0.
+Новые12 regressions выполняются в обоих builds. Full/lean all-target Clippy,
+fmt/diff GREEN. Full suite включает настоящие CLI compatibility tests и frozen
+search gate; baseline/recordings/dependencies/CI/daemon implementation не менялись.
+No inference/provider requests; TMPDIR=/var/tmp, existing host slack3.
+Fresh task/final review и final-head native CI остаются delivery gates.
+CF3 fresh task review: FAIL/CHANGES, Important I1 — strict-v2 preview сохранял
+project scope legacy budget key. Исправление: owner descriptor vector_cache.max_bytes
+со Scope::Daemon/Unit::Bytes, provenance rebind после layering; v1 key/scope
+сохраняются. Regression RED подтвердил отсутствие v2 identity до исправления.
+Scope expansion: config/schema.rs (generic provenance projection) и vector_cache.rs
+(только owner descriptor, без изменения store/runtime).
+I1 fix validation: full config/migration/resolution68/0, lean61/0; новые13 migration
+regressions. Full/lean all-target Clippy и fmt/diff GREEN. Полный локальный1230 run
+предшествует изолированному I1 fix; native final-head suite остаётся обязательным.
+Task CF3: complete (2026-11-11, implementation + fresh task review).
+I1 re-review: ADDRESSED; new Critical/Important none. Все CF3-1…CF3-5 выполнены
+в source-only scope; deferred minors нет. Fresh whole-branch final review и
+required docs/Linux/macOS/Windows CI остаются delivery gates. #78 не закрывается.

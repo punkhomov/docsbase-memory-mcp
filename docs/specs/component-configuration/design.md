@@ -412,3 +412,47 @@ Acquire получает абсолютный deadline caller, собствен�
 S1 не меняет dispatcher/search concurrency: short phases/snapshot/singleflight
 принадлежат оставшимся task #66. TOML activation остаётся CF3/CF5. Детали и
 acceptance: `../search-concurrency/{requirements,design,tasks}.md`, S1/SC-1.
+
+## Delta 2026-11-11 — CF3 source planning boundary
+
+CF3 реализует pure SourceLayer/preview и MigrationDraft из caller-supplied
+текстов и явной registry inventory. Обычный Config loader остаётся v1; preview
+показывает, что operational v2 ждёт CF5/CF7. Это позволяет проверить mixed
+version resolution/migration, не запускать legacy evictor под новым названием.
+
+V2 hybrid table наследует поля, включая enabled. Stage table включает/обновляет
+стадию; false отключает; true у stage отклоняется (empty table — явное включение).
+У существующей стадии provider/model/dimensions наследуются по полям: смена
+provider сама не подменяет model/dimensions. Новая стадия получает default в
+owner resolution. Bool hybrid reset сохраняет CF1 templates и их provenance.
+
+Пример ADR-CFG-2 с project-v2 hybrid.cache superseded: ресурс принадлежит global
+vector_cache.max_bytes, поэтому пример partial merge теперь reranker.window.
+V2 hybrid.cache запрещён. Legacy project override поверх global2 отражается
+как scope conflict в preview; это не разрешение mixed runtime store modes.
+
+Migration получает inspected loaded/missing состояния для явного списка
+зарегистрированных config paths. Необследованные paths блокируют full draft.
+max(legacy effective budgets) только предложен; UseBytes/AcceptSuggestedMaximum
+передаются явно. Canonical TOML proposal показывает before/after/hash и потерю
+comments/formatting; запись отсутствует. V1 table replacement materializes
+текущие defaults/отсутствующие stages, bool остаётся bool, v2 patches сохраняются.
+Все proposed sources повторно разрешаются с проверкой non-resource equivalence;
+изменение shared budget показано отдельно. Migration не доказывает artifact
+readiness или возможность apply, которыми владеют CF4/CF5/CF7/CF11.
+
+
+CF3 budget survey clarification (2026-11-11): при global-v1 учитываются effective
+legacy budgets всех обследованных проектов. При global-v2 уже выбранный global
+cap действует для отсутствующих/v2/reset источников; explicit legacy project
+cache override остаётся отдельным конфликтующим наблюдением. Неиспользуемый
+legacy default не увеличивает suggested maximum. Ошибки preview сохраняют
+категорию слоя (base/hybrid/effective), но не включают исходные значения; обычные
+v1 runtime diagnostics не меняются.
+
+CF3 review delta (2026-11-11): strict-v2 preview после legacy-compatible layering
+переносит provenance с hybrid.cache.max_bytes на owner descriptor
+vector_cache.max_bytes (Scope::Daemon, Unit::Bytes). V1 preview сохраняет прежние
+key/scope. Значение пока проецируется в compatibility Config.hybrid_cfg.cache;
+это source review DTO, а не новый operational loader. Descriptor живёт у
+vector_cache, runtime ownership/evictor не меняются до CF7.
