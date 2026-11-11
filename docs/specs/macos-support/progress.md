@@ -19,3 +19,16 @@ Task M4: complete (commit 3c76932 + review round; docs CI gate зелёный)
 Task M4: Ruling: платформенные заявления — macOS 12+ Apple Silicon (Intel/universal out, ADR-M2); install-путь macOS ad-hoc + curl без карантина; конституция — delta-маркер «артефакты Linux + Windows + macOS aarch64»; AGENTS — macOS-грабли (exclusive cfg, SZOMB, O_NONBLOCK/XNU EINVAL, codesign) и advisory-статус macos-джобы.
 Task M4: Review: spec PASS/quality APPROVED; minors закрыты (ARM64 Windows в out-of-scope, macOS-верификация sha, macOS-пути data/config).
 Task M4: follow-up: MACOSX_DEPLOYMENT_TARGET=12.0 зафиксирован в macos-джобах ci.yml/release.yml (док-заявление «macOS 12+» стало enforced; rustc-дефолт arm64 — 11.0).
+
+
+## Investigation #113 — 2026-11-11 (temporary experiment branch)
+
+Initial hypothesis: repeated Env::install overwrites the same already-executed
+launcher inode; macOS code-signing/cache behaviour might differ from a fresh
+inode. Not a confirmed cause. Temporary ignored native probe compares overwrite,
+fresh-name and unlink-before-copy,50 trials each, executing --version and keeping
+PID/inode/status/stdio plus signature/unified-log evidence at a failure. The
+registered manual ANN workflow is overridden only on this investigation branch
+to execute the probe; its main version and required ci.yml are unchanged. No
+production fix or issue completion is claimed. A real change requires a separate
+reviewed task/delta and native acceptance after evidence is obtained.
