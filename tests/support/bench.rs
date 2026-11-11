@@ -795,13 +795,26 @@ pub struct VectorFixture {
     pub corpus_hash: String,
     pub queries_hash: String,
     pub vectors: HashMap<String, Vec<f32>>,
+    /// None is explicit legacy v1; v2 never falls back across roles.
+    pub query_vectors: Option<HashMap<String, Vec<f32>>>,
+}
+
+const VECTOR_FORMAT_ROLE_AWARE: u32 = 2;
+const DOCUMENT_INPUT_RECIPE: &str = "embedder-document-v1";
+const QUERY_INPUT_RECIPE: &str = "embedder-query-v1";
+
+fn legacy_vector_format() -> u32 {
+    1
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct VectorManifest {
+    #[serde(default = "legacy_vector_format")]
+    format_version: u32,
+    document_input_recipe: Option<String>,
+    query_input_recipe: Option<String>,
     model_pin: String,
     dim: usize,
-    #[allow(dead_code)]
     count: usize,
     corpus_hash: String,
     queries_hash: String,
@@ -811,6 +824,7 @@ struct VectorManifest {
 
 #[derive(Debug, serde::Deserialize)]
 struct VectorEntry {
+    role: Option<String>,
     text_hash: String,
     offset_bytes: u64,
     len_floats: usize,
@@ -824,10 +838,35 @@ impl VectorFixture {
             .with_context(|| format!("read {}", dir.join("manifest.json").display()))?;
         let manifest: VectorManifest =
             serde_json::from_str(&raw).context("parse vector manifest")?;
+        let role_aware = match manifest.format_version {
+            1 => {
+                anyhow::ensure!(
+                    manifest.document_input_recipe.is_none()
+                        && manifest.query_input_recipe.is_none(),
+                    "legacy vector manifest has role recipes"
+                );
+                false
+            }
+            VECTOR_FORMAT_ROLE_AWARE => {
+                anyhow::ensure!(
+                    manifest.document_input_recipe.as_deref() == Some(DOCUMENT_INPUT_RECIPE)
+                        && manifest.query_input_recipe.as_deref() == Some(QUERY_INPUT_RECIPE),
+                    "unknown vector input recipe"
+                );
+                true
+            }
+            version => anyhow::bail!("unsupported vector format version {version}"),
+        };
+        anyhow::ensure!(
+            manifest.count == manifest.entries.len(),
+            "vector manifest count mismatch"
+        );
+        anyhow::ensure!(manifest.dim > 0, "empty vector dimension");
         let bytes = std::fs::read(dir.join(&manifest.bin))
             .with_context(|| format!("read {}", dir.join(&manifest.bin).display()))?;
         let floats = bytes_to_f32_le(&bytes)?;
         let mut vectors = HashMap::with_capacity(manifest.entries.len());
+        let mut query_vectors = role_aware.then(HashMap::new);
         for entry in &manifest.entries {
             if entry.offset_bytes % 4 != 0 {
                 anyhow::bail!(
@@ -859,7 +898,22 @@ impl VectorFixture {
             if vec.iter().any(|v| !v.is_finite()) {
                 anyhow::bail!("vector {} is not finite", entry.text_hash);
             }
-            vectors.insert(entry.text_hash.clone(), vec);
+            let table = match entry.role.as_deref() {
+                None if !role_aware => &mut vectors,
+                Some("document") if role_aware => &mut vectors,
+                Some("query") if role_aware => {
+                    query_vectors.as_mut().context("missing query table")?
+                }
+                role => anyhow::bail!(
+                    "invalid vector role {role:?} for format {}",
+                    manifest.format_version
+                ),
+            };
+            anyhow::ensure!(
+                table.insert(entry.text_hash.clone(), vec).is_none(),
+                "duplicate vector role/hash entry {}",
+                entry.text_hash
+            );
         }
         Ok(Self {
             model_pin: manifest.model_pin,
@@ -867,6 +921,7 @@ impl VectorFixture {
             corpus_hash: manifest.corpus_hash,
             queries_hash: manifest.queries_hash,
             vectors,
+            query_vectors,
         })
     }
 
@@ -875,11 +930,19 @@ impl VectorFixture {
     /// a manifest pointing at a half-written blob).
     pub fn write(&self, dir: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-        let mut entries: Vec<(&String, &Vec<f32>)> = self.vectors.iter().collect();
-        entries.sort_by(|a, b| a.0.cmp(b.0));
+        let role_aware = self.query_vectors.is_some();
+        let mut entries: Vec<_> = self
+            .vectors
+            .iter()
+            .map(|(hash, vector)| ("document", hash, vector))
+            .collect();
+        if let Some(queries) = &self.query_vectors {
+            entries.extend(queries.iter().map(|(hash, vector)| ("query", hash, vector)));
+        }
+        entries.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
         let mut bytes = Vec::new();
         let mut meta = Vec::new();
-        for (hash, vec) in &entries {
+        for (role, hash, vec) in &entries {
             if vec.len() != self.dim {
                 anyhow::bail!("vector {hash} has dim {}, want {}", vec.len(), self.dim);
             }
@@ -890,17 +953,20 @@ impl VectorFixture {
             for value in *vec {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
-            meta.push(serde_json::json!({
-                "text_hash": hash,
-                "offset_bytes": offset,
-                "len_floats": vec.len(),
-            }));
+            let mut entry = serde_json::json!({
+                "text_hash": hash, "offset_bytes": offset, "len_floats": vec.len(),
+            });
+            if role_aware {
+                entry["role"] = (*role).into();
+            }
+            meta.push(entry);
         }
         let digest = blake3_hash_bytes(&bytes);
         let bin_name = format!("vectors-{digest}.bin");
         std::fs::write(dir.join(&bin_name), &bytes)
             .with_context(|| format!("write {}", dir.join(&bin_name).display()))?;
-        let manifest = serde_json::json!({
+        let mut manifest = serde_json::json!({
+            "format_version": if role_aware { VECTOR_FORMAT_ROLE_AWARE } else { 1 },
             "model_pin": self.model_pin,
             "dim": self.dim,
             "count": entries.len(),
@@ -909,6 +975,10 @@ impl VectorFixture {
             "bin": bin_name,
             "entries": meta,
         });
+        if role_aware {
+            manifest["document_input_recipe"] = DOCUMENT_INPUT_RECIPE.into();
+            manifest["query_input_recipe"] = QUERY_INPUT_RECIPE.into();
+        }
         let tmp = dir.join("manifest.json.tmp");
         std::fs::write(&tmp, manifest.to_string())
             .with_context(|| format!("write {}", tmp.display()))?;
@@ -952,6 +1022,20 @@ impl VectorFixture {
         let hash = blake3_hash_bytes(text.as_bytes());
         self.get_by_hash(&hash)
             .with_context(|| format!("no vector for text {text:?} (model {})", self.model_pin))
+    }
+
+    /// Legacy lookups preserve historical bytes; v2 misses fail closed.
+    pub fn get_query(&self, text: &str) -> anyhow::Result<&[f32]> {
+        let Some(queries) = &self.query_vectors else {
+            return self.get(text);
+        };
+        let hash = blake3_hash_bytes(text.as_bytes());
+        queries.get(&hash).map(Vec::as_slice).with_context(|| {
+            format!(
+                "no query vector for text hash {hash} (model {})",
+                self.model_pin
+            )
+        })
     }
 
     /// Looks up one pre-hashed text (used by [`preload_vectors`]).
@@ -1151,6 +1235,15 @@ pub struct ReplayEmbedder {
 }
 
 impl Embedder for ReplayEmbedder {
+    fn embed_query(&self, text: &str) -> docsbase_memory::error::Result<Vec<f32>> {
+        self.fixture
+            .get_query(text)
+            .map(<[f32]>::to_vec)
+            .map_err(|error| {
+                docsbase_memory::error::Error::internal(format!("replay query: {error}"))
+            })
+    }
+
     fn model_id(&self) -> &str {
         &self.pin
     }
@@ -1817,8 +1910,8 @@ pub fn write_rerank_fixture(fixture: &RerankFixture, path: &Path) -> anyhow::Res
 /// the `Bm25Rerank` and `RrfRerank` configs through a collecting rerank
 /// stage to capture the exact candidate windows production sends, replays
 /// them through `reranker` for real scores, and writes the rerank fixture.
-/// Every write is atomic; a failure anywhere before the final commit leaves
-/// the previous fixture set untouched and valid.
+/// Embedding failures precede all writes. Vector and rerank publication are
+/// separate atomic phases, not a transaction across the whole fixture set.
 ///
 /// `rerank_model` is an explicit parameter because [`Reranker`] carries no
 /// identity by design (scores are never cached, so there is no consumer).
@@ -1832,37 +1925,73 @@ pub fn record_fixtures_with(
     vector_out: &Path,
     rerank_out: &Path,
 ) -> anyhow::Result<()> {
-    let mut texts: Vec<String> = repo::chunk_texts(env.db.connection(), env.project.id)?;
-    for case in cases {
-        if !texts.iter().any(|text| text == &case.query) {
-            texts.push(case.query.clone());
-        }
-    }
-    let mut fixture = VectorFixture {
-        model_pin: embedder.model_id().to_owned(),
-        dim: 0,
-        corpus_hash: corpus_hash(env.root.path())?,
-        queries_hash: blake3_hash_bytes(&serde_json::to_vec(cases)?),
-        vectors: HashMap::new(),
+    anyhow::ensure!(!cases.is_empty(), "record needs query cases");
+    let mut seen = BTreeSet::new();
+    let texts: Vec<_> = repo::chunk_texts(env.db.connection(), env.project.id)?
+        .into_iter()
+        .filter(|text| seen.insert(text.clone()))
+        .collect();
+    let query_count = cases
+        .iter()
+        .map(|case| case.query.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let query_pause = if embedder.model_id().contains(":free") {
+        FREE_MODEL_PACE
+    } else {
+        std::time::Duration::ZERO
     };
+    eprintln!(
+        "record embedding plan: {} unique document inputs via 1 embed method call \
+         (provider may split batches); {query_count} unique query inputs via \
+         {query_count} embed_query calls; pause before each query: {query_pause:?}; \
+         provider retries excluded",
+        texts.len()
+    );
     let matrix = embedder
         .embed(&texts)
-        .map_err(|err| anyhow::anyhow!("record embed: {err}"))?;
-    if matrix.is_empty() {
-        anyhow::bail!("record embed: empty result");
-    }
+        .map_err(|error| anyhow::anyhow!("record embed: {error}"))?;
+    anyhow::ensure!(
+        matrix.len() == texts.len(),
+        "record embed count mismatch: expected {}, got {}",
+        texts.len(),
+        matrix.len()
+    );
     let dim = matrix
         .first()
         .map(Vec::len)
-        .ok_or_else(|| anyhow::anyhow!("record embed: empty result"))?;
-    fixture.dim = dim;
+        .filter(|dim| *dim > 0)
+        .context("record embed: empty result or dimension")?;
+    let mut fixture = VectorFixture {
+        model_pin: embedder.model_id().to_owned(),
+        dim,
+        corpus_hash: corpus_hash(env.root.path())?,
+        queries_hash: blake3_hash_bytes(&serde_json::to_vec(cases)?),
+        vectors: HashMap::new(),
+        query_vectors: Some(HashMap::new()),
+    };
     for (text, vector) in texts.iter().zip(matrix) {
-        if vector.len() != dim || vector.iter().any(|value| !value.is_finite()) {
-            anyhow::bail!("record embed: bad vector for text hash");
-        }
+        validate_record_vector(&vector, dim, "document")?;
         fixture
             .vectors
             .insert(blake3_hash_bytes(text.as_bytes()), vector);
+    }
+    let queries = fixture
+        .query_vectors
+        .as_mut()
+        .context("query recording table")?;
+    for case in cases {
+        let hash = blake3_hash_bytes(case.query.as_bytes());
+        if let std::collections::hash_map::Entry::Vacant(entry) = queries.entry(hash) {
+            if !query_pause.is_zero() {
+                std::thread::sleep(query_pause);
+            }
+            let vector = embedder
+                .embed_query(&case.query)
+                .map_err(|error| anyhow::anyhow!("record query: {error}"))?;
+            validate_record_vector(&vector, dim, "query")?;
+            entry.insert(vector);
+        }
     }
     write_vector_fixture(&fixture, vector_out)?;
     preload_vectors(env, &fixture)?;
@@ -1880,6 +2009,14 @@ pub fn record_fixtures_with(
         pools,
     };
     write_rerank_fixture(&rr, rerank_out)?;
+    Ok(())
+}
+
+fn validate_record_vector(vector: &[f32], dim: usize, role: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        vector.len() == dim && vector.iter().all(|value| value.is_finite()),
+        "record {role}: wrong dimension or non-finite vector"
+    );
     Ok(())
 }
 
@@ -3121,6 +3258,9 @@ pub fn recording_provenance_warnings(
     };
     let cases_hash = blake3_hash_bytes(&serde_json::to_vec(&fixtures.cases)?);
     let mut warnings = Vec::new();
+    if vectors.query_vectors.is_none() {
+        warnings.push("recording provenance: legacy vector format v1; query/document role provenance unknown; preserving historical replay".to_owned());
+    }
     for (label, recorded, current) in [
         ("corpus_hash", &vectors.corpus_hash, &fixtures.corpus_hash),
         ("serialized_cases_hash", &vectors.queries_hash, &cases_hash),
@@ -3703,14 +3843,8 @@ impl<E: Embedder> PacingEmbedder<E> {
             last_call: std::sync::Mutex::new(None),
         }
     }
-}
 
-impl<E: Embedder> Embedder for PacingEmbedder<E> {
-    fn model_id(&self) -> &str {
-        self.inner.model_id()
-    }
-
-    fn embed(&self, texts: &[String]) -> docsbase_memory::error::Result<Vec<Vec<f32>>> {
+    fn wait_for_turn(&self) {
         if let Ok(mut last) = self.last_call.lock() {
             if let Some(previous) = *last {
                 let elapsed = previous.elapsed();
@@ -3720,6 +3854,21 @@ impl<E: Embedder> Embedder for PacingEmbedder<E> {
             }
             *last = Some(std::time::Instant::now());
         }
+    }
+}
+
+impl<E: Embedder> Embedder for PacingEmbedder<E> {
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+
+    fn embed_query(&self, text: &str) -> docsbase_memory::error::Result<Vec<f32>> {
+        self.wait_for_turn();
+        self.inner.embed_query(text)
+    }
+
+    fn embed(&self, texts: &[String]) -> docsbase_memory::error::Result<Vec<Vec<f32>>> {
+        self.wait_for_turn();
         self.inner.embed(texts)
     }
 }

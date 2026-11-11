@@ -508,3 +508,44 @@ T20 final reviewer converged (source a32c27d), no findings or deferred minors;
 independently checked all327 records/193 qrels and exact byte totals. Delivery
 is batched with independent M5 fixture change in PR #121, as permitted for
 small tasks; combined final tree gets native checks. No inference scope added.
+
+
+## Delta 2026-11-11 — T21: query/document recording roles (#122)
+
+Task T21: complete (implementation and task review). RED: real recorder with
+identical document/query text called query API0times instead of1. GREEN:
+version2 role-aware entries/recipes, explicit query dispatch/lookup, separate
+role tables and fail-closed v2 misses. Legacy v1 retains old lookup with
+unknown-role provenance warning; no frozen recordings/baseline rewritten.
+Cardinality and query dim/finite/error failures preserve prior artifacts
+before any publication. Existing separate vector/rerank commit phases remain;
+this is not a transaction across the complete recording set.
+Verify Rust1.88: default search_bench83/external10 passed,3manual ignores;
+cli-full search_bench83/external10/live-unit7 passed,6manual ignores.
+metrics_match_baseline unchanged; cli-full all-target Clippy, fmt and diff
+checks clean. Actual OpenRouter adapter exercised with fake Transport:
+search_document then search_query, distinct vectors, no network. No new
+crates, production, CI or provider implementation edits; quality impact of
+new recordings remains unmeasured and part of #71. Fresh task/final review
+and hosted native execution evidence follow before integration.
+
+T21 task review found one Important: manual default-free recorder would
+burst193 query RPCs. RED reproduced missing free-route wait and a separate
+existing PacingEmbedder role loss (query returned document vector). Fix uses
+existing4s free pacing and prints planned unique-input/method-call counts
+before inference, explicitly excluding provider batch splitting/retries.
+PacingEmbedder now forwards inner query role with the shared pacer. No API
+was invoked; re-review and updated verification follow.
+
+Ruling: fresh task reviewer /root/review_query_roles_t21 initially CHANGES
+for unpaced free queries; fix re-review ADDRESSED, no new Critical/Important
+findings. No deferred minors. Updated final Rust1.88 checks: cli-full101passed
+(84bench+10external+7live-unit)/6manual ignores; default94passed/3manual
+ignores. All-target cli-full Clippy/fmt/diff clean. Full native/final-review
+evidence follows in PR close-out before integration.
+
+T21 final source review76dce24: requirements/code converged, no Important/
+Critical findings; hosted CI pending. Its Minor timing-boundary finding is
+fixed in-task: measure before first document invocation so scheduler delay
+before the query cannot shorten the observed120ms interval. No deferred
+minors. Focused pacing regression/lint rerun and final fix review follow.

@@ -294,6 +294,10 @@ fn explicit_replay_runs_all_modes_and_missing_content_fails_closed() {
     let result = evaluate_directory(dir.path(), &options).unwrap();
     assert_eq!(result.quality.len(), 4);
     assert_eq!(result.provenance.model_pins.len(), 2);
+    assert_eq!(
+        result.provenance.embedding_vector_format,
+        Some("v2-role-aware-raw")
+    );
     assert_eq!(result.cost.provider_requests, 0);
     let dense_only = ExternalOptions {
         configs: vec![ConfigId::Rrf],
@@ -328,6 +332,15 @@ fn explicit_replay_runs_all_modes_and_missing_content_fails_closed() {
         "missing scores must not downgrade to BM25"
     );
     std::fs::write(&rerank, original).unwrap();
+    let saved = bench::VectorFixture::load(&vectors).unwrap();
+    let mut missing_queries = saved.clone();
+    missing_queries.query_vectors.as_mut().unwrap().clear();
+    missing_queries.write(&vectors).unwrap();
+    assert!(
+        evaluate_directory(dir.path(), &options).is_err(),
+        "missing query role must not use document rows or downgrade"
+    );
+    saved.write(&vectors).unwrap();
     let mut fixture = bench::VectorFixture::load(&vectors).unwrap();
     fixture.vectors.remove(&env.chunk_hashes[0].1).unwrap();
     fixture.write(&vectors).unwrap();

@@ -832,3 +832,29 @@ handling измерений, production parser и frozen gate не меняют�
   явный output вне checkout; публикует новый artifact без перезаписи.
   Production, fixtures/baseline, CI и provider clients не меняются.
   Успешный preflight не закрывает #71 и не доказывает качество recipe.
+
+## Delta 2026-11-11 — ROLE-122: точные роли embedding recordings
+
+- **ROLE-122-1:** новый recorder вызывает Embedder.embed только для unique
+  document inputs, Embedder.embed_query — для unique query inputs. Same raw
+  text в двух ролях сохраняет два независимых vectors. Count/dim/finiteness
+  проверяются до записи; query failure не меняет прежние artifacts.
+- **ROLE-122-2:** vector manifest v2 явно различает document/query role и
+  raw input recipes. Model/preprocessing pin остаётся частью identity.
+  Load/replay отклоняют unknown version/role/recipe, duplicate role+hash и
+  missing query в v2; document preload не берёт query vectors.
+- **ROLE-122-3:** v1 frozen recordings остаются explicit legacy с прежним
+  lookup/quality и предупреждением об unknown role provenance. Старые
+  vectors не relabel в query-role; baseline/fixtures не переписываются.
+- **ROLE-122-4:** real recorder→disk→load→replay regression с role-aware
+  fake и тем же текстом в обеих ролях; реальный OpenRouter adapter через
+  fake Transport проверяет input_type без API. Default/cli-full harness,
+  unchanged frozen gate, fmt/Clippy, fresh reviews и required native CI.
+  Новых crates/runtime изменений/live calls нет. Quality after new live
+  recordings и deliberate baseline review остаются отдельным scope #71.
+
+ROLE-122 review delta2026-11-11: free-route manual query recording uses the
+existing FREE_MODEL_PACE before each unique query call and prints unique
+input/method-call counts before inference (provider splitting/retries are
+not claimed as counted). PacingEmbedder must preserve embed_query dispatch
+and the same pacing timeline across document/query methods. No live run.

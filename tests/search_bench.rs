@@ -850,6 +850,7 @@ fn replay_embedder_missing_hash_is_error() {
         dim: 4,
         corpus_hash: "test".to_owned(),
         queries_hash: "test".to_owned(),
+        query_vectors: None,
         vectors: [("known".to_owned(), vec![1.0, 0.0, 0.0, 0.0])]
             .into_iter()
             .collect(),
@@ -1079,6 +1080,7 @@ fn write_vector_fixture(
         dim: 4,
         corpus_hash: "test".to_owned(),
         queries_hash: "test".to_owned(),
+        query_vectors: None,
         vectors,
     };
     fixture.write(&tmp.join("vectors")).expect("write vectors");
@@ -2460,6 +2462,7 @@ fn make_fixture(env: &support::bench::BenchEnv, rotate: bool) -> VectorFixture {
         dim: 4,
         corpus_hash: "test".to_owned(),
         queries_hash: "test".to_owned(),
+        query_vectors: None,
         vectors: texts
             .iter()
             .zip(vecs)
@@ -2794,6 +2797,7 @@ fn vector_rewrite_sweeps_orphan_bins() {
         dim: 1,
         corpus_hash: "c".to_owned(),
         queries_hash: "q".to_owned(),
+        query_vectors: None,
         vectors: [("deadbeef".to_owned(), vec![value])].into_iter().collect(),
     };
     fixture(1.0).write(dir).expect("write v1");
@@ -3083,7 +3087,12 @@ fn recording_aggregates_warn_without_invalidating_content_addressed_replay() {
     let replay = support::bench::replay_stages(root, &baseline).expect("recordings load");
     let warnings =
         support::bench::recording_provenance_warnings(&replay, &fixtures).expect("provenance");
-    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert_eq!(warnings.len(), 3, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("role provenance unknown"))
+    );
     assert!(
         warnings
             .iter()
@@ -3329,4 +3338,228 @@ fn absolute_quality_reports_post_adjudication_counts_without_rewriting_baseline(
     let mut old = value;
     old.as_object_mut().unwrap().remove("quality_diagnostics");
     let _: Report = serde_json::from_value(old).unwrap();
+}
+
+/// Query and document roles intentionally produce different vectors even
+/// when the raw bytes are identical (ROLE-122-1).
+struct RoleAwareEmbedder {
+    queries: AtomicUsize,
+}
+
+impl Embedder for RoleAwareEmbedder {
+    fn model_id(&self) -> &'static str {
+        "test/role-aware@d4@l2"
+    }
+    fn embed(&self, texts: &[String]) -> docsbase_memory::error::Result<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+    }
+    fn embed_query(&self, _text: &str) -> docsbase_memory::error::Result<Vec<f32>> {
+        self.queries.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![0.0, 1.0, 0.0, 0.0])
+    }
+}
+
+#[test]
+fn record_mode_preserves_query_role_for_the_same_text_as_a_document() {
+    let tmp = TempDir::new().unwrap();
+    tiny_corpus(tmp.path());
+    let env = support::bench::build_env(&tmp.path().join("corpus"), "roles", 3..=3).unwrap();
+    let text = env.chunk_texts[0].clone();
+    let first = probe_case("role-1", &text, 10);
+    let mut second = first.clone();
+    second.id = "role-2".to_owned();
+    let role = Arc::new(RoleAwareEmbedder {
+        queries: AtomicUsize::new(0),
+    });
+    let embedder: Arc<dyn Embedder> = role.clone();
+    let vectors = tmp.path().join("vectors");
+    record_fixtures_with(
+        &env,
+        &[first, second],
+        &embedder,
+        &FailingReranker {
+            fail: AtomicBool::new(false),
+        },
+        "test/rerank",
+        &vectors,
+        &tmp.path().join("rerank.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        role.queries.load(Ordering::SeqCst),
+        1,
+        "unique query uses query API"
+    );
+    let loaded = VectorFixture::load(&vectors).unwrap();
+    let replay = support::bench::ReplayEmbedder {
+        pin: embedder.model_id().to_owned(),
+        fixture: Arc::new(loaded),
+    };
+    assert_eq!(
+        replay.embed(&[text.clone()]).unwrap(),
+        vec![vec![1.0, 0.0, 0.0, 0.0]]
+    );
+    assert_eq!(replay.embed_query(&text).unwrap(), vec![0.0, 1.0, 0.0, 0.0]);
+}
+
+#[test]
+fn role_aware_manifest_rejects_ambiguous_metadata_and_cross_role_fallback() {
+    let tmp = TempDir::new().unwrap();
+    let text = "shared input";
+    let fixture = VectorFixture {
+        model_pin: "test/roles@d2@l2".to_owned(),
+        dim: 2,
+        corpus_hash: "corpus".to_owned(),
+        queries_hash: "queries".to_owned(),
+        vectors: [(blake3_of(text), vec![1.0, 0.0])].into_iter().collect(),
+        query_vectors: Some([(blake3_of(text), vec![0.0, 1.0])].into_iter().collect()),
+    };
+    fixture.write(tmp.path()).unwrap();
+    let path = tmp.path().join("manifest.json");
+    let original: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(original["format_version"], 2);
+    for defect in [
+        "version",
+        "recipe",
+        "role",
+        "missing-role",
+        "duplicate",
+        "count",
+    ] {
+        let mut bad = original.clone();
+        match defect {
+            "version" => bad["format_version"] = 3.into(),
+            "recipe" => bad["query_input_recipe"] = "unknown".into(),
+            "role" => bad["entries"][0]["role"] = "unknown".into(),
+            "missing-role" => {
+                bad["entries"][0].as_object_mut().unwrap().remove("role");
+            }
+            "duplicate" => {
+                let entry = bad["entries"][0].clone();
+                bad["entries"].as_array_mut().unwrap().push(entry);
+                bad["count"] = 3.into();
+            }
+            "count" => bad["count"] = 99.into(),
+            _ => unreachable!(),
+        }
+        fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
+        assert!(VectorFixture::load(tmp.path()).is_err(), "{defect}");
+    }
+    let mut missing = original;
+    missing["entries"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|entry| entry["role"] == "document");
+    missing["count"] = 1.into();
+    fs::write(&path, serde_json::to_vec(&missing).unwrap()).unwrap();
+    let loaded = VectorFixture::load(tmp.path()).unwrap();
+    assert_eq!(loaded.get(text).unwrap(), [1.0, 0.0]);
+    assert!(
+        loaded.get_query(text).is_err(),
+        "v2 must not borrow document vector for query"
+    );
+}
+
+#[test]
+fn record_rejects_wrong_cardinality_and_query_failures_before_publication() {
+    struct BadRecord(&'static str);
+    impl Embedder for BadRecord {
+        fn model_id(&self) -> &'static str {
+            "test/role-aware@d4@l2"
+        }
+        fn embed(&self, texts: &[String]) -> docsbase_memory::error::Result<Vec<Vec<f32>>> {
+            let count = match self.0 {
+                "short" => texts.len() - 1,
+                "extra" => texts.len() + 1,
+                _ => texts.len(),
+            };
+            Ok(vec![vec![1.0, 0.0, 0.0, 0.0]; count])
+        }
+        fn embed_query(&self, _: &str) -> docsbase_memory::error::Result<Vec<f32>> {
+            match self.0 {
+                "dimension" => Ok(vec![1.0]),
+                "nonfinite" => Ok(vec![f32::NAN, 0.0, 0.0, 0.0]),
+                _ => Err(docsbase_memory::error::Error::internal(
+                    "injected query failure",
+                )),
+            }
+        }
+    }
+    let tmp = TempDir::new().unwrap();
+    tiny_corpus(tmp.path());
+    let env =
+        support::bench::build_env(&tmp.path().join("corpus"), "query-failure", 3..=3).unwrap();
+    let case = record_case();
+    let vectors = tmp.path().join("vectors");
+    let rerank = tmp.path().join("rerank.json");
+    let working: Arc<dyn Embedder> = Arc::new(RoleAwareEmbedder {
+        queries: AtomicUsize::new(0),
+    });
+    let ranker = FailingReranker {
+        fail: AtomicBool::new(false),
+    };
+    record_fixtures_with(
+        &env,
+        &[case.clone()],
+        &working,
+        &ranker,
+        "test/rerank",
+        &vectors,
+        &rerank,
+    )
+    .unwrap();
+    let before_manifest = fs::read(vectors.join("manifest.json")).unwrap();
+    let before_rerank = fs::read(&rerank).unwrap();
+    for mode in ["short", "extra", "dimension", "nonfinite", "error"] {
+        let bad: Arc<dyn Embedder> = Arc::new(BadRecord(mode));
+        let err = record_fixtures_with(
+            &env,
+            &[case.clone()],
+            &bad,
+            &ranker,
+            "test/rerank",
+            &vectors,
+            &rerank,
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains(if mode == "short" || mode == "extra" {
+                "count mismatch"
+            } else {
+                "query"
+            }),
+            "{mode}: {message}"
+        );
+        assert_eq!(
+            fs::read(vectors.join("manifest.json")).unwrap(),
+            before_manifest,
+            "{mode}"
+        );
+        assert_eq!(fs::read(&rerank).unwrap(), before_rerank, "{mode}");
+    }
+}
+
+#[test]
+fn pacing_embedder_preserves_roles_and_spaces_mixed_calls() {
+    let interval = std::time::Duration::from_millis(120);
+    let embedder = support::bench::PacingEmbedder::new(
+        RoleAwareEmbedder {
+            queries: AtomicUsize::new(0),
+        },
+        interval,
+    );
+    let started = std::time::Instant::now();
+    assert_eq!(
+        embedder.embed(&["same text".to_owned()]).unwrap(),
+        vec![vec![1.0, 0.0, 0.0, 0.0]]
+    );
+    assert_eq!(
+        embedder.embed_query("same text").unwrap(),
+        vec![0.0, 1.0, 0.0, 0.0]
+    );
+    assert!(
+        started.elapsed() >= interval,
+        "query must share document pacing"
+    );
 }
