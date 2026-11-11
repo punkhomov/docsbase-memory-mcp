@@ -585,3 +585,34 @@ not tokens/cost or future context-dense pool bounds. Artifact18629920bytes,
 created outside checkout with requests0/qualitynull and explicit unknown-role
 legacy provenance. Worktree remained clean. Final-source artifact identity,
 fresh final review and required native checks are recorded in PR close-out.
+
+
+## Delta 2026-11-11 — T23: offline factorial kernel (#71)
+
+Task T23: complete (implementation and fresh task review). RED: run_matrix/
+MatrixStages absent; real indexed tests fail compilation. GREEN: independent
+raw/context document and rerank recipes execute through search_docs_with,
+shared explicit-role query bank, full-membership/model/recipe temporary
+vector namespaces and exact ordered rerank memo identities. Same-text roles
+remain separate. Ambiguous contexts and invalid k/pins fail before stage
+methods; 12 vector/query/rerank failure modes abort; no incomplete response
+is cached. Mutex guards end before the injected method. Sequential test-only
+kernel, not a concurrent production resource/cache contract.
+
+Verify Rust1.88: representation12passed/2existing manual ignores on both
+default and cli-full. Benchmark84passed/2manual ignores,
+unchanged metrics_match_baseline. All-target cli-full Clippy/fmt/diff clean.
+Six new tests cover exact recorded bytes/order/citation mapping, independent
+dense/rerank effects, query/warm pool reuse, pre-method guards, empty lexical
+pools and full327chunk frozen2query pilot (16observations plus warm repeats).
+All execution uses fake stages. Quality/token/cost/wire requests unknown;
+no API clients, live entrypoint, production/CI/dependency/frozen changes.
+
+Ruling: fresh task reviewer /root/review_matrix_t23 initially CHANGES for
+Important reranker-pin validation and Minor exact-input test assertions.
+Both fixed in-task: parser checks roles/nonempty components before methods;
+11invalid pin cases RED→GREEN; exact preflight inputs map through provider
+score indices to original citations and recorded ordered method arguments.
+Re-review ADDRESSED both; no new Critical/Important findings, no deferred
+minors. Fresh final review/native CI and guarded squash integration follow.
+#71 remains open for separately scoped recordings and measured quality.

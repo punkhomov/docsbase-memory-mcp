@@ -12,6 +12,10 @@ use serde_json::{Value, json};
 mod census;
 pub use census::collect_candidates;
 
+#[path = "representation_matrix.rs"]
+mod matrix;
+pub use matrix::{MatrixStages, run_matrix};
+
 use super::support::bench::{self, BenchEnv, QueryCase};
 use docsbase_memory::hybrid::config::{EmbeddingCfg, RerankerCfg, embedding_model_id};
 use docsbase_memory::index::tokenizer::TOKENIZER_VERSION;

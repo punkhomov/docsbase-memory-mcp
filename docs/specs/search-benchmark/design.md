@@ -1242,3 +1242,24 @@ Recorded-v1 pools describe historical memberships; transformed dense pools
 are unknown until new vectors exist. Input-byte sums do not estimate tokens
 or cost. Scores/quality are null, requests0. Existing external no-clobber
 writer/clean-source check are reused; no new runtime defaults or APIs.
+
+## Delta 2026-11-11 — T23: bounded offline matrix kernel
+
+T23 использует точный preflight с явными pins. Guarded map raw body→context
+проверяется до inference seam: одинаковый body под разными locations не
+может представлять два context vectors в текущем body-addressed cache.
+В этом случае kernel отказывает, не выбирает location и не меняет hashes.
+Две complete vector banks используют research namespace из base pin,
+document recipe и полного membership digest; query bank один, с отдельной
+ролью и исходным query text. Это deliberate coarse temporary invalidation.
+
+Private replay embedder отдаёт bank через model_id-qualified cache, без
+вызова исходного stage во время поиска. Transforming reranker получает
+actual production pool, подменяет только provider input, оставляет original
+citation identity; complete validated response кэшируется по exact ordered
+pool key. Cache guard снимается до stage method; execution sequential, без
+заявлений о concurrent singleflight. Две стадии проверяются independently
+на fake outputs; повторный поиск проверяет warm reuse. Wire attempts,
+реальное качество, tokens/cost не выводятся из числа trait method calls.
+Нет live entrypoint или нового recording/replay файла: такой runner с
+attempt/cost admission — будущая отдельная задача при явном live scope.
