@@ -30,7 +30,7 @@ original cases, source/model/tokenizer pins и counts. Входные query stri
 - [x] Focused tests, frozen gate, fmt/clippy, fresh task review, ledger/commit.
 - [x] Manual ignored export на clean commit вне checkout; проверить полный
   frozen corpus/cases/bytes, source identity и отсутствие fixture mutations.
-- [ ] Fresh final review и required native CI, отдельный PR; #71 остаётся
+- [ ] Fresh final review и required native CI в общем test-only PR с M5; #71 остаётся
   открытой до измеренных results. Inference scope не расширяется.
 
 Команда после task commit (output parent должен существовать, файл — нет):
@@ -47,3 +47,9 @@ Artifact — проверяемая подготовка, не quality report и
 pools штатного search; отдельный live scope задаёт модели, requests/retries,
 usage/cost caps и доступность route. Сохранённые старые scores не подходят
 для изменённых inputs; raw controls нужны для проверки provider drift.
+
+## Delta 2026-11-11 — интеграция test-only задач
+
+По разрешённому batch небольших задач T20 доставляется вместе с M5 (#113)
+в PR #121. Task commits/reviews остаются отдельными; production изменений
+нет, совместный финальный tree проходит required native CI.

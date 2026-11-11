@@ -503,3 +503,8 @@ path/heading/spans/body/context records match the independent earlier audit;
 all193 cases/qrels preserve existing QueryCase semantics (omitted optional
 lines serializes as null). Output outside checkout, tree stays clean;
 provider_requests0 and qualitynull. Final/native evidence remains in PR.
+
+T20 final reviewer converged (source a32c27d), no findings or deferred minors;
+independently checked all327 records/193 qrels and exact byte totals. Delivery
+is batched with independent M5 fixture change in PR #121, as permitted for
+small tasks; combined final tree gets native checks. No inference scope added.
