@@ -66,21 +66,42 @@ continues until actual provider work ends. Hidden tabs pause status polling.
 From Git, prepare frontend assets explicitly before compiling `web`/`cli-full`:
 
 ```sh
-npm ci --prefix web
-npm run check --prefix web
-npm run test:unit --prefix web
-npm run build --prefix web
+corepack enable
+corepack install
+pnpm install --frozen-lockfile
+pnpm --dir web format:check
+pnpm --dir web check
+pnpm --dir web test:unit
+pnpm --dir web build
 cargo build --locked --features cli-full
 cargo test --locked --features cli-full
-cd web && npx playwright install chromium && npm test
+pnpm --dir web exec playwright install chromium
+pnpm --dir web test
 ```
 
-Rust 1.88 and Node.js 22+ are build tools; installed users need neither. Cargo's
+Rust 1.88 and the exact Node.js version in `.node-version` are build tools;
+installed users need neither. The root `package.json` pins pnpm, including its
+package checksum. Run all installation commands from the repository root. Cargo's
 build script only embeds already-built `web/dist` files and fails with an
 instruction if absent. Default Cargo features remain lean and do not need UI
 assets. Crates.io publication is not currently supported; release binaries are
 the distribution channel. For `cargo install --path . --features cli-full`, run
 the frontend preparation first.
+
+The pnpm workspace rejects packages published less than 14 days ago, including
+transitive dependencies and entries in a frozen lockfile. Missing publication
+dates and provenance downgrades fail installation. Registry integrity, exact
+package-manager/Node versions, and peer dependencies are checked. New dependency
+install scripts fail until explicitly reviewed; current dependency scripts are
+denied. pnpm does not automatically install agent skills. These checks are
+configured in the root `pnpm-workspace.yaml`; do not bypass them with local flags
+or regenerate the lockfile with npm.
+
+Use `pnpm --dir web format` to format frontend source and
+`pnpm --dir web format:check` to check it without rewriting files. Native CI runs
+the same format check before typechecking and building. Generated Rust contract
+declarations are checked by their contract test rather than rewritten by the
+frontend formatter.
 
 Rust DTOs generate `web/src/shared/api/generated.ts`. After changing contracts:
 `DOCSBASE_GENERATE_TYPES=1 cargo test --features web --test web_contract`.

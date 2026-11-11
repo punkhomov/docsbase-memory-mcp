@@ -18,3 +18,5 @@ __pycache__/
 /web/test-results/
 /web/playwright-report/
 /work/
+
+/node_modules/

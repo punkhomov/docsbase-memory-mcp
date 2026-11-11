@@ -520,3 +520,15 @@ Frontend можно собирать в каждом native-задании ли�
 - документация описывает запуск, конфигурацию, сборку, ограничения локального режима и диагностику.
 
 Для начала реализации дополнительных продуктовых решений от тебя не требуется. Основная оставшаяся подготовка — сверка этого задания с текущим кодом и доступными IPC-контрактами после восстановления среды.
+
+## Delta 2026-11-11 — requested frontend stack and tooling
+
+Use Lucide icons and shadcn-svelte components while preserving the approved
+visual design and existing search behavior. Use pnpm with a strict 14-day
+minimum release age for all dependencies, including frozen lockfile checks,
+and deny unreviewed installation scripts. Pin Node 24.22.3 exactly: the user
+explicitly approved this security release as the sole cooldown exception.
+Prefer Biome when its Svelte support works on this application; formatting must
+remain covered by typechecking, builds and browser tests. Document official
+Svelte/shadcn AI documentation, skills and MCP options without implicitly
+activating remote integrations or executing unpinned tooling.

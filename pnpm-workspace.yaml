@@ -1,0 +1,28 @@
+packages:
+  - web
+
+# Enforced for the whole graph, including frozen-lockfile installs.
+minimumReleaseAge: 20160 # 14 days, in minutes
+minimumReleaseAgeStrict: true
+minimumReleaseAgeIgnoreMissingTime: false
+trustPolicy: no-downgrade
+trustLockfile: false
+blockExoticSubdeps: true
+
+# New install scripts require a reviewed allow/deny decision. None may run.
+strictDepBuilds: true
+allowBuilds:
+  esbuild: false
+  '@tailwindcss/oxide': false
+  shadcn-svelte: false
+skills:
+  dirs: []
+
+autoInstallPeers: false
+strictPeerDependencies: true
+engineStrict: true
+pmOnFail: error
+verifyDepsBeforeRun: error
+verifyStoreIntegrity: true
+strictStorePkgContentCheck: true
+saveExact: true

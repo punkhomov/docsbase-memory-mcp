@@ -82,7 +82,10 @@ then point the stages at them (all provisioning commands are offline-safe and
 idempotent):
 
 ```sh
-npm ci --prefix web && npm run build --prefix web
+corepack enable
+corepack install
+pnpm install --frozen-lockfile
+pnpm --dir web build
 cargo build --release --features cli-full
 # 1. Install the pinned ONNX Runtime (downloads once; `--check` reports state)
 docsbase connect fastembed
@@ -144,13 +147,16 @@ prompts (notarization is not needed for this path).
 ```sh
 git clone https://github.com/punkhomov/docsbase-memory-mcp.git
 cd docsbase-memory-mcp
-npm ci --prefix web
-npm run build --prefix web
+corepack enable
+corepack install
+pnpm install --frozen-lockfile
+pnpm --dir web build
 cargo install --path . --locked --features cli-full
 docsbase install   # register the binary with the daemon
 ```
 
-Requires Rust 1.88+ (MSRV) and Node.js 22+ for building embedded Web assets. Local development pins nightly in
+Requires Rust 1.88+ (MSRV) and the exact Node.js version in `.node-version`
+for building embedded Web assets. Local development pins nightly in
 `rust-toolchain.toml`; CI validates the MSRV toolchain.
 
 ### Manual
@@ -295,5 +301,5 @@ MIT — see [LICENSE](LICENSE).
 
 `docsbase web --open` opens the local projects, search and safe configuration panel.
 Included in official `cli-full` binaries; no Node.js needed at runtime.
-Git source builds require `npm ci --prefix web && npm run build --prefix web`
+Git source builds prepare embedded assets with the pinned Node.js/pnpm toolchain
 before Cargo. See [Web setup and testing](docs/WEB.md).

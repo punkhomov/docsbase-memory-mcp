@@ -67,13 +67,17 @@ $env:DOCSBASE_VERSION = "v0.1.0-alpha.5"; iex (irm .../install.ps1)
 ```sh
 git clone https://github.com/punkhomov/docsbase-memory-mcp.git
 cd docsbase-memory-mcp
-npm ci --prefix web
-npm run build --prefix web
+corepack enable
+corepack install
+pnpm install --frozen-lockfile
+pnpm --dir web build
 cargo install --path . --locked --features cli-full
 docsbase install
 ```
 
-Requires Rust 1.88+. Local dev uses the nightly pinned in
+Requires Rust 1.88+ and the exact Node.js version in `.node-version`.
+Corepack uses the pnpm version and checksum pinned in the root `package.json`.
+Local dev uses the nightly pinned in
 `rust-toolchain.toml`; MSRV builds use `--locked`.
 
 ## Option C — manual

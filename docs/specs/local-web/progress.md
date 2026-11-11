@@ -45,3 +45,31 @@ Environment note: managed sandbox exposes a synthetic `/tmp/.git` directory,
 which aliases unrelated temporary test projects. Full Rust tests use
 `TMPDIR=/var/tmp` outside that synthetic tree; no product/baseline workaround.
 No golden or performance baselines changed. Merging remains a human action.
+
+
+2026-11-11 — requested tooling/UI follow-up
+
+Task W5: complete (root pnpm workspace, exact Node 24.22.3 and pnpm 12.16.1,
+strict 14-day supply-chain policy, Biome 2.6.3 and native workflow migration).
+Ruling: fresh security review APPROVED. Independent negative probes rejected
+fresh resolution, a fresh frozen-lock entry and an unapproved postinstall; its
+marker was not created. Clean frozen install verified 145 lock entries. No
+dependency scripts ran. Node archive SHA-256 verified against official sums.
+Node is the sole user-approved security cooldown exception. Formatting,
+typecheck, unit test and build passed. Audit: zero moderate/high/critical; one
+unpatched LOW development-only deepmerge advisory explicitly documented.
+
+Task W6: complete (Lucide SVG icons and pinned shadcn-svelte source primitives,
+existing sage theme and native select behavior, embedded third-party notices).
+Ruling: fresh UI review APPROVED; source semantics, native form behavior,
+component provenance, licenses and CSP checked. Desktop/mobile captures inspected.
+Seven real-daemon browser scenarios passed with Node 24.22.3 and pnpm; desktop
+and mobile evidence refreshed. Biome's experimental Svelte support was exercised
+on the actual application and checked by svelte-check, compile and browser tests.
+Official Svelte/shadcn AI docs, reviewed skills and optional docs-only MCP setup
+are recorded in docs/AI-TOOLING.md; no integration is implicitly activated.
+
+Windows CI's previous generated-contract failure was solely CRLF checkout
+conversion. Frontend source attributes now enforce LF, preserving exact contract
+comparison and consistent formatting on all native runners. Final CI results
+remain recorded in PR #126 checks.

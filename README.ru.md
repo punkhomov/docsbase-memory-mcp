@@ -81,7 +81,10 @@ $env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punk
 укажите стадии (все шаги provisioning офлайн-безопасны и идемпотентны):
 
 ```sh
-npm ci --prefix web && npm run build --prefix web
+corepack enable
+corepack install
+pnpm install --frozen-lockfile
+pnpm --dir web build
 cargo build --release --features cli-full
 # 1. Установка закреплённого ONNX Runtime (скачивается один раз; `--check` показывает состояние)
 docsbase connect fastembed
@@ -144,13 +147,16 @@ curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/
 ```sh
 git clone https://github.com/punkhomov/docsbase-memory-mcp.git
 cd docsbase-memory-mcp
-npm ci --prefix web
-npm run build --prefix web
+corepack enable
+corepack install
+pnpm install --frozen-lockfile
+pnpm --dir web build
 cargo install --path . --locked --features cli-full
 docsbase install   # зарегистрировать бинарь в демоне
 ```
 
-Требуется Rust 1.88+ (MSRV) и Node.js 22+ для сборки Web-ресурсов. Для локальной разработки в `rust-toolchain.toml`
+Требуется Rust 1.88+ (MSRV) и точная версия Node.js из `.node-version`
+для сборки Web-ресурсов. Для локальной разработки в `rust-toolchain.toml`
 зафиксирован nightly; CI проверяет MSRV-тулчейн.
 
 ### Вручную

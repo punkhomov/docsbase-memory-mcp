@@ -10,3 +10,12 @@
 # Frozen benchmark JSON participates in raw-byte provenance hashes.
 tests/fixtures/search-bench/*.json text eol=lf
 Cargo.lock text eol=lf
+# Frontend formatter and generated contract bytes are identical on native runners.
+*.svelte text eol=lf
+*.ts text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+.node-version text eol=lf
+.npmrc text eol=lf

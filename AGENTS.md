@@ -19,8 +19,12 @@ here.
 ## Commands (verification)
 
 Official CLI builds use `--features cli-full` (both provider implementations and Web).
-Prepare embedded assets first: `npm ci --prefix web && npm run build --prefix web`.
-See `docs/WEB.md` for frontend checks and browser acceptance.
+Use the exact Node.js version in `.node-version`. At the repository root, run
+`corepack enable`, `corepack install`, `pnpm install --frozen-lockfile`, then
+`pnpm --dir web build` before Cargo. See `docs/WEB.md` for frontend checks and
+browser acceptance.
+Frontend AI documentation and optional Svelte/shadcn-svelte integrations:
+`docs/AI-TOOLING.md`.
 The plain Cargo default remains the lean/source compatibility build.
 
 Sandboxed agents: point `CARGO_HOME`/`RUSTUP_HOME` at a writable directory

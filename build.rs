@@ -10,7 +10,7 @@ fn main() {
     let root = Path::new("web/dist");
     assert!(
         root.join("index.html").is_file(),
-        "Web assets missing. Run: cd web && npm ci && npm run build (or build without --features web/cli-full)"
+        "Web assets missing. Run from repo root: corepack enable && corepack install && pnpm install --frozen-lockfile && pnpm --dir web build (or build without --features web/cli-full)"
     );
     let mut files = Vec::new();
     collect(root, &mut files);
@@ -30,6 +30,7 @@ fn main() {
             Some("js") => "text/javascript; charset=utf-8",
             Some("css") => "text/css; charset=utf-8",
             Some("svg") => "image/svg+xml",
+            Some("txt") => "text/plain; charset=utf-8",
             _ => "application/octet-stream",
         };
         let route = if relative == "index.html" {

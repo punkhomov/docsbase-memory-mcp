@@ -16,6 +16,9 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
   protection, native artifact smoke and real-daemon browser acceptance checks.
   Executable, bundle and distribution sizes remain measured; the old 40 MiB
   executable ceiling is removed.
+- Lucide icons and shadcn-svelte components in the Web panel; exact Node 24.22.3
+  and pnpm 12.16.1 build tooling with a strict 14-day dependency cooldown,
+  denied dependency install scripts and Biome formatting.
 - A bounded query-embedding cache inside the dense path: a repeated query with the
   same model no longer calls the provider. 256 entries / 4 MiB, LRU eviction, and a
   failed embed is never cached. `status` now reports

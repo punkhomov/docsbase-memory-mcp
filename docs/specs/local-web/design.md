@@ -34,3 +34,18 @@ CSP self-only, никаких HTML renders из документации, no-sto
 Идентификаторы chunk_id сохраняют числовой wire-контракт существующего поиска.
 UI не использует их как ключи/адреса: JSON JavaScript может округлять u64 свыше 2^53.
 Статус ANN использует общую с CLI классификацию stale/disabled/loading.
+
+## Delta 2026-11-11 — frontend tooling
+
+Root pnpm workspace owns lockfile and supply-chain policy. Exact Node 24.22.3
+and pnpm 12.16.1 (with integrity hash) are shared by local builds and every native
+job. Node is the user's explicit security-update cooldown exception; dependency
+resolution has no exceptions. Biome 2.6.3 formats Svelte with experimental full
+support enabled; typecheck, compile and browser checks guard this use.
+
+shadcn-svelte source components are checked in from a reviewed October 23 commit,
+with MIT attribution; Lucide provides SVG icons. NativeSelect preserves native
+keyboard and browser behavior. Tailwind utilities use the existing sage theme
+without a global reset. Third-party notices are embedded and linked in the footer.
+See docs/supply-chain.md for the unpatched low-severity development-only advisory
+and docs/AI-TOOLING.md for optional official documentation integrations.
