@@ -193,7 +193,7 @@ pub struct SearchMeta {
     pub total_ms: u64,
     /// Milliseconds per stage; absent keys mean "did not run".
     pub stage_ms: Vec<(Stage, u64)>,
-    /// Candidate window actually fetched, after the `MAX_HITS` clamp.
+    /// Last planned eligible candidate window; actual retained candidates may be fewer.
     pub window: usize,
     /// Index generation the answer was served from.
     pub index_generation: i64,

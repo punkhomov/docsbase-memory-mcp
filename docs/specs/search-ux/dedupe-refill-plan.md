@@ -50,17 +50,26 @@ is attached by PreparedSearch.finish, so normal response remains an array.
 - [x] GREEN focused tests, lib/CLI/IPC/hybrid regression suites, clippy/fmt.
 - [x] Fresh R1 review via immutable diff package, fix findings, ledger/commit.
 
-## R2 — measurement and delivery
+## R2 — measurement and local acceptance
 
 Files: product docs/CHANGELOG, reports/dedupe-refill-2026-11-11.md, ledger.
 
-- [ ] Release diagnostic no-refill/refill/budget with real index and offline
+- [x] Release diagnostic no-refill/refill/budget with real index and offline
   deterministic vectors. Record time, source widths, retained pool, rounds.
   Compare lexical-only group collection alternative as an algorithm tradeoff,
   not a performance claim about an unimplemented equivalent production path.
-- [ ] ru_morph dedupe_slice_diagnostics and unchanged metrics_match_baseline;
+- [x] ru_morph dedupe_slice_diagnostics and unchanged metrics_match_baseline;
   full cli-full tests, clippy all-targets + opt-in targets, fmt, relevant release
   resource/static/offline checks. No baseline updates.
-- [ ] Fresh R2 review, ledger/commit; fresh final whole-branch review.
+- [x] Fresh R2 review, ledger/commit.
+
+## R3 — reviewed native delivery
+
+Process clarification 2026-11-11: native CI requires a published commit; R2
+local evidence and R3 forge delivery have distinct completion records.
+
+- [ ] Fresh final whole-branch review, fix findings, commit final ledger.
 - [ ] Push PR closes #68 only; docs/linux/macos/windows green on final HEAD.
   Squash merge exact checked HEAD, verify issue closure and main commit.
+  Final forge outcomes go in the PR evidence comment without a new CI-only
+  documentation commit after each run.

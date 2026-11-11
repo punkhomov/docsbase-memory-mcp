@@ -391,3 +391,13 @@ remote-only cfg/feature-off проверки из linux-hybrid перенося�
 
 Новых TOML/CLI/IPC ключей, crates, hidden defaults, provider requests, изменений
 ранжирования, форматов индекса и baseline нет. Исправление независимо от #78.
+
+
+## Delta 2026-11-11 — #68 document-cap refill
+
+FR-11 ordinary rerank window сохраняется без `dedupe=path`. Для cap-запроса
+единственный rerank call получает final candidate pool, который при недостаточной
+вместимости может вырасти до `max(base,search.dedupe_max_candidates)` (default1000).
+Это явная SearchSpec policy с byte/deadline admission, не повторный provider batch.
+Подробный контракт/остановки: search-ux FR-21..25, Delta #68. Валидация
+`hybrid.reranker.window`10..100 и normal fetch без cap не меняются.

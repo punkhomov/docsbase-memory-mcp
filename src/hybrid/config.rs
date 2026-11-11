@@ -145,7 +145,7 @@ pub struct RerankerCfg {
     pub provider: String,
     /// Model id as the provider knows it.
     pub model: String,
-    /// BM25 candidates sent per rerank request (FR-11 bounds).
+    /// Ordinary candidate window (FR-11); explicit document-cap refill may enlarge it.
     pub window: u32,
 }
 

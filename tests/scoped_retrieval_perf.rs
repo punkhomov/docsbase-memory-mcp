@@ -70,13 +70,9 @@ fn query_first(index: &ReadIndex, db: &Db, query: &str, prefix: &str) -> (usize,
     }
 }
 
-#[test]
-#[ignore = "manual 20k diagnostic; creates a real file/SQLite/Tantivy corpus"]
-fn two_folder_scope_diagnostics() {
-    let cache = tempfile::tempdir().expect("cache");
-    let root = tempfile::tempdir().expect("root");
+fn create_two_folder_corpus(root: &std::path::Path) {
     for folder in ["a", "b"] {
-        fs::create_dir(root.path().join(folder)).expect("directory");
+        fs::create_dir(root.join(folder)).expect("directory");
         for id in 0..10_000 {
             let rare = if id % 1000 == 0 {
                 "rareword"
@@ -84,12 +80,20 @@ fn two_folder_scope_diagnostics() {
                 "ordinary"
             };
             fs::write(
-                root.path().join(format!("{folder}/{id:05}.md")),
+                root.join(format!("{folder}/{id:05}.md")),
                 format!("# Manual\n\nshared {rare} document {id}\n"),
             )
             .expect("file");
         }
     }
+}
+
+#[test]
+#[ignore = "manual 20k diagnostic; creates a real file/SQLite/Tantivy corpus"]
+fn two_folder_scope_diagnostics() {
+    let cache = tempfile::tempdir().expect("cache");
+    let root = tempfile::tempdir().expect("root");
+    create_two_folder_corpus(root.path());
     let mut db = Db::open(cache.path()).expect("db");
     let mut project = registry::ensure_project(&mut db, root.path()).expect("project");
     tools::run_project_index(&mut db, cache.path(), &project, &Config::default()).expect("index");
@@ -132,6 +136,28 @@ fn two_folder_scope_diagnostics() {
             )
             .expect("scoped dense");
             let dense_ms = dense_started.elapsed().as_secs_f64() * 1000.0;
+            let cap_started = Instant::now();
+            let capped = tools::search_docs_with(
+                &hybrid,
+                &dense,
+                &db,
+                cache.path(),
+                &project,
+                &json!({"query":query,"limit":10,"path_prefix":prefix,
+                    "dedupe":"path","explain":true}),
+                40,
+            )
+            .expect("capped scoped dense");
+            let capped_ms = cap_started.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(capped["meta"]["refill"]["rounds"], 1);
+            assert_eq!(
+                capped["hits"].as_array().expect("hits").len(),
+                dense_result.as_array().expect("hits").len()
+            );
+            println!(
+                "cap_probe query={query} prefix={prefix} phase={phase} plain_rrf_ms={dense_ms:.3} capped_rrf_ms={capped_ms:.3} refill={}",
+                capped["meta"]["refill"]
+            );
             assert!(dense.ann_snapshot(project.id).is_none());
             assert!(
                 dense_result

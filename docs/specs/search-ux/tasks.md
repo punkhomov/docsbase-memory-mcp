@@ -292,3 +292,12 @@ R1: owner-resolved budget, bounded refill, truthful diagnostics, state/resource
 regressions (FR-21..25 / SC-13). R2: delivery/measurements/product docs (SC-14),
 fresh whole-branch review, required native checks. New crates: none.
 Подробные шаги: [dedupe-refill-plan.md](dedupe-refill-plan.md).
+
+
+### #68 delivery clarification — 2026-11-11
+
+R2 отвечает за release measurements/product docs и полные local acceptance
+checks. R3 отдельно фиксирует fresh whole-branch review и docs/linux/macos/
+windows CI на опубликованном точном HEAD, затем явно разрешённый пользователем
+squash merge. Это разделяет локальное доказательство и forge delivery, не
+ослабляет SC-14 и не меняет runtime scope/requirements.

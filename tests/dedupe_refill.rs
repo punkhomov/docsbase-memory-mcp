@@ -20,10 +20,11 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 struct Fixture {
-    cache: TempDir,
-    _root: TempDir,
+    // Close SQLite before removing its files, including on Windows.
     db: Db,
     project: Project,
+    _root: TempDir,
+    cache: TempDir,
 }
 impl Fixture {
     fn new(chunks: usize, others: usize) -> Self {
@@ -51,10 +52,10 @@ impl Fixture {
             .expect("index");
         project.status = ProjectStatus::Indexed;
         Self {
-            cache,
-            _root: root,
             db,
             project,
+            _root: root,
+            cache,
         }
     }
     fn search(&self, stages: &HybridStages, args: &Value) -> Value {
@@ -492,5 +493,56 @@ fn unfiltered_rrf_uses_one_dense_source_and_scoped_single_doc_proves_exhaustion(
         );
         assert_cap(&result, 2);
         assert_eq!(geometry.queries.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+#[ignore = "manual release-only local refill diagnostic; no network or thresholds"]
+fn release_refill_diagnostics() {
+    assert!(!cfg!(debug_assertions), "run with --release");
+    for (label, chunks, others) in [
+        ("no-refill", 1, 10),
+        ("refill", 40, 10),
+        ("budget", 1010, 10),
+    ] {
+        let f = Fixture::new(chunks, others);
+        let geometry = Arc::new(Geometry::default());
+        docsbase_memory::hybrid::jobs::embed_project_chunks_with(
+            &f.db,
+            geometry.as_ref(),
+            f.project.id,
+        )
+        .expect("vectors");
+        for rrf in [false, true] {
+            let stages = HybridStages {
+                embedder: rrf.then(|| geometry.clone() as Arc<dyn Embedder>),
+                ranking: if rrf { Ranking::Rrf } else { Ranking::Lexical },
+                reranker: None,
+            };
+            let dense = DenseCache::new();
+            for phase in ["first", "warm"] {
+                let started = Instant::now();
+                let mut query = args();
+                query["path_prefix"] = json!("guide/");
+                let result = tools::search_docs_with(
+                    &stages,
+                    &dense,
+                    &f.db,
+                    f.cache.path(),
+                    &f.project,
+                    &query,
+                    40,
+                )
+                .expect("diagnostic");
+                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                println!(
+                    "case={label} chunks={chunks} docs={} rrf={rrf} phase={phase} ms={ms:.3} hits={} window={} refill={}",
+                    others + 1,
+                    hits(&result).len(),
+                    result["meta"]["window"],
+                    result["meta"]["refill"]
+                );
+            }
+        }
     }
 }
