@@ -587,3 +587,13 @@ pipe instance before the real connection; add deterministic native no-consumptio
 RED plus NUL-live-prefix control BEFORE further production changes. Narrow
 Win32 NOWAIT probe exception is designed above, not yet implemented. PR112
 stays draft, fresh review/full acceptance pending.
+
+Task S4.3c: deterministic no-consumption RED confirmed on608ef34/run42952521536/
+job130299907555 BEFORE production change: real next client gets231All pipe
+instances are busy;455other lib tests including NUL/live-prefix control pass.
+Minimal WaitNamedPipeW NOWAIT availability probe now replaces connect-and-close;
+validates embedded NUL before FFI, scopes allow and SAFETY comment to this one
+platform function, enables existing windows-sys System_Pipes feature only.
+No crate/version/lock change, generic blocking or async ZERO change, extra MCP
+retry, hidden application timeout, sleep or quality gate relaxation. Native
+GREEN/full validation and fresh review remain pending; this is a draft candidate.

@@ -21,11 +21,14 @@ use interprocess::local_socket::{
     ConnectOptions, GenericNamespaced, Listener as SyncListener, ListenerNonblockingMode,
     ListenerOptions, Name, Stream as SyncStream, ToNsName as _,
 };
+use interprocess::os::windows::named_pipe::pipe_mode::Bytes;
 use interprocess::os::windows::named_pipe::tokio::DuplexPipeStream as AsyncPipeStream;
-use interprocess::os::windows::named_pipe::{DuplexPipeStream, pipe_mode::Bytes};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::signal::windows::{CtrlC, CtrlClose, ctrl_c, ctrl_close};
-use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_PIPE_BUSY, ERROR_SEM_TIMEOUT, STILL_ACTIVE,
+};
+use windows_sys::Win32::System::Pipes::{NMPWAIT_NOWAIT, WaitNamedPipeW};
 use windows_sys::Win32::System::Threading::{
     CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS, GetExitCodeProcess, OpenProcess,
     PROCESS_QUERY_LIMITED_INFORMATION,
@@ -253,7 +256,15 @@ pub async fn connect_async(endpoint: &Endpoint) -> io::Result<Stream> {
 // Match GenericNamespaced's local \\.\pipe\ mapping used by our listeners.
 fn pipe_path(endpoint: &Endpoint) -> io::Result<String> {
     match endpoint {
-        Endpoint::Pipe(name) => Ok(format!(r"\\.\pipe\{name}")),
+        Endpoint::Pipe(name) => {
+            if name.contains('\0') {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "named pipe name contains NUL",
+                ));
+            }
+            Ok(format!(r"\\.\pipe\{name}"))
+        }
         Endpoint::Unix(_) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "unix endpoint submitted to the Windows backend",
@@ -261,20 +272,29 @@ fn pipe_path(endpoint: &Endpoint) -> io::Result<String> {
     }
 }
 
-/// Probes once without waiting for a free instance. A busy pipe is present;
-/// an available pipe is connected and closed (byte EOF on the server, ADR-10).
+/// Checks pipe availability without opening a connection or waiting for a
+/// free instance. A busy pipe is present; absent/invalid endpoints are not.
 #[must_use]
+#[allow(unsafe_code)] // windows-sys FFI: validated input, no handle creation
 pub fn connect_probe(endpoint: &Endpoint) -> bool {
     let Ok(path) = pipe_path(endpoint) else {
         return false;
     };
-    match DuplexPipeStream::<Bytes>::connect_by_path_with_wait_mode(
-        path.as_str(),
-        ConnectWaitMode::Timeout(Duration::ZERO),
-    ) {
-        Ok(_) => true,
-        Err(error) => error.kind() == io::ErrorKind::TimedOut,
+    let Ok(wide) = path_to_wide(Path::new(&path)) else {
+        return false;
+    };
+    // SAFETY: wide is a live NUL-terminated UTF-16 buffer, with embedded NUL
+    // rejected above. WaitNamedPipeW only reads it during this call.
+    let available = unsafe { WaitNamedPipeW(wide.as_ptr(), NMPWAIT_NOWAIT) };
+    if available != 0 {
+        return true;
     }
+    matches!(
+        io::Error::last_os_error()
+            .raw_os_error()
+            .and_then(|code| u32::try_from(code).ok()),
+        Some(ERROR_SEM_TIMEOUT | ERROR_PIPE_BUSY)
+    )
 }
 
 /// Same as [`connect_probe`]: named pipes have no file to check.

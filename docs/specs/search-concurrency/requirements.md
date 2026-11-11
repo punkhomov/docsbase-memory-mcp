@@ -153,3 +153,10 @@ nonblocking OS attempt and returns a transport error when all instances are
 busy. Liveness probes must return present for a busy endpoint and false for
 an absent endpoint without waiting for an instance. Preserve available-pipe
 byte-stream/protocol behavior and generic legacy blocking-client compatibility.
+
+### Delta 2026-11-11 — non-consuming liveness
+
+A Windows liveness probe must leave an available named-pipe instance available
+for the actual client. It does not reserve capacity against concurrent clients,
+but must not itself create a client connection. Reject embedded NUL rather than
+querying a live truncated prefix. Busy means present, missing means absent.
