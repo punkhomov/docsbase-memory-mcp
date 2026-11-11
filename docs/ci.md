@@ -444,3 +444,18 @@ cap; исходный raw size допустим fixture config. Имя/coverage 
 production и deadlines прежние. Old/new assertions проверены на временно
 ослабленном guard; production восстановлен. Это уточнение теста, не новый
 дефект daemon framing. Детали: FR-40 и ledger.
+
+
+## Delta 2026-11-11 — manual ANN recall investigation (#109)
+
+`ANN recall investigation` (`ann-investigation.yml`) — отдельный manual-only
+macOS workflow для воспроизведения нестабильного качества HNSW. Он выполняет
+cli-full ann_recall suite до указанного числа раз (default20, integer1..50)
+и завершает job с failure при первом nonzero exit. Это stress observation,
+не rerun-until-green. Логи всех выполненных trials и failing graph bundle
+попадают в artifact с retention14d. Required ci.yml, её tests/scheduling и
+пороги качества сохраняются. Успешная серия не закрывает #109 без root cause.
+
+Обычный separated-cluster test при quality failure сохраняет граф и queries
+в уже загружаемый `target/ci-observations/ann-recall`. Replay-команда и
+ограничения: `docs/specs/ann-index/reports/recall-investigation-2026-11-11.md`.

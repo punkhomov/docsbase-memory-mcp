@@ -632,3 +632,15 @@ PR close-out. Новый public-path тест проверяет fallback до �
 **Acceptance:** Delta 0.5 FR-7 / NFR-4 / SC-6; возврат бюджета после успеха,
 ошибки и stale completion. Delta 0.4 остаётся совместимой: вытеснение metadata
 не означает освобождения рабочего набора живого worker.
+
+## Delta 0.6 tasks — 2026-11-11
+
+### T24 — Capture and replay native ANN recall failures (#109)
+
+**New crates:** none. **Runtime changes:** none.
+Сохранить failing граф, actual vectors/hits и context; проверить real
+capture/drop/reload/search; добавить explicit ignored replay и bounded
+manual native stress с fail-on-first-failure. Порог0.99 и required coverage
+сохраняются. Проверки: ann_recall, unchanged baseline gate, MSRV fmt/clippy,
+fresh reviews и required CI. Детальный план: `recall-investigation-plan.md`.
+Root-cause fix и закрытие #109 в этот milestone не входят.

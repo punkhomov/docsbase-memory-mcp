@@ -545,3 +545,25 @@ reservation в resident graph bytes. При ошибке сохраняется 
 с hash-only состоянием. Per-cache gate и join handles существуют только в
 unit tests: проверки не зависят от времени выполнения соседних тестов и не
 оставляют фоновые потоки за временем жизни временного cache root.
+
+## Delta 0.6 — 2026-11-11: capture / replay (#109)
+
+Test-only helper `tests/support/ann_capture.rs` пишет actual observations и
+platform/thread/source context, затем использует публичные `AnnIndex::dump`
+и `AnnStore` для сохранения именно failing graph. Уникальная kept temporary
+поддиректория в `target/ci-observations/ann-recall` исключает перезапись двух
+параллельных failures; existing required CI уже загружает этот каталог.
+
+Штатная проверка сначала собирает100 результатов, затем при short result или
+membership<0.99 сохраняет bundle и завершает прежний quality assert. Explicit
+replay читает observations и валидирует существующий persisted slot, без
+повторной генерации случайного графа; saved scores — diagnostic reference,
+не требование к будущему исправленному search ordering. Переносимость dump
+проверяется фактическим replay, не предполагается для произвольных платформ.
+Construction fix может требовать rebuild/invalidation старого графа: replay
+сам по себе не является проверкой исправленной construction.
+
+`.github/workflows/ann-investigation.yml` запускается только вручную на
+native macOS. Предел trials проверяется как integer1..50; первый nonzero
+выход suite завершает job с failure. Каждый transcript и failing graph
+загружаются с retention14d. Required ci.yml и её scheduling не меняются.
