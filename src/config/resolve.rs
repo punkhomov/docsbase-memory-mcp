@@ -94,7 +94,7 @@ pub fn resolve_component<S: SettingsSpec>(
     resolution.finish()
 }
 
-use super::{Config, ConfigSpec, GlobalFileConfig, read_global, read_project};
+use super::{Config, ConfigSpec, read_global, read_project};
 
 fn global_resolution(config_dir: &Path) -> Result<Resolution<ConfigSpec>> {
     let mut resolution = Resolution::new(&DefaultsContext::standalone());
@@ -110,18 +110,7 @@ fn project_layer(resolution: &mut Resolution<ConfigSpec>, root: &Path) -> Result
     let path = root.join(".docsbase.toml");
     if path.exists() {
         let project = read_project(&path)?;
-        resolution.apply(
-            &SourceId::Project(path),
-            GlobalFileConfig {
-                ignores: project.ignores,
-                max_file_size: project.max_file_size,
-                max_docs_per_project: project.max_docs_per_project,
-                auto_index: project.auto_index,
-                hybrid: project.hybrid,
-                providers: None,
-                search: None,
-            },
-        )?;
+        resolution.apply(&SourceId::Project(path), project.into_global())?;
     }
     Ok(())
 }
@@ -158,4 +147,77 @@ pub(super) fn legacy_for_project(global: &Config, root: &Path) -> Result<Resolve
         Resolution::<ConfigSpec>::from_provided(&DefaultsContext::standalone(), global);
     project_layer(&mut resolution, root)?;
     resolution.finish()
+}
+
+/// Resolves caller-supplied versioned sources for offline review only.
+/// Ordinary file loaders deliberately do not activate the v2 source format.
+///
+/// # Errors
+/// Invalid source order, scope, stage settings or unsupported configuration.
+pub fn preview_sources(
+    global: &super::source::SourceLayer,
+    project: Option<&super::source::SourceLayer>,
+) -> Result<super::source::SourcePreview> {
+    use super::source::{ConfigVersion, PreviewConflict, SourcePreview, invalid};
+    if !matches!(global.source, SourceId::Global(_))
+        || project.is_some_and(|p| !matches!(p.source, SourceId::Project(_)))
+    {
+        return Err(invalid(
+            "preview requires a global source followed by a project source",
+        ));
+    }
+    let mut resolution = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone());
+    let strict_cap = (global.version == ConfigVersion::V2).then(|| {
+        global
+            .vector_max_bytes
+            .unwrap_or(resolution.settings.hybrid_cfg.cache.max_bytes)
+    });
+    for layer in std::iter::once(global).chain(project) {
+        resolution
+            .apply(&layer.source, layer.base.clone())
+            .map_err(|_| invalid("invalid base configuration in source preview"))?;
+        if let Some(patch) = &layer.hybrid_merge {
+            crate::hybrid::config::merge::overlay(
+                &mut resolution.settings.hybrid_cfg,
+                patch.clone(),
+                &resolution.defaults.hybrid,
+                &layer.source,
+                &mut resolution.origins,
+            )
+            .map_err(|_| invalid("invalid hybrid stage settings in source preview"))?;
+            resolution.settings.hybrid = resolution.settings.hybrid_cfg.enabled;
+        }
+        resolution
+            .validate()
+            .map_err(|_| invalid("invalid effective settings in source preview"))?;
+    }
+    let legacy_vector_max_bytes = resolution.settings.hybrid_cfg.cache.max_bytes;
+    let mut conflicts = Vec::new();
+    if let Some(cap) = strict_cap {
+        if let Some(project) = project
+            && let Some(max_bytes) = project.legacy_vector_override()
+        {
+            conflicts.push(PreviewConflict::LegacyProjectVectorBudget {
+                source: project.source.clone(),
+                max_bytes,
+            });
+        }
+        resolution.settings.hybrid_cfg.cache.max_bytes = cap;
+        let origin = if global.vector_max_bytes.is_some() {
+            global.source.clone()
+        } else {
+            SourceId::Defaults
+        };
+        resolution.origins.rebind(
+            "hybrid.cache.max_bytes",
+            crate::vector_cache::V2_MAX_BYTES_FIELD,
+            &origin,
+        )?;
+    }
+    Ok(SourcePreview {
+        effective: resolution.finish()?,
+        legacy_vector_max_bytes,
+        conflicts,
+        runtime_activation_available: false,
+    })
 }

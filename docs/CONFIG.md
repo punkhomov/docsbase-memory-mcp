@@ -252,3 +252,44 @@ docsbase config   # effective values for the current directory (JSON)
   built (`OnnxSource::Memory`, which is what makes load-time sha256
   verification possible), so a 1.1 GiB fp32 reranker such as
   `bge-reranker-base` peaks at roughly twice its file size during load.
+
+
+## Versioned source planning API (CF3)
+
+The running CLI/daemon still loads the v1 format documented above. Do not add
+`config_version` or `vector_cache` to active configuration files yet: ordinary
+loaders reject them. There is no migration command or write/apply operation in
+this milestone.
+
+For offline tooling, `config::source::SourceLayer::parse` accepts supplied TOML
+text with an independent version per file (absent/1 or 2), and
+`config::resolve::preview_sources` resolves it without reading paths, credentials
+or model files. Every preview reports `runtime_activation_available = false`.
+V1 replaces the entire hybrid value. V2 hybrid tables inherit absent fields;
+a stage table enables or updates it, `false` disables it, and whole `hybrid`
+bools retain the v1 reset semantics. An existing stage inherits provider, model
+and dimensions independently; changing provider does not silently reset the
+other fields. `enabled` also inherits when absent.
+
+V2 source previews place the vector budget in global `vector_cache.max_bytes`.
+Project overrides of that key and v2 `hybrid.cache` are rejected. An explicit
+legacy project cache override under a v2 global source is reported as a scope
+conflict. It does not change the strict global budget in the preview. V2 provenance
+uses `vector_cache.max_bytes` with daemon scope; v1 retains the legacy
+project-scoped key. The preview settings retain the compatibility Rust layout.
+
+`config::migrate::draft_migration` takes an explicit list of registered project
+config paths, loaded/observed-missing sources and a budget decision. Uninspected
+projects block a complete proposal. The suggested maximum includes v1 effective
+budgets or, under a v2 global, its capacity and explicit legacy conflicts; v2
+bool resets do not reintroduce the old default budget. A caller must choose
+`UseBytes` or `AcceptSuggestedMaximum`; resource changes remain visible.
+
+Drafts expose original text/hash and canonical proposed TOML for review. They
+warn that comments and formatting may be lost. V1 hybrid tables materialize
+current effective values, while bool shorthand and existing v2 inheritance are
+retained. All proposals are parsed and resolved again to check non-resource
+settings. Observed-missing project files remain missing. Source/edit debug
+output omits file text; explicit before/after views should be treated as source
+files. No files, artifacts or providers are changed. Runtime adoption, consent,
+strict shared-store ownership and recovery are later #78 milestones.

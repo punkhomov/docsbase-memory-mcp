@@ -148,6 +148,34 @@ impl Provenance {
         Ok(())
     }
 
+    /// Rebinds a legacy field to an owner's versioned descriptor after layering.
+    /// Validates before mutation so a rejected projection preserves all origins.
+    pub(crate) fn rebind(
+        &mut self,
+        legacy_key: &'static str,
+        field: FieldSpec,
+        source: &SourceId,
+    ) -> Result<()> {
+        if !self.fields.contains_key(legacy_key) || self.fields.contains_key(field.key) {
+            return Err(Error::internal("invalid provenance field projection"));
+        }
+        if !source.permits(field.scope) {
+            return Err(Error::Admission {
+                message: "source cannot own projected settings scope".to_owned(),
+            });
+        }
+        self.fields.remove(legacy_key);
+        self.fields.insert(
+            field.key,
+            FieldOrigin {
+                source: source.clone(),
+                scope: field.scope,
+                unit: field.unit,
+            },
+        );
+        Ok(())
+    }
+
     pub(crate) fn replace_group(&mut self, prefix: &str, source: &SourceId) -> Result<()> {
         let keys: Vec<_> = self
             .fields

@@ -16,9 +16,11 @@ use schema::{
 };
 
 pub mod bootstrap;
+pub mod migrate;
 pub mod paths;
 pub mod resolve;
 pub mod schema;
+pub mod source;
 
 /// Effective configuration after merging all sources.
 ///
@@ -69,7 +71,7 @@ pub struct ConfigOverrides {
 /// Only the global file may carry `[providers.*]` (FR-1): a project file is
 /// parsed by [`ProjectFileConfig`], which has no `providers` field, so a
 /// provider section in a project is a parse error, not a post-merge check.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GlobalFileConfig {
     ignores: Option<Vec<String>>,
@@ -91,6 +93,20 @@ struct ProjectFileConfig {
     max_docs_per_project: Option<usize>,
     auto_index: Option<bool>,
     hybrid: Option<HybridPatch>,
+}
+
+impl ProjectFileConfig {
+    fn into_global(self) -> GlobalFileConfig {
+        GlobalFileConfig {
+            ignores: self.ignores,
+            max_file_size: self.max_file_size,
+            max_docs_per_project: self.max_docs_per_project,
+            auto_index: self.auto_index,
+            hybrid: self.hybrid,
+            providers: None,
+            search: None,
+        }
+    }
 }
 
 /// Converts the raw `[providers.*]` map into the typed [`ProvidersCfg`].

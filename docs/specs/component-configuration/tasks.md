@@ -362,3 +362,12 @@ CF2a file expansion (2026-11-10, ADR-9): Modify
 `store/inspect.rs` вызывает только facade. Existing platform_boundary regression
 остаётся без изменений/исключений. Verify platform_boundary и store_settings
 без name-filter; private store unit filter выполняется отдельной командой.
+
+## Delta 2026-11-11 — ограниченная реализация CF3
+
+Подробный контракт и шаги: [cf3-plan.md](cf3-plan.md), CF3-1…CF3-5.
+Добавить source.rs и hybrid/config/merge.rs для pure versioned inputs и правил
+компонента; без runtime v2 activation, CLI/state apply и новых зависимостей.
+Прежний пример project-v2 cache заменён override поля стадии: v2 resource
+settings остаются global-only. Native/final delivery evidence фиксируется
+в PR после task implementation/review ledger.

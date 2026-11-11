@@ -5,6 +5,8 @@
 //! the feature-off admission path and the cache-key composition are testable
 //! without the network feature (SC-3).
 
+pub mod merge;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
