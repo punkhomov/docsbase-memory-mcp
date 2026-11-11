@@ -378,3 +378,11 @@ FR-11 ordinary rerank window сохраняется без `dedupe=path`. Для
 Это явная SearchSpec policy с byte/deadline admission, не повторный provider batch.
 Подробный контракт/остановки: search-ux FR-21..25, Delta #68. Валидация
 `hybrid.reranker.window`10..100 и normal fetch без cap не меняются.
+
+
+## Delta 2026-11-11 — Local Web distribution
+
+The local Web specification supersedes the earlier 40 MiB executable ceiling.
+Static linking and artifact routing checks remain; executable, embedded bundle
+and compressed distribution sizes are measured without a replacement ceiling.
+The official `cli-full` profile includes `web`; lean Cargo defaults remain lean.
