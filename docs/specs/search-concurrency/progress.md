@@ -622,3 +622,32 @@ The resulting latest head still requires all4native checks again, then original
 whole-feature reviewer's supplemental acceptance of the new bounded task and
 final SC-4 evidence. This source-task completion is not feature convergence or
 merge approval. #66/#114/#115 remain open until actual accepted delivery.
+
+Task S4.final.NFR-1: Ruling (2026-11-11, basec557e423): supplemental review found
+that NFR-1 still prohibited the already designed non-consuming Windows probe.
+Requirements now record a dated MODIFIED NFR-1 delta for exactly one
+WaitNamedPipeW NOWAIT call in platform/windows.rs::connect_probe, with embedded-
+NUL rejection, a live NUL-terminated UTF-16 buffer, function-scoped allow, SAFETY
+comment and real native regression coverage. All other NFR-1 restrictions and
+the existing design ruling/implementation safety approval remain unchanged.
+This is a documentation-only consistency correction; source/tests/Cargo/frozen
+inputs are unchanged and no functional tests were rerun. Scoped re-review and
+latest-head docs/linux/macos/windows remain pending; this ruling does not claim
+whole-feature acceptance or merge approval. PR112 stays draft and #66/#114/#115
+remain open.
+
+Task S4.final.NFR-1: complete (basec557e423; documentation-only consistency
+correction by a dedicated finding-fix agent). Requirements explicitly MODIFIED
+NFR-1 for exactly one non-consuming NOWAIT probe FFI call with all reviewed
+safety conditions; every other restriction remains unchanged. Documentation
+checker/diff0; all168source-reference inputs, all171trackedRust including3benches,
+bothCargo manifests,113frozen and422non-owned tracked inputs unchanged. Root
+independently verified exact correction diff, immutable-input maps and recorded
+command results. Original reviewer scoped re-review Important ADDRESSED, no new
+Critical/Important; resulting Spec PASS/Quality APPROVED. Implementation safety
+approval is unchanged, no functional rerun or source edit for this prose fix.
+Task S4.final.NFR-1: Ruling: publish this final metadata head for all4required
+checks; source/Cargo remain byte-identical to reviewed nativebbeac6b. Earlier
+source/c557 native observations cannot substitute for the resulting latest head.
+Whole-feature supplemental final acceptance remains pending; PR112 stays draft
+and #66/#114/#115 remain open until actual accepted delivery.

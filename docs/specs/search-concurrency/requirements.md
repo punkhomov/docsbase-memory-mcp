@@ -160,3 +160,19 @@ A Windows liveness probe must leave an available named-pipe instance available
 for the actual client. It does not reserve capacity against concurrent clients,
 but must not itself create a client connection. Reject embedded NUL rather than
 querying a live truncated prefix. Busy means present, missing means absent.
+
+## Delta 2026-11-11 — MODIFIED NFR-1: non-consuming Windows probe
+
+MODIFIED NFR-1: permit exactly one new `unsafe` FFI call,
+`WaitNamedPipeW(..., NMPWAIT_NOWAIT)`, only in
+`src/platform/windows.rs::connect_probe` for non-consuming liveness. Reject
+embedded NUL before FFI; pass a NUL-terminated UTF-16 buffer that remains live
+for the entire call. Require a function-scoped `#[allow(unsafe_code)]`, a
+`SAFETY:` comment and real native regression coverage for non-consumption and
+embedded-NUL rejection against a live prefix. This records the
+[existing S4.3c design ruling](design.md#delta-2026-11-11--liveness-must-not-consume-a-pipe-instance)
+without broadening its implementation safety approval.
+
+All other NFR-1 restrictions remain unchanged: Rust1.88/edition2024 and
+Linux/macOS/Windows support, no new crates or other new unsafe, no network by
+default, and unchanged golden/baseline, ranking, provider windows and budgets.
