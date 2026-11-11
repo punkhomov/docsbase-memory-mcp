@@ -19,3 +19,21 @@ Task M4: complete (commit 3c76932 + review round; docs CI gate зелёный)
 Task M4: Ruling: платформенные заявления — macOS 12+ Apple Silicon (Intel/universal out, ADR-M2); install-путь macOS ad-hoc + curl без карантина; конституция — delta-маркер «артефакты Linux + Windows + macOS aarch64»; AGENTS — macOS-грабли (exclusive cfg, SZOMB, O_NONBLOCK/XNU EINVAL, codesign) и advisory-статус macos-джобы.
 Task M4: Review: spec PASS/quality APPROVED; minors закрыты (ARM64 Windows в out-of-scope, macOS-верификация sha, macOS-пути data/config).
 Task M4: follow-up: MACOSX_DEPLOYMENT_TARGET=12.0 зафиксирован в macos-джобах ci.yml/release.yml (док-заявление «macOS 12+» стало enforced; rustc-дефолт arm64 — 11.0).
+
+
+- Task M5: complete (2026-11-11, #113 fixture hazard implementation slice).
+  Ruling: held-file regression RED on original copy, GREEN after same-directory
+  tempfile publication. install16 passed under Rust1.88 cli-full; all-targets
+  Clippy clean. Runtime/installer production behaviour and retry policy unchanged.
+  Native scratch probe150 --version launches passed, original SIGKILL not
+  reproduced; #113 remains open.
+  Review: fresh task reviewer spec PASS / quality APPROVED; no findings.
+  Required native CI and fresh final review remain PR delivery close-out.
+
+M5 native portability correction (2026-11-11): run43051934156 failed only
+new Windows held-open regression (PermissionDenied5); all14 previous Windows
+install tests and macOS install16 passed. Revised regression retains old-file
+identity with a hard link, without an open handle across rename. Copy-through
+RED confirmed; replacement GREEN/install16, cli-full all-target Clippy/fmt
+clean. Final reviewer: ADDRESSED, no new Critical/Important findings. Prior
+Windows compatibility assumption rejected; corrected native checks pending.

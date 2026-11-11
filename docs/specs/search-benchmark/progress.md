@@ -485,3 +485,26 @@ unchanged:211hits/89misses/7errors. Literal217hits/83misses/0errors; original128
 still misses; two new misses514/551 and gains1041/1259 retained.18case metrics
 changed;282identical. No tuning or frozen gate/fixtures/oldreport edits. Full
 paired JSONs and interpretation: reports/scifact-query-modes-2026-11-11.md.
+
+## Delta 2026-11-11 — T20: #71 offline preflight
+
+Task T20: complete (offline materializer implementation). RED: real-index duplicate-body test fails
+with missing materializer; GREEN:3 preflight tests passed/1 manual ignored,
+search_bench80 passed/2 manual ignored; unchanged metrics_match_baseline.
+Rust1.88 cli-full all-targets Clippy/fmt/diff checks clean. No production,
+fixture/baseline/provider/CI changes.
+Ruling: fresh task reviewer PASS / APPROVED, no findings. Clean-commit
+manual artifact verification/final review/native CI remain PR delivery
+close-out; #71 remains open.
+
+T20 manual verification on clean source491a61e:81docs/327chunks/193cases,
+raw84710/context111123 UTF8 bytes, unique raw/context327/327. All327
+path/heading/spans/body/context records match the independent earlier audit;
+all193 cases/qrels preserve existing QueryCase semantics (omitted optional
+lines serializes as null). Output outside checkout, tree stays clean;
+provider_requests0 and qualitynull. Final/native evidence remains in PR.
+
+T20 final reviewer converged (source a32c27d), no findings or deferred minors;
+independently checked all327 records/193 qrels and exact byte totals. Delivery
+is batched with independent M5 fixture change in PR #121, as permitted for
+small tasks; combined final tree gets native checks. No inference scope added.

@@ -811,3 +811,24 @@ nDCG, top1=query_error и отдельный query_errors count. Denominator о�
 всем positive-qrel split. Только Error::Query допускает продолжение;
 ошибки replay, индекса, I/O и provenance прерывают весь отчёт. Это уточнение
 handling измерений, production parser и frozen gate не меняются.
+
+## Delta 2026-11-11 — REP-71: offline preflight перед inference
+
+- **REP-71-1:** test-only materializer использует штатный индекс на копии
+  frozen corpus; сохраняет каждый chunk по path/seq, heading/kind/lines,
+  original body и точный исследовательский input path+heading+body. Duplicate
+  bodies не сводятся к одному произвольному context/citation.
+- **REP-71-2:** отдельные role/model/recipe/input identities для raw/context
+  document inputs и неизменённых query inputs; blob-set identities отделены
+  от chunk membership/citation digest. Перемещение файла меняет context и
+  membership, но допускает reuse raw blob/query. Это исследовательский
+  формат, не новая production cache policy.
+- **REP-71-3:** advisory JSON явно содержит source revision/harness hash,
+  corpus/query hashes, model pins, tokenizer version, исходные cases/qrels,
+  factorial2×2 recipes и точные UTF8 byte/item counts. Provider requests=0;
+  quality/token count/live cost не измерены. Pilot IDs hard-08/hn-22; полные
+  193 cases сохраняются. Новый inputs не получают старые vectors/scores.
+- **REP-71-4:** ручной ignored entrypoint требует чистый source tree и
+  явный output вне checkout; публикует новый artifact без перезаписи.
+  Production, fixtures/baseline, CI и provider clients не меняются.
+  Успешный preflight не закрывает #71 и не доказывает качество recipe.

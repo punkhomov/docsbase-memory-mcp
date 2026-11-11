@@ -117,3 +117,22 @@ SBOM — общий на релиз (существующий job), новых �
 M1 (шов) → M2 (тесты + CI) → M3 (release/installer/update) → M4 (доки).
 M2 зависит от M1 (liveness/counters). M3 не зависит от M2, но CI-гейт M3 —
 macOS-джоба из M2.
+
+## Delta 2026-11-11 — M5: immutable launcher staging in tests
+
+Apple [Updating Mac software](https://developer.apple.com/documentation/security/updating-mac-software)
+предписывает обновлять signed executable через новый temporary file и
+rename: kernel signature cache связан со старым файлом. Env::install раньше
+выполнял fs::copy поверх прежнего launcher при idempotent re-install.
+
+Test-only stage_launcher использует существующий tempfile: NamedTempFile в
+parent target, into_temp_path закрывает writable handle, fs::copy сохраняет
+source permissions, TempPath::persist атомарно заменяет target. Guard удаляет
+staging при ошибке; прежний target не переписывается. Закрытый writer также
+не добавляет ETXTBSY при следующем exec. Production swap_binary не меняется.
+
+Regression удерживает hard-link alias прежнего файла и проверяет оба views
+после publish. На прежнем copy-through alias читает новые bytes (RED),
+на rename — старые (GREEN). Открытого handle через rename нет: native
+Windows отверг held-open вариант (PermissionDenied5, run43051934156). Native probe150 launches не воспроизвёл SIGKILL;
+устранение documented hazard не является доказательством причины #113.

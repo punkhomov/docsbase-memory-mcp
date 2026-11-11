@@ -99,7 +99,7 @@ impl Env {
     /// binary.
     fn install(&self) -> Value {
         let launcher = self.launcher();
-        fs::copy(daemon_bin(), &launcher).expect("copy launcher");
+        stage_launcher(&daemon_bin(), &launcher);
         let output = output_retry(self.cmd_at(&launcher).arg("install"));
         assert!(output.status.success(), "install failed: {output:?}");
         let bytes = fs::read(self.manifest()).expect("manifest");
@@ -148,6 +148,37 @@ impl Drop for Env {
 
 fn daemon_bin() -> PathBuf {
     assert_cmd::cargo::cargo_bin!("docsbase").to_path_buf()
+}
+
+fn stage_launcher(source: &Path, target: &Path) {
+    // Apple associates cached code signatures with the existing file. Publish
+    // a new file instead of truncating a previously executed launcher.
+    // Closing the temporary writer before exec also avoids ETXTBSY on Linux.
+    let staged = tempfile::NamedTempFile::new_in(target.parent().expect("launcher parent"))
+        .expect("stage launcher")
+        .into_temp_path();
+    fs::copy(source, &staged).expect("copy launcher");
+    staged.persist(target).expect("publish launcher");
+}
+
+#[test]
+fn launcher_publication_preserves_the_previous_file() {
+    let root = TempDir::new().expect("launcher files");
+    let source = root.path().join("source");
+    let target = root.path().join("launcher");
+    fs::write(&source, b"new launcher").expect("source");
+    fs::write(&target, b"previous launcher").expect("target");
+    let previous = root.path().join("previous-launcher");
+    fs::hard_link(&target, &previous).expect("retain previous file");
+    stage_launcher(&source, &target);
+    assert_eq!(
+        fs::read(&previous).expect("read previous file"),
+        b"previous launcher"
+    );
+    assert_eq!(
+        fs::read(&target).expect("read published path"),
+        b"new launcher"
+    );
 }
 
 /// Runs a command, retrying `ETXTBSY`: in a parallel test process a fork by

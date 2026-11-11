@@ -709,3 +709,22 @@ options) -> ExternalReport. All input datasets stay outside repository.
   fresh task review, fix findings, ledger and separate task commit.
 После task commit: final branch review и hosted CI фиксируются в PR;
 агент готовит ready PR, слияние выполняет человек.
+
+## Delta 2026-11-11 — T20: offline input preflight (#71)
+
+**Spec:** REP-71-1…4. **New crates:** none. **Files:**
+`tests/search_representation.rs`, `tests/support/representation.rs`, dated
+spec deltas, `representation-preflight-plan.md`, progress ledger.
+**Interfaces:** `prepare(&BenchEnv, &[QueryCase], corpus_hash, revision)
+-> Result<Value>`; `write_new(&Path, &Value) -> Result<()>`.
+
+- [x] RED: real indexed duplicate-body/parent-heading corpus cannot produce
+  required inventory before materializer exists.
+- [x] GREEN: exact SQL metadata/context, separate input identities, stable
+  output across independent indexes; relocation changes context/membership,
+  preserves raw blob/query reuse; corpus mismatch and overwrite rejected.
+- [x] Verify focused cli-full tests, unchanged frozen gate, fmt/all-targets
+  Clippy; fresh task review/fix findings and task commit/ledger.
+- [x] On clean reachable source commit, run manual offline frozen preflight;
+  inspect81docs/327chunks/193cases and new artifact without fixture changes.
+  Final review/native CI and integration evidence follow in PR close-out.

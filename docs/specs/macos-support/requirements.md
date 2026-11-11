@@ -104,3 +104,25 @@
 | Case-sensitive APFS (редкий) | fold как на Windows; ограничение в доке |
 | Длинный cache-путь (>104) | FR-6 guard с понятной ошибкой |
 | Intel/universal запросы | документированный out-of-scope + Tier 2 обоснование |
+
+## Delta 2026-11-11 — M5: fixture executable publication (#113)
+
+FR-10 / SC-1: повторная установка в integration fixture не перезаписывает
+уже запускавшийся launcher. Test-only staging публикует новый файл через
+same-directory rename, сохраняя реальную install/update/uninstall coverage,
+ownership assertions и существующий ETXTBSY-only spawn retry. Production
+installer, CI, подпись релизов и runtime policy не меняются.
+
+Детерминированный критерий: hard-link alias старого файла продолжает
+читать прежние bytes, а опубликованный path читает новые. Это проверка
+безопасной публикации, не детерминированное воспроизведение исходного
+macOS SIGKILL. #113 остаётся открытой до доказательства termination cause.
+
+### Delta 2026-11-11 — M5 native portability correction
+
+First native Windows run43051934156: первоначальный held-open regression
+получил PermissionDenied5 при persist, все14 прежних Windows install tests
+прошли. Для проверки сохранения старого file identity используется hard
+link без открытого handle через rename. Unix-only предположение о замене
+открытого target не является частью fixture contract; production/helper/
+coverage/retries не меняются. Это не flake и не исходный SIGKILL #113.
