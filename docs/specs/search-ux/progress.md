@@ -268,3 +268,23 @@ Ruling фиксируют принятые решения; minor — что от
   exceeded Clippy's line limit; pure preparation-charge helper extraction in
   S2 resolved it, and the final scoped tests above cover all three encodings.
   Remaining resource/lean/offline and native CI gates belong to S3.
+
+- Task S3: complete (final review and implementation verification, 2026-11-11).
+  Fresh whole-branch review of `498753e..9b2ad65`: runtime/spec convergence,
+  no Critical/Important/Minor findings. Its only outstanding delivery item was
+  native CI/S3 recording; required run **43022238707** then passed **docs,
+  linux, macos, windows** for implementation commit `9b2ad65`.
+- Final evidence: cli-full **1186 passed / 14 ignored**; **521 focused passed**
+  after the pure preflight-helper extraction; unchanged benchmark gate green;
+  fmt/Clippy all-targets plus explicit artifact/perf lint; fresh static CLI
+  **20522880 bytes** with static linkage + both provider-capability checks;
+  **6 release resource checks**, lean dependency boundary, offline workflow,
+  **6 Python CI-observer regression checks** all passed. The 20k report records
+  individual release runs and logical admission, not peak RSS/real-corpus p95.
+- Ruling: PR **#118** contains #67 only. No schema/tokenizer/dependency,
+  baseline/threshold/model/recording changes. No deferred minors. #117 retains
+  adaptive planning/filtered ANN; #68 diversity/refill remains a separate PR
+  after human merge. Merging remains a human action.
+- This final commit changes only this ledger. Required checks must also be
+  green on its final PR head before marking ready; final head/run outcomes are
+  recorded in PR #118 to avoid modifying the ledger after every CI run.
