@@ -11,6 +11,7 @@ use crate::config::paths;
 use crate::daemon::tools;
 use crate::error::{Error, Result};
 use crate::hybrid::work::Cancellation;
+use crate::index::QueryMode;
 use crate::ipc::async_client::{AsyncClient, within_operation};
 use crate::search::operation::SearchOperation;
 
@@ -42,9 +43,10 @@ pub struct Options {
 
 impl Options {
     /// The MCP argument object, so both seams send exactly the same request.
-    fn args(&self, query: &str) -> serde_json::Value {
+    fn args(&self, query: &str, mode: QueryMode) -> serde_json::Value {
         let mut args = serde_json::json!({
             "query": query,
+            "query_mode": mode,
             "limit": self.limit,
             "explain": self.explain,
             "snippet": self.snippet,
@@ -75,10 +77,27 @@ pub fn run(query: &str, options: &Options) -> anyhow::Result<()> {
     run_with_settings(query, options, &crate::store::settings::standalone()?)
 }
 
+/// Runs search with explicit query interpretation using the original request budget.
+///
+/// # Errors
+/// As [`run`], including refusal when a connected daemon lacks literal support.
+pub fn run_with_mode(query: &str, options: &Options, mode: QueryMode) -> anyhow::Result<()> {
+    run_with_settings_and_mode(query, options, &crate::store::settings::standalone()?, mode)
+}
+
 pub(crate) fn run_with_settings(
     query: &str,
     options: &Options,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> anyhow::Result<()> {
+    run_with_settings_and_mode(query, options, settings, QueryMode::Syntax)
+}
+
+pub(crate) fn run_with_settings_and_mode(
+    query: &str,
+    options: &Options,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    mode: QueryMode,
 ) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let global = Config::global()?;
@@ -86,7 +105,7 @@ pub(crate) fn run_with_settings(
     let cache = paths::cache_dir()?;
     let cwd = std::env::current_dir()
         .map_err(|error| Error::internal_with_source("resolve current directory", error))?;
-    let args = options.args(query);
+    let args = options.args(query, mode);
     if let Some(value) = try_daemon_search(&cache, &cwd, args.clone(), &operation)? {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());

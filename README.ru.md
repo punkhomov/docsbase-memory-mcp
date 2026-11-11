@@ -57,6 +57,7 @@ docsbase index
 
 # 3. Поиск
 docsbase search "admission lease" --limit 10
+docsbase search "Crohn's disease: alpha (+)" --query-mode literal
 
 # 4. Переиндексация по требованию
 docsbase sync
@@ -93,6 +94,11 @@ docsbase models use rerank fastembed/jina-reranker-v1-turbo-en
 
 `models use` проверяет файл проекта; вне проекта передайте `--global`. Всё
 перечисленное работает полностью офлайн после явных шагов fetch.
+
+Поиск по умолчанию использует прежний синтаксис запросов. Для обычного текста
+со знаками используйте `--query-mode literal`; в MCP — `query_mode: "literal"`.
+[Контракт режимов](docs/MCP.md#query-interpretation) описывает операторы и совместимость daemon.
+
 
 ## Установка
 
@@ -163,7 +169,7 @@ docsbase install   # зарегистрировать бинарь в демон
 docsbase install            # установка/обновление бинаря + манифеста
 docsbase update             # скачать последний релиз, проверить и заменить бинарь
 docsbase index [PATH]       # регистрация и индексация проекта (по умолч. cwd)
-docsbase search QUERY [--limit N]
+docsbase search QUERY [--query-mode syntax|literal] [--limit N]
 docsbase list               # документы текущего проекта в индексе
 docsbase sync [PATH]        # переиндексация (джоба демона, иначе напрямую)
 docsbase config             # эффективный конфиг для текущего каталога

@@ -16,6 +16,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(2);
 /// Connected daemon client.
 pub struct Client {
     stream: BufReader<BlockingStream>,
+    capabilities: Vec<String>,
     /// Set when framing desynced the stream; the client must not be reused.
     poisoned: bool,
 }
@@ -35,6 +36,7 @@ impl Client {
         stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
         Some(Self {
             stream: BufReader::new(stream),
+            capabilities: Vec::new(),
             poisoned: false,
         })
     }
@@ -51,6 +53,8 @@ impl Client {
     }
 
     /// Sends one request and reads one NDJSON response.
+    /// Raw calls leave capability negotiation to the caller; use `call_tool`
+    /// for validated search arguments and literal capability admission.
     ///
     /// # Errors
     /// Returns [`Error::Protocol`] on framing/decoding problems and
@@ -110,6 +114,7 @@ impl Client {
     /// # Errors
     /// Returns protocol/admission errors on version or build mismatch.
     pub fn handshake_registry(&mut self) -> Result<()> {
+        self.capabilities.clear();
         let hello = self.call(Request::Hello {
             protocol_version: PROTOCOL_VERSION,
             build_id: protocol::build_id(),
@@ -117,8 +122,14 @@ impl Client {
         })?;
         match hello {
             Response::Hello {
-                protocol_version, ..
-            } => protocol::ensure_protocol_version(protocol_version),
+                protocol_version,
+                capabilities,
+                ..
+            } => {
+                protocol::ensure_protocol_version(protocol_version)?;
+                self.capabilities = capabilities;
+                Ok(())
+            }
             Response::Error {
                 code,
                 message,
@@ -183,6 +194,9 @@ impl Client {
     /// Returns the daemon-advertised error category when the reply is
     /// [`Response::Error`].
     pub fn call_tool(&mut self, name: &str, args: Value) -> Result<Value> {
+        if name == "search_docs" {
+            protocol::ensure_search_query_mode(&args, &self.capabilities)?;
+        }
         match self.call(Request::CallTool {
             name: name.to_owned(),
             args,

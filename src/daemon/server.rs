@@ -789,7 +789,10 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                     protocol_version: PROTOCOL_VERSION,
                     build_id: protocol::build_id(),
                     schema_version: migrations::SCHEMA_VERSION,
-                    capabilities: vec![protocol::SEARCH_CONTEXT_CAPABILITY.to_owned()],
+                    capabilities: vec![
+                        protocol::SEARCH_CONTEXT_CAPABILITY.to_owned(),
+                        protocol::LITERAL_QUERY_CAPABILITY.to_owned(),
+                    ],
                 },
                 false,
             )

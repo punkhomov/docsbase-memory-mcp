@@ -131,3 +131,21 @@ major version; wire/DB mismatches fail with an actionable `Admission` error
 `min-publish-age = 14 days` (nightly-only feature, no `[unstable]` needed),
 no network at runtime by default (hybrid stages are opt-in per project/request,
 constitution 1.2.0), releases with sha256 + SBOM + SLSA provenance.
+
+
+## Explicit query interpretation
+
+`index::QueryMode` owns request spellings and the Syntax compatibility default.
+CLI/MCP/IPC boundaries validate mode, then daemon `SearchArgs` passes the typed
+value to `ReadIndex::search_with_mode`. Syntax retains Tantivy's parser; Literal
+builds fieldless OR literals through its public AST builder using the same
+analyzers/boosts. Existing index `search` APIs explicitly select Syntax. Provider
+inputs and cache identities stay based on the original text. No tokenizer/schema
+version or state invalidation is required.
+
+`literal-query-v1` is an additive Hello capability under protocol1. Supported
+blocking/async search helpers refuse literal before dispatch to an incapable
+peer. Async scoped search also retains `search-context-v1` and the original
+operation budget; connected refusal cannot trigger direct fallback or a new
+request. Raw frame calls leave negotiation to the caller. See [MCP query
+interpretation](MCP.md#query-interpretation).

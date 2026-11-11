@@ -226,3 +226,14 @@ value has exactly one owner. No per-stage/reconnect reset, index/vector
 invalidation or new provider timeout. Active/pending/provider scheduling in I66
 remains future work. Global changes require restart under the existing policy;
 S3.6a primitive alone does not activate transport cancellation.
+
+
+## Delta 2026-11-11 — #87 explicit request query semantics
+
+X01 additionally covers `QueryMode::{Syntax,Literal}` wire spellings and the
+Syntax compatibility default, plus the fixed `literal-query-v1` capability.
+These identify versioned per-request interpretation, not cache/time/work policy.
+`index::QueryMode` owns parsing/default initialization; consumers receive the
+typed value. Omitted/null selects the owner default at boundaries; old index/
+CLI APIs explicitly preserve Syntax as a compatibility contract. No deployment
+setting, hidden component fallback, persistent state or invalidation is added.
