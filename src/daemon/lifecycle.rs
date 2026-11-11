@@ -18,6 +18,10 @@ use crate::ipc::protocol::{self, Request};
 use crate::platform::{self, Endpoint, Listener};
 use crate::store::migrations;
 
+#[cfg(test)]
+#[path = "project_read_tests.rs"]
+mod project_read_tests;
+
 /// How long [`ensure_daemon`] waits for the socket after spawning a child.
 pub const START_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -334,9 +338,8 @@ async fn accept_loop(
                 let shutdown = shutdown_tx.clone();
                 let shared = Arc::clone(&shared);
                 tokio::spawn(async move {
-                    let _permit = permit;
-                    crate::daemon::server::handle_connection(
-                        shared, stream, in_flight, events, shutdown,
+                    crate::daemon::server::handle_admitted_connection(
+                        shared, stream, in_flight, events, shutdown, permit,
                     )
                     .await;
                 });
@@ -651,6 +654,51 @@ pub(crate) fn with_writer_lease<T>(
     let result = f();
     drop(guard);
     result
+}
+
+/// Runs short search preparation under a shared project lease. Cooperating
+/// index/watcher writers use the same lock file and cannot update either store
+/// until this scope ends. Other readers remain admitted.
+///
+/// The caller must capture owned data and release this scope before invoking
+/// providers. This file lease alone does not validate project status, schema or
+/// crash markers and does not make arbitrary uncoordinated writers safe.
+///
+/// # Errors
+/// Refuses immediately with a retry hint when a writer owns the lease; returns
+/// filesystem/lock errors or the work error unchanged. Unwind releases the lease.
+pub fn with_project_read_lease<T>(
+    cache_root: &Path,
+    project_id: i64,
+    work: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let path = lease_path(cache_root, project_id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            Error::internal_with_source(format!("create {}", parent.display()), err)
+        })?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|err| Error::internal_with_source(format!("open {}", path.display()), err))?;
+    let lock = RwLock::new(file);
+    let _guard = lock.try_read().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            Error::Project {
+                message: format!("another writer holds {}", path.display()),
+                instruction: Some(
+                    "wait for the index update to finish, then retry search".to_owned(),
+                ),
+            }
+        } else {
+            Error::internal_with_source(format!("read-lock {}", path.display()), err)
+        }
+    })?;
+    work()
 }
 
 pub(crate) fn state_dir(cache: &Path) -> PathBuf {

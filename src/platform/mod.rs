@@ -24,12 +24,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(unix)]
 pub use unix::{
     BlockingListener, BlockingStream, Listener, ShutdownSignal, Stream, bind, bind_blocking,
-    connect_blocking, connect_probe, daemon_endpoint, exists, remove,
+    connect_async, connect_blocking, connect_probe, daemon_endpoint, exists, remove,
 };
 #[cfg(windows)]
 pub use windows::{
     BlockingListener, BlockingStream, Listener, ShutdownSignal, Stream, bind, bind_blocking,
-    connect_blocking, connect_probe, daemon_endpoint, exists, remove,
+    connect_async, connect_blocking, connect_probe, daemon_endpoint, exists, remove,
 };
 
 /// Private directory/file modes and logs (NFR-5); free-space probe for the

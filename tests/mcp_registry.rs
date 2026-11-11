@@ -1,3 +1,6 @@
+#[path = "support/search_visibility.rs"]
+mod search_visibility;
+
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -643,8 +646,8 @@ fn watcher_refreshes_search() {
             Ok(hits) if !hits.as_array().expect("hits").is_empty() => break,
             Ok(_) => {}
             Err(err) => assert!(
-                err.to_string().contains("needs to be rebuilt"),
-                "only the rebuild marker may interrupt the refresh window: {err}"
+                search_visibility::temporarily_unavailable(&err),
+                "only a project visibility transition may interrupt the refresh window: {err}"
             ),
         }
         assert!(Instant::now() < deadline, "watcher did not refresh search");
@@ -682,15 +685,14 @@ fn watcher_retries_transient_batch_failure() {
     );
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        // The retry after the injected fault may hit the Windows file race
-        // and take the index offline until the next retried batch rebuilds
-        // it (T27); the poll tolerates exactly that window.
+        // A retry can expose a pending SQL update or the rebuild marker
+        // (T27); only those explicit project transitions may interrupt polling.
         match bound.call_tool("search_docs", json!({ "query": "sprockets" })) {
             Ok(hits) if !hits.as_array().expect("hits").is_empty() => break,
             Ok(_) => {}
             Err(err) => assert!(
-                err.to_string().contains("needs to be rebuilt"),
-                "only the rebuild marker may interrupt the healing window: {err}"
+                search_visibility::temporarily_unavailable(&err),
+                "only a project visibility transition may interrupt the healing window: {err}"
             ),
         }
         assert!(
@@ -745,8 +747,8 @@ fn watcher_recovers_from_a_commit_failure() {
             Ok(hits) if !hits.as_array().expect("hits").is_empty() => break,
             Ok(_) => {}
             Err(err) => assert!(
-                err.to_string().contains("needs to be rebuilt"),
-                "only the rebuild marker may interrupt the healing window: {err}"
+                search_visibility::temporarily_unavailable(&err),
+                "only a project visibility transition may interrupt the healing window: {err}"
             ),
         }
         assert!(

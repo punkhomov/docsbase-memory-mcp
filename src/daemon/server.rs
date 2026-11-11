@@ -5,32 +5,42 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
+use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, watch};
 
 use crate::config::schema::Resolved;
 use crate::config::{Config, paths};
-use crate::daemon::registry;
+use crate::daemon::request::{self, Activity};
 use crate::daemon::session::SessionRegistry;
 use crate::daemon::tools;
+use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
 use crate::hybrid::HybridStages;
 use crate::hybrid::config::{Ranking, embedding_model_id};
-use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits};
+use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits, DenseRequest};
 use crate::hybrid::jobs as hybrid_jobs;
+use crate::ipc::framing::{Frame, FrameReader};
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 use crate::platform::Stream;
+use crate::search::metadata::MetadataSource;
 use crate::store::Db;
 use crate::store::migrations;
 use crate::store::read_pool::ReadPool;
 use crate::store::settings::{DbSettings, ReadPoolSettings};
 use crate::watch::Watchers;
+
+#[cfg(test)]
+#[path = "search_phase_tests.rs"]
+mod search_phase_tests;
+
+#[path = "scoped.rs"]
+mod scoped;
 
 /// Daemon state shared by all connections.
 pub struct Shared {
@@ -40,7 +50,8 @@ pub struct Shared {
     // Independent of the DB mutex: child construction never waits for a query
     // just to obtain its startup policy.
     db_settings: Resolved<DbSettings>,
-    readers: ReadPool,
+    readers: Arc<ReadPool>,
+    payload_budget: crate::search::budget::PayloadBudget,
     /// Live sessions.
     pub sessions: SessionRegistry,
     /// Per-project filesystem watchers (FR-15).
@@ -59,7 +70,47 @@ pub struct Shared {
     pub dense: DenseCache,
 }
 
-type ProjectSlot = Arc<Mutex<ProjectState>>;
+type ProjectSlot = Arc<ProjectCell>;
+
+/// Stable per-project authority; model construction uses only the reload lock.
+#[derive(Default)]
+struct ProjectCell {
+    state: Mutex<ProjectState>,
+    reload: Mutex<()>,
+    preparation: RwLock<()>,
+}
+
+impl ProjectCell {
+    fn with_preparation<T>(
+        &self,
+        expected: &Arc<Config>,
+        work: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let _preparation = self.preparation_lease(expected)?;
+        work()
+    }
+
+    fn preparation_lease(&self, expected: &Arc<Config>) -> Result<RwLockReadGuard<'_, ()>> {
+        let preparation = self
+            .preparation
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .config
+            .as_ref()
+            .is_some_and(|config| Arc::ptr_eq(config, expected));
+        if !current {
+            return Err(Error::Project {
+                message: "project configuration changed before search preparation".to_owned(),
+                instruction: Some("retry search".to_owned()),
+            });
+        }
+        Ok(preparation)
+    }
+}
 
 /// A config Arc is its revision identity. Stages always belong to that Arc.
 #[derive(Default)]
@@ -108,7 +159,7 @@ impl Shared {
             &Capabilities::current(),
         )?;
         let db = Db::open_with_settings(cache, settings)?;
-        let readers = ReadPool::prepare(cache, settings, pool_settings)?;
+        let readers = Arc::new(ReadPool::prepare(cache, settings, pool_settings)?);
         let orphans = crate::store::repo::fail_orphan_sync_jobs(db.connection())?;
         if orphans > 0 {
             eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
@@ -128,11 +179,14 @@ impl Shared {
             vector_cache_max_bytes: global_config.hybrid_cfg.cache.max_bytes,
             ..DenseCacheLimits::default()
         };
+        let payload_budget =
+            crate::search::budget::PayloadBudget::new(global_config.search.clone())?;
         let shared = Arc::new(Self {
             cache: cache.to_path_buf(),
             db: Mutex::new(db),
             db_settings: settings.clone(),
             readers,
+            payload_budget,
             sessions: SessionRegistry::new(),
             watchers: Arc::new(Watchers::new()),
             stopping: AtomicBool::new(false),
@@ -150,10 +204,10 @@ impl Shared {
         Ok(shared)
     }
 
-    /// Prepared metadata readers, independent of the writer mutex. Search
-    /// adoption follows the request-snapshot/singleflight work in #66.
+    /// Prepared metadata readers shared by search phases and ANN refresh,
+    /// independent of the writer mutex.
     #[must_use]
-    pub const fn read_pool(&self) -> &ReadPool {
+    pub fn read_pool(&self) -> &ReadPool {
         &self.readers
     }
 
@@ -206,7 +260,7 @@ impl Shared {
         let slot = self.project_slot(project.id);
         loop {
             let config = {
-                let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
                 let config = self.config_in(&mut state, project)?;
                 if let Some(stages) = &state.stages {
                     return Ok((config, Arc::clone(stages)));
@@ -215,7 +269,7 @@ impl Shared {
             };
             // Construction can load models: do not hold the project lock.
             let outcome = build(&config);
-            let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
             if !state
                 .config
                 .as_ref()
@@ -305,7 +359,7 @@ impl Shared {
     /// Returns config read/parse errors.
     pub fn project_config(&self, project: &crate::store::models::Project) -> Result<Arc<Config>> {
         let slot = self.project_slot(project.id);
-        let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
         self.config_in(&mut state, project)
     }
 
@@ -320,37 +374,73 @@ impl Shared {
         self: &Arc<Self>,
         project: &crate::store::models::Project,
     ) -> Option<std::thread::JoinHandle<()>> {
-        self.refresh_ann_after_sync_with(project, DenseCache::warm)
+        self.refresh_ann_after_sync_with(project, |_, _, _| Ok(()))
     }
 
-    /// Private operation seam: tests observe/fail warm on the real config and
-    /// cleanup path, without a process-global hook or public runtime setting.
+    /// Private metadata observation seam; production performs the actual warm.
     fn refresh_ann_after_sync_with<F>(
         self: &Arc<Self>,
         project: &crate::store::models::Project,
-        warm_ann: F,
+        before_metadata: F,
     ) -> Option<std::thread::JoinHandle<()>>
     where
-        F: FnOnce(&DenseCache, &Db, i64, &str) -> Result<()> + Send + 'static,
+        F: FnOnce(&Db, i64, &str) -> Result<()> + Send + 'static,
+    {
+        self.refresh_ann_after_sync_before_with(project, || {}, before_metadata)
+    }
+
+    // Private scheduling seam for deterministic delayed-revision tests.
+    fn refresh_ann_after_sync_before_with<B, F>(
+        self: &Arc<Self>,
+        project: &crate::store::models::Project,
+        before_admission: B,
+        before_metadata: F,
+    ) -> Option<std::thread::JoinHandle<()>>
+    where
+        B: FnOnce() + Send + 'static,
+        F: FnOnce(&Db, i64, &str) -> Result<()> + Send + 'static,
     {
         let config = self.project_config(project).ok()?;
+        let slot = self.project_slot(project.id);
         let embed_cfg = config.hybrid_cfg.embedding.as_ref()?;
-        // Warm only a project whose dense channel is actually read:
-        // `rrf_active` gates `dense_candidates`, and the `hybrid = true`
-        // shorthand keeps `Ranking::Lexical` (Delta 0.3). Cleanup stays
-        // unconditional: a ranking flip must still reclaim old dumps.
         let warm = config.hybrid_cfg.enabled && config.hybrid_cfg.ranking == Ranking::Rrf;
         let model_id = embedding_model_id(embed_cfg);
         let cache_path = self.cache.clone();
         let dense = self.dense.snapshot();
-        let db_settings = self.db_settings.clone();
+        let readers = Arc::clone(&self.readers);
+        let project = project.clone();
         let project_id = project.id;
         Some(std::thread::spawn(move || {
-            let Ok(db) = Db::open_readonly_with_settings(&cache_path, &db_settings) else {
-                return;
-            };
-            if warm && let Err(err) = warm_ann(&dense, &db, project_id, &model_id) {
-                eprintln!("warning: ann warm failed for project {project_id}: {err}");
+            before_admission();
+            if warm {
+                let result = (|| {
+                    let generation = {
+                        let reader = readers.try_acquire()?;
+                        slot.with_preparation(&config, || {
+                            lifecycle::with_project_read_lease(&cache_path, project_id, || {
+                                before_metadata(&reader, project_id, &model_id)?;
+                                tools::snapshot_info(&reader, &project, None)
+                            })
+                        })?
+                    };
+                    // The scalar lease is gone before entering the shared flight.
+                    // Its factory has no personal query budget or outer READ gate.
+                    let source = MetadataSource::Prepared(&readers);
+                    dense.warm_with_metadata_admitted(
+                        DenseRequest {
+                            cache_root: &cache_path,
+                            project_id,
+                            generation,
+                            model_id: &model_id,
+                        },
+                        &crate::hybrid::work::Cancellation::new(),
+                        || tools::capture_dense(source, &project, generation),
+                        || slot.preparation_lease(&config),
+                    )
+                })();
+                if let Err(err) = result {
+                    eprintln!("warning: ann warm failed for project {project_id}: {err}");
+                }
             }
             if let Err(err) = dense.cleanup(project_id) {
                 eprintln!("warning: ann cleanup failed for project {project_id}: {err}");
@@ -383,13 +473,41 @@ impl Shared {
     where
         F: FnOnce(&Config) -> Result<HybridStages>,
     {
+        self.open_project_config_observing_contention(project, build, || {})
+    }
+
+    fn open_project_config_observing_contention<F, O>(
+        &self,
+        project: &crate::store::models::Project,
+        build: F,
+        on_publication_contention: O,
+    ) -> Result<Arc<Config>>
+    where
+        F: FnOnce(&Config) -> Result<HybridStages>,
+        O: FnOnce(),
+    {
         let slot = self.project_slot(project.id);
-        // Serialize the complete reload for this project, including its
-        // watcher/cache policy. No global map lock spans construction.
-        let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        // Only same-project reloads wait for construction. Existing runtime
+        // reads and unrelated projects keep their last coherent state.
+        let _reload = slot.reload.lock().unwrap_or_else(PoisonError::into_inner);
         let config = Arc::new(self.config_for_root(&project.canonical_root)?);
         let stages = Arc::new(build(&config)?);
+        // Never wait for active preparation while retaining the state mutex.
+        let _publication = match slot.preparation.try_write() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                on_publication_contention();
+                slot.preparation
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner)
+            }
+        };
+        let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
         let changed = state.config.as_deref() != Some(config.as_ref());
+        if changed {
+            self.dense.invalidate_memory(project.id);
+        }
         // Both fallible preparation steps precede publication: a rejected
         // reload leaves the last valid runtime and its policies intact.
         state.config = Some(Arc::clone(&config));
@@ -436,7 +554,7 @@ impl Shared {
     /// Returns config/spawn errors; a failed start is not fatal to callers.
     pub fn ensure_watcher(&self, project: &crate::store::models::Project) -> Result<bool> {
         let slot = self.project_slot(project.id);
-        let mut state = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
         let config = self.config_in(&mut state, project)?;
         self.watchers
             .ensure_with_settings(&self.cache, project, config, &self.db_settings)
@@ -477,43 +595,14 @@ fn ipc_debug(message: &str) {
     }
 }
 
-/// One bounded NDJSON frame from a connection.
-#[derive(Debug)]
-enum Frame {
-    /// Complete line, delimiter included.
-    Line(Vec<u8>),
-    /// Peer closed the stream.
-    Eof,
-    /// Stream ended without a delimiter before the cap.
-    Incomplete,
-    /// No delimiter within [`protocol::MAX_FRAME_BYTES`].
-    TooLarge,
+#[derive(Default)]
+struct Peer {
+    session_id: Option<u64>,
+    cancel_rx: Option<oneshot::Receiver<()>>,
+    hello_done: bool,
 }
 
-/// Reads one frame, capping the buffer at the protocol limit (I-2; T45).
-async fn read_frame<R>(reader: &mut R) -> std::io::Result<Frame>
-where
-    R: tokio::io::AsyncBufRead + Unpin,
-{
-    let limit = protocol::MAX_FRAME_BYTES as u64 + 2;
-    let mut line = Vec::new();
-    let read = reader.take(limit).read_until(b'\n', &mut line).await?;
-    if read == 0 {
-        return Ok(Frame::Eof);
-    }
-    let complete = line.ends_with(b"\n");
-    if line.len() > protocol::MAX_FRAME_BYTES + 1
-        || (u64::try_from(read).unwrap_or(u64::MAX) >= limit && !complete)
-    {
-        return Ok(Frame::TooLarge);
-    }
-    if !complete {
-        return Ok(Frame::Incomplete);
-    }
-    Ok(Frame::Line(line))
-}
-
-/// Serves one connection until EOF, cleanup included (FR-8, I2).
+/// Serves an explicitly unadmitted compatibility connection.
 pub async fn handle_connection(
     shared: Arc<Shared>,
     stream: Stream,
@@ -521,26 +610,56 @@ pub async fn handle_connection(
     events: mpsc::Sender<()>,
     shutdown: watch::Sender<bool>,
 ) {
+    handle_connection_in(shared, stream, in_flight, events, shutdown, None).await;
+}
+
+/// Real accept retains its existing connection slot through actual work.
+pub(super) async fn handle_admitted_connection(
+    shared: Arc<Shared>,
+    stream: Stream,
+    in_flight: Arc<AtomicUsize>,
+    events: mpsc::Sender<()>,
+    shutdown: watch::Sender<bool>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    handle_connection_in(
+        shared,
+        stream,
+        in_flight,
+        events,
+        shutdown,
+        Some(Arc::new(permit)),
+    )
+    .await;
+}
+
+async fn handle_connection_in(
+    shared: Arc<Shared>,
+    stream: Stream,
+    in_flight: Arc<AtomicUsize>,
+    events: mpsc::Sender<()>,
+    shutdown: watch::Sender<bool>,
+    connection: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+) {
     let (read_half, mut writer) = tokio::io::split(stream);
-    let mut reader = BufReader::new(read_half);
-    let mut session_id: Option<u64> = None;
-    let mut cancel_rx: Option<oneshot::Receiver<()>> = None;
-    let mut hello_done = false;
+    let mut reader = FrameReader::new(BufReader::new(read_half));
+    let mut peer = Peer::default();
 
     loop {
-        let next_frame = match cancel_rx.as_mut() {
+        let next_frame = match peer.cancel_rx.as_mut() {
             Some(cancel) => tokio::select! {
-                frame = read_frame(&mut reader) => frame,
+                frame = reader.read_frame() => frame,
                 // The janitor reaped this session: stop holding the socket.
                 _ = cancel => break,
             },
-            None => read_frame(&mut reader).await,
+            None => reader.read_frame().await,
         };
         let line = match next_frame {
             Ok(Frame::Line(line)) => {
                 ipc_debug(&format!(
-                    "frame {} bytes on session {session_id:?}",
-                    line.len()
+                    "frame {} bytes on session {:?}",
+                    line.len(),
+                    peer.session_id
                 ));
                 line
             }
@@ -567,79 +686,65 @@ pub async fn handle_connection(
                 break;
             }
         };
-        let guard = InFlightGuard::new(&in_flight);
-        let (response, close) = handle_request(
-            &shared,
-            &shutdown,
-            &in_flight,
-            &mut hello_done,
-            &mut session_id,
-            &mut cancel_rx,
-            &line,
-        )
-        .await;
-        // The request is only settled once its response is on the wire:
-        // otherwise an armed grace deadline could tear the socket down
-        // between completing the work and delivering the reply.
-        let Ok(bytes) = protocol::encode(&response) else {
-            drop(guard);
-            let _ = events.try_send(());
-            break;
+        let guard = Activity::new(&in_flight, &events, connection.as_ref());
+        let decoded = protocol::decode_request(&line);
+        let scope = match &decoded {
+            Ok(request) => scoped::Scope::new(&shared, request, Arc::clone(&guard)),
+            Err(_) => Ok(scoped::Scope {
+                activity: Arc::clone(&guard),
+                operation: None,
+            }),
         };
-        // JSON escaping can expand a document up to 6x, so the config-level
-        // reserve is not enough on adversarial content: never emit a frame
-        // the peers would reject (T45 review finding).
-        let bytes = if bytes.len() > protocol::MAX_FRAME_BYTES + 1 {
-            let err = Error::Protocol {
-                message: format!(
-                    "response frame is {} bytes, over {}; reduce max_file_size or the document size",
-                    bytes.len(),
-                    protocol::MAX_FRAME_BYTES
-                ),
-            };
-            let Ok(fallback) = protocol::encode(&error_response(&err)) else {
-                drop(guard);
-                let _ = events.try_send(());
-                break;
-            };
-            fallback
-        } else {
-            bytes
+        let immediate = scope.is_err()
+            || decoded
+                .as_ref()
+                .is_err_and(|error| matches!(error, Error::Admission { .. }));
+        let (response, close) = match (decoded, &scope) {
+            (Ok(request), Ok(scope)) => {
+                handle_request(
+                    &shared,
+                    &shutdown,
+                    &in_flight,
+                    &mut peer,
+                    request,
+                    scope,
+                    &mut reader,
+                )
+                .await
+            }
+            (Err(error), _) => (error_response(&error), immediate),
+            (_, Err(error)) => (error_response(error), true),
         };
-        if writer.write_all(&bytes).await.is_err() {
-            drop(guard);
-            let _ = events.try_send(());
+        let operation = scope
+            .as_ref()
+            .ok()
+            .and_then(|scope| scope.operation.as_ref());
+        let delivered = scoped::reply(&mut writer, response, operation, immediate).await;
+        drop(guard);
+        if !delivered {
             break;
         }
-        drop(guard);
-        // Any request may change liveness accounting (registration, EOF of a
-        // session, completion of a request).
-        let _ = events.try_send(());
         if close {
             break;
         }
     }
 
-    if let Some(id) = session_id {
+    if let Some(id) = peer.session_id {
         ipc_debug(&format!("leaving session {id}"));
         shared.sessions.leave(id);
     }
     let _ = events.try_send(());
 }
 
-async fn handle_request(
+async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
     shared: &Arc<Shared>,
     shutdown: &watch::Sender<bool>,
     in_flight: &Arc<AtomicUsize>,
-    hello_done: &mut bool,
-    session_id: &mut Option<u64>,
-    cancel_rx: &mut Option<oneshot::Receiver<()>>,
-    line: &[u8],
+    peer: &mut Peer,
+    request: Request,
+    scope: &scoped::Scope,
+    reader: &mut FrameReader<R>,
 ) -> (Response, bool) {
-    let request = match protocol::decode_request(line) {
-        Ok(request) => request,
-        Err(err) => return (error_response(&err), false),
-    };
     match request {
         Request::Hello {
             protocol_version,
@@ -678,37 +783,56 @@ async fn handle_request(
                 };
                 return (error_response(&err), true);
             }
-            *hello_done = true;
+            peer.hello_done = true;
             (
                 Response::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_id: protocol::build_id(),
                     schema_version: migrations::SCHEMA_VERSION,
+                    capabilities: vec![protocol::SEARCH_CONTEXT_CAPABILITY.to_owned()],
                 },
                 false,
             )
         }
         Request::RegisterSession { pid, cwd } => {
-            if !*hello_done {
+            if !peer.hello_done {
                 return (hello_required(), true);
             }
-            register_and_respond(shared, session_id, cancel_rx, pid, &cwd, false).await
+            register_and_respond(
+                shared,
+                &mut peer.session_id,
+                &mut peer.cancel_rx,
+                pid,
+                &cwd,
+                false,
+            )
+            .await
         }
         Request::RegisterUnbound { pid, cwd } => {
-            if !*hello_done {
+            if !peer.hello_done {
                 return (hello_required(), true);
             }
-            register_and_respond(shared, session_id, cancel_rx, pid, &cwd, true).await
+            register_and_respond(
+                shared,
+                &mut peer.session_id,
+                &mut peer.cancel_rx,
+                pid,
+                &cwd,
+                true,
+            )
+            .await
         }
         Request::CallTool { name, args } => {
-            if !*hello_done {
+            if !peer.hello_done {
                 return (hello_required(), true);
             }
-            let value = call_tool(shared, *session_id, &name, args).await;
-            match value {
-                Ok(value) => (Response::ToolResult { value }, false),
-                Err(err) => (error_response(&err), false),
+            call_and_respond(shared, peer.session_id, &name, args, scope).await
+        }
+        Request::Search { args, .. } => {
+            if !peer.hello_done {
+                return (hello_required(), true);
             }
+            scoped::call(shared, peer, args, scope, reader).await
         }
         Request::StopDaemon => {
             // Idempotent: only the first stop drains and signals shutdown, so
@@ -721,6 +845,32 @@ async fn handle_request(
             }
             (Response::ToolResult { value: Value::Null }, false)
         }
+    }
+}
+
+async fn call_and_respond(
+    shared: &Arc<Shared>,
+    session_id: Option<u64>,
+    name: &str,
+    args: Value,
+    scope: &scoped::Scope,
+) -> (Response, bool) {
+    let operation = scope.operation.clone();
+    let value = call_tool_in(
+        shared,
+        session_id,
+        name,
+        args,
+        operation.clone(),
+        Some(Arc::clone(&scope.activity)),
+    )
+    .await;
+    let close = operation
+        .as_ref()
+        .is_some_and(|operation| operation.cancellation().is_cancelled());
+    match value {
+        Ok(value) => (Response::ToolResult { value }, close),
+        Err(err) => (error_response(&err), close),
     }
 }
 
@@ -842,28 +992,79 @@ async fn register_session(
     }
 }
 
+fn search_operation(
+    shared: &Shared,
+    name: &str,
+) -> Result<Option<crate::search::operation::SearchOperation>> {
+    if name == "search_docs" {
+        crate::search::operation::SearchOperation::new(
+            &shared.global_config.search,
+            Instant::now(),
+            crate::hybrid::work::Cancellation::new(),
+        )
+        .map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
 async fn call_tool(
     shared: &Arc<Shared>,
     session_id: Option<u64>,
     name: &str,
     args: Value,
 ) -> Result<Value> {
+    call_tool_in(
+        shared,
+        session_id,
+        name,
+        args,
+        search_operation(shared, name)?,
+        None,
+    )
+    .await
+}
+
+async fn call_tool_in(
+    shared: &Arc<Shared>,
+    session_id: Option<u64>,
+    name: &str,
+    args: Value,
+    operation: Option<crate::search::operation::SearchOperation>,
+    activity: Option<Arc<Activity>>,
+) -> Result<Value> {
     let shared = Arc::clone(shared);
     let name = name.to_owned();
-    tokio::task::spawn_blocking(move || route_tool(&shared, session_id, &name, &args))
-        .await
-        .map_err(|err| Error::internal_with_source("tool task join", err))?
+    let worker_operation = operation.clone();
+    let queued_at = Instant::now();
+    let worker = tokio::task::spawn_blocking(move || {
+        if let Some(operation) = &worker_operation {
+            operation.record_queue(queued_at.elapsed());
+        }
+        let result = route_tool(&shared, session_id, &name, &args, worker_operation);
+        drop(activity);
+        result
+    });
+    request::run(worker, operation.as_ref()).await
 }
 
 /// `search_docs` with the project's hybrid stages, dense cache and window.
 fn route_search(
     shared: &Arc<Shared>,
-    db: &crate::store::Db,
     session_id: Option<u64>,
     args: &Value,
+    operation: crate::search::operation::SearchOperation,
 ) -> Result<Value> {
-    let project = bound_project(shared, db, session_id)?;
+    operation.check()?;
+    let project = {
+        let reader = MetadataSource::Prepared(&shared.readers).acquire(&operation)?;
+        operation.check()?;
+        bound_project(shared, &reader, session_id)?
+    };
     let (config, stages) = shared.project_runtime(&project)?;
+    operation.check()?;
+    let slot = shared.project_slot(project.id);
     let window = config
         .hybrid_cfg
         .reranker
@@ -871,18 +1072,41 @@ fn route_search(
         .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |reranker| {
             reranker.window
         });
-    tools::search_docs_with(
-        &stages,
-        &shared.dense,
-        db,
-        &shared.cache,
-        &project,
+    tools::search_docs_from(
+        &tools::SearchContext {
+            stages: &stages,
+            dense: &shared.dense,
+            cache: &shared.cache,
+            project: &project,
+            window,
+            payload_budget: &shared.payload_budget,
+            operation,
+        },
+        crate::search::metadata::MetadataSource::Prepared(&shared.readers),
         args,
-        window,
+        || slot.preparation_lease(&config),
     )
 }
 
 fn route_tool(
+    shared: &Arc<Shared>,
+    session_id: Option<u64>,
+    name: &str,
+    args: &Value,
+    operation: Option<crate::search::operation::SearchOperation>,
+) -> Result<Value> {
+    if name == "search_docs" {
+        return route_search(
+            shared,
+            session_id,
+            args,
+            operation.ok_or_else(|| Error::internal("search request context missing"))?,
+        );
+    }
+    route_metadata_tool(shared, session_id, name, args)
+}
+
+fn route_metadata_tool(
     shared: &Arc<Shared>,
     session_id: Option<u64>,
     name: &str,
@@ -911,7 +1135,6 @@ fn route_tool(
             )
         }
         "list_projects" => tools::list_projects(&db),
-        "search_docs" => route_search(shared, &db, session_id, args),
         "list_docs" => {
             let project = bound_project(shared, &db, session_id)?;
             tools::list_docs(&db, &project, args)
@@ -1066,22 +1289,6 @@ fn session_cwd(shared: &Arc<Shared>, session_id: Option<u64>) -> Result<PathBuf>
         })
 }
 
-/// Keeps `in_flight` balanced even if request handling ever panics.
-struct InFlightGuard<'a>(&'a AtomicUsize);
-
-impl<'a> InFlightGuard<'a> {
-    fn new(counter: &'a AtomicUsize) -> Self {
-        counter.fetch_add(1, Ordering::SeqCst);
-        Self(counter)
-    }
-}
-
-impl Drop for InFlightGuard<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
 fn hello_required() -> Response {
     error_response(&Error::Protocol {
         message: "Hello must be the first request".to_owned(),
@@ -1180,10 +1387,26 @@ mod tests {
             chunks: usize,
             policy: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
         ) -> Self {
+            Self::with_policies(
+                enabled,
+                ranking,
+                chunks,
+                policy,
+                &crate::store::settings::standalone_read_pool().expect("pool policy"),
+            )
+        }
+
+        fn with_policies(
+            enabled: bool,
+            ranking: Option<&str>,
+            chunks: usize,
+            policy: &Resolved<DbSettings>,
+            pool: &Resolved<ReadPoolSettings>,
+        ) -> Self {
             let cache = tempfile::TempDir::new().expect("cache");
             let root = tempfile::TempDir::new().expect("root");
             // Open an empty registry: this fixture tests refresh, not watchers.
-            let shared = Shared::open_with_settings(cache.path(), policy).expect("shared");
+            let shared = Shared::open_with_policies(cache.path(), policy, pool).expect("shared");
             let ranking = ranking.map_or(String::new(), |value| format!("ranking = \"{value}\"\n"));
             fs::write(
                 root.path().join(".docsbase.toml"),
@@ -1329,12 +1552,99 @@ mod tests {
     }
 
     #[test]
+    fn refresh_refuses_exhausted_prepared_pool_and_still_cleans() {
+        let fixture = RefreshFixture::new(true, Some("rrf"), 1);
+        let stale = fixture.stale_tmp();
+        let readers: Vec<_> = (0..fixture
+            .shared
+            .read_pool()
+            .settings()
+            .settings()
+            .max_connections)
+            .map(|_| {
+                fixture
+                    .shared
+                    .read_pool()
+                    .try_acquire()
+                    .expect("hold every reader")
+            })
+            .collect();
+        let (called, observed) = std_mpsc::channel();
+        finish_refresh(fixture.shared.refresh_ann_after_sync_with(
+            &fixture.project,
+            move |_, _, _| {
+                called
+                    .send(())
+                    .map_err(|err| Error::internal(err.to_string()))
+            },
+        ));
+        let attempted = observed.try_recv();
+        drop(readers);
+        assert_eq!(
+            attempted,
+            Err(TryRecvError::Disconnected),
+            "refresh must not open a replacement outside the prepared pool"
+        );
+        assert!(
+            !stale.exists(),
+            "cleanup must run after reader admission refusal"
+        );
+    }
+
+    #[test]
+    fn refresh_releases_single_scalar_reader_before_lazy_warm() {
+        use crate::config::bootstrap::DefaultsContext;
+        use crate::config::resolve::resolve_component;
+        use crate::config::schema::SourceId;
+        use crate::store::settings::{ReadPoolPatch, ReadPoolSpec};
+        let pool = resolve_component::<ReadPoolSpec>(
+            &DefaultsContext::standalone(),
+            [(
+                SourceId::Cli,
+                ReadPoolPatch {
+                    max_connections: Some(1),
+                },
+            )],
+        )
+        .expect("one reader");
+        let mut fixture =
+            RefreshFixture::with_policies(true, Some("rrf"), 1, &configured_db_policy(), &pool);
+        // Isolate metadata ownership from ANN tier/threshold selection.
+        Arc::get_mut(&mut fixture.shared)
+            .expect("unique fixture state")
+            .dense = DenseCache::with_cap(2);
+        finish_refresh(fixture.shared.refresh_ann_after_sync(&fixture.project));
+        let generation =
+            crate::store::repo::index_generation(fixture.db.connection(), fixture.project.id)
+                .expect("generation");
+        let rows = fixture
+            .shared
+            .dense
+            .get_with_metadata(
+                DenseRequest {
+                    cache_root: fixture.cache.path(),
+                    project_id: fixture.project.id,
+                    generation,
+                    model_id: FakeEmbedder.model_id(),
+                },
+                &crate::hybrid::work::Cancellation::new(),
+                || panic!("warm must materialize and retain rows using the single reader"),
+            )
+            .expect("warm populated resident state");
+        match rows {
+            crate::hybrid::dense::DenseRows::Ready(index) => assert_eq!(index.rows().len(), 1),
+            _ => panic!("explicit exact-only fixture must retain its one vector"),
+        }
+        assert!(fixture.shared.read_pool().try_acquire().is_ok());
+    }
+
+    #[test]
     fn ann_refresh_uses_configured_readonly_connection() {
         let policy = configured_db_policy();
         let fixture = RefreshFixture::with_db_settings(true, Some("rrf"), 1, &policy);
         let (called, observed) = std_mpsc::channel();
         finish_refresh(fixture.shared.refresh_ann_after_sync_with(&fixture.project,
-            move |_, db, _, _| {
+            move |db, _, _| {
                 let timeout: u32 = db.connection()
                     .pragma_query_value(None, "busy_timeout", |row| row.get(0)).expect("timeout");
                 assert_eq!(timeout, 29, "child reader must receive the same supplied policy");
@@ -1356,7 +1666,7 @@ mod tests {
         let (release, proceed) = std_mpsc::channel();
         let worker = fixture
             .shared
-            .refresh_ann_after_sync_with(&fixture.project, move |dense, db, project, model| {
+            .refresh_ann_after_sync_with(&fixture.project, move |_, project, model| {
                 called
                     .send((project, model.to_owned()))
                     .map_err(|err| Error::internal(err.to_string()))?;
@@ -1364,7 +1674,7 @@ mod tests {
                 proceed
                     .recv_timeout(REFRESH_WATCHDOG)
                     .map_err(|err| Error::internal(err.to_string()))?;
-                dense.warm(db, project, model)
+                Ok(())
             })
             .expect("worker");
         assert_eq!(
@@ -1388,11 +1698,11 @@ mod tests {
         let (called, observed) = std_mpsc::channel();
         finish_refresh(fixture.shared.refresh_ann_after_sync_with(
             &fixture.project,
-            move |dense, db, project, model| {
+            move |_, _, _| {
                 called
                     .send(())
                     .map_err(|err| Error::internal(err.to_string()))?;
-                dense.warm(db, project, model)
+                Ok(())
             },
         ));
         assert_eq!(
@@ -1429,7 +1739,7 @@ mod tests {
         .clone();
         config.hybrid_cfg.embedding = None;
         let slot = fixture.shared.project_slot(fixture.project.id);
-        slot.lock().expect("project state").config = Some(Arc::new(config));
+        slot.state.lock().expect("project state").config = Some(Arc::new(config));
         assert!(
             fixture
                 .shared
@@ -1437,7 +1747,7 @@ mod tests {
                 .is_none()
         );
 
-        slot.lock().expect("project state").config = None;
+        slot.state.lock().expect("project state").config = None;
         fs::write(fixture.root.path().join(".docsbase.toml"), "[invalid toml")
             .expect("invalid config fixture");
         assert!(
@@ -1495,7 +1805,7 @@ mod tests {
         let (called, observed) = std_mpsc::channel();
         finish_refresh(fixture.shared.refresh_ann_after_sync_with(
             &fixture.project,
-            move |_, _, project, model| {
+            move |_, project, model| {
                 called
                     .send((project, model.to_owned()))
                     .map_err(|err| Error::internal(err.to_string()))?;
@@ -1557,6 +1867,46 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn delayed_old_ann_refresh_is_rejected_after_reload_and_still_cleans_up() {
+        let fixture = RefreshFixture::new(true, Some("rrf"), 1);
+        let stale = fixture.stale_tmp();
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let (called_tx, called_rx) = std_mpsc::channel();
+        let worker = fixture.shared.refresh_ann_after_sync_before_with(
+            &fixture.project,
+            move || {
+                entered_tx.send(()).expect("revision captured");
+                release_rx
+                    .recv_timeout(REFRESH_WATCHDOG)
+                    .expect("release delayed scheduling");
+            },
+            move |_, _, _| {
+                called_tx.send(()).expect("warm called");
+                Ok(())
+            },
+        );
+        entered_rx
+            .recv_timeout(REFRESH_WATCHDOG)
+            .expect("old refresh scheduled");
+        fs::write(
+            fixture.root.path().join(".docsbase.toml"),
+            "hybrid = false\n",
+        )
+        .expect("new config");
+        let reloaded = fixture.shared.open_project_config(&fixture.project);
+        release_tx.send(()).expect("release old refresh");
+        finish_refresh(worker);
+        assert!(!reloaded.expect("reload before old warm").hybrid_cfg.enabled);
+        assert_eq!(
+            called_rx.try_recv(),
+            Err(TryRecvError::Disconnected),
+            "old revision cannot warm"
+        );
+        assert!(!stale.exists(), "cleanup runs when stale warm is refused");
     }
 }
 

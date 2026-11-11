@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridCfg, HybridDefaults, HybridPatch, HybridSpec, ProvidersCfg};
+use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
 use bootstrap::DefaultsContext;
 use schema::{
     ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Scope, SettingsSpec,
@@ -30,6 +31,8 @@ pub struct Config {
     pub max_file_size: u64,
     /// Maximum number of documents per project.
     pub max_docs_per_project: usize,
+    /// Global-only policy for request deadlines and owned search payload admission.
+    pub search: SearchSettings,
     /// Register and index a project automatically on first connection (ADR-6: off).
     pub auto_index: bool,
     /// Hybrid retrieval feature flag (phase 2; off in v1).
@@ -73,11 +76,12 @@ struct GlobalFileConfig {
     max_file_size: Option<u64>,
     max_docs_per_project: Option<usize>,
     auto_index: Option<bool>,
+    search: Option<SearchPatch>,
     hybrid: Option<HybridPatch>,
     providers: Option<HashMap<String, toml::Table>>,
 }
 
-/// Raw **project** file shape: identical to the global shape minus
+/// Raw **project** file shape excludes shared `search` policy and machine
 /// `providers` (FR-1, structural enforcement).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -211,6 +215,7 @@ impl Config {
             });
         }
         crate::hybrid::config::validate_settings(&self.hybrid_cfg)?;
+        SearchSpec::validate(&self.search, &Capabilities::current())?;
         Ok(())
     }
 }
@@ -276,6 +281,7 @@ fn read_capped(path: &Path) -> Result<String> {
 struct ConfigDefaults {
     initial: Config,
     hybrid: HybridDefaults,
+    search: SearchSettings,
 }
 struct ConfigSpec;
 impl SettingsSpec for ConfigSpec {
@@ -293,20 +299,27 @@ impl SettingsSpec for ConfigSpec {
     fn fields() -> Vec<FieldSpec> {
         let mut fields = Self::FIELDS.to_vec();
         fields.extend_from_slice(HybridSpec::FIELDS);
+        fields.extend_from_slice(SearchSpec::FIELDS);
         fields
     }
     fn defaults(context: &DefaultsContext) -> Self::Defaults {
         let hybrid = HybridSpec::defaults(context);
+        let search = SearchSpec::defaults(context);
         let initial = Config {
             ignores: Vec::new(),
             max_file_size: 1_048_576,
             max_docs_per_project: 20_000,
+            search: SearchSpec::initial(&search),
             auto_index: false,
             hybrid: false,
             hybrid_cfg: HybridSpec::initial(&hybrid),
             providers: ProvidersCfg::default(),
         };
-        ConfigDefaults { initial, hybrid }
+        ConfigDefaults {
+            initial,
+            hybrid,
+            search,
+        }
     }
     fn initial(defaults: &Self::Defaults) -> Config {
         defaults.initial.clone()
@@ -347,6 +360,15 @@ impl SettingsSpec for ConfigSpec {
         if let Some(raw) = patch.providers {
             settings.providers = providers_from_raw(raw)?;
             origins.set("providers", source)?;
+        }
+        if let Some(patch) = patch.search {
+            SearchSpec::overlay(
+                &mut settings.search,
+                patch,
+                &defaults.search,
+                source,
+                origins,
+            )?;
         }
         Ok(())
     }

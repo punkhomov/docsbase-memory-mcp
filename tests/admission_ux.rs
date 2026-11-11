@@ -1,3 +1,6 @@
+#[path = "support/search_visibility.rs"]
+mod search_visibility;
+
 use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -416,7 +419,7 @@ fn stale_schema_survives_file_edit() {
             }
             match client.call_tool("search_docs", json!({ "query": "watcherready" })) {
                 Ok(hits) => !hits.as_array().expect("hits").is_empty(),
-                Err(err) if err.to_string().contains("needs to be rebuilt") => false,
+                Err(err) if search_visibility::temporarily_unavailable(&err) => false,
                 Err(err) => panic!("healthy watcher search failed: {err}"),
             }
         }),

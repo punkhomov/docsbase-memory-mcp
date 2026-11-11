@@ -94,3 +94,85 @@ Typed overrides доступны composition root. Совместимые constr
 published generations (#78). S1 только готовит pool, старый dispatcher пока
 сохранён. Открытых вопросов для S1 нет; detailed S2–S4 interfaces фиксируются
 датированным design/task delta после проверки действующего кода.
+
+## Delta 2026-11-10 — S4.3 scoped transport and queue diagnostics
+
+FR-6/FR-7/SC-5: protocol1 gains an additive capability-advertised search request
+with explicit remaining/elapsed/queue milliseconds. Clients must discover its
+versioned capability before using it; missing capability means actionable
+restart/refusal, not an unchecked fallback. Package version alone cannot prove
+capability because development daemon/frontend builds share the same build_id.
+Legacy CallTool and its write-half-close/reply behavior remain supported within
+the configured request budget. Scoped search opts into one outstanding call
+and EOF cancellation; no multiplexing/correlation extension is promised.
+
+One original request budget includes queueing and reconnect, and the server
+clamps received remaining time to its own complete policy and original elapsed
+time. Expired/malformed context is refused before paid work. Active scoped EOF,
+session cancellation or deadline cancels only that caller; actual job/reply/
+connection charges retain S4.2b semantics. A blocked reply write receives no fresh
+budget; closure may prevent a complete error frame after expiry. Synchronous
+providers are still not forcibly preempted. Frontend/CLI propagation, bounded
+retry and MCP cancellation integration are S4.3b before whole-feature delivery.
+
+Explain gains additive queue_ms for admission waiting, while stage_ms.total
+retains original elapsed time and default array responses stay unchanged.
+Queue accumulation starts at structural zero, not a consumer setting default.
+Existing public metadata constructors/serialization helpers retain their
+signatures; producers use an explicit queue-aware envelope adapter.
+
+## Delta 2026-11-10 — S4.3b: canonical caller lifetime
+
+FR-6/FR-7/SC-5: canonical MCP and CLI socket search use asynchronous IPC on all
+three platforms. One complete owner search policy creates the original operation
+before daemon startup, connection admission or reconnect. Connect, handshake,
+serialized connection waiting, search exchange and reply decoding consume that
+same budget. Client cancellation/expiry drops or poisons its owned connection;
+a cancelled queued caller must not close another caller's active connection.
+
+Search requires the advertised search-context-v1 capability. A same-version
+legacy daemon without it yields actionable restart Admission before Search is
+sent; no silent CallTool search fallback. The old blocking Client remains an
+explicit compatibility API. Generic non-search tools keep their existing tool
+budgets; no new consumer default or provider feature reduction is introduced.
+
+MCP request cancellation uses the actual rmcp per-request cancellation signal.
+A transport failure may reconnect/retry at most once while the original budget
+is live. Expired/cancelled requests cannot replay paid work. CLI falls back to
+direct mode only when its initial connection cannot be established; connected
+handshake/call failures propagate. Direct CLI retains its original ingress time.
+Explain total is finalized using the canonical caller's original monotonic
+clock after receipt; returned queue is not double-counted. Default arrays stay.
+
+## Delta 2026-11-11 — Windows busy endpoint admission
+
+FR-5/FR-6 and SC-4 also cover connection admission: a busy named pipe must not
+leave an unbounded dependency blocking worker after cancellation, or make the
+CLI runtime teardown wait indefinitely. Windows async connect makes one
+nonblocking OS attempt and returns a transport error when all instances are
+busy. Liveness probes must return present for a busy endpoint and false for
+an absent endpoint without waiting for an instance. Preserve available-pipe
+byte-stream/protocol behavior and generic legacy blocking-client compatibility.
+
+### Delta 2026-11-11 — non-consuming liveness
+
+A Windows liveness probe must leave an available named-pipe instance available
+for the actual client. It does not reserve capacity against concurrent clients,
+but must not itself create a client connection. Reject embedded NUL rather than
+querying a live truncated prefix. Busy means present, missing means absent.
+
+## Delta 2026-11-11 — MODIFIED NFR-1: non-consuming Windows probe
+
+MODIFIED NFR-1: permit exactly one new `unsafe` FFI call,
+`WaitNamedPipeW(..., NMPWAIT_NOWAIT)`, only in
+`src/platform/windows.rs::connect_probe` for non-consuming liveness. Reject
+embedded NUL before FFI; pass a NUL-terminated UTF-16 buffer that remains live
+for the entire call. Require a function-scoped `#[allow(unsafe_code)]`, a
+`SAFETY:` comment and real native regression coverage for non-consumption and
+embedded-NUL rejection against a live prefix. This records the
+[existing S4.3c design ruling](design.md#delta-2026-11-11--liveness-must-not-consume-a-pipe-instance)
+without broadening its implementation safety approval.
+
+All other NFR-1 restrictions remain unchanged: Rust1.88/edition2024 and
+Linux/macOS/Windows support, no new crates or other new unsafe, no network by
+default, and unchanged golden/baseline, ranking, provider windows and budgets.

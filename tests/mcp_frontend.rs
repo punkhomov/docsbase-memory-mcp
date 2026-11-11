@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use docsbase_memory::ipc::protocol::{
-    MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, encode,
+    MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, SEARCH_CONTEXT_CAPABILITY, encode,
 };
 use docsbase_memory::platform;
 
@@ -173,10 +173,16 @@ fn serve_fake_connection(
                 protocol_version: PROTOCOL_VERSION,
                 build_id: docsbase_memory::ipc::protocol::build_id(),
                 schema_version: 1,
+                capabilities: vec![SEARCH_CONTEXT_CAPABILITY.to_owned()],
             },
             Request::RegisterSession { .. } | Request::RegisterUnbound { .. } => {
                 Response::ToolResult { value: Value::Null }
             }
+            Request::CallTool { name, .. } if name == "search_docs" => Response::Error {
+                code: -32011,
+                message: "fake daemon expects scoped search".to_owned(),
+                instruction: None,
+            },
             Request::CallTool { name, .. } => {
                 seen.lock().expect("lock").push(name.clone());
                 Response::ToolResult {
@@ -186,6 +192,12 @@ fn serve_fake_connection(
             Request::StopDaemon => {
                 stop.store(true, Ordering::SeqCst);
                 Response::ToolResult { value: Value::Null }
+            }
+            Request::Search { .. } => {
+                seen.lock().expect("lock").push("search_docs".to_owned());
+                Response::ToolResult {
+                    value: json!({"routed_tool":"search_docs"}),
+                }
             }
         };
         writer

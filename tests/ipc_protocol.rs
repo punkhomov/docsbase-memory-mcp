@@ -41,10 +41,65 @@ fn roundtrip() {
         protocol_version: PROTOCOL_VERSION,
         build_id: "test-build".to_owned(),
         schema_version: 1,
+        capabilities: Vec::new(),
     };
     let bytes = encode(&response).expect("encode response");
     let decoded: Response = serde_json::from_slice(&bytes).expect("decode response");
     assert_eq!(decoded, response);
+}
+
+#[test]
+fn scoped_search_roundtrip_keeps_the_explicit_budget() {
+    let wire = json!({
+        "method": "Search",
+        "params": {
+            "args": {"query":"widgets", "explain":true},
+            "context": {"remaining_ms":5000, "elapsed_ms":11, "queue_ms":3},
+        },
+    });
+    let request = decode_request(&serde_json::to_vec(&wire).expect("wire bytes"))
+        .expect("scoped search request");
+    let encoded = encode(&request).expect("encode scoped search");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&encoded).expect("wire value"),
+        wire
+    );
+}
+
+#[test]
+fn scoped_budget_is_validated_before_dispatch() {
+    for context in [
+        json!({"remaining_ms":0, "elapsed_ms":11, "queue_ms":3}),
+        json!({"remaining_ms":5000, "elapsed_ms":2, "queue_ms":3}),
+    ] {
+        let wire = json!({"method":"Search", "params":{"args":{}, "context":context}});
+        let error = decode_request(&serde_json::to_vec(&wire).expect("wire"))
+            .expect_err("invalid scoped budget");
+        assert!(matches!(error, Error::Admission { .. }), "{error:?}");
+    }
+}
+
+#[test]
+fn scoped_context_has_no_hidden_budget_defaults() {
+    for missing in ["remaining_ms", "elapsed_ms", "queue_ms"] {
+        let mut context = json!({"remaining_ms":5000, "elapsed_ms":11, "queue_ms":3});
+        context.as_object_mut().expect("context").remove(missing);
+        let wire = json!({"method":"Search", "params":{"args":{}, "context":context}});
+        let error = decode_request(&serde_json::to_vec(&wire).expect("wire"))
+            .expect_err("missing budget field");
+        assert!(matches!(error, Error::Protocol { .. }));
+        assert!(error.inner_message().contains(missing), "{error}");
+    }
+}
+
+#[test]
+fn legacy_hello_has_no_scoped_capability() {
+    let reply = decode_response(br#"{"kind":"Hello","data":{"protocol_version":1,"build_id":"old-daemon","schema_version":2}}"#)
+        .expect("legacy hello");
+    match reply {
+        Response::Hello { capabilities, .. } => assert!(capabilities.is_empty()),
+        other => panic!("expected hello, got {other:?}"),
+    }
 }
 
 #[test]

@@ -6,8 +6,9 @@ Short operator's view. Full spec: `specs/docsbase-memory-mcp/design.md`.
 
 One binary, three roles:
 
-- **CLI** (`docsbase <cmd>`) — parses args, talks to the daemon when
-  reachable, else falls back to read-only snapshots (FR-30).
+- **CLI** (`docsbase <cmd>`) — parses args and prefers the daemon. Search falls
+  back to local snapshots only if its initial connection cannot be established;
+  connected errors and an incompatible daemon are reported (FR-30).
 - **MCP frontend** (`docsbase mcp`) — thin stdio proxy: ensures the daemon,
   binds the session, forwards tool calls (FR-7).
 - **Daemon** (`docsbase serve`, supervised) — owns registry, indexes,
@@ -31,6 +32,62 @@ flowchart LR
     CLI -.->|read-only snapshot| T
     CLI -.->|read-only| R
 ```
+
+## Concurrent search ownership
+
+The daemon prepares a bounded operational read-only SQLite pool after startup
+migration. Search acquires readers only for short metadata phases and captures
+bounded owned candidate/citation/filter/text payloads. Providers, vector CPU,
+singleflight followers and rendering retain no global DB mutex, SQL transaction
+or metadata reader. A slow hybrid search therefore leaves independent lexical,
+status and list requests able to progress.
+
+Project read barriers and config/stages revisions coordinate preparation with
+sync/rebuild/reload. Generation, pending updates and payload identities are
+checked; an incomplete index or obsolete view produces an explicit retry/index
+instruction. A request may finish with its already captured payload or refuse,
+rather than combine new text with old candidates. SQLite and Tantivy commits
+are independent, not an atomic multi-store publication.
+
+Identical query embedding misses and cold dense initialization share work.
+Errors/unwinds wake followers, cancelled callers stop participating and live
+followers can continue. Large vector materialization happens after flight
+admission. Background refresh uses the same prepared metadata pool.
+
+## Scoped search IPC
+
+Protocol version remains `1`. `Hello` replies add `data.capabilities`, including
+`search-context-v1`; an absent list means legacy support only. Canonical MCP
+and CLI search require this capability and report restart guidance when it is
+missing, without falling back to an unscoped call or local search.
+
+Scoped requests use this existing tagged JSON shape (illustrative durations):
+
+```json
+{"method":"Search","params":{"args":{"query":"widgets"},"context":{"remaining_ms":29988,"elapsed_ms":12,"queue_ms":3}}}
+```
+
+All three context fields are required unsigned milliseconds. The caller derives
+them from one configuration-owned original operation, never a new per-exchange
+budget; remaining time must be positive and queue time cannot exceed elapsed.
+The server checks clock range and clamps to its own original policy deadline.
+Responses retain the existing `kind`/`data` envelope and default search array.
+Explain adds `queue_ms` and retains original `stage_ms.total`.
+
+There is one outstanding scoped request per connection. EOF or session/request
+cancellation abandons that caller; another complete frame during work is a
+protocol refusal, while a partial next frame survives if the current work wins.
+The same original deadline bounds reply writes, without a fresh error-delivery
+budget. Clients discard interrupted/partial connections before reuse. Actual
+synchronous jobs retain activity and connection capacity until they complete;
+graceful shutdown drains that real work, not only waiting client futures.
+
+Legacy `CallTool` remains available to compatibility clients and retains its
+half-close/reply semantics. It does not provide the new EOF cancellation or
+upstream timing contract. CLI search creates an async runtime bridge on a plain
+thread (or a multithread runtime's blocking context); synchronous invocation from
+an existing current-thread runtime returns explicit Admission. Async consumers
+can use the internal `AsyncClient` API, whose stability remains unpublished.
 
 ## Runtime layout
 

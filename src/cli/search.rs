@@ -1,15 +1,24 @@
 //! `docsbase search` — read-only snapshot search (FR-20, FR-30).
 
+use std::future::Future;
+use std::path::Path;
+
+use serde_json::Value;
+
 use crate::cli::status::read_project_with_settings;
 use crate::config::Config;
 use crate::config::paths;
 use crate::daemon::tools;
+use crate::error::{Error, Result};
+use crate::hybrid::work::Cancellation;
+use crate::ipc::async_client::{AsyncClient, within_operation};
+use crate::search::operation::SearchOperation;
 
 /// Runs `docsbase search <query> [--limit N] [--explain] [--snippet] [--dedupe …]`,
 /// printing a JSON array
 /// of `{path, heading_path, lines, score}` (FR-20) or, with `--explain`, the
-/// `{hits, meta}` envelope (spec `search-telemetry`, FR-1). Hits whose citation row
-/// vanished during an R2 crash window are dropped from the snapshot.
+/// `{hits, meta}` envelope (spec `search-telemetry`, FR-1). Response stages use
+/// one bounded owned SQL payload; incomplete index updates require rebuilding.
 ///
 /// # Errors
 /// Returns an error when the project is unregistered/not indexed, the snapshot
@@ -59,8 +68,9 @@ impl Options {
 /// `--explain`, the `{hits, meta}` envelope (spec `search-telemetry`, FR-1).
 ///
 /// # Errors
-/// Returns an error when the project is unregistered or not indexed, the
-/// snapshot cannot be opened, or the query or an argument is invalid.
+/// Returns an error for invalid configuration/query, admission or connected
+/// transport failure, an unregistered/unindexed project, an unavailable snapshot,
+/// or synchronous invocation from a current-thread Tokio runtime.
 pub fn run(query: &str, options: &Options) -> anyhow::Result<()> {
     run_with_settings(query, options, &crate::store::settings::standalone()?)
 }
@@ -70,18 +80,27 @@ pub(crate) fn run_with_settings(
     options: &Options,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
-    if let Some(value) = crate::cli::try_daemon("search_docs", options.args(query), true)? {
+    let started = std::time::Instant::now();
+    let global = Config::global()?;
+    let operation = SearchOperation::new(&global.search, started, Cancellation::new())?;
+    let cache = paths::cache_dir()?;
+    let cwd = std::env::current_dir()
+        .map_err(|error| Error::internal_with_source("resolve current directory", error))?;
+    let args = options.args(query);
+    if let Some(value) = try_daemon_search(&cache, &cwd, args.clone(), &operation)? {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
 
+    operation.check()?;
     let (db, project) = read_project_with_settings(settings)?;
-    let cache = paths::cache_dir()?;
     // Direct mode honors the project's hybrid configuration exactly like the
     // daemon route: stages resolved up front (explicit admission on failure,
-    // FR-14) and the same `search_docs_with` seam (FR-11/12).
-    let config = Config::load(Some(&project.canonical_root))?;
+    // FR-14) and the same explicit search context (FR-11/12).
+    let config = Config::for_project(&global, &project.canonical_root)?;
+    operation.check()?;
     let stages = crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)?;
+    operation.check()?;
     let window = config
         .hybrid_cfg
         .reranker
@@ -101,19 +120,60 @@ pub(crate) fn run_with_settings(
         &cache,
         limits,
     );
-    let value = tools::search_docs_with(
-        &stages,
-        &dense,
+    let budget = crate::search::budget::PayloadBudget::new(config.search.clone())?;
+    let value = tools::search_docs_in(
+        &tools::SearchContext {
+            stages: &stages,
+            dense: &dense,
+            cache: &cache,
+            project: &project,
+            window,
+            payload_budget: &budget,
+            operation,
+        },
         &db,
-        &cache,
-        &project,
-        //
-        // Direct mode forwards every search argument, `explain` included: it used
-        // to drop it, so `--explain` worked only with a daemon running
-        // (search-ux FR-8, T0).
-        &options.args(query),
-        window,
+        // Every search argument, including explain, reaches the same pipeline.
+        &args,
     )?;
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
+
+/// Only an initial failed connect permits direct mode; connected failures propagate.
+fn try_daemon_search(
+    cache: &Path,
+    cwd: &Path,
+    args: Value,
+    operation: &SearchOperation,
+) -> Result<Option<Value>> {
+    block_on_io(within_operation(operation, async {
+        let Ok(mut client) = AsyncClient::connect(cache).await else {
+            operation.check()?;
+            return Ok(None);
+        };
+        client.handshake(cwd).await?;
+        client.search(args, operation).await.map(Some)
+    }))
+}
+
+fn block_on_io<T>(work: impl Future<Output = Result<T>>) -> Result<T> {
+    let run = || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| Error::internal_with_source("create CLI IPC runtime", error))?;
+        runtime.block_on(work)
+    };
+    match tokio::runtime::Handle::try_current() {
+        Err(_) => run(),
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+            tokio::task::block_in_place(run),
+        Ok(_) => Err(Error::Admission {
+            message: "synchronous CLI search cannot run inside a current-thread Tokio runtime; use AsyncClient".to_owned(),
+        }),
+    }
+}
+
+#[cfg(test)]
+#[path = "search_tests.rs"]
+mod tests;

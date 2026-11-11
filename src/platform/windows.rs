@@ -13,6 +13,7 @@ use std::process::Command;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use interprocess::ConnectWaitMode;
 use interprocess::local_socket::tokio::{Listener as TokioListener, Stream as TokioStream};
 use interprocess::local_socket::traits::Listener as _;
 use interprocess::local_socket::traits::tokio::Listener as _;
@@ -20,9 +21,14 @@ use interprocess::local_socket::{
     ConnectOptions, GenericNamespaced, Listener as SyncListener, ListenerNonblockingMode,
     ListenerOptions, Name, Stream as SyncStream, ToNsName as _,
 };
+use interprocess::os::windows::named_pipe::pipe_mode::Bytes;
+use interprocess::os::windows::named_pipe::tokio::DuplexPipeStream as AsyncPipeStream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::signal::windows::{CtrlC, CtrlClose, ctrl_c, ctrl_close};
-use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_PIPE_BUSY, ERROR_SEM_TIMEOUT, STILL_ACTIVE,
+};
+use windows_sys::Win32::System::Pipes::{NMPWAIT_NOWAIT, WaitNamedPipeW};
 use windows_sys::Win32::System::Threading::{
     CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS, GetExitCodeProcess, OpenProcess,
     PROCESS_QUERY_LIMITED_INFORMATION,
@@ -229,11 +235,66 @@ pub fn connect_blocking(endpoint: &Endpoint) -> io::Result<BlockingStream> {
         .map(BlockingStream)
 }
 
-/// Liveness probe: a pipe has no persistent name, so probing means connecting
-/// once and closing (`None`-byte EOF on the server side, ADR-10).
+/// Makes one nonblocking connection attempt through the IO runtime.
+///
+/// # Errors
+/// Returns invalid endpoint and raw connect errors, or `TimedOut` when busy.
+pub async fn connect_async(endpoint: &Endpoint) -> io::Result<Stream> {
+    let path = pipe_path(endpoint)?;
+    // interprocess 2.4.4 local-socket adapters ignore the wait mode. Their
+    // default busy-pipe path spawns an unbounded blocking worker, which can
+    // survive future cancellation and delay runtime Drop. ZERO selects the
+    // raw API's single OS attempt; retry/budget ownership stays with callers.
+    AsyncPipeStream::<Bytes>::connect_by_path_with_wait_mode(
+        path.as_str(),
+        ConnectWaitMode::Timeout(Duration::ZERO),
+    )
+    .await
+    .map(|pipe| Stream(TokioStream::NamedPipe(pipe.into())))
+}
+
+// Match GenericNamespaced's local \\.\pipe\ mapping used by our listeners.
+fn pipe_path(endpoint: &Endpoint) -> io::Result<String> {
+    match endpoint {
+        Endpoint::Pipe(name) => {
+            if name.contains('\0') {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "named pipe name contains NUL",
+                ));
+            }
+            Ok(format!(r"\\.\pipe\{name}"))
+        }
+        Endpoint::Unix(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unix endpoint submitted to the Windows backend",
+        )),
+    }
+}
+
+/// Checks pipe availability without opening a connection or waiting for a
+/// free instance. A busy pipe is present; absent/invalid endpoints are not.
 #[must_use]
+#[allow(unsafe_code)] // windows-sys FFI: validated input, no handle creation
 pub fn connect_probe(endpoint: &Endpoint) -> bool {
-    connect_blocking(endpoint).is_ok()
+    let Ok(path) = pipe_path(endpoint) else {
+        return false;
+    };
+    let Ok(wide) = path_to_wide(Path::new(&path)) else {
+        return false;
+    };
+    // SAFETY: wide is a live NUL-terminated UTF-16 buffer, with embedded NUL
+    // rejected above. WaitNamedPipeW only reads it during this call.
+    let available = unsafe { WaitNamedPipeW(wide.as_ptr(), NMPWAIT_NOWAIT) };
+    if available != 0 {
+        return true;
+    }
+    matches!(
+        io::Error::last_os_error()
+            .raw_os_error()
+            .and_then(|code| u32::try_from(code).ok()),
+        Some(ERROR_SEM_TIMEOUT | ERROR_PIPE_BUSY)
+    )
 }
 
 /// Same as [`connect_probe`]: named pipes have no file to check.
@@ -400,4 +461,178 @@ pub fn open_readonly_nofollow(path: &Path) -> io::Result<File> {
         .read(true)
         .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future as _;
+    use std::sync::mpsc;
+    use std::task::Waker;
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+
+    #[test]
+    fn busy_pipe_async_connect_is_immediate() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        // Reserve the only blocking worker. If old connect enqueues a worker,
+        // it cannot enter WaitNamedPipe before the busy endpoint is removed.
+        let reserved = runtime.spawn_blocking(move || {
+            entered_tx.send(()).expect("entered");
+            release_rx.recv().expect("release");
+        });
+        entered_rx.recv().expect("blocking worker reserved");
+        let outcome = runtime.block_on(async {
+            let cache = tempfile::TempDir::new().expect("cache");
+            let endpoint = daemon_endpoint(cache.path());
+            let Endpoint::Pipe(name) = &endpoint else {
+                panic!("Windows endpoint");
+            };
+            let path = format!(r"\\.\pipe\{name}");
+            let server = ServerOptions::new()
+                .max_instances(1)
+                .first_pipe_instance(true)
+                .create(&path)
+                .expect("single pipe instance");
+            let client = ClientOptions::new().open(&path).expect("occupy pipe");
+            server.connect().await.expect("occupied connection");
+            let outcome = {
+                let mut connect = std::pin::pin!(connect_async(&endpoint));
+                let mut cx = Context::from_waker(Waker::noop());
+                connect
+                    .as_mut()
+                    .poll(&mut cx)
+                    .map(|result| result.err().map(|e| e.kind()))
+            };
+            // Cleanup precedes releasing the reserved worker and any assertion.
+            drop(client);
+            drop(server);
+            outcome
+        });
+        release_tx.send(()).expect("release reserved worker");
+        runtime.block_on(reserved).expect("reserved worker joined");
+        drop(runtime);
+        assert_eq!(outcome, Poll::Ready(Some(io::ErrorKind::TimedOut)));
+    }
+
+    #[tokio::test]
+    async fn busy_pipe_probe_reports_presence() {
+        let cache = tempfile::TempDir::new().expect("cache");
+        let endpoint = daemon_endpoint(cache.path());
+        let path = pipe_path(&endpoint).expect("pipe path");
+        let server = ServerOptions::new()
+            .max_instances(1)
+            .first_pipe_instance(true)
+            .create(&path)
+            .expect("single pipe instance");
+        let client = ClientOptions::new().open(&path).expect("occupy pipe");
+        server.connect().await.expect("occupied connection");
+        let present = connect_probe(&endpoint);
+        drop(client);
+        drop(server);
+        assert!(present, "busy endpoint is still present");
+        // Mio's pending IO may retain kernel handles after wrapper Drop.
+        // True absence is covered using a never-created name below.
+    }
+
+    #[tokio::test]
+    async fn available_pipe_async_connect_preserves_byte_stream() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let cache = tempfile::TempDir::new().expect("cache");
+        let endpoint = daemon_endpoint(cache.path());
+        let listener = bind(&endpoint).expect("bind");
+        let (mut client, mut server) =
+            tokio::try_join!(connect_async(&endpoint), listener.accept()).expect("connect/accept");
+        client.write_all(b"ping\n").await.expect("client write");
+        client.flush().await.expect("client flush");
+        let mut bytes = [0; 5];
+        server.read_exact(&mut bytes).await.expect("server read");
+        assert_eq!(&bytes, b"ping\n");
+        server.write_all(b"pong\n").await.expect("server write");
+        server.flush().await.expect("server flush");
+        client.read_exact(&mut bytes).await.expect("client read");
+        assert_eq!(&bytes, b"pong\n");
+    }
+
+    #[tokio::test]
+    async fn absent_pipe_async_connect_returns_not_found() {
+        let cache = tempfile::TempDir::new().expect("cache");
+        let endpoint = daemon_endpoint(cache.path());
+        let error = connect_async(&endpoint)
+            .await
+            .err()
+            .expect("absent endpoint");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(!connect_probe(&endpoint));
+    }
+
+    #[tokio::test]
+    async fn unix_endpoint_async_connect_is_invalid_on_windows() {
+        let endpoint = Endpoint::Unix(std::path::PathBuf::from("invalid-unix-endpoint"));
+        let error = connect_async(&endpoint)
+            .await
+            .err()
+            .expect("invalid endpoint");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(!connect_probe(&endpoint));
+    }
+
+    #[test]
+    fn probe_does_not_consume_available_pipe_instance() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let entered = runtime.enter();
+        let cache = tempfile::TempDir::new().expect("cache");
+        let endpoint = daemon_endpoint(cache.path());
+        let path = pipe_path(&endpoint).expect("pipe path");
+        let server = ServerOptions::new()
+            .max_instances(1)
+            .first_pipe_instance(true)
+            .create(&path)
+            .expect("single idle pipe instance");
+        let present = connect_probe(&endpoint);
+        // The server has not accepted/disconnected any probe connection.
+        // A non-consuming probe leaves its only instance available.
+        let error = ClientOptions::new().open(&path).err();
+        drop(server);
+        drop(entered);
+        drop(runtime);
+        assert!(present, "idle endpoint is present");
+        assert!(
+            error.is_none(),
+            "probe consumed the pipe instance: {error:?}"
+        );
+    }
+
+    #[test]
+    fn probe_rejects_nul_alias_of_a_live_pipe() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let entered = runtime.enter();
+        let cache = tempfile::TempDir::new().expect("cache");
+        let endpoint = daemon_endpoint(cache.path());
+        let path = pipe_path(&endpoint).expect("pipe path");
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&path)
+            .expect("live prefix pipe");
+        let Endpoint::Pipe(name) = &endpoint else {
+            panic!("Windows endpoint");
+        };
+        let alias = Endpoint::Pipe(format!("{name}\0suffix"));
+        let present = connect_probe(&alias);
+        drop(server);
+        drop(entered);
+        drop(runtime);
+        assert!(!present, "embedded NUL must not probe the live prefix");
+    }
 }

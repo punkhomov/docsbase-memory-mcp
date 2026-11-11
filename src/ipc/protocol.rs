@@ -9,6 +9,37 @@ use crate::error::{Error, Result};
 /// Wire protocol version; a mismatch refuses the connection (FR-7).
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Opt-in search lifetime semantics; fixed protocol identity, not a timeout.
+pub const SEARCH_CONTEXT_CAPABILITY: &str = "search-context-v1";
+
+/// Durations from one caller's original operation, never fresh stage budgets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchCallContext {
+    /// Remaining portion of the caller's original budget.
+    pub remaining_ms: u64,
+    /// Time already spent before sending this request.
+    pub elapsed_ms: u64,
+    /// Admission delay already included in elapsed time.
+    pub queue_ms: u64,
+}
+
+impl SearchCallContext {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.remaining_ms == 0 {
+            return Err(Error::Admission {
+                message: "search request deadline expired before dispatch".to_owned(),
+            });
+        }
+        if self.queue_ms > self.elapsed_ms {
+            return Err(Error::Admission {
+                message: "scoped search queue exceeds original elapsed time".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Maximum accepted NDJSON/JSON-RPC frame on the daemon, client and
 /// frontend stdin wires (I-2; T45).
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -66,6 +97,13 @@ pub enum Request {
         /// Tool arguments.
         args: serde_json::Value,
     },
+    /// One cancellable search; EOF abandons this caller and calls do not multiplex.
+    Search {
+        /// Search arguments, identical to `search_docs`.
+        args: serde_json::Value,
+        /// Explicit original budget and upstream admission measurements.
+        context: SearchCallContext,
+    },
     /// Graceful daemon shutdown request.
     StopDaemon,
 }
@@ -82,6 +120,9 @@ pub enum Response {
         build_id: String,
         /// Database schema version.
         schema_version: u32,
+        /// Additive protocol support; an old daemon advertises none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
     },
     /// Successful tool result.
     ToolResult {
@@ -104,7 +145,10 @@ impl Request {
     /// Validates the request against local invariants (I8).
     ///
     /// # Errors
-    /// Returns [`Error::Protocol`] when a `CallTool` name is not allowlisted.
+    /// Returns [`Error::Protocol`] when a `CallTool` name is not allowlisted, or
+    /// [`Error::Admission`] when a `Search` scoped budget has zero `remaining_ms`
+    /// or `queue_ms` greater than `elapsed_ms`. Malformed or missing wire fields
+    /// are rejected as [`Error::Protocol`] by [`decode_request`] before validation.
     pub fn validate(&self) -> Result<()> {
         if let Self::CallTool { name, .. } = self
             && !TOOL_ALLOWLIST.contains(&name.as_str())
@@ -112,6 +156,9 @@ impl Request {
             return Err(Error::Protocol {
                 message: format!("unknown tool: {name}"),
             });
+        }
+        if let Self::Search { context, .. } = self {
+            context.validate()?;
         }
         Ok(())
     }
@@ -161,7 +208,8 @@ pub fn decode_response(line: &[u8]) -> Result<Response> {
 /// Decodes one NDJSON line into a validated [`Request`].
 ///
 /// # Errors
-/// Returns [`Error::Protocol`] on malformed JSON or an invalid tool name.
+/// Returns [`Error::Protocol`] on malformed JSON or an invalid tool name, or
+/// [`Error::Admission`] when an explicit scoped budget is invalid/expired.
 pub fn decode_request(line: &[u8]) -> Result<Request> {
     let request: Request =
         serde_json::from_slice(line.trim_ascii_end()).map_err(|err| Error::Protocol {

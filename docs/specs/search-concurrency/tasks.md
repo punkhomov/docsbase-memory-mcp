@@ -100,3 +100,389 @@ before code. Existing S3/S4 boundaries remain in force.
   then fresh task/final reviews and latest-head four required native checks.
 - FR-5 cold/generation subset complete only; config revision publication and
   coherent Tantivy/citation capture remain S3. #66 stays open.
+
+## Delta 2026-11-10 — S3.1: read barrier и crash-marker predicate
+
+- Изменить `src/daemon/lifecycle.rs`, `src/store/repo.rs`; добавить локальные
+  lease tests в `src/daemon/project_read_tests.rs`. FR-4 foundation only.
+- API: `with_project_read_lease(cache, project_id, FnOnce()->Result<T>)` и
+  `repo::has_pending_docs(&Connection, project_id)->Result<bool>`.
+- RED: реальные shared/shared, shared/exclusive, exclusive/shared locks;
+  освобождение reader при error/unwind и независимость разных проектов.
+  Настоящий SQLite: empty/ready/pending, изоляция проектов, cleanup/удаление
+  marker. Сначала подтвердить ошибки отсутствующего API.
+- GREEN: fail-fast shared lock по существующему writer path, без provider/
+  migration/default timeout. Predicate только читает переданный connection.
+- Проверки: focused units, существующие writer admission/watch retry tests,
+  полный cli-full, lean relevant tests, full/lean Clippy и fmt/diff. Свежий
+  task reviewer. Whole-S3 final review и required native CI перед одним PR.
+- После S3.1 не объявлять FR-4/SC-4 или #66 завершёнными: owned payload,
+  config authority, production adoption и S4 остаются отдельными шагами.
+
+## Delta 2026-11-10 — S3.2: component policy и shared byte permits
+
+- Создать `src/search/{mod,settings,budget}.rs`, подключить в `src/lib.rs`;
+  изменить `src/config/{mod,resolve}.rs`; дополнить settings inventory.
+- API/числа/scope — dated S3.2 design: owner defaults64MiB/256MiB,
+  `Config.search`, global-only table, pure owner/provenance и shared RAII budget.
+- RED до production: missing SearchSpec/SearchSettings/Config.search/budget API.
+  Проверить omitted/partial/full global policy, project/unknown/invalid отказ,
+  source/unit/scope, impact и неизменность legacy hybrid/config JSON.
+- Budget tests: на границе/за границей, aggregate contention с удерживаемыми
+  permits, clone sharing, release на error/unwind/other thread, checked overflow
+  без allocation, imported invalid settings и отсутствие изменения после отказа.
+- Consumer не выбирает defaults и не выполняет filesystem/network actions.
+  Новые payload settings применяются реальным pipeline до delivery whole S3.
+- Verify focused config/budget, полный cli-full, lean config/budget и нужные
+  integrations, full/lean all-target+opt-in Clippy/fmt/diff; свежий task review.
+  S3.3 owned SQL capture и последующая revision/pipeline adoption ещё не готовы.
+
+## Delta 2026-11-10 — S3.3: preflight, owned capture и lifetime
+
+- Создать `src/search/{payload,payload_tests}.rs`, подключить модуль. Consumes
+  S3.2 PayloadBudget/Permit, Db/repo и S3.1 pending predicate. API/data/charge
+  formula — dated S3.3 design; без defaults/connection opens/provider calls.
+- RED: missing PayloadRequest/OwnedPayload API. Настоящий SQLite: identity и
+  порядок текста/citations/meta, flags без лишних полей, missing-doc/rerank
+  behavior, wrong root/gen/pending/foreign keys, cancellation, bound/duplicates.
+- SQL preflight/copy snapshot: gated writer commit между ними возвращает целиком
+  old payload/charge; success/error/unwind заканчивают только свой transaction.
+  UTF-8 multibyte/NUL byte count и UTF-16 CJK/emoji upper bound, request/aggregate
+  refusal before large copies, error/cancel cleanup и повторная capture.
+- Проверить actual payload data-drop gate: пока destructor данных удерживается,
+  второй reserve ещё отклоняется. После release весь charge доступен. Permit
+  last field и construction locals order подтверждаются реальными объектами.
+- Тесты не закрепляют platform-dependent numeric struct sizes: boundary charge
+  берётся из captured payload, а значения/идентичности — из SQL fixture.
+- Verify focused payload/policy/metadata, полный cli-full, lean relevant suites,
+  full/lean all-target+opt-in Clippy/fmt/diff; свежий task reviewer. Whole feature
+  final/native gates сохраняются. Actual consumers/revision/dispatch ещё pending.
+
+## Delta 2026-11-10 — S3.4: owned response consumers
+
+- Изменить src/daemon/tools.rs, src/daemon/server.rs, src/cli/search.rs,
+  src/search/settings.rs; создать src/daemon/search_payload_tests.rs;
+  расширить tests/cli_read.rs и tests/ipc_server.rs реальной global-policy
+  admission через CLI subprocess/daemon wire (isolated per-process config).
+- Consumes OwnedPayload/PayloadBudget/Cancellation. Produces SearchContext,
+  search_docs_in и private owned PreparedSearch/finish без metadata handles.
+- RED: missing new context/prepare API; real SQL/Tantivy fixture и fake reranker.
+  После prepare закрыть Db и получить прежние texts/citations/filter/generation.
+  Изменить SQL во время provider и проверить целиком прежний payload.
+- Проверить explicit tiny request refusal до provider, actual aggregate
+  contention при gated rerank, release+retry после success/error/unwind,
+  cancellation до/после prepare и после provider. Только gates/watchdogs.
+- Production daemon использует один shared global search policy budget; CLI
+  direct использует config.search. Compat adapter разрешает SearchSpec явно.
+- Сохранить exact provider candidate order/top_n, фильтры/dedupe/snippet,
+  missing-doc behavior и legacy wire; limit0 не резервирует payload.
+- Verify focused owned consumers и existing ranking/search-ux/config suites,
+  full cli-full, lean relevant tests, full/lean all-target+opt-in Clippy/fmt/diff.
+  Fresh task review перед commit. S3.5/S4 и whole-branch/native gates ещё pending.
+
+S3.4 validation addition: tests/config_runtime.rs readiness helper accepts only
+transient Project states until a real success under the existing watchdog;
+explicit pending-marker IPC refusal/recovery added. Preserve all watcher/reopen
+assertions. Full-pending-contract-red.log is the actual prior failure evidence.
+
+S3.4 same-shape validation audit: tests/support/search_visibility.rs is included
+by config_runtime, mcp_registry, admission_ux and soak; adapt existing polling
+refusal classification without dropping assertions or increasing watchdogs.
+Actual MCP full-suite pending-marker failure retained as additional RED evidence.
+
+S3.4 additional validation: run existing nightly soak with SOAK_SECS=10 to
+exercise its changed search-readiness classification; this does not change the
+nightly job, ignored status or its acceptance thresholds. Local full command
+uses --no-fail-fast to collect every target in one pass, preserving all checks.
+
+## Delta 2026-11-10 — S3.5: stable runtime cell и memory invalidation
+
+- Base: S3.4 commit22019f7. Изменить src/daemon/server.rs,
+  src/daemon/project_state_tests.rs, src/hybrid/dense.rs и их local tests.
+- API: ProjectCell state/reload/preparation и with_preparation, crate-private
+  DenseCache::invalidate_memory. Contract — dated S3.5 design, без новых defaults.
+- RED до production: missing cell fields/with_preparation/invalidate_memory.
+  Проверить obsolete revision без work, current revision, error/unwind release,
+  state/preparation free при gated model construction, reload serialisation и
+  active preparation blocking publication без state-mutex hostage.
+- Preserve failure/obsolete-lazy-builder tests #76; добавить reload panic/recovery.
+  Семантически changed reload очищает resident identity, unchanged сохраняет;
+  query cache/last outcome/persisted ANN и worker reservation сохраняются.
+  Late invalidated worker не публикует graph и не освобождает charge раньше конца.
+- Gated delayed old ANN refresh отвергается после реального reload до warm;
+  cleanup и configured readonly policy tests сохраняются. Только private hooks,
+  channels/gates и watchdog на failure, без sleeps для ordering.
+- Verify focused state/dense/refresh + old integrations, full cli-full, lean
+  relevant scopes, full/lean all-target+opt-in Clippy/fmt/diff. Fresh task review
+  перед commit; source findings только через отдельного implementer.
+- Actual search pool/cross-store/cancellation/dispatch/timing и whole-feature
+  required native CI остаются отдельными шагами до delivery.
+
+## Delta 2026-11-10 — S3.6a: one request budget, before pool adoption
+
+- Base4a5c28f. Modify src/search/{settings,mod}.rs, src/config/mod.rs doc,
+  tests/search_payload_budget.rs and explicit payload-test policy fixtures;
+  add src/search/operation.rs and operation_tests.rs. Update owned settings
+  inventory. No new crates, transport/schema/ranking/baseline changes.
+- API: SearchSettings/SearchPatch.request_timeout_ms; SearchOperation::new(
+  &SearchSettings, original_start:Instant, Cancellation)->Result<Self>.
+  Accessors started_at/deadline/cancellation, check/remaining/elapsed.
+- RED missing policy/context API. Inject Instant values in private check_at/
+  remaining_at/elapsed_at helpers: exact deadline, queued elapsed time, clones
+  cannot reset budget, cancellation wakes request token, independent requests,
+  checked overflow and invalid imported policy. No sleeps or timing SLA.
+- Real config tests: default30000/Daemon/Milliseconds provenance, timeout-only
+  override preserves byte defaults, partial byte policy preserves timeout,
+  project file/typed patch rejects daemon override; inherited global snapshot,
+  zero/negative/unknown rejection and unchanged legacy config JSON.
+- Verify focused operation/policy/config, full cli-full, lean operation/config/
+  existing consumers, full/lean all-target+opt-in Clippy/fmt/diff. Fresh task
+  reviewer required before commit; controller delegates reviewer fixes.
+- Pool/core adoption and S4 timer/transport/dispatcher/telemetry plus native
+  acceptance remain pending. Primitive alone is not independently shippable.
+
+## Delta 2026-11-10 — S3.6b: pooled core and guarded dense admission
+
+- Basebf450f1. Modify src/store/read_pool.rs; add src/search/metadata.rs;
+  modify search/mod.rs, daemon/{tools,server}.rs, hybrid/dense.rs, cli/search.rs;
+  add daemon/search_phase_tests.rs and hybrid/dense_admission_tests.rs. Adapt
+  existing owned-consumer Context constructors and persisted-status fixtures;
+  tests/read_pool.rs, tests/ipc_server.rs and shared readiness classifier.
+- Consumes complete operation/payload policy, prepared ReadPool, ProjectCell
+  revision gate and OS read lease. Produces MetadataSource/MetadataReader,
+  pool.try_acquire/cache_root, checked preparation guard, guarded lazy dense
+  get/warm and search_docs_from. Compatibility signatures search_docs_with and
+  search_docs_in remain; new Context is unpublished within this branch.
+- First meaningful RED on existing production: pause real reranker through
+  async call_tool dispatcher, observe Shared.db.try_lock fails, release/join
+  before assertion. After implementation same-project lexical/status/list must
+  complete before release; cap1 pool, config gate and writer lease are free.
+- MissingAPI RED for try_acquire/metadata/guarded dense; actual SQLite readonly,
+  exhaustion/release/error/unwind/quarantine without elapsed wall-time tests.
+- Gate embedding with cap1: no SQL/global Db/preparation/file hostage; actual
+  sync generation change or config reload before resumption gives retry, no
+  mixed payload/obsolete resident publication. Invalid BM25 query calls no
+  embedding. Existing rerank-time old-payload result remains unchanged.
+- Dense leader/follower gates prove follower holds no admission guard while
+  waiting, one cold loader, leader cancellation retains work for live follower,
+  obsolete admission refuses before loader and no registry/gate deadlock.
+- Real cooperative writer/IPC refusal and recovery; narrow transient-test
+  classification keeps original deadlines, fatal categories and actual success.
+- Explicitly persist Indexed in existing inconsistent fixtures; retain counts,
+  assertions/golden/provider windows/budgets. Source identity, limit0 and exact
+  fallback behavior preserved. No new crates/unsafe/global hooks/defaults.
+- Verify focused new phase/dense/pool suites, existing ranking/visibility/config
+  integration, full cli-full, relevant lean scopes, full/lean all-target+opt-in
+  Clippy/fmt/diff. Fresh task review before commit, delegated reviewer fixes.
+- S3.6c refresh adoption and S4/final/native requirements remain separate and
+  mandatory before the one whole-S3/S4 draft PR becomes deliverable.
+
+S3.6b timing regression also covers limit0: existing envelope/window/stages stay,
+but total includes injected original queue history, with no real wait/SLA.
+
+S3.6b full-suite addition: correct tests/support/bench.rs::build_env persisted
+index status (same fixture shortcut), preserve frozen inputs/recordings/baseline;
+focused benchmark/external and lean benchmark validate this changed harness.
+
+## Delta 2026-11-10 — S3.6c: background refresh source adoption
+
+- Base437242b. Modify src/daemon/server.rs and its inline refresh fixture/tests,
+  plus pub(super) visibility of tools snapshot_info/capture_dense. No new crate,
+  policy/default, schema/protocol/ranking/provider/threshold change.
+- Shared.readers becomes Arc<ReadPool>, read_pool() signature remains &ReadPool.
+  Refresh captures this pool, current cell/config, owned project/model and dense
+  snapshot. Scalar try_acquire scope ends before guarded lazy warm; loader uses
+  the shared checked prepared-source helper. Cleanup on skip/stale/busy/error.
+- First meaningful RED on existing code: exhaust actual prepared pool and
+  refresh; old unpooled open calls the observer. Release/join before assertions;
+  new code must not call metadata observer and must clean stale artifacts.
+- Capacity1 actual warm regression, explicit exact-only cache and one seeded
+  vector: result retained without invoking a later fallback loader, proving
+  scalar lease released before lazy metadata. Private fixture policy constructor
+  may receive both complete resolved policies; wrappers use owner defaults.
+- Adapt existing private warm callbacks to actual Db metadata observation,
+  return Ok rather than performing a duplicate warm. Preserve every existing
+  config/readonly/error/gate/skip/threshold/stale cleanup assertion.
+- Verify focused refresh/state/core/dense/visibility, full cli-full, relevant
+  lean scopes and full/lean all-target+opt-in Clippy/fmt/diff. Fresh task review
+  before commit; controller delegates findings.
+- Remaining S4 and whole-feature final/current-head native gates still pending;
+  PR112 remains draft. Source helper reuse does not complete cancellation.
+
+## Delta 2026-11-10 — S4.1: shared phase interest
+
+- Base84c4134. Modify src/hybrid/flight.rs, dense.rs and existing
+  dense_admission_tests.rs. No new files/crates/unsafe/defaults/public API.
+- Before production code: gated real cold metadata with two callers, cancel
+  both before release, join/release before asserting no cache publication and
+  no retained flight; original code must fail for materializing cancelled work.
+  A later active request must actually initialize successfully.
+- Add private group-interest/typed-abandonment checked-work API; preserve run
+  adapter. Carry it through cold metadata and vector/ANN phase boundaries.
+  Ordinary errors are shared without retry, no per-leader cancellation.
+- Deterministic late-admission test at between-phase retirement covers caller
+  joining before retirement and caller selected before but registered after it;
+  both retry, exactly one live work execution and no leaked flight/listeners.
+- Verify focused flight/query/dense and daemon phases/refresh, full cli-full,
+  relevant lean hybrid/routing/integration/config and full/lean all-target plus
+  opt-in Clippy/fmt/diff. Frozen113 inputs unchanged. Fresh task review before
+  commit; delegate findings. Remaining S4/final/native gates stay pending.
+
+## Delta 2026-11-10 — S4.2a: persistent bounded frame reader
+
+- Basea2b03c5. Create src/ipc/framing.rs, register private module in ipc/mod.rs;
+  replace local daemon Frame/read_frame with the helper in daemon/server.rs.
+- Before production edits, manually-poll/drop a partial actual old read and
+  resume it on the same buffered duplex transport. Must fail because the prefix
+  was lost, not timeout/compile. Move regression to new helper module, changing
+  only construction/call to own per-connection frame state; retain expected bytes.
+- Preserve exact protocol cap, newline/EOF/incomplete/error behavior. Pending
+  bytes survive every future drop; copying/consume has no cancellation point.
+  No public API/default/config/crate/unsafe or active-call cancellation yet.
+- Verify framing regression, actual IPC/framing/frontend/routing, daemon core
+  and refresh, full cli-full; relevant lean scopes and full/lean all-target+
+  opt-in Clippy/fmt/diff, frozen113 inputs. Fresh review before commit, delegate
+  findings. S4 driver/accounting/frontend/telemetry/final/native still mandatory.
+
+## Delta 2026-11-10 — S4.2b: deadline and actual job accounting
+
+- Base76b0c0b. Modify daemon/{server,lifecycle}.rs; create private daemon request
+  driver/activity module with unit tests; extend daemon/search_phase_tests.rs.
+  No crates/unsafe/new timeout/default/wire/config or provider/ranking changes.
+- RED actual call_tool dispatcher: pause embedding, abort/await caller task,
+  release provider, drain runtime before assertions. Existing code runs a real
+  counting reranker despite caller abandonment; new code must not.
+- Add original-deadline driver with cancellation-on-drop and private injected
+  expiry future. Production uses original absolute sleep_until, no per-phase
+  timeout/retry reset. Keep compatibility call_tool entry for existing tests.
+- Shared request activity owns counter/event sender/admitted permit Arc; outer
+  connection retains through reply and actual blocking worker retains through
+  completion/error/unwind. One in_flight increment per request, one connection
+  permit; timer does not free actual-job charge. Close after timed-out search.
+- Deterministic gates/injected expiry verify live sync work survives timeout
+  while token cancels, counter/permit stays until actual work AND reply finish,
+  cleanup on error/unwind, and no leaked event/accounting. Group live follower
+  behavior remains covered. Preserve legacy session/wire/half-close semantics.
+- Verify focused driver/core/refresh/wire/lifecycle, full cli-full and relevant
+  lean scopes/full+lean all-target/opt-in Clippy/fmt/diff; frozen inputs. Fresh
+  review before commit, delegate findings. Scoped active EOF/wire deadline/
+  frontend original budget+retry/queue/docs/wholefinal/native remain S4.3.
+
+## Delta 2026-11-10 — S4.3a: scoped daemon transport and diagnostics
+
+- Base507f223. Modify ipc/protocol.rs, search/{operation,operation_tests,
+  metadata}.rs, hybrid/meta.rs, daemon/{server,tools}.rs; create scoped daemon
+  tests, adapt Hello constructors/tests and add only necessary async platform
+  connect seam in platform/{mod,unix,windows}.rs. No crates/unsafe/new policy.
+- First RED actual daemon Hello lacks search-context-v1; no API-typo failure or
+  waiting on a provider for an unsupported method. Then budget/context and wire
+  tests precede their production changes. Existing CallTool helpers stay valid.
+- Add explicit scoped context, default-empty advertised capabilities and owner-
+  clamped operation/queue state. Refuse invalid/expired before provider. Reuse
+  Activity, existing absolute timer and persistent bounded framing.
+- Scoped EOF/session/deadline cancels only caller; pending second complete frame
+  refuses/closes, no new job. Bound response write by the same deadline with no
+  extra error-delivery timeout. Preserve legacy half-close and shutdown drain.
+- Explain queue_ms and original total, including limit0, via additive metadata
+  adapters; no SearchMeta struct/signature break or default array/ranking change.
+- Test real transport/provider gates, capacity/reply ownership, clock-injected
+  original context/queue and old-peer compatibility. All waits have safety
+  watchdogs, no new ordering sleeps or host-relative performance assumptions.
+- Verify focused new operation/scoped/wire/metadata and existing daemon/flights/
+  lifecycle, full cli-full, relevant lean and full/lean all-target+opt-in lint/
+  fmt/diff, frozen113. Fresh review before commit; delegate findings. S4.3b and
+  whole-feature final/current-head native gates remain mandatory before delivery.
+
+## Delta 2026-11-10 — S4.3b staged canonical client adoption
+
+- S4.3b1 (base4c63610): add ipc/async_client.rs and export from ipc/mod.rs;
+  asynchronous native connection/exchange/Hello/session/tool helpers, poisoned
+  connection on interrupted IO, capability-required scoped search and original
+  budget driver/queue context/explain total. Preserve blocking Client API.
+  TDD missing new API then real native fake-daemon contexts/capability refusal/
+  dropped exchange/expiry/metadata, generous watchdogs and injected expiry.
+  Full cli-full plus focused full/lean async client/wire, full/lean all-target+
+  opt-in lint/fmt/diff, frozen113; fresh task review, delegate findings.
+- S4.3b2 after b1: MCP async connection lease and original budget through startup/
+  mutex/reconnect, complete owner policy and actual rmcp cancellation signal;
+  one live-budget transport retry, no cancelled/expired paid replay. Test real
+  IPC cancellation, serialization ownership, old capabilities, retry and existing
+  unbound/index/rebind/registry behavior. Prove/duplicate-check CappedRead candidate
+  before changing it. Full/lean relevant and required checks/fresh task review.
+- S4.3b3 after b2: CLI scoped search/async bridge, original policy and direct-mode
+  fallback contract, actual native tests and product documentation. Full/lean
+  relevant checks/fresh task review. Then mandatory whole-branch fresh final
+  review and docs/linux/macos/windows on final head; only then ready/merge.
+- Ruling: these are bounded stages of the already mandatory S4.3b, not separate
+  feature deliveries. PR112 remains draft and #66 remains open throughout;
+  no intermediate native result substitutes for final-head acceptance.
+
+### Delta 2026-11-11 — B2 frame boundary probe before frontend adoption
+
+For S4.3b2, modify src/mcp/frontend.rs and add its private unit test module
+src/mcp/frontend_frame_tests.rs. First exercise actual CappedRead using the
+actual MAX_FRAME_BYTES+1 payload plus newline in one native AsyncRead poll;
+expect InvalidData, preserve the old implementation until observed RED. If
+confirmed, inspect all existing open/closed issues before filing, then fix by
+checking pending length as each non-delimiter byte is counted, before a later
+newline can reset it. Preserve exact-limit acceptance and fragmented/multiple
+frame semantics with deterministic tests/watchdogs. No new limit/default or
+unbounded-DoS claim. This bounded correction stays in b2; all canonical caller
+work, full checks and fresh review remain mandatory before committing the stage.
+
+### Delta 2026-11-11 — B2 MCP caller tests and composition files
+
+Modify src/mcp/frontend.rs, add private src/mcp/frontend_proxy_tests.rs, and
+adapt tests/mcp_frontend.rs fake to advertise/serve scoped calls while retaining
+an explicit legacy-capability fixture. First prove old Frontend still sends
+legacy search to an incapable daemon with an actual native fake listener.
+Then test original policy, actual rmcp cancellation, serialized connection lease,
+startup/queue/reconnect budget and no expired paid replay. Use complete policy
+constructor for tests and Config::global at normal startup; compatibility new()
+explicitly obtains owner SearchSpec defaults. No global test environment hooks.
+Non-search tools retain existing catalogue budgets/queue behavior; async control
+operations use that same owner quick budget, not a new local timeout constant.
+
+## Delta 2026-11-11 — S4.3b3 CLI and documentation execution
+
+Base8312ed6. Modify src/cli/search.rs, add private src/cli/search_tests.rs,
+adapt tests/cli_routing.rs only as needed for scoped/native/legacy fixtures.
+Preserve generic cli/mod.rs routing API and blockingClient. TDD actual CLI old-
+capability refusal/no direct fallback on an indexed project before production;
+then missing bridge API tests for original operation, runtime safety and initial
+connection behavior. Retain explicit legacy fake; upgraded normal fake must
+advertise/serve Search and reject legacy CallTool search.
+
+Verify actualCLI scoped routing, connected errors/no fallback, no-daemon direct
+search, original expired admission before IO, plain/multithread/current-thread
+runtime behavior and complete owner policy without host-latency assertions.
+All new waits use generous watchdogs/ordering gates. Add no new sleeps/thresholds.
+Update the four named product docs; check references/commands and all frozen113.
+Full cli-full, relevant full/lean CLI/wire/operation and all-target+opt-in lint/
+fmt/diff; fresh task review, delegate findings. Then fresh whole-branch final
+review with FR/SC/task mapping and four final-head native checks before ready/
+squash merge. No intermediate native success replaces final acceptance.
+
+## Delta 2026-11-11 — S4.3c native Windows connection admission
+
+Baseb9d0355. First add a private Windows platform regression in windows.rs only,
+with no production change. Run on actual Windows CI and archive its expected
+Pending-vs-Ready failure before the fix. Then implement safe raw no-wait async
+connect and busy-aware no-wait connect_probe; keep blockingClient unchanged.
+Add real native probe/available/absent/invalid tests. Native tests use actual
+handles and a gated worker rather than sleeps/timing assertions. Verify full
+cli-full, relevant full/lean platform/wire/lifecycle and lint/fmt/docs, then
+fresh task review. Final latest-head four required checks and scoped whole-
+feature acceptance remain mandatory; previous final review does not cover
+this newly added bounded task. Duplicate-check all existing issues before any
+new leaf filing. No native reproduction claim until its actual run completes.
+
+### Delta 2026-11-11 — S4.3c no-consumption probe regression
+
+Before further production changes, add actual idle one-instance pipe test:
+probe presence must not consume the instance before an immediate real client
+open. Add NUL-prefix negative control with a live valid prefix. Observe native
+RED; only then implement the narrow validated WaitNamedPipeW NOWAIT adapter in
+platform/windows.rs and enable the existing windows-sys System_Pipes feature.
+Keep generic blocking and raw async ZERO behavior, original deadlines and one
+MCP transport retry. Revalidate current full/lean, actual native and fresh review.

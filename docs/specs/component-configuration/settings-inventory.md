@@ -132,6 +132,24 @@ Literal retrieval defaults в `parse_search_args` и CLI — один будущ
 | I67 | local instance maps / model VERIFY_MEMO без отдельного size/TTL setting | local manager; D/Pr | закрытый registry ограничивает нынешние identities; перед hot reload расширенных settings нужны retained-handle accounting и bounded retention; R/E/I |
 | I66 | search active/pending, provider in-flight, interactive/background priorities, deadline context сейчас не определены как settings | executor/providers; D/Pr | owning #66/#79/#81 задают и тестируют до ввода consumers; не притворяться, что MAX_CONNECTIONS уже решает это |
 
+### Delta 2026-11-10 — #66 S3 owned payload policy
+
+| ID | Новые defaults / источник | Owner; scope | Validation / последствия |
+|---|---|---|---|
+| I70 | search.max_request_payload_bytes64MiB | search::settings::SearchSpec; D | >0, <=aggregate; global-only TOML/defaults/provenance, byte admission; без vector/index invalidation |
+| I71 | search.max_retained_payload_bytes256MiB | search::settings::SearchSpec; D | >0; shared RAII charge, checked sum; global restart по существующей policy; не RSS cap |
+
+Это сознательно введённые runtime policies, не заимствование wire frame limit.
+Они не вычисляются из read_pool capacity. S3.2 готовит owner/budget, реальные
+SQL/pipeline consumers обязательны до whole-S3 delivery. Старый config JSON
+остаётся legacy view; versioned full effective view принадлежит #78.
+
+### Delta 2026-11-10 — S3.3 вычисляемый payload charge
+
+| ID | Значение / источник | Почему fixed/computed |
+|---|---|---|
+| X15 | std::mem::size_of для owned payload/record headers; SQL octet_length direct columns; UTF-16→UTF-8 upper bound 3*ceil(bytes/2) | Размер Rust representation и Unicode code-unit bound — вычисляемые свойства формата, не memory policy. Лимиты I70/I71 настраиваемы; logical charge не равен всему RSS. BATCH_KEYS/MAX_HITS переиспользуют прежние bounded query domains |
+
 Источники: [runtime](../../../src/hybrid/runtime.rs), [models](../../../src/hybrid/models.rs),
 [local](../../../src/hybrid/local.rs), `daemon/lifecycle.rs::run_daemon`,
 `hybrid/ann.rs::AnnIndex::build`. I63/I64 — видимый dependency-default debt,
@@ -197,3 +215,14 @@ The channel capacity1 coalesces completion/cancellation wakeups; published state
 is authoritative and is checked after waking. This is message-protocol cardinality,
 not a configurable request/work/memory budget. Active subscriptions/flights retire
 on drop/completion; no persistent failed-flight cache or hidden deadline is added.
+
+## Delta 2026-11-10 — #66 S3.6a request deadline owner
+
+`search.request_timeout_ms` adopts the deadline-context portion of I66 under
+`search::settings::SearchSpec` (daemon scope, Milliseconds). Default30000 matches
+the existing MCP quick-call budget for search. Positive u64, global-only config
+and typed provenance; construction checks platform Instant overflow. The initial
+value has exactly one owner. No per-stage/reconnect reset, index/vector
+invalidation or new provider timeout. Active/pending/provider scheduling in I66
+remains future work. Global changes require restart under the existing policy;
+S3.6a primitive alone does not activate transport cancellation.

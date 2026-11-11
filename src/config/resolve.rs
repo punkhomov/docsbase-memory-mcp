@@ -119,6 +119,7 @@ fn project_layer(resolution: &mut Resolution<ConfigSpec>, root: &Path) -> Result
                 auto_index: project.auto_index,
                 hybrid: project.hybrid,
                 providers: None,
+                search: None,
             },
         )?;
     }

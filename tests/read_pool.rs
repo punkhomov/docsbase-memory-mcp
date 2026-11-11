@@ -78,6 +78,30 @@ fn expired_caller_deadline_is_rejected_even_with_idle_reader() {
 }
 
 #[test]
+fn nonblocking_checkout_preserves_capacity_root_and_transaction_cleanup() {
+    let cache = tempfile::tempdir().expect("cache");
+    let _writer = Db::open(cache.path()).expect("writer");
+    let pool = pool(cache.path(), 1);
+    assert_eq!(pool.cache_root(), cache.path());
+    let reader = pool.try_acquire().expect("idle prepared reader");
+    assert!(matches!(
+        pool.try_acquire(),
+        Err(docsbase_memory::error::Error::Admission { .. })
+    ));
+    reader
+        .connection()
+        .execute_batch("BEGIN; SELECT * FROM projects")
+        .expect("read transaction");
+    drop(reader);
+    let replacement = pool.try_acquire().expect("same capacity returned");
+    assert!(replacement.connection().is_autocommit());
+    assert!(
+        pool.try_acquire().is_err(),
+        "one lease still consumes one slot"
+    );
+}
+
+#[test]
 fn lease_returns_after_error_and_unwind() {
     let cache = tempfile::tempdir().expect("cache");
     let _writer = Db::open(cache.path()).expect("writer");

@@ -67,6 +67,8 @@ impl Bench {
         };
         let stats = run_full(&mut db, &mut index, &project, &Config::default()).expect("run_full");
         assert!(stats.docs >= 8, "corpus indexed: {stats:?}");
+        docsbase_memory::daemon::registry::mark_indexed(&db, project.id)
+            .expect("persist indexed status");
         project.status = ProjectStatus::Indexed;
         Self {
             cache,

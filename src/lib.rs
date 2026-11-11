@@ -11,6 +11,7 @@ pub mod ipc;
 pub mod limits;
 pub mod mcp;
 pub mod platform;
+pub mod search;
 pub mod store;
 pub mod vcs;
 pub mod vector_cache;
