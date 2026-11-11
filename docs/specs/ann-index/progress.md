@@ -477,3 +477,15 @@
   Ruling: final re-review — both Important findings ADDRESSED, no new
   Critical/Important findings; final verdict converged, deferred minors none.
   Full-suite and Linux/macOS/Windows/feature checks: PR #83 close-out evidence.
+
+
+- Task T24: complete (2026-11-11, #109 observability slice).
+  Ruling: Linux investigation did not reproduce the macOS0.945 failure;
+  runtime/build/search parameters and threshold0.99 remain unchanged.
+  Actual failing graph/queries/hits are captured through the public store,
+  with explicit no-rebuild replay and fail-on-first-failure manual macOS stress.
+  Rust1.88 cli-full:1201 passed,16 ignored,71 groups, unchanged benchmark gate;
+  fmt/all-targets clippy clean. Real capture/drop/reload control passed;
+  explicit replay positive1.000 passed and negative0.000 failed as expected.
+  Ruling: fresh task review PASS/APPROVED, no findings/deferred minors.
+  Required native checks and final review remain PR close-out. #109 is open.

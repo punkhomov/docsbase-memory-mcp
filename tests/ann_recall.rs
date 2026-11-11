@@ -17,6 +17,9 @@ use support::ann::{cluster_vectors, interleaved_rows};
 
 mod support;
 
+#[path = "support/ann_capture.rs"]
+mod capture;
+
 const DIM: usize = 64;
 const PER_CLUSTER: usize = 2500;
 
@@ -52,19 +55,98 @@ fn build_search_recall_on_separated_clusters() {
     let rows = interleaved_rows(&a, &b);
     let ann = AnnIndex::build(&rows, DIM).expect("build");
 
-    let mut cluster_a_hits = 0usize;
-    let mut total = 0usize;
-    for vector in a.iter().take(100) {
-        let hits = ann.search(vector.as_ref(), 10).expect("search");
-        assert_eq!(hits.len(), 10);
-        cluster_a_hits += hits.iter().filter(|(id, _)| id % 2 == 0).count();
-        total += 10;
+    let observations: Vec<_> = a
+        .iter()
+        .take(100)
+        .map(|vector| capture::Observation {
+            query: vector.to_vec(),
+            hits: ann.search(vector.as_ref(), 10).expect("search"),
+        })
+        .collect();
+    let recall = cluster_a_recall(&observations, 10);
+    if recall < 0.99 || observations.iter().any(|o| o.hits.len() != 10) {
+        let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/ci-observations/ann-recall");
+        match capture::save(&parent, &ann, &key(), 10, &observations) {
+            Ok(bundle) => eprintln!("ANN recall failure bundle: {}", bundle.display()),
+            Err(error) => eprintln!("ANN recall failure capture failed: {error}"),
+        }
+        for (i, observation) in observations.iter().enumerate() {
+            if observation.hits.len() != 10 || observation.hits.iter().any(|(id, _)| id % 2 != 0) {
+                eprintln!("query {i}: {:?}", observation.hits);
+            }
+        }
     }
-    let recall = cluster_a_hits as f64 / total as f64;
+    assert!(observations.iter().all(|o| o.hits.len() == 10));
     assert!(
         recall >= 0.99,
         "recall@10 on separated clusters too low: {recall}"
     );
+}
+
+fn cluster_a_recall(observations: &[capture::Observation], fetch: usize) -> f64 {
+    let hits = observations
+        .iter()
+        .flat_map(|o| &o.hits)
+        .filter(|(id, _)| id % 2 == 0)
+        .count();
+    hits as f64 / (observations.len() * fetch) as f64
+}
+
+#[test]
+fn failure_capture_replays_the_saved_graph_and_queries() {
+    let rows = vec![
+        (0, Arc::from(vec![1.0_f32, 0.0])),
+        (1, Arc::from(vec![-1.0_f32, 0.0])),
+    ];
+    let ann = AnnIndex::build(&rows, 2).expect("build");
+    let query = vec![1.0, 0.0];
+    let observations = vec![capture::Observation {
+        hits: ann.search(&query, 2).expect("search"),
+        query,
+    }];
+    let mut key = key();
+    key.dim = 2;
+    key.chunk_count = 2;
+    let parent = TempDir::new().expect("capture parent");
+    let bundle = capture::save(parent.path(), &ann, &key, 2, &observations).expect("capture");
+    drop(ann);
+    let (saved, replay) = capture::load(&bundle).expect("load capture");
+    assert_eq!(saved.observations, observations);
+    assert_eq!(saved.fetch, 2);
+    assert_eq!(saved.meta.key(), key);
+    for observation in &saved.observations {
+        assert_eq!(
+            replay
+                .search(&observation.query, saved.fetch)
+                .expect("replay"),
+            observation.hits
+        );
+    }
+    assert!((cluster_a_recall(&saved.observations, 2) - 0.5).abs() < f64::EPSILON);
+}
+
+#[test]
+#[ignore = "requires an explicit captured ANN bundle; never rebuilds the graph"]
+fn replay_captured_separated_cluster_failure() {
+    let bundle = std::env::var_os("DOCSBASE_ANN_REPLAY_BUNDLE")
+        .expect("set DOCSBASE_ANN_REPLAY_BUNDLE to the failure directory");
+    let (saved, ann) = capture::load(std::path::Path::new(&bundle)).expect("load capture");
+    assert_eq!(saved.fetch, 10, "separated-cluster capture contract");
+    assert_eq!(saved.observations.len(), 100, "original query count");
+    let replayed: Vec<_> = saved
+        .observations
+        .iter()
+        .map(|observation| capture::Observation {
+            query: observation.query.clone(),
+            hits: ann.search(&observation.query, saved.fetch).expect("replay"),
+        })
+        .collect();
+    let before = cluster_a_recall(&saved.observations, saved.fetch);
+    let after = cluster_a_recall(&replayed, saved.fetch);
+    eprintln!("captured recall={before:.3}; replay recall={after:.3}");
+    assert!(replayed.iter().all(|o| o.hits.len() == saved.fetch));
+    assert!(after >= 0.99, "replayed recall@10 too low: {after}");
 }
 
 #[test]

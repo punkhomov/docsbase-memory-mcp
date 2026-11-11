@@ -400,3 +400,20 @@ invalidation, stale completion и возврат бюджета после ус�
 учётный cap cache-owned состояния и build working sets, не hard RSS bound:
 внешние query snapshots и transient concurrent cold loads остаются вне этой
 дельты (связанные #66 / #78).
+
+## Delta 0.6 — 2026-11-11: воспроизводимость recall-сбоя (#109)
+
+SC-9 / NFR-2: падение separated-cluster проверки сохраняет уже построенный
+ANN-граф и фактические100 query vectors/hit IDs/scores в CI artifact. Порог
+cluster-membership>=0.99 и10 результатов на запрос сохраняются; эта метрика
+не заменяет existing exact-neighbour recall tests. Успешный прогон не пишет
+bundle. Ошибка диагностики не превращает quality failure в успех.
+
+Explicit ignored replay загружает bundle без rebuild и проверяет ту же
+quality guarantee. Manual-only native macOS stress ограничен1..50 полными
+исполнениями ann_recall и прекращается с failure при первом сбое. Он не
+заменяет required native suite и не является retry-until-green механизмом.
+
+Это observability milestone, не исправление #109. Причина macOS0.945 пока
+не установлена; Linux stress без сбоев не доказывает её устранение. Runtime
+параметры, graph/AnnKey format, invalidation, настройки и ranking не меняются.
