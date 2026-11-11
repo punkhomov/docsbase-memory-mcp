@@ -98,6 +98,8 @@ docsbase models use rerank fastembed/jina-reranker-v1-turbo-en
 Поиск по умолчанию использует прежний синтаксис запросов. Для обычного текста
 со знаками используйте `--query-mode literal`; в MCP — `query_mode: "literal"`.
 [Контракт режимов](docs/MCP.md#query-interpretation) описывает операторы и совместимость daemon.
+[Парный замер SciFact](docs/specs/search-benchmark/reports/scifact-query-modes-2026-11-11.md)
+сохраняет ошибки, улучшения и потери retrieval в обоих режимах.
 
 
 ## Установка

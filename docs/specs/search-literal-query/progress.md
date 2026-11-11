@@ -105,3 +105,31 @@ specPASS/qualityAPPROVED/no findings or deferred minors. Evidence scratch/issue-
 Ruling: this clean reviewed source/harness commit is the measurement pin. Real
 SciFact300case Syntax/Literal report pair starts only after committing this task;
 query counts/error IDs/input/profile/source hashes will be checked independently.
+
+Task LQ3b: measured pair ready for review. Actual commands ran separately on clean
+source/harness645485b739b042e468d006dd7288c0bb75a47e8a, release/cli-full/Rust1.88/
+Linux x86_64, networknone, Bm25/cap0/spent0/requests0. Same5183docs/1109rawqueries/
+300positive IDs, raw3BLAKE3/derivedhash/split/adapter1/tokenizer7 as old report.
+Independent runtime/harness BLAKE3 plus SHA256 source snapshots/gitclean/HEAD
+checked before/after both. Syntax summary exactly matches historical211hits/
+89misses/7errors at1232/1280/1320/279/42/744/993; Literal217hits/83misses/0errors.
+Ruling:1280 still misses; Literal also gains1041/1259 and loses514/551 among
+previously valid Syntax cases. All300cases and18 changed metrics (282same) remain
+visible. Explicit literal semantics do not promise per-query dominance; no query/
+qrels/ranking/budget/baseline tuning or case exclusions to conceal losses.
+Both generated JSONs copied byte-identical to new report paths; historical files
+untouched. New MD records dataset source/license/fetch, exact pins/profile,
+all7error outcomes, all11otherchanged cases, timing limits and honest scope.
+Metadata-only changes since measurement pin; no runtime/harness/source edits.
+Evidence scratch/issue-87/lq3b/{paired-proof,root-comparison-audit}.json and rawlogs.
+Fresh report/doc task review and whole-feature/native acceptance remain pending.
+
+Task LQ3b: complete (report/docs implementation; sourcepin645485b, metadata commit
+contains this line). Fresh report reviewer specPASS/qualityAPPROVED/no findings.
+Independently recomputed600 case metrics from raw qrels/ranks and both summaries,
+all inventories/18changes/raw3/runtime/harness BLAKE3/305-file SHA256 source snapshot,
+exact generated-report copies and protected old2reports/113inputs. No deferred
+minors. No source/harness changes since actual clean paired measurements.
+Ruling: global feature acceptance remains pending: whole-feature most-capable
+review and docs/linux/macos/windows on the final reviewed head before readiness/
+normal squash. Report task completion does not claim those later gates passed.

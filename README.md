@@ -99,6 +99,8 @@ Everything above works fully offline after the explicit fetch steps.
 Search defaults to the existing query syntax. Use `--query-mode literal` for
 natural-language punctuation; MCP accepts `query_mode: "literal"`. See
 [query interpretation](docs/MCP.md#query-interpretation) for operators and daemon compatibility.
+A [paired SciFact evaluation](docs/specs/search-benchmark/reports/scifact-query-modes-2026-11-11.md)
+records parser errors, retrieval gains and losses for both modes.
 
 
 ## Install

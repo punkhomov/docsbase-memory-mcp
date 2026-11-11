@@ -473,3 +473,15 @@ converged after its one Important BM25-minimum finding was ADDRESSED;
 no new Critical/Important and no deferred minors. Fifth complete SciFact
 release measurement on reachable ef96df0 preserves all 300-case quality;
 final report source identity refreshed. Hosted CI status is maintained in PR.
+
+
+## Delta 2026-11-11 — #87 measured explicit query-mode pair
+
+Actual full SciFact test Syntax/Literal reports measured on clean reviewed
+source/harness645485b739b042e468d006dd7288c0bb75a47e8a, Rust1.88 release/cli-full,
+Linux x86_64, networknone/Bm25/cap0/spent0/requests0. Same5183docs/1109queries/
+300positive IDs/raw3BLAKE3/derivedhash as historical report. Syntax summary exactly
+unchanged:211hits/89misses/7errors. Literal217hits/83misses/0errors; original1280
+still misses; two new misses514/551 and gains1041/1259 retained.18case metrics
+changed;282identical. No tuning or frozen gate/fixtures/oldreport edits. Full
+paired JSONs and interpretation: reports/scifact-query-modes-2026-11-11.md.

@@ -67,6 +67,8 @@ their existing contract. Supported sync/async tool helpers negotiate literal;
 low-level `Client::call(Request)` / `AsyncClient::call(Request)` leave capability
 negotiation to the caller.
 
+Measured comparison, including retrieval gains and losses: [SciFact Syntax/Literal](specs/search-benchmark/reports/scifact-query-modes-2026-11-11.md).
+
 ## Scores
 
 `score` has different scales. The default array does not label the scale;
