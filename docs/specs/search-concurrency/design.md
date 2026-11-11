@@ -919,3 +919,13 @@ One manual poll must return Ready with busy error; old code returns Pending.
 Drop that future and both pipe handles before releasing the worker, then join
 and drop the runtime before asserting. This proves the boundary without a
 host latency threshold or leaving an indefinite worker behind in RED.
+
+### Delta 2026-11-11 — native probe fixture teardown contract
+
+An absent endpoint means no kernel pipe instance, not merely logical Drop of
+Tokio wrappers. Mio retains Arc-owned handles for pending IO completion; Drop
+cancels operations but their completions release those references later. Test
+busy presence while occupied and true absence on a never-created unique name.
+The existing transport removal regression joins its server/runtime before
+checking absence. Do not impose immediate name disappearance after wrapper Drop
+or add a sleep/timing allowance to make that invalid contract pass.

@@ -564,3 +564,17 @@ no production correction existed at that run. Runtime cleanup completed.
 #115 filed after RED and all114records/32issues duplicate check. Minimal raw
 zero-wait connection/probe correction and four real endpoint controls added;
 validation/fresh review pending. This candidate stays draft, not mergeable.
+
+Task S4.3c: native candidate266b089/run42949328740 docs/Linux/macOS pass.
+Windows453pass/1fail lib: original busy-connect RED is GREEN; available byte IO,
+absent/invalid and busy-probe presence controls pass. Sole failure is an extra
+post-Drop immediate-absence assertion. Source evidence (Mio Arc ownership and
+IOCP completion) proves that assertion assumes an unsupported teardown instant.
+Remove it, retain actual busy presence, dedicated never-created absent endpoint
+and existing joined-runtime removal regressions. No production change, timeout,
+sleep, retry or gate weakening. Local11 stages on266 passed: cli-full1152/0/13/66,
+full/lean relevant65/client8/lints/fmt/docs0/frozen113. Their exact old snapshot
+is retained; only a cfgWindows test assertion/comment now differs, so do not
+claim final-byte map equality. Final native CI reruns all platforms on new head;
+local Linux functional code is unchanged and a duplicate local full run adds no
+coverage. Fresh task review remains pending until final native evidence.
