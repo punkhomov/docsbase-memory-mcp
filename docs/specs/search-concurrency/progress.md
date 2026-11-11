@@ -597,3 +597,28 @@ platform function, enables existing windows-sys System_Pipes feature only.
 No crate/version/lock change, generic blocking or async ZERO change, extra MCP
 retry, hidden application timeout, sleep or quality gate relaxation. Native
 GREEN/full validation and fresh review remain pending; this is a draft candidate.
+
+Task S4.3c: complete (baseb9d0355..bbeac6b; bounded Windows async admission and
+non-consuming liveness). Actual busy-connect RED3fa6ae7/Pending is corrected by
+safe raw ZERO admission. Actual no-consumption RED608ef34/code231 is corrected
+by the narrow documented Win32 NOWAIT probe, validated UTF16/NUL guard and
+existing windows-sys System_Pipes feature. Seven real native platform controls
+pass; actual MCP project_error_has_instruction passes. An earlier extra immediate
+absence-after-wrapperDrop assertion was explicitly corrected using Mio pending
+IOCP ownership evidence; true absent/joined-runtime coverage remains. No retry,
+sleep, spin, new crate/version/lock or quality-budget change.
+Final11 local stages all0 on the exact168Rust AND Cargo.toml/Cargo.lock manifests:
+cli-full1152passed/0failed/13ignored across66targets; full/lean relevant65across8
+targets,client8,full/lean all-target+opt-in Clippy/fmt/diff/docs0. All113frozen
+inputs unchanged. Actual source nativebbeac6b/run42953737372 docs/Linux/macOS/
+Windows SUCCESS: cli-full1152/1148/1140,0failed13ignored; Linuxstaticartifact2.
+Inventoryadds12/12/19versus831,none removed; rawlastsummary counts, artifact
+digests and testedPRmerge TREE equality to head independently checked. Fresh
+task review Spec PASS/Quality APPROVED, no findings or deferred minors; reviewer
+independently inspected evidence without rerunning tests or editing source.
+Task S4.3c: Ruling: record this reviewed completion in a metadata-only commit;
+all168Rust and Cargo manifests remain byte-identical to reviewed/testedbbeac6b.
+The resulting latest head still requires all4native checks again, then original
+whole-feature reviewer's supplemental acceptance of the new bounded task and
+final SC-4 evidence. This source-task completion is not feature convergence or
+merge approval. #66/#114/#115 remain open until actual accepted delivery.
