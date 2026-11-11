@@ -16,3 +16,6 @@ pub mod store;
 pub mod vcs;
 pub mod vector_cache;
 pub mod watch;
+
+#[cfg(feature = "web")]
+pub mod web;

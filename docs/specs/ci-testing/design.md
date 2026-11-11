@@ -269,3 +269,11 @@ functional cases diagnostically, record the local red gate, and require a full
 unchanged compatibility flow on a standard GitHub Ubuntu runner before close-out.
 A temporary ref using registered ci.yml can execute the exact new job before
 its own filename is registered on main; compare source/job blobs explicitly.
+
+
+## Delta 2026-11-11 — Local Web distribution
+
+The local Web specification supersedes the earlier 40 MiB executable ceiling.
+Static linking and artifact routing checks remain; executable, embedded bundle
+and compressed distribution sizes are measured without a replacement ceiling.
+The official `cli-full` profile includes `web`; lean Cargo defaults remain lean.

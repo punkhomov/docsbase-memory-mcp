@@ -175,9 +175,9 @@ fn serve_fake_connection(
                 schema_version: 1,
                 capabilities: vec![SEARCH_CONTEXT_CAPABILITY.to_owned()],
             },
-            Request::RegisterSession { .. } | Request::RegisterUnbound { .. } => {
-                Response::ToolResult { value: Value::Null }
-            }
+            Request::RegisterSession { .. }
+            | Request::RegisterUnbound { .. }
+            | Request::BindReadOnly { .. } => Response::ToolResult { value: Value::Null },
             Request::CallTool { name, .. } if name == "search_docs" => Response::Error {
                 code: -32011,
                 message: "fake daemon expects scoped search".to_owned(),

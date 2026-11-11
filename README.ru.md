@@ -40,7 +40,7 @@ scope (`x86_64-apple-darwin` — Tier 2 у upstream, Intel-железо EOL).
 Обычная Cargo-сборка сохраняет минимальный набор зависимостей. Использование
 providers включается конфигурацией; локальные модели и ONNX Runtime
 устанавливаются отдельно.
-Уже опубликованные assets alpha.5 не содержат эти providers; до исправленного
+Уже опубликованные assets alpha.5 не содержат эти providers и Web-панель; до исправленного
 релиза используйте полную сборку из исходников.
 
 ## Быстрый старт (5 минут)
@@ -81,6 +81,7 @@ $env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punk
 укажите стадии (все шаги provisioning офлайн-безопасны и идемпотентны):
 
 ```sh
+npm ci --prefix web && npm run build --prefix web
 cargo build --release --features cli-full
 # 1. Установка закреплённого ONNX Runtime (скачивается один раз; `--check` показывает состояние)
 docsbase connect fastembed
@@ -143,11 +144,13 @@ curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/
 ```sh
 git clone https://github.com/punkhomov/docsbase-memory-mcp.git
 cd docsbase-memory-mcp
+npm ci --prefix web
+npm run build --prefix web
 cargo install --path . --locked --features cli-full
 docsbase install   # зарегистрировать бинарь в демоне
 ```
 
-Требуется Rust 1.88+ (MSRV). Для локальной разработки в `rust-toolchain.toml`
+Требуется Rust 1.88+ (MSRV) и Node.js 22+ для сборки Web-ресурсов. Для локальной разработки в `rust-toolchain.toml`
 зафиксирован nightly; CI проверяет MSRV-тулчейн.
 
 ### Вручную
@@ -280,3 +283,10 @@ cargo test --locked --release   # включая перф-бюджеты (одн
 ## Лицензия
 
 MIT — см. [LICENSE](LICENSE).
+
+## Локальная Web-панель
+
+`docsbase web --open` открывает локальную панель проектов, поиска и безопасной
+эффективной конфигурации. Она доступна только на `127.0.0.1`, работает через
+общий daemon и включена в официальные бинарники. Node.js при запуске не нужен.
+Подробности запуска, сборки, настроек и диагностики — [docs/WEB.md](docs/WEB.md).

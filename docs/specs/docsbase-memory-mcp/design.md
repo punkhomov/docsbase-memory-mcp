@@ -763,3 +763,13 @@ PR/migration; пока не являются существующими возм
 Минимальный CF1/CF2 bootstrap/store foundation предшествует #66, полная #78
 не блокирует исправление глобальной DB contention. #76 уже исправляет только
 config/stages publication; SQLite/Tantivy/vector generation требует своего design.
+
+
+## Delta 2026-11-11 — локальная Web-панель
+
+По ТЗ `docs/specs/local-web/requirements.md` прежний предел 40 МиБ для
+бинаря/поставки снят. Размер бинаря, встроенного frontend и архива продолжают
+измеряться; новый произвольный предел не вводится. Прежние записи бюджета
+выше — исторические. Ограничения RAM, очередей, IPC и поисковых операций
+сохраняются. `cli-full` включает optional feature `web`; Cargo default=[]
+остаётся без HTTP frontend. Rust 1.88; frontend собирается явно до Cargo.

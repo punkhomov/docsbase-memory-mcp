@@ -49,6 +49,18 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Prepare embedded Web assets
+        shell: bash
+        run: |
+          npm ci --prefix web
+          npm run check --prefix web
+          npm run test:unit --prefix web
+          npm run build --prefix web
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
@@ -73,6 +85,10 @@ jobs:
           smoke="$(mktemp -d)"
           tar -xzf dist/linux/docsbase-*.tar.gz -C "$smoke"
           python3 .github/scripts/check-cli-capabilities.py "$smoke/docsbase"
+          python3 .github/scripts/check-web-artifact.py "$smoke/docsbase"
+      - name: Measure distribution bytes
+        shell: bash
+        run: python -c "from pathlib import Path; [print(str(p), p.stat().st_size) for p in Path('dist').rglob('*') if p.is_file()]"
       - name: Attest linux artifact (SLSA provenance, Sigstore)
         uses: actions/attest-build-provenance@v4
         with:
@@ -95,6 +111,18 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Prepare embedded Web assets
+        shell: bash
+        run: |
+          npm ci --prefix web
+          npm run check --prefix web
+          npm run test:unit --prefix web
+          npm run build --prefix web
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
@@ -125,6 +153,10 @@ jobs:
           $archive = Get-ChildItem dist/windows/docsbase-*.zip | Select-Object -First 1
           Expand-Archive -LiteralPath $archive.FullName -DestinationPath $smoke -Force
           python .github/scripts/check-cli-capabilities.py (Join-Path $smoke "docsbase.exe")
+          python .github/scripts/check-web-artifact.py (Join-Path $smoke "docsbase.exe")
+      - name: Measure distribution bytes
+        shell: bash
+        run: python -c "from pathlib import Path; [print(str(p), p.stat().st_size) for p in Path('dist').rglob('*') if p.is_file()]"
       - name: Attest windows artifact (SLSA provenance, Sigstore)
         uses: actions/attest-build-provenance@v4
         with:
@@ -150,6 +182,18 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Prepare embedded Web assets
+        shell: bash
+        run: |
+          npm ci --prefix web
+          npm run check --prefix web
+          npm run test:unit --prefix web
+          npm run build --prefix web
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
@@ -184,12 +228,16 @@ jobs:
           export DOCSBASE_DATA_DIR="$work/data"
           bin="$work/docsbase"
           python3 .github/scripts/check-cli-capabilities.py "$bin"
+          python3 .github/scripts/check-web-artifact.py "$bin"
           "$bin" --version
           "$bin" install
           cd "$work"
           "$bin" index "$work"
           "$bin" search "gizmos" --limit 3 > "$work/search.json"
           grep -q "README.md" "$work/search.json"
+      - name: Measure distribution bytes
+        shell: bash
+        run: python -c "from pathlib import Path; [print(str(p), p.stat().st_size) for p in Path('dist').rglob('*') if p.is_file()]"
       - name: Attest macos artifact (SLSA provenance, Sigstore)
         uses: actions/attest-build-provenance@v4
         with:
@@ -232,6 +280,9 @@ jobs:
           # Belt and suspenders: keep only the versioned pair in the stage dir.
           find dist/sbom -type f ! -name "docsbase-$VERSION*" -delete
           ls -la dist/sbom
+      - name: Measure distribution bytes
+        shell: bash
+        run: python -c "from pathlib import Path; [print(str(p), p.stat().st_size) for p in Path('dist').rglob('*') if p.is_file()]"
       - name: Attest SBOM
         uses: actions/attest-build-provenance@v4
         with:

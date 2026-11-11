@@ -401,3 +401,13 @@ FR-11 ordinary rerank window сохраняется без `dedupe=path`. Для
 Это явная SearchSpec policy с byte/deadline admission, не повторный provider batch.
 Подробный контракт/остановки: search-ux FR-21..25, Delta #68. Валидация
 `hybrid.reranker.window`10..100 и normal fetch без cap не меняются.
+
+
+## Delta 2026-11-11 — локальная Web-панель
+
+По ТЗ `docs/specs/local-web/requirements.md` прежний предел 40 МиБ для
+бинаря/поставки снят. Размер бинаря, встроенного frontend и архива продолжают
+измеряться; новый произвольный предел не вводится. Прежние записи бюджета
+выше — исторические. Ограничения RAM, очередей, IPC и поисковых операций
+сохраняются. `cli-full` включает optional feature `web`; Cargo default=[]
+остаётся без HTTP frontend. Rust 1.88; frontend собирается явно до Cargo.

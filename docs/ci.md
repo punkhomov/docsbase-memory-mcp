@@ -46,7 +46,7 @@ GitHub должен сначала зарегистрировать новый w
 local model command и remote credential-validation path. Не требует сети,
 моделей и установленной ORT. Native CI проверяет свой test-build binary;
 release workflow распаковывает созданный archive и проверяет файл из него.
-Linux release-static alias включает cli-full и сохраняет static/40 MiB checks.
+Linux release-static alias включает cli-full и сохраняет static linking and size measurements.
 Windows/macOS release build указывает cli-full явно.
 
 Так проверка не зависит от того, с какими features собран сам тестовый harness.
@@ -365,7 +365,7 @@ watchdog и завершаются на наблюдаемом прогресс�
 
 `artifact` теперь opt-in target (`test = false`). Обычный функциональный
 `cargo test` не собирает static release CLI из теста. Required Linux сохраняет
-обе проверки — static linking и40MiB — после отдельного успешного
+обе проверки — static linking и измерение размера — после отдельного успешного
 `cargo release-static --locked`. Этот alias по-прежнему включает cli-full.
 Оба providers дополнительно проверяются offline именно в static binary;
 прежний smoke debug CLI и проверка packaged release CLI остаются.
@@ -459,3 +459,14 @@ cli-full ann_recall suite до указанного числа раз (default20
 Обычный separated-cluster test при quality failure сохраняет граф и queries
 в уже загружаемый `target/ci-observations/ann-recall`. Replay-команда и
 ограничения: `docs/specs/ann-index/reports/recall-investigation-2026-11-11.md`.
+
+
+## Delta 2026-11-11 — Web acceptance
+
+Native jobs explicitly prepare the same locked Svelte bundle before cli-full.
+Linux runs Playwright against the already built debug binary, with no retries;
+traces/screenshots/console/Web logs are retained. Each native capability smoke
+also opens the embedded Web artifact from an empty directory. Default dependency
+boundary additionally excludes axum/ts-rs. The 40 MiB cap is removed; Cargo/Vite
+report bundle bytes, artifact tests report executable bytes, release packaging
+reports archive bytes. Historical cap references are superseded.

@@ -84,9 +84,10 @@ async fn serve(
                     Vec::new()
                 },
             }),
-            Request::RegisterSession { .. } | Request::RegisterUnbound { .. } => {
-                Some(Response::ToolResult { value: Value::Null })
-            }
+            Request::RegisterSession { .. }
+            | Request::RegisterUnbound { .. }
+            | Request::BindReadOnly { .. }
+            | Request::CallTool { .. } => Some(Response::ToolResult { value: Value::Null }),
             Request::Search { .. } => {
                 if answer.is_none() {
                     write
@@ -99,7 +100,6 @@ async fn serve(
                 }
                 answer.clone()
             }
-            Request::CallTool { .. } => Some(Response::ToolResult { value: Value::Null }),
             Request::StopDaemon => panic!("unexpected stop"),
         };
         requests.push(request);
@@ -263,7 +263,7 @@ async fn scoped_client_preserves_default_array_after_session_registration() {
         assert_eq!(harness.client.call_tool("status", json!({})).await.expect("status"), Value::Null);
         drop(harness.client);
         let requests = harness.server.await.expect("server joined");
-        assert!(matches!(requests.as_slice(), [Request::Hello { .. }, Request::RegisterSession { .. }, Request::RegisterUnbound { .. }, Request::Search { .. }, Request::CallTool { name, .. }] if name == "status"));
+        assert!(matches!(requests.as_slice(), [Request::Hello { .. }, Request::RegisterSession { .. }, Request::RegisterUnbound { .. } | Request::BindReadOnly { .. }, Request::Search { .. }, Request::CallTool { name, .. }] if name == "status"));
     }).await.expect("session watchdog");
 }
 

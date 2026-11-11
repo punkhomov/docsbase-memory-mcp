@@ -149,3 +149,10 @@ peer. Async scoped search also retains `search-context-v1` and the original
 operation budget; connected refusal cannot trigger direct fallback or a new
 request. Raw frame calls leave negotiation to the caller. See [MCP query
 interpretation](MCP.md#query-interpretation).
+
+
+## Local Web panel
+
+See [WEB.md](WEB.md) for `docsbase web --open`, session security, Web settings,
+source-build frontend preparation and diagnostics. Official cli-full includes
+Web; Cargo default stays lean.

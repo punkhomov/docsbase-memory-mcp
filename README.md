@@ -39,7 +39,7 @@ Official release binaries include both local and remote providers (`cli-full`).
 For a full CLI built from source, use `cargo build --release --features cli-full`;
 plain Cargo builds retain the lean dependency set. Provider use remains opt-in
 through configuration, and local models/ONNX Runtime are provisioned separately.
-The already published alpha.5 assets omit these providers; use a full source build
+The already published alpha.5 assets omit these providers and the Web panel; use a full source build
 until a corrected release is available.
 
 ## Quickstart (5 minutes)
@@ -82,6 +82,7 @@ then point the stages at them (all provisioning commands are offline-safe and
 idempotent):
 
 ```sh
+npm ci --prefix web && npm run build --prefix web
 cargo build --release --features cli-full
 # 1. Install the pinned ONNX Runtime (downloads once; `--check` reports state)
 docsbase connect fastembed
@@ -143,11 +144,13 @@ prompts (notarization is not needed for this path).
 ```sh
 git clone https://github.com/punkhomov/docsbase-memory-mcp.git
 cd docsbase-memory-mcp
+npm ci --prefix web
+npm run build --prefix web
 cargo install --path . --locked --features cli-full
 docsbase install   # register the binary with the daemon
 ```
 
-Requires Rust 1.88+ (MSRV). Local development pins nightly in
+Requires Rust 1.88+ (MSRV) and Node.js 22+ for building embedded Web assets. Local development pins nightly in
 `rust-toolchain.toml`; CI validates the MSRV toolchain.
 
 ### Manual
@@ -287,3 +290,10 @@ Report issues per [`SECURITY.md`](SECURITY.md).
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Local Web panel
+
+`docsbase web --open` opens the local projects, search and safe configuration panel.
+Included in official `cli-full` binaries; no Node.js needed at runtime.
+Git source builds require `npm ci --prefix web && npm run build --prefix web`
+before Cargo. See [Web setup and testing](docs/WEB.md).

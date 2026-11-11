@@ -200,7 +200,9 @@ async fn serve(stream: platform::Stream, state: std::sync::Arc<State>) {
                     },
                     _ => Response::ToolResult { value: Value::Null },
                 },
-                Request::RegisterUnbound { .. } => Response::ToolResult { value: Value::Null },
+                Request::RegisterUnbound { .. } | Request::BindReadOnly { .. } => {
+                    Response::ToolResult { value: Value::Null }
+                }
                 Request::CallTool { name, .. }
                     if name == "index_project"
                         && matches!(state.mode, Mode::IndexThenRejectRebind(_)) =>
@@ -279,7 +281,7 @@ async fn check_post_index_rebind_rejection(rejection: RebindRejection) {
         assert!(
             matches!(requests.as_slice(), [
                 Request::RegisterSession { .. },
-                Request::RegisterUnbound { .. },
+                Request::RegisterUnbound { .. } | Request::BindReadOnly { .. },
                 Request::CallTool { name, .. },
                 Request::RegisterSession { .. },
             ] if name == "index_project"),

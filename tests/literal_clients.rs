@@ -81,9 +81,9 @@ impl Peer {
                             value: args.clone(),
                         }
                     }
-                    Request::RegisterSession { .. } | Request::RegisterUnbound { .. } => {
-                        Response::ToolResult { value: Value::Null }
-                    }
+                    Request::RegisterSession { .. }
+                    | Request::RegisterUnbound { .. }
+                    | Request::BindReadOnly { .. } => Response::ToolResult { value: Value::Null },
                     Request::StopDaemon => panic!("unexpected stop"),
                 };
                 requests.push(request);

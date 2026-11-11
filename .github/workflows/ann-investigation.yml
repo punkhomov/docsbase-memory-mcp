@@ -23,6 +23,18 @@ jobs:
       ANN_TRIALS: ${{ inputs.trials }}
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Prepare embedded Web assets
+        shell: bash
+        run: |
+          npm ci --prefix web
+          npm run check --prefix web
+          npm run test:unit --prefix web
+          npm run build --prefix web
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       - name: Prepare unchanged native recall suite

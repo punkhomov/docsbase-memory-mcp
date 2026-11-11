@@ -387,3 +387,8 @@ absence of intermediate changes. The identity binds context, registry, every inp
 source (including unchanged files), choice and output, not future freshness. Future
 apply must revalidate all those facts under its own publication protocol. Source
 observation hashes describe exact file bytes, not semantic artifact fingerprints.
+## Local Web panel
+
+See [WEB.md](WEB.md) for `docsbase web --open`, session security, Web settings,
+source-build frontend preparation and diagnostics. Official cli-full includes
+Web; Cargo default stays lean.

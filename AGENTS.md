@@ -18,7 +18,9 @@ here.
 
 ## Commands (verification)
 
-Official CLI builds use `--features cli-full` (both provider implementations).
+Official CLI builds use `--features cli-full` (both provider implementations and Web).
+Prepare embedded assets first: `npm ci --prefix web && npm run build --prefix web`.
+See `docs/WEB.md` for frontend checks and browser acceptance.
 The plain Cargo default remains the lean/source compatibility build.
 
 Sandboxed agents: point `CARGO_HOME`/`RUSTUP_HOME` at a writable directory

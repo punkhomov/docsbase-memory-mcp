@@ -839,20 +839,29 @@ fn ann_state(dense: Option<&DenseCache>, project_id: i64, hybrid_on: bool) -> Va
     let (vectors, bytes) = snapshot.map_or((Value::Null, Value::Null), |(count, bytes)| {
         (json!(count), json!(bytes))
     });
-    let (state, reason) = match dense.outcome(project_id) {
-        Some(outcome) if outcome.is_stale() => {
-            (AnnState::Stale, Some("last search is older than one hour"))
-        }
-        Some(outcome) => (outcome.state, outcome.reason),
-        None if !hybrid_on => (AnnState::Disabled, Some("hybrid off")),
-        None => (AnnState::Loading, Some("no search yet")),
-    };
+    let (state, reason) = classified_ann_state(dense, project_id, hybrid_on);
     json!({
         "state": state.as_str(),
         "vectors": vectors,
         "estimated_bytes": bytes,
         "reason": reason.map_or(Value::Null, Value::from),
     })
+}
+
+/// Shared safe classification for daemon status and the local panel.
+pub(super) fn classified_ann_state(
+    dense: &DenseCache,
+    project_id: i64,
+    hybrid_on: bool,
+) -> (AnnState, Option<&'static str>) {
+    match dense.outcome(project_id) {
+        Some(outcome) if outcome.is_stale() => {
+            (AnnState::Stale, Some("last search is older than one hour"))
+        }
+        Some(outcome) => (outcome.state, outcome.reason),
+        None if !hybrid_on => (AnnState::Disabled, Some("hybrid off")),
+        None => (AnnState::Loading, Some("no search yet")),
+    }
 }
 
 /// Records a degradation once (order preserved, no duplicates).
@@ -869,22 +878,23 @@ fn build_rows(payload: &OwnedPayload, ordered: Vec<(u64, f32)>, snippet: bool) -
         let Some(citation) = payload.citation(chunk_id) else {
             continue;
         };
-        let mut row = json!({
-            "chunk_id": chunk_id,
-            "path": citation.path,
-            "heading_path": citation.heading_path,
-            "lines": [citation.line_start, citation.line_end],
-            "score": score,
-        });
-        if snippet {
+        let preview = if snippet {
             let Some(text) = payload.chunk_text(chunk_id) else {
                 continue;
             };
-            let (text, truncated) = snippet_of(text);
-            row["snippet"] = json!(text);
-            row["snippet_truncated"] = json!(truncated);
-        }
-        rows.push(row);
+            Some(snippet_of(text))
+        } else {
+            None
+        };
+        rows.push(json!(crate::ipc::panel::SearchHit {
+            chunk_id,
+            path: citation.path.clone(),
+            heading_path: citation.heading_path.clone(),
+            lines: [citation.line_start, citation.line_end],
+            score,
+            snippet: preview.as_ref().map(|(text, _)| text.clone()),
+            snippet_truncated: preview.map(|(_, truncated)| truncated),
+        }));
     }
     rows
 }

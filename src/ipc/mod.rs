@@ -7,3 +7,5 @@ pub mod protocol;
 
 #[cfg(test)]
 mod async_client_tests;
+
+pub mod panel;

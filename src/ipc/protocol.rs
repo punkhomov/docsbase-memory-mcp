@@ -13,6 +13,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const SEARCH_CONTEXT_CAPABILITY: &str = "search-context-v1";
 
 /// Explicit literal interpretation; old peers may otherwise ignore the argument.
+pub const PANEL_READ_CAPABILITY: &str = "panel-read-v1";
+
+/// Literal query interpretation.
 pub const LITERAL_QUERY_CAPABILITY: &str = "literal-query-v1";
 
 pub(crate) fn ensure_search_query_mode(
@@ -81,6 +84,9 @@ pub const TOOL_ALLOWLIST: &[&str] = &[
     "sync_start",
     "sync_status",
     "status",
+    "panel_info",
+    "panel_config",
+    "panel_projects",
 ];
 
 /// Frontend -> daemon messages.
@@ -126,6 +132,8 @@ pub enum Request {
         /// Explicit original budget and upstream admission measurements.
         context: SearchCallContext,
     },
+    /// Nonmutating session binding for registered projects or registry keepalive.
+    BindReadOnly { pid: u32, project_id: Option<i64> },
     /// Graceful daemon shutdown request.
     StopDaemon,
 }

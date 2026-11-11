@@ -67,6 +67,8 @@ $env:DOCSBASE_VERSION = "v0.1.0-alpha.5"; iex (irm .../install.ps1)
 ```sh
 git clone https://github.com/punkhomov/docsbase-memory-mcp.git
 cd docsbase-memory-mcp
+npm ci --prefix web
+npm run build --prefix web
 cargo install --path . --locked --features cli-full
 docsbase install
 ```
@@ -165,5 +167,12 @@ For a full source build use `cargo build --release --locked --features cli-full`
 the lean dependency set.
 
 The published `v0.1.0-alpha.5` assets predate this correction and omit both
-provider implementations; installed copies require a corrected release or a
+provider implementations and the Web panel; installed copies require a corrected release or a
 source rebuild to use them.
+
+
+## Local Web panel
+
+See [WEB.md](WEB.md) for `docsbase web --open`, session security, Web settings,
+source-build frontend preparation and diagnostics. Official cli-full includes
+Web; Cargo default stays lean.

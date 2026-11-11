@@ -55,6 +55,18 @@ jobs:
       DOCSBASE_BENCH_LATENCY_SLACK: "3"
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Prepare embedded Web assets
+        shell: bash
+        run: |
+          npm ci --prefix web
+          npm run check --prefix web
+          npm run test:unit --prefix web
+          npm run build --prefix web
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
@@ -75,7 +87,7 @@ jobs:
             echo "::error::cargo tree returned an empty dependency graph"
             exit 1
           fi
-          if grep -wE 'fastembed|ort|tokenizers|hf-hub|image|native-tls|ureq|reqwest' target/ci-observations/lean-dependency-tree.txt; then
+          if grep -wE 'axum|ts-rs|fastembed|ort|tokenizers|hf-hub|image|native-tls|ureq|reqwest' target/ci-observations/lean-dependency-tree.txt; then
             echo "::error::forbidden crate leaked into the default build (NFR-1)"
             exit 1
           fi
@@ -94,8 +106,23 @@ jobs:
       - name: Functional suite (Linux)
         run: python3 .github/scripts/observe-tests.py --suite cli-full --phase execute -- cargo test --locked --features cli-full
 
+      - name: Browser acceptance (real daemon)
+        run: |
+          cd web
+          npx playwright install --with-deps chromium
+          npm test
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-browser-evidence
+          path: |
+            web/test-results/
+            web/playwright-report/
       - name: Full CLI provider capabilities (offline)
         run: python3 .github/scripts/check-cli-capabilities.py target/debug/docsbase
+      - name: Embedded Web artifact smoke
+        run: python3 .github/scripts/check-web-artifact.py target/debug/docsbase
       - name: Build static CLI (NFR-6, ADR-8)
         run: python3 .github/scripts/observe-tests.py --suite static-artifact-build --phase prepare -- cargo release-static --locked --timings
       - name: Static artifact checks (NFR-2, NFR-6)
@@ -105,6 +132,8 @@ jobs:
           python3 .github/scripts/observe-tests.py --suite static-artifact --phase execute -- cargo test --locked --features cli-full --test artifact -- --nocapture
       - name: Static CLI provider capabilities (offline)
         run: python3 .github/scripts/check-cli-capabilities.py target/x86_64-unknown-linux-gnu/release/docsbase
+      - name: Embedded Web artifact smoke
+        run: python3 .github/scripts/check-web-artifact.py target/x86_64-unknown-linux-gnu/release/docsbase
       - name: Upload test diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -120,6 +149,18 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Prepare embedded Web assets
+        shell: bash
+        run: |
+          npm ci --prefix web
+          npm run check --prefix web
+          npm run test:unit --prefix web
+          npm run build --prefix web
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
@@ -144,6 +185,8 @@ jobs:
 
       - name: Full CLI provider capabilities (offline)
         run: python .github/scripts/check-cli-capabilities.py target/debug/docsbase.exe
+      - name: Embedded Web artifact smoke
+        run: python .github/scripts/check-web-artifact.py target/debug/docsbase.exe
       - name: Upload test diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -163,6 +206,18 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "12.0"
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Prepare embedded Web assets
+        shell: bash
+        run: |
+          npm ci --prefix web
+          npm run check --prefix web
+          npm run test:unit --prefix web
+          npm run build --prefix web
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
@@ -186,6 +241,8 @@ jobs:
         run: python3 .github/scripts/observe-tests.py --suite cli-full --phase execute -- cargo test --locked --features cli-full
       - name: Full CLI provider capabilities (offline)
         run: python3 .github/scripts/check-cli-capabilities.py target/debug/docsbase
+      - name: Embedded Web artifact smoke
+        run: python3 .github/scripts/check-web-artifact.py target/debug/docsbase
       - name: Upload test diagnostics
         if: always()
         uses: actions/upload-artifact@v4

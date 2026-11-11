@@ -736,6 +736,7 @@ async fn handle_connection_in(
     let _ = events.try_send(());
 }
 
+#[allow(clippy::too_many_lines)] // Exhaustive wire dispatcher; each arm owns one protocol operation.
 async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
     shared: &Arc<Shared>,
     shutdown: &watch::Sender<bool>,
@@ -792,6 +793,7 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                     capabilities: vec![
                         protocol::SEARCH_CONTEXT_CAPABILITY.to_owned(),
                         protocol::LITERAL_QUERY_CAPABILITY.to_owned(),
+                        protocol::PANEL_READ_CAPABILITY.to_owned(),
                     ],
                 },
                 false,
@@ -836,6 +838,47 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                 return (hello_required(), true);
             }
             scoped::call(shared, peer, args, scope, reader).await
+        }
+        Request::BindReadOnly { pid, project_id } => {
+            if !peer.hello_done {
+                return (hello_required(), true);
+            }
+            let reader_shared = Arc::clone(shared);
+            let activity = Arc::clone(&scope.activity);
+            let bound = tokio::task::spawn_blocking(move || {
+                let _activity = activity;
+                let project = project_id
+                    .map(|id| {
+                        registry::project_by_id(&reader_shared.db(), id)?.ok_or_else(|| {
+                            Error::Project {
+                                message: "unknown project".into(),
+                                instruction: None,
+                            }
+                        })
+                    })
+                    .transpose()?;
+                Ok::<_, Error>(
+                    project.map_or_else(|| reader_shared.cache.clone(), |p| p.canonical_root),
+                )
+            })
+            .await
+            .map_err(|e| Error::internal_with_source("read-only bind", e))
+            .and_then(|r| r);
+            match bound.and_then(|cwd| shared.sessions.join(pid, cwd, project_id)) {
+                Ok((id, cancel)) => {
+                    if let Some(old) = peer.session_id.replace(id) {
+                        shared.sessions.leave(old);
+                    }
+                    peer.cancel_rx = Some(cancel);
+                    (
+                        Response::ToolResult {
+                            value: json!({"session_id": id}),
+                        },
+                        false,
+                    )
+                }
+                Err(error) => (error_response(&error), false),
+            }
         }
         Request::StopDaemon => {
             // Idempotent: only the first stop drains and signals shutdown, so
@@ -1109,6 +1152,7 @@ fn route_tool(
     route_metadata_tool(shared, session_id, name, args)
 }
 
+#[allow(clippy::too_many_lines)] // Exhaustive tool dispatcher.
 fn route_metadata_tool(
     shared: &Arc<Shared>,
     session_id: Option<u64>,
@@ -1136,6 +1180,55 @@ fn route_metadata_tool(
                 },
                 Some(&shared.dense),
             )
+        }
+        "panel_info" => Ok(json!(crate::ipc::panel::PanelInfo {
+            capabilities: vec![
+                protocol::PANEL_READ_CAPABILITY.into(),
+                protocol::SEARCH_CONTEXT_CAPABILITY.into(),
+                protocol::LITERAL_QUERY_CAPABILITY.into()
+            ],
+            request_timeout_ms: shared.global_config.search.request_timeout_ms,
+            max_request_payload_bytes: shared.global_config.search.max_request_payload_bytes,
+            max_retained_payload_bytes: shared.global_config.search.max_retained_payload_bytes,
+            dedupe_max_candidates: shared.global_config.search.dedupe_max_candidates,
+            max_hits: crate::index::tantivy_index::MAX_HITS,
+        })),
+        "panel_config" => {
+            let project = bound_project(shared, &db, session_id)?;
+            let config = shared.project_config(&project)?;
+            Ok(json!(crate::ipc::panel::ConfigView::from_config(&config)))
+        }
+        "panel_projects" => {
+            let projects = registry::list_projects(&db)?
+                .into_iter()
+                .map(|p| {
+                    let count = crate::store::repo::project_counts(db.connection(), p.id)?;
+                    let config = shared.project_config(&p).ok();
+                    let coverage = config.as_ref().and_then(|config| {
+                        hybrid_jobs::coverage(&db, &config.hybrid_cfg, p.id)
+                            .ok()
+                            .flatten()
+                    });
+                    Ok(crate::ipc::panel::ProjectView {
+                        watched: shared.watchers.watching(p.id),
+                        cached_vectors: coverage.map(|c| c.cached),
+                        vector_chunks: coverage.map(|c| c.total),
+                        ann_state: config.as_ref().map(|_| {
+                            tools::classified_ann_state(&shared.dense, p.id, coverage.is_some())
+                                .0
+                                .as_str()
+                                .to_owned()
+                        }),
+                        id: p.id,
+                        name: p.name,
+                        root: p.canonical_root.to_string_lossy().into_owned(),
+                        status: p.status.as_str().into(),
+                        docs: count.docs,
+                        chunks: count.chunks,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(json!(projects))
         }
         "list_projects" => tools::list_projects(&db),
         "list_docs" => {
