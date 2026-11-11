@@ -22,9 +22,10 @@ SIGKILL retries, ослабления assertions/CI или baseline changes.
 Файлы: `tests/install.rs`, dated deltas requirements/design/tasks/progress,
 отчёт `installer-copy-investigation-2026-11-11.md`.
 
-- [x] RED: выделить существующий copy в test-only helper и открыть прежний
-  target через File; после публикации этот handle должен читать прежние
-  bytes, а path — новые. На прежнем fs::copy handle видит новые bytes.
+- [x] RED: выделить copy в test-only helper и сохранить hard-link alias
+  прежнего target; после публикации alias должен читать прежние bytes,
+  а path — новые. На прежнем fs::copy alias видит новые bytes. Начальный
+  held-open вариант не portable: Windows PermissionDenied5, run43051934156.
 - [x] GREEN: NamedTempFile в том же parent → into_temp_path (writer закрыт)
   → fs::copy → TempPath::persist поверх target. При ошибке staging guard
   удаляет temporary file, существующий target не переписывается.

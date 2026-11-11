@@ -31,9 +31,9 @@ copies. Его результаты не включены в150. Scratch workflo
 ## Изменение M5
 
 Fixture публикует launcher через существующий tempfile и same-directory
-atomic replacement. Реальный regression удерживает descriptor старого файла:
-исходный fs::copy изменяет наблюдаемые им bytes (RED), staging/rename сохраняет
-их и публикует новые bytes по target path (GREEN). Исправляется именно unsafe
+atomic replacement. Реальный regression удерживает hard-link alias старого
+файла: исходный fs::copy изменяет наблюдаемые через alias bytes (RED),
+staging/rename сохраняет их и публикует новые по target path (GREEN). Исправляется именно unsafe
 copy boundary в test utility, production installer не меняется.
 
 Локально Rust1.88 cli-full install:16 passed (все15 прежних +1 regression).
@@ -42,3 +42,15 @@ All-targets Clippy чистый; fmt и native CI/review фиксируются 
 subprocess retries. No migration/recovery action. #113 остаётся открытой:
 нужны actual failed PID/phase и macOS termination evidence либо новое
 воспроизведение, чтобы приписать исходный сбой этой конкретной границе.
+
+## Native correction before merge
+
+First required run43051934156: macOS succeeded (install16), Windows failed
+only the new held-open regression with PermissionDenied5 at TempPath::persist;
+all14 prior Windows installer tests passed. Keeping a readable File handle
+across replacement was an invalid portability assumption, not the original
+SIGKILL or a flaky success threshold. The regression now retains old file
+identity through a hard link without an open handle during rename. It still
+fails on copy-through and passes on replacement; no cfg skip, retry or
+production/helper change. The failed run remains part of the PR evidence;
+required checks run again on the corrected commit.

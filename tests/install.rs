@@ -1,6 +1,5 @@
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -163,19 +162,19 @@ fn stage_launcher(source: &Path, target: &Path) {
 }
 
 #[test]
-fn launcher_publication_preserves_the_previous_file_handle() {
+fn launcher_publication_preserves_the_previous_file() {
     let root = TempDir::new().expect("launcher files");
     let source = root.path().join("source");
     let target = root.path().join("launcher");
     fs::write(&source, b"new launcher").expect("source");
     fs::write(&target, b"previous launcher").expect("target");
-    let mut previous = fs::File::open(&target).expect("hold previous file");
+    let previous = root.path().join("previous-launcher");
+    fs::hard_link(&target, &previous).expect("retain previous file");
     stage_launcher(&source, &target);
-    let mut old_bytes = Vec::new();
-    previous
-        .read_to_end(&mut old_bytes)
-        .expect("read old handle");
-    assert_eq!(old_bytes, b"previous launcher");
+    assert_eq!(
+        fs::read(&previous).expect("read previous file"),
+        b"previous launcher"
+    );
     assert_eq!(
         fs::read(&target).expect("read published path"),
         b"new launcher"

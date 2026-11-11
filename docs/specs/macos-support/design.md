@@ -131,7 +131,8 @@ source permissions, TempPath::persist атомарно заменяет target. 
 staging при ошибке; прежний target не переписывается. Закрытый writer также
 не добавляет ETXTBSY при следующем exec. Production swap_binary не меняется.
 
-Regression держит открытым прежний файл и проверяет оба views после publish.
-На прежнем copy-through старый handle читает новые bytes (RED), на rename
-читает старые (GREEN). Native probe150 launches не воспроизвёл SIGKILL;
+Regression удерживает hard-link alias прежнего файла и проверяет оба views
+после publish. На прежнем copy-through alias читает новые bytes (RED),
+на rename — старые (GREEN). Открытого handle через rename нет: native
+Windows отверг held-open вариант (PermissionDenied5, run43051934156). Native probe150 launches не воспроизвёл SIGKILL;
 устранение documented hazard не является доказательством причины #113.

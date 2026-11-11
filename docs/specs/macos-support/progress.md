@@ -29,3 +29,11 @@ Task M4: follow-up: MACOSX_DEPLOYMENT_TARGET=12.0 зафиксирован в ma
   reproduced; #113 remains open.
   Review: fresh task reviewer spec PASS / quality APPROVED; no findings.
   Required native CI and fresh final review remain PR delivery close-out.
+
+M5 native portability correction (2026-11-11): run43051934156 failed only
+new Windows held-open regression (PermissionDenied5); all14 previous Windows
+install tests and macOS install16 passed. Revised regression retains old-file
+identity with a hard link, without an open handle across rename. Copy-through
+RED confirmed; replacement GREEN/install16, cli-full all-target Clippy/fmt
+clean. Final reviewer: ADDRESSED, no new Critical/Important findings. Prior
+Windows compatibility assumption rejected; corrected native checks pending.

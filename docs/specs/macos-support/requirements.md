@@ -113,7 +113,16 @@ same-directory rename, сохраняя реальную install/update/uninstal
 ownership assertions и существующий ETXTBSY-only spawn retry. Production
 installer, CI, подпись релизов и runtime policy не меняются.
 
-Детерминированный критерий: открытый descriptor старого файла продолжает
+Детерминированный критерий: hard-link alias старого файла продолжает
 читать прежние bytes, а опубликованный path читает новые. Это проверка
 безопасной публикации, не детерминированное воспроизведение исходного
 macOS SIGKILL. #113 остаётся открытой до доказательства termination cause.
+
+### Delta 2026-11-11 — M5 native portability correction
+
+First native Windows run43051934156: первоначальный held-open regression
+получил PermissionDenied5 при persist, все14 прежних Windows install tests
+прошли. Для проверки сохранения старого file identity используется hard
+link без открытого handle через rename. Unix-only предположение о замене
+открытого target не является частью fixture contract; production/helper/
+coverage/retries не меняются. Это не flake и не исходный SIGKILL #113.

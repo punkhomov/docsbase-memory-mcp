@@ -75,8 +75,8 @@ CHANGELOG, delta-маркер конституции, AGENTS, issue-template.
 ### M5 — Publish installer fixture launchers as new files (#113)
 
 New crates:none. Production changes:none. Files:tests/install.rs, dated
-spec deltas, investigation report and progress ledger. RED: held old handle
-observes replacement bytes under original fs::copy. GREEN: same-directory
+spec deltas, investigation report and progress ledger. RED: old-file hard
+link alias observes replacement bytes under original fs::copy. GREEN: same-directory
 TempPath::persist; close staging writer before exec. Preserve all15 existing
 installer tests and add one real file-ownership regression. Verify: Rust1.88
 cli-full install suite, fmt/all-targets Clippy; fresh task/final review and
