@@ -542,3 +542,18 @@ new bounded native-compatibility task, not a reopening of the closed ANN finding
 Confirm exact dependency behavior and meaningful native regression before its
 production fix. Final convergence/PR readiness waits for that task review and
 latest-head docs/linux/macos/windows; #66/#114 remain open.
+
+Task S4.3c: design ready, baseb9d0355; source-confirmed locked dependency uses
+unbounded Windows busy-pipe waits. Actual native regression before production
+change is pending. This task closes the connection-admission hole in the
+existing FR-5/FR-6/SC-4 flow; not an async rewrite or legacy-client change.
+Ruling: the prior whole-feature code review passed after its ANN I1 correction,
+but did not cover this late dependency finding. Add a bounded task and fresh
+review, then supplemental whole-feature acceptance/latest-head native evidence.
+
+Task S4.3c: Ruling: actual Windows TDD requires an intermediate draft push of
+the test-only head; Linux cannot execute this native API. This supersedes the
+previous single-final-push optimization, without weakening any gate. The new
+Windows regression is expected RED; no production fix is included and this
+intermediate head cannot be merged. Test formatting preflight was corrected
+before this head (no behavior change).

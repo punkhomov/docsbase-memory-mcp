@@ -143,3 +143,13 @@ direct mode only when its initial connection cannot be established; connected
 handshake/call failures propagate. Direct CLI retains its original ingress time.
 Explain total is finalized using the canonical caller's original monotonic
 clock after receipt; returned queue is not double-counted. Default arrays stay.
+
+## Delta 2026-11-11 — Windows busy endpoint admission
+
+FR-5/FR-6 and SC-4 also cover connection admission: a busy named pipe must not
+leave an unbounded dependency blocking worker after cancellation, or make the
+CLI runtime teardown wait indefinitely. Windows async connect makes one
+nonblocking OS attempt and returns a transport error when all instances are
+busy. Liveness probes must return present for a busy endpoint and false for
+an absent endpoint without waiting for an instance. Preserve available-pipe
+byte-stream/protocol behavior and generic legacy blocking-client compatibility.

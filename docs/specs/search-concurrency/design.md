@@ -897,3 +897,25 @@ original queue/total, scoped capability/context, old-client limitations, EOF/
 request cancellation, physical charging/nonpreemption, CLI initial-connect-only
 fallback and legacy half-close. #79/#81/#78 remain separate future capabilities;
 no official 20k capacity/HTTP/remote-async/configv2 claim.
+
+## Delta 2026-11-11 — Windows busy-pipe compatibility
+
+Locked interprocess2.4.4 local-socket adapters ignore connection wait mode.
+Their named-pipe defaults use Unbounded: async busy admission spawns a blocking
+WaitNamedPipe worker, and synchronous liveness enters the same indefinite wait.
+Tokio runtime Drop waits for such workers. A cancelable outer future is
+insufficient. Use the existing safe raw byte-pipe API with explicit
+ConnectWaitMode::Timeout(Duration::ZERO), then its safe local-socket conversion
+for the existing Stream type. ZERO selects one nonblocking attempt; it is not
+a local operational timeout/default. Preserve GenericNamespaced local prefix
+\\.\pipe\ and endpoint validation. No retry spin, sleep, new configuration,
+crate or unsafe. A busy probe is present (raw zero-mode TimedOut), while absent
+and invalid endpoints are false. Keep generic connect_blocking unchanged.
+
+First test the actual old async adapter on native Windows with max_instances1
+and an occupied byte pipe. Reserve the runtime's sole blocking worker using a
+channel gate so the dependency's detached connect cannot start before cleanup.
+One manual poll must return Ready with busy error; old code returns Pending.
+Drop that future and both pipe handles before releasing the worker, then join
+and drop the runtime before asserting. This proves the boundary without a
+host latency threshold or leaving an indefinite worker behind in RED.

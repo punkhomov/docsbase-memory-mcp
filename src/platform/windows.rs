@@ -410,3 +410,61 @@ pub fn open_readonly_nofollow(path: &Path) -> io::Result<File> {
         .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future as _;
+    use std::sync::mpsc;
+    use std::task::Waker;
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+
+    #[test]
+    fn busy_pipe_async_connect_is_immediate() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        // Reserve the only blocking worker. If old connect enqueues a worker,
+        // it cannot enter WaitNamedPipe before the busy endpoint is removed.
+        let reserved = runtime.spawn_blocking(move || {
+            entered_tx.send(()).expect("entered");
+            release_rx.recv().expect("release");
+        });
+        entered_rx.recv().expect("blocking worker reserved");
+        let outcome = runtime.block_on(async {
+            let cache = tempfile::TempDir::new().expect("cache");
+            let endpoint = daemon_endpoint(cache.path());
+            let Endpoint::Pipe(name) = &endpoint else {
+                panic!("Windows endpoint");
+            };
+            let path = format!(r"\\.\pipe\{name}");
+            let server = ServerOptions::new()
+                .max_instances(1)
+                .first_pipe_instance(true)
+                .create(&path)
+                .expect("single pipe instance");
+            let client = ClientOptions::new().open(&path).expect("occupy pipe");
+            server.connect().await.expect("occupied connection");
+            let outcome = {
+                let mut connect = std::pin::pin!(connect_async(&endpoint));
+                let mut cx = Context::from_waker(Waker::noop());
+                connect
+                    .as_mut()
+                    .poll(&mut cx)
+                    .map(|result| result.err().map(|e| e.kind()))
+            };
+            // Cleanup precedes releasing the reserved worker and any assertion.
+            drop(client);
+            drop(server);
+            outcome
+        });
+        release_tx.send(()).expect("release reserved worker");
+        runtime.block_on(reserved).expect("reserved worker joined");
+        drop(runtime);
+        assert_eq!(outcome, Poll::Ready(Some(io::ErrorKind::TimedOut)));
+    }
+}

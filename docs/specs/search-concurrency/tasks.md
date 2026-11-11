@@ -462,3 +462,17 @@ Full cli-full, relevant full/lean CLI/wire/operation and all-target+opt-in lint/
 fmt/diff; fresh task review, delegate findings. Then fresh whole-branch final
 review with FR/SC/task mapping and four final-head native checks before ready/
 squash merge. No intermediate native success replaces final acceptance.
+
+## Delta 2026-11-11 — S4.3c native Windows connection admission
+
+Baseb9d0355. First add a private Windows platform regression in windows.rs only,
+with no production change. Run on actual Windows CI and archive its expected
+Pending-vs-Ready failure before the fix. Then implement safe raw no-wait async
+connect and busy-aware no-wait connect_probe; keep blockingClient unchanged.
+Add real native probe/available/absent/invalid tests. Native tests use actual
+handles and a gated worker rather than sleeps/timing assertions. Verify full
+cli-full, relevant full/lean platform/wire/lifecycle and lint/fmt/docs, then
+fresh task review. Final latest-head four required checks and scoped whole-
+feature acceptance remain mandatory; previous final review does not cover
+this newly added bounded task. Duplicate-check all existing issues before any
+new leaf filing. No native reproduction claim until its actual run completes.
