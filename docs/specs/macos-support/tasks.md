@@ -69,3 +69,15 @@ CHANGELOG, delta-маркер конституции, AGENTS, issue-template.
 4. Коммит.
 **Acceptance:** FR-11; docs-гейт CI зелёный.
 **Verify:** `cargo test --locked --test smoke` (docs) + CI docs.
+
+## Delta 2026-11-11 — M5
+
+### M5 — Publish installer fixture launchers as new files (#113)
+
+New crates:none. Production changes:none. Files:tests/install.rs, dated
+spec deltas, investigation report and progress ledger. RED: held old handle
+observes replacement bytes under original fs::copy. GREEN: same-directory
+TempPath::persist; close staging writer before exec. Preserve all15 existing
+installer tests and add one real file-ownership regression. Verify: Rust1.88
+cli-full install suite, fmt/all-targets Clippy; fresh task/final review and
+required docs/linux/macos/windows. #113 stays open pending actual cause.
