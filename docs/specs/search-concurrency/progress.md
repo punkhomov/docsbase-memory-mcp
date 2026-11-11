@@ -423,3 +423,33 @@ records final163 source identity and precise comment-only equivalence. Prior
 reviews/full regressions cover unchanged S1–S4.2b seams. Current native checks,
 mandatory S4.3b canonical callers and whole-feature final acceptance remain;
 PR112 stays draft, #66 remains open. No hard synchronous preemption promised.
+
+Task S4.3b: Ruling: implement canonical caller adoption in b1 async IPC/driver,
+b2 MCP cancellation/lease/retry, b3 CLI/docs. This keeps native transport tests
+and compatibility review bounded without weakening S4 acceptance; all stages
+stay in draft PR112, then whole-feature final review/latest-head4native. Dated
+requirements/design/tasks recorded before b1 source implementation, base4c63610.
+
+Task S4.3a: native preflight4c63610/run42927420839 complete docs/linux/macos/
+windows SUCCESS. Captured diagnostic archives independently add17tests perOS
+against507f223, none removed; native scoped EOF case present on allOS.
+Linux1116+2artifact/macOS1112/Windows1097,0failed13ignored. This is prior-task
+server evidence, not acceptance for S4.3b/final head.
+
+Task S4.3b1: complete (base4c63610, asynchronous native IPC and explicit scoped
+search operation; tests:11 sequential commands all exit0, full cli-full1124/
+0/13 across66targets; tested165 Rust snapshot, frozen113 unchanged; full+lean
+client8/wire34, full+lean all-target+opt-in Clippy/fmt/diff0). After commands,
+own inspection corrected one encoding-error rustdoc line only: final165 differs
+from tested165 at exactly that comment, other164 and executable/test code
+unchanged; exact before/diff/final map and separate fmt/diff0 recorded. No
+functional rerun for a comment-only correction or identical-final-hash claim.
+Fresh review Spec PASS; sole Minor M1 evidence-summary wording fixed by a
+dedicated agent without source/spec/raw-manifest changes. Scoped re-review M1
+ADDRESSED, no new Critical/Important, resulting Quality APPROVED; no deferred
+minors. Root independently verified final165/raw11/frozen113 and exact comment.
+Task S4.3b1: Ruling: generic async connect/call admission belongs to caller
+composition; search itself uses the original absolute driver. This task supplies
+the client, not canonical MCP/CLI adoption. Mandatory b2/b3 cancellation/lease/
+retry/CLI/docs and whole-feature final review/final-head4native remain; PR112
+stays draft and #66 remains open. No provider preemption or CappedRead bug claim.

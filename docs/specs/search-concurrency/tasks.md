@@ -392,3 +392,27 @@ focused benchmark/external and lean benchmark validate this changed harness.
   lifecycle, full cli-full, relevant lean and full/lean all-target+opt-in lint/
   fmt/diff, frozen113. Fresh review before commit; delegate findings. S4.3b and
   whole-feature final/current-head native gates remain mandatory before delivery.
+
+## Delta 2026-11-10 — S4.3b staged canonical client adoption
+
+- S4.3b1 (base4c63610): add ipc/async_client.rs and export from ipc/mod.rs;
+  asynchronous native connection/exchange/Hello/session/tool helpers, poisoned
+  connection on interrupted IO, capability-required scoped search and original
+  budget driver/queue context/explain total. Preserve blocking Client API.
+  TDD missing new API then real native fake-daemon contexts/capability refusal/
+  dropped exchange/expiry/metadata, generous watchdogs and injected expiry.
+  Full cli-full plus focused full/lean async client/wire, full/lean all-target+
+  opt-in lint/fmt/diff, frozen113; fresh task review, delegate findings.
+- S4.3b2 after b1: MCP async connection lease and original budget through startup/
+  mutex/reconnect, complete owner policy and actual rmcp cancellation signal;
+  one live-budget transport retry, no cancelled/expired paid replay. Test real
+  IPC cancellation, serialization ownership, old capabilities, retry and existing
+  unbound/index/rebind/registry behavior. Prove/duplicate-check CappedRead candidate
+  before changing it. Full/lean relevant and required checks/fresh task review.
+- S4.3b3 after b2: CLI scoped search/async bridge, original policy and direct-mode
+  fallback contract, actual native tests and product documentation. Full/lean
+  relevant checks/fresh task review. Then mandatory whole-branch fresh final
+  review and docs/linux/macos/windows on final head; only then ready/merge.
+- Ruling: these are bounded stages of the already mandatory S4.3b, not separate
+  feature deliveries. PR112 remains draft and #66 remains open throughout;
+  no intermediate native result substitutes for final-head acceptance.

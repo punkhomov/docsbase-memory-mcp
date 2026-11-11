@@ -120,3 +120,26 @@ retains original elapsed time and default array responses stay unchanged.
 Queue accumulation starts at structural zero, not a consumer setting default.
 Existing public metadata constructors/serialization helpers retain their
 signatures; producers use an explicit queue-aware envelope adapter.
+
+## Delta 2026-11-10 — S4.3b: canonical caller lifetime
+
+FR-6/FR-7/SC-5: canonical MCP and CLI socket search use asynchronous IPC on all
+three platforms. One complete owner search policy creates the original operation
+before daemon startup, connection admission or reconnect. Connect, handshake,
+serialized connection waiting, search exchange and reply decoding consume that
+same budget. Client cancellation/expiry drops or poisons its owned connection;
+a cancelled queued caller must not close another caller's active connection.
+
+Search requires the advertised search-context-v1 capability. A same-version
+legacy daemon without it yields actionable restart Admission before Search is
+sent; no silent CallTool search fallback. The old blocking Client remains an
+explicit compatibility API. Generic non-search tools keep their existing tool
+budgets; no new consumer default or provider feature reduction is introduced.
+
+MCP request cancellation uses the actual rmcp per-request cancellation signal.
+A transport failure may reconnect/retry at most once while the original budget
+is live. Expired/cancelled requests cannot replay paid work. CLI falls back to
+direct mode only when its initial connection cannot be established; connected
+handshake/call failures propagate. Direct CLI retains its original ingress time.
+Explain total is finalized using the canonical caller's original monotonic
+clock after receipt; returned queue is not double-counted. Default arrays stay.

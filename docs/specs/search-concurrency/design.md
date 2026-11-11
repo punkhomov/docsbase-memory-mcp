@@ -793,3 +793,51 @@ S4.3b still owns canonical async MCP/CLI clients, capability refusal, original
 queue/retry budget, rmcp cancellation and product docs. The same draft PR stays
 unmergeable until that work, whole-feature final review and final-head native
 checks complete. No remote async provider rewrite, HTTP adapter or v2 config.
+
+## Delta 2026-11-10 — S4.3b: async callers, staged adoption
+
+S4.3b1 adds ipc::async_client::AsyncClient using the existing platform Stream
+and FrameReader. Connect/call/Hello/session/tool operations are asynchronous;
+no socket timeout setter or blocking socket read is used. The low-level connect
+and generic exchange have no invented timeout; their composition owner bounds
+them. AsyncClient::search requires an explicit SearchOperation and capability,
+serializes explicit remaining/elapsed/queue, bounds exchange by its original
+absolute deadline and finalizes existing explain total after decoding. Missing
+capability returns Admission with restart guidance before sending a Search.
+
+An exchange arms a poison-on-drop guard before IO. Interrupted/malformed/EOF/
+oversized exchanges leave the client unusable; a fully decoded response disarms
+it. A search operation driver checks before and after completion, races original
+sleep_until, cancels on expiry/drop and never creates a new stage budget. A
+private injected expiry future permits deterministic tests without treating
+Tokio virtual time as std::Instant. Normal daemon errors retain their category.
+The driver is reusable by caller composition; it has no rmcp dependency.
+
+S4.3b2 adopts this client in MCP with a Tokio connection mutex. A caller first
+waits for the mutex, then takes the Option<Conn> into its future and restores it
+only after a healthy completed exchange. Dropping a caller closes only its own
+leased connection; a cancelled mutex waiter leaves the active lease untouched.
+One original operation precedes ensure_daemon/spawn/lock/reconnect and includes
+actual queue delay. Async lifecycle wrappers retain real blocking startup work
+and check cancellation before subsequent phases. Search observes rmcp request
+context cancellation. A single reconnect is permitted only after Transport and
+only while that same operation remains live; no expired/cancelled replay. Normal
+startup resolves Config::global search settings; Frontend::new compatibility
+obtains defaults explicitly from SearchSpec at its composition boundary.
+
+S4.3b3 adopts the same async client/driver through a safe synchronous CLI bridge,
+with no nested-runtime panic. Failed initial connect alone permits direct mode;
+there is no direct fallback after a connected failure. Both routes retain the
+original CLI ingress time and complete configuration-owned search policy before
+providers. Existing non-search routing remains compatible. Update product IPC/
+architecture/configuration documentation, then whole-feature fresh final review
+and all four latest-head native checks before ready/squash merge.
+
+All stages remain in PR112 draft. Native real-stream client tests cover normal
+context/response, missing capability/no request, dropped partial exchange and
+poisoning, expiry/cancellation and original elapsed/queue metadata. Tests use
+provider/IO gates and generous watchdogs, never new ordering sleeps or tight
+host budgets. Existing CappedRead newline-overflow candidate must first be
+proved against its actual implementation and duplicate-checked before a bug
+claim/issue; any fix retains the existing exact frame limit. No new crate,
+unsafe, network policy, remote-provider async rewrite, HTTP or v2 config scope.
