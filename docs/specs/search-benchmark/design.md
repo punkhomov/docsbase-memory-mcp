@@ -1175,3 +1175,42 @@ canonical output parent обязан быть вне checkout. No provider const
 recordings/provenance для каждого recipe; raw control записывается заново
 для отделения provider drift. Сначала pilot2, затем193 cases/all slices.
 До реализации collector/ограниченного live scope inference не запускается.
+
+## Delta 2026-11-11 — T21: role-aware recordings (#122)
+
+VectorFixture.vectors остаётся document table. query_vectors:Option<HashMap>
+равен None только у legacy v1; Some(empty) — v2 без query rows и не допускает
+fallback на document hash. Адрес внутри pinned fixture = role+raw input hash;
+manifest v2 хранит role каждого entry и два raw method recipes
+(embedder-document-v1 / embedder-query-v1). Unknown recipe/version/role
+отклоняется, context recipe #71 сюда не подмешивается. Provider/model/dim/
+normalization/local preprocessing revision остаются в существующем pin.
+
+Recorder deduplicates exact strings отдельно по роли. Documents идут через
+batch embed, cardinality проверяется до zip; queries через embed_query,
+проверяются dim/finiteness. Generic trait пока не имеет batch-query API:
+manual recorder делает один вызов на unique query. Это не runtime search
+regression; будущий provider-specific batch adapter требует отдельного
+контракта и явного request budget. Все document/query vectors собраны до
+первой публикации; прежняя vector/rerank phase atomicity сохраняется.
+
+ReplayEmbedder реализует embed_query явно. V2 miss fail-closed; v1 читает
+исторический combined table и выдаёт отдельную provenance warning. Это
+совместимость неизменённого frozen gate, не гарантия правильной роли старых
+recordings. Новые raw controls/pools для #71 надо записать намеренно.
+External replay использует тот же VectorFixture/ReplayEmbedder и получает
+тот же контракт без отдельного изменения production API.
+
+T21 external boundary: query coverage читает get_query, document preload —
+прежний get_by_hash. Report provenance содержит embedding_vector_format:
+null для BM25, v2-role-aware-raw либо v1-legacy-role-unknown. Existing reports
+и dataset/qrels/quality не переписываются; отсутствующий v2 query — error.
+
+T21 review fix2026-11-11: the recorder prints unique-document/unique-query
+method counts before first inference; document provider batching and retries
+remain separate. Free-model query recording waits FREE_MODEL_PACE before
+every unique query. Existing PacingEmbedder now forwards embed_query to the
+inner query method under its shared document/query pacer; inherited default
+would otherwise route live measurement queries through document encoding.
+An actual fake OpenRouter transport test pins the4s free-recording interval;
+the mixed-role wrapper regression uses120ms and distinct role outputs.

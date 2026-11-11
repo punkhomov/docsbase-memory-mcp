@@ -728,3 +728,21 @@ spec deltas, `representation-preflight-plan.md`, progress ledger.
 - [x] On clean reachable source commit, run manual offline frozen preflight;
   inspect81docs/327chunks/193cases and new artifact without fixture changes.
   Final review/native CI and integration evidence follow in PR close-out.
+
+## Delta 2026-11-11 — T21: query/document fixture roles (#122)
+
+**Spec:** ROLE-122-1…4. **New crates:** none. **Files:**
+tests/support/bench.rs, tests/search_bench.rs, tests/search_bench_live.rs,
+tests/support/external{,/replay}.rs, tests/search_bench_external.rs, dated
+requirements/design/tasks/progress. No production/frozen/CI edits.
+
+- [x] RED: real recorder with query identical to indexed body must dispatch
+  query API once and preserve two distinct vectors after disk roundtrip.
+- [x] GREEN: versioned role/recipe entries, exact count/dim/finite validation,
+  explicit query replay; no cross-role fallback; v1 legacy warning.
+- [x] Test same-input distinct roles, missing/invalid query, malformed
+  role/version/recipe, short batch/cardinality, prior artifact preservation;
+  fake OpenRouter transport verifies actual query/document request roles.
+- [x] Focused/default/cli-full harness, unchanged gate, fmt/all-target Clippy.
+- [x] Fresh task review/fix findings, ledger+commit. Final review/native CI
+  and integration evidence follow in the PR close-out.

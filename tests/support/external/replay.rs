@@ -147,7 +147,7 @@ fn load_dense(
     // Annotation-only changes do not alter inference inputs; query/chunk
     // coverage below is authoritative for content-addressed replay.
     for case in &data.cases {
-        fixture.get(&case.query)?;
+        fixture.get_query(&case.query)?;
     }
     loaded.hashes.insert(
         format!("{rel}/manifest.json"),

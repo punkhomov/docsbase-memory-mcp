@@ -78,8 +78,12 @@ fn record_fixtures() {
     let loaded_rerank = support::bench::RerankFixture::load(&rerank_path).expect("reload rerank");
     assert_eq!(loaded_rerank.model_pin, rerank_pin);
     println!(
-        "recorded {} vectors + {} rerank pools",
+        "recorded {} document vectors + {} query vectors + {} rerank pools",
         loaded_vectors.vectors.len(),
+        loaded_vectors
+            .query_vectors
+            .as_ref()
+            .map_or(0, std::collections::HashMap::len),
         loaded_rerank.pools.len()
     );
 }
@@ -626,4 +630,108 @@ fn live_measurement() {
     }
     std::fs::write(&out, serde_json::to_string_pretty(&report).expect("json")).expect("write");
     println!("live report: {} (cost ${total_cost:.4})", out.display());
+}
+
+/// Offline wire verification through the real provider adapter and recorder.
+#[test]
+fn recording_dispatches_document_and_query_wire_roles() {
+    use docsbase_memory::hybrid::openrouter::{BASE_URL, OpenRouterClient};
+    use docsbase_memory::hybrid::wire::{Transport, TransportResponse};
+    use std::sync::Mutex;
+    struct WireProbe(Arc<Mutex<Vec<(String, std::time::Instant)>>>);
+    impl Transport for WireProbe {
+        fn post_json(
+            &self,
+            _url: &str,
+            _headers: &[(String, String)],
+            body: &str,
+        ) -> docsbase_memory::error::Result<TransportResponse> {
+            let request: serde_json::Value = serde_json::from_str(body).unwrap();
+            let role = request["input_type"].as_str().unwrap();
+            self.0
+                .lock()
+                .unwrap()
+                .push((role.to_owned(), std::time::Instant::now()));
+            let vector = match role {
+                "search_document" => vec![1.0, 0.0],
+                "search_query" => vec![0.0, 1.0],
+                _ => panic!("unexpected role {role}"),
+            };
+            let data: Vec<_> = request["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(index, _)| serde_json::json!({"index":index,"embedding":vector}))
+                .collect();
+            Ok(TransportResponse {
+                status: 200,
+                body: serde_json::json!({"data":data}).to_string(),
+                retry_after: None,
+            })
+        }
+        fn get_json(
+            &self,
+            _: &str,
+            _: &[(String, String)],
+        ) -> docsbase_memory::error::Result<TransportResponse> {
+            panic!("unexpected GET")
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let corpus = tmp.path().join("corpus");
+    std::fs::create_dir(&corpus).unwrap();
+    std::fs::write(corpus.join("a.md"), "alpha content\n").unwrap();
+    let env = support::bench::build_env(&corpus, "wire-roles", 1..=1).unwrap();
+    let text = env.chunk_texts[0].clone();
+    let case: support::bench::QueryCase = serde_json::from_value(serde_json::json!({
+        "id":"wire-roles","query":text,"class":"probe","k":3,
+        "expected":[],"absent":[],"source":"test","notes":"wire roles","reviewed_by":[]
+    }))
+    .unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let client = OpenRouterClient::new(
+        BASE_URL,
+        "offline-test-key",
+        Box::new(WireProbe(seen.clone())),
+    )
+    .unwrap();
+    let embedder: Arc<dyn Embedder> = Arc::new(OpenRouterEmbedder::with_client(
+        EmbeddingCfg {
+            dimensions: 2,
+            ..EmbeddingCfg::default()
+        },
+        Arc::new(client),
+    ));
+    let vectors = tmp.path().join("vectors");
+    docsbase_memory::hybrid::blocking::enter(|| {
+        support::bench::record_fixtures_with(
+            &env,
+            &[case],
+            &embedder,
+            &support::bench::CollectingReranker {
+                seen: Mutex::new(Vec::new()),
+            },
+            "test/rerank",
+            &vectors,
+            &tmp.path().join("rerank.json"),
+        )
+        .map_err(|error| docsbase_memory::error::Error::internal(error.to_string()))
+    })
+    .unwrap();
+    let calls = seen.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|(role, _)| role.as_str())
+            .collect::<Vec<_>>(),
+        ["search_document", "search_query"]
+    );
+    assert!(
+        calls[1].1.duration_since(calls[0].1) >= support::bench::FREE_MODEL_PACE,
+        "free query recording must be paced after document inference"
+    );
+    let loaded = support::bench::VectorFixture::load(&vectors).unwrap();
+    assert_eq!(loaded.get(&text).unwrap(), [1.0, 0.0]);
+    assert_eq!(loaded.get_query(&text).unwrap(), [0.0, 1.0]);
 }

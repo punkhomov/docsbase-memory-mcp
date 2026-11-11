@@ -301,6 +301,7 @@ pub struct Provenance {
     pub engine_source_hash: String,
     pub tokenizer_version: u32,
     pub model_pins: Vec<String>,
+    pub embedding_vector_format: Option<&'static str>,
     pub replay_hashes: BTreeMap<String, String>,
     pub metric_contract: String,
 }
@@ -459,6 +460,10 @@ fn provenance(
         engine_source_hash: engine_source_hash()?,
         tokenizer_version: docsbase_memory::index::tokenizer::TOKENIZER_VERSION,
         model_pins: replay.pins.clone(),
+        embedding_vector_format: replay.stages.vectors.as_ref().map(|fixture| {
+            if fixture.query_vectors.is_some() { "v2-role-aware-raw" }
+            else { "v1-legacy-role-unknown" }
+        }),
         replay_hashes: replay.hashes.clone(),
         metric_contract: "binary positive document qrels at top-k citation slots; duplicate document gain once; IDCG truncated at k; unjudged is not explicit negative".into(),
     })
