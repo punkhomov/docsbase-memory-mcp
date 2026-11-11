@@ -485,3 +485,14 @@ unchanged:211hits/89misses/7errors. Literal217hits/83misses/0errors; original128
 still misses; two new misses514/551 and gains1041/1259 retained.18case metrics
 changed;282identical. No tuning or frozen gate/fixtures/oldreport edits. Full
 paired JSONs and interpretation: reports/scifact-query-modes-2026-11-11.md.
+
+## Delta 2026-11-11 — T20: #71 offline preflight
+
+Task T20: complete (offline materializer implementation). RED: real-index duplicate-body test fails
+with missing materializer; GREEN:3 preflight tests passed/1 manual ignored,
+search_bench80 passed/2 manual ignored; unchanged metrics_match_baseline.
+Rust1.88 cli-full all-targets Clippy/fmt/diff checks clean. No production,
+fixture/baseline/provider/CI changes.
+Ruling: fresh task reviewer PASS / APPROVED, no findings. Clean-commit
+manual artifact verification/final review/native CI remain PR delivery
+close-out; #71 remains open.

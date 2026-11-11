@@ -1140,3 +1140,38 @@ split/k/config list/replay dir/output path. Выход в frozen fixture paths
 abstracts ODC-By 1.0 (allenai/scifact LICENSE.md). Результат — вне домена
 проектной документации; он проверяет generalization retrieval pipeline,
 не пригодность конкретного продукта и не относительное качество моделей.
+
+## Delta 2026-11-11 — T20: representation preflight (#71)
+
+`tests/search_representation.rs` подключает отдельный test-only
+`tests/support/representation.rs`; остальные harness modules не расширяются.
+Materializer читает ordered SQL join `(rel_path, seq)` после штатного
+`build_env` (corpus копируется за пределы Git root), сохраняет реальные
+metadata/citation boundaries без изменения chunk text.
+
+Исследовательские recipes: raw-body-v1 = body; path-heading-v1 =
+`Path: <rel_path>\nHeading: <heading_path>\n\n<body>`; raw-query-v1 = исходный
+query. BLAKE3 от JSON tuple `(role, model_pin, recipe, actual_input)` исключает
+неоднозначное склеивание полей. Raw/context embedding keys и rerank-document
+keys раздельны. Rerank-document key сам по себе не является записью score:
+будущая запись должна также включать query/top_n/ordered candidate pool.
+
+Unique document blob-set digest не кодирует расположение; отдельный
+chunk_set_key включает locations/heading/kind/spans и оба input keys.
+ANN принадлежит комбинации recipe/vector-set/chunk membership, а не одному
+blob-set key. Query keys не зависят от document recipe. Полные original
+locations остаются даже при совпадающих raw bodies. Это inventory для
+эксперимента, не работающий новый VectorCache/ANN формат или migration.
+
+Artifact содержит все четыре пары document×rerank recipes, исходные queries
+и qrels. Candidate pools ещё не собраны; задан штатный benchmark window50,
+без per_document_limit/refill. Byte totals учитывают каждый chunk occurrence;
+unique item counts отражают возможную дедупликацию в пределах recipe. Это
+не token/cost/latency estimate. Manual entrypoint получает реальный HEAD и
+отклоняет dirty tree; tempfile+persist_noclobber защищает прежний artifact,
+canonical output parent обязан быть вне checkout. No provider construction.
+
+Следующий live collector должен сохранять exact ordered pools и новые
+recordings/provenance для каждого recipe; raw control записывается заново
+для отделения provider drift. Сначала pilot2, затем193 cases/all slices.
+До реализации collector/ограниченного live scope inference не запускается.
