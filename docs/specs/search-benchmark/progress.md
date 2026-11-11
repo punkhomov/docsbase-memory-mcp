@@ -543,3 +543,9 @@ findings. No deferred minors. Updated final Rust1.88 checks: cli-full101passed
 (84bench+10external+7live-unit)/6manual ignores; default94passed/3manual
 ignores. All-target cli-full Clippy/fmt/diff clean. Full native/final-review
 evidence follows in PR close-out before integration.
+
+T21 final source review76dce24: requirements/code converged, no Important/
+Critical findings; hosted CI pending. Its Minor timing-boundary finding is
+fixed in-task: measure before first document invocation so scheduler delay
+before the query cannot shorten the observed120ms interval. No deferred
+minors. Focused pacing regression/lint rerun and final fix review follow.

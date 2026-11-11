@@ -3549,17 +3549,17 @@ fn pacing_embedder_preserves_roles_and_spaces_mixed_calls() {
         },
         interval,
     );
+    let started = std::time::Instant::now();
     assert_eq!(
         embedder.embed(&["same text".to_owned()]).unwrap(),
         vec![vec![1.0, 0.0, 0.0, 0.0]]
     );
-    let started = std::time::Instant::now();
     assert_eq!(
         embedder.embed_query("same text").unwrap(),
         vec![0.0, 1.0, 0.0, 0.0]
     );
     assert!(
-        started.elapsed() >= std::time::Duration::from_millis(100),
+        started.elapsed() >= interval,
         "query must share document pacing"
     );
 }
