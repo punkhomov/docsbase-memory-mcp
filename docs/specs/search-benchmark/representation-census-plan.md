@@ -23,7 +23,7 @@
 
 **Interfaces:** existing prepare(env,cases,hash,revision)->Result<Value> retains its defaults. New private prepare_with_pins adds explicit embedding/rerank pins; collect_candidates(env:&BenchEnv,cases:&[QueryCase],vectors:&VectorFixture,corpus_hash:&str,revision:&str)->Result<Value> returns the preflight plus historical pools.
 
-- [ ] Step1 RED: use existing real duplicate corpus/cases helpers, make4dim pinned replay vectors, call collect_candidates and assert both a.md/b.md shared body occurrences have different context keys. Compare ordered raw_inputs to actual CollectingReranker seen for original k. Run cargo test --locked --features cli-full --test search_representation candidate_census. Expected missing collector compilation error before implementation.
+- [x] Step1 RED: use existing real duplicate corpus/cases helpers, make4dim pinned replay vectors, call collect_candidates and assert both a.md/b.md shared body occurrences have different context keys. Compare ordered raw_inputs to actual CollectingReranker seen for original k. Run cargo test --locked --features cli-full --test search_representation candidate_census. Expected missing collector compilation error before implementation.
 
 ```rust
 let root=corpus();
@@ -38,12 +38,14 @@ assert!(representation::collect_candidates(&env,&cases(),&vectors,&corpus_hash(r
 
 Define census_vectors in the same test file: document hashes come from env.chunk_hashes, each vector is[1,0,0,0], query hashes from unchanged case.query with the same dimension, model pin test/census@d4@l2; query_vectors Some. No fake search result lists.
 
-- [ ] Step2 implement common explicit-pin preflight; prepare still obtains existing component default target pins and delegates. Build census metadata maps from project-local SQL doc_id→path and preflight(path,seq)→row. Use chunk_id_parts to resolve actual citation IDs. Reject duplicate/missing map entries.
-- [ ] Step3 instantiate ReplayEmbedder only; check parsed model/dim, all vectors finite and matching dimensions, every query present, then preload_vectors. For each case/config use a fresh capture reranker, args query/original text + limit50, existing RERANK_WINDOW, DenseCache shared only within this isolated capture. Reject k>50 before execution.
-- [ ] Step4 validate captured query/body/top_n against complete citations and original occurrence rows. Empty search must have no capture. Return ordered candidates with exact raw/context strings/keys, two rerank pool keys, byte sums, explicit vector role provenance, original qrels/k and source/harness identities. No quality scores.
-- [ ] Step5 GREEN: run the new corpus tests plus frozen replay, require every nonempty observed pool to match the existing RerankFixture query/ordered-body/top_n key. Empty lexical observations stay in the denominator. Reuse outside_source_output/clean_revision/write_new for manual export, with DOCSBASE_REPRESENTATION_CENSUS_OUT.
-- [ ] Step6 verify default/cli-full search_representation and unchanged search_bench gate; clippy --locked --features cli-full --all-targets -- -D warnings; fmt/diff. Fresh task review; fix Critical/Important and record minors; append Task T22 complete/Ruling to progress.md and commit.
-- [ ] Step7 on the clean commit export the full frozen81docs/327chunks/193cases/386observations outside source; audit every candidate/body/context and frozen-pool agreement, then final review/required docs/linux/macos/windows CI and guarded squash merge as explicitly authorized by the user. #71 stays open for new provider recordings and measured full-slice results.
+- [x] Step2 implement common explicit-pin preflight; prepare still obtains existing component default target pins and delegates. Build census metadata maps from project-local SQL doc_id→path and preflight(path,seq)→row. Use chunk_id_parts to resolve actual citation IDs. Reject duplicate/missing map entries.
+- [x] Step3 instantiate ReplayEmbedder only; check parsed model/dim, all vectors finite and matching dimensions, every query present, then preload_vectors. For each case/config use a fresh capture reranker, args query/original text + limit50, existing RERANK_WINDOW, DenseCache shared only within this isolated capture. Reject k>50 before execution.
+- [x] Step4 validate captured query/body/top_n against complete citations and original occurrence rows. Empty search must have no capture. Return ordered candidates with exact raw/context strings/keys, two rerank pool keys, byte sums, explicit vector role provenance, original qrels/k and source/harness identities. No quality scores.
+- [x] Step5 GREEN: run the new corpus tests plus frozen replay, require every nonempty observed pool to match the existing RerankFixture query/ordered-body/top_n key. Empty lexical observations stay in the denominator. Reuse outside_source_output/clean_revision/write_new for manual export, with DOCSBASE_REPRESENTATION_CENSUS_OUT.
+- [x] Step6 verify default/cli-full search_representation and unchanged search_bench gate; clippy --locked --features cli-full --all-targets -- -D warnings; fmt/diff. Fresh task review; fix Critical/Important and record minors; append Task T22 complete/Ruling to progress.md and commit.
+- [x] Step7 on the clean commit export the full frozen81docs/327chunks/193cases/386observations outside source; audit every candidate/body/context and frozen-pool agreement.
+
+Integration gate, recorded in the PR: final review, required docs/linux/macos/windows CI and guarded squash merge as explicitly authorized by the user. #71 stays open for new provider recordings and measured full-slice results.
 
 Manual command after task commit:
 

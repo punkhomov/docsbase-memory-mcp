@@ -762,6 +762,6 @@ representation-census-plan.md, dated specs/ledger. No src/frozen/CI edits.
   expected search behavior. Default/cli-full targeted tests and unchanged
   gate, fmt/all-target Clippy.
 - [x] Fresh task review/fix/ledger+commit.
-- [ ] Clean-source manual full export outside checkout; audit386case/source
+- [x] Clean-source manual full export outside checkout; audit386case/source
   observations and agreement of all nonempty historical pools. Final review,
   required native CI and squash integration follow in PR close-out.
