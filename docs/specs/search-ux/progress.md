@@ -288,3 +288,26 @@ Ruling фиксируют принятые решения; minor — что от
 - This final commit changes only this ledger. Required checks must also be
   green on its final PR head before marking ready; final head/run outcomes are
   recorded in PR #118 to avoid modifying the ledger after every CI run.
+
+
+## Delta 2026-11-11 — #68
+
+- Task R1: complete (bounded candidate refill and owner policy). Real RED
+  40+10 corpus returned2 instead10; >1000 dominant case stayed at window40.
+  Policy RED rejected the new key. GREEN covers lexical/RRF/rerank, one provider
+  call/late winning chunk, scopes, scores/order, exhaustion vs budget, configured
+  ceiling/base floor, generation/cancellation and byte admission cleanup.
+- Verify: full cli-full runtime suite **1198 passed,14 ignored** (71 groups);
+  subsequently added unfiltered-RRF integration and clamped-RRF unit both passed.
+  Final focused11 integration +18 policy, then fix-round unit +11 integration;
+  all-target Clippy/fmt passed. Logs: /tmp/refill-{red,policy-red,full,focused-final,
+  r1-fix,clippy}.log. No baseline/threshold/tokenizer/schema/dependency changes.
+- Ruling: fresh R1 reviewer PASS/APPROVED. Two Minor findings fixed in-task:
+  cleanup reservations now exhaust the complete aggregate allowance; adversarial
+  actual RRF10→12 widening proves naive top12 displaces base chunks and the
+  selected pool preserves all of them. Fix review: both ADDRESSED, no new
+  Critical/Important findings. No deferred minors. R2 measurement/delivery pending.
+- Session process delta: user explicitly requested agents perform squash merge
+  after verified checks. This overrides historical human-only delivery guidance
+  for the authorized work in this session. #118 was squash-merged at061b353, #67
+  closed; #68 branch starts from that actual main commit.

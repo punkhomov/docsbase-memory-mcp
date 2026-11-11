@@ -13,6 +13,7 @@ use docsbase_memory::search::settings::{SearchPatch, SearchSettings, SearchSpec}
 
 fn settings(request: u64, retained: u64) -> SearchSettings {
     SearchSettings {
+        dedupe_max_candidates: 1000,
         request_timeout_ms: 30_000,
         max_request_payload_bytes: request,
         max_retained_payload_bytes: retained,
@@ -40,6 +41,13 @@ fn missing_search_fields_are_resolved_by_the_config_owner() {
         assert_eq!(origin.scope, Scope::Daemon);
         assert_eq!(origin.unit, Unit::Bytes);
     }
+    assert_eq!(resolved.settings().search.dedupe_max_candidates, 1000);
+    let refill = resolved
+        .provenance()
+        .get("search.dedupe_max_candidates")
+        .expect("refill default");
+    assert_eq!(refill.source, SourceId::Defaults);
+    assert_eq!(refill.unit, Unit::Count);
     let origin = resolved
         .provenance()
         .get("search.request_timeout_ms")
@@ -354,4 +362,78 @@ fn retained_charge_uses_checked_arithmetic_without_allocating_payload() {
             .reserve(u64::MAX)
             .expect("overflow did not leak charge"),
     );
+}
+
+#[test]
+fn refill_policy_has_count_provenance_and_rejects_invalid_or_project_values() {
+    let config = tempfile::tempdir().expect("config");
+    let path = config.path().join("config.toml");
+    std::fs::write(&path, "[search]\ndedupe_max_candidates = 123\n").expect("config");
+    let resolved = global_from(config.path()).expect("refill policy");
+    let origin = resolved
+        .provenance()
+        .get("search.dedupe_max_candidates")
+        .expect("origin");
+    assert_eq!(origin.source, SourceId::Global(path.clone()));
+    assert_eq!(origin.scope, Scope::Daemon);
+    assert_eq!(origin.unit, Unit::Count);
+    for value in ["0", "-1", "1001", "1.5"] {
+        std::fs::write(
+            &path,
+            format!("[search]\ndedupe_max_candidates = {value}\n"),
+        )
+        .expect("config");
+        assert!(Config::global_from(config.path()).is_err(), "{value}");
+    }
+    std::fs::write(&path, "").expect("default");
+    let project = tempfile::tempdir().expect("project");
+    std::fs::write(
+        project.path().join(".docsbase.toml"),
+        "[search]\ndedupe_max_candidates = 123\n",
+    )
+    .expect("project config");
+    assert!(Config::load_from(config.path(), Some(project.path())).is_err());
+}
+
+#[test]
+fn typed_refill_policy_is_validated_and_rejects_project_scope() {
+    for value in [0, 123, 1001] {
+        let resolved = resolve_component::<SearchSpec>(
+            &DefaultsContext::standalone(),
+            [(
+                SourceId::Global("policy.toml".into()),
+                SearchPatch {
+                    dedupe_max_candidates: Some(value),
+                    ..SearchPatch::default()
+                },
+            )],
+        );
+        if value == 123 {
+            assert_eq!(
+                resolved
+                    .expect("valid typed policy")
+                    .settings()
+                    .dedupe_max_candidates,
+                123
+            );
+        } else {
+            assert!(resolved.is_err());
+        }
+    }
+    assert!(
+        resolve_component::<SearchSpec>(
+            &DefaultsContext::standalone(),
+            [(
+                SourceId::Project("project".into()),
+                SearchPatch {
+                    dedupe_max_candidates: Some(123),
+                    ..SearchPatch::default()
+                }
+            )]
+        )
+        .is_err()
+    );
+    let mut policy = settings(8, 12);
+    policy.dedupe_max_candidates = 0;
+    assert!(PayloadBudget::new(policy).is_err());
 }

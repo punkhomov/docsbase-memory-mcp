@@ -284,3 +284,11 @@ S1 owns FR-15…19 / SC-10 (scope/candidates/state/regressions). S2 owns
 FR-20 / SC-11/12 (measured page-local vector IO and evidence). S3 owns product
 docs, quality/portability evidence, fresh final review and ready PR.
 New crates: none. No baseline/snapshot/tokenizer/schema changes. #68 is separate.
+
+
+## Delta 2026-11-11 — #68
+
+R1: owner-resolved budget, bounded refill, truthful diagnostics, state/resource
+regressions (FR-21..25 / SC-13). R2: delivery/measurements/product docs (SC-14),
+fresh whole-branch review, required native checks. New crates: none.
+Подробные шаги: [dedupe-refill-plan.md](dedupe-refill-plan.md).

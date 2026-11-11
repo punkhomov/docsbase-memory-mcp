@@ -94,7 +94,8 @@ is the bare array above, unchanged.
 | `stages` | Stages that executed, in order: `bm25`, `dense`, `rrf`, `rerank` |
 | `stage_ms` | Milliseconds per executed stage plus original end-to-end `total`, including startup, queueing and transport through reply receipt; a stage that did not run has no key |
 | `queue_ms` | Admission delay already included in `stage_ms.total`: frontend/worker/metadata-reader waiting; do not add it to total again |
-| `window` | Planned eligible candidate window: `limit` for lexical search (×4 with a document cap), `max(limit, window)` when fused or reranked, clamped to 1000. Actual candidates may be fewer |
+| `window` | Planned eligible candidate window: `limit` for lexical search, `max(limit, window)` when fused or reranked. Document caps start with lexical ×4 or the hybrid base, then refill up to the configured ceiling; the last planned window is reported. Actual candidates may be fewer |
+| `refill` | Present for nonzero `dedupe=path` requests: `stop_reason`, `candidate_limit`, `candidates`, `capacity`, `rounds`, `dense_window`; see below |
 | `index_generation` | Index generation the answer was served from |
 | `degraded` | Reasons the tier did not serve in full: `ann-building`, `ann-insufficient`, `ann-error`, `exact-fallback`, `no-rerank-stage`. Empty is the normal answer |
 
@@ -142,13 +143,39 @@ This allowance measures logical retained data/preparation, not process RSS.
 No scope cache is retained; sync/tag/path changes are observed on the next
 request, and a generation change during preparation asks the caller to retry.
 
-Document caps still apply after ranking over a bounded window (lexical ×4,
-maximum 1000); they can produce fewer than `limit` hits. Diversity/refill is
-separate work. `explain` echoes the requested scope/cap in `meta.filters`.
+Document caps apply after ranking. If the ordinary pool cannot fill `limit`
+under the cap, local candidate windows grow until they can, the sources end,
+or the effective ceiling is reached. That ceiling is
+`max(base_window, search.dedupe_max_candidates)` (global default1000). All
+base chunks remain eligible for reranking; there is at most one rerank call,
+with the final pool, followed by the cap. `limit` still counts chunks, not pages.
+RRF cap requests collect one dense source up to the ceiling, even if the base
+pool later suffices, avoiding repeated vector scans or changing ANN results.
+ANN remains approximate. No reindex is required for this upgrade.
+
+With `explain`, `meta.refill.stop_reason` explains the outcome:
+
+- `satisfied`: the capped result reached `limit`;
+- `source-exhausted`: all active source lists ended and their whole union was
+  considered; fewer chunks may exist under the cap;
+- `candidate-budget`: the ceiling stopped exploration/retention; this does not
+  claim that no other documents match;
+- `post-filter-shortfall`: defensive filtering or a missing citation reduced a
+  pool whose prepared capacity had been sufficient.
+
+`candidates` is the final retained pool size, `capacity` its sum of capped
+per-document counts, `candidate_limit` the effective ceiling, `rounds` includes
+the initial round, and `dense_window` is the requested dense width (zero without
+RRF). Full lists without an exhaustion proof conservatively report budget.
+This is bounded retrieval, not exhaustive group pagination or a total count.
+Byte/deadline/cancellation refusal returns the existing error instead of partial
+results. `stage_ms` sums each stage across rounds. `explain` also echoes the
+requested scope/cap in `meta.filters`.
 `meta.trimmed.filtered_out` counts only rejections observed by the final
 check, normally zero because scope exclusion happened before collection;
 it does not count excluded corpus documents. Missing document metadata never
-counts as a filter rejection. `deduped` counts observed document-cap drops.
+counts as a filter rejection. `deduped` counts document-cap drops from the final retained pool once; repeated
+refill attempts do not inflate either counter.
 
 `query_cache` reports `{hits, misses, entries, bytes}` for the query-embedding
 cache: a repeated query with the same model is answered without calling the

@@ -31,6 +31,11 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 - `docsbase search --explain` prints the same envelope as the MCP tool.
 
 ### Fixed
+- Document caps refill undersized candidate pools before one rerank operation,
+  then preserve the order of surviving chunks. Global
+  `search.dedupe_max_candidates` bounds extra exploration (default1000), and
+  explain-only `meta.refill` distinguishes source exhaustion from a candidate
+  budget stop. No reindex is needed (#68).
 - Path/tag search scopes now apply before lexical/dense candidate limits and
   RRF, so eligible matches beyond the former global window are retrieved.
   BM25 scores and unfiltered ranking stay unchanged. Filtered dense streams

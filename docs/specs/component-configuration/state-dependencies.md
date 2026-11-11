@@ -121,3 +121,12 @@ index mutation. Он обязан предотвращать смешение с
 но не объявляет нынешнюю SQLite/Tantivy пару immutable generations. Для будущего
 server mode допустимость maintenance/503 при sync фиксируется в #79 и нагрузочной
 приёмке; zero-downtime обновление не выводится из одного config snapshot.
+
+
+## Delta 2026-11-11 — #68
+
+`search.dedupe_max_candidates` — daemon request policy: global restart как
+остальные SearchSpec fields. Меняет только ширину source/retained candidate
+пула при opt-in cap. Никакой индекс/metadata/vector/query cache migration или
+инвалидации не требуется; dense query identity остаётся model+query. Каждый
+refill снова допускается под исходной generation/config/deadline.

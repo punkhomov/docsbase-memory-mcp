@@ -46,16 +46,24 @@ search components receive complete settings.
 
 | Key | Default | Meaning |
 |---|---|---|
+| `dedupe_max_candidates` | `1000` | Ceiling for extra document-cap refill; 1…1000. Effective ceiling is the larger of this value and the ordinary base window |
 | `request_timeout_ms` | `30000` | Original search budget, including startup, admission, transport and reconnect |
 | `max_request_payload_bytes` | `67108864` (64 MiB) | Logical allowance for one preparation scope or captured candidate/citation/filter/text payload; the two phases do not overlap |
 | `max_retained_payload_bytes` | `268435456` (256 MiB) | Shared allowance for concurrent live scopes/payloads in one daemon; not process RSS |
 
 ```toml
 [search]
+dedupe_max_candidates = 1000
 request_timeout_ms = 30000
 max_request_payload_bytes = 67108864
 max_retained_payload_bytes = 268435456
 ```
+
+`dedupe_max_candidates` only affects `dedupe=path`; it does not shrink the base
+window or change indexing/vector/query caches. It may enlarge the single rerank
+request beyond `hybrid.reranker.window`, which remains its ordinary base size.
+For RRF with a document cap, the dense source is collected once up to this
+effective ceiling and reused as prefixes during refill.
 
 All values must be positive and the per-request allowance cannot exceed the
 shared allowance. Payload admission refuses an oversized request or exhausted
