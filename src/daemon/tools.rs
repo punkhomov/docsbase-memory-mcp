@@ -250,63 +250,43 @@ fn scoped_dense<Guard>(
             .query_embedding(embedder, query.text, context.operation.cancellation())?;
     context.operation.check()?;
     let mut cache = crate::vector_cache::VectorCache::open(context.cache)?;
-    let mut batches = scope.documents().chunks(repo::BATCH_KEYS);
-    let mut batch = batches.next();
-    let mut after = (0_i64, 0_u32);
-    let mut page = Vec::<(u64, String)>::new().into_iter();
-    let mut failed = false;
-    let rows = std::iter::from_fn(|| {
-        if failed {
-            return None;
-        }
-        let next = (|| -> Result<Option<(u64, Vec<f32>)>> {
-            loop {
+    let mut top = dense::TopK::new(&vector, query.fetch)?;
+    for documents in scope.documents().chunks(repo::BATCH_KEYS) {
+        let mut after = (0_i64, 0_u32);
+        loop {
+            context.operation.check()?;
+            let hashes = in_read_phase(context, source, admit, |reader| {
+                let transaction = reader
+                    .connection()
+                    .unchecked_transaction()
+                    .map_err(repo::db_error)?;
+                snapshot_info(&reader, context.project, Some(query.generation))?;
+                let hashes = crate::search::scope::hash_page(
+                    &transaction,
+                    context.project.id,
+                    documents,
+                    after,
+                    &context.operation,
+                )?;
+                transaction.commit().map_err(repo::db_error)?;
+                Ok(hashes)
+            })?;
+            if let Some((id, _)) = hashes.chunks.last() {
+                after = chunk_id_parts(*id);
+            }
+            cache.visit_page(embedder.model_id(), &hashes.chunks, |id, vector| {
                 context.operation.check()?;
-                if let Some((id, hash)) = page.next() {
-                    if let Some(vector) = cache.get(embedder.model_id(), &hash)? {
-                        return Ok(Some((id, vector)));
-                    }
-                    continue;
+                if let Some(vector) = vector {
+                    top.push(id, vector)?;
                 }
-                let Some(documents) = batch else {
-                    return Ok(None);
-                };
-                let hashes = in_read_phase(context, source, admit, |reader| {
-                    let transaction = reader
-                        .connection()
-                        .unchecked_transaction()
-                        .map_err(repo::db_error)?;
-                    snapshot_info(&reader, context.project, Some(query.generation))?;
-                    let hashes = crate::search::scope::hash_page(
-                        &transaction,
-                        context.project.id,
-                        documents,
-                        after,
-                        &context.operation,
-                    )?;
-                    transaction.commit().map_err(repo::db_error)?;
-                    Ok(hashes)
-                })?;
-                if let Some((id, _)) = hashes.chunks.last() {
-                    after = chunk_id_parts(*id);
-                }
-                if !hashes.more {
-                    batch = batches.next();
-                    after = (0, 0);
-                }
-                page = hashes.chunks.into_iter();
-            }
-        })();
-        match next {
-            Ok(Some(row)) => Some(Ok(row)),
-            Ok(None) => None,
-            Err(err) => {
-                failed = true;
-                Some(Err(err))
+                Ok(())
+            })?;
+            if !hashes.more {
+                break;
             }
         }
-    });
-    dense::top_k_iter(&vector, rows, query.fetch)
+    }
+    Ok(top.finish())
 }
 
 fn stream_exact(

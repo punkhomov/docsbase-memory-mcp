@@ -272,3 +272,16 @@ O(eligible chunks × vector dimension) plus eligible vector IO and can be slower
 than ANN. Measurements belong in the ledger; a measured adaptive/lazy planner
 and bounded filtered ANN remain follow-ups under #117. A short response due to
 per-document caps remains possible: diversity/refill belongs to separate #68.
+
+### Measured correction: page-local vector cache transactions
+
+The initial release diagnostic found 1.8–2.1s for 10k eligible two-dimensional
+vectors. `VectorCache::get` committed each LRU touch separately. `visit_page`
+now reserves an IMMEDIATE transaction before reads, reuses SELECT/UPDATE
+statements and commits once per supplied hash page. Missing rows still reach
+the caller for cancellation checks. Each BLOB is decoded and scored before the
+next lookup; no vector page is materialized. On callback/decode error or unwind,
+RAII rolls back LRU touches. Only vector-cache resources span this local scan;
+metadata/config/project admission already ended, and the cache transaction ends
+before the next metadata page. No provider is invoked by the visitor. The exact
+heap is shared with `top_k_iter`; cosine/tie/error semantics remain unchanged.

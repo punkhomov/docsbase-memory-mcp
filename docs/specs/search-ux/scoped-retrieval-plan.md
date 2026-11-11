@@ -16,10 +16,19 @@ Fuse scoped source ranks, rerank once, preserve the document cap. Release
 scope admission before final payload admission. Cover state/errors/cleanup,
 score invariance and unfiltered compatibility. Fresh task review and fixes.
 
-## S2 — evidence and delivery
+## S2 — measured vector IO and evidence
 
 Measure real 20k two-folder cold/warm broad/narrow scope vs query-first
 reference. Document diagnostics and exact dense tradeoff. Run MSRV tests,
 clippy/fmt, quality gate and appropriate static/offline/artifact checks.
-Fresh final review and fixes; ready PR with required native CI. Human merge.
+Fresh task review and fixes.
+
+## S3 — final verification and delivery
+
+Full checks and fresh final review; ready PR with required native CI. Human merge.
 #68, ACL, MMR, scope caches and adaptive filtered ANN remain separate work.
+
+Measured S2 correction (FR-20 / SC-12): initial 20k release evidence exposed
+per-vector LRU autocommit cost. Add page-local vector transactions + shared exact
+heap, with real rollback/model/order/missing-row tests, then repeat measurements
+and full checks. Do not materialize a vector page or hold metadata during IO.

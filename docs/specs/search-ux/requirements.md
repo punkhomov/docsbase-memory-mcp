@@ -362,3 +362,17 @@
 - **SC-11:** measure 20k two-folder broad/narrow scopes vs a query-first
   reference, cold/warm latency and memory accounting. No optimal-planner or
   filtered-ANN-recall claim.
+
+### Delta 2026-11-11 — #67 measured vector IO correction
+
+- **FR-20:** eligible vector pages decode one vector at a time and share one
+  short vector-cache write transaction for LRU touches, with prepared statements
+  reused within the page. Reserve the write transaction before reads (avoid WAL
+  upgrade races); commit/rollback ends before the next metadata phase. Failed
+  decoding, visitor/cancellation error or unwind must release the transaction;
+  no partial search response is published. This does not retain a vector page
+  or alter score/tie/missing-vector/model/cache-key semantics.
+- **SC-12:** real cache tests verify model isolation, missing rows, visitation
+  order/LRU, rollback and reuse after error; existing exact-streaming tests and
+  scoped generation/cancellation/late-page regressions remain green. Repeat the
+  same 20k release measurement; report the initial and corrected results.

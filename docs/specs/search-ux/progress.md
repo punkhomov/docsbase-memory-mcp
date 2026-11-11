@@ -247,3 +247,24 @@ Ruling фиксируют принятые решения; minor — что от
   follow-up is page-local vector-cache transactions while streaming one vector
   at a time; no whole-scope vector materialization. Final numbers and all
   delivery gates follow after this measured correction.
+
+- Task S2: complete (FR-20 / SC-11/12). Same 20k release diagnostic repeated:
+  broad scoped RRF **163.629–212.639ms**, initial **1796.817–2079.110ms**.
+  Exact heap shared with the iterator path; vector pages use one IMMEDIATE
+  transaction, reused statements and one decoded vector at a time. LRU/model/
+  missing-row/order/rollback/reuse behavior has real cache tests.
+- Ruling: retain exact scoped dense for this first slice; broad-scope/rare-query
+  eager planning costs and synthetic-vector/OS-cache caveats are explicit in
+  `reports/scoped-retrieval-2026-11-11.md`. No optimal-planner or p95 claim.
+  #117 retains adaptive planner/filtered ANN work; #68 remains separate.
+- Fresh S2 reviewer: PASS / APPROVED, no outstanding findings. Logical admission
+  prose corrected to match `size_of<Term>` (480kB broad, 48B narrow, plus38400B
+  dense hash page). No deferred minors. Final native/cold/RSS acceptance is not
+  inferred from synthetic tests.
+- Verify: cli-full **1186 passed, 14 ignored** (70 groups), unchanged quality
+  gate green. Post-lint helper extraction: **521 passed** across lib, hybrid,
+  direct CLI and IPC. Clippy all-targets + opt-in artifact/perf, fmt, fresh
+  static artifact and provider capability checks passed. Late S1 UTF-16 fix
+  exceeded Clippy's line limit; pure preparation-charge helper extraction in
+  S2 resolved it, and the final scoped tests above cover all three encodings.
+  Remaining resource/lean/offline and native CI gates belong to S3.

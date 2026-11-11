@@ -43,7 +43,7 @@ impl DocumentScope {
             project,
             prefix,
             tags,
-            dense,
+            dense: _,
         } = request;
         let encoding: String = connection
             .pragma_query_value(None, "encoding", |row| row.get(0))
@@ -77,35 +77,8 @@ impl DocumentScope {
             )
             .map_err(db_error)?;
         let count = u64::try_from(count).map_err(|_| overflow())?;
-        let mut json_bytes = u64::try_from(json_bytes).map_err(|_| overflow())?;
-        if encoding != "UTF-8" {
-            // SQLite converts UTF-16 text to UTF-8 for rusqlite; one UTF-16
-            // unit may become three UTF-8 bytes.
-            json_bytes = json_bytes
-                .checked_add(1)
-                .and_then(|n| (n / 2).checked_mul(3))
-                .ok_or_else(overflow)?;
-        }
-        // Every JSON byte is allowed one Value slot (conservative logical
-        // allowance for container-heavy metadata); at most one row is parsed.
-        let json_charge = if tags.is_empty() {
-            0
-        } else {
-            json_bytes
-                .checked_mul(size_of::<Value>() as u64)
-                .ok_or_else(overflow)?
-        };
-        let per_doc = (size_of::<i64>() + size_of::<Term>() + size_of::<i64>()) as u64;
-        let page_charge = if dense && count > 0 {
-            (BATCH_KEYS * (size_of::<(u64, String)>() + 64)) as u64
-        } else {
-            0
-        };
-        let charge = count
-            .checked_mul(per_doc)
-            .and_then(|n| n.checked_add(json_charge))
-            .and_then(|n| n.checked_add(page_charge))
-            .ok_or_else(overflow)?;
+        let json_bytes = u64::try_from(json_bytes).map_err(|_| overflow())?;
+        let charge = preparation_charge(count, json_bytes, utf8, request)?;
         let permit = budget.reserve(charge)?;
         let capacity = usize::try_from(count).map_err(|_| overflow())?;
         let mut documents = Vec::with_capacity(capacity);
@@ -154,6 +127,42 @@ impl DocumentScope {
     pub(crate) fn documents(&self) -> &[i64] {
         &self.documents
     }
+}
+
+fn preparation_charge(
+    count: u64,
+    mut json_bytes: u64,
+    utf8: bool,
+    request: ScopeRequest<'_>,
+) -> Result<u64> {
+    if !utf8 {
+        // SQLite converts UTF-16 text to UTF-8 for rusqlite; one UTF-16
+        // unit may become three UTF-8 bytes.
+        json_bytes = json_bytes
+            .checked_add(1)
+            .and_then(|n| (n / 2).checked_mul(3))
+            .ok_or_else(overflow)?;
+    }
+    // Every JSON byte is allowed one Value slot (conservative logical
+    // allowance for container-heavy metadata); at most one row is parsed.
+    let json_charge = if request.tags.is_empty() {
+        0
+    } else {
+        json_bytes
+            .checked_mul(size_of::<Value>() as u64)
+            .ok_or_else(overflow)?
+    };
+    let per_doc = (size_of::<i64>() + size_of::<Term>() + size_of::<i64>()) as u64;
+    let page_charge = if request.dense && count > 0 {
+        (BATCH_KEYS * (size_of::<(u64, String)>() + 64)) as u64
+    } else {
+        0
+    };
+    count
+        .checked_mul(per_doc)
+        .and_then(|n| n.checked_add(json_charge))
+        .and_then(|n| n.checked_add(page_charge))
+        .ok_or_else(overflow)
 }
 
 fn overflow() -> Error {

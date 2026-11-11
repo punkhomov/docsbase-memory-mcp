@@ -280,6 +280,7 @@ FR-4 и строки citation сохраняются. New crates: none.
 ## Delta 2026-11-11 — #67
 
 Implementation contracts: [S1 / S2](scoped-retrieval-plan.md).
-S1 owns FR-15…19 / SC-10 (scope/candidates/state/regressions); S2 owns SC-11,
-product docs, quality/portability evidence, final review and ready PR.
+S1 owns FR-15…19 / SC-10 (scope/candidates/state/regressions). S2 owns
+FR-20 / SC-11/12 (measured page-local vector IO and evidence). S3 owns product
+docs, quality/portability evidence, fresh final review and ready PR.
 New crates: none. No baseline/snapshot/tokenizer/schema changes. #68 is separate.

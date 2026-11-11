@@ -170,44 +170,68 @@ pub fn top_k_iter<I>(query: &[f32], rows: I, fetch: usize) -> Result<Vec<(u64, f
 where
     I: Iterator<Item = Result<(u64, Vec<f32>)>>,
 {
-    if query.is_empty() {
-        return Err(Error::internal("dense query vector is empty"));
-    }
+    let mut top = TopK::new(query, fetch)?;
     if fetch == 0 {
         return Ok(Vec::new());
     }
-    let query_norm = norm(query);
-    let mut heap: BinaryHeap<Worst> = BinaryHeap::new();
     for row in rows {
-        let (chunk_id, vector) = row?;
-        if vector.len() != query.len() {
+        let (id, vector) = row?;
+        top.push(id, &vector)?;
+    }
+    Ok(top.finish())
+}
+
+/// Same exact bounded heap for iterator and page-driven dense scans.
+pub(crate) struct TopK<'a> {
+    query: &'a [f32],
+    query_norm: f32,
+    fetch: usize,
+    heap: BinaryHeap<Worst>,
+}
+
+impl<'a> TopK<'a> {
+    pub(crate) fn new(query: &'a [f32], fetch: usize) -> Result<Self> {
+        if query.is_empty() {
+            return Err(Error::internal("dense query vector is empty"));
+        }
+        Ok(Self {
+            query,
+            query_norm: norm(query),
+            fetch,
+            heap: BinaryHeap::new(),
+        })
+    }
+
+    pub(crate) fn push(&mut self, chunk_id: u64, vector: &[f32]) -> Result<()> {
+        if vector.len() != self.query.len() {
             return Err(Error::internal(format!(
                 "dense candidate vector dim {} does not match query dim {} (chunk {chunk_id})",
                 vector.len(),
-                query.len()
+                self.query.len(),
             )));
         }
         let candidate = Worst {
-            score: cosine(query_norm, query, &vector),
+            score: cosine(self.query_norm, self.query, vector),
             chunk_id,
         };
-        if heap.len() < fetch {
-            heap.push(candidate);
-            continue;
+        if self.heap.len() < self.fetch {
+            self.heap.push(candidate);
+        } else if self.heap.peek().is_some_and(|victim| candidate < *victim) {
+            self.heap.pop();
+            self.heap.push(candidate);
         }
-        if let Some(victim) = heap.peek()
-            && candidate < *victim
-        {
-            heap.pop();
-            heap.push(candidate);
-        }
+        Ok(())
     }
-    let mut out: Vec<(u64, f32)> = heap
-        .into_iter()
-        .map(|row| (row.chunk_id, row.score))
-        .collect();
-    out.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    Ok(out)
+
+    pub(crate) fn finish(self) -> Vec<(u64, f32)> {
+        let mut out: Vec<_> = self
+            .heap
+            .into_iter()
+            .map(|row| (row.chunk_id, row.score))
+            .collect();
+        out.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        out
+    }
 }
 
 /// Heap ordering where `peek()` is the eviction victim: the lowest score,
