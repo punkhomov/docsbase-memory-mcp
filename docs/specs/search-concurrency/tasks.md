@@ -476,3 +476,13 @@ fresh task review. Final latest-head four required checks and scoped whole-
 feature acceptance remain mandatory; previous final review does not cover
 this newly added bounded task. Duplicate-check all existing issues before any
 new leaf filing. No native reproduction claim until its actual run completes.
+
+### Delta 2026-11-11 — S4.3c no-consumption probe regression
+
+Before further production changes, add actual idle one-instance pipe test:
+probe presence must not consume the instance before an immediate real client
+open. Add NUL-prefix negative control with a live valid prefix. Observe native
+RED; only then implement the narrow validated WaitNamedPipeW NOWAIT adapter in
+platform/windows.rs and enable the existing windows-sys System_Pipes feature.
+Keep generic blocking and raw async ZERO behavior, original deadlines and one
+MCP transport retry. Revalidate current full/lean, actual native and fresh review.

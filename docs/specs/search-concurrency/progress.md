@@ -578,3 +578,12 @@ is retained; only a cfgWindows test assertion/comment now differs, so do not
 claim final-byte map equality. Final native CI reruns all platforms on new head;
 local Linux functional code is unchanged and a duplicate local full run adds no
 coverage. Fresh task review remains pending until final native evidence.
+
+Task S4.3c: native9cfce9e/run42950674651 docs/Linux/macOS pass, all5newplatform
+controls and454Windowslib pass. FullWindows later fails project_error_has_instruction
+with connect-after-startup Transport instead of Project. No rerun/extra retry.
+Source-backed candidate: connect-and-close liveness itself consumes the one
+pipe instance before the real connection; add deterministic native no-consumption
+RED plus NUL-live-prefix control BEFORE further production changes. Narrow
+Win32 NOWAIT probe exception is designed above, not yet implemented. PR112
+stays draft, fresh review/full acceptance pending.

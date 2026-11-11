@@ -929,3 +929,31 @@ busy presence while occupied and true absence on a never-created unique name.
 The existing transport removal regression joins its server/runtime before
 checking absence. Do not impose immediate name disappearance after wrapper Drop
 or add a sleep/timing allowance to make that invalid contract pass.
+
+### Delta 2026-11-11 — liveness must not consume a pipe instance
+
+Native9cfce9e/run42950674651 passes all five platform controls and
+454library tests pass, then error_surface::project_error_has_instruction gets
+Transport instead of Project after startup. A connect-and-close liveness probe
+occupies a server instance until accept/disconnect handling; two immediate MCP
+transport attempts, each preceded by another probe, need not escape that state.
+Preserve the bounded retry contract instead of adding retries/backoff. First
+prove a no-consumption requirement with a real single-instance idle pipe:
+probe true, then a real client opens immediately without server accept/reset.
+Current connect-based probe should consume the instance and fail that test.
+
+Use WaitNamedPipeW with the platform NMPWAIT_NOWAIT flag for liveness only;
+available is true, busy (ERROR_SEM_TIMEOUT/ERROR_PIPE_BUSY) is present, missing/
+invalid is false. This queries availability without opening a client handle.
+A successful probe does not reserve an instance against other clients. Reject
+embedded NUL before FFI so a name cannot alias its prefix. Verify this against
+a live valid prefix, as well as available/busy/absent/unix endpoint controls.
+
+Ruling: supersede S4.3c's no-new-unsafe implementation preference for one narrow
+Windows platform FFI call, with function-scoped allow, SAFETY comment and real
+native regression. Locked interprocess has no public safe non-consuming probe;
+its safe raw connect necessarily consumes a connection. The existing windows-sys
+OS seam already uses this convention; enable its System_Pipes feature, no new
+crate/version/lock dependency. NMPWAIT_NOWAIT is the named OS probe mode, not an
+application timeout default. No unbounded waiter, provider budget, sleep, spin
+or extra MCP retry. The existing async raw ZERO admission remains unchanged.

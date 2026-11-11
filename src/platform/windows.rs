@@ -561,4 +561,58 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(!connect_probe(&endpoint));
     }
+
+    #[test]
+    fn probe_does_not_consume_available_pipe_instance() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let entered = runtime.enter();
+        let cache = tempfile::TempDir::new().expect("cache");
+        let endpoint = daemon_endpoint(cache.path());
+        let path = pipe_path(&endpoint).expect("pipe path");
+        let server = ServerOptions::new()
+            .max_instances(1)
+            .first_pipe_instance(true)
+            .create(&path)
+            .expect("single idle pipe instance");
+        let present = connect_probe(&endpoint);
+        // The server has not accepted/disconnected any probe connection.
+        // A non-consuming probe leaves its only instance available.
+        let error = ClientOptions::new().open(&path).err();
+        drop(server);
+        drop(entered);
+        drop(runtime);
+        assert!(present, "idle endpoint is present");
+        assert!(
+            error.is_none(),
+            "probe consumed the pipe instance: {error:?}"
+        );
+    }
+
+    #[test]
+    fn probe_rejects_nul_alias_of_a_live_pipe() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let entered = runtime.enter();
+        let cache = tempfile::TempDir::new().expect("cache");
+        let endpoint = daemon_endpoint(cache.path());
+        let path = pipe_path(&endpoint).expect("pipe path");
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&path)
+            .expect("live prefix pipe");
+        let Endpoint::Pipe(name) = &endpoint else {
+            panic!("Windows endpoint");
+        };
+        let alias = Endpoint::Pipe(format!("{name}\0suffix"));
+        let present = connect_probe(&alias);
+        drop(server);
+        drop(entered);
+        drop(runtime);
+        assert!(!present, "embedded NUL must not probe the live prefix");
+    }
 }
