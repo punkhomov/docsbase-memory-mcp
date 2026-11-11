@@ -288,3 +288,58 @@ Ruling фиксируют принятые решения; minor — что от
 - This final commit changes only this ledger. Required checks must also be
   green on its final PR head before marking ready; final head/run outcomes are
   recorded in PR #118 to avoid modifying the ledger after every CI run.
+
+
+## Delta 2026-11-11 — #68
+
+- Task R1: complete (bounded candidate refill and owner policy). Real RED
+  40+10 corpus returned2 instead10; >1000 dominant case stayed at window40.
+  Policy RED rejected the new key. GREEN covers lexical/RRF/rerank, one provider
+  call/late winning chunk, scopes, scores/order, exhaustion vs budget, configured
+  ceiling/base floor, generation/cancellation and byte admission cleanup.
+- Verify: full cli-full runtime suite **1198 passed,14 ignored** (71 groups);
+  subsequently added unfiltered-RRF integration and clamped-RRF unit both passed.
+  Final focused11 integration +18 policy, then fix-round unit +11 integration;
+  all-target Clippy/fmt passed. Logs: /tmp/refill-{red,policy-red,full,focused-final,
+  r1-fix,clippy}.log. No baseline/threshold/tokenizer/schema/dependency changes.
+- Ruling: fresh R1 reviewer PASS/APPROVED. Two Minor findings fixed in-task:
+  cleanup reservations now exhaust the complete aggregate allowance; adversarial
+  actual RRF10→12 widening proves naive top12 displaces base chunks and the
+  selected pool preserves all of them. Fix review: both ADDRESSED, no new
+  Critical/Important findings. No deferred minors. R2 measurement/delivery pending.
+- Session process delta: user explicitly requested agents perform squash merge
+  after verified checks. This overrides historical human-only delivery guidance
+  for the authorized work in this session. #118 was squash-merged at061b353, #67
+  closed; #68 branch starts from that actual main commit.
+
+
+- Task R2: complete (release measurements and local acceptance,2026-11-11).
+  Report: `reports/dedupe-refill-2026-11-11.md`. Original40+10 case now10 hits:
+  release lexical1.015–1.353ms, RRF3.120–3.914ms.1010-dominant case stops at
+ 1000 candidates /4 rounds with candidate-budget, not source-exhausted.
+  Real20k-file scoped RRF cap probe records paired timings/cache-order bias;
+  synthetic2D data are not a high-dimensional ANN/production/p95 claim.
+- Verify: final runtime cli-full **1200 passed,15 ignored** (71 groups), unchanged
+  `metrics_match_baseline` and ru_morph curve (plain11/.582, cap2:10/.357).
+  All-target/explicit artifact+perf Clippy and fmt passed. Fresh static CLI
+  **20535168B**, static linkage/both capabilities; **6 release resource checks**,
+  lean dependency boundary, offline syscall and6 Python CI-observer tests passed.
+  Test-only fixture disposal now closes SQLite before TempDirs on Windows; final
+  focused11 regressions +all-target Clippy passed after that disposal correction.
+- Ruling: fresh R2 reviewer PASS/APPROVED; log totals/measurements reconciled,
+  no Critical/Important/Minor findings or deferred minors. R1 runtime unchanged.
+  R3 owns whole-branch review/native CI and authorized squash merge; those
+  delivery conditions remain pending until checked on the published final HEAD.
+
+
+- Task R3: review complete; forge delivery in progress (2026-11-11). Fresh
+  whole-branch review061b353..f844576 found implementation convergence,
+  no Critical/Important/Minor findings or deferred minors. All FR-21..25/SC-13
+  and SC-14 local evidence mapped to code/tests/logs.
+- Ruling: final review verdict is partial solely because required native
+  docs/linux/macos/windows on the final published HEAD, squash merge and #68
+  closure are not yet observed. This commit changes only the ledger/checklist;
+  runtime and measurement tree match f844576. Before merge, all four checks
+  must pass for this exact final head. Final forge outcomes and R3 completion
+  are recorded in the PR evidence comment as specified by the plan, avoiding
+  repeated CI-only ledger commits. User-authorized squash merge follows checks.

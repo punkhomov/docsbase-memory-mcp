@@ -285,3 +285,42 @@ RAII rolls back LRU touches. Only vector-cache resources span this local scan;
 metadata/config/project admission already ended, and the cache transaction ends
 before the next metadata page. No provider is invoked by the visitor. The exact
 heap is shared with `top_k_iter`; cosine/tie/error semantics remain unchanged.
+
+
+## Delta 2026-11-11 — #68: единый ограниченный добор
+
+План: [dedupe-refill-plan.md](dedupe-refill-plan.md).
+
+Выбран geometric widening существующего score-aware collector, вместо нового
+Tantivy group collector. Group collector экономит retained duplicate records
+на lexical-only пути, но преждевременно отбрасывает chunks перед rerank; для
+одного неизменяемого ранжирования он может дать более глубокую полноту, однако
+потребовал бы отдельного collector с long-chunk score bound, ties и work budget.
+Здесь общий bounded контракт честно допускает candidate-budget и не обещает
+exhaustive group top-k. Увеличение одного фиксированного overscan решением не
+считается: раунды управляются capacity и явной причиной остановки.
+
+1. Capture generation/scope/initial lexical pool как в #67.
+2. Для cap+RRF один dense lookup до effective ceiling; использовать его
+   prefix(fetch) при каждом fusion. Exact source сканируется один раз; ANN
+   остаётся approximate, но один и тот же frozen result не дрейфует по раундам.
+   Если пул уже достаточен, дополнительный dense heap/ANN beam всё равно
+   затрачивается: осознанный tradeoff против повторных full-vector scans.
+3. Слить source prefixes, сохранить base pool IDs. Для fetch мест зарезервировать
+   base IDs и взять остальные лучшие новые chunks; сохранить текущий общий
+   порядок fusion и вычислить capacity. Базовый пул не cap-ится до rerank.
+4. При нехватке capacity: exhausted только если lexical.len<fetch,
+   dense.len<fetch (либо стадия отсутствует) и union.len<=fetch. Иначе
+   fetch=min(fetch×4,ceiling); остановиться по budget при fetch=ceiling.
+   Каждая lexical фаза короткая с повторной generation/config/pending проверкой.
+5. Scope drops до единственного captured payload. Byte refusal — typed error.
+   Один rerank, defensive metadata filter, cap, limit, citation. Результат
+   содержит только исходные chunk scores, без нерелевантного filler.
+
+Work budget ограничивает final/source candidate widths и число widening rounds
+(геометрическая сумма lexical widths <3×ceiling); не обещает ограничить число
+внутренних Tantivy postings/документов, просмотренных ради long-chunk penalty.
+Существующий cooperative deadline проверяется между фазами; один Tantivy call
+не становится принудительно прерываемым. Scope permit живёт только до payload;
+числовые bounded candidate lists не содержат full text. Нет shared mutable
+planner/cache, межзапросных cursor или новых invalidation callbacks.

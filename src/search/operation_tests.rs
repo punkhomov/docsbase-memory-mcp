@@ -8,6 +8,7 @@ use super::{SearchOperation, checked_deadline};
 
 fn policy() -> SearchSettings {
     SearchSettings {
+        dedupe_max_candidates: 1000,
         request_timeout_ms: 37,
         max_request_payload_bytes: 1,
         max_retained_payload_bytes: 2,

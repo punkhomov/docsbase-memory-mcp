@@ -19,6 +19,8 @@ pub fn standalone() -> Result<crate::config::schema::Resolved<SearchSettings>> {
 /// Complete daemon-wide request policy; byte limits do not measure process RSS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchSettings {
+    /// Additional document-cap refill ceiling, never below the ordinary base window.
+    pub dedupe_max_candidates: usize,
     /// Total request budget in milliseconds, including queues and retries.
     pub request_timeout_ms: u64,
     /// Maximum charged bytes for one preparation scope or captured request payload.
@@ -31,6 +33,8 @@ pub struct SearchSettings {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchPatch {
+    /// Additional document-cap refill ceiling (`1..=MAX_HITS`).
+    pub dedupe_max_candidates: Option<usize>,
     /// Total request budget in milliseconds, including queues and retries.
     pub request_timeout_ms: Option<u64>,
     /// Maximum charged bytes for one preparation scope or captured request payload.
@@ -48,6 +52,7 @@ impl SettingsSpec for SearchSpec {
     type Defaults = SearchSettings;
     const SCOPE: Scope = Scope::Daemon;
     const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::new("search.dedupe_max_candidates", Scope::Daemon, Unit::Count),
         FieldSpec::new(
             "search.request_timeout_ms",
             Scope::Daemon,
@@ -67,6 +72,7 @@ impl SettingsSpec for SearchSpec {
 
     fn defaults(_: &DefaultsContext) -> Self::Defaults {
         SearchSettings {
+            dedupe_max_candidates: 1000,
             request_timeout_ms: 30_000,
             max_request_payload_bytes: 64 * 1024 * 1024,
             max_retained_payload_bytes: 256 * 1024 * 1024,
@@ -84,6 +90,10 @@ impl SettingsSpec for SearchSpec {
         source: &SourceId,
         origins: &mut Provenance,
     ) -> Result<()> {
+        if let Some(value) = patch.dedupe_max_candidates {
+            settings.dedupe_max_candidates = value;
+            origins.set("search.dedupe_max_candidates", source)?;
+        }
         if let Some(value) = patch.request_timeout_ms {
             settings.request_timeout_ms = value;
             origins.set("search.request_timeout_ms", source)?;
@@ -100,6 +110,11 @@ impl SettingsSpec for SearchSpec {
     }
 
     fn validate(settings: &Self::Settings, _: &Capabilities) -> Result<()> {
+        if !(1..=crate::index::tantivy_index::MAX_HITS).contains(&settings.dedupe_max_candidates) {
+            return Err(Error::Admission {
+                message: "search.dedupe_max_candidates must be between 1 and 1000".to_owned(),
+            });
+        }
         if settings.request_timeout_ms == 0 {
             return Err(Error::Admission {
                 message: "search.request_timeout_ms must be positive".to_owned(),

@@ -237,3 +237,16 @@ These identify versioned per-request interpretation, not cache/time/work policy.
 typed value. Omitted/null selects the owner default at boundaries; old index/
 CLI APIs explicitly preserve Syntax as a compatibility contract. No deployment
 setting, hidden component fallback, persistent state or invalidation is added.
+
+
+## Delta 2026-11-11 — #68 request refill policy
+
+| ID | Значения / источник | Owner; scope | Validation / последствия |
+|---|---|---|---|
+| I72 | search.dedupe_max_candidates=1000 | search::settings::SearchSpec; D | 1..=MAX_HITS; effective=max(base,configured); count/provenance/global-only; R, restart; no L/V/Q/A invalidation |
+
+I13 factor4 используется также для bounded refill growth; новая скрытая
+константа не добавляется. I12 MAX_HITS остаётся прежним compatibility ceiling.
+Candidate budget — не exhaustive recall/RSS/time claim; payload admission и
+original deadline продолжают действовать. RRF+cap один раз получает dense до
+effective ceiling, без повторного vector scan при lexical widening.

@@ -34,6 +34,10 @@ use crate::store::migrations;
 use crate::store::models::{Project, ProjectStatus, SyncJob, SyncState};
 use crate::store::{Db, repo};
 
+#[path = "search_refill.rs"]
+mod search_refill;
+use search_refill::Refill;
+
 #[cfg(test)]
 #[path = "search_payload_tests.rs"]
 mod search_payload_tests;
@@ -72,8 +76,8 @@ fn apply_rerank(
         return Ok(());
     };
     let documents = payload.rerank_documents()?;
-    // `documents` is already bounded by the fetch window (`max(limit,
-    // window)`, truncated after fusion): the provider ranks exactly the
+    // `documents` is bounded by the ordinary or explicitly refilled window:
+    // the provider ranks exactly the
     // candidates it received (FR-11); every ranked score is a
     // `relevance_score`, so the tail can never mix score scales.
     let ranked = blocking::enter(|| reranker.rerank(query, documents, documents.len()))?;
@@ -445,6 +449,7 @@ struct PreparedSearch {
     degraded: Vec<Degraded>,
     operation: SearchOperation,
     fetch: usize,
+    refill: Option<Refill>,
 }
 
 impl PreparedSearch {
@@ -484,11 +489,11 @@ impl PreparedSearch {
             self.fetch,
             self.payload.generation(),
         );
-        Ok(meta::envelope_with_queue(
-            &rows,
-            &meta,
-            self.operation.queue_ms(),
-        ))
+        let mut response = meta::envelope_with_queue(&rows, &meta, self.operation.queue_ms());
+        if let Some(refill) = self.refill {
+            response["meta"]["refill"] = refill.to_json(rows.len(), self.arguments.limit);
+        }
+        Ok(response)
     }
 }
 
@@ -512,7 +517,7 @@ fn search_plan(
     }
     let filtering = args.dedupe != Dedupe::None;
     let fetch = if rerank_active || rrf_active {
-        // Preserve the exact provider window; fusion is truncated to this size.
+        // Ordinary base pool; document caps may refill before one rerank.
         args.limit.max(window as usize).min(MAX_HITS)
     } else if filtering {
         args.limit
@@ -630,28 +635,68 @@ fn lexical_snapshot<Guard>(
         };
         transaction.commit().map_err(repo::db_error)?;
         drop(reader);
-        let index = ReadIndex::open(&lifecycle::index_dir(context.cache, context.project.id))?;
-        let hits = if let Some(scope) = &scope {
-            index.search_scoped(
-                &arguments.query,
-                fetch,
-                arguments.query_mode,
-                scope.documents(),
-            )?
-        } else {
-            index.search_with_mode(&arguments.query, fetch, arguments.query_mode)?
-        };
-        context.operation.check()?;
+        let hits = lexical_hits(context, arguments, fetch, scope.as_ref())?;
         Ok(LexicalSnapshot {
             generation,
-            hits: hits
-                .into_iter()
-                .map(|hit| (hit.chunk_id, hit.score))
-                .collect(),
+            hits,
             elapsed_ms: elapsed_ms(started),
             scope,
         })
     })
+}
+
+fn lexical_hits(
+    context: &SearchContext<'_>,
+    arguments: &SearchArgs,
+    fetch: usize,
+    scope: Option<&DocumentScope>,
+) -> Result<Vec<(u64, f32)>> {
+    let index = ReadIndex::open(&lifecycle::index_dir(context.cache, context.project.id))?;
+    let hits = if let Some(scope) = scope {
+        index.search_scoped(
+            &arguments.query,
+            fetch,
+            arguments.query_mode,
+            scope.documents(),
+        )?
+    } else {
+        index.search_with_mode(&arguments.query, fetch, arguments.query_mode)?
+    };
+    context.operation.check()?;
+    Ok(hits
+        .into_iter()
+        .map(|hit| (hit.chunk_id, hit.score))
+        .collect())
+}
+
+fn lexical_refill<Guard>(
+    context: &SearchContext<'_>,
+    source: MetadataSource<'_>,
+    admit: &impl Fn() -> Result<Guard>,
+    arguments: &SearchArgs,
+    fetch: usize,
+    snapshot: &LexicalSnapshot,
+) -> Result<Vec<(u64, f32)>> {
+    in_read_phase(context, source, admit, |reader| {
+        snapshot_info(&reader, context.project, Some(snapshot.generation))?;
+        drop(reader);
+        lexical_hits(context, arguments, fetch, snapshot.scope.as_ref())
+    })
+}
+
+fn dense_for_scope<Guard>(
+    context: &SearchContext<'_>,
+    source: MetadataSource<'_>,
+    admit: &impl Fn() -> Result<Guard>,
+    query: DenseQuery<'_>,
+    scope: Option<&DocumentScope>,
+    degraded: &mut Vec<Degraded>,
+) -> Result<Vec<(u64, f32)>> {
+    if let Some(scope) = scope {
+        scoped_dense(context, source, admit, query, scope)
+    } else {
+        dense_candidates(context, source, admit, query, degraded)
+    }
 }
 
 fn prepare_search<Guard>(
@@ -661,37 +706,74 @@ fn prepare_search<Guard>(
     arguments: SearchArgs,
 ) -> Result<PreparedSearch> {
     context.operation.check()?;
-    let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
-    let lexical = lexical_snapshot(context, source, admit, &arguments, fetch)?;
+    let (active, mut fetch) = search_plan(context.stages, &arguments, context.window)?;
+    let mut lexical = lexical_snapshot(context, source, admit, &arguments, fetch)?;
+    let mut refill = Refill::new(
+        &arguments,
+        fetch,
+        context.payload_budget.settings().dedupe_max_candidates,
+        active.rrf_active,
+    );
+    let mut bm25_ms = lexical.elapsed_ms;
     let mut stage_ms = Vec::with_capacity(4);
-    stage_ms.push((Stage::Bm25, lexical.elapsed_ms));
     let mut degraded = Vec::new();
     if !active.rerank_active && context.stages.reranker.is_some() {
         degrade(&mut degraded, Degraded::NoRerankStage);
     }
     context.operation.check()?;
-    let ordered = if active.rrf_active {
+    let dense_hits = if active.rrf_active {
         let dense_started = std::time::Instant::now();
         let query = DenseQuery {
             text: &arguments.query,
             generation: lexical.generation,
-            fetch,
+            // One frozen source: no repeated full-vector scans or changing ANN
+            // membership as lexical/fusion prefixes grow.
+            fetch: refill.as_ref().map_or(fetch, Refill::ceiling),
         };
-        let dense_hits = if let Some(scope) = &lexical.scope {
-            scoped_dense(context, source, admit, query, scope)?
-        } else {
-            dense_candidates(context, source, admit, query, &mut degraded)?
-        };
+        let hits = dense_for_scope(
+            context,
+            source,
+            admit,
+            query,
+            lexical.scope.as_ref(),
+            &mut degraded,
+        )?;
         stage_ms.push((Stage::Dense, elapsed_ms(dense_started)));
-        context.operation.check()?;
-        let fuse_started = std::time::Instant::now();
-        let mut fused = rrf_merge(&lexical.hits, &dense_hits);
-        fused.truncate(fetch);
-        stage_ms.push((Stage::Rrf, elapsed_ms(fuse_started)));
-        fused
+        hits
     } else {
-        lexical.hits
+        Vec::new()
     };
+    let mut fusion_ms = 0_u64;
+    let ordered = loop {
+        context.operation.check()?;
+        let mut ordered = if active.rrf_active {
+            let started = std::time::Instant::now();
+            let fused = rrf_merge(&lexical.hits, &dense_hits[..fetch.min(dense_hits.len())]);
+            fusion_ms = fusion_ms.saturating_add(elapsed_ms(started));
+            fused
+        } else {
+            lexical.hits.clone()
+        };
+        let exhausted = lexical.hits.len() < fetch
+            && (!active.rrf_active || dense_hits.len() < fetch)
+            && ordered.len() <= fetch;
+        let next = if let Some(refill) = &mut refill {
+            refill.select(&mut ordered, fetch)?;
+            refill.next(&ordered, &arguments, fetch, exhausted)
+        } else {
+            ordered.truncate(fetch);
+            None
+        };
+        let Some(next) = next else { break ordered };
+        fetch = next;
+        let started = std::time::Instant::now();
+        lexical.hits = lexical_refill(context, source, admit, &arguments, fetch, &lexical)?;
+        bm25_ms = bm25_ms.saturating_add(elapsed_ms(started));
+    };
+    stage_ms.insert(0, (Stage::Bm25, bm25_ms));
+    if active.rrf_active {
+        stage_ms.push((Stage::Rrf, fusion_ms));
+    }
     // Preparation and final payload allowances never overlap per request.
     drop(lexical.scope);
     let ids: Vec<_> = ordered.iter().map(|(id, _)| *id).collect();
@@ -722,6 +804,7 @@ fn prepare_search<Guard>(
         degraded,
         operation: context.operation.clone(),
         fetch,
+        refill,
     })
 }
 

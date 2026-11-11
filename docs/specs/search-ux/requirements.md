@@ -376,3 +376,54 @@
   order/LRU, rollback and reuse after error; existing exact-streaming tests and
   scoped generation/cancellation/late-page regressions remain green. Repeat the
   same 20k release measurement; report the initial and corrected results.
+
+
+## Delta 2026-11-11 — #68: bounded document-cap refill
+
+Эта дельта заменяет отказ от добора из FR-2/NFR-1 для `dedupe=path`.
+Без dedupe поведение, query semantics, scoring и baseline не меняются.
+
+- **FR-21:** Начать с прежнего scoped base window. Вместимость пула
+  `capacity(P)=Σ_doc min(count_doc,n_per_doc)`; пока она меньше limit,
+  расширять source/retained windows ×SEARCH_UX_OVERSCAN до
+  `max(base_window,search.dedupe_max_candidates)`. Не удалять дубликаты
+  перед rerank. Сохранить все кандидаты base pool; новые места заполнять
+  лучшими кандидатами в текущем порядке. После одной rerank-операции —
+  прежний cap и chunk-count limit, с сохранением порядка surviving hits.
+- **FR-22:** SearchSpec владеет global-only `dedupe_max_candidates`, default1000,
+  целое 1..=MAX_HITS(1000), provenance Count. Это потолок дополнительного
+  добора, не уменьшение обычного configured/limit base window. Один retained
+  пул <= effective ceiling; source lists <= ceiling каждая, fusion временно
+  <=2×ceiling. Byte admission scope/payload не перекрывается; превышение
+  bytes/deadline/cancel — прежняя typed error, без partial response.
+- **FR-23:** RRF использует scoped source ranks. Для cap-запроса dense list
+  захватывается один раз до effective ceiling и используется префиксами:
+  exact scan/ANN/provider-query не повторяются при lexical widening; это
+  также фиксирует один approximate ANN result для запроса. Base pool строится
+  из этих же source lists. Переупорядочивание fusion не удаляет base chunks.
+  Без cap прежний dense fetch сохраняется. Ни новый relevance threshold,
+  ни MMR/ACL, ни score calibration разных rerank batches не вводятся.
+- **FR-24:** `explain.meta.refill` только для ненулевого cap-запроса содержит
+  `stop_reason`: satisfied (пул и результат вместили limit), source-exhausted
+  (оба активных источника доказанно закончились и вся fusion сохранена),
+  candidate-budget (остались неизвестные/неудержанные кандидаты), либо
+  post-filter-shortfall (финальная защита/отсутствующая citation сократила
+  подготовленный достаточный пул). Поля candidate_limit, candidates, capacity,
+  rounds, dense_window объясняют достигнутый бюджет; window — последний
+  planned retained/source prefix. Полное окно без sentinel не доказывает
+  exhaustion. Trimmed считает только финальный пул один раз; stage_ms —
+  сумма работы стадии по всем раундам. Это не total match count/pagination.
+- **FR-25:** Каждый новый lexical phase повторно проверяет прежнюю generation,
+  pending и config admission. Scope строится один раз; SQL/reader/project/config
+  leases не держатся через vector IO/providers, старые candidates не смешиваются
+  с новым поколением. Новый cache/derived artifact не создаётся; настройки
+  добора меняют только request policy (restart), не vector/query cache identity.
+- **SC-13:** Реальный индекс с 40 сильными chunks одного документа +10 слабыми
+  документами возвращает10 chunks при default cap2, лексика/RRF/оба rerank пути.
+  Поздний chunk может стать лучшим после ровно одного rerank. Один полезный
+  документ даёт cap2 + source-exhausted, без filler. >1000 доминирующих chunks
+  дают cap2 + candidate-budget. Проверить явный небольшой policy ceiling,
+  scopes, RRF score/rank, обычный путь без cap, state changes, byte cleanup.
+- **SC-14:** Повторить ru_morph diagnostic, unchanged-baseline gate, MSRV1.88
+  cli-full suite, fmt/clippy и native docs/linux/macos/windows. Отдельно измерить
+  release no-refill/refill/budget сценарии без paid/live API.
