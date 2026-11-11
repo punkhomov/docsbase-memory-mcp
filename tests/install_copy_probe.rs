@@ -82,6 +82,12 @@ fn compare_launcher_copy_lifecycles() {
                 );
                 break;
             }
+            // Keep the probe's disk use constant even for large debug CLIs.
+            // The next fresh pathname is still distinct; recorded inode IDs
+            // show whether the filesystem actually reuses an inode.
+            if mode == "fresh-name" {
+                fs::remove_file(&launcher).expect("remove successful fresh launcher");
+            }
         }
     }
     assert_eq!(
