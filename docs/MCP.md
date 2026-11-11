@@ -21,7 +21,7 @@ tools bind correctly.
 
 | Tool | Scope | Input | Notes |
 |---|---|---|---|
-| `search_docs` | project | `{query: string, limit?: int ≥ 1 (default 10), scope?: "project", rerank?: bool, explain?: bool, snippet?: bool, dedupe?: "none"\|"path", n_per_doc?: int 1…10, path_prefix?: string, tags?: [string]}` | Lexical BM25 over chunks, or hybrid when the project enables it; returns `{chunk_id, path, heading_path, lines, score}` citations. `scope` is reserved: v1 serves the current project only. `rerank` overrides the project setting per request; `true` requires a rerank stage. `explain` returns `{hits, meta}` — see [Telemetry](#telemetry). `snippet`, `dedupe`, `path_prefix` and `tags` are post-filters — see [Post-filters](#post-filters) |
+| `search_docs` | project | `{query: string, query_mode?: "syntax"\|"literal", limit?: int ≥ 1 (default 10), scope?: "project", rerank?: bool, explain?: bool, snippet?: bool, dedupe?: "none"\|"path", n_per_doc?: int 1…10, path_prefix?: string, tags?: [string]}` | Lexical BM25 over chunks, or hybrid when the project enables it; returns `{chunk_id, path, heading_path, lines, score}` citations. `scope` is reserved: v1 serves the current project only. `rerank` overrides the project setting per request; `true` requires a rerank stage. `explain` returns `{hits, meta}` — see [Telemetry](#telemetry). `snippet`, `dedupe`, `path_prefix` and `tags` are post-filters — see [Post-filters](#post-filters) |
 | `get_doc` | project | `{path: string}` | Full document by project-relative path |
 | `read_neighbors` | project | `{chunk_id: int, before?: int (default 1), after?: int (default 1)}` | Adjacent chunks for progressive disclosure |
 | `list_docs` | project | `{limit?: int (default 50), cursor?: string}` | Keyset-paginated `{title, size, chunks}` |
@@ -35,6 +35,39 @@ Project tools require a session bound to a registered project; otherwise the
 server returns a `Project` error with a fix-up instruction (e.g. run
 `docsbase index`). `index_project` may take the full indexing budget —
 clients must allow the 600 s IPC timeout; `sync_*` only enqueue/read rows.
+
+## Query interpretation
+
+`query_mode` selects `syntax` (the default, also used for omitted/null values)
+or `literal`. Syntax supports the existing fields, operators and quoted phrases;
+invalid syntax remains a query error. For natural-language text, use:
+
+```json
+{"query":"Crohn's disease: alpha (+)","query_mode":"literal","limit":10}
+```
+
+Literal analyzes each whitespace-separated word through the existing field
+analyzers and searches their OR combination. Punctuation, quotes, field-like
+prefixes and signs are text rather than query operators; the whole input is not
+made a required phrase. A single word that analyzes into multiple tokens keeps
+the analyzer's phrase/position behavior. Input without searchable terms is a
+query error when search executes. Embedding and reranking receive the original
+text unchanged. Existing ranking, filters and response shapes apply in both modes.
+
+Literal requires the daemon's `literal-query-v1` capability. An older daemon
+produces a protocol error asking for restart before the search is sent; clients
+do not downgrade or retry the query in syntax/direct mode. The protocol version
+remains 1 and default syntax remains compatible with older scoped-search daemons.
+
+CLI: `docsbase search "Crohn's disease: alpha (+)" --query-mode literal`.
+Rust: `IndexHandle::search_with_mode(query, limit, QueryMode::Literal)` and the
+same method on `ReadIndex`; existing `search(query, limit)` stays Syntax. The
+CLI `search::run_with_mode` accepts the same enum while `Options` and `run` keep
+their existing contract. Supported sync/async tool helpers negotiate literal;
+low-level `Client::call(Request)` / `AsyncClient::call(Request)` leave capability
+negotiation to the caller.
+
+Measured comparison, including retrieval gains and losses: [SciFact Syntax/Literal](specs/search-benchmark/reports/scifact-query-modes-2026-11-11.md).
 
 ## Scores
 

@@ -7,3 +7,6 @@ pub mod tantivy_index;
 pub mod textnorm;
 pub mod tokenizer;
 pub mod walk;
+
+mod query;
+pub use query::QueryMode;

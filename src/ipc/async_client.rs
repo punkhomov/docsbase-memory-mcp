@@ -41,6 +41,8 @@ impl AsyncClient {
     }
 
     /// Exchanges one capped frame. Dropping this future poisons the connection.
+    /// Raw calls leave capability negotiation to the caller; search helpers
+    /// validate mode and require the literal capability before dispatch.
     ///
     /// # Errors
     /// Returns Transport on IO, framing, malformed responses or prior poisoning.
@@ -74,6 +76,7 @@ impl AsyncClient {
     /// # Errors
     /// Returns transport/protocol errors or the daemon's advertised category.
     pub async fn handshake_registry(&mut self) -> Result<()> {
+        self.capabilities.clear();
         match self
             .call(Request::Hello {
                 protocol_version: protocol::PROTOCOL_VERSION,
@@ -139,6 +142,9 @@ impl AsyncClient {
     /// # Errors
     /// Returns transport/protocol errors or the daemon's advertised category.
     pub async fn call_tool(&mut self, name: &str, args: Value) -> Result<Value> {
+        if name == "search_docs" {
+            protocol::ensure_search_query_mode(&args, &self.capabilities)?;
+        }
         value(
             self.call(Request::CallTool {
                 name: name.to_owned(),
@@ -169,6 +175,7 @@ impl AsyncClient {
 
     async fn exchange_search(&mut self, args: Value, operation: &SearchOperation) -> Result<Value> {
         operation.check()?;
+        protocol::ensure_search_query_mode(&args, &self.capabilities)?;
         if !self
             .capabilities
             .iter()

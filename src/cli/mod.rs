@@ -68,6 +68,9 @@ pub enum Command {
     Search {
         /// Query string.
         query: String,
+        /// Interpret query syntax or literal natural-language text (syntax|literal).
+        #[arg(long, default_value_t = crate::index::QueryMode::default())]
+        query_mode: crate::index::QueryMode,
         /// Maximum number of hits.
         #[arg(long, default_value_t = 10)]
         limit: usize,
@@ -182,6 +185,7 @@ pub fn run() -> anyhow::Result<()> {
         Command::Index { path } => index::run_with_settings(path.as_deref(), &db_settings),
         Command::Search {
             query,
+            query_mode,
             limit,
             explain,
             snippet,
@@ -189,7 +193,7 @@ pub fn run() -> anyhow::Result<()> {
             n_per_doc,
             path_prefix,
             tags,
-        } => search::run_with_settings(
+        } => search::run_with_settings_and_mode(
             &query,
             &search::Options {
                 limit,
@@ -201,6 +205,7 @@ pub fn run() -> anyhow::Result<()> {
                 tags,
             },
             &db_settings,
+            query_mode,
         ),
         Command::List => status::list_with_settings(&db_settings),
         Command::Sync { path } => sync(path.as_deref(), &db_settings),

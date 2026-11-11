@@ -57,6 +57,7 @@ docsbase index
 
 # 3. Search
 docsbase search "admission lease" --limit 10
+docsbase search "Crohn's disease: alpha (+)" --query-mode literal
 
 # 4. Re-index on demand
 docsbase sync
@@ -94,6 +95,13 @@ docsbase models use rerank fastembed/jina-reranker-v1-turbo-en
 
 `models use` validates a project file; outside any project pass `--global`.
 Everything above works fully offline after the explicit fetch steps.
+
+Search defaults to the existing query syntax. Use `--query-mode literal` for
+natural-language punctuation; MCP accepts `query_mode: "literal"`. See
+[query interpretation](docs/MCP.md#query-interpretation) for operators and daemon compatibility.
+A [paired SciFact evaluation](docs/specs/search-benchmark/reports/scifact-query-modes-2026-11-11.md)
+records parser errors, retrieval gains and losses for both modes.
+
 
 ## Install
 
@@ -163,7 +171,7 @@ ships `sha256sum` files, an SBOM, and SLSA build provenance (Sigstore).
 docsbase install            # install/update the binary + owned manifest
 docsbase update             # fetch the latest release, verify, replace the binary
 docsbase index [PATH]       # register and index a project (default: cwd)
-docsbase search QUERY [--limit N]
+docsbase search QUERY [--query-mode syntax|literal] [--limit N]
 docsbase list               # indexed documents of the current project
 docsbase sync [PATH]        # re-index (daemon job when reachable, else direct)
 docsbase config             # effective config for the current directory

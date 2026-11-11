@@ -12,6 +12,28 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Opt-in search lifetime semantics; fixed protocol identity, not a timeout.
 pub const SEARCH_CONTEXT_CAPABILITY: &str = "search-context-v1";
 
+/// Explicit literal interpretation; old peers may otherwise ignore the argument.
+pub const LITERAL_QUERY_CAPABILITY: &str = "literal-query-v1";
+
+pub(crate) fn ensure_search_query_mode(
+    args: &serde_json::Value,
+    capabilities: &[String],
+) -> Result<()> {
+    let mode = crate::index::QueryMode::from_argument(args.get("query_mode"))?;
+    if mode == crate::index::QueryMode::Literal
+        && !capabilities
+            .iter()
+            .any(|capability| capability == LITERAL_QUERY_CAPABILITY)
+    {
+        return Err(Error::Protocol {
+            message: format!(
+                "daemon does not advertise {LITERAL_QUERY_CAPABILITY}; restart the daemon and frontend"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Durations from one caller's original operation, never fresh stage budgets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

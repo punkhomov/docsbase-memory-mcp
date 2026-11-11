@@ -359,3 +359,29 @@ fn list_documents() {
     assert!(docs[0]["size"].as_i64().expect("size") > 0);
     assert!(docs[0]["chunks"].as_i64().expect("chunks") > 0);
 }
+
+#[test]
+fn direct_literal_mode_accepts_natural_punctuation_and_preserves_syntax_default() {
+    let env = Env::new(&[("claim.md", "# Claim\n\nCrohn's disease: alpha (+)\n")]);
+    env.index();
+    let query = "Crohn's disease: alpha (+)";
+    let output = env
+        .cmd()
+        .args(["search", query, "--query-mode", "literal"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let hits = stdout_json(&output);
+    assert!(
+        hits.as_array()
+            .expect("array")
+            .iter()
+            .any(|hit| hit["path"] == "claim.md")
+    );
+    env.cmd().args(["search", query]).assert().failure();
+    env.cmd()
+        .args(["search", "alpha", "--query-mode", "auto"])
+        .assert()
+        .failure();
+}

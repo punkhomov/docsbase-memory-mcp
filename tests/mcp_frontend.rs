@@ -301,6 +301,17 @@ fn initialize_and_list_tools() {
         let schema = tool["inputSchema"].as_object().expect("inputSchema");
         assert!(!schema.is_empty(), "empty schema for {tool:?}");
     }
+    let search = tools
+        .iter()
+        .find(|tool| tool["name"] == "search_docs")
+        .expect("search tool");
+    let mode = &search["inputSchema"]["properties"]["query_mode"];
+    assert_eq!(mode["default"], "syntax");
+    // These exact constraints admit only the supported values, including null;
+    // leaving query_mode out of required also admits the compatibility default.
+    assert_eq!(mode["type"], json!(["string", "null"]));
+    assert_eq!(mode["enum"], json!(["syntax", "literal", null]));
+    assert_eq!(search["inputSchema"]["required"], json!(["query"]));
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|tool| tool["name"].as_str())
@@ -516,4 +527,147 @@ fn frontend_rejects_oversized_frame() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(exited, "frontend must exit on an oversized frame");
+}
+
+#[test]
+fn query_mode_defaults_and_invalid_values_through_real_mcp() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    let indexed = env
+        .cmd(&daemon_bin())
+        .args(["index"])
+        .output()
+        .expect("index");
+    assert!(indexed.status.success(), "{indexed:?}");
+    let mut mcp = Mcp::start(&env);
+    mcp.initialize();
+    let mut expected = None;
+    for (id, args) in [
+        json!({"query":"widgets"}),
+        json!({"query":"widgets","query_mode":null}),
+        json!({"query":"widgets","query_mode":"syntax"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response = mcp.request(&json!({
+            "jsonrpc":"2.0","id":id + 2,"method":"tools/call",
+            "params":{"name":"search_docs","arguments":args}
+        }));
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        let hits = &response["result"]["structuredContent"];
+        assert!(
+            hits.as_array()
+                .expect("hits")
+                .iter()
+                .any(|hit| hit["path"] == "docs/a.md"),
+            "{response}"
+        );
+        if let Some(expected) = &expected {
+            assert_eq!(hits, expected, "omitted/null/explicit Syntax must agree");
+        } else {
+            expected = Some(hits.clone());
+        }
+    }
+    for (id, mode) in [
+        json!("auto"),
+        json!("Syntax"),
+        json!(""),
+        json!("unsupported".repeat(1024)),
+        json!(true),
+        json!(42),
+        json!([]),
+        json!({}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response = mcp.request(&json!({
+            "jsonrpc":"2.0","id":id + 5,"method":"tools/call",
+            "params":{"name":"search_docs","arguments":{"query":"widgets","query_mode":mode}}
+        }));
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert_eq!(
+            response["result"]["structuredContent"]["code"], -32011,
+            "{response}"
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["message"],
+            "search_docs: query_mode must be syntax or literal",
+            "{response}"
+        );
+    }
+}
+
+#[test]
+fn literal_query_reaches_the_real_daemon_through_mcp() {
+    let env = Env::new(&[("claim.md", "# Claim\n\nCrohn's disease: alpha (+)\n")]);
+    let indexed = env
+        .cmd(&daemon_bin())
+        .args(["index"])
+        .output()
+        .expect("index");
+    assert!(indexed.status.success(), "{indexed:?}");
+    let mut mcp = Mcp::start(&env);
+    mcp.initialize();
+    let response = mcp.request(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_docs","arguments":{"query":"Crohn's disease: alpha (+)","query_mode":"literal"}}}));
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert!(
+        response["result"]["structuredContent"]
+            .as_array()
+            .expect("hits")
+            .iter()
+            .any(|hit| hit["path"] == "claim.md"),
+        "{response}"
+    );
+    let cli = env
+        .cmd(&daemon_bin())
+        .args([
+            "search",
+            "Crohn's disease: alpha (+)",
+            "--query-mode",
+            "literal",
+        ])
+        .output()
+        .expect("daemon CLI search");
+    assert!(cli.status.success(), "{cli:?}");
+    let cli_hits: Value = serde_json::from_slice(&cli.stdout).expect("CLI hits");
+    assert!(
+        cli_hits
+            .as_array()
+            .expect("array")
+            .iter()
+            .any(|hit| hit["path"] == "claim.md")
+    );
+    let syntax = mcp.request(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_docs","arguments":{"query":"Crohn's disease: alpha (+)","query_mode":"syntax"}}}));
+    assert_eq!(syntax["result"]["isError"], true, "{syntax}");
+}
+
+#[test]
+fn literal_mcp_refuses_an_old_scoped_daemon_without_replaying_search() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    let indexed = env
+        .cmd(&daemon_bin())
+        .args(["index"])
+        .output()
+        .expect("index");
+    assert!(indexed.status.success(), "{indexed:?}");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let _daemon = FakeDaemon::start(env.cache.path(), Arc::clone(&seen));
+    let mut mcp = Mcp::start(&env);
+    mcp.initialize();
+    let response = mcp.request(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_docs","arguments":{"query":"widgets","query_mode":"literal"}}}));
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["code"], -32011,
+        "{response}"
+    );
+    let status = mcp.request(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"status","arguments":{}}}));
+    assert_eq!(status["result"]["isError"], false, "{status}");
+    assert!(
+        !seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|name| name == "search_docs")
+    );
 }

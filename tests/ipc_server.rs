@@ -185,6 +185,14 @@ fn hello_advertises_scoped_search_capability() {
             .is_some_and(|values| values.iter().any(|value| value == "search-context-v1")),
         "daemon did not advertise scoped search: {reply}"
     );
+    assert!(
+        reply["data"]["capabilities"]
+            .as_array()
+            .expect("capabilities")
+            .iter()
+            .any(|value| value == "literal-query-v1"),
+        "literal capability missing: {reply}"
+    );
 }
 
 const SCOPED_WATCHDOG: Duration = Duration::from_secs(300);
