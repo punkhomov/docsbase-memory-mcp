@@ -453,3 +453,40 @@ composition; search itself uses the original absolute driver. This task supplies
 the client, not canonical MCP/CLI adoption. Mandatory b2/b3 cancellation/lease/
 retry/CLI/docs and whole-feature final review/final-head4native remain; PR112
 stays draft and #66 remains open. No provider preemption or CappedRead bug claim.
+
+Task S4.3b2: design ready, baseca2c6db. First prove the existing CappedRead
+newline-boundary candidate against its actual implementation/actual frame cap;
+no confirmed issue or fix claim yet. Probe files/test expectations recorded
+before source changes. Then canonical MCP adoption under the binding b2 design.
+
+Task S4.3b1: native preflightca2c6db/run42930505074 complete docs/linux/macos/
+windows SUCCESS. Diagnostic inventories independently add8tests perOS versus
+4c63610, none removed; Linux1124+2artifact/macOS1120/Windows1105,0failed13ignored.
+This is prior-client-task evidence, not acceptance for B2/final head.
+
+Task S4.3b2: complete (baseca2c6db; async MCP original scope, actual rmcp
+cancellation, owned connection lease/retry and #114 same-limit frame correction).
+Original13-stage snapshot167Rust/full1137/0/13/66 remains historical evidence.
+Fresh review found Important I1: post-index Admission/Protocol was swallowed,
+restoring a rejected lease. Dedicated fix agent added actual native unbound→
+index→rebind rejection regressions: RED1pass/2failin0.01 (only lease-discard
+assertions fail; primary success/no replay already pass, Transport preserved),
+then minimal helper propagation of Transport/Admission/Protocol gives3GREEN.
+Final14 sequential fix stages all exit0 and match current167Rust: full cli-full
+1140passed/0failed/13ignored across66targets, full+lean frontend12/frame4/wire34,
+full+lean all-target+opt-in Clippy/fmt/diff0. Actual order full-feature focused/
+lints→lean focused/lints→fmt/diff→final full, no concurrency. All113frozen and
+421non-owned inputs unchanged; only two owned source/test files differ from the
+reviewed original snapshot. Root independently verified current167/all14 maps,
+exactRED source/same final tests, frozen inputs and last-summary full totals.
+Scoped original-reviewer re-review I1 ADDRESSED/no new Critical or Important;
+resulting Spec PASS/Quality APPROVED, no deferred minors. No index replay or
+primary-result loss on failed post-index bind.
+Task S4.3b2: Ruling: #114 was filed only after actual-cap wrapper RED and all31
+open/closed issue duplicate check. Server creation00:23:02Z follows RED finish
+00:22:07.207816; retrieved issue metadata matches exact POST input. Historical
+POST response was tool output only, not an invented archived response. This is
+read-boundary-dependent framing failure, not a claim of unlimited memory growth.
+B3 CLI/original policy/direct fallback/product docs and whole-feature final
+review/latest-head4native remain mandatory; PR112 stays draft, #66/#114 open
+until actual delivery/merge. No environment changes or hard preemption promise.

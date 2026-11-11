@@ -416,3 +416,29 @@ focused benchmark/external and lean benchmark validate this changed harness.
 - Ruling: these are bounded stages of the already mandatory S4.3b, not separate
   feature deliveries. PR112 remains draft and #66 remains open throughout;
   no intermediate native result substitutes for final-head acceptance.
+
+### Delta 2026-11-11 — B2 frame boundary probe before frontend adoption
+
+For S4.3b2, modify src/mcp/frontend.rs and add its private unit test module
+src/mcp/frontend_frame_tests.rs. First exercise actual CappedRead using the
+actual MAX_FRAME_BYTES+1 payload plus newline in one native AsyncRead poll;
+expect InvalidData, preserve the old implementation until observed RED. If
+confirmed, inspect all existing open/closed issues before filing, then fix by
+checking pending length as each non-delimiter byte is counted, before a later
+newline can reset it. Preserve exact-limit acceptance and fragmented/multiple
+frame semantics with deterministic tests/watchdogs. No new limit/default or
+unbounded-DoS claim. This bounded correction stays in b2; all canonical caller
+work, full checks and fresh review remain mandatory before committing the stage.
+
+### Delta 2026-11-11 — B2 MCP caller tests and composition files
+
+Modify src/mcp/frontend.rs, add private src/mcp/frontend_proxy_tests.rs, and
+adapt tests/mcp_frontend.rs fake to advertise/serve scoped calls while retaining
+an explicit legacy-capability fixture. First prove old Frontend still sends
+legacy search to an incapable daemon with an actual native fake listener.
+Then test original policy, actual rmcp cancellation, serialized connection lease,
+startup/queue/reconnect budget and no expired paid replay. Use complete policy
+constructor for tests and Config::global at normal startup; compatibility new()
+explicitly obtains owner SearchSpec defaults. No global test environment hooks.
+Non-search tools retain existing catalogue budgets/queue behavior; async control
+operations use that same owner quick budget, not a new local timeout constant.

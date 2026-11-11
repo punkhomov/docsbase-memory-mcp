@@ -841,3 +841,29 @@ host budgets. Existing CappedRead newline-overflow candidate must first be
 proved against its actual implementation and duplicate-checked before a bug
 claim/issue; any fix retains the existing exact frame limit. No new crate,
 unsafe, network policy, remote-provider async rewrite, HTTP or v2 config scope.
+
+### Delta 2026-11-11 — B2 implementation rulings
+
+Keep non-search mutex waiting outside the existing catalogue exchange budget;
+async control/bind operations use its existing QUICK_TIMEOUT, and index_project
+uses LONG_TIMEOUT. Search bypasses those per-exchange timers and retains one
+original operation across all startup/control/wait/retry phases. Connection and
+handshake Transport errors also participate in the same single reconnect limit.
+Cancellation takes/drops only the current future's leased connection; a queued
+waiter has not taken one. Restore healthy completed exchanges, discard transport/
+admission/protocol failures. Successful index remains successful if the later
+rebind transport fails; reconnect on the next request instead of replaying it.
+
+A private cancellable helper boxes the workflow before constructing its async
+state (initial unboxed service future measured16744bytes by Clippy). This keeps
+MCP service futures small without a lint suppression or another operational
+limit. A startup helper retains actual spawn_blocking work, measures its queue,
+checks the original token before invoking startup and after its real completion;
+a cancelled caller can return while an already-running synchronous startup still
+finishes. It cannot then dispatch paid search. Existing lifecycle locks/OS calls
+are not forcibly interrupted and may complete an already-started daemon launch.
+
+Normal MCP startup parses Config::global before creating the service, so invalid
+global configuration fails explicitly rather than supplying a hidden search
+policy. The compatibility constructor uses SearchSpec defaults explicitly; the
+complete-policy constructor validates on each search before any startup/IO.

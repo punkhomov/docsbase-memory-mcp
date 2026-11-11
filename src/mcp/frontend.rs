@@ -1,9 +1,11 @@
 //! stdio MCP server proxying tool calls to the daemon (FR-7, FR-34; I8).
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
@@ -12,16 +14,23 @@ use rmcp::model::{
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler};
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
 
-use crate::config::paths;
+use crate::config::bootstrap::DefaultsContext;
+use crate::config::schema::SettingsSpec;
+use crate::config::{Config, paths};
 use crate::daemon::lifecycle::ensure_daemon;
-use crate::error::Error;
-use crate::ipc::client::{Client, is_transport_error};
+use crate::error::{Error, Result};
+use crate::hybrid::work::Cancellation;
+use crate::ipc::async_client::{AsyncClient, within_operation};
+use crate::ipc::client::is_transport_error;
 use crate::ipc::protocol::{MAX_FRAME_BYTES, TOOL_ALLOWLIST};
 use crate::mcp::tools;
+use crate::search::operation::SearchOperation;
+use crate::search::settings::{SearchSettings, SearchSpec};
 
 struct Conn {
-    client: Client,
+    client: AsyncClient,
     cwd: PathBuf,
     project_hint: Option<(String, Option<String>)>,
 }
@@ -31,98 +40,227 @@ struct Conn {
 pub struct Frontend {
     cache: PathBuf,
     conn: Arc<Mutex<Option<Conn>>>,
+    search_policy: SearchSettings,
 }
 
 impl Frontend {
-    /// Builds a frontend for `cache`.
+    /// Compatibility constructor using the search owner's explicit defaults.
+    /// Normal startup passes its parsed global policy to `with_search_policy`.
     #[must_use]
     pub fn new(cache: PathBuf) -> Self {
+        let defaults = SearchSpec::defaults(&DefaultsContext::standalone());
+        Self::with_search_policy(cache, SearchSpec::initial(&defaults))
+    }
+
+    /// Builds with complete owner policy; each search validates it before IO.
+    #[must_use]
+    pub fn with_search_policy(cache: PathBuf, search_policy: SearchSettings) -> Self {
         Self {
             cache,
             conn: Arc::new(Mutex::new(None)),
+            search_policy,
         }
     }
 
-    async fn proxy(&self, name: &str, args: Value) -> Result<Value, Error> {
-        let cache = self.cache.clone();
-        let conn = Arc::clone(&self.conn);
-        let name = name.to_owned();
-        tokio::task::spawn_blocking(move || -> Result<Value, Error> {
-            ensure_daemon(&cache)?;
-            let mut guard = conn.lock().unwrap_or_else(PoisonError::into_inner);
-            for attempt in 0..2 {
-                if guard.is_none() {
-                    *guard = Some(open_conn(&cache)?);
+    #[cfg(test)]
+    async fn proxy(&self, name: &str, args: Value) -> Result<Value> {
+        self.proxy_cancellable(name, args, Instant::now(), std::future::pending())
+            .await
+    }
+
+    async fn proxy_cancellable(
+        &self,
+        name: &str,
+        args: Value,
+        started: Instant,
+        cancelled: impl Future<Output = ()>,
+    ) -> Result<Value> {
+        let operation = if name == "search_docs" {
+            Some(SearchOperation::new(
+                &self.search_policy,
+                started,
+                Cancellation::new(),
+            )?)
+        } else {
+            None
+        };
+        run_cancellable(
+            operation.as_ref(),
+            self.proxy_in(name, args, operation.as_ref()),
+            cancelled,
+        )
+        .await
+    }
+
+    async fn proxy_in(
+        &self,
+        name: &str,
+        args: Value,
+        operation: Option<&SearchOperation>,
+    ) -> Result<Value> {
+        ensure_using(&self.cache, operation, ensure_daemon).await?;
+        self.proxy_ready(name, args, operation).await
+    }
+
+    async fn proxy_ready(
+        &self,
+        name: &str,
+        args: Value,
+        operation: Option<&SearchOperation>,
+    ) -> Result<Value> {
+        let queued = Instant::now();
+        let mut guard = self.conn.lock().await;
+        if let Some(operation) = operation {
+            operation.record_queue(queued.elapsed());
+        }
+        check_operation(operation)?;
+        // Only this future owns the active connection. Cancellation leaves None
+        // for the next caller and cannot expose a partially consumed exchange.
+        let mut lease = guard.take();
+        for attempt in 0..2 {
+            check_operation(operation)?;
+            let result = async {
+                if lease.is_none() {
+                    lease = Some(
+                        legacy_budget(operation, tools::QUICK_TIMEOUT, open_conn(&self.cache))
+                            .await?,
+                    );
                 }
-                let conn = guard
+                let conn = lease
                     .as_mut()
                     .ok_or_else(|| Error::internal("daemon connection lost"))?;
-                if tools::PROJECT_TOOLS.contains(&name.as_str()) && conn.project_hint.is_some() {
-                    // The project may have been indexed out-of-band (e.g.
-                    // `docsbase index` in a terminal): retry the bind before
-                    // serving the stale hint.
-                    if conn.client.handshake(&conn.cwd).is_ok() {
-                        conn.project_hint = None;
-                    }
-                }
-                if tools::PROJECT_TOOLS.contains(&name.as_str())
-                    && let Some((hint, instruction)) = &conn.project_hint
-                {
-                    return Err(Error::Project {
-                        message: hint.clone(),
-                        instruction: instruction.clone(),
-                    });
-                }
-                let timeout = if tools::LONG_TOOLS.contains(&name.as_str()) {
+                let timeout = if tools::LONG_TOOLS.contains(&name) {
                     tools::LONG_TIMEOUT
                 } else {
                     tools::QUICK_TIMEOUT
                 };
-                let timeout_set = conn.client.set_read_timeout(Some(timeout));
-                let result = match timeout_set {
-                    Ok(()) => conn.client.call_tool(&name, args.clone()),
-                    Err(err) => Err(err),
-                };
-                match result {
-                    Err(err) if is_transport_error(&err) && attempt == 0 => {
-                        // The daemon restarted underneath us: revive and retry once.
-                        *guard = None;
-                        ensure_daemon(&cache)?;
+                legacy_budget(
+                    operation,
+                    timeout,
+                    call_bound(conn, name, args.clone(), operation),
+                )
+                .await
+            }
+            .await;
+            match result {
+                Err(error) if is_transport_error(&error) && attempt == 0 => {
+                    drop(lease.take());
+                    check_operation(operation)?;
+                    ensure_using(&self.cache, operation, ensure_daemon).await?;
+                }
+                result => {
+                    let mut healthy = !matches!(
+                        &result,
+                        Err(Error::Transport { .. }
+                            | Error::Admission { .. }
+                            | Error::Protocol { .. })
+                    );
+                    if result.is_ok() && name == "index_project" {
+                        let conn = lease
+                            .as_mut()
+                            .ok_or_else(|| Error::internal("completed index lost connection"))?;
+                        healthy = legacy_budget(
+                            operation,
+                            tools::QUICK_TIMEOUT,
+                            rebind_after_index(conn),
+                        )
+                        .await
+                        .is_ok();
                     }
-                    Ok(value) => {
-                        if name == "index_project" {
-                            // The cwd project is registered now: rebind so the
-                            // same frontend can search without a restart.
-                            rebind_after_index(&mut guard);
-                        }
-                        return Ok(value);
+                    if healthy {
+                        *guard = lease;
                     }
-                    Err(err) => return Err(err),
+                    return result;
                 }
             }
-            Err(Error::internal("daemon unreachable after reconnect"))
-        })
-        .await
-        .map_err(|err| Error::internal_with_source("mcp proxy join", err))?
+        }
+        Err(Error::internal("daemon unreachable after reconnect"))
     }
 }
 
-fn open_conn(cache: &Path) -> Result<Conn, Error> {
-    let mut client = Client::connect(cache)
-        .ok_or_else(|| Error::internal("daemon socket missing after ensure_daemon"))?;
-    let cwd =
-        std::env::current_dir().map_err(|err| Error::internal_with_source("resolve cwd", err))?;
-    let project_hint = match client.handshake(&cwd) {
+fn run_cancellable<T>(
+    operation: Option<&SearchOperation>,
+    work: impl Future<Output = Result<T>>,
+    cancelled: impl Future<Output = ()>,
+) -> impl Future<Output = Result<T>> {
+    // Box before constructing the async state to keep MCP service futures small.
+    let work = Box::pin(work);
+    async move {
+        let request = async {
+            match operation {
+                Some(operation) => within_operation(operation, work).await,
+                None => work.await,
+            }
+        };
+        tokio::select! {
+            biased;
+            () = cancelled => {
+                if let Some(operation) = operation { operation.cancellation().cancel(); }
+                Err(Error::Admission { message: "MCP request cancelled".to_owned() })
+            }
+            result = request => result,
+        }
+    }
+}
+
+fn check_operation(operation: Option<&SearchOperation>) -> Result<()> {
+    match operation {
+        Some(operation) => operation.check(),
+        None => Ok(()),
+    }
+}
+
+async fn ensure_using(
+    cache: &Path,
+    operation: Option<&SearchOperation>,
+    startup: impl FnOnce(&Path) -> Result<()> + Send + 'static,
+) -> Result<()> {
+    check_operation(operation)?;
+    let cache = cache.to_path_buf();
+    let worker_operation = operation.cloned();
+    let queued = Instant::now();
+    tokio::task::spawn_blocking(move || {
+        if let Some(operation) = &worker_operation {
+            operation.record_queue(queued.elapsed());
+            operation.check()?;
+        }
+        startup(&cache)
+    })
+    .await
+    .map_err(|error| Error::internal_with_source("MCP daemon startup join", error))??;
+    check_operation(operation)
+}
+
+async fn legacy_budget<T>(
+    operation: Option<&SearchOperation>,
+    timeout: Duration,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    if operation.is_some() {
+        return work.await;
+    }
+    tokio::time::timeout(timeout, work)
+        .await
+        .map_err(|_| Error::transport("timed out waiting for the daemon"))?
+}
+
+async fn open_conn(cache: &Path) -> Result<Conn> {
+    let mut client = AsyncClient::connect(cache)
+        .await
+        .map_err(|error| Error::transport_with_source("connect daemon after startup", error))?;
+    let cwd = std::env::current_dir()
+        .map_err(|error| Error::internal_with_source("resolve cwd", error))?;
+    let project_hint = match client.handshake(&cwd).await {
         Ok(()) => None,
         Err(Error::Project {
             message,
             instruction,
         }) => {
-            client.handshake_registry()?;
-            client.register_unbound(&cwd)?;
+            client.handshake_registry().await?;
+            client.register_unbound(&cwd).await?;
             Some((message, instruction))
         }
-        Err(err) => return Err(err),
+        Err(error) => return Err(error),
     };
     Ok(Conn {
         client,
@@ -131,20 +269,48 @@ fn open_conn(cache: &Path) -> Result<Conn, Error> {
     })
 }
 
-/// After a successful `index_project`, tries to bind the (previously
-/// unbound) session to the now-registered project (FR-11, C8).
-fn rebind_after_index(guard: &mut Option<Conn>) {
-    let Some(conn) = guard.as_mut() else {
-        return;
-    };
-    let Conn {
-        client,
-        cwd,
-        project_hint,
-    } = conn;
-    if project_hint.is_some() && client.handshake(cwd).is_ok() {
-        *project_hint = None;
+async fn call_bound(
+    conn: &mut Conn,
+    name: &str,
+    args: Value,
+    operation: Option<&SearchOperation>,
+) -> Result<Value> {
+    if tools::PROJECT_TOOLS.contains(&name) && conn.project_hint.is_some() {
+        match conn.client.handshake(&conn.cwd).await {
+            Ok(()) => conn.project_hint = None,
+            Err(Error::Project {
+                message,
+                instruction,
+            }) => conn.project_hint = Some((message, instruction)),
+            Err(error) => return Err(error),
+        }
     }
+    if tools::PROJECT_TOOLS.contains(&name)
+        && let Some((hint, instruction)) = &conn.project_hint
+    {
+        return Err(Error::Project {
+            message: hint.clone(),
+            instruction: instruction.clone(),
+        });
+    }
+    match operation {
+        Some(operation) => conn.client.search(args, operation).await,
+        None => conn.client.call_tool(name, args).await,
+    }
+}
+
+async fn rebind_after_index(conn: &mut Conn) -> Result<()> {
+    if conn.project_hint.is_some() {
+        match conn.client.handshake(&conn.cwd).await {
+            Ok(()) => conn.project_hint = None,
+            Err(
+                error
+                @ (Error::Transport { .. } | Error::Admission { .. } | Error::Protocol { .. }),
+            ) => return Err(error),
+            Err(_) => {}
+        }
+    }
+    Ok(())
 }
 
 impl ServerHandler for Frontend {
@@ -163,7 +329,7 @@ impl ServerHandler for Frontend {
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> {
+    ) -> impl std::future::Future<Output = std::result::Result<ListToolsResult, McpError>> {
         std::future::ready(Ok(ListToolsResult {
             tools: tools::catalogue(),
             ..ListToolsResult::default()
@@ -173,8 +339,9 @@ impl ServerHandler for Frontend {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResponse, McpError> {
+        context: RequestContext<RoleServer>,
+    ) -> std::result::Result<CallToolResponse, McpError> {
+        let started = Instant::now();
         let name = request.name.to_string();
         if !TOOL_ALLOWLIST.contains(&name.as_str()) {
             return Ok(tool_error(&Error::Protocol {
@@ -183,7 +350,10 @@ impl ServerHandler for Frontend {
             .into());
         }
         let args = request.arguments.map_or_else(|| json!({}), Value::Object);
-        match self.proxy(&name, args).await {
+        match self
+            .proxy_cancellable(&name, args, started, context.ct.cancelled())
+            .await
+        {
             Ok(value) => {
                 let mut result =
                     CallToolResult::success(vec![ContentBlock::text(value.to_string())]);
@@ -245,13 +415,13 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for CappedRead<R> {
                     this.pending = 0;
                 } else {
                     this.pending += 1;
+                    if this.pending > this.limit {
+                        return Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "frame exceeds the protocol limit",
+                        )));
+                    }
                 }
-            }
-            if this.pending > this.limit {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "frame exceeds the protocol limit",
-                )));
             }
         }
         result
@@ -264,7 +434,7 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for CappedRead<R> {
 /// Returns an error when the runtime or MCP transport fails.
 pub async fn run() -> anyhow::Result<()> {
     let cache = paths::cache_dir()?;
-    let service = Frontend::new(cache);
+    let service = Frontend::with_search_policy(cache, Config::global()?.search);
     let stdin = CappedRead::new(tokio::io::stdin(), MAX_FRAME_BYTES);
     let transport = rmcp::transport::async_rw::AsyncRwTransport::<RoleServer, _, _>::new_server(
         stdin,
@@ -290,3 +460,11 @@ pub fn run_blocking() -> anyhow::Result<()> {
         .build()?;
     runtime.block_on(run())
 }
+
+#[cfg(test)]
+#[path = "frontend_frame_tests.rs"]
+mod frame_tests;
+
+#[cfg(test)]
+#[path = "frontend_proxy_tests.rs"]
+mod proxy_tests;
