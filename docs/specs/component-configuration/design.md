@@ -566,3 +566,20 @@ canonical directory/DB entry; normalized DOS filename должен совпас�
 bounded expected path length. Нет дополнительного File handle/close/ownership
 transfer. Это закрывает preflight→open symlink substitution до immutable SQL.
 Windows native retries описаны в safety note; observer не меняет global AV_RETRY.
+
+## Delta 2026-11-12 — I133 schema observation через native lease
+
+Header inspector переиспользует store-private `registry_inspect::lease` без
+дублирования FFI или переноса публичного API. `LockedConnection::header` вызывает
+проверенный xRead на том же leased native file: writable buffer100bytes, offset0,
+синхронный callback; raw pointer не покидает scope. SQLite SQL/schema parser не
+вызывается. std metadata calls не открывают DB descriptor и безопасны для locks.
+
+Два header reads и metadata size/mtime comparisons сохраняются; namespace/sidecar
+checks и повторное разрешение cache directory выполняются до публикации facts.
+Busy/unsupported/invalid observation даёт Unknown; missing/recovery logic прежняя.
+Private lease требует достаточных прав для native exclusivity; отсутствие такой
+возможности не запускает raw-file fallback. Mutation fixture в unit test пишет
+header напрямую, поскольку cooperating SQL mutation теперь блокируется; отдельные
+external-process tests доказывают настоящий lock protocol, включая CF4c1 lease.
+План и acceptance: [issue133-plan.md](issue133-plan.md).

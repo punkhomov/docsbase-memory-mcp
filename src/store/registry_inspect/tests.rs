@@ -244,6 +244,45 @@ fn observation_preserves_existing_rollback_reader_os_lock() {
     reader.execute_batch("ROLLBACK").unwrap();
 }
 
+#[test]
+fn schema_observation_cannot_release_the_registry_lease() {
+    let (cache, _project) = fixture();
+    let observation = inspect_with(
+        cache.path(),
+        &settings::standalone().unwrap(),
+        limits(),
+        || {},
+        |_| {
+            let facts =
+                Db::inspect_readonly(cache.path(), &settings::standalone().unwrap()).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "store::registry_inspect::tests::external_write_attempt_child",
+                    "--nocapture",
+                ])
+                .env("DOCSBASE_TEST_REGISTRY_ATTEMPT", cache.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                facts.artifacts[0].state,
+                crate::config::schema::ArtifactState::Unknown
+            );
+        },
+    )
+    .unwrap();
+    assert!(matches!(observation.state, RegistryState::Ready { .. }));
+    let writer = Connection::open(cache.path().join(DB_FILE)).unwrap();
+    writer.busy_timeout(Duration::ZERO).unwrap();
+    assert_eq!(update(&writer).unwrap(), 1);
+}
+
 // Keep OS-specific fixtures under the explicit test-module boundary used by
 // the repository's platform-seam source scanner.
 #[cfg(unix)]

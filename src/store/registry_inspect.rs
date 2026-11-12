@@ -8,7 +8,7 @@ use super::settings::{DbSettings, DbSpec};
 use crate::config::schema::{Capabilities, Resolved, SettingsSpec};
 use crate::error::{Error, Result};
 
-mod lease;
+pub(super) mod lease;
 
 /// Caller-owned limits; no runtime fallback/default is chosen by the observer.
 #[derive(Debug, Clone, Copy)]

@@ -201,8 +201,9 @@ impl Db {
         &self.settings
     }
 
-    /// Observes metadata schema identity without opening `SQLite` or writing
-    /// state. This does not construct a query-ready connection or row snapshot.
+    /// Observes metadata schema identity without SQL, recovery or persisted writes.
+    /// Uses a native exclusive inspection lease; busy stores remain unknown.
+    /// This does not construct a query-ready connection or row snapshot.
     /// Unknown/unavailable state is reported conservatively in the facts.
     ///
     /// # Errors

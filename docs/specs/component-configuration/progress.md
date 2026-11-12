@@ -356,3 +356,23 @@ exception (no global setting mutation); canonical test directory on macOS.
 Run43243065134: docs/Linux green, macOS failed only alternate-method fixture;
 Windows still executing when correction prepared. Final re-review and new native
 run remain required. #133 work is isolated in a dependent worktree.
+
+I133 started (2026-11-12, depends CF4c1): два controlled RED подтверждают, что
+старый header inspector снимает rollback-reader и registry-observer OS locks:
+external writer сначала BUSY, после inspection неожиданно пишет. Logs
+/tmp/issue133-red.log, /tmp/issue133-registry-red.log. Исправление переиспользует
+native lease и fixed100-byte xRead без SQL. Первые focused integration42/0 и
+store units32/0 GREEN, lean all-target Clippy GREEN. Existing test names сохранены;
+platform scanner/thresholds/baselines не менялись. Full/fresh reviews ещё впереди.
+I133 local validation: full cli-full1279passed/0failed/18existing ignores,
+76targets; full/lean all-target Clippy/fmt GREEN. После переноса поверх CF4c1
+4063486 (Windows namespace/final review fixes) повторно прошли42focused
+integration+32store unit tests и full Clippy/fmt. Повторное исполнение всех
+unrelated targets не требуется из-за platform-gated parent correction; native
+final-head CI remains required. Fresh task/final review follows.
+
+Task I133: complete (2026-11-12, implementation + fresh task review).
+Ruling: Spec compliance PASS, Quality APPROVED, no findings/deferred minors.
+Full1279/0/18existing ignores; rebased focused42integration+32units/full Clippy/fmt
+GREEN, lean checks GREEN. Final review and native final-head CI remain delivery
+gates; parent CF4c1 must land first. Closes #133 only after verified PR delivery.

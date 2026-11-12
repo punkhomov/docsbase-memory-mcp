@@ -20,14 +20,14 @@ enum NativeVfs {
 
 /// The connection owns and closes the native file, including partial locks.
 /// No raw pointer or connection escapes the inspector's synchronous scope.
-pub(super) struct LockedConnection {
+pub(in crate::store) struct LockedConnection {
     connection: Connection,
     vfs: NativeVfs,
     #[cfg(windows)]
     path: std::path::PathBuf,
 }
 impl LockedConnection {
-    pub(super) fn open(path: &Path, before_lock: impl FnOnce()) -> Observed<Self> {
+    pub(in crate::store) fn open(path: &Path, before_lock: impl FnOnce()) -> Observed<Self> {
         let uri = immutable_uri(path)?;
         let connection = Connection::open_with_flags(
             uri,
@@ -57,11 +57,29 @@ impl LockedConnection {
         Ok(locked)
     }
 
-    pub(super) const fn connection(&self) -> &Connection {
+    pub(in crate::store) const fn connection(&self) -> &Connection {
         &self.connection
     }
 
-    pub(super) fn configure(&self, value_bytes: i32, cache_kib: i32) -> Observed<()> {
+    /// Fixed schema header only; no SQL statement or schema loading.
+    pub(in crate::store) fn header(&self) -> Observed<[u8; 100]> {
+        let file = native_file(&self.connection)?;
+        // SAFETY: the owning live connection retains this file and its v1 table.
+        let methods = unsafe { (*file).pMethods };
+        if methods.is_null() {
+            return Err(Why::UnsupportedVfs);
+        }
+        // SAFETY: xRead is a v1 field of the checked native table.
+        let read = unsafe { (*methods).xRead }.ok_or(Why::UnsupportedVfs)?;
+        let mut header = [0; 100];
+        // SAFETY: header is writable for exactly 100 bytes and remains live for
+        // this synchronous native callback. Offset0 and size100 are representable;
+        // the same native file remains exclusively leased throughout the read.
+        status(unsafe { read(file, header.as_mut_ptr().cast(), 100, 0) })?;
+        Ok(header)
+    }
+
+    pub(in crate::store) fn configure(&self, value_bytes: i32, cache_kib: i32) -> Observed<()> {
         // SAFETY: the connection is live, private and has no statement in flight.
         // The caller admitted positive representable limits before construction.
         unsafe {
@@ -81,7 +99,7 @@ impl LockedConnection {
         Ok(())
     }
 
-    pub(super) fn check_namespace(&self) -> Observed<()> {
+    pub(in crate::store) fn check_namespace(&self) -> Observed<()> {
         let mut moved = 0;
         // SAFETY: SQLite expects a writable int for HAS_MOVED. The private
         // connection and native filename remain alive throughout this call.

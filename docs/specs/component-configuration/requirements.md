@@ -294,3 +294,15 @@ preflight/NOFOLLOW flags одни недостаточны для reparse races.
 «Nonblocking lease» означает отсутствие application retry/busy-timeout loop:
 платформенные SQLite3.53.2 Windows pending-byte/AV retries остаются явно описанным
 исключением; hard wall-clock deadline и нулевая задержка не обещаются.
+
+## Delta 2026-11-12 — I133: schema inspection сохраняет locks
+
+- `Db::inspect_readonly` не открывает/закрывает raw DB descriptors вне SQLite
+  bookkeeping: существующие locks reader/registry observer сохраняются, внешний
+  writer получает BUSY до их освобождения.
+- Schema header остаётся fixed100-byte observation без SQL/schema loading,
+  recovery/migration/sidecar/log writes. Native exclusive lease и directory
+  resolution/recheck общие с CF4c1. Busy/unsupported stores дают Unknown.
+- Это заменяет прежнюю формулировку CF2 «без Connection»: private SQLite handle
+  разрешён ради lock correctness, SQL и query-readiness claims по-прежнему нет.
+  Missing/orphaned recovery и версионирование identity остаются прежними.
