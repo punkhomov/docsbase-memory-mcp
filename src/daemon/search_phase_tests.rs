@@ -10,7 +10,7 @@ use crate::store::settings::{ReadPoolPatch, ReadPoolSpec};
 use crate::vector_cache::Embedder;
 use std::sync::mpsc as std_mpsc;
 
-const WATCHDOG: Duration = Duration::from_secs(300);
+const WATCHDOG: Duration = Duration::from_mins(5);
 
 pub(super) struct Fixture {
     pub(super) shared: Arc<Shared>,

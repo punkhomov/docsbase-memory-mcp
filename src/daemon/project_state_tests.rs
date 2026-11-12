@@ -5,7 +5,7 @@ use crate::store::models::Project;
 use std::sync::mpsc as sync_mpsc;
 
 // Failure watchdog only: successful ordering is driven by channel messages.
-const WATCHDOG: Duration = Duration::from_secs(60);
+const WATCHDOG: Duration = Duration::from_mins(1);
 
 struct Fixture {
     shared: Arc<Shared>,

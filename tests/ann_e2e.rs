@@ -205,9 +205,9 @@ fn ann_e2e_8k_x_256() {
     // plenty on Linux; the Windows runner ran out of it after a 165 s test
     // (CI run 40900557474) without any build error — pure CPU slowness.
     let timeout = if cfg!(windows) {
-        Duration::from_secs(300)
+        Duration::from_mins(5)
     } else {
-        Duration::from_secs(60)
+        Duration::from_mins(1)
     };
     run_e2e(
         8_000,
@@ -228,6 +228,6 @@ fn ann_e2e_75k_x_2048() {
             dim: 2048,
             model: "e2e/model@d2048@l2",
         },
-        Duration::from_secs(600),
+        Duration::from_mins(10),
     );
 }

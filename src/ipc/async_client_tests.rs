@@ -16,7 +16,7 @@ use crate::hybrid::work::Cancellation;
 use crate::platform;
 use crate::search::operation::SearchOperation;
 
-const WATCHDOG: Duration = Duration::from_secs(300);
+const WATCHDOG: Duration = Duration::from_mins(5);
 
 struct Harness {
     client: AsyncClient,

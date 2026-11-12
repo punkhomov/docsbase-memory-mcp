@@ -11,7 +11,7 @@ use std::time::Duration;
 
 const TEXTS: [&str; 2] = ["A\0界🙂", "beta"];
 const FRONTMATTER: &str = r#"{"tags":["rust","search"]}"#;
-const WATCHDOG: Duration = Duration::from_secs(300);
+const WATCHDOG: Duration = Duration::from_mins(5);
 
 struct Fixture {
     writer: Db,

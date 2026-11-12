@@ -418,8 +418,8 @@ impl HttpModelSource {
     pub fn new() -> Result<Self> {
         let agent = ureq::Agent::config_builder()
             .timeout_connect(Some(std::time::Duration::from_secs(30)))
-            .timeout_recv_response(Some(std::time::Duration::from_secs(120)))
-            .timeout_recv_body(Some(std::time::Duration::from_secs(300)))
+            .timeout_recv_response(Some(std::time::Duration::from_mins(2)))
+            .timeout_recv_body(Some(std::time::Duration::from_mins(5)))
             .build()
             .new_agent();
         Ok(Self { agent })

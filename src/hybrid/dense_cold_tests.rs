@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 
 const MODEL: &str = "test/cold@d3@l2";
-const WATCHDOG: Duration = Duration::from_secs(300);
+const WATCHDOG: Duration = Duration::from_mins(5);
 
 fn request(root: &std::path::Path, project_id: i64, generation: i64) -> DenseRequest<'_> {
     DenseRequest {

@@ -106,12 +106,18 @@ impl Bench {
 fn citations(hits: &[serde_json::Value]) -> Vec<serde_json::Value> {
     hits.iter()
         .map(|hit| {
-            json!({
+            let mut citation = json!({
                 "chunk_id": hit["chunk_id"],
                 "path": hit["path"],
                 "heading_path": hit["heading_path"],
                 "lines": hit["lines"],
-            })
+            });
+            // Rig enables serde_json/preserve_order through feature unification.
+            // JSON object order is not part of the retrieval contract; keep the
+            // same canonical snapshots in lean and remote builds. Array order
+            // (ranking and line ranges) remains significant.
+            citation.sort_all_objects();
+            citation
         })
         .collect()
 }

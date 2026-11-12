@@ -1647,7 +1647,7 @@ mod tests {
         use std::time::Duration;
 
         let _env_guard = env_guard();
-        let watchdog = Duration::from_secs(300);
+        let watchdog = Duration::from_mins(5);
         let dir = tempfile::TempDir::new().expect("tmp");
         let path = dir.path().join("config.toml");
         let seed = "max_file_size = 1\n[providers.fastembed]\nenabled = true\n[hybrid]\nranking = \"rrf\"\n";

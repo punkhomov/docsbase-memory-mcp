@@ -68,7 +68,7 @@ fn ready(dense: &DenseCache, db: &Db, project_id: i64, model: &str) -> Arc<Dense
 }
 
 fn wait_for_ann(dense: &DenseCache, db: &Db, project_id: i64, model: &str) -> Arc<AnnIndex> {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         match dense.get(db, project_id, model).expect("get") {
             DenseRows::Ann(ann) => return ann,
@@ -82,7 +82,7 @@ fn wait_for_ann(dense: &DenseCache, db: &Db, project_id: i64, model: &str) -> Ar
 }
 
 fn wait_for_failed(dense: &DenseCache, db: &Db, project_id: i64, model: &str) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         match dense.get(db, project_id, model).expect("get") {
             DenseRows::Failed(_) => return,

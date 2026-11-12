@@ -8,7 +8,7 @@ use docsbase_memory::store::settings::{DbPatch, DbSpec, ReadPoolPatch, ReadPoolS
 use std::time::{Duration, Instant};
 
 fn deadline() -> Instant {
-    Instant::now() + Duration::from_secs(300) // Deadlock watchdog, not a latency SLA.
+    Instant::now() + Duration::from_mins(5) // Deadlock watchdog, not a latency SLA.
 }
 
 fn pool(cache: &std::path::Path, capacity: usize) -> ReadPool {
