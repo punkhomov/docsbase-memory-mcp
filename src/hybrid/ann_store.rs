@@ -396,7 +396,7 @@ fn dir_size(path: &Path) -> u64 {
             if path.is_dir() {
                 dir_size(&path)
             } else {
-                fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+                fs::metadata(path).map_or(0, |meta| meta.len())
             }
         })
         .sum()
@@ -447,11 +447,7 @@ fn dump_sizes_ok(dir: &Path) -> bool {
         format!("{DUMP_BASENAME}.hnsw.data"),
     ]
     .iter()
-    .all(|name| {
-        fs::metadata(dir.join(name))
-            .map(|meta| meta.len() <= MAX_ANN_FILE_BYTES)
-            .unwrap_or(false)
-    })
+    .all(|name| fs::metadata(dir.join(name)).is_ok_and(|meta| meta.len() <= MAX_ANN_FILE_BYTES))
 }
 
 /// `sync_all` on the dump files before the `READY` marker is written
@@ -478,14 +474,12 @@ fn sync_dump_files(dir: &Path) -> Result<()> {
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(0))
-        .unwrap_or(0)
+        .map_or(0, |duration| i64::try_from(duration.as_secs()).unwrap_or(0))
 }
 
 /// Nanosecond tick for unique temporary directory names.
 fn nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_nanos())
 }

@@ -15,9 +15,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # rust-toolchain.toml pins nightly for local development; CI validates the
+  # rust-toolchain.toml pins stable 1.100.0 for local development; CI validates the
   # MSRV toolchain explicitly (the env var overrides the file).
-  RUSTUP_TOOLCHAIN: "1.88.0"
+  RUSTUP_TOOLCHAIN: "1.100.0"
 
 jobs:
   docs:
@@ -45,6 +45,8 @@ jobs:
           grep -q 'README.ru.md' README.md
           grep -q 'README.md' README.ru.md
           echo "docs gate OK (version $VERSION)"
+      - name: Audit locked Cargo publication ages
+        run: python3 .github/scripts/check-cargo-age.py
       - name: CI observer regression checks
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
@@ -69,7 +71,7 @@ jobs:
           pnpm --dir web check
           pnpm --dir web test:unit
           pnpm --dir web build
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -164,7 +166,7 @@ jobs:
           pnpm --dir web check
           pnpm --dir web test:unit
           pnpm --dir web build
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -223,7 +225,7 @@ jobs:
           pnpm --dir web check
           pnpm --dir web test:unit
           pnpm --dir web build
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2

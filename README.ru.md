@@ -3,7 +3,7 @@
 [![CI](https://github.com/punkhomov/docsbase-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/punkhomov/docsbase-memory-mcp/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/punkhomov/docsbase-memory-mcp?include_prereleases)](https://github.com/punkhomov/docsbase-memory-mcp/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![MSRV 1.88](https://img.shields.io/badge/MSRV-1.88-blue.svg)](rust-toolchain.toml)
+[![MSRV 1.100.0](https://img.shields.io/badge/MSRV-1.100.0-blue.svg)](rust-toolchain.toml)
 
 > **Альфа:** текущая версия [`0.1.0-alpha.5`](CHANGELOG.md). До `0.1.0`
 > возможны ломающие изменения. Git-тег `v<version>` всегда равен
@@ -155,9 +155,9 @@ cargo install --path . --locked --features cli-full
 docsbase install   # зарегистрировать бинарь в демоне
 ```
 
-Требуется Rust 1.88+ (MSRV) и точная версия Node.js из `.node-version`
+Требуется Rust 1.100.0+ (MSRV) и точная версия Node.js из `.node-version`
 для сборки Web-ресурсов. Для локальной разработки в `rust-toolchain.toml`
-зафиксирован nightly; CI проверяет MSRV-тулчейн.
+зафиксирован stable 1.100.0; CI проверяет MSRV-тулчейн.
 
 ### Вручную
 
@@ -269,8 +269,8 @@ cargo test --locked
 cargo test --locked --release   # включая перф-бюджеты (однопоточно)
 ```
 
-Тулчейн: `rust-toolchain.toml` пинит nightly для локальной разработки; CI
-проверяет MSRV 1.88 явно. `Cargo.lock` коммитится; новые крейты — только
+Тулчейн: `rust-toolchain.toml` пинит stable 1.100.0 для локальной разработки; CI
+проверяет MSRV 1.100.0 явно. `Cargo.lock` коммитится; новые крейты — только
 через ADR и при `min-publish-age = 14 days`.
 
 Ветки: GitHub Flow (`main` + PR + теги `v*`). Conventional Commits. Релизы

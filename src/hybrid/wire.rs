@@ -237,7 +237,7 @@ mod tests {
                     Duration::from_millis(*jitter_ms.next().expect("unexpected jitter request"))
                 },
             );
-            assert!(self.responses.lock().expect("responses").is_empty());
+            assert_eq!(self.responses.lock().expect("responses").len(), 0);
             assert!(jitter_ms.next().is_none(), "all jitter samples used");
             result
         }
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn empty_input_produces_no_batches() {
-        assert!(embed_batches(&[]).is_empty());
+        assert_eq!(embed_batches(&[]).len(), 0);
     }
 
     #[test]

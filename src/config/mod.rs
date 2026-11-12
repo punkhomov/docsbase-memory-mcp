@@ -259,8 +259,7 @@ fn read_project(path: &Path) -> Result<ProjectFileConfig> {
             // top-level `providers` key, the failure is the structural
             // FR-1 violation, not a generic syntax error.
             let has_providers = toml::from_str::<toml::Value>(&text)
-                .ok()
-                .is_some_and(|value| value.get("providers").is_some());
+                .is_ok_and(|value| value.get("providers").is_some());
             if has_providers {
                 Err(Error::Admission {
                     message: format!(

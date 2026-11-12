@@ -209,7 +209,7 @@ async fn write_before<W: AsyncWrite + Unpin>(
 
 #[cfg(test)]
 mod tests {
-    use std::future::{Future as _, poll_fn};
+    use std::future::poll_fn;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, mpsc as std_mpsc};
     use std::task::Poll;

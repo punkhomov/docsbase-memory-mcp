@@ -177,7 +177,7 @@ fn edit_becomes_searchable_within_budget() {
 
     let hits = env.search("gizmos");
     assert!(!hits.is_empty(), "edit must be searchable");
-    let post_flush = start.elapsed() - flushed;
+    let post_flush = start.elapsed().checked_sub(flushed).unwrap();
     assert!(
         post_flush < POST_FLUSH_BUDGET,
         "post-flush freshness took {post_flush:?}"

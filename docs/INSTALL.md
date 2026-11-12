@@ -75,9 +75,9 @@ cargo install --path . --locked --features cli-full
 docsbase install
 ```
 
-Requires Rust 1.88+ and the exact Node.js version in `.node-version`.
+Requires Rust 1.100.0+ and the exact Node.js version in `.node-version`.
 Corepack uses the pnpm version and checksum pinned in the root `package.json`.
-Local dev uses the nightly pinned in
+Local dev uses the stable 1.100.0 pinned in
 `rust-toolchain.toml`; MSRV builds use `--locked`.
 
 ## Option C — manual

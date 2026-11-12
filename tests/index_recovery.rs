@@ -65,8 +65,7 @@ fn a_failed_commit_marks_the_index_for_rebuild_and_the_next_run_heals() {
     );
     let during_heal = docsbase_memory::index::tantivy_index::ReadIndex::open(&index_dir)
         .err()
-        .map(|err| err.to_string())
-        .unwrap_or_default();
+        .map_or_default(|err| err.to_string());
     assert!(
         during_heal.contains("needs to be rebuilt"),
         "a reader during the heal sees the rebuild state, got: {during_heal}"

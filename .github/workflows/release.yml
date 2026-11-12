@@ -14,9 +14,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # rust-toolchain.toml pins nightly for local development; CI builds the
+  # rust-toolchain.toml pins stable 1.100.0 for local development; CI builds the
   # MSRV toolchain explicitly (the env var overrides the file).
-  RUSTUP_TOOLCHAIN: "1.88.0"
+  RUSTUP_TOOLCHAIN: "1.100.0"
 
 jobs:
   version-check:
@@ -63,7 +63,7 @@ jobs:
           pnpm --dir web check
           pnpm --dir web test:unit
           pnpm --dir web build
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -127,7 +127,7 @@ jobs:
           pnpm --dir web check
           pnpm --dir web test:unit
           pnpm --dir web build
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -200,7 +200,7 @@ jobs:
           pnpm --dir web check
           pnpm --dir web test:unit
           pnpm --dir web build
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2

@@ -159,7 +159,7 @@ fn stale_admission_prevents_cold_load_warm_and_hot_return() {
         ),
         Err(Error::Project { .. })
     ));
-    assert!(cache.lock_entries().is_empty());
+    assert_eq!(cache.lock_entries().len(), 0);
     assert!(
         cache
             .warm_with_metadata_admitted(
@@ -215,7 +215,7 @@ fn error_and_unwind_release_leader_revision_and_flight_for_retry() {
             outcome.expect("returned error").is_err()
         });
         assert!(revision.try_write().is_ok());
-        assert!(cache.lock_entries().is_empty());
+        assert_eq!(cache.lock_entries().len(), 0);
         let retry = cache
             .get_with_metadata_admitted(
                 request,

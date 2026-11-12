@@ -168,3 +168,14 @@ required в Linux. Этот согласованный с пользовател
 выше — исторические. Ограничения RAM, очередей, IPC и поисковых операций
 сохраняются. `cli-full` включает optional feature `web`; Cargo default=[]
 остаётся без HTTP frontend. Rust 1.88; frontend собирается явно до Cargo.
+
+
+## Delta 2026-11-13 — stable Cargo cooldown
+
+Supersedes the nightly/MSRV and deferred age-enforcement statements above.
+Toolchain, MSRV and all CI builds use exact Rust 1.100.0 with rustfmt/Clippy.
+The existing global 14-day deny policy is stable. Cargo exempts locked entries
+and cannot enforce absent pubtime; the required docs CI job independently
+audits all crates.io lock entries, including transitives, against publication
+dates and checksums. Missing dates and unsupported external sources fail closed.
+Lockfiles are regenerated from scratch with Cargo 1.100.0; no exception added.

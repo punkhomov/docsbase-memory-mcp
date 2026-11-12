@@ -361,7 +361,10 @@ mod tests {
             );
             assert!(status.success(), "FIFO inspection failed:\n{output}");
             assert!(output.contains("fifo-inspection-start"));
-            assert!(fifo_metadata(&cache.path().join(super::super::super::DB_FILE)).2 == 0);
+            assert_eq!(
+                fifo_metadata(&cache.path().join(super::super::super::DB_FILE)).2,
+                0
+            );
         }
 
         #[test]

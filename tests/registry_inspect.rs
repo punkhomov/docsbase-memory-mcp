@@ -85,7 +85,10 @@ fn persisted_registry_contains_unindexed_and_missing_roots() {
 fn empty_existing_registry_is_distinct_from_missing() {
     let cache = tempfile::tempdir().unwrap();
     drop(Db::open(cache.path()).unwrap());
-    assert!(roots(&observe(cache.path(), limits())).is_empty());
+    assert_eq!(
+        roots(&observe(cache.path(), limits())),
+        [] as [std::path::PathBuf; 0]
+    );
 }
 
 #[test]
@@ -191,13 +194,19 @@ fn uri_metacharacters_do_not_change_the_opened_database_or_create_files() {
     let cache = root.path().join("cache # % Unicode-ёж");
     std::fs::create_dir(&cache).unwrap();
     drop(Db::open(&cache).unwrap());
-    assert!(roots(&observe(&cache, limits())).is_empty());
+    assert_eq!(
+        roots(&observe(&cache, limits())),
+        [] as [std::path::PathBuf; 0]
+    );
     #[cfg(unix)]
     {
         let question = root.path().join("cache?mode=rw");
         std::fs::create_dir(&question).unwrap();
         drop(Db::open(&question).unwrap());
-        assert!(roots(&observe(&question, limits())).is_empty());
+        assert_eq!(
+            roots(&observe(&question, limits())),
+            [] as [std::path::PathBuf; 0]
+        );
     }
 }
 
@@ -304,7 +313,10 @@ fn repeated_leading_separator_is_a_local_path_not_a_uri_authority() {
     drop(Db::open(cache.path()).unwrap());
     let alias = PathBuf::from(format!("/{}", cache.path().display()));
     assert_eq!(alias, cache.path());
-    assert!(roots(&observe(&alias, limits())).is_empty());
+    assert_eq!(
+        roots(&observe(&alias, limits())),
+        [] as [std::path::PathBuf; 0]
+    );
 }
 
 #[cfg(unix)]
@@ -316,7 +328,7 @@ fn symlink_cache_ancestor_preserves_selected_context() {
     let alias = parent.path().join("cache-alias");
     std::os::unix::fs::symlink(&cache, &alias).unwrap();
     let report = observe(&alias, limits());
-    assert!(roots(&report).is_empty());
+    assert_eq!(roots(&report), [] as [std::path::PathBuf; 0]);
     assert_ne!(report.state, observe(&cache, limits()).state);
 }
 

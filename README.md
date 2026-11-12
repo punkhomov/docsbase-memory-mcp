@@ -3,7 +3,7 @@
 [![CI](https://github.com/punkhomov/docsbase-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/punkhomov/docsbase-memory-mcp/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/punkhomov/docsbase-memory-mcp?include_prereleases)](https://github.com/punkhomov/docsbase-memory-mcp/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![MSRV 1.88](https://img.shields.io/badge/MSRV-1.88-blue.svg)](rust-toolchain.toml)
+[![MSRV 1.100.0](https://img.shields.io/badge/MSRV-1.100.0-blue.svg)](rust-toolchain.toml)
 
 > **Alpha:** current version [`0.1.0-alpha.5`](CHANGELOG.md). Breaking changes
 > are expected before `0.1.0`. Git tag `v<version>` always equals
@@ -155,8 +155,8 @@ cargo install --path . --locked --features cli-full
 docsbase install   # register the binary with the daemon
 ```
 
-Requires Rust 1.88+ (MSRV) and the exact Node.js version in `.node-version`
-for building embedded Web assets. Local development pins nightly in
+Requires Rust 1.100.0+ (MSRV) and the exact Node.js version in `.node-version`
+for building embedded Web assets. Local development pins stable 1.100.0 in
 `rust-toolchain.toml`; CI validates the MSRV toolchain.
 
 ### Manual
@@ -277,8 +277,8 @@ cargo test --locked
 cargo test --locked --release   # incl. perf budgets (single-threaded)
 ```
 
-Toolchain: `rust-toolchain.toml` pins nightly for local dev; CI validates
-MSRV 1.88 explicitly. `Cargo.lock` is committed; new crates need an ADR and
+Toolchain: `rust-toolchain.toml` pins stable 1.100.0 for local dev; CI validates
+MSRV 1.100.0 explicitly. `Cargo.lock` is committed; new crates need an ADR and
 must satisfy `min-publish-age = 14 days`.
 
 Branching: GitHub Flow (`main` + PR + `v*` tags). Conventional Commits.

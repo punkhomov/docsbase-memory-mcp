@@ -398,7 +398,7 @@ fn stale_schema_survives_file_edit() {
     let hits = client
         .call_tool("search_docs", json!({ "query": "watcherready" }))
         .expect("initial search control");
-    assert!(hits.as_array().expect("hits").is_empty());
+    assert_eq!(hits.as_array().expect("hits").len(), 0);
 
     // Both committed data and search must show a real healthy watcher edit.
     write_file(
@@ -474,11 +474,12 @@ fn stale_schema_survives_file_edit() {
     // Open after the refusal: an earlier reader could hide an unwanted commit.
     let index = ReadIndex::open(&env.cache().join(format!("projects/{project_id}/tantivy")))
         .expect("fresh physical index");
-    assert!(
-        !index
+    assert_ne!(
+        index
             .search("watcherready", 10)
             .expect("healthy content")
-            .is_empty()
+            .len(),
+        0
     );
     assert!(
         index

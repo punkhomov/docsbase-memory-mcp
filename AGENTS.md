@@ -7,7 +7,7 @@ here.
 
 ## Repo map
 
-- `src/` — Rust (edition 2024, MSRV 1.88): CLI (`src/cli`), daemon
+- `src/` — Rust (edition 2024, MSRV 1.100.0): CLI (`src/cli`), daemon
   (`src/daemon`), MCP frontend (`src/mcp`), index/tokenizer/chunker
   (`src/index`), store (`src/store`), OS seam (`src/platform`).
 - `tests/` — functional suites per area; `tests/fixtures/search-quality/`
@@ -28,8 +28,8 @@ Frontend AI documentation and optional Svelte/shadcn-svelte integrations:
 The plain Cargo default remains the lean/source compatibility build.
 
 Sandboxed agents: point `CARGO_HOME`/`RUSTUP_HOME` at a writable directory
-first. CI pins the MSRV toolchain explicitly (the repo file pins nightly for
-local development), so validate with `RUSTUP_TOOLCHAIN=1.88.0`.
+first. CI pins the MSRV toolchain explicitly (the repo file pins stable 1.100.0 for
+local development), so validate with `RUSTUP_TOOLCHAIN=1.100.0`.
 
 Memory: 32-core hosts run 32 parallel `rustc` by default — full builds
 (`test --all-targets`, `clippy --all-targets`, release) spike to ~20 GB RSS
@@ -38,19 +38,19 @@ plus page cache (`target/` grows to ~19 GB). On constrained hosts cap it:
 iteration.
 
 ```sh
-RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --features cli-full
-RUSTUP_TOOLCHAIN=1.88.0 cargo clippy --locked --features cli-full --all-targets -- -D warnings
-RUSTUP_TOOLCHAIN=1.88.0 cargo clippy --locked --features cli-full --test perf_budget -- -D warnings  # opt-in Linux target
-RUSTUP_TOOLCHAIN=1.88.0 cargo clippy --locked --features cli-full --test artifact -- -D warnings  # opt-in Linux target
+RUSTUP_TOOLCHAIN=1.100.0 cargo test --locked --features cli-full
+RUSTUP_TOOLCHAIN=1.100.0 cargo clippy --locked --features cli-full --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=1.100.0 cargo clippy --locked --features cli-full --test perf_budget -- -D warnings  # opt-in Linux target
+RUSTUP_TOOLCHAIN=1.100.0 cargo clippy --locked --features cli-full --test artifact -- -D warnings  # opt-in Linux target
 cargo fmt --check
-RUSTUP_TOOLCHAIN=1.88.0 cargo release-static --locked  # Linux artifact build, before its opt-in checks
-RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --features cli-full --test artifact -- --nocapture
-RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --features cli-full --release --test perf_budget -- --test-threads=1
-RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test offline            # Linux only
-INSTA_UPDATE=always RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_golden
-RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --test search_bench
-RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --features hybrid-remote --test search_bench_live   # unit only, no key
-OPENROUTER_API_KEY=... RUSTUP_TOOLCHAIN=1.88.0 cargo test --locked --features hybrid-remote --test search_bench_live -- --ignored live_measurement   # manual, cost-capped
+RUSTUP_TOOLCHAIN=1.100.0 cargo release-static --locked  # Linux artifact build, before its opt-in checks
+RUSTUP_TOOLCHAIN=1.100.0 cargo test --locked --features cli-full --test artifact -- --nocapture
+RUSTUP_TOOLCHAIN=1.100.0 cargo test --locked --features cli-full --release --test perf_budget -- --test-threads=1
+RUSTUP_TOOLCHAIN=1.100.0 cargo test --locked --test offline            # Linux only
+INSTA_UPDATE=always RUSTUP_TOOLCHAIN=1.100.0 cargo test --locked --test search_golden
+RUSTUP_TOOLCHAIN=1.100.0 cargo test --locked --test search_bench
+RUSTUP_TOOLCHAIN=1.100.0 cargo test --locked --features hybrid-remote --test search_bench_live   # unit only, no key
+OPENROUTER_API_KEY=... RUSTUP_TOOLCHAIN=1.100.0 cargo test --locked --features hybrid-remote --test search_bench_live -- --ignored live_measurement   # manual, cost-capped
 ```
 
 Timing budgets are host-relative, not host-absolute: CI runners are shared VMs

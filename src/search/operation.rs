@@ -90,7 +90,7 @@ impl SearchOperation {
         let millis = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
         let _ = self
             .queue_ms
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 Some(current.saturating_add(millis))
             });
     }

@@ -97,7 +97,9 @@ fn legacy_hello_has_no_scoped_capability() {
     let reply = decode_response(br#"{"kind":"Hello","data":{"protocol_version":1,"build_id":"old-daemon","schema_version":2}}"#)
         .expect("legacy hello");
     match reply {
-        Response::Hello { capabilities, .. } => assert!(capabilities.is_empty()),
+        Response::Hello { capabilities, .. } => {
+            assert_eq!(capabilities, [] as [std::string::String; 0]);
+        }
         other => panic!("expected hello, got {other:?}"),
     }
 }

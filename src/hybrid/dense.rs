@@ -2460,7 +2460,7 @@ mod tests {
             hits.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             vec![10, 11]
         );
-        assert!(top_k(&query, &rows, 0).expect("scan").is_empty());
+        assert_eq!(top_k(&query, &rows, 0).expect("scan").len(), 0);
         assert_eq!(top_k(&query, &rows, 99).expect("scan").len(), 3);
     }
 
@@ -2468,7 +2468,7 @@ mod tests {
     fn empty_inputs_are_empty() {
         let query = [1.0, 0.0];
         let rows: Vec<(u64, Vec<f32>)> = Vec::new();
-        assert!(top_k(&query, &rows, 10).expect("scan").is_empty());
+        assert_eq!(top_k(&query, &rows, 10).expect("scan").len(), 0);
     }
 
     #[test]
@@ -2539,15 +2539,17 @@ mod tests {
     fn iter_edge_inputs_are_empty_or_errors() {
         let query = [1.0, 0.0];
         let rows: Vec<(u64, Vec<f32>)> = vec![(10, vec![1.0, 0.0])];
-        assert!(
+        assert_eq!(
             top_k_iter(&query, iter_rows(&rows), 0)
                 .expect("fetch 0")
-                .is_empty()
+                .len(),
+            0
         );
-        assert!(
+        assert_eq!(
             top_k_iter(&query, iter_rows(&[]), 10)
                 .expect("no rows")
-                .is_empty()
+                .len(),
+            0
         );
         let err = top_k_iter(&[], iter_rows(&rows), 10).expect_err("empty query");
         assert!(err.to_string().contains("empty"), "{err}");
@@ -2682,7 +2684,7 @@ mod tests {
                 .get(&db, project_id, embedder.model_id())
                 .expect("get"),
         );
-        assert!(!first.rows().is_empty());
+        assert_ne!(first.rows().len(), 0);
 
         let other = ready(
             dense
@@ -2828,12 +2830,13 @@ mod tests {
             dense.digest_for(1, 1, &chunks),
             crate::hybrid::ann_store::chunk_set_digest(&chunks)
         );
-        assert!(
+        assert_eq!(
             dense
                 .digests
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .is_empty()
+                .len(),
+            0
         );
     }
 

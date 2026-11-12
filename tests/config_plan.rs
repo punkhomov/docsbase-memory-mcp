@@ -50,7 +50,10 @@ fn runtime_owners_classify_changes_without_artifact_actions() {
     next.request_timeout_ms += 1;
     let before = SearchSpec::assess_change(Some(&old), &old).unwrap();
     let unchanged = compile(&[before], limits()).unwrap();
-    assert!(unchanged.body.actions.is_empty());
+    assert_eq!(
+        unchanged.body.actions,
+        [] as [docsbase_memory::config::change::Action; 0]
+    );
     assert_eq!(unchanged.body.unchanged_observations.len(), 1);
     let changed = compile(
         &[SearchSpec::assess_change(Some(&old), &next).unwrap()],
@@ -178,9 +181,15 @@ fn migration_dependencies_remain_blocked_and_sources_are_not_claimed_observed() 
     let global =
         SourceLayer::parse(SourceId::Global("config.toml".into()), "hybrid=false\n").unwrap();
     let incomplete = draft_migration(&global, &[PathBuf::from("project.toml")], &[], None).unwrap();
-    assert!(incomplete.edits.is_empty());
+    assert_eq!(
+        incomplete.edits,
+        [] as [docsbase_memory::config::migrate::SourceEdit; 0]
+    );
     let blocked = compile(&[incomplete.assess_change().unwrap()], limits()).unwrap();
-    assert!(blocked.body.actions.is_empty());
+    assert_eq!(
+        blocked.body.actions,
+        [] as [docsbase_memory::config::change::Action; 0]
+    );
     assert!(
         blocked
             .body
@@ -280,14 +289,20 @@ fn missing_schema_plan_creates_no_directory_and_no_rebuild() {
     let plan = schema_plan(&cache);
     assert!(!cache.exists());
     assert_eq!(plan.body.actions[0].effect, Effect::InitializeStore);
-    assert!(plan.body.required_grants.is_empty());
+    assert_eq!(
+        plan.body.required_grants,
+        [] as [docsbase_memory::config::change::Grant; 0]
+    );
 }
 #[test]
 fn actual_schema_observations_preserve_files_and_never_claim_query_readiness() {
     let dir = tempfile::tempdir().unwrap();
     drop(Db::open(dir.path()).unwrap());
     let ready = schema_plan(dir.path());
-    assert!(ready.body.actions.is_empty());
+    assert_eq!(
+        ready.body.actions,
+        [] as [docsbase_memory::config::change::Action; 0]
+    );
     assert_eq!(ready.body.unchanged_observations.len(), 1);
     let path = dir.path().join(docsbase_memory::store::DB_FILE);
     let connection = rusqlite::Connection::open(&path).unwrap();
@@ -303,7 +318,10 @@ fn actual_schema_observations_preserve_files_and_never_claim_query_readiness() {
     )
     .unwrap();
     let wal = schema_plan(dir.path());
-    assert!(wal.body.actions.is_empty());
+    assert_eq!(
+        wal.body.actions,
+        [] as [docsbase_memory::config::change::Action; 0]
+    );
     assert!(
         wal.body
             .blockers
@@ -317,12 +335,9 @@ fn actual_schema_observations_preserve_files_and_never_claim_query_readiness() {
 #[test]
 fn unknown_or_future_schema_identity_is_never_reused() {
     let empty = DbSpec::assess_schema(&ArtifactFacts::default()).unwrap();
-    assert!(
-        !compile(&[empty], limits())
-            .unwrap()
-            .body
-            .blockers
-            .is_empty()
+    assert_ne!(
+        compile(&[empty], limits()).unwrap().body.blockers,
+        [] as [docsbase_memory::config::change::Blocker; 0]
     );
     let dir = tempfile::tempdir().unwrap();
     drop(Db::open(dir.path()).unwrap());
@@ -337,8 +352,14 @@ fn unknown_or_future_schema_identity_is_never_reused() {
     ] {
         facts.artifacts[0].identity = identity.map(str::to_owned);
         let plan = compile(&[DbSpec::assess_schema(&facts).unwrap()], limits()).unwrap();
-        assert!(plan.body.actions.is_empty());
-        assert!(plan.body.unchanged_observations.is_empty());
+        assert_eq!(
+            plan.body.actions,
+            [] as [docsbase_memory::config::change::Action; 0]
+        );
+        assert_eq!(
+            plan.body.unchanged_observations,
+            [] as [docsbase_memory::config::change::ResourceId; 0]
+        );
         assert!(
             plan.body
                 .blockers
@@ -376,8 +397,14 @@ fn identity_covers_observations_targets_reasons_and_permissions() {
     assert!(compile(std::slice::from_ref(&original), cap).is_err());
     assert_eq!(original, before);
     let empty = compile(&[], limits()).unwrap();
-    assert!(empty.body.actions.is_empty());
-    assert!(empty.body.blockers.is_empty());
+    assert_eq!(
+        empty.body.actions,
+        [] as [docsbase_memory::config::change::Action; 0]
+    );
+    assert_eq!(
+        empty.body.blockers,
+        [] as [docsbase_memory::config::change::Blocker; 0]
+    );
     assert!(compile(&[assessment("self", &["self"])], limits()).is_err());
 }
 

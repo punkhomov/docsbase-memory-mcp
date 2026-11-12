@@ -123,7 +123,7 @@ fn provider_projection_never_serializes_arbitrary_record_parameters() {
     assert!(!text.contains("credential-sentinel"));
     assert_eq!(output["enabled"], true);
     assert_eq!(output["unexposed_parameters"], true);
-    assert!(output["parameters"].as_object().unwrap().is_empty());
+    assert_eq!(output["parameters"].as_object().unwrap().len(), 0);
 }
 
 fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
@@ -248,7 +248,7 @@ fn effective_cli_errors_do_not_echo_raw_sources() {
             .get_output()
             .clone();
         assert!(!String::from_utf8_lossy(&out.stderr).contains("credential-sentinel"));
-        assert!(out.stdout.is_empty());
+        assert_eq!(out.stdout, [] as [u8; 0]);
         assert_eq!(snapshot(root.path()), before);
     }
 }

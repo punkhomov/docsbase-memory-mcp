@@ -299,7 +299,7 @@ async fn cli_refuses_an_old_scoped_peer_even_with_a_valid_direct_index() {
             error.contains(LITERAL_CAP) && error.contains("restart"),
             "{error}"
         );
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout, [] as [u8; 0]);
         let requests = peer.finish().await;
         assert!(
             matches!(

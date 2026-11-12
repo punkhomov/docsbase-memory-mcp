@@ -623,9 +623,8 @@ fn fastembed_without_provider_fails_with_connect_hint() {
             None => std::env::remove_var("ORT_DYLIB_PATH"),
         }
     }
-    let err = match result {
-        Ok(_) => panic!("expected admission, got an embedder"),
-        Err(e) => e,
+    let Err(err) = result else {
+        panic!("expected admission, got an embedder")
     };
     let text = err.to_string();
     assert!(text.contains("admission refused"), "{text}");
@@ -665,12 +664,11 @@ fn fastembed_unfetched_model_fails_with_fetch_hint() {
     let config = Config::load_from(config_dir.path(), None).expect("load ok");
     // Keep the cache isolation alive across the embedder call (see C3:
     // provisioning surfaces at construction); then restore.
-    let err = match docsbase_memory::hybrid::local::embedder(
+    let Err(err) = docsbase_memory::hybrid::local::embedder(
         config.hybrid_cfg.embedding.as_ref().expect("embedding"),
         &config.providers,
-    ) {
-        Ok(_) => panic!("expected admission, got an embedder"),
-        Err(e) => e,
+    ) else {
+        panic!("expected admission, got an embedder")
     };
     // SAFETY: same locked section as above.
     unsafe {
@@ -732,9 +730,8 @@ fn fastembed_env_runtime_override_reaches_model_check() {
             None => std::env::remove_var("ORT_DYLIB_PATH"),
         }
     }
-    let err = match result {
-        Ok(_) => panic!("expected admission, got an embedder"),
-        Err(e) => e,
+    let Err(err) = result else {
+        panic!("expected admission, got an embedder")
     };
     let text = err.to_string();
     assert!(text.contains("admission refused"), "{text}");

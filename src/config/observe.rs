@@ -73,10 +73,10 @@ fn plan_with(
     if limits.max_output_bytes == 0 || limits.registry.max_projects.checked_add(2).is_none() {
         return Err(invalid("invalid migration planning limits"));
     }
-    if let Some(VectorBudgetDecision::UseBytes(n)) = decision {
-        if n == 0 || i64::try_from(n).is_err() {
-            return Err(invalid("vector budget must be a positive TOML integer"));
-        }
+    if let Some(VectorBudgetDecision::UseBytes(n)) = decision
+        && (n == 0 || i64::try_from(n).is_err())
+    {
+        return Err(invalid("vector budget must be a positive TOML integer"));
     }
     let registry = registry_inspect::inspect_registry(cache_root, db, limits.registry)?;
     let mut ids = vec![SourceId::Global(config_root.join("config.toml"))];

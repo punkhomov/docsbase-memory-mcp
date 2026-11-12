@@ -922,7 +922,6 @@ pub(crate) mod test_env {
 mod tests {
     use super::super::config::PROVIDER_FASTEMBED;
     use std::collections::HashSet;
-    use std::io::Write as _;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1063,7 +1062,7 @@ mod tests {
                 "duplicate triple {}",
                 target.triple
             );
-            assert!(!target.archive_url.is_empty());
+            assert_ne!(target.archive_url.len(), 0);
             assert!(target.archive_url.starts_with("https://"));
             assert_eq!(target.archive_sha256.len(), 64);
             assert!(target.archive_sha256.chars().all(|c| c.is_ascii_hexdigit()));
@@ -1254,7 +1253,6 @@ mod tests {
 
     /// Builds a `.zip` archive with the library at `library_path`.
     fn fake_zip(library_path: &str, content: &[u8]) -> Vec<u8> {
-        use std::io::Write as _;
         let cursor = std::io::Cursor::new(Vec::new());
         let mut writer = zip::ZipWriter::new(cursor);
         let options = zip::write::SimpleFileOptions::default()

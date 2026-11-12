@@ -112,17 +112,15 @@ fn block_tags_do_not_collect_other_lists_or_nested_items() {
         let text = format!("---\n{block}\n---\nbody");
         assert_eq!(parse(&text).0.tags, ["api"], "{block}");
     }
-    assert!(
-        parse("---\ntags:\nother:\n  - unrelated\n---\nbody")
-            .0
-            .tags
-            .is_empty()
+    assert_eq!(
+        parse("---\ntags:\nother:\n  - unrelated\n---\nbody").0.tags,
+        [] as [std::string::String; 0]
     );
-    assert!(
+    assert_eq!(
         parse("---\nother:\n  tags:\n    - unrelated\n---\nbody")
             .0
-            .tags
-            .is_empty()
+            .tags,
+        [] as [std::string::String; 0]
     );
 }
 

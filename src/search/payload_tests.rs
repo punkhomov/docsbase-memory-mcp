@@ -680,11 +680,9 @@ fn empty_candidate_set_has_owned_identity_and_no_document_rows() {
     )
     .expect("empty payload");
     assert_eq!(payload.generation(), 1);
-    assert!(
-        payload
-            .rerank_documents()
-            .expect("empty text mode")
-            .is_empty()
+    assert_eq!(
+        payload.rerank_documents().expect("empty text mode").len(),
+        0
     );
     assert!(payload.citation(fixture.ids[0]).is_none());
     assert!(payload.doc_meta(fixture.doc).is_none());

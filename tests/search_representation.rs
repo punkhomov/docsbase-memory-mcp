@@ -271,11 +271,12 @@ fn candidate_census_fails_closed_and_keeps_empty_lexical_observations() {
         0
     );
     assert_eq!(report["candidate_pools"][0]["rerank_call"], false);
-    assert!(
-        !report["candidate_pools"][1]["candidates"]
+    assert_ne!(
+        report["candidate_pools"][1]["candidates"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
     let mut bad = vectors.clone();
     bad.query_vectors.as_mut().unwrap().clear();
@@ -547,7 +548,7 @@ fn matrix_dispatches_exact_recipes_and_reuses_roles_and_warm_pools() {
             );
         }
         let inputs = run["pool"]["inputs"].as_array().unwrap();
-        assert!(!inputs.is_empty());
+        assert_ne!(inputs.len(), 0);
         let strings: Vec<_> = inputs
             .iter()
             .map(|s| s.as_str().unwrap().to_owned())
@@ -620,8 +621,8 @@ fn matrix_rejects_ambiguous_context_before_any_stage_method() {
         err.to_string().contains("ambiguous body/context"),
         "{err:#}"
     );
-    assert!(embedder.calls.lock().unwrap().is_empty());
-    assert!(reranker.calls.lock().unwrap().is_empty());
+    assert_eq!(embedder.calls.lock().unwrap().len(), 0);
+    assert_eq!(reranker.calls.lock().unwrap().len(), 0);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -818,8 +819,8 @@ fn matrix_keeps_empty_lexical_pools_and_rejects_invalid_k_before_stages() {
         )
         .is_err()
     );
-    assert!(embedder.calls.lock().unwrap().is_empty());
-    assert!(reranker.calls.lock().unwrap().is_empty());
+    assert_eq!(embedder.calls.lock().unwrap().len(), 0);
+    assert_eq!(reranker.calls.lock().unwrap().len(), 0);
     queries[0].k = 3;
     let report = representation::run_matrix(
         &env,
@@ -834,9 +835,9 @@ fn matrix_keeps_empty_lexical_pools_and_rejects_invalid_k_before_stages() {
     for run in runs {
         if run["source"] == "Bm25Rerank" {
             assert!(run["pool"].is_null());
-            assert!(run["citations"].as_array().unwrap().is_empty());
+            assert_eq!(run["citations"].as_array().unwrap().len(), 0);
         } else {
-            assert!(!run["pool"]["inputs"].as_array().unwrap().is_empty());
+            assert_ne!(run["pool"]["inputs"].as_array().unwrap().len(), 0);
         }
         assert_eq!(run["warm_equal"], true);
     }
@@ -867,8 +868,8 @@ fn matrix_rejects_invalid_model_pins_before_stage_methods() {
             representation::run_matrix(&env, &cases(), &stages, &hash, "test-revision").is_err(),
             "{pin}"
         );
-        assert!(embedder.calls.lock().unwrap().is_empty());
-        assert!(reranker.calls.lock().unwrap().is_empty());
+        assert_eq!(embedder.calls.lock().unwrap().len(), 0);
+        assert_eq!(reranker.calls.lock().unwrap().len(), 0);
     }
     for pin in [
         "garbage",
@@ -891,7 +892,7 @@ fn matrix_rejects_invalid_model_pins_before_stage_methods() {
             representation::run_matrix(&env, &cases(), &stages, &hash, "test-revision").is_err(),
             "{pin}"
         );
-        assert!(embedder.calls.lock().unwrap().is_empty());
-        assert!(reranker.calls.lock().unwrap().is_empty());
+        assert_eq!(embedder.calls.lock().unwrap().len(), 0);
+        assert_eq!(reranker.calls.lock().unwrap().len(), 0);
     }
 }

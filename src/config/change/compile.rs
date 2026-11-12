@@ -21,10 +21,10 @@ pub fn compile(assessments: &[Assessment], limits: PlanLimits) -> Result<ChangeP
     let mut blockers = BTreeSet::new();
     for assessment in assessments {
         for fact in &assessment.expected {
-            if let Some(previous) = expected.insert(fact.resource.clone(), fact.state.clone()) {
-                if previous != fact.state {
-                    return Err(invalid("conflicting plan observations"));
-                }
+            if let Some(previous) = expected.insert(fact.resource.clone(), fact.state.clone())
+                && previous != fact.state
+            {
+                return Err(invalid("conflicting plan observations"));
             }
         }
         blockers.extend(assessment.blockers.iter().cloned());
