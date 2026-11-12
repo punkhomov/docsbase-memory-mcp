@@ -230,7 +230,7 @@ mod tests {
     use super::super::search_phase_tests::{CountingReranker, Fixture, TestEmbedder};
     use super::*;
 
-    const WATCHDOG: Duration = Duration::from_secs(300);
+    const WATCHDOG: Duration = Duration::from_mins(5);
 
     trait TestIo: AsyncRead + AsyncWrite + Unpin + Send {}
     impl<T: AsyncRead + AsyncWrite + Unpin + Send> TestIo for T {}

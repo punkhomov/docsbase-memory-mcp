@@ -545,7 +545,7 @@ fn update_waits_for_synchronous_job() {
 
     let mut client = env.client();
     client
-        .set_read_timeout(Some(Duration::from_secs(120)))
+        .set_read_timeout(Some(Duration::from_mins(2)))
         .expect("timeout");
     // The project is not registered yet: this call runs the *first* full index
     // through the daemon, which takes far longer than the 5 s stop timeout.

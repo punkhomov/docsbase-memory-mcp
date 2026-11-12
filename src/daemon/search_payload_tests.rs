@@ -14,7 +14,7 @@ use std::time::Duration;
 
 const CAP: u64 = 4 * 1024 * 1024;
 // Failure watchdog only. All successful ordering is driven by channel messages.
-const WATCHDOG: Duration = Duration::from_secs(300);
+const WATCHDOG: Duration = Duration::from_mins(5);
 
 struct Fixture {
     db: Db,

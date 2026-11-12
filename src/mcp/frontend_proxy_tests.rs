@@ -15,7 +15,7 @@ use crate::platform;
 
 use super::Frontend;
 
-const WATCHDOG: Duration = Duration::from_secs(300);
+const WATCHDOG: Duration = Duration::from_mins(5);
 
 #[derive(Clone)]
 enum Mode {

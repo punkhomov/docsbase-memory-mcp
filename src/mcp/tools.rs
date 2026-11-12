@@ -18,7 +18,7 @@ pub const LONG_TOOLS: &[&str] = &["index_project"];
 pub const QUICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// IPC read timeout for long-running tools.
-pub const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+pub const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
 
 /// MCP tool definitions with JSON input schemas.
 #[must_use]

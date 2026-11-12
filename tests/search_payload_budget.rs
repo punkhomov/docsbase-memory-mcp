@@ -334,7 +334,7 @@ fn concurrent_reservations_cannot_exceed_the_shared_aggregate() {
         let accepted = (0..3)
             .filter(|_| {
                 completed
-                    .recv_timeout(Duration::from_secs(300))
+                    .recv_timeout(Duration::from_mins(5))
                     .expect("reservation returned")
             })
             .count();

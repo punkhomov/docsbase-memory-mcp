@@ -22,7 +22,7 @@ cli-full = ["hybrid-local", "hybrid-remote", "web"]
 web = ["dep:axum", "dep:getrandom", "dep:ts-rs"]
 # OpenRouter embeddings + rerank (spec docs/specs/hybrid-providers, ADR-14).
 # The default build stays fully offline: no network crates, no reqwest.
-hybrid-remote = ["dep:reqwest"]
+hybrid-remote = ["dep:reqwest", "dep:rig-core"]
 # Local fastembed provider (spec docs/specs/hybrid-local, ADR-17): model
 # registry/cache, ORT runtime install, fastembed embed/rerank. Everything is
 # optional and pinned exactly (supply-chain cooldown, docs/supply-chain.md);
@@ -41,6 +41,8 @@ hybrid-local = [
 axum = { version = "0.8", optional = true }
 getrandom = { version = "0.3", optional = true }
 ts-rs = { version = "11", optional = true, features = ["serde-json-impl"] }
+# ADR-RIG1: provider codecs only; transport/retries stay owned by docsbase.
+rig-core = { version = "=0.45.0", default-features = false, optional = true }
 anyhow = "1.0.104"
 blake3 = "1.8.7"
 clap = { version = "4", features = ["derive"] }

@@ -115,7 +115,7 @@ fn status_reports_ready_after_an_ann_search() {
     .expect("search");
     // The first search starts the build; wait for it to publish, then search
     // again so the recorded outcome is `ready` rather than `building`.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
     while std::time::Instant::now() < deadline {
         if matches!(
             dense

@@ -1,12 +1,11 @@
 //! `OpenRouter` client: `OpenAI`-compatible embeddings and the rerank router
 //! (FR-1, FR-2, FR-5, FR-8, FR-9). Recorded response fixtures live in
-//! `tests/fixtures/openrouter/` (T1 spike, 2026-10-14).
+//! `tests/fixtures/openrouter/` (T1 spike, 2026-10-14). Runtime codecs use
+//! Rig through `rig_codec` (ADR-RIG1); transport/retries remain owned here.
 
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
-
-use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::vector_cache::Embedder;
@@ -19,7 +18,7 @@ use super::{Reranker, blocking};
 pub const BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// App attribution headers (FR-9; values are OQ-2, finalized here).
-const HTTP_REFERER: &str = "https://github.com/punkhomov/docsbase-memory-mcp";
+pub(crate) const HTTP_REFERER: &str = "https://github.com/punkhomov/docsbase-memory-mcp";
 pub(crate) const X_TITLE: &str = "docsbase-memory-mcp";
 
 /// Input type for chunk (document) embeddings.
@@ -92,18 +91,6 @@ impl OpenRouterClient {
         Self::new(BASE_URL, &key, Box::new(ReqwestTransport::new()?))
     }
 
-    fn headers(&self) -> Vec<(String, String)> {
-        vec![
-            (
-                "Authorization".to_owned(),
-                format!("Bearer {}", self.api_key.0),
-            ),
-            ("Content-Type".to_owned(), "application/json".to_owned()),
-            ("HTTP-Referer".to_owned(), HTTP_REFERER.to_owned()),
-            ("X-Title".to_owned(), X_TITLE.to_owned()),
-        ]
-    }
-
     /// Embeds `texts` in bounded batches, preserving input order.
     ///
     /// # Errors
@@ -134,83 +121,23 @@ impl OpenRouterClient {
         input_type: &str,
     ) -> Result<Vec<Vec<f32>>> {
         ensure_context()?;
-        let url = format!("{}/embeddings", self.base_url);
+        let codec = super::rig_codec::OpenRouterCodec::new(&self.api_key.0);
         let mut vectors = Vec::with_capacity(texts.len());
         for range in wire::embed_batches(texts) {
-            let batch = &texts[range];
-            let request = EmbeddingsRequest {
+            let batch = codec.embed(
+                &*self.transport,
                 model,
-                input: batch,
                 dimensions,
+                &texts[range],
                 input_type,
-            };
-            let body = serde_json::to_string(&request)
-                .map_err(|err| Error::internal_with_source("encode embeddings request", err))?;
-            let response = wire::post_with_retry(&*self.transport, &url, &self.headers(), &body)?;
-            let parsed: EmbeddingsResponse =
-                serde_json::from_str(&response.body).map_err(|err| {
-                    Error::internal_with_source(
-                        format!("incompatible OpenRouter embeddings schema: {err}"),
-                        err,
-                    )
-                })?;
-            if parsed.data.len() != batch.len() {
-                return Err(Error::internal(format!(
-                    "OpenRouter returned {} vectors for {} inputs",
-                    parsed.data.len(),
-                    batch.len()
-                )));
-            }
-            // The provider must place each input exactly once when it sends
-            // indices (design §5: count + dim + index-range validation) -
-            // duplicated, missing or out-of-range indices mean schema drift
-            // and must never persist a vector under the wrong content hash
-            // (I1/A1). The index field is advisory (FR-1): a response without
-            // indices is read as input order; mixing both forms is drift.
-            let any_index = parsed.data.iter().any(|datum| datum.index.is_some());
-            let mut slots: Vec<Option<Vec<f32>>> = (0..batch.len()).map(|_| None).collect();
-            for (position, datum) in parsed.data.into_iter().enumerate() {
-                let index = match datum.index {
-                    Some(index) => index,
-                    None if !any_index => position,
-                    None => {
-                        return Err(Error::internal(
-                            "OpenRouter mixed indexed and unindexed embeddings",
-                        ));
-                    }
-                };
-                if index >= batch.len() {
-                    return Err(Error::internal(format!(
-                        "OpenRouter returned index {index} for {} inputs",
-                        batch.len()
-                    )));
-                }
-                if slots[index].is_some() {
-                    return Err(Error::internal(format!(
-                        "OpenRouter returned index {index} twice"
-                    )));
-                }
-                slots[index] = Some(datum.embedding);
-            }
-            for slot in slots {
-                let embedding =
-                    slot.ok_or_else(|| Error::internal("OpenRouter skipped an input index"))?;
-                if embedding.is_empty() {
-                    return Err(Error::internal("OpenRouter returned an empty vector"));
-                }
-                if embedding.len() != dimensions as usize {
-                    return Err(Error::internal(format!(
-                        "OpenRouter returned a {}-dimensional vector, expected {dimensions}",
-                        embedding.len()
-                    )));
-                }
-                let vector = if normalize {
-                    l2_normalize(embedding)
+            )?;
+            vectors.extend(batch.into_iter().map(|vector| {
+                if normalize {
+                    l2_normalize(vector)
                 } else {
-                    embedding
-                };
-                vectors.push(vector);
-            }
+                    vector
+                }
+            }));
         }
         Ok(vectors)
     }
@@ -232,44 +159,13 @@ impl OpenRouterClient {
         if docs.is_empty() || top_n == 0 {
             return Ok(Vec::new());
         }
-        let url = format!("{}/rerank", self.base_url);
-        let request = RerankRequest {
+        super::rig_codec::OpenRouterCodec::new(&self.api_key.0).rerank(
+            &*self.transport,
             model,
             query,
-            documents: docs,
+            docs,
             top_n,
-        };
-        let body = serde_json::to_string(&request)
-            .map_err(|err| Error::internal_with_source("encode rerank request", err))?;
-        let response = wire::post_with_retry(&*self.transport, &url, &self.headers(), &body)?;
-        let parsed: RerankResponse = serde_json::from_str(&response.body).map_err(|err| {
-            Error::internal_with_source(
-                format!("incompatible OpenRouter rerank schema: {err}"),
-                err,
-            )
-        })?;
-        if parsed.results.is_empty() {
-            // Empty results for non-empty documents are schema drift, not an
-            // implicit fallback to BM25 order (A1, FR-11).
-            return Err(Error::internal(
-                "OpenRouter rerank returned no results for non-empty documents",
-            ));
-        }
-        let mut ranked: Vec<(usize, f32)> = Vec::with_capacity(parsed.results.len());
-        for result in parsed.results {
-            if result.index >= docs.len() {
-                return Err(Error::internal(format!(
-                    "OpenRouter rerank returned index {} for {} documents",
-                    result.index,
-                    docs.len()
-                )));
-            }
-            ranked.push((result.index, result.relevance_score));
-        }
-        // The provider sorts best-first; re-sort defensively for determinism.
-        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
-        ranked.truncate(top_n);
-        Ok(ranked)
+        )
     }
 }
 
@@ -294,46 +190,6 @@ fn l2_normalize(mut vector: Vec<f32>) -> Vec<f32> {
         }
     }
     vector
-}
-
-#[derive(Serialize)]
-struct EmbeddingsRequest<'a> {
-    model: &'a str,
-    input: &'a [String],
-    dimensions: u32,
-    input_type: &'a str,
-}
-
-#[derive(Deserialize)]
-struct EmbeddingsResponse {
-    data: Vec<EmbeddingDatum>,
-}
-
-#[derive(Deserialize)]
-struct EmbeddingDatum {
-    /// Advisory per the provider docs: absent means "input order" (FR-1).
-    #[serde(default)]
-    index: Option<usize>,
-    embedding: Vec<f32>,
-}
-
-#[derive(Serialize)]
-struct RerankRequest<'a> {
-    model: &'a str,
-    query: &'a str,
-    documents: &'a [String],
-    top_n: usize,
-}
-
-#[derive(Deserialize)]
-struct RerankResponse {
-    results: Vec<RerankResult>,
-}
-
-#[derive(Deserialize)]
-struct RerankResult {
-    index: usize,
-    relevance_score: f32,
 }
 
 /// `Embedder` adapter over [`OpenRouterClient`] (FR-1, FR-5).

@@ -314,7 +314,7 @@ fn search_refuses_legacy_daemon_without_direct_fallback() {
     let _daemon = spawn_fake_daemon_with_capability(env.cache.path(), false);
     let output = env
         .cmd()
-        .timeout(Duration::from_secs(300))
+        .timeout(Duration::from_mins(5))
         .args(["search", "widgets"])
         .assert()
         .failure()
@@ -339,7 +339,7 @@ fn connected_search_failure_does_not_fall_back_to_valid_local_index() {
     );
     let output = env
         .cmd()
-        .timeout(Duration::from_secs(300))
+        .timeout(Duration::from_mins(5))
         .args(["search", "widgets"])
         .assert()
         .failure()

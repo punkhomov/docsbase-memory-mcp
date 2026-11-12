@@ -20,7 +20,7 @@ use super::dense::{DenseCacheLimits, ann_build_admitted_for_model};
 use super::{HybridCfg, blocking, from_config};
 
 /// Backfill lease duration: covers a remote 75k backfill + ANN build/retry.
-const BACKFILL_PIN_TTL: Duration = Duration::from_secs(3_600);
+const BACKFILL_PIN_TTL: Duration = Duration::from_hours(1);
 
 /// Debug-only override of the resident ANN cap used by the lease gate, so a
 /// test can exercise the admission boundary without a 92k-chunk corpus.

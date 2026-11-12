@@ -4,7 +4,7 @@ use crate::vector_cache::Embedder;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 
-const WATCHDOG: Duration = Duration::from_secs(300);
+const WATCHDOG: Duration = Duration::from_mins(5);
 
 #[derive(Clone, Copy)]
 enum Outcome {
