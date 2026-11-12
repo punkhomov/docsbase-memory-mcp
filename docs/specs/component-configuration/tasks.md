@@ -387,3 +387,12 @@ state planner/migration CLI остаются следующим owning task; #78
 assessment methods. Проверить реальные SQLite artifacts, actual validated owner
 policies и CF3 drafts наряду с graph invariants. CLI migration/registry/apply
 остаются отдельными задачами CF4; общий issue не закрывать.
+
+## Delta 2026-11-12 — CF4c1 actual registry observation
+
+Одна задача по [cf4c1-plan.md](cf4c1-plan.md), CF4c1-1…5. New crates: none.
+Новые `src/store/registry_inspect{.rs,/lease.rs,/tests.rs}` и
+`tests/registry_inspect.rs`; export в store/mod.rs. SQL rows под native lease,
+explicit limits, typed unavailable, no-write/recovery и exact context revision.
+Fresh task/final reviews и required native CI обязательны. После этого отдельно
+идут actual source observations/migration CLI; #78 целиком остаётся открытым.

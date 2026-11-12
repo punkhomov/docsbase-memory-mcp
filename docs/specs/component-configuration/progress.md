@@ -300,3 +300,50 @@ Critical/Important, no deferred minors. Final local full cli-full1252/0/18existi
 ignores,74targets; lean59/0; full/lean all-target Clippy and fmt/diff GREEN.
 13plan integration tests on Linux; additional Windows prefix test requires native
 Windows. Final whole-branch review and native final-head checks remain gates.
+
+CF4b delivery (2026-11-12): PR132 merged as d2d903780466eafe9f14ae1b78b7891213d1cd24.
+Fresh final review converged, no findings. Native run43227848982 attempt1: all
+four required checks green; Linux1252+2static/macOS1248/Windows1241, zero failures,
+18existing ignores. Parent inventory retained;13new tests/platform plus Windows
+prefix case. Reviewed sourcef314efc and tested mergef064fb4 share squash tree
+ d6ffddcf3e68d38b2871cb300332a05c6669ea94.
+
+CF4c1 implementation started (2026-11-12): actual bounded quiescent registry
+observer. RED absent API; causal RED removing native lease allows competing write.
+URI double-slash RED→GREEN; external child stdout BrokenPipe fixed in harness.
+Additional causal RED: raw header preflight releases existing rollback-reader OS
+locks; observer now uses metadata-only preflight and native SQLite descriptor.
+Regression passes with external writer blocked before/after unavailable observation.
+Targeted integration13/0 and leased units7/0 (Linux); final validation/reviews and
+native namespace checks remain pending. Existing raw header inspector defect (#133) is
+separate from this new API and must be tracked rather than hidden by this change.
+
+CF4c1 local full verification: Rust1.88 cli-full1272passed/0failed/18existing
+ignores across75targets including doc (nested child summaries excluded). Clippy
+found identical match arms in metadata preflight; merged equivalent arms, no
+behavior change. Lean/final lint verification follows; required native CI will
+run the complete suite on the final reviewed tree. No baseline/threshold changes.
+CF4c1 remaining local checks: lean integration36/0, leased units7/0;
+full/lean all-target Clippy, fmt and diff checks green. Fresh reviews pending.
+
+CF4c1 task review: Important macOS auto-locking backend (unix name alone does not
+prove POSIX) and Minor oversized persisted-value coverage. Fix: concrete methods
+checked before xLock; actual native unix-none/dotfile RED→GREEN, no file writes.
+Additional URI/path audit found SQLite NOFOLLOW rejects symlink ancestors; real
+alias RED→GREEN via directory-only resolution with final retarget recheck.
+Oversized stored root test uses4096value cap admitting the actual schema.
+Re-review and final validation are pending; no delivery claim yet.
+CF4c1 re-review: both original findings ADDRESSED; no new Critical/Important.
+Lean targeted fixes:15integration+9units pass, all-target Clippy pass. Full suite
+then caught a test-file layout mismatch with platform_boundary scanner: the new
+Unix symlink fixture now lives under an explicit cfg(test) module; scanner itself
+unchanged and both platform_boundary tests pass. Final full rerun pending.
+
+Task CF4c1: complete (2026-11-12, implementation + fresh task review).
+Ruling: Important concrete-backend guarantee and Minor stored-value coverage
+addressed; re-review confirms both, no new Critical/Important or deferred minors.
+Final local cli-full1276passed/0failed/18existing ignores,75targets; full all-target
+Clippy/fmt GREEN. Lean targeted15integration+9units and all-target Clippy GREEN
+before the behavior-neutral test-module relocation; native final-head suite is
+still required. No new crates or baseline/threshold changes. Final whole-branch
+review and docs/Linux/macOS/Windows delivery gates follow; #78 remains open.
