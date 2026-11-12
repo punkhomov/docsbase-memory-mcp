@@ -376,3 +376,9 @@ Ruling: Spec compliance PASS, Quality APPROVED, no findings/deferred minors.
 Full1279/0/18existing ignores; rebased focused42integration+32units/full Clippy/fmt
 GREEN, lean checks GREEN. Final review and native final-head CI remain delivery
 gates; parent CF4c1 must land first. Closes #133 only after verified PR delivery.
+
+Delivery decision (2026-11-12): CF4c1 and I133 ship atomically in PR134, as the
+user permits strongly related issues in one PR. This supersedes the separate-PR
+ordering above: both independently reviewed tasks remain separate commits, but
+schema/registry observers land together after combined final review and native
+final-head gates. I133 final review converged at5f5f398, no findings/minors.
