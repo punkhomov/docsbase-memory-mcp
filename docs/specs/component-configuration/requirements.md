@@ -306,3 +306,10 @@ preflight/NOFOLLOW flags одни недостаточны для reparse races.
 - Это заменяет прежнюю формулировку CF2 «без Connection»: private SQLite handle
   разрешён ради lock correctness, SQL и query-readiness claims по-прежнему нет.
   Missing/orphaned recovery и версионирование identity остаются прежними.
+
+## Delta 2026-11-12 — CF4c2 observed migration CLI
+
+- `config migrate --to 2 --format=json` is a read-only planning operation over the actual complete persisted registry, including absent roots. Unknown registry or unavailable source blocks source proposals. Cwd is not inventory.
+- Observe missing and existing-empty sources distinctly. Bind context, registry and every surveyed source (including unchanged inputs) into the plan identity. Recheck registry after source reads; no atomic multi-file snapshot or future freshness is promised.
+- Explicit owner limits bound project count, path metadata, source bytes and serialized output. Source reads reject nonregular/final symlink paths and never create files, locks, DB sidecars or directories. No provider/runtime construction.
+- Default JSON exposes safe source revision/version/budget changes, not original/proposed TOML or arbitrary values/comments. Invalid-source diagnostics omit source text. Explicit budget choice is not apply consent; strict-store and executor blockers remain.

@@ -217,7 +217,7 @@ pub fn run() -> anyhow::Result<()> {
         Command::Config { command: None } => show_config(),
         Command::Config {
             command: Some(command),
-        } => config::run(&command),
+        } => config::run(&command, &db_settings),
         Command::Status => status::status_with_settings(&db_settings),
         Command::Serve { detached, grace_ms } => {
             serve(detached, grace_ms, &db_settings, &pool_settings)

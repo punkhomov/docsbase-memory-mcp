@@ -450,6 +450,21 @@ pub fn open_private_log(path: &Path) -> io::Result<File> {
     OpenOptions::new().create(true).append(true).open(path)
 }
 
+/// Whether no-follow metadata identifies a file without any reparse attribute.
+/// Unlike `FileType::is_file`, this also excludes non-name-surrogate reparse tags.
+#[must_use]
+pub fn is_regular_nofollow(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_type().is_file() && regular_attributes(metadata.file_attributes())
+}
+fn regular_attributes(attributes: u32) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+    attributes & (FILE_ATTRIBUTE_DEVICE | FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+        == 0
+}
+
 /// Opens an existing path read-only, opening a final reparse point itself.
 /// Does not create or truncate; callers reject symlink/non-regular handles.
 ///
@@ -498,6 +513,19 @@ pub unsafe fn native_file_matches_path(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn non_symlink_reparse_file_attributes_are_not_regular() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_REPARSE_POINT,
+        };
+        // Cloud/WOF tags need not be name-surrogate tags and may otherwise
+        // report FileType::is_file=true. Admission must not depend on tag kind.
+        assert!(super::regular_attributes(FILE_ATTRIBUTE_ARCHIVE));
+        assert!(!super::regular_attributes(
+            FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_REPARSE_POINT
+        ));
+    }
+
     use super::*;
     use std::future::Future as _;
     use std::sync::mpsc;

@@ -258,8 +258,8 @@ docsbase config   # effective values for the current directory (JSON)
 
 The running CLI/daemon still loads the v1 format documented above. Do not add
 `config_version` or `vector_cache` to active configuration files yet: ordinary
-loaders reject them. There is no migration command or write/apply operation in
-this milestone.
+loaders reject them. The read-only migration command below previews changes;
+there is no write/apply operation in this milestone.
 
 For offline tooling, `config::source::SourceLayer::parse` accepts supplied TOML
 text with an independent version per file (absent/1 or 2), and
@@ -333,3 +333,57 @@ text are not printed. For FastEmbed the public projection includes `runtime` and
 `runtime_path`. Invalid input produces an error without echoing the source text.
 The CLI continues to reject the experimental v2 file format; the library can also
 render an explicitly supplied CF3 preview with its v2 budget key and scope.
+
+
+## Observed migration plan (CF4c2)
+
+```sh
+docsbase config migrate --to 2 --format=json
+docsbase config migrate --to 2 --accept-suggested-vector-budget
+docsbase config migrate --to 2 --vector-max-bytes 536870912
+```
+
+This command reads the selected config/cache roots and the complete persisted
+project registry. It includes registered roots that no longer exist; current cwd
+and active daemon sessions are not the project inventory. Missing config files
+remain distinct from empty files. It does not create directories, locks, databases
+or sidecars, write configuration, start a daemon, load models or call providers.
+Existing v1 runtime loading is unchanged; v2 is accepted here for planning only.
+
+The version1 JSON envelope contains `observation_id`, selected roots, registry,
+`registry_stable`, all source states/revisions, the budget decision, a summary and
+the versioned `plan` action graph. The summary shows observed/proposed numeric
+budgets, legacy scope conflicts, source rewrites with target versions/hashes and
+formatting/materialization warnings. It omits original/proposed TOML, comments,
+models, provider parameters and other arbitrary configuration values. File paths
+and revision hashes remain visible. Canonical migration may discard comments;
+non-resource effective values are checked for equivalence by the pure planner.
+
+Without a budget choice, `vector_budget_decision_required` blocks rewrites.
+`--accept-suggested-vector-budget` explicitly selects the largest observed legacy
+capacity; `--vector-max-bytes` selects a positive capacity instead. These flags
+conflict and neither grants permission to apply. Even a complete source proposal
+retains `strict_store_adoption_unavailable` and `executor_unavailable` blockers.
+Do not copy proposed v2 settings into active files before runtime adoption ships.
+
+A busy/WAL/recovery-bearing registry is unavailable, not empty. The command never
+stops a daemon or repairs storage. Unavailable registry/source observations block
+all source rewrites. Invalid semantic settings or exceeded envelope/context limits
+produce a redacted error and nonzero exit; a successfully emitted blocked plan
+returns exit 0. No prompts or partial JSON are emitted on planning errors.
+
+Sources must be regular UTF-8 files, at most 1 MiB each; final symlinks and special
+files are rejected. Parent aliases are resolved and checked around reads. Official
+planning limits are 256 projects, 1 MiB path/registry metadata, 16 MiB aggregate source
+bytes and 8 MiB encoded plan/output. Registry SQL uses a 1 MiB value limit and 256 KiB
+soft page-cache target. These bound logical inputs/output, not exact RSS or time.
+The library takes explicit alternate `PlanningLimits`; these are planning policy,
+not runtime/search configuration knobs.
+
+Each file is read independently, with conservative metadata race checks. The
+registry is observed again after source reads; a difference blocks proposals.
+`atomic_snapshot=false` is intentional: equal boundary observations do not prove
+absence of intermediate changes. The identity binds context, registry, every input
+source (including unchanged files), choice and output, not future freshness. Future
+apply must revalidate all those facts under its own publication protocol. Source
+observation hashes describe exact file bytes, not semantic artifact fingerprints.

@@ -18,6 +18,7 @@ use schema::{
 pub mod bootstrap;
 pub mod change;
 pub mod migrate;
+pub mod observe;
 pub mod paths;
 pub mod resolve;
 pub mod schema;
