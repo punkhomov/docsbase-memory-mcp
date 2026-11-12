@@ -474,3 +474,55 @@ preview с его глобальным resource key, но не заявляет 
 идут отдельно. Ограничения настоящего inspector и inventory перечислены в
 [cf4-investigation.md](cf4-investigation.md); ни одна из них не маскируется
 под готовность индекса или implicit recovery.
+
+## Delta 2026-11-12 — CF4b compiler and owner boundaries
+
+`ResourceId` разделяет Runtime/Artifact/Source. `Observation` различает Missing,
+Unknown, NeedsRecovery, KnownIdentity и SuppliedSourceRevision. Последнее —
+exact-byte stale token из CF3, не filesystem identity и не semantic fingerprint
+provider/credentials. Canonical body включает plan_version=1, sorted observations,
+DAG-ordered actions, unchanged_observations, required_grants и blockers. Plan ID:
+BLAKE3 derive-key domain `docsbase.change-plan.v1` над serde JSON body; внешнее
+поле plan_id исключено из digest, но входит в итоговый byte budget.
+
+Compiler (`config/change/compile.rs`) не знает правил Search/Db/migration.
+BTreeMap задаёт один action/observation на resource; reasons/dependencies union
+и сортируются один раз после accumulation. Kahn traversal с ordered ready set
+отклоняет cycles/missing dependencies без recursion. Конфликтующие core effects,
+outputs, grants или observations отвергаются. Evict/DeleteStore/Rebuild не
+схлопываются. Streaming input admission происходит до cloning/indexing; raw
+limits учитывают duplicates. Output отдельно должен помещаться в тот же явно
+переданный byte cap. Logical metadata size не является точной оценкой RSS.
+
+SearchSpec и DbSpec владеют policy fingerprint/impact; compiler получает готовые
+assessments. Db duration encoding сохраняет seconds+nanos. Runtime old policy
+предоставлен caller: live daemon не опрашивается. `store/plan.rs` распознаёт только
+canonical `sqlite-schema-v1:<version>:<cookie>` для `metadata_db_schema`:
+current version → unchanged **header**, older → blocked MigrateSchema,
+future/unknown format → blocker. Missing → InitializeStore, recovery evidence →
+RecoverStore без обещания schema результата. Store initialization не требует
+Destructive; schema migration/recovery требуют conservative Destructive grant.
+
+MigrationDraft projection не переносит raw source values в plan. Public draft
+проверяется на version/cap/source byte limits и exact-before hash. Все source
+rewrites зависят от strict shared-store adoption; selected cap виден числом bytes.
+Даже уже canonical v2 files не доказывают store adoption. Incomplete drafts
+возвращают blockers без source actions; full source proposal остаётся в CF3 DTO.
+`runtime_activation_available` не может включить отсутствующий executor.
+
+В CF4b нет executor registry: каждое действие автоматически получает
+ExecutorUnavailable. Предыдущие sketches `ComponentImpact` не заменяются огромным
+trait: сохраняется локальный enum CF1 и добавлены конкретные owner assessments.
+Расширение artifact IDs до model/generation, active revisions, CLI plan/migrate,
+полный registry survey, risk/cost/space estimates и actual apply принадлежат
+следующим slices. Нынешний формат нельзя подавать будущему executor без проверки
+версии и свежести; plan_id сам по себе не authorization.
+
+CF4b review correction: Source resource JSON представляет paths последовательностью
+лексических components (включая parsed Windows prefix). Это совпадает с PathBuf
+Eq/Ord: repeated separators/interior `.` не меняют ID при перестановке входов;
+`..` и verbatim semantics сохраняются, filesystem canonicalization не вызывается.
+Все occurrences (observations/actions/dependencies/blockers) используют один
+serializer. Отдельно сумма raw encoded path bytes должна укладываться в
+max_metadata_bytes до cloning: длинные последовательности separators не обходят
+лимит через компактное canonical JSON. SourceId serialization вне plans не меняется.

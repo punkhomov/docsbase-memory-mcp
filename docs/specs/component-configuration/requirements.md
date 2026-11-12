@@ -231,3 +231,32 @@ v1 runtime diagnostics не меняются.
 - **CF4a-3:** новый CLI path не создаёт state/cache/data, не открывает БД/IPC,
   не вызывает providers и не активирует v2 runtime. Ошибки не раскрывают исходный
   TOML/credential values. Это scoped FR-6/8/12, не завершение всего CF4/#78.
+
+## Delta 2026-11-12 — CF4b bounded pure state plans
+
+- **CF4b-1:** `config::change::compile` принимает borrowed owner assessments и
+  explicit `PlanLimits`; выдаёт `ChangePlan` v1 с canonical identity, observations,
+  topological actions, required grants и blockers. Duplicate actions объединяют
+  reasons/dependencies; conflicts/missing inputs/cycles отклоняются. Input
+  permutations не меняют результат. Evict/DeleteStore/Rebuild различаются.
+- **CF4b-2:** реальные SearchSpec/DbSpec оценивают свои validated policy значения;
+  timeout влияет только на runtime policy, не на vectors/ANN/index. Fingerprints
+  имеют разные versioned domains, длительности не теряют sub-ms точность.
+- **CF4b-3:** metadata schema owner использует no-write inspector: Missing,
+  Unknown, NeedsRecovery и распознанный schema header различаются. Future/unknown
+  identity не переиспользуется. Ни header, ни unchanged observation не доказывают
+  row/index/query readiness. Отсутствующий cache не создаётся; mismatch/WAL и
+  recovery evidence не меняют DB, sidecars, conflict logs или directories.
+- **CF4b-4:** CF3 MigrationDraft становится state assessment: incomplete survey
+  не означает no-op; RewriteSource зависит от AdoptSharedStore. Source revisions
+  относятся к supplied text, не observed file existence; strict-store adoption
+  и source observation остаются явными blockers. Plan не содержит source text.
+- **CF4b-5:** raw action/edge counts проверяются до построения graph; streaming
+  JSON admission ограничивает bytes входа и результата независимо. Лимиты задаёт
+  caller без default. Это bounds metadata, не RSS. Каждый SourceEdit повторно
+  проверяется по существующему MAX_STATE_BYTES перед hashing. Plan ID не consent;
+  все actions отмечены ExecutorUnavailable до появления реального apply.
+
+CF4b — pure Rust API, не новый CLI. Не закрывает CF4/SC-4: registry observation,
+активный daemon snapshot, CLI migration, оценки места/стоимости, полная карта
+artifact fingerprints и исполнение остаются последующими owning slices.

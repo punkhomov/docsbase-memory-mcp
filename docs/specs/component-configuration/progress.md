@@ -268,3 +268,35 @@ Task CF4a: complete (2026-11-12, local implementation + fresh task review).
 Spec compliance PASS / Quality APPROVED, Critical/Important none. Minor M1 fixed:
 plan использует точное wire имя provisioning_checked=false, как code/tests/docs.
 Deferred minors нет. Final whole-branch review и native final-head CI следуют.
+
+CF4a delivery (2026-11-12): PR131 merged as
+f70a6f80e0d1a3f6cae654d6e9a8e5a34eb47276. Fresh final review converged; native
+run43221452372 attempt1 all four required checks green. Linux1239+2static,
+macOS1235, Windows1227; zero failures,18existing ignores/platform. Parent
+inventory retained,8new tests executed/platform. Reviewed source10f4170 and
+merge7c23a94 share squash tree509b9839774dcf86e47e571da49398edc0a34890.
+
+CF4b implementation started (2026-11-12): pure bounded graph + actual Search/Db
+and MigrationDraft adapters. RED missing APIs; separate behavioral RED showed
+public SourceEdit could bypass source byte contract; now checked before hashing.
+Initial GREEN10 real/graph integration tests. No runtime/CLI behavior changed;
+all proposed actions explicitly lack executor. Full validation/reviews pending.
+
+CF4b local verification: Rust1.88 cli-full1249passed/0failed/18existing ignores,
+74targets including doc; lean plan/migration/resolution/store56passed/0failed.
+Full/lean all-target Clippy and fmt/diff checks GREEN. Aggregate excludes nested
+child-process lock-holder summary (its parent unit test is counted once).
+Task/final independent reviews and final-head native CI remain delivery gates.
+CF4b task review: initial CHANGES — Important path equality/serialization mismatch,
+Minor exact input-budget boundaries and independent malformed-draft tests. Fixes:
+component-based source encoding on every resource reference, raw path byte cap,
+permutation/dependency/Windows-prefix coverage, isolated version/cap checks.
+Behavioral RED→GREEN for alias identity and canonical-size bypass. Re-review:
+all three findings ADDRESSED; no new Critical/Important. Deferred minors none.
+
+Task CF4b: complete (2026-11-12, local implementation + fresh task review).
+Ruling: initial Important and two Minor findings addressed; re-review no new
+Critical/Important, no deferred minors. Final local full cli-full1252/0/18existing
+ignores,74targets; lean59/0; full/lean all-target Clippy and fmt/diff GREEN.
+13plan integration tests on Linux; additional Windows prefix test requires native
+Windows. Final whole-branch review and native final-head checks remain gates.

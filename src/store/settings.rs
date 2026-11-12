@@ -190,3 +190,44 @@ impl SettingsSpec for ReadPoolSpec {
         ComponentImpact::between(old, next)
     }
 }
+
+impl DbSpec {
+    /// Assess connection policy only, without opening/migrating any store.
+    /// Old policy is caller-supplied; this is not a live daemon observation.
+    ///
+    /// # Errors
+    /// Invalid old/new settings or policy encoding.
+    pub fn assess_change(
+        old: Option<&DbSettings>,
+        next: &DbSettings,
+    ) -> Result<crate::config::change::Assessment> {
+        use crate::config::change::{policy_identity, runtime_assessment};
+        let identity = |value: &DbSettings| {
+            Self::validate(value, &Capabilities::current())?;
+            // Duration serde uses integer seconds+nanos, preserving sub-ms input.
+            policy_identity(
+                "metadata-db-policy-v1",
+                &(
+                    value.write_busy_timeout,
+                    value.read_busy_timeout,
+                    value.wal_attempts,
+                    value.wal_retry_delay,
+                ),
+            )
+        };
+        Ok(runtime_assessment(
+            "metadata_db",
+            old.map(identity).transpose()?,
+            identity(next)?,
+            Self::impact(old, next, &ArtifactFacts::default()),
+        ))
+    }
+
+    /// Assess header schema observations, never registry rows or query readiness.
+    ///
+    /// # Errors
+    /// Multiple contradictory metadata schema observations.
+    pub fn assess_schema(facts: &ArtifactFacts) -> Result<crate::config::change::Assessment> {
+        super::plan::assess_schema(facts)
+    }
+}

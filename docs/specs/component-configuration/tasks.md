@@ -378,3 +378,12 @@ settings остаются global-only. Native/final delivery evidence фикси
 Owning values + checked provenance composition + реальная read-only CLI команда.
 Не включать пока неподтверждённые artifact/registry readiness в output. Pure
 state planner/migration CLI остаются следующим owning task; #78 не закрывается.
+
+## Delta 2026-11-12 — CF4b pure compiler и три реальных owner adapters
+
+Контракт CF4b-1…5 и [cf4b-plan.md](cf4b-plan.md). New files:
+`src/config/change.rs`, `src/config/change/compile.rs`, `src/store/plan.rs`,
+`tests/config_plan.rs`; owners SearchSpec/DbSpec/MigrationDraft получают pure
+assessment methods. Проверить реальные SQLite artifacts, actual validated owner
+policies и CF3 drafts наряду с graph invariants. CLI migration/registry/apply
+остаются отдельными задачами CF4; общий issue не закрывать.
