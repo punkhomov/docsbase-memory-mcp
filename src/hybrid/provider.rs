@@ -206,6 +206,21 @@ pub trait Provider: Sync {
         Ok(ProviderRecord::new(record_enabled(self.name(), table)?))
     }
 
+    /// Pure, explicitly safe configuration projection for effective views.
+    /// The default never exposes arbitrary provider parameters. New providers
+    /// opt in to individual non-secret fields instead of serializing raw records.
+    /// No status/provisioning/runtime/environment methods may be called here.
+    ///
+    /// # Errors
+    /// Invalid typed configuration in a provider-specific projection.
+    fn configuration_view(&self, record: &ProviderRecord) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "enabled": record.enabled,
+            "parameters": {},
+            "unexposed_parameters": !record.params.is_empty(),
+        }))
+    }
+
     /// Pre-write check for the embedding stage (FR-8): can this build serve it
     /// *now*? The provider owns the probe, so the CLI never branches on names.
     ///
@@ -338,6 +353,15 @@ impl Provider for FastembedProvider {
             }
         }
         Ok(ProviderRecord { enabled, params })
+    }
+
+    fn configuration_view(&self, record: &ProviderRecord) -> Result<serde_json::Value> {
+        let typed = super::config::FastembedProvider::from_record(record)?;
+        Ok(serde_json::json!({
+            "enabled": typed.enabled,
+            "parameters": {"runtime": typed.runtime, "runtime_path": typed.runtime_path},
+            "unexposed_parameters": record.params.keys().any(|key| key != "runtime" && key != "runtime_path"),
+        }))
     }
 
     fn probe_embedding(&self, cfg: &EmbeddingCfg) -> Result<()> {

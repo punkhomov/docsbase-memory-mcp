@@ -293,3 +293,43 @@ settings. Observed-missing project files remain missing. Source/edit debug
 output omits file text; explicit before/after views should be treated as source
 files. No files, artifacts or providers are changed. Runtime adoption, consent,
 strict shared-store ownership and recovery are later #78 milestones.
+
+## Effective values with origins
+
+```sh
+docsbase config effective --format=json
+```
+
+This versioned view resolves the current v1 global/project files and shows each
+file setting's typed value, unit, scope and source. It does not contact the daemon:
+a running process can still hold its earlier configuration. The output therefore
+identifies its basis as `source_resolution`, sets `live_runtime_observed` to
+`false`, and limits coverage to `file_settings`. Bare `docsbase config` keeps its
+existing JSON format.
+
+`view_version` is `1`. Fields appear in key order; for example:
+
+```json
+{
+  "key": "search.request_timeout_ms",
+  "value": 30000,
+  "source": { "kind": "defaults" },
+  "scope": "daemon",
+  "unit": "milliseconds",
+  "capability": null
+}
+```
+
+Sources distinguish defaults, global/project paths and supplied snapshots whose
+original sources are unavailable. A disabled stage has null values. Provider
+capabilities report compiled support from the existing registry; they do not
+prove that credentials, models or runtimes are available. `provisioning_checked`
+is `false`: the command does not probe providers, load models, start a daemon or
+open a database.
+
+Provider records expose only fields selected by their owner. Arbitrary parameters
+are omitted and indicated by `unexposed_parameters`; secrets and raw configuration
+text are not printed. For FastEmbed the public projection includes `runtime` and
+`runtime_path`. Invalid input produces an error without echoing the source text.
+The CLI continues to reject the experimental v2 file format; the library can also
+render an explicitly supplied CF3 preview with its v2 budget key and scope.

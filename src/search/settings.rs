@@ -139,3 +139,32 @@ impl SettingsSpec for SearchSpec {
         ComponentImpact::between(old, next)
     }
 }
+
+impl SearchSpec {
+    pub(crate) fn view_fields(
+        settings: &SearchSettings,
+        view: &mut crate::config::view::ViewBuilder<'_>,
+    ) -> Result<()> {
+        for (key, value) in [
+            (
+                "search.dedupe_max_candidates",
+                serde_json::json!(settings.dedupe_max_candidates),
+            ),
+            (
+                "search.request_timeout_ms",
+                serde_json::json!(settings.request_timeout_ms),
+            ),
+            (
+                "search.max_request_payload_bytes",
+                serde_json::json!(settings.max_request_payload_bytes),
+            ),
+            (
+                "search.max_retained_payload_bytes",
+                serde_json::json!(settings.max_retained_payload_bytes),
+            ),
+        ] {
+            view.push(key, value, None)?;
+        }
+        Ok(())
+    }
+}

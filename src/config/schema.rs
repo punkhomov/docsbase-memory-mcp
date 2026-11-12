@@ -8,7 +8,8 @@ use crate::error::{Error, Result};
 use super::bootstrap::DefaultsContext;
 
 /// Owner of a setting; project layers cannot change shared resources.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Scope {
     /// Machine/bootstrap state.
     Machine,
@@ -21,7 +22,8 @@ pub enum Scope {
 }
 
 /// A source identity, never a source's values or credentials.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum SourceId {
     /// Component-owned baseline.
     Defaults,
@@ -48,7 +50,8 @@ impl SourceId {
 }
 
 /// Units for future effective views; values stay in typed settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Unit {
     /// Count of objects or attempts.
     Count,
@@ -84,7 +87,7 @@ impl FieldSpec {
 }
 
 /// Origin of an effective field. No raw source values are retained.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct FieldOrigin {
     /// Source path/name only.
     pub source: SourceId,

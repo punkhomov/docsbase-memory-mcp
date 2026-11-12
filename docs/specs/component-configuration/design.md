@@ -456,3 +456,21 @@ vector_cache.max_bytes (Scope::Daemon, Unit::Bytes). V1 preview сохраняе
 key/scope. Значение пока проецируется в compatibility Config.hybrid_cfg.cache;
 это source review DTO, а не новый operational loader. Descriptor живёт у
 vector_cache, runtime ownership/evictor не меняются до CF7.
+
+## Delta 2026-11-12 — CF4a source effective view
+
+CF4 делится на проверяемые deliverables: первым поставляется effective view
+по [cf4a-plan.md](cf4a-plan.md). Он принимает уже разрешённые данные и соединяет
+owner-provided values с настоящим provenance; defaults не вычисляет повторно.
+Provider registry даёт capability/safe configuration projection без runtime
+construction или probing. Это сохраняет single-registry boundary для #128.
+
+JSON version1 явно обозначает source_resolution и live_runtime_observed=false:
+текущие файлы не доказывают snapshot работающего демона. Прежний bare config
+output не меняется. CLI читает v1 как раньше; pure view может отображать CF3 v2
+preview с его глобальным resource key, но не заявляет operational adoption.
+
+Остальные части CF4 (action graph/state-plan/registry observations/migration CLI)
+идут отдельно. Ограничения настоящего inspector и inventory перечислены в
+[cf4-investigation.md](cf4-investigation.md); ни одна из них не маскируется
+под готовность индекса или implicit recovery.
