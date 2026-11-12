@@ -7,3 +7,9 @@ fmt, diff-check, actionlint and 11 Python gate tests PASS. Independent code
 review APPROVED after correcting assertion migration issues; no code findings
 remain. Audits: Rig 484 / Web 481 registry entries all >=14 days with matching
 checksums. Full local/native suites and combined integration remain pending.
+
+2026-11-13: updated the smoke test's former nightly assertion to exact 1.100.0;
+focused smoke checks pass in both PRs. Rig's first parallel full run passed
+quality but failed BM25 timing (12.45ms vs10.15ms). Same unchanged gate passed
+when run alone with the documented CI factor3; no baseline/threshold changes.
+Web's full run passed the search gate, then exposed the stale smoke assertion.

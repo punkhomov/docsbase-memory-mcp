@@ -20,7 +20,7 @@ fn toolchain_pinned() {
     let manifest =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/rust-toolchain.toml"))
             .expect("read rust-toolchain.toml");
-    assert!(manifest.contains("channel = \"nightly\""), "{manifest}");
+    assert!(manifest.contains("channel = \"1.100.0\""), "{manifest}");
     assert!(manifest.contains("\"rustfmt\""), "{manifest}");
     assert!(manifest.contains("\"clippy\""), "{manifest}");
 }
