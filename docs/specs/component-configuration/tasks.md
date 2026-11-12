@@ -371,3 +371,10 @@ CF2a file expansion (2026-11-10, ADR-9): Modify
 Прежний пример project-v2 cache заменён override поля стадии: v2 resource
 settings остаются global-only. Native/final delivery evidence фиксируется
 в PR после task implementation/review ledger.
+
+## Delta 2026-11-12 — CF4a effective view до state planner
+
+Первый самостоятельный deliverable CF4: [cf4a-plan.md](cf4a-plan.md), CF4a-1…3.
+Owning values + checked provenance composition + реальная read-only CLI команда.
+Не включать пока неподтверждённые artifact/registry readiness в output. Pure
+state planner/migration CLI остаются следующим owning task; #78 не закрывается.

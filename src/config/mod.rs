@@ -21,6 +21,7 @@ pub mod paths;
 pub mod resolve;
 pub mod schema;
 pub mod source;
+pub mod view;
 
 /// Effective configuration after merging all sources.
 ///
@@ -393,5 +394,24 @@ impl SettingsSpec for ConfigSpec {
     }
     fn impact(old: Option<&Config>, next: &Config, _: &ArtifactFacts) -> ComponentImpact {
         ComponentImpact::between(old, next)
+    }
+}
+
+impl ConfigSpec {
+    fn view_fields(settings: &Config, view: &mut view::ViewBuilder<'_>) -> Result<()> {
+        for (key, value) in [
+            ("ignores", serde_json::json!(settings.ignores)),
+            ("max_file_size", serde_json::json!(settings.max_file_size)),
+            (
+                "max_docs_per_project",
+                serde_json::json!(settings.max_docs_per_project),
+            ),
+            ("auto_index", serde_json::json!(settings.auto_index)),
+            ("providers", view::provider_records(&settings.providers)?),
+        ] {
+            view.push(key, value, None)?;
+        }
+        crate::hybrid::config::view::fields(&settings.hybrid_cfg, view)?;
+        SearchSpec::view_fields(&settings.search, view)
     }
 }

@@ -216,3 +216,18 @@ cache override остаётся отдельным конфликтующим н
 legacy default не увеличивает suggested maximum. Ошибки preview сохраняют
 категорию слоя (base/hybrid/effective), но не включают исходные значения; обычные
 v1 runtime diagnostics не меняются.
+
+## Delta 2026-11-12 — CF4a: effective source view
+
+- **CF4a-1:** новый `config effective --format=json` имеет view_version1 и явно
+  показывает source_resolution basis, без утверждения об observed live runtime.
+  Bare `config` сохраняет прежнюю форму. Поля имеют typed value, unit, scope,
+  реальный SourceId и feature capability; unknown origins не угадываются.
+- **CF4a-2:** значения формирует owning component, а не центральная копия правил.
+  Checked composition отклоняет missing/duplicate/undeclared поля. Provider
+  capabilities и safe record projection принадлежат существующему registry;
+  credentials/raw arbitrary provider params не сериализуются. Build availability
+  не равна provisioning readiness; status/probe/build методов не вызывают.
+- **CF4a-3:** новый CLI path не создаёт state/cache/data, не открывает БД/IPC,
+  не вызывает providers и не активирует v2 runtime. Ошибки не раскрывают исходный
+  TOML/credential values. Это scoped FR-6/8/12, не завершение всего CF4/#78.

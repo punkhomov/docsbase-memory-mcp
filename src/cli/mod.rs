@@ -25,6 +25,7 @@ pub(crate) mod test_env {
     }
 }
 
+pub mod config;
 pub mod connect;
 pub mod index;
 pub mod install;
@@ -101,7 +102,11 @@ pub enum Command {
         path: Option<PathBuf>,
     },
     /// Print the effective configuration for the current directory.
-    Config,
+    Config {
+        /// Optional versioned view; omission preserves the legacy JSON.
+        #[command(subcommand)]
+        command: Option<config::ConfigCommand>,
+    },
     /// Show registry-wide status.
     Status,
     /// Run the shared daemon in the foreground (hidden `--detached` for autostart).
@@ -209,7 +214,10 @@ pub fn run() -> anyhow::Result<()> {
         ),
         Command::List => status::list_with_settings(&db_settings),
         Command::Sync { path } => sync(path.as_deref(), &db_settings),
-        Command::Config => show_config(),
+        Command::Config { command: None } => show_config(),
+        Command::Config {
+            command: Some(command),
+        } => config::run(&command),
         Command::Status => status::status_with_settings(&db_settings),
         Command::Serve { detached, grace_ms } => {
             serve(detached, grace_ms, &db_settings, &pool_settings)

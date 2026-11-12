@@ -6,6 +6,7 @@
 //! without the network feature (SC-3).
 
 pub mod merge;
+pub(crate) mod view;
 
 use std::path::PathBuf;
 use std::sync::Arc;

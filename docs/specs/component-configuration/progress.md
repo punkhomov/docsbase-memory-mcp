@@ -242,3 +242,29 @@ Task CF3: complete (2026-11-11, implementation + fresh task review).
 I1 re-review: ADDRESSED; new Critical/Important none. Все CF3-1…CF3-5 выполнены
 в source-only scope; deferred minors нет. Fresh whole-branch final review и
 required docs/Linux/macOS/Windows CI остаются delivery gates. #78 не закрывается.
+
+CF3 delivery (2026-11-11): PR127 merged as543225be973f9faadcfc17f00b2cfba3be71a027.
+Fresh final review converged, no findings. Native run43082250608 attempt1:
+docs/linux/macos/windows GREEN; Linux1231 +2static, macOS1227, Windows1219,
+0failures/18existing ignores. Каждый parent test сохранён,13 migration tests
+выполнены на каждой ОС. Squash tree99fd7f92f74756c1618dd9aea0d3965fae317747
+совпадает с reviewed/tested tree. Доказательства: PR127 comments и issue78.
+
+CF4a implementation started (2026-11-12): working source effective view, отдельно
+от будущего state planner. Dated requirements CF4a-1…3/plan. RED: отсутствующие
+view API/provider safe projection. Initial GREEN:6real integration tests, включая
+CLI/bare-config compatibility, no-write snapshots, unprovisioned models и error
+redaction. Owner values/provenance checked; existing provider registry reused.
+Проверка полного suite/lean/lint и свежие reviews ещё не завершены.
+CF4a local verification: Rust1.88 full cli-full1239/0/18existing ignores,
+73targets включая doc; lean config/view/migration/resolution/hybrid/cli-routing81/0
+и owner-view units2/0. Full/lean all-target Clippy, fmt/diff GREEN. Единственный
+lint fix: private CLI run принимает ссылку вместо ненужного владения enum; после
+него actual CLI view integrations6/0 повторно GREEN. Full suite был до этого
+behavior-neutral signature change; final-head native suite остаётся gate.
+No new crates, baseline/threshold/snapshot changes, provider calls или model
+provisioning. Views используют actual resolver и existing provider registry.
+Task CF4a: complete (2026-11-12, local implementation + fresh task review).
+Spec compliance PASS / Quality APPROVED, Critical/Important none. Minor M1 fixed:
+plan использует точное wire имя provisioning_checked=false, как code/tests/docs.
+Deferred minors нет. Final whole-branch review и native final-head CI следуют.
