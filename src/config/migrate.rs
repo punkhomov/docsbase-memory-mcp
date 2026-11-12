@@ -397,3 +397,106 @@ fn hybrid_table(config: &HybridCfg) -> toml::Value {
     );
     toml::Value::Table(table)
 }
+
+impl MigrationDraft {
+    /// Project the source draft into a blocked state plan, without writing files.
+    /// Supplied text is explicitly not proof of on-disk existence or freshness.
+    ///
+    /// # Errors
+    /// Unsupported draft version, incomplete choices or inconsistent source hashes.
+    pub fn assess_change(&self) -> Result<super::change::Assessment> {
+        use super::change::{
+            Action, Assessment, Blocker, BlockerCode, Effect, ExpectedState, Grant, Observation,
+            Reason, ResourceId, Target,
+        };
+        use super::schema::ArtifactId;
+        if self.draft_version != 1 {
+            return Err(invalid("unsupported migration draft version"));
+        }
+        let mut assessment = Assessment::default();
+        for blocker in &self.blockers {
+            let (resource, code) = match blocker {
+                MigrationBlocker::UninspectedProject(path) => (
+                    Some(ResourceId::Source(SourceId::Project(path.clone()))),
+                    BlockerCode::UninspectedProject,
+                ),
+                MigrationBlocker::VectorBudgetDecisionRequired => {
+                    (None, BlockerCode::VectorBudgetDecisionRequired)
+                }
+            };
+            if let Some(resource) = &resource {
+                assessment.expected.push(Observation {
+                    resource: resource.clone(),
+                    state: ExpectedState::Unknown,
+                });
+            }
+            assessment.blockers.push(Blocker { resource, code });
+        }
+        if !self.source_proposal_complete() {
+            return Ok(assessment);
+        }
+        let cap = self
+            .selected_vector_max_bytes
+            .filter(|value| *value > 0 && i64::try_from(*value).is_ok())
+            .ok_or_else(|| invalid("complete migration draft needs an explicit budget"))?;
+        let store = ResourceId::Artifact(ArtifactId {
+            component: "shared_vector_store".into(),
+            project_id: None,
+        });
+        assessment.expected.push(Observation {
+            resource: store.clone(),
+            state: ExpectedState::Unknown,
+        });
+        assessment.blockers.push(Blocker {
+            resource: Some(store.clone()),
+            code: BlockerCode::StrictStoreAdoptionUnavailable,
+        });
+        assessment.actions.push(Action {
+            resource: store.clone(),
+            effect: Effect::AdoptSharedStore,
+            target: Some(Target::VectorBudgetBytes(cap)),
+            reasons: vec![Reason::SharedBudgetOwnership],
+            dependencies: vec![],
+            required_grants: vec![Grant::Destructive],
+        });
+        for edit in &self.edits {
+            // SourceEdit is public: recheck the existing source-size contract
+            // before hashing rather than trusting a caller-constructed draft.
+            if [edit.before.len(), edit.after.len()]
+                .into_iter()
+                .any(|length| {
+                    u64::try_from(length).map_or(true, |size| size > crate::limits::MAX_STATE_BYTES)
+                })
+            {
+                return Err(invalid("migration source exceeds the state byte limit"));
+            }
+            if !matches!(edit.source, SourceId::Global(_) | SourceId::Project(_))
+                || blake3::hash(edit.before.as_bytes()).to_hex().as_str()
+                    != edit.expected_source_hash
+            {
+                return Err(invalid("inconsistent migration source precondition"));
+            }
+            let resource = ResourceId::Source(edit.source.clone());
+            assessment.expected.push(Observation {
+                resource: resource.clone(),
+                state: ExpectedState::SuppliedSourceRevision(edit.expected_source_hash.clone()),
+            });
+            assessment.blockers.push(Blocker {
+                resource: Some(resource.clone()),
+                code: BlockerCode::SourceObservationRequired,
+            });
+            assessment.actions.push(Action {
+                resource,
+                effect: Effect::RewriteSource,
+                target: Some(Target::Identity(format!(
+                    "source-bytes-v1:{}",
+                    blake3::hash(edit.after.as_bytes()).to_hex()
+                ))),
+                reasons: vec![Reason::SourceMigration],
+                dependencies: vec![store.clone()],
+                required_grants: vec![Grant::Destructive],
+            });
+        }
+        Ok(assessment)
+    }
+}

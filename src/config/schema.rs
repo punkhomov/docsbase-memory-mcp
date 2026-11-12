@@ -22,7 +22,7 @@ pub enum Scope {
 }
 
 /// A source identity, never a source's values or credentials.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum SourceId {
     /// Component-owned baseline.
@@ -257,7 +257,7 @@ impl<T> Resolved<T> {
 }
 
 /// Stable identity of an observed artifact; no storage handles.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub struct ArtifactId {
     /// Owning component.
     pub component: String,

@@ -168,3 +168,35 @@ impl SearchSpec {
         Ok(())
     }
 }
+
+impl SearchSpec {
+    /// Assess only search runtime policy; no index/vector identity is affected.
+    /// The old policy is caller-supplied, not a live daemon observation.
+    ///
+    /// # Errors
+    /// Invalid old/new settings or policy encoding.
+    pub fn assess_change(
+        old: Option<&SearchSettings>,
+        next: &SearchSettings,
+    ) -> Result<crate::config::change::Assessment> {
+        use crate::config::change::{policy_identity, runtime_assessment};
+        let identity = |value: &SearchSettings| {
+            Self::validate(value, &Capabilities::current())?;
+            policy_identity(
+                "search-policy-v1",
+                &(
+                    value.dedupe_max_candidates,
+                    value.request_timeout_ms,
+                    value.max_request_payload_bytes,
+                    value.max_retained_payload_bytes,
+                ),
+            )
+        };
+        Ok(runtime_assessment(
+            "search",
+            old.map(identity).transpose()?,
+            identity(next)?,
+            Self::impact(old, next, &ArtifactFacts::default()),
+        ))
+    }
+}
