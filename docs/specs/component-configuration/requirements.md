@@ -286,3 +286,11 @@ POSIX method table; automatic no-lock/dotfile/AFP/NFS alternatives отклон�
 до xLock. Symlink cache ancestors допустимы с directory resolution/recheck,
 сам DB entry остаётся NOFOLLOW; alias retarget запрещает Ready. Oversized persisted
 root проверяется отдельным value cap, который допускает schema и обычный root.
+
+CF4c1 final-review delta (2026-11-12): Windows фактический borrowed native HANDLE
+должен соответствовать canonical-directory/DB filename до SQL и Ready; metadata
+preflight/NOFOLLOW flags одни недостаточны для reparse races. Gated native test
+подменяет DB symlink после preflight и проверяет target recovery preservation.
+«Nonblocking lease» означает отсутствие application retry/busy-timeout loop:
+платформенные SQLite3.53.2 Windows pending-byte/AV retries остаются явно описанным
+исключением; hard wall-clock deadline и нулевая задержка не обещаются.

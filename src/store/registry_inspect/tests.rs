@@ -282,3 +282,46 @@ mod namespace {
         assert_eq!(files(&second), before_second);
     }
 }
+
+#[cfg(windows)]
+#[cfg(test)]
+mod windows_namespace {
+    use super::*;
+
+    #[test]
+    fn database_symlink_after_preflight_cannot_hide_target_recovery() {
+        let cache = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        drop(Db::open(cache.path()).unwrap());
+        drop(Db::open(target.path()).unwrap());
+        std::fs::write(
+            target.path().join(format!("{DB_FILE}-journal")),
+            b"unresolved recovery",
+        )
+        .unwrap();
+        let target_before = files(target.path());
+        // Freeze the exact gap between ordinary preflight and actual open.
+        assert!(presence(cache.path()).unwrap());
+        std::fs::remove_file(cache.path().join(DB_FILE)).unwrap();
+        std::os::windows::fs::symlink_file(target.path().join(DB_FILE), cache.path().join(DB_FILE))
+            .unwrap();
+        let bytes = validate(cache.path(), limits()).unwrap();
+        assert_eq!(
+            capture(
+                cache.path(),
+                limits(),
+                bytes,
+                || {},
+                |_| panic!("wrong native file must never reach SQL")
+            ),
+            Err(UnavailableReason::Changed)
+        );
+        assert_eq!(files(target.path()), target_before);
+        assert!(
+            std::fs::symlink_metadata(cache.path().join(DB_FILE))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+}

@@ -92,7 +92,8 @@ assert_eq!(snapshot_files(cache.path()), before);
   WITHOUT CREATE. immutable makes the pager read-only while the native descriptor
   can acquire write-style OS locks. No SQL before lease. Use FILE_POINTER and
   VFS_POINTER file controls, recognize only built-in unix/win32, call native xLock
-  SHARED then EXCLUSIVE, nonblocking. Validate pointers/callbacks/statuses, keep
+  SHARED then EXCLUSIVE without an application retry loop (native Windows retries
+  are an explicit pinned dependency exception; no wall-clock guarantee). Validate pointers/callbacks/statuses, keep
   connection private, no raw pointer escapes. Drop connection on every error;
   native xClose releases even partial locks. No separate reopen by filename.
 - [x] Reject WAL/SHM/journal before SQL and after capture. Unix HAS_MOVED must
@@ -165,3 +166,12 @@ crate or public runtime setting is required.
   resolution before Ready. Support macOS /var symlink ancestry; reject retarget.
 - Persist a root larger than SQLite value cap that admits the normal schema;
   require LimitExceeded/no writes and demonstrate recovery with sufficient cap.
+
+## Final review corrections
+
+- Compare Windows borrowed native HANDLE normalized DOS filename to expected
+  canonical-directory/DB entry before SQL and Ready; bounded output, no extra
+  file open/close. Add narrow platform facade and gated symlink-after-preflight
+  regression with target recovery journal. Native Windows verification required.
+- Document pinned native Windows retry exception, never change global AV_RETRY.
+- Canonicalize alternate-VFS test directory on macOS before direct NOFOLLOW open.

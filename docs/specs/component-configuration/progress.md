@@ -347,3 +347,12 @@ Clippy/fmt GREEN. Lean targeted15integration+9units and all-target Clippy GREEN
 before the behavior-neutral test-module relocation; native final-head suite is
 still required. No new crates or baseline/threshold changes. Final whole-branch
 review and docs/Linux/macOS/Windows delivery gates follow; #78 remains open.
+
+CF4c1 final review on dd93b71: partial. Important findings: Windows NOFOLLOW
+preflight race, overstrong no-wait statement, actual macOS fixture failure.
+Fixes: native HANDLE normalized-path verification via platform facade before SQL/
+Ready; gated Windows DB-symlink/recovery regression; explicit native retry
+exception (no global setting mutation); canonical test directory on macOS.
+Run43243065134: docs/Linux green, macOS failed only alternate-method fixture;
+Windows still executing when correction prepared. Final re-review and new native
+run remain required. #133 work is isolated in a dependent worktree.

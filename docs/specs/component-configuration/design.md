@@ -559,3 +559,10 @@ Unsupported tables отвергаются до xLock, сам xShmMap не выз
 canonicalization допускает symlink ancestors, final recheck связывает alias с
 тем же каталогом; DB entry остаётся NOFOLLOW. Подробное source/test evidence —
 в дополнении safety note.
+
+CF4c1 final-review delta: Win32 HAS_MOVED=NOTFOUND теперь недостаточен. Borrowed
+WIN32_GET_HANDLE сверяется через platform::fs::native_file_matches_path с ожидаемым
+canonical directory/DB entry; normalized DOS filename должен совпасть, buffer
+bounded expected path length. Нет дополнительного File handle/close/ownership
+transfer. Это закрывает preflight→open symlink substitution до immutable SQL.
+Windows native retries описаны в safety note; observer не меняет global AV_RETRY.

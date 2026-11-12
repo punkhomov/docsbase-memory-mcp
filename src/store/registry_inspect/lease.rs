@@ -23,6 +23,8 @@ enum NativeVfs {
 pub(super) struct LockedConnection {
     connection: Connection,
     vfs: NativeVfs,
+    #[cfg(windows)]
+    path: std::path::PathBuf,
 }
 impl LockedConnection {
     pub(super) fn open(path: &Path, before_lock: impl FnOnce()) -> Observed<Self> {
@@ -45,7 +47,12 @@ impl LockedConnection {
         before_lock();
         let vfs = native_vfs(&connection)?;
         lock_file(&connection, vfs)?;
-        let locked = Self { connection, vfs };
+        let locked = Self {
+            connection,
+            vfs,
+            #[cfg(windows)]
+            path: path.to_owned(),
+        };
         locked.check_namespace()?;
         Ok(locked)
     }
@@ -90,10 +97,45 @@ impl LockedConnection {
             // Native win32 opens with SHARE_READ|SHARE_WRITE, without
             // SHARE_DELETE: file replacement/deletion is prohibited while open.
             // Do not generalize this exception to arbitrary VFS implementations.
-            (ffi::SQLITE_OK, 0, _) | (ffi::SQLITE_NOTFOUND, _, NativeVfs::Windows) => Ok(()),
+            (ffi::SQLITE_OK, 0, NativeVfs::Unix) => Ok(()),
+            (ffi::SQLITE_OK, 0, NativeVfs::Windows)
+            | (ffi::SQLITE_NOTFOUND, _, NativeVfs::Windows) => self.windows_namespace(),
             (ffi::SQLITE_OK, _, _) => Err(Why::Changed),
             _ => Err(Why::UnsupportedVfs),
         }
+    }
+
+    #[cfg(windows)]
+    fn windows_namespace(&self) -> Observed<()> {
+        let mut handle: *mut std::ffi::c_void = ptr::null_mut();
+        // SAFETY: native win32 control writes its borrowed HANDLE into this slot.
+        // The private owning connection is live and cannot be concurrently closed.
+        status(unsafe {
+            ffi::sqlite3_file_control(
+                self.connection.handle(),
+                c"main".as_ptr(),
+                ffi::SQLITE_FCNTL_WIN32_GET_HANDLE,
+                std::ptr::from_mut(&mut handle).cast(),
+            )
+        })?;
+        if handle.is_null() {
+            return Err(Why::UnsupportedVfs);
+        }
+        // SAFETY: the successful native file control supplies a valid live handle;
+        // the platform adapter only queries it and never transfers/closes ownership.
+        if unsafe { crate::platform::fs::native_file_matches_path(handle, &self.path) }
+            .map_err(|_| Why::Io)?
+        {
+            Ok(())
+        } else {
+            Err(Why::Changed)
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[allow(clippy::unused_self)] // No win32 handle adapter on non-Windows builds.
+    fn windows_namespace(&self) -> Observed<()> {
+        Err(Why::UnsupportedVfs)
     }
 }
 
@@ -206,7 +248,9 @@ mod tests {
     fn alternate_unix_locking_methods_are_refused_without_sidecars() {
         let cache = tempfile::tempdir().unwrap();
         drop(crate::store::Db::open(cache.path()).unwrap());
-        let path = cache.path().join(crate::store::DB_FILE);
+        let path = std::fs::canonicalize(cache.path())
+            .unwrap()
+            .join(crate::store::DB_FILE);
         let before = std::fs::read(&path).unwrap();
         for vfs in ["unix-none", "unix-dotfile"] {
             let connection = Connection::open_with_flags_and_vfs(

@@ -61,8 +61,8 @@ IDs/schema; SQLite individual-value limit; soft page-cache KiB target. При LI
 Массив не reserve(max_projects); выделения пропорциональны фактически принятым rows.
 Mmap выключен как фиксированная стратегия observer. Весь DB/vector/document
 payload не копируется. Объектные overhead и внутренний SQLite schema heap не
-выдаются за измеренный/жёсткий process RSS cap. Nonblocking lease не вводит retry
-budget или неявное ожидание, отличие от operational busy timeout намеренное.
+выдаются за измеренный/жёсткий process RSS cap. Observer не добавляет application retry/busy-timeout loop; native Windows VFS
+имеет собственные bounded retries (точная оговорка ниже). Wall-clock bound нет.
 
 ## Evidence
 
@@ -119,3 +119,34 @@ Observer canonicalize только cache directory, не DB entry; SQLite отк
 Retarget alias после open даёт Changed, а revision сохраняет exact caller context.
 Тесты: actual ancestor symlink (RED→GREEN), alias retarget after open, DB symlink
 rejection, long persisted root превышает value cap, допускающий normal schema.
+
+## Final review corrections — 2026-11-12
+
+Windows SQLite не реализует NOFOLLOW для reparse points так же, как Unix.
+Поэтому кроме metadata preflight и SHARE_DELETE exclusion теперь обязательно
+получить borrowed HANDLE через SQLITE_FCNTL_WIN32_GET_HANDLE и проверить
+GetFinalPathNameByHandleW(FILE_NAME_NORMALIZED|VOLUME_NAME_DOS) против expected
+canonical-directory/DB filename до SQL и перед Ready. Запрос не открывает/не
+закрывает файл, ownership остаётся у SQLite. Buffer ограничен длиной expected
+path (+NUL), более длинный/different target отклоняется. Новая narrow функция
+лежит в platform seam. Пока native handle открыт без SHARE_DELETE, проверенные
+file/physical-parent names защищены; file/parent rename native test остаётся gate.
+Gated Windows regression меняет DB entry на symlink к другому cache с recovery
+journal ПОСЛЕ presence preflight и требует Changed до SQL, сохраняя target bytes.
+
+`nonblocking` означает отсутствие application retry loop/busy-timeout ожидания
+после возврата native xLock. Это НЕ нулевая задержка всех ОС/SQLite операций.
+Pinned SQLite3.53.2 winLock использует LOCKFILE_FAIL_IMMEDIATELY, но пытается взять
+pending byte до3раз с двумя1ms sleep на один такой шаг; winOpen/winRead при
+соответствующих AV/share errors имеют до10 retries с25,50,…250ms delays
+(1375ms суммарного sleep на retry loop при штатных compiled settings).
+Source: sqlite3.c50854–50915,52140–52185. VFS settings могут быть process-wide;
+observer их не меняет и не объявляет эти числа wall-clock deadline. OS I/O/
+scheduling тоже не имеют hard duration bound. Operational Db busy timeout
+не становится inspection policy. Это явное ограничение pinned dependency,
+не hidden application fallback и не новый runtime knob.
+
+macOS alternate-method fixture canonicalizes его cache directory до direct VFS
+open; иначе /var symlink отклонялся NOFOLLOW раньше проверки backend. Production
+ancestor resolution при этом не менялся. Native run43243065134 подтвердил это
+одним fixture failure; остальные store registry unit interleavings прошли.
