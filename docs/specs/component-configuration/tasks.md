@@ -404,3 +404,10 @@ FR-12 и общих state-consistency требований. Existing schema insp
 сохранить reader/registry lease и bounded/no-write semantics; public API не
 меняется. RED external-writer сценарии, GREEN native protocols и прежние schema/
 FIFO/sidecar cases; full/lean checks, fresh task/final review и native inventory.
+
+## Delta 2026-11-12 — CF4c2
+
+- [x] **CF4c2:** Actual bounded source survey and `config migrate --to 2 --format=json`;
+  explicit Missing preconditions, safe output, complete persisted registry,
+  context-sensitive identity and remaining strict-store/executor blockers.
+  Plan: [cf4c2-plan.md](cf4c2-plan.md). No runtime activation/apply.

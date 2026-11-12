@@ -382,3 +382,22 @@ user permits strongly related issues in one PR. This supersedes the separate-PR
 ordering above: both independently reviewed tasks remain separate commits, but
 schema/registry observers land together after combined final review and native
 final-head gates. I133 final review converged at5f5f398, no findings/minors.
+
+
+## 2026-11-12 — CF4c2 actual source migration planning
+
+Task CF4c2: complete (bounded observed source survey + read-only `config migrate
+--to 2 --format=json`; actual complete registry, missing/empty distinction, all
+input preconditions, explicit budget choice, safe numeric/version/revision output).
+Ruling: fresh task review found Windows non-symlink reparse-file admission;
+platform-owned attribute guard added at each source metadata boundary. Fix
+re-review: ADDRESSED; no new Critical/Important findings. No deferred minors.
+Validation: MSRV1.88 cli-full full suite1294 passed,18 unchanged ignored; focused
+12 integration +3 deterministic race tests; platform boundary2; all-targets
+Clippy/fmt passed. Lean migration/plan/view/observation and3 units passed. Windows
+attribute regression and native delivery checks remain PR gates. No baseline,
+threshold, dependency, workflow or provider-request changes.
+Limits: observations are independent reads, not an atomic multi-file snapshot;
+future apply must revalidate all inputs. No raw source export, source writes,
+runtime activation, strict-store adoption or executor is implemented here.
+Issue78 and the remaining CF4/CF5–CF14 contracts stay open.

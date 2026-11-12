@@ -583,3 +583,15 @@ Private lease требует достаточных прав для native exclu
 header напрямую, поскольку cooperating SQL mutation теперь блокируется; отдельные
 external-process tests доказывают настоящий lock protocol, включая CF4c1 lease.
 План и acceptance: [issue133-plan.md](issue133-plan.md).
+
+## Delta 2026-11-12 — CF4c2 observation boundary
+
+`config::observe` owns bounded filesystem survey and a safe migration envelope;
+CF3 remains pure and CF4b retains executor blocking. See [cf4c2-plan.md](cf4c2-plan.md)
+for limits, source handling, output contract and deliberate alternatives. Missing
+global defaults are synthetic only within CF3; actual precondition is Missing.
+Observed states replace supplied-text preconditions only after matching the exact
+source revision. All source inputs, registry and selected roots enter envelope
+identity. Raw source edits are discarded after safe projection; no public raw
+export/apply API. Future execution must revalidate complete inputs and serialize
+publication; this read-only survey cannot authorize later writes.

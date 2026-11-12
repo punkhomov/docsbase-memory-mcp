@@ -450,6 +450,12 @@ pub fn secure_dir(dir: &Path) -> io::Result<()> {
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
+/// Whether no-follow metadata identifies an ordinary file.
+#[must_use]
+pub fn is_regular_nofollow(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_file()
+}
+
 /// Opens an existing path read-only without following a final symlink.
 /// Does not create, truncate or change permissions; callers check file type.
 /// Nonblocking open lets callers reject FIFOs without waiting for a writer.
