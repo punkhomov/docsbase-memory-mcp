@@ -5,6 +5,7 @@ pub mod migrations;
 pub mod models;
 mod plan;
 pub mod read_pool;
+pub mod registry_inspect;
 /// Document and chunk repository helpers (part of the public core surface).
 pub mod repo;
 pub mod settings;
@@ -200,8 +201,9 @@ impl Db {
         &self.settings
     }
 
-    /// Observes metadata schema identity without opening `SQLite` or writing
-    /// state. This does not construct a query-ready connection or row snapshot.
+    /// Observes metadata schema identity without SQL, recovery or persisted writes.
+    /// Uses a native exclusive inspection lease; busy stores remain unknown.
+    /// This does not construct a query-ready connection or row snapshot.
     /// Unknown/unavailable state is reported conservatively in the facts.
     ///
     /// # Errors

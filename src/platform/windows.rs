@@ -463,6 +463,39 @@ pub fn open_readonly_nofollow(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// Checks the normalized filename of an existing borrowed native file handle.
+/// The expected path must already have its parent directory canonicalized.
+/// No file is opened/closed; output allocation is bounded by the expected path.
+///
+/// # Safety
+/// `handle` must be a live Windows file handle retained by the caller throughout
+/// this call. This function neither takes ownership nor closes the handle.
+///
+/// # Errors
+/// Returns native I/O or length errors; a different/longer filename returns false.
+#[allow(unsafe_code)] // Borrowed SQLite native HANDLE; no ownership transfer.
+pub unsafe fn native_file_matches_path(
+    handle: *mut std::ffi::c_void,
+    expected: &Path,
+) -> io::Result<bool> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+    let expected: Vec<u16> = expected.as_os_str().encode_wide().collect();
+    let capacity = expected
+        .len()
+        .checked_add(1)
+        .and_then(|size| u32::try_from(size).ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "native filename too long"))?;
+    let mut actual = vec![0; capacity as usize];
+    // SAFETY: caller retains a valid borrowed handle; actual has capacity writable
+    // u16 elements. Flags0 requests normalized DOS spelling, as canonicalize does.
+    let length = unsafe { GetFinalPathNameByHandleW(handle, actual.as_mut_ptr(), capacity, 0) };
+    if length == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(length < capacity && actual[..length as usize] == expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

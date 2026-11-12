@@ -260,3 +260,49 @@ v1 runtime diagnostics не меняются.
 CF4b — pure Rust API, не новый CLI. Не закрывает CF4/SC-4: registry observation,
 активный daemon snapshot, CLI migration, оценки места/стоимости, полная карта
 artifact fingerprints и исполнение остаются последующими owning slices.
+
+## Delta 2026-11-12 — CF4c1: quiescent registry observation
+
+- **CF4c1-1:** полный persisted registry наблюдается bounded API, включая
+  неиндексированные и отсутствующие на диске roots. Missing, Ready(empty) и
+  Unavailable различаются. Ready относится только к registry, не query readiness.
+- **CF4c1-2:** observer не пишет DB/sidecars/directories/conflict log и не вызывает
+  recovery/providers/daemon. Native SQLite connection владеет nonblocking exclusive
+  lease и immutable read-only pager на одном descriptor; sidecars и изменившийся
+  namespace запрещают Ready. Active/recovery DB остаётся Unavailable.
+- **CF4c1-3:** caller явно задаёт count, retained metadata bytes, individual SQLite
+  value cap и soft page-cache KiB. Нет partial Ready или скрытого fallback. Эти
+  limits не являются жёстким RSS cap внутренних SQLite allocations.
+- **CF4c1-4:** revision v1 включает exact cache context, schema и ordered id/root;
+  future apply обязан повторно наблюдать state. CLI/source observation/apply ещё
+  не поставляются. FR-10/12 закрываются только в этой границе.
+- **CF4c1-5:** существующие same-process SQLite locks сохраняются. Raw open/close
+  DB descriptor запрещён: POSIX close снимает locks процесса. Поэтому CF4c1 не
+  вызывает прежний header-only inspector; preflight использует только metadata,
+  а schema читается после lease. Это заменяет initial-plan header-first proposal.
+
+CF4c1 review correction (2026-11-12): native `unix` допускается только с concrete
+POSIX method table; automatic no-lock/dotfile/AFP/NFS alternatives отклоняются
+до xLock. Symlink cache ancestors допустимы с directory resolution/recheck,
+сам DB entry остаётся NOFOLLOW; alias retarget запрещает Ready. Oversized persisted
+root проверяется отдельным value cap, который допускает schema и обычный root.
+
+CF4c1 final-review delta (2026-11-12): Windows фактический borrowed native HANDLE
+должен соответствовать canonical-directory/DB filename до SQL и Ready; metadata
+preflight/NOFOLLOW flags одни недостаточны для reparse races. Gated native test
+подменяет DB symlink после preflight и проверяет target recovery preservation.
+«Nonblocking lease» означает отсутствие application retry/busy-timeout loop:
+платформенные SQLite3.53.2 Windows pending-byte/AV retries остаются явно описанным
+исключением; hard wall-clock deadline и нулевая задержка не обещаются.
+
+## Delta 2026-11-12 — I133: schema inspection сохраняет locks
+
+- `Db::inspect_readonly` не открывает/закрывает raw DB descriptors вне SQLite
+  bookkeeping: существующие locks reader/registry observer сохраняются, внешний
+  writer получает BUSY до их освобождения.
+- Schema header остаётся fixed100-byte observation без SQL/schema loading,
+  recovery/migration/sidecar/log writes. Native exclusive lease и directory
+  resolution/recheck общие с CF4c1. Busy/unsupported stores дают Unknown.
+- Это заменяет прежнюю формулировку CF2 «без Connection»: private SQLite handle
+  разрешён ради lock correctness, SQL и query-readiness claims по-прежнему нет.
+  Missing/orphaned recovery и версионирование identity остаются прежними.

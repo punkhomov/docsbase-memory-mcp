@@ -1,6 +1,5 @@
 //! No-write observation of metadata schema identity, not a SQL row snapshot.
 
-use std::io::Read;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -9,6 +8,7 @@ use crate::config::schema::{
 };
 use crate::error::Result;
 
+use super::registry_inspect::lease::LockedConnection;
 use super::settings::{DbSettings, DbSpec};
 
 pub(super) fn schema(cache: &Path, settings: &Resolved<DbSettings>) -> Result<ArtifactFacts> {
@@ -37,14 +37,34 @@ fn schema_with(
     if sidecars != Some(false) {
         return Ok(facts(ArtifactState::Unknown, None));
     }
-    let Some(first) = observe(&path) else {
+    if !std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+        return Ok(facts(ArtifactState::Unknown, None));
+    }
+    let Ok(directory) = std::fs::canonicalize(cache) else {
+        return Ok(facts(ArtifactState::Unknown, None));
+    };
+    let path = directory.join(super::DB_FILE);
+    let Ok(locked) = LockedConnection::open(&path, || {}) else {
+        return Ok(facts(ArtifactState::Unknown, None));
+    };
+    if sidecars_present(&directory) != Some(false) {
+        return Ok(facts(ArtifactState::Unknown, None));
+    }
+    let Some(first) = observe(&locked, &path) else {
         return Ok(facts(ArtifactState::Unknown, None));
     };
     before_recheck();
-    let Some(second) = observe(&path) else {
+    if locked.check_namespace().is_err() {
+        return Ok(facts(ArtifactState::Unknown, None));
+    }
+    let Some(second) = observe(&locked, &path) else {
         return Ok(facts(ArtifactState::Unknown, None));
     };
-    if first != second || sidecars_present(cache) != Some(false) {
+    if first != second
+        || sidecars_present(&directory) != Some(false)
+        || locked.check_namespace().is_err()
+        || std::fs::canonicalize(cache).ok().as_ref() != Some(&directory)
+    {
         return Ok(facts(ArtifactState::Unknown, None));
     }
     // SQLite file-format offsets, not runtime policy: schema cookie at40,
@@ -86,15 +106,15 @@ struct Observation {
     modified: SystemTime,
 }
 
-fn observe(path: &Path) -> Option<Observation> {
-    let mut file = crate::platform::fs::open_readonly_nofollow(path).ok()?;
-    let before = file.metadata().ok()?;
+fn observe(locked: &LockedConnection, path: &Path) -> Option<Observation> {
+    // Metadata queries do not open/close a DB descriptor. A Rust File here would
+    // release other connections' POSIX locks when dropped, bypassing SQLite.
+    let before = std::fs::symlink_metadata(path).ok()?;
     if !before.is_file() || before.file_type().is_symlink() {
         return None;
     }
-    let mut header = [0; 100];
-    file.read_exact(&mut header).ok()?;
-    let after = file.metadata().ok()?;
+    let header = locked.header().ok()?;
+    let after = std::fs::symlink_metadata(path).ok()?;
     if before.len() != after.len() || before.modified().ok()? != after.modified().ok()? {
         return None;
     }
@@ -167,14 +187,16 @@ mod tests {
     fn changed_header_is_unknown() {
         let (cache, settings) = closed_db();
         let facts = schema_with(cache.path(), &settings, || {
-            let conn = rusqlite::Connection::open(cache.path().join(super::super::DB_FILE))
-                .expect("concurrent writer");
-            conn.pragma_update(
-                None,
-                "user_version",
-                crate::store::migrations::SCHEMA_VERSION + 1,
-            )
-            .expect("changed schema");
+            use std::io::{Seek, SeekFrom, Write};
+            // Deliberately bypass SQLite in this corruption fixture: a normal
+            // cooperating writer is now blocked by the inspection lease.
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(cache.path().join(super::super::DB_FILE))
+                .expect("raw header mutation");
+            file.seek(SeekFrom::Start(60)).expect("user_version offset");
+            file.write_all(&(crate::store::migrations::SCHEMA_VERSION + 1).to_be_bytes())
+                .expect("changed schema header");
         })
         .expect("facts");
         assert_eq!(facts.artifacts[0].state, ArtifactState::Unknown);

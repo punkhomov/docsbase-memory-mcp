@@ -46,8 +46,8 @@ pub mod fs {
 #[cfg(windows)]
 pub mod fs {
     pub use super::windows::{
-        available_space, open_private_log, open_readonly_nofollow, secure_dir, secure_executable,
-        secure_file,
+        available_space, native_file_matches_path, open_private_log, open_readonly_nofollow,
+        secure_dir, secure_executable, secure_file,
     };
 }
 

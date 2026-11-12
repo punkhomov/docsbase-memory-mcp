@@ -526,3 +526,60 @@ Eq/Ord: repeated separators/interior `.` не меняют ID при перес�
 serializer. Отдельно сумма raw encoded path bytes должна укладываться в
 max_metadata_bytes до cloning: длинные последовательности separators не обходят
 лимит через компактное canonical JSON. SourceId serialization вне plans не меняется.
+
+## Delta 2026-11-12 — CF4c1: native lease and registry rows
+
+Контракт и FFI rationale: [cf4c1-plan.md](cf4c1-plan.md),
+[cf4c1-safety.md](cf4c1-safety.md); rejected alternatives и реальные probes —
+[cf4c-investigation.md](cf4c-investigation.md).
+
+`store::registry_inspect::inspect_registry` принимает Resolved<DbSettings> и
+InspectionLimits. Metadata-only preflight отличает missing/nonregular/sidecars,
+не открывая raw DB descriptor. Private immutable connection открывает native
+READWRITE file без CREATE и берёт SHARED→EXCLUSIVE через его xLock до SQL.
+NOFOLLOW, escaped URI (включая slash), recognized unix/win32, namespace/sidecar
+rechecks ограничивают поддерживаемый путь. Connection drop освобождает partial
+locks через SQLite bookkeeping; дополнительных handles/VFS registrations нет.
+
+После lease: explicit LENGTH/cache limits, mmap off, user_version и
+`SELECT id, canonical_root FROM projects ORDER BY rowid LIMIT ?1` (count+1).
+Borrowed text проверяется до копирования; бюджет включает UTF-8 cache/root bytes,
+4 bytes schema,8 bytes/id. revision-v1 domain binds context/schema/ordered rows.
+Quiescence обязательна: live WAL и recovery не читаются main-only shortcut.
+Native Windows file/parent rename guarantee проверяется его CI, не Unix mock.
+
+Один same-process raw open/close может снять POSIX locks любой SQLite connection.
+Поэтому прежний Db::inspect_readonly здесь не переиспользуется. Его независимый
+дефект отслеживается в #133 и требует отдельного исправления; safety boundary предполагает cooperating
+SQLite access, без raw writes/descriptor closes мимо native VFS bookkeeping.
+
+CF4c1 review correction: `unix` проверяется также по pinned concrete methods
+(iVersion>=2, non-null xShmMap: только posixIoMethods у bundled Unix tables).
+Unsupported tables отвергаются до xLock, сам xShmMap не вызывается. Directory-only
+canonicalization допускает symlink ancestors, final recheck связывает alias с
+тем же каталогом; DB entry остаётся NOFOLLOW. Подробное source/test evidence —
+в дополнении safety note.
+
+CF4c1 final-review delta: Win32 HAS_MOVED=NOTFOUND теперь недостаточен. Borrowed
+WIN32_GET_HANDLE сверяется через platform::fs::native_file_matches_path с ожидаемым
+canonical directory/DB entry; normalized DOS filename должен совпасть, buffer
+bounded expected path length. Нет дополнительного File handle/close/ownership
+transfer. Это закрывает preflight→open symlink substitution до immutable SQL.
+Windows native retries описаны в safety note; observer не меняет global AV_RETRY.
+
+## Delta 2026-11-12 — I133 schema observation через native lease
+
+Header inspector переиспользует store-private `registry_inspect::lease` без
+дублирования FFI или переноса публичного API. `LockedConnection::header` вызывает
+проверенный xRead на том же leased native file: writable buffer100bytes, offset0,
+синхронный callback; raw pointer не покидает scope. SQLite SQL/schema parser не
+вызывается. std metadata calls не открывают DB descriptor и безопасны для locks.
+
+Два header reads и metadata size/mtime comparisons сохраняются; namespace/sidecar
+checks и повторное разрешение cache directory выполняются до публикации facts.
+Busy/unsupported/invalid observation даёт Unknown; missing/recovery logic прежняя.
+Private lease требует достаточных прав для native exclusivity; отсутствие такой
+возможности не запускает raw-file fallback. Mutation fixture в unit test пишет
+header напрямую, поскольку cooperating SQL mutation теперь блокируется; отдельные
+external-process tests доказывают настоящий lock protocol, включая CF4c1 lease.
+План и acceptance: [issue133-plan.md](issue133-plan.md).
