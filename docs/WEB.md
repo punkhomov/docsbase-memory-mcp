@@ -73,6 +73,7 @@ pnpm --dir web format:check
 pnpm --dir web check
 pnpm --dir web test:unit
 pnpm --dir web build
+pnpm --dir packages/client build
 cargo build --locked --features cli-full
 cargo test --locked --features cli-full
 pnpm --dir web exec playwright install chromium
@@ -87,6 +88,12 @@ instruction if absent. Default Cargo features remain lean and do not need UI
 assets. Crates.io publication is not currently supported; release binaries are
 the distribution channel. For `cargo install --path . --features cli-full`, run
 the frontend preparation first.
+
+The full `web`/`cli-full` Rust test suite also runs the native Node IPC client
+acceptance test. Build `packages/client` explicitly before that suite (or a
+selected `--test node_client` run with either feature): workspace installation
+does not generate its ignored `dist` exports. CLI builds and selected Rust test
+targets that do not run the Node acceptance test need only the Web assets.
 
 The pnpm workspace rejects packages published less than 14 days ago, including
 transitive dependencies and entries in a frozen lockfile. Missing publication
