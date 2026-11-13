@@ -132,6 +132,42 @@ pub fn load_from(config_dir: &Path, project_root: Option<&Path>) -> Result<Resol
 pub fn global_from(config_dir: &Path) -> Result<Resolved<Config>> {
     global_resolution(config_dir)?.finish()
 }
+
+/// Resolve a launch's already captured v1 bytes; no filesystem access or v2 activation.
+pub(crate) fn launch_resolution(path: &Path, bytes: Option<&[u8]>) -> Result<LaunchResolution> {
+    let mut resolution = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone());
+    if let Some(bytes) = bytes {
+        let text = std::str::from_utf8(bytes).map_err(|err| {
+            Error::internal_with_source(format!("read {}: {err}", path.display()), err)
+        })?;
+        resolution.apply(
+            &SourceId::Global(path.to_owned()),
+            super::parse_global(path, text)?,
+        )?;
+    }
+    // Invalid globals never disappear behind a later CLI selector.
+    resolution.validate()?;
+    Ok(LaunchResolution(resolution))
+}
+
+// Retain the same once-computed defaults catalog between source validation and
+// the CLI patch. Legacy fallback applies only to source errors, never CLI errors.
+pub(crate) struct LaunchResolution(Resolution<ConfigSpec>);
+impl LaunchResolution {
+    pub(crate) fn finish(
+        mut self,
+        patch: crate::daemon::settings::DaemonPatch,
+    ) -> Result<Resolved<Config>> {
+        self.0.apply(
+            &SourceId::Cli,
+            super::GlobalFileConfig {
+                daemon: Some(patch),
+                ..super::GlobalFileConfig::default()
+            },
+        )?;
+        self.0.finish()
+    }
+}
 /// Layers a project over a typed snapshot, retaining its earlier origins.
 ///
 /// # Errors

@@ -210,3 +210,80 @@ runtime coding and closes #152 with the existing S1 integration PR. I1..I5 and
 three Minor plan contracts remain closed/untouched. Review package:
 /workspace/scratch/agent-b/79/s1a/plan152/. No product/test code, Cargo, commits,
 GitHub operations, runtime tests or build commands by the addendum implementer.
+
+## 2026-11-13 — S1a implementation checkpoint (review pending)
+
+Task S1a: implementation in progress on rebased main `e911fd2`; separate fresh
+task review and final full gates pending. Added daemon owner/config composition,
+global-only source/provenance/views/migration preservation, complete existing
+resource consumer forwarding and strict captured-launch constructors. The shared
+bounded byte primitive serves observer/legacy reads/launch/restart diagnostics;
+observer adapter policies and existing SearchOperation/generation/singleflight
+are unchanged. No S1b/c implementation or full CF12/#79 completion is claimed.
+
+Actual RED: `daemon_settings` missing owner/launch APIs; low-level `config::capture`
+missing bounded API; real `lifecycle::owner_connection_limit_is_enforced_by_the_accept_loop`
+accepted a second connection for configured1. Optional CLI grace API RED,
+recognized Website strict+legacy startup semantic RED, and explicit captured
+Tokio worker-sum missing-API RED were also observed. Evidence:
+`/workspace/scratch/agent-b/79/s1a/{owner,capture,connection,grace-cli,website-interim,executor-sum}-red.log`.
+Focused semantic GREEN: bounded reader5; config32/config_migration14/
+config_observation13/config_resolution24/config_runtime14/config_view6;
+latest daemon_settings15/lifecycle11. All-target cli-full Clippy passed before
+the final narrow executor-count addition; fresh full/lint/lean evidence follows
+before completion/review. Node/Web preparation is unchanged from the confirmed
+session build; no dependency/feature/golden edits.
+
+Ruling: S1a resolves/presents Website data but common strict+legacy startup
+explicitly refuses it before cache/admission/listener/resources. S1b removes this
+intermediate refusal only with all backend fixed-project/hybrid/watcher/lifecycle
+gates. Recognized valid Website never enters malformed-global Shared fallback;
+malformed legacy global warning/default/error retention remains intentional.
+
+Ruling: reuse existing BootstrapContext Tokio env/CPU resolver/source, check
+blocking+captured async-worker count before lease/runtime, and pass exactly that
+captured count into Builder.worker_threads; no validate-then-reread race, new
+literal/default/whitelist or broad bootstrap adoption. Deterministic overflow
+uses explicit captured facts, no ambient env race or resource allocation.
+
+Ruling: duration validation checks the actual platform Instant bound; u64::MAX
+milliseconds is representable on Linux, so no arbitrary additional ceiling is
+invented. Shared explicit grace0 and pending0 remain valid as specified.
+
+Ruling: S1a preserves the accepted lexical owner sum but claims no physical
+control reserve. S1c must audit Windows interprocess async flush/dirty-Drop linger
+with the transport contract before validating the closed helper inventory. No
+worker admission, janitor orchestration, transport rewrite or A-owned runtime
+work is included here. Adopted/pending/deferred inventory and diagnostic-only
+state dependencies are updated in this slice; repeat them after S1b/c before the
+single S1 integration PR ships.
+
+### S1a verification checkpoint — fresh review pending
+
+Task S1a: verified implementation checkpoint, **not complete before fresh task
+review**. Final Debug cli-full observer inventory/execute: exit0, 1448 inventory
+entries, 88 target summaries, 1430 passed / 0 failed / 18 ignored; execute193.550s.
+Raw evidence: `/workspace/scratch/agent-b/79/s1a/observations/s1a-cli-full/`.
+Final owner target has16 passing cases, including additional semantic RED/GREEN
+for imported Website policy hiding changed Shared grace. Full suite ran this
+semantic implementation; the only subsequent source edit corrected a stale
+lifecycle comment, with fresh lint and lean checks afterwards.
+
+Commands executed through the task's offline Docker/private-tmp wrapper, Rust1.100.0:
+
+- `cargo test --locked --features cli-full -- --list` -> exit0 / 1448 names.
+- `cargo test --locked --features cli-full` -> exit0 / 1430 passed,18 ignored.
+- `cargo test --locked --test daemon_settings --test config_resolution` -> exit0,
+  owner16 + resolution23, no full lean suite.
+- `cargo test --locked --lib config::capture` -> exit0 / 5 passed.
+- `cargo clippy --locked --features cli-full --all-targets -- -D warnings` -> exit0.
+- `cargo clippy --locked --features cli-full --test perf_budget --test artifact -- -D warnings` -> exit0.
+- `cargo fmt --check` -> exit0. `git diff --check` and final source/inventory audit
+  are included in the implementation review package.
+
+Sourceguard baseline `5f86e46` -> current source: 1437 -> 1462 test names,
+25 additions / 0 removals; 18 ignore attributes unchanged. Source scan/classification
+is saved in `s1a/source-scan.txt` and the component inventory/state matrix. No new
+crates/features, retrieval/golden changes, release/LTO run, model downloads or
+paid API calls. Windows/macOS runtime acceptance and fresh review remain pending;
+S1a cannot ship apart from connected S1b/c and their integrated final review.

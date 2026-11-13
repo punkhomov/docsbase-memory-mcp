@@ -250,3 +250,46 @@ I13 factor4 используется также для bounded refill growth; н
 Candidate budget — не exhaustive recall/RSS/time claim; payload admission и
 original deadline продолжают действовать. RRF+cap один раз получает dense до
 effective ceiling, без повторного vector scan при lexical widening.
+
+## Delta 2026-11-13 — #79 S1a: daemon owner и bounded launch capture
+
+`daemon::settings::DaemonSpec` определяет один каталог defaults, complete
+`DaemonSettings`, global-only `DaemonPatch`, units/provenance, structural/count/
+duration validation и pure runtime assessment. `ConfigSpec` только компонует
+owner. `[daemon]` структурно запрещён в project files; v1/v2 source preview и
+source migration сохраняют глобальные значения/provenance без runtime activation.
+Все принятые изменения требуют restart; live executor unsupported, persisted
+artifacts не инвалидируются. Compatibility constants ссылаются на owner catalog.
+
+| Inventory | S1a adoption / consumer / units | Что ещё не завершено |
+|---|---|---|
+| I44 | `daemon.profile`: complete tagged Shared/Website, Name, D; whole-profile CLI patch, provenance default/global/CLI | В S1a только resolution/view. Website startup явно отклоняется до resources; S1b добавляет fixed-project/lexical/watcher-off/no-idle invariants и только затем снимает отказ. Отдельного watcher bool нет |
+| I45 | `daemon.idle_grace_ms=5000`, Milliseconds, D; lifecycle получает complete policy. Omitted CLI grace сохраняет file/default provenance; explicit Shared0 допустим | START10s/STOP15s/no-listener2s остаются прежними deferred caller/bootstrap policy |
+| I46 | `daemon.max_connections=64`, `max_events=1024`, `max_sessions=256`, Count, D; реальные accept-loop Semaphore/event channel/SessionRegistry используют overrides | Положительные counts проверены против actual Tokio MAX_PERMITS/channel bound и checked session allocation; worker admission отдельно |
+| I47 | `daemon.poll_interval_ms=50`, `janitor_interval_ms=500`, `reply_drain_ms=5000`, `drain_poll_ms=20`, Milliseconds, D; lifecycle/server timers используют complete policy | Coalesced nonblocking janitor и physical Activity completion относятся к S1c; S1a меняет policy forwarding, не orchestration |
+| I63 | `daemon.max_blocking_threads=512`, Count, D; lifecycle явно задаёт pinned Tokio1.54.1 Builder capacity. Existing BootstrapContext даёт captured Tokio async-worker count: checked blocking+async sum до lease/resources, ровно этот count передаётся worker_threads без повторного env read | Async-worker env/CPU default/source переиспользованы из bootstrap resolver; новые file keys/whitelist/defaults не вводятся. Остальной bootstrap adoption deferred; Shared hybrid reserve не обещается |
+| I66 subset | `daemon.search_active=4`, `search_pending=32`, `control_active=2`, `control_pending=16`, Count; `control_timeout_ms=2000`, Milliseconds, D; owner validation/provenance/views/complete forwarding | Физические consumers/zero-pending refusal/FIFO/cancellation подключаются в S1c. Эти accepted fields не могут ship до этого; provider/background orchestration — #81 |
+| I52 subset / #152 | Существующий trusted `limits::MAX_STATE_BYTES=1MiB` теперь фактически ограничивает global/project reads, one launch capture и restart hashing через общий `config::capture::read_bounded`; actual consumption/retention <= checked budget+1 | Per-type configurable bootstrap budgets остаются deferred; cap не читается из ограничиваемого файла. Observer сохраняет собственные no-follow/regular/race/CF5 semantics |
+
+Lexical executor sum проверяется checked arithmetic:
+`search-active + control-active + fixed sync1 + nominal helper1 <= blocking capacity`.
+Две единицы — closed-inventory
+implementation invariants, не дополнительные settings и не разрешение untracked
+work. Сам physical reserve и watcher/provider zero-classes требуют S1b/c и
+повторного source scan перед единственным S1 merge. Connection fds, payload bytes
+и ReadPool — независимые budgets; real-corpus capacity/RSS/latency не измерены.
+Windows interprocess flush/dirty-Drop linger требует отдельного transport audit
+перед S1c: формула owner validation в S1a ещё не доказывает полноту helper
+inventory или physical control reserve на этой платформе.
+
+Launch parse и baseline diagnostic digest используют одни captured bytes, без
+повторного startup file read. Missing/Loaded/Unavailable различаются; текущий
+Unavailable всегда даёт notice. Это runtime/diagnostic state, не CF5 precondition,
+generation identity или publication edge. Malformed-global legacy warning/default
+adapter сохранён; strict launch отклоняет ошибки до cache/admission/listener writes.
+
+Остальные I41..I58 subsets остаются deferred: watcher debounce/queues/traversal,
+installer waits, IPC/MCP caller timeouts, config/model lock retries, per-type
+bootstrap/log/VCS budgets, root/runtime discovery, updater/debug controls.
+S1a не означает full CF12 adoption или завершение #79. Source scan:
+`rg -n 'const |DEFAULT_|Semaphore::new|mpsc::channel|spawn_blocking|block_in_place|tokio::fs|thread::spawn|thread::Builder' src/daemon src/platform src/hybrid src/watch src/web src/mcp`.

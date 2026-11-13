@@ -20,6 +20,40 @@ struct Env {
     cache: TempDir,
 }
 
+#[test]
+fn owner_connection_limit_is_enforced_by_the_accept_loop() {
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let env = Env::new();
+    let config = TempDir::new().unwrap();
+    fs::write(
+        config.path().join("config.toml"),
+        "[daemon]\nmax_connections=1\n",
+    )
+    .unwrap();
+    let _child = ChildGuard(
+        env.cli()
+            .env("DOCSBASE_CONFIG_DIR", config.path())
+            .args(["serve", "--grace-ms", "60000"])
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_until(Duration::from_secs(10), || env.endpoint_up()));
+    let mut held = Client::connect(env.cache()).unwrap();
+    held.handshake_registry().unwrap();
+    let mut extra = Client::connect(env.cache()).unwrap();
+    assert!(
+        extra.handshake_registry().is_err(),
+        "the second connection must be shed by owner max_connections=1"
+    );
+    held.handshake_registry().unwrap();
+}
+
 impl Env {
     fn new() -> Self {
         Self {

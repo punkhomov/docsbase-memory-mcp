@@ -2,7 +2,6 @@
 //! FR-33; I2, I6, I8).
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
@@ -14,10 +13,12 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, watch};
 
+use crate::config::Config;
 use crate::config::schema::Resolved;
-use crate::config::{Config, paths};
+use crate::daemon::launch::{ConfigStamp, LaunchConfig, LaunchSnapshot};
 use crate::daemon::request::{self, Activity};
 use crate::daemon::session::SessionRegistry;
+use crate::daemon::settings::{DaemonPatch, DaemonSettings};
 use crate::daemon::tools;
 use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
@@ -65,7 +66,8 @@ pub struct Shared {
     /// Why the global config could not be loaded; surfaced by `status`.
     global_config_error: Option<String>,
     /// Fingerprint of the global config file at daemon start (OQ-6).
-    global_config_stamp: Option<u64>,
+    global_config_stamp: ConfigStamp,
+    global_config_path: Option<PathBuf>,
     /// Per-project config/stage slots; the map lock only protects lookup.
     project_states: Mutex<HashMap<i64, ProjectSlot>>,
     /// Dense candidate cache keyed by project and index generation (FR-16).
@@ -123,7 +125,9 @@ struct ProjectState {
 
 impl Shared {
     /// Opens the registry database and prepares shared state.
-    /// Compatibility adapter; production passes policies to [`Self::open_with_dense_policy`].
+    /// Compatibility adapter: one captured global source, warned defaults on a
+    /// malformed source, and owner-resolved daemon resources. Strict boundaries
+    /// use [`Self::open_with_launch`].
     ///
     /// # Errors
     /// Returns [`Error::Internal`]/[`Error::Admission`] from [`Db::open`].
@@ -179,8 +183,9 @@ impl Shared {
         Self::open_with_dense_policy(cache, settings, pool_settings, &dense)
     }
 
-    /// Construct with component-owned dense/query policy. The legacy Config
-    /// vector-store budget retains precedence over its dense-path fallback.
+    /// Compatibility adapter with component-owned dense/query policy and one
+    /// captured global source. Malformed global input retains warned defaults
+    /// and blocks project opens; the legacy vector-store budget keeps precedence.
     ///
     /// # Errors
     /// Invalid component policies fail before filesystem access; startup failures
@@ -191,7 +196,42 @@ impl Shared {
         pool_settings: &Resolved<ReadPoolSettings>,
         dense_settings: &crate::hybrid::dense_settings::DenseSettings,
     ) -> Result<Arc<Self>> {
+        let launch = LaunchSnapshot::capture().legacy(DaemonPatch::default())?;
+        Self::open_with_launch_config(cache, settings, pool_settings, dense_settings, launch)
+    }
+
+    /// Strict launch from one bounded source capture. Reject invalid configuration
+    /// before creating cache state, readers, watchers or a listener.
+    ///
+    /// # Errors
+    /// Invalid global/daemon/component policies or resource preparation failures.
+    pub fn open_with_launch(
+        cache: &Path,
+        settings: &Resolved<DbSettings>,
+        pool_settings: &Resolved<ReadPoolSettings>,
+        dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+        snapshot: &LaunchSnapshot,
+        patch: DaemonPatch,
+    ) -> Result<Arc<Self>> {
+        Self::open_with_launch_config(
+            cache,
+            settings,
+            pool_settings,
+            dense_settings,
+            snapshot.strict(patch)?,
+        )
+    }
+
+    pub(crate) fn open_with_launch_config(
+        cache: &Path,
+        settings: &Resolved<DbSettings>,
+        pool_settings: &Resolved<ReadPoolSettings>,
+        dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+        launch: LaunchConfig,
+    ) -> Result<Arc<Self>> {
         use crate::config::schema::{Capabilities, SettingsSpec};
+        launch.admit_startup()?;
+        launch.config.settings().validate()?;
         crate::hybrid::dense_settings::DenseSpec::validate(
             dense_settings,
             &Capabilities::current(),
@@ -207,17 +247,7 @@ impl Shared {
         if orphans > 0 {
             eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
         }
-        // Stamp before loading: a write racing this window then shows up as
-        // "changed" (a harmless false positive) instead of being silently
-        // adopted as the baseline (a false negative).
-        let stamp = global_config_stamp();
-        let (global_config, global_config_error) = match Config::global() {
-            Ok(config) => (config, None),
-            Err(err) => {
-                eprintln!("warning: global config unavailable: {err}");
-                (Config::default(), Some(err.to_string()))
-            }
-        };
+        let global_config = launch.config.into_settings();
         let mut effective_dense = dense_settings.clone();
         effective_dense.vector_cache_max_bytes = global_config.hybrid_cfg.cache.max_bytes;
         let payload_budget =
@@ -228,12 +258,13 @@ impl Shared {
             db_settings: settings.clone(),
             readers,
             payload_budget,
-            sessions: SessionRegistry::new(),
+            sessions: SessionRegistry::with_settings(&global_config.daemon)?,
             watchers: Arc::new(Watchers::new()),
             stopping: AtomicBool::new(false),
             global_config,
-            global_config_error,
-            global_config_stamp: stamp,
+            global_config_error: launch.error,
+            global_config_stamp: launch.stamp,
+            global_config_path: launch.path,
             project_states: Mutex::new(HashMap::new()),
             dense: DenseCache::with_settings(AnnPolicy::BuildOrLoad, cache, &effective_dense)?,
         });
@@ -250,6 +281,12 @@ impl Shared {
     #[must_use]
     pub fn read_pool(&self) -> &ReadPool {
         &self.readers
+    }
+
+    /// Complete immutable daemon policy captured by the controlling boundary.
+    #[must_use]
+    pub fn daemon_settings(&self) -> &DaemonSettings {
+        &self.global_config.daemon
     }
 
     fn db(&self) -> MutexGuard<'_, Db> {
@@ -682,24 +719,16 @@ impl Shared {
                 "global config is invalid ({err}); fix it and run `docsbase daemon stop`"
             ));
         }
-        if global_config_stamp() == self.global_config_stamp {
-            return None;
-        }
-        Some("global config changed; restart the daemon: `docsbase daemon stop`".to_owned())
+        crate::daemon::launch::restart_notice(
+            self.global_config_path.as_deref(),
+            &self.global_config_stamp,
+        )
     }
 }
 
-/// Content hash of the global config file; `None` when it does not exist.
-fn global_config_stamp() -> Option<u64> {
-    let path = paths::config_dir().ok()?.join("config.toml");
-    let bytes = std::fs::read(path).ok()?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    Some(hasher.finish())
-}
-
 /// Bound for waiting until in-flight requests settle before shutdown (T46).
-pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DRAIN_TIMEOUT: Duration =
+    Duration::from_millis(crate::daemon::settings::DaemonSpec::DEFAULTS.reply_drain_ms);
 
 /// Stderr tracing for connection lifecycle (`DOCSBASE_IPC_DEBUG=1`).
 fn ipc_debug(message: &str) {
@@ -999,7 +1028,13 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
             // (FR-5, FR-6). The drain lets every other request finish; the
             // process then lives until background jobs complete.
             if !shared.stopping.swap(true, Ordering::SeqCst) {
-                wait_for_drain(in_flight, DRAIN_TIMEOUT).await;
+                let settings = shared.daemon_settings();
+                wait_for_drain(
+                    in_flight,
+                    Duration::from_millis(settings.reply_drain_ms),
+                    Duration::from_millis(settings.drain_poll_ms),
+                )
+                .await;
                 let _ = shutdown.send(true);
             }
             (Response::ToolResult { value: Value::Null }, false)
@@ -1036,13 +1071,13 @@ async fn call_and_respond(
 /// Waits until only the stopping request itself is in flight; `false` on
 /// timeout so a wedged request cannot hold shutdown forever (T46). SIGTERM
 /// remains the operator's escalation path.
-async fn wait_for_drain(in_flight: &AtomicUsize, timeout: Duration) -> bool {
+async fn wait_for_drain(in_flight: &AtomicUsize, timeout: Duration, poll: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
     while in_flight.load(Ordering::SeqCst) > 1 {
         if tokio::time::Instant::now() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(poll).await;
     }
     true
 }
@@ -1581,14 +1616,28 @@ mod tests {
     async fn drain_timeout_is_bounded() {
         let stuck = AtomicUsize::new(2);
         let started = tokio::time::Instant::now();
-        assert!(!wait_for_drain(&stuck, Duration::from_millis(50)).await);
+        assert!(
+            !wait_for_drain(
+                &stuck,
+                Duration::from_millis(50),
+                Duration::from_millis(crate::daemon::settings::DaemonSpec::DEFAULTS.drain_poll_ms)
+            )
+            .await
+        );
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "drain must stop at the timeout"
         );
 
         let idle = AtomicUsize::new(1);
-        assert!(wait_for_drain(&idle, Duration::from_millis(50)).await);
+        assert!(
+            wait_for_drain(
+                &idle,
+                Duration::from_millis(50),
+                Duration::from_millis(crate::daemon::settings::DaemonSpec::DEFAULTS.drain_poll_ms)
+            )
+            .await
+        );
     }
 
     struct FakeEmbedder;

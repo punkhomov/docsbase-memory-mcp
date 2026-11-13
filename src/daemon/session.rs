@@ -23,14 +23,26 @@ pub struct SessionInfo {
 }
 
 /// Sessions a single daemon serves at once (T46).
-pub const MAX_SESSIONS: usize = 256;
+pub const MAX_SESSIONS: usize = crate::daemon::settings::DaemonSpec::DEFAULTS.max_sessions;
 
 /// Sessions currently served by the daemon.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SessionRegistry {
+    max_sessions: usize,
     next_id: AtomicU64,
     sessions: Mutex<HashMap<u64, SessionInfo>>,
     cancels: Mutex<HashMap<u64, oneshot::Sender<()>>>,
+}
+
+impl Default for SessionRegistry {
+    fn default() -> Self {
+        Self {
+            max_sessions: crate::daemon::settings::DaemonSpec::DEFAULTS.max_sessions,
+            next_id: AtomicU64::new(0),
+            sessions: Mutex::default(),
+            cancels: Mutex::default(),
+        }
+    }
 }
 
 /// Runtime counters surfaced by `status` (design §5).
@@ -45,17 +57,32 @@ pub struct Stats {
 }
 
 impl SessionRegistry {
-    /// Empty registry.
+    /// Empty registry using the owner's standalone default catalog (legacy adapter).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct from complete owner policy; no absent fields are filled here.
+    ///
+    /// # Errors
+    /// Invalid daemon resource policy.
+    pub fn with_settings(settings: &crate::daemon::settings::DaemonSettings) -> Result<Self> {
+        use crate::config::schema::{Capabilities, SettingsSpec};
+        crate::daemon::settings::DaemonSpec::validate(settings, &Capabilities::current())?;
+        Ok(Self {
+            max_sessions: settings.max_sessions,
+            next_id: AtomicU64::new(0),
+            sessions: Mutex::default(),
+            cancels: Mutex::default(),
+        })
     }
 
     /// Registers a session and returns its id plus the receiver that fires
     /// when the daemon reaps it because the frontend died (NFR-9).
     ///
     /// # Errors
-    /// Returns [`Error::Admission`] when [`MAX_SESSIONS`] sessions are live.
+    /// Returns [`Error::Admission`] when the resolved session capacity is full.
     pub fn join(
         &self,
         pid: u32,
@@ -67,9 +94,9 @@ impl SessionRegistry {
         // `prune_dead` can never observe the session without its cancel
         // sender (lock order is always sessions -> cancels).
         let mut sessions = self.map();
-        if sessions.len() >= MAX_SESSIONS {
+        if sessions.len() >= self.max_sessions {
             return Err(Error::Admission {
-                message: format!("session limit reached ({MAX_SESSIONS})"),
+                message: format!("session limit reached ({})", self.max_sessions),
             });
         }
         sessions.insert(

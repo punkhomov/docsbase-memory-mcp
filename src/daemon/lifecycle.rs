@@ -13,6 +13,9 @@ use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
+use crate::config::bootstrap::{BootstrapContext, EntrypointFacts};
+use crate::daemon::launch::{LaunchConfig, LaunchSnapshot};
+use crate::daemon::settings::{DaemonPatch, DaemonSpec};
 use crate::error::{Error, Result};
 use crate::ipc::protocol::{self, Request};
 use crate::platform::{self, Endpoint, Listener};
@@ -27,16 +30,14 @@ pub const START_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default grace period before the last session's exit stops the daemon
 /// (OQ-7: 5 s).
-pub const DEFAULT_GRACE_MS: u64 = 5_000;
+pub const DEFAULT_GRACE_MS: u64 = DaemonSpec::DEFAULTS.idle_grace_ms;
 
 /// Concurrent connections a daemon accepts (T46); excess clients are shed
 /// immediately so fd/memory stay bounded.
-pub const MAX_CONNECTIONS: usize = 64;
+pub const MAX_CONNECTIONS: usize = DaemonSpec::DEFAULTS.max_connections;
 
-/// Bound for the internal connection-event queue (T46).
-const MAX_EVENTS: usize = 1024;
-
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
+// Standalone start/stop adapters use the owner's default lifecycle poll policy.
+const POLL_INTERVAL: Duration = Duration::from_millis(DaemonSpec::DEFAULTS.poll_interval_ms);
 /// Upper bound for `daemon stop` while the daemon drains and exits; a busy
 /// machine can stretch the 3 s grace window well past 5 s (T32 flake).
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -199,7 +200,108 @@ pub fn run_daemon_with_dense_policy(
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
 ) -> Result<()> {
+    let grace_ms = u64::try_from(grace.as_millis()).map_err(|_| Error::Admission {
+        message: "daemon grace milliseconds overflow".to_owned(),
+    })?;
+    let launch = LaunchSnapshot::capture().legacy(DaemonPatch {
+        idle_grace_ms: Some(grace_ms),
+        ..DaemonPatch::default()
+    })?;
+    run_with_launch(
+        cache,
+        settings,
+        pool_settings,
+        dense_settings,
+        launch,
+        &runtime_bootstrap()?,
+    )
+}
+
+/// Strict launch boundary. Captured config/daemon policy is validated before
+/// admission locks, cache writes, runtime construction or listener publication.
+///
+/// # Errors
+/// Invalid launch/component policy or daemon startup failure.
+pub fn run_daemon_with_launch(
+    cache: &Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+    snapshot: &LaunchSnapshot,
+    patch: DaemonPatch,
+) -> Result<()> {
+    run_with_launch(
+        cache,
+        settings,
+        pool_settings,
+        dense_settings,
+        snapshot.strict(patch)?,
+        &runtime_bootstrap()?,
+    )
+}
+
+/// Strict launch with already captured bootstrap facts. The exact Tokio worker
+/// count is checked before writes and passed to the builder without an env reread.
+///
+/// # Errors
+/// Invalid configuration, executor count overflow or daemon startup failure.
+pub fn run_daemon_with_launch_and_bootstrap(
+    cache: &Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+    snapshot: &LaunchSnapshot,
+    patch: DaemonPatch,
+    bootstrap: &BootstrapContext,
+) -> Result<()> {
+    run_with_launch(
+        cache,
+        settings,
+        pool_settings,
+        dense_settings,
+        snapshot.strict(patch)?,
+        bootstrap,
+    )
+}
+
+// The existing CLI retains its documented warning/default startup adapter.
+// S1b will add explicit profile activation at that controlling boundary.
+pub(crate) fn run_daemon_with_legacy_launch(
+    cache: &Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+    snapshot: &LaunchSnapshot,
+    patch: DaemonPatch,
+) -> Result<()> {
+    run_with_launch(
+        cache,
+        settings,
+        pool_settings,
+        dense_settings,
+        snapshot.legacy(patch)?,
+        &runtime_bootstrap()?,
+    )
+}
+
+fn runtime_bootstrap() -> Result<BootstrapContext> {
+    let cores = std::thread::available_parallelism().map_err(|error| {
+        Error::internal_with_source("capture daemon runtime parallelism", error)
+    })?;
+    BootstrapContext::capture_with(cores.get(), EntrypointFacts::standalone(), std::env::var_os)
+}
+
+fn run_with_launch(
+    cache: &Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+    launch: LaunchConfig,
+    bootstrap: &BootstrapContext,
+) -> Result<()> {
     use crate::config::schema::SettingsSpec;
+    launch.admit_startup()?;
+    launch.config.settings().validate()?;
     crate::hybrid::dense_settings::DenseSpec::validate(
         dense_settings,
         &crate::config::schema::Capabilities::current(),
@@ -212,16 +314,34 @@ pub fn run_daemon_with_dense_policy(
         pool_settings.settings(),
         &crate::config::schema::Capabilities::current(),
     )?;
+    let workers = bootstrap.tokio_workers.value.get();
+    launch
+        .config
+        .settings()
+        .daemon
+        .max_blocking_threads
+        .checked_add(workers)
+        .ok_or_else(|| Error::Admission {
+            message: "daemon blocking plus async executor thread capacity overflow".to_owned(),
+        })?;
     let _lease = crate::daemon::admission::Lease::acquire(
         cache,
         &protocol::build_id(),
         migrations::SCHEMA_VERSION,
     )?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .max_blocking_threads(launch.config.settings().daemon.max_blocking_threads)
         .enable_all()
         .build()
         .map_err(|err| Error::internal_with_source("build tokio runtime", err))?;
-    runtime.block_on(serve(cache, grace, settings, pool_settings, dense_settings))
+    runtime.block_on(serve(
+        cache,
+        settings,
+        pool_settings,
+        dense_settings,
+        launch,
+    ))
 }
 
 /// Asks a running daemon to stop and waits for it to exit (FR-6).
@@ -295,10 +415,10 @@ pub fn daemon_pid(cache: &Path) -> Option<u32> {
 
 async fn serve(
     cache: &Path,
-    grace: Duration,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+    launch: LaunchConfig,
 ) -> Result<()> {
     create_state_dir(cache)?;
     if is_running(cache) {
@@ -309,11 +429,12 @@ async fn serve(
     cleanup_stale(cache)?;
 
     // Prepare resources before advertising a listener or daemon state.
-    let shared = crate::daemon::server::Shared::open_with_dense_policy(
+    let shared = crate::daemon::server::Shared::open_with_launch_config(
         cache,
         settings,
         pool_settings,
         dense_settings,
+        launch,
     )?;
 
     let endpoint = platform::daemon_endpoint(cache);
@@ -328,7 +449,7 @@ async fn serve(
         .map_err(|err| Error::internal_with_source("chmod 0600 socket", err))?;
     write_state(cache)?;
 
-    let result = accept_loop(shared, &listener, grace).await;
+    let result = accept_loop(shared, &listener).await;
 
     if let Err(err) = platform::remove(&endpoint) {
         eprintln!(
@@ -345,11 +466,12 @@ async fn serve(
 async fn accept_loop(
     shared: Arc<crate::daemon::server::Shared>,
     listener: &Listener,
-    grace: Duration,
 ) -> Result<()> {
+    let settings = shared.daemon_settings().clone();
+    let grace = Duration::from_millis(settings.idle_grace_ms);
     let in_flight = Arc::new(AtomicUsize::new(0));
-    let (events_tx, mut events_rx) = mpsc::channel::<()>(MAX_EVENTS);
-    let connections = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    let (events_tx, mut events_rx) = mpsc::channel::<()>(settings.max_events);
+    let connections = Arc::new(tokio::sync::Semaphore::new(settings.max_connections));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let mut shutdown_signal = platform::ShutdownSignal::new()
         .map_err(|err| Error::internal_with_source("install signal handlers", err))?;
@@ -360,7 +482,7 @@ async fn accept_loop(
 
     // Sessions whose frontend died without closing its socket must not keep
     // the daemon alive (NFR-9, C6).
-    let mut janitor = tokio::time::interval(JANITOR_INTERVAL);
+    let mut janitor = tokio::time::interval(Duration::from_millis(settings.janitor_interval_ms));
     janitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     janitor.tick().await;
 
@@ -446,7 +568,7 @@ async fn accept_loop(
     if graceful_stop {
         let drained = async {
             while in_flight.load(Ordering::SeqCst) > 0 {
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(Duration::from_millis(settings.poll_interval_ms)).await;
             }
         };
         tokio::select! {
@@ -458,9 +580,6 @@ async fn accept_loop(
     }
     Ok(())
 }
-
-/// How often dead frontends are reaped (NFR-9: cleanup within 2 s).
-const JANITOR_INTERVAL: Duration = Duration::from_millis(500);
 
 /// No live sessions and no request in flight.
 fn idle(shared: &crate::daemon::server::Shared, in_flight: &AtomicUsize) -> bool {

@@ -26,6 +26,44 @@ max_bytes=4096
 "#;
 
 #[test]
+fn migration_roundtrip_preserves_daemon_policy_and_global_provenance() {
+    let source = global(
+        "[daemon]\nprofile={mode='shared'}\nidle_grace_ms=0\nmax_sessions=7\ncontrol_pending=0\n",
+    );
+    let before = preview_sources(&source, None).unwrap();
+    let draft = docsbase_memory::config::migrate::draft_migration(
+        &source,
+        &[],
+        &[],
+        Some(docsbase_memory::config::migrate::VectorBudgetDecision::UseBytes(4096)),
+    )
+    .unwrap();
+    assert!(!draft.runtime_activation_available);
+    let edit = draft
+        .edits
+        .iter()
+        .find(|edit| edit.source == *source.source())
+        .unwrap();
+    let after_source = SourceLayer::parse(source.source().clone(), &edit.after).unwrap();
+    let after = preview_sources(&after_source, None).unwrap();
+    assert_eq!(
+        before.effective.settings().daemon,
+        after.effective.settings().daemon
+    );
+    for key in [
+        "daemon.profile",
+        "daemon.idle_grace_ms",
+        "daemon.max_sessions",
+        "daemon.control_pending",
+    ] {
+        assert_eq!(
+            after.effective.provenance().get(key).unwrap().source,
+            *source.source()
+        );
+    }
+}
+
+#[test]
 fn versioned_preview_preserves_v1_replacement_and_v2_inheritance() {
     let g = global(CUSTOM);
     let p = project("config_version=2\n[hybrid.reranker]\nwindow=20\n");

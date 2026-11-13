@@ -1,6 +1,4 @@
 //! Bounded regular-file reads. These observations are not cross-file snapshots.
-use std::io::Read;
-
 use serde::Serialize;
 
 use crate::config::schema::SourceId;
@@ -90,14 +88,11 @@ fn read_with(
     if before.len() > cap {
         return Err(SourceFailure::LimitExceeded);
     }
-    let mut bytes = Vec::new();
-    (&file)
-        .take(cap + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| SourceFailure::Io)?;
-    if bytes.len() as u64 > cap {
-        return Err(SourceFailure::LimitExceeded);
-    }
+    let bytes = crate::config::capture::read_bounded(&file, cap).map_err(|error| match error {
+        crate::config::capture::ReadFailure::Io(_) => SourceFailure::Io,
+        crate::config::capture::ReadFailure::LimitExceeded
+        | crate::config::capture::ReadFailure::BudgetOverflow => SourceFailure::LimitExceeded,
+    })?;
     *bytes_left -= bytes.len();
     after_read();
     let after = file.metadata().map_err(|_| SourceFailure::Changed)?;

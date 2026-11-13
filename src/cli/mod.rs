@@ -125,8 +125,8 @@ pub enum Command {
         #[arg(long, hide = true)]
         detached: bool,
         /// Grace period before the last session's exit stops the daemon.
-        #[arg(long, hide = true, default_value_t = crate::daemon::lifecycle::DEFAULT_GRACE_MS)]
-        grace_ms: u64,
+        #[arg(long, hide = true)]
+        grace_ms: Option<u64>,
     },
     /// Run the stdio MCP server for one agent.
     Mcp,
@@ -282,18 +282,22 @@ pub fn run() -> anyhow::Result<()> {
 
 fn serve(
     _detached: bool,
-    grace_ms: u64,
+    grace_ms: Option<u64>,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
 ) -> anyhow::Result<()> {
     let cache = paths::cache_dir()?;
-    crate::daemon::lifecycle::run_daemon_with_dense_policy(
+    crate::daemon::lifecycle::run_daemon_with_legacy_launch(
         &cache,
-        std::time::Duration::from_millis(grace_ms),
         settings,
         pool_settings,
         dense_settings,
+        &crate::daemon::launch::LaunchSnapshot::capture(),
+        crate::daemon::settings::DaemonPatch {
+            idle_grace_ms: grace_ms,
+            ..crate::daemon::settings::DaemonPatch::default()
+        },
     )?;
     Ok(())
 }
