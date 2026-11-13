@@ -130,3 +130,17 @@ Node55/0, local native2/0, build/check/format/diff0. Original C3 task scoped rev
 and most-capable final scoped review PASS/APPROVED, no new findings/minors.
 Evidence /workspace/scratch/agent-b/79/windows-fix/. Fresh exact-head native4 still
 required, no blind rerun or Windows skip. User-deferred corpus remains unverified.
+
+2026-11-13 nativeCI43426206657 headf03027d: docs/linux/macos passed; Windows lookup
+now passed and real daemon started, then fixture connected to an absent pipe.
+Actual Windows ENOENT log retained, actual daemon pipe hash not printed. Before
+any fix, standalone proof linked the production platform::pipe_name and showed
+before/after cache creation via canonical alias changes its result; stale-parent
+endpoint actualdaemon RED confirms dependency. Separate implementer changed only
+three testfiles: matching-PID daemon.json.socket is authoritative before first
+realclient; Windows bare pipe name qualified per serialization; restart asserts
+stable recorded endpoint and existingclient reconnects. Initial absent/noCache
+negative retained. Staleendpoint RED→GREEN, Node58/0, native2/0, build/check/format/
+diff0. Original task and most-capable final scoped reviewers PASS/APPROVED, no new
+findings. Evidence /workspace/scratch/agent-b/79/windows-endpoint-fix/.
+No production SDK/Rust behavior change, no retry/skip; fresh exactheadnative4 pending.

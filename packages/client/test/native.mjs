@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { once } from 'node:events';
 import { DocsbaseClient } from '@docsbase/client';
 import { registeredProject } from './native-project.ts';
+import { daemonEndpoint } from './native-state.ts';
 
 const [binary, root, endpoint, expectedBuildId, rawSchema] = process.argv.slice(2);
 assert.ok(binary && root && endpoint && expectedBuildId && rawSchema);
@@ -62,7 +63,7 @@ async function start() {
       try {
         state = JSON.parse(readFileSync(join(cache, 'state', 'daemon.json'), 'utf8'));
       } catch {}
-      if (state?.pid === daemon.pid) return;
+      if (state?.pid === daemon.pid) return state;
       await once(events, 'change', { signal });
     }
   } catch (error) {
@@ -106,7 +107,9 @@ try {
   const other = registeredProject(direct.projects, beta);
   assert.notEqual(project.id, other.id);
   config.projectId = project.id;
-  await start();
+  // The supplied endpoint was computed while cache was absent. Use the actual
+  // daemon's published endpoint now that registration has created the cache.
+  config.endpoint = daemonEndpoint(await start());
   const client = make();
   const snapshot = await client.status();
   assert.equal(snapshot.project.id, project.id);
@@ -165,7 +168,11 @@ try {
   await stop();
   await assert.rejects(client.search('widgets'), { kind: 'transport' });
   assert.equal(existsSync(join(cache, 'state', 'daemon.json')), false);
-  await start();
+  assert.equal(
+    daemonEndpoint(await start()),
+    config.endpoint,
+    'daemon endpoint must remain stable across restart for the existing client',
+  );
   assert.notEqual(daemon.pid, firstPid);
   assert.equal((await client.status()).project.index_generation, snapshot.project.index_generation);
   assert.equal((await client.search('widgets')).length > 0, true);
@@ -187,6 +194,12 @@ try {
     }) + '\n',
   );
 } catch (error) {
+  console.error(
+    JSON.stringify({
+      suppliedEndpoint: endpoint.slice(0, 512),
+      selectedEndpoint: config.endpoint.slice(0, 512),
+    }),
+  );
   console.error(daemonLog);
   throw error;
 } finally {
