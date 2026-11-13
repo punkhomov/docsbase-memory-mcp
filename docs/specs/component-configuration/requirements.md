@@ -463,3 +463,13 @@ and SQLite control commits are separate durable boundaries. Exact schema/namespa
 lease/native durability proofs remain owning implementation gates before any v2
 startup or source write. Investigation and acceptance boundary:
 [adoption-recovery.md](adoption-recovery.md). No runtime FR/SC completion claimed.
+
+## Delta 2026-11-13 — CF5b1 control-state and session contract
+
+[control-contract.md](control-contract.md) defines the exact private SQLite schema,
+namespace latch, all-caller session lifetime, ordered maintenance admission,
+bounded decode and initial adoption/resume/restore states. Its isolated bundled
+SQLite/native-lock experiment is research evidence only. Activation requires
+CF5b2 source/directory durability on each platform, CF5b3 product control/executor
+and CF5c participation before config capture in every construction path. No
+source mutation, product API/startup or FR-13–16 completion is claimed here.

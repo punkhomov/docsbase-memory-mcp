@@ -784,3 +784,25 @@ unknown/corrupt-state refusals, sensitive before-image handling and native failu
 cases. Exact SQL/control-state/namespace/lease/durability contract is the CF5b1 gate;
 this investigation cannot authorize implementation or activate file-v2 on its own.
 Data generation apply remains CF10/CF11; consent remains CF5a's separate gate.
+
+## Delta 2026-11-13 — CF5b1 exact stopped-control contract
+
+[control-contract.md](control-contract.md) and [schema1](control-state-v1.sql)
+specify permanent namespace evidence separate from disposable stores, full policy
+and before/after journal, terminal strict mode, explicit recovery and a shared
+session acquired before config capture. Existing admission/project/vector/config
+locks alone cannot exclude a direct caller carrying an older captured Config.
+The contract therefore requires all constructors/child handles to retain the
+session; it is not implemented by this design PR. An isolated existing-dependency
+[experiment](experiments/control-journal.md) checks real Linux process/SQLite/lock
+behavior; its limits and later platform/product gates are explicit. Initial
+maintenance supports one installation domain per source set, with existing
+canonical roots; external editors, old binaries and independent installations
+are not claimed to be coordinated by path comparison or PID probes.
+
+CF5b1 replaces CF5b0's preliminary SQL registry-transaction requirement with a
+retained no-write native SQLite reservation from the existing inspector. A real
+WAL experiment showed BEGIN IMMEDIATE creates sidecars before stale validation;
+it cannot satisfy the coordination-only allowlist. The native lease admits only
+sidecar-free quiescent stores and is retained through bounded local publication.
+No operational Db open, migration/recovery or second POSIX DB descriptor is used.
