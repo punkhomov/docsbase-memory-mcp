@@ -74,3 +74,14 @@ fn internal_keeps_source_chain() {
             .is_some_and(|s| s.to_string().contains("denied"))
     );
 }
+
+#[test]
+fn website_denial_retains_admission_category_across_ipc_projection() {
+    let denied = Error::Admission {
+        message: "website requires foreground docsbase serve".to_owned(),
+    };
+    let restored = Error::from_mcp_code(denied.mcp_code(), denied.inner_message(), None);
+    assert_eq!(restored.mcp_code(), -32010);
+    assert!(matches!(restored, Error::Admission { .. }));
+    assert!(restored.to_string().contains("foreground"));
+}

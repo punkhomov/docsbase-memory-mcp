@@ -1476,9 +1476,13 @@ pub const NEIGHBOR_CAP: u64 = 100;
 /// # Errors
 /// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn list_projects(db: &Db) -> Result<Value> {
+    list_projects_from(db, &registry::list_projects(db)?)
+}
+
+pub(super) fn list_projects_from(db: &Db, selected: &[Project]) -> Result<Value> {
     let mut projects = Vec::new();
-    for project in registry::list_projects(db)? {
-        projects.push(project_entry(db, &project, None, false)?);
+    for project in selected {
+        projects.push(project_entry(db, project, None, false)?);
     }
     Ok(Value::Array(projects))
 }
@@ -1496,13 +1500,37 @@ pub fn status(
     coverage: &dyn Fn(&Project) -> Option<Coverage>,
     dense: Option<&DenseCache>,
 ) -> Result<Value> {
+    status_for_projects(
+        db,
+        &registry::list_projects(db)?,
+        stats,
+        watchers,
+        restart_notice,
+        watching,
+        coverage,
+        dense,
+    )
+}
+
+// The caller filters identities before any project/runtime/coverage callback.
+#[allow(clippy::too_many_arguments)] // Existing status inputs plus the admitted project set.
+pub(super) fn status_for_projects(
+    db: &Db,
+    selected: &[Project],
+    stats: &Stats,
+    watchers: u64,
+    restart_notice: Option<&str>,
+    watching: &dyn Fn(i64) -> bool,
+    coverage: &dyn Fn(&Project) -> Option<Coverage>,
+    dense: Option<&DenseCache>,
+) -> Result<Value> {
     let mut projects = Vec::new();
-    for project in registry::list_projects(db)? {
-        let mut entry = project_entry(db, &project, Some(watching(project.id)), true)?;
+    for project in selected {
+        let mut entry = project_entry(db, project, Some(watching(project.id)), true)?;
         entry["root_state"] = json!(registry::root_state(&project.canonical_root).as_str());
         entry["index_generation"] = json!(repo::index_generation(db.connection(), project.id)?);
-        let hybrid_on = coverage(&project).is_some();
-        entry["embed_coverage"] = match coverage(&project) {
+        let hybrid_on = coverage(project).is_some();
+        entry["embed_coverage"] = match coverage(project) {
             Some(cov) => json!({ "cached": cov.cached, "total": cov.total }),
             None => Value::Null,
         };

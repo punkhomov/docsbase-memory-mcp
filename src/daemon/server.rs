@@ -2,7 +2,6 @@
 //! FR-33; I2, I6, I8).
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
@@ -14,10 +13,14 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, watch};
 
+use crate::config::Config;
 use crate::config::schema::Resolved;
-use crate::config::{Config, paths};
+use crate::daemon::launch::{
+    AdmittedLaunch, ConfigStamp, FixedProject, LaunchConfig, LaunchSnapshot,
+};
 use crate::daemon::request::{self, Activity};
 use crate::daemon::session::SessionRegistry;
+use crate::daemon::settings::{DaemonPatch, DaemonSettings};
 use crate::daemon::tools;
 use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
@@ -41,6 +44,14 @@ use crate::watch::Watchers;
 #[path = "search_phase_tests.rs"]
 mod search_phase_tests;
 
+#[cfg(test)]
+#[path = "profile_tests.rs"]
+mod profile_tests;
+
+#[cfg(test)]
+#[path = "server_worker_tests.rs"]
+mod server_worker_tests;
+
 #[path = "scoped.rs"]
 mod scoped;
 
@@ -54,6 +65,9 @@ pub struct Shared {
     db_settings: Resolved<DbSettings>,
     readers: Arc<ReadPool>,
     payload_budget: crate::search::budget::PayloadBudget,
+    pub(super) workers: crate::daemon::worker_admission::WorkerAdmission,
+    // Website has exactly one fixed-project background sync closure.
+    sync_slot: Arc<tokio::sync::Semaphore>,
     /// Live sessions.
     pub sessions: SessionRegistry,
     /// Per-project filesystem watchers (FR-15).
@@ -62,10 +76,12 @@ pub struct Shared {
     stopping: AtomicBool,
     /// Global config snapshot taken at daemon start (OQ-6).
     global_config: Config,
+    website: Option<FixedProject>,
     /// Why the global config could not be loaded; surfaced by `status`.
     global_config_error: Option<String>,
     /// Fingerprint of the global config file at daemon start (OQ-6).
-    global_config_stamp: Option<u64>,
+    global_config_stamp: ConfigStamp,
+    global_config_path: Option<PathBuf>,
     /// Per-project config/stage slots; the map lock only protects lookup.
     project_states: Mutex<HashMap<i64, ProjectSlot>>,
     /// Dense candidate cache keyed by project and index generation (FR-16).
@@ -123,7 +139,9 @@ struct ProjectState {
 
 impl Shared {
     /// Opens the registry database and prepares shared state.
-    /// Compatibility adapter; production passes policies to [`Self::open_with_dense_policy`].
+    /// Compatibility adapter: one captured global source, warned defaults on a
+    /// malformed source, and owner-resolved daemon resources. Strict boundaries
+    /// use [`Self::open_with_launch`].
     ///
     /// # Errors
     /// Returns [`Error::Internal`]/[`Error::Admission`] from [`Db::open`].
@@ -179,8 +197,9 @@ impl Shared {
         Self::open_with_dense_policy(cache, settings, pool_settings, &dense)
     }
 
-    /// Construct with component-owned dense/query policy. The legacy Config
-    /// vector-store budget retains precedence over its dense-path fallback.
+    /// Compatibility adapter with component-owned dense/query policy and one
+    /// captured global source. Malformed global input retains warned defaults
+    /// and blocks project opens; the legacy vector-store budget keeps precedence.
     ///
     /// # Errors
     /// Invalid component policies fail before filesystem access; startup failures
@@ -191,7 +210,58 @@ impl Shared {
         pool_settings: &Resolved<ReadPoolSettings>,
         dense_settings: &crate::hybrid::dense_settings::DenseSettings,
     ) -> Result<Arc<Self>> {
+        let launch = LaunchSnapshot::capture().legacy(DaemonPatch::default())?;
+        Self::open_with_launch_config(cache, settings, pool_settings, dense_settings, launch)
+    }
+
+    /// Strict launch from one bounded source capture. Reject invalid configuration
+    /// before creating cache state, readers, watchers or a listener.
+    ///
+    /// # Errors
+    /// Invalid global/daemon/component policies or resource preparation failures.
+    pub fn open_with_launch(
+        cache: &Path,
+        settings: &Resolved<DbSettings>,
+        pool_settings: &Resolved<ReadPoolSettings>,
+        dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+        snapshot: &LaunchSnapshot,
+        patch: DaemonPatch,
+    ) -> Result<Arc<Self>> {
+        Self::open_with_launch_config(
+            cache,
+            settings,
+            pool_settings,
+            dense_settings,
+            snapshot.strict(patch)?,
+        )
+    }
+
+    pub(crate) fn open_with_launch_config(
+        cache: &Path,
+        settings: &Resolved<DbSettings>,
+        pool_settings: &Resolved<ReadPoolSettings>,
+        dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+        launch: LaunchConfig,
+    ) -> Result<Arc<Self>> {
+        Self::open_with_admitted_launch(
+            cache,
+            settings,
+            pool_settings,
+            dense_settings,
+            launch.admit(cache, settings)?,
+        )
+    }
+
+    pub(crate) fn open_with_admitted_launch(
+        cache: &Path,
+        settings: &Resolved<DbSettings>,
+        pool_settings: &Resolved<ReadPoolSettings>,
+        dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+        admitted: AdmittedLaunch,
+    ) -> Result<Arc<Self>> {
         use crate::config::schema::{Capabilities, SettingsSpec};
+        let AdmittedLaunch { launch, website } = admitted;
+        launch.config.settings().validate()?;
         crate::hybrid::dense_settings::DenseSpec::validate(
             dense_settings,
             &Capabilities::current(),
@@ -207,35 +277,49 @@ impl Shared {
         if orphans > 0 {
             eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
         }
-        // Stamp before loading: a write racing this window then shows up as
-        // "changed" (a harmless false positive) instead of being silently
-        // adopted as the baseline (a false negative).
-        let stamp = global_config_stamp();
-        let (global_config, global_config_error) = match Config::global() {
-            Ok(config) => (config, None),
-            Err(err) => {
-                eprintln!("warning: global config unavailable: {err}");
-                (Config::default(), Some(err.to_string()))
-            }
-        };
+        let global_config = launch.config.into_settings();
         let mut effective_dense = dense_settings.clone();
         effective_dense.vector_cache_max_bytes = global_config.hybrid_cfg.cache.max_bytes;
         let payload_budget =
             crate::search::budget::PayloadBudget::new(global_config.search.clone())?;
+        let project_states = website.as_ref().map_or_else(HashMap::new, |fixed| {
+            HashMap::from([(
+                fixed.project.id,
+                Arc::new(ProjectCell {
+                    state: Mutex::new(ProjectState {
+                        config: Some(Arc::clone(&fixed.config)),
+                        stages: Some(Arc::new(HybridStages::default())),
+                    }),
+                    ..ProjectCell::default()
+                }),
+            )])
+        });
+        let watchers = Arc::new(Watchers::with_enabled(website.is_none()));
+        let ann_policy = if website.is_some() {
+            AnnPolicy::Disabled
+        } else {
+            AnnPolicy::BuildOrLoad
+        };
         let shared = Arc::new(Self {
             cache: cache.to_path_buf(),
             db: Mutex::new(db),
             db_settings: settings.clone(),
             readers,
             payload_budget,
-            sessions: SessionRegistry::new(),
-            watchers: Arc::new(Watchers::new()),
+            workers: crate::daemon::worker_admission::WorkerAdmission::with_settings(
+                &global_config.daemon,
+            )?,
+            sync_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+            sessions: SessionRegistry::with_settings(&global_config.daemon)?,
+            watchers,
             stopping: AtomicBool::new(false),
             global_config,
-            global_config_error,
-            global_config_stamp: stamp,
-            project_states: Mutex::new(HashMap::new()),
-            dense: DenseCache::with_settings(AnnPolicy::BuildOrLoad, cache, &effective_dense)?,
+            website,
+            global_config_error: launch.error,
+            global_config_stamp: launch.stamp,
+            global_config_path: launch.path,
+            project_states: Mutex::new(project_states),
+            dense: DenseCache::with_settings(ann_policy, cache, &effective_dense)?,
         });
         match shared.start_watchers() {
             Ok(started) if started > 0 => eprintln!("watching {started} indexed project(s)"),
@@ -250,6 +334,47 @@ impl Shared {
     #[must_use]
     pub fn read_pool(&self) -> &ReadPool {
         &self.readers
+    }
+
+    /// Complete immutable daemon policy captured by the controlling boundary.
+    #[must_use]
+    pub fn daemon_settings(&self) -> &DaemonSettings {
+        &self.global_config.daemon
+    }
+
+    fn profile_denial() -> Error {
+        Error::Admission { message: "website profile permits only its fixed project through read-only binding and explicit sync".to_owned() }
+    }
+
+    fn admit_project(&self, project: &crate::store::models::Project) -> Result<()> {
+        if let Some(fixed) = &self.website
+            && (fixed.project.id != project.id
+                || crate::platform::paths::normalize_for_compare(&fixed.project.canonical_root)
+                    != crate::platform::paths::normalize_for_compare(&project.canonical_root))
+        {
+            return Err(Self::profile_denial());
+        }
+        Ok(())
+    }
+
+    fn admit_binding(&self, project_id: Option<i64>) -> Result<()> {
+        if let Some(fixed) = &self.website
+            && project_id != Some(fixed.project.id)
+        {
+            return Err(Self::profile_denial());
+        }
+        Ok(())
+    }
+
+    fn visible_projects(&self, db: &Db) -> Result<Vec<crate::store::models::Project>> {
+        if let Some(fixed) = &self.website {
+            let project =
+                registry::project_by_id(db, fixed.project.id)?.ok_or_else(Self::profile_denial)?;
+            self.admit_project(&project)?;
+            Ok(vec![project])
+        } else {
+            registry::list_projects(db)
+        }
     }
 
     fn db(&self) -> MutexGuard<'_, Db> {
@@ -298,6 +423,7 @@ impl Shared {
     where
         F: FnMut(&Config) -> Result<HybridStages>,
     {
+        self.admit_project(project)?;
         let slot = self.project_slot(project.id);
         loop {
             let config = {
@@ -309,7 +435,11 @@ impl Shared {
                 config
             };
             // Construction can load models: do not hold the project lock.
-            let outcome = build(&config);
+            let outcome = if self.website.is_some() {
+                Ok(HybridStages::default())
+            } else {
+                build(&config)
+            };
             let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
             if !state
                 .config
@@ -351,6 +481,10 @@ impl Shared {
     /// # Errors
     /// Stage admission errors (propagated to the open) and registry failures.
     fn schedule_backfill(self: &Arc<Self>, project: &crate::store::models::Project) -> Result<()> {
+        self.admit_project(project)?;
+        if self.website.is_some() {
+            return Ok(());
+        }
         let (config, stages) = self.project_runtime(project)?;
         if stages.embedder.is_none()
             || project.status != crate::store::models::ProjectStatus::Indexed
@@ -372,7 +506,15 @@ impl Shared {
         }
         let (job_id, created) = crate::daemon::tools::enqueue_sync(&db, project)?;
         if created {
-            spawn_sync_job(Arc::clone(self), job_id, project.id, config, stages, source);
+            spawn_sync_job(
+                Arc::clone(self),
+                job_id,
+                project.id,
+                config,
+                stages,
+                source,
+                (None, None),
+            );
         }
         Ok(())
     }
@@ -394,7 +536,19 @@ impl Shared {
         if let Some(err) = self.global_error() {
             return Err(err);
         }
-        Config::for_project(&self.global_config, root)
+        if let Some(fixed) = &self.website {
+            let root = root.canonicalize().map_err(|_| Self::profile_denial())?;
+            if crate::platform::paths::normalize_for_compare(&root)
+                != crate::platform::paths::normalize_for_compare(&fixed.project.canonical_root)
+            {
+                return Err(Self::profile_denial());
+            }
+        }
+        let config = Config::for_project(&self.global_config, root)?;
+        if self.website.is_some() {
+            crate::daemon::launch::lexical_only(&config)?;
+        }
+        Ok(config)
     }
 
     fn config_in(
@@ -402,12 +556,15 @@ impl Shared {
         state: &mut ProjectState,
         project: &crate::store::models::Project,
     ) -> Result<Arc<Config>> {
+        self.admit_project(project)?;
         if let Some(config) = &state.config {
             return Ok(Arc::clone(config));
         }
         let config = Arc::new(self.config_for_root(&project.canonical_root)?);
-        self.dense
-            .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
+        if self.website.is_none() {
+            self.dense
+                .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
+        }
         state.config = Some(Arc::clone(&config));
         Ok(config)
     }
@@ -418,6 +575,7 @@ impl Shared {
     /// # Errors
     /// Returns config read/parse errors.
     pub fn project_config(&self, project: &crate::store::models::Project) -> Result<Arc<Config>> {
+        self.admit_project(project)?;
         let slot = self.project_slot(project.id);
         let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
         self.config_in(&mut state, project)
@@ -460,6 +618,9 @@ impl Shared {
         B: FnOnce() + Send + 'static,
         F: FnOnce(&Db, i64, &str) -> Result<()> + Send + 'static,
     {
+        if self.website.is_some() {
+            return None;
+        }
         let config = self.project_config(project).ok()?;
         let slot = self.project_slot(project.id);
         let embed_cfg = config.hybrid_cfg.embedding.as_ref()?;
@@ -546,19 +707,28 @@ impl Shared {
         F: FnOnce(&Config) -> Result<HybridStages>,
         O: FnOnce(),
     {
+        self.admit_project(project)?;
         let slot = self.project_slot(project.id);
         // Only same-project reloads wait for construction. Existing runtime
         // reads and unrelated projects keep their last coherent state.
         let _reload = slot.reload.lock().unwrap_or_else(PoisonError::into_inner);
         let config = Arc::new(self.config_for_root(&project.canonical_root)?);
-        let stages = Arc::new(build(&config)?);
-        let source = self.vector_source_for(project.id, &config);
-        source.validate_root(&self.cache)?;
-        let watch_runtime = Arc::new(crate::watch::WatchRuntime::new(
-            Arc::clone(&config),
-            Arc::clone(&stages),
-            source,
-        ));
+        let stages = Arc::new(if self.website.is_some() {
+            HybridStages::default()
+        } else {
+            build(&config)?
+        });
+        let watch_runtime = if self.website.is_none() {
+            let source = self.vector_source_for(project.id, &config);
+            source.validate_root(&self.cache)?;
+            Some(Arc::new(crate::watch::WatchRuntime::new(
+                Arc::clone(&config),
+                Arc::clone(&stages),
+                source,
+            )))
+        } else {
+            None
+        };
         // Never wait for active preparation while retaining the state mutex.
         let _publication = match slot.preparation.try_write() {
             Ok(guard) => guard,
@@ -571,10 +741,12 @@ impl Shared {
             }
         };
         let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
-        self.dense
-            .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
+        if self.website.is_none() {
+            self.dense
+                .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
+        }
         let changed = state.config.as_deref() != Some(config.as_ref());
-        if changed {
+        if changed && self.website.is_none() {
             self.dense.invalidate_memory(project.id);
         }
         // All fallible preparation steps precede publication: a rejected
@@ -583,23 +755,25 @@ impl Shared {
         state.stages = Some(stages);
         // Provider construction may refresh credentials even when Config values
         // are equal. Every published runtime must reach the watcher as one pair.
-        let watcher = self
-            .watchers
-            .revise_with_runtime(&self.cache, project.id, Arc::clone(&watch_runtime))
-            .and_then(|revised| {
-                if revised {
-                    Ok(false)
-                } else {
-                    self.watchers.ensure_with_runtime(
-                        &self.cache,
-                        project,
-                        watch_runtime,
-                        &self.db_settings,
-                    )
-                }
-            });
-        if let Err(err) = watcher {
-            eprintln!("warning: cannot watch project {}: {err}", project.id);
+        if let Some(watch_runtime) = watch_runtime {
+            let watcher = self
+                .watchers
+                .revise_with_runtime(&self.cache, project.id, Arc::clone(&watch_runtime))
+                .and_then(|revised| {
+                    if revised {
+                        Ok(false)
+                    } else {
+                        self.watchers.ensure_with_runtime(
+                            &self.cache,
+                            project,
+                            watch_runtime,
+                            &self.db_settings,
+                        )
+                    }
+                });
+            if let Err(err) = watcher {
+                eprintln!("warning: cannot watch project {}: {err}", project.id);
+            }
         }
         Ok(config)
     }
@@ -610,6 +784,9 @@ impl Shared {
     /// # Errors
     /// Returns [`Error::Internal`] when the registry cannot be listed.
     fn start_watchers(&self) -> Result<usize> {
+        if self.website.is_some() {
+            return Ok(0);
+        }
         let projects = registry::list_projects(&self.db())?;
         let mut started = 0;
         for project in projects {
@@ -637,6 +814,10 @@ impl Shared {
         project: &crate::store::models::Project,
         before_admission: impl FnOnce(),
     ) -> Result<bool> {
+        self.admit_project(project)?;
+        if self.website.is_some() {
+            return Ok(false);
+        }
         if project.status != crate::store::models::ProjectStatus::Indexed
             || registry::root_state(&project.canonical_root) == registry::RootState::Missing
         {
@@ -682,24 +863,16 @@ impl Shared {
                 "global config is invalid ({err}); fix it and run `docsbase daemon stop`"
             ));
         }
-        if global_config_stamp() == self.global_config_stamp {
-            return None;
-        }
-        Some("global config changed; restart the daemon: `docsbase daemon stop`".to_owned())
+        crate::daemon::launch::restart_notice(
+            self.global_config_path.as_deref(),
+            &self.global_config_stamp,
+        )
     }
 }
 
-/// Content hash of the global config file; `None` when it does not exist.
-fn global_config_stamp() -> Option<u64> {
-    let path = paths::config_dir().ok()?.join("config.toml");
-    let bytes = std::fs::read(path).ok()?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    Some(hasher.finish())
-}
-
 /// Bound for waiting until in-flight requests settle before shutdown (T46).
-pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DRAIN_TIMEOUT: Duration =
+    Duration::from_millis(crate::daemon::settings::DaemonSpec::DEFAULTS.reply_drain_ms);
 
 /// Stderr tracing for connection lifecycle (`DOCSBASE_IPC_DEBUG=1`).
 fn ipc_debug(message: &str) {
@@ -903,11 +1076,17 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                     protocol_version: PROTOCOL_VERSION,
                     build_id: protocol::build_id(),
                     schema_version: migrations::SCHEMA_VERSION,
-                    capabilities: vec![
-                        protocol::SEARCH_CONTEXT_CAPABILITY.to_owned(),
-                        protocol::LITERAL_QUERY_CAPABILITY.to_owned(),
-                        protocol::PANEL_READ_CAPABILITY.to_owned(),
-                    ],
+                    capabilities: {
+                        let mut capabilities = vec![
+                            protocol::SEARCH_CONTEXT_CAPABILITY.to_owned(),
+                            protocol::LITERAL_QUERY_CAPABILITY.to_owned(),
+                            protocol::PANEL_READ_CAPABILITY.to_owned(),
+                        ];
+                        if shared.website.is_some() {
+                            capabilities.push(protocol::ACTIVE_WEBSITE_CAPABILITY.to_owned());
+                        }
+                        capabilities
+                    },
                 },
                 false,
             )
@@ -923,6 +1102,7 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                 pid,
                 &cwd,
                 false,
+                Some(Arc::clone(&scope.activity)),
             )
             .await
         }
@@ -937,6 +1117,7 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                 pid,
                 &cwd,
                 true,
+                Some(Arc::clone(&scope.activity)),
             )
             .await
         }
@@ -956,10 +1137,17 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
             if !peer.hello_done {
                 return (hello_required(), true);
             }
+            if let Err(error) = shared.admit_binding(project_id) {
+                return (error_response(&error), false);
+            }
+            let permit = match shared.workers.control().await {
+                Ok(permit) => permit,
+                Err(error) => return (error_response(&error), false),
+            };
             let reader_shared = Arc::clone(shared);
             let activity = Arc::clone(&scope.activity);
-            let bound = tokio::task::spawn_blocking(move || {
-                let _activity = activity;
+            let bound = request::spawn(Some(permit), Some(activity), move || {
+                reader_shared.admit_binding(project_id)?;
                 let project = project_id
                     .map(|id| {
                         registry::project_by_id(&reader_shared.db(), id)?.ok_or_else(|| {
@@ -970,6 +1158,12 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                         })
                     })
                     .transpose()?;
+                if let Some(project) = &project {
+                    reader_shared.admit_project(project)?;
+                    if reader_shared.website.is_some() {
+                        reader_shared.open_project_config(project)?;
+                    }
+                }
                 Ok::<_, Error>(
                     project.map_or_else(|| reader_shared.cache.clone(), |p| p.canonical_root),
                 )
@@ -999,7 +1193,14 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
             // (FR-5, FR-6). The drain lets every other request finish; the
             // process then lives until background jobs complete.
             if !shared.stopping.swap(true, Ordering::SeqCst) {
-                wait_for_drain(in_flight, DRAIN_TIMEOUT).await;
+                shared.workers.shutdown();
+                let settings = shared.daemon_settings();
+                wait_for_drain(
+                    in_flight,
+                    Duration::from_millis(settings.reply_drain_ms),
+                    Duration::from_millis(settings.drain_poll_ms),
+                )
+                .await;
                 let _ = shutdown.send(true);
             }
             (Response::ToolResult { value: Value::Null }, false)
@@ -1036,13 +1237,36 @@ async fn call_and_respond(
 /// Waits until only the stopping request itself is in flight; `false` on
 /// timeout so a wedged request cannot hold shutdown forever (T46). SIGTERM
 /// remains the operator's escalation path.
-async fn wait_for_drain(in_flight: &AtomicUsize, timeout: Duration) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn wait_for_drain(in_flight: &AtomicUsize, timeout: Duration, poll: Duration) -> bool {
+    wait_for_drain_with(
+        in_flight,
+        timeout,
+        poll,
+        tokio::time::Instant::now,
+        tokio::time::sleep,
+    )
+    .await
+}
+
+async fn wait_for_drain_with<N, S, F>(
+    in_flight: &AtomicUsize,
+    timeout: Duration,
+    poll: Duration,
+    mut now: N,
+    mut sleep: S,
+) -> bool
+where
+    N: FnMut() -> tokio::time::Instant,
+    S: FnMut(Duration) -> F,
+    F: std::future::Future<Output = ()>,
+{
+    let deadline = now() + timeout;
     while in_flight.load(Ordering::SeqCst) > 1 {
-        if tokio::time::Instant::now() >= deadline {
+        let current = now();
+        if current >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        sleep(poll.min(deadline.duration_since(current))).await;
     }
     true
 }
@@ -1054,8 +1278,9 @@ async fn register_and_respond(
     pid: u32,
     cwd: &Path,
     allow_unbound: bool,
+    activity: Option<Arc<Activity>>,
 ) -> (Response, bool) {
-    match register_session(shared, pid, cwd, allow_unbound).await {
+    match register_session_in(shared, pid, cwd, allow_unbound, activity).await {
         Ok((id, value, cancel)) => {
             if let Some(previous) = session_id.replace(id) {
                 shared.sessions.leave(previous);
@@ -1067,66 +1292,89 @@ async fn register_and_respond(
     }
 }
 
+#[cfg(test)]
 async fn register_session(
     shared: &Arc<Shared>,
     pid: u32,
     cwd: &Path,
     allow_unbound: bool,
 ) -> Result<(u64, Value, oneshot::Receiver<()>)> {
+    register_session_in(shared, pid, cwd, allow_unbound, None).await
+}
+
+async fn register_session_in(
+    shared: &Arc<Shared>,
+    pid: u32,
+    cwd: &Path,
+    allow_unbound: bool,
+    activity: Option<Arc<Activity>>,
+) -> Result<(u64, Value, oneshot::Receiver<()>)> {
+    if shared.website.is_some() {
+        return Err(Shared::profile_denial());
+    }
+    let permit = shared.workers.control().await?;
     let shared_for_task = Arc::clone(shared);
     let cwd = cwd.to_path_buf();
     let cwd_for_task = cwd.clone();
-    let outcome = tokio::task::spawn_blocking(move || -> Result<crate::store::models::Project> {
-        // Own connection: the shared read connection must stay free while a
-        // full index runs (F4/NFR-1).
-        let mut db = Db::open_with_settings(&shared_for_task.cache, &shared_for_task.db_settings)?;
-        let project_err = match registry::resolve_by_cwd(&db, &cwd_for_task) {
-            Ok(project) => {
-                shared_for_task.open_project_config(&project)?;
-                shared_for_task.schedule_backfill(&project)?;
-                return Ok(project);
+    let outcome = request::spawn(
+        Some(permit),
+        activity,
+        move || -> Result<crate::store::models::Project> {
+            // Own connection: the shared read connection must stay free while a
+            // full index runs (F4/NFR-1).
+            let mut db =
+                Db::open_with_settings(&shared_for_task.cache, &shared_for_task.db_settings)?;
+            let project_err = match registry::resolve_by_cwd(&db, &cwd_for_task) {
+                Ok(project) => {
+                    shared_for_task.open_project_config(&project)?;
+                    shared_for_task.schedule_backfill(&project)?;
+                    return Ok(project);
+                }
+                Err(err) => err,
+            };
+            let Ok(root) = registry::project_root_for(&cwd_for_task, &shared_for_task.cache) else {
+                return Err(project_err);
+            };
+            let config = shared_for_task.config_for_root(&root)?;
+            if !config.auto_index {
+                return Err(project_err);
             }
-            Err(err) => err,
-        };
-        let Ok(root) = registry::project_root_for(&cwd_for_task, &shared_for_task.cache) else {
-            return Err(project_err);
-        };
-        let config = shared_for_task.config_for_root(&root)?;
-        if !config.auto_index {
-            return Err(project_err);
-        }
-        let project = registry::ensure_project(&mut db, &root)?;
-        // Publish policy only through the per-project authority; a raw config
-        // must not overwrite a concurrent reload's legacy dense budget.
-        let (config, stages) = shared_for_task.project_runtime(&project)?;
-        if !config.auto_index {
-            return Err(project_err);
-        }
-        let source = shared_for_task.vector_source_for(project.id, &config);
-        if let Err(err) = tools::run_project_index_with_vectors(
-            &mut db,
-            &shared_for_task.cache,
-            &project,
-            &config,
-            &stages,
-            &source,
-        ) {
-            // A concurrent registration may have won the writer lease and
-            // already indexed the project; bind to that result instead.
-            if let Some(indexed) = registry::resolve_by_cwd(&db, &cwd_for_task)
-                .ok()
-                .filter(|project| project.status == crate::store::models::ProjectStatus::Indexed)
-            {
-                return Ok(indexed);
+            let project = registry::ensure_project(&mut db, &root)?;
+            // Publish policy only through the per-project authority; a raw config
+            // must not overwrite a concurrent reload's legacy dense budget.
+            let (config, stages) = shared_for_task.project_runtime(&project)?;
+            if !config.auto_index {
+                return Err(project_err);
             }
-            return Err(err);
-        }
-        let project = registry::project_by_id(&db, project.id)?.ok_or_else(|| {
-            Error::internal(format!("project {} vanished after auto-index", project.id))
-        })?;
-        shared_for_task.open_project_config(&project)?;
-        Ok(project)
-    })
+            let source = shared_for_task.vector_source_for(project.id, &config);
+            if let Err(err) = tools::run_project_index_with_vectors(
+                &mut db,
+                &shared_for_task.cache,
+                &project,
+                &config,
+                &stages,
+                &source,
+            ) {
+                // A concurrent registration may have won the writer lease and
+                // already indexed the project; bind to that result instead.
+                if let Some(indexed) =
+                    registry::resolve_by_cwd(&db, &cwd_for_task)
+                        .ok()
+                        .filter(|project| {
+                            project.status == crate::store::models::ProjectStatus::Indexed
+                        })
+                {
+                    return Ok(indexed);
+                }
+                return Err(err);
+            }
+            let project = registry::project_by_id(&db, project.id)?.ok_or_else(|| {
+                Error::internal(format!("project {} vanished after auto-index", project.id))
+            })?;
+            shared_for_task.open_project_config(&project)?;
+            Ok(project)
+        },
+    )
     .await
     .map_err(|err| Error::internal_with_source("session task join", err))?;
 
@@ -1205,19 +1453,39 @@ async fn call_tool_in(
     operation: Option<crate::search::operation::SearchOperation>,
     activity: Option<Arc<Activity>>,
 ) -> Result<Value> {
+    let mut cancellation = request::CancelOnDrop(
+        operation
+            .as_ref()
+            .map(|operation| operation.cancellation().clone()),
+    );
+    let permit = match &operation {
+        Some(operation) => shared.workers.search(operation).await?,
+        None => shared.workers.control().await?,
+    };
     let shared = Arc::clone(shared);
     let name = name.to_owned();
     let worker_operation = operation.clone();
     let queued_at = Instant::now();
-    let worker = tokio::task::spawn_blocking(move || {
+    let child_activity = activity.clone();
+    if let Some(operation) = &operation {
+        operation.check()?;
+    }
+    let worker = request::spawn(Some(permit), activity, move || {
         if let Some(operation) = &worker_operation {
             operation.record_queue(queued_at.elapsed());
         }
-        let result = route_tool(&shared, session_id, &name, &args, worker_operation);
-        drop(activity);
-        result
+        route_tool(
+            &shared,
+            session_id,
+            &name,
+            &args,
+            worker_operation,
+            child_activity,
+        )
     });
-    request::run(worker, operation.as_ref()).await
+    let result = request::run(worker, operation.as_ref()).await;
+    cancellation.0 = None;
+    result
 }
 
 /// `search_docs` with the project's hybrid stages, dense cache and window.
@@ -1265,6 +1533,7 @@ fn route_tool(
     name: &str,
     args: &Value,
     operation: Option<crate::search::operation::SearchOperation>,
+    activity: Option<Arc<Activity>>,
 ) -> Result<Value> {
     if name == "search_docs" {
         return route_search(
@@ -1274,28 +1543,47 @@ fn route_tool(
             operation.ok_or_else(|| Error::internal("search request context missing"))?,
         );
     }
-    route_metadata_tool(shared, session_id, name, args)
+    route_metadata_tool_in(shared, session_id, name, args, activity)
 }
 
-#[allow(clippy::too_many_lines)] // Exhaustive tool dispatcher.
+#[cfg(test)]
 fn route_metadata_tool(
     shared: &Arc<Shared>,
     session_id: Option<u64>,
     name: &str,
     args: &Value,
 ) -> Result<Value> {
+    route_metadata_tool_in(shared, session_id, name, args, None)
+}
+
+#[allow(clippy::too_many_lines)] // Exhaustive tool dispatcher.
+fn route_metadata_tool_in(
+    shared: &Arc<Shared>,
+    session_id: Option<u64>,
+    name: &str,
+    args: &Value,
+    activity: Option<Arc<Activity>>,
+) -> Result<Value> {
+    if name == "index_project" && shared.website.is_some() {
+        return Err(Shared::profile_denial());
+    }
     let db = shared.db();
     match name {
         "status" => {
             let stats = shared.sessions.stats();
             let notice = shared.restart_notice();
-            tools::status(
+            let projects = shared.visible_projects(&db)?;
+            tools::status_for_projects(
                 &db,
+                &projects,
                 &stats,
                 shared.watchers.count(),
                 notice.as_deref(),
                 &|id| shared.watchers.watching(id),
                 &|project| {
+                    if shared.website.is_some() {
+                        return None;
+                    }
                     let Ok(config) = shared.project_config(project) else {
                         return None;
                     };
@@ -1308,7 +1596,11 @@ fn route_metadata_tool(
                     .ok()
                     .flatten()
                 },
-                Some(&shared.dense),
+                if shared.website.is_none() {
+                    Some(&shared.dense)
+                } else {
+                    None
+                },
             )
         }
         "panel_info" => Ok(json!(crate::ipc::panel::PanelInfo {
@@ -1329,11 +1621,16 @@ fn route_metadata_tool(
             Ok(json!(crate::ipc::panel::ConfigView::from_config(&config)))
         }
         "panel_projects" => {
-            let projects = registry::list_projects(&db)?
+            let projects = shared
+                .visible_projects(&db)?
                 .into_iter()
                 .map(|p| {
                     let count = crate::store::repo::project_counts(db.connection(), p.id)?;
-                    let config = shared.project_config(&p).ok();
+                    let config = if shared.website.is_none() {
+                        shared.project_config(&p).ok()
+                    } else {
+                        None
+                    };
                     let coverage = config.as_ref().and_then(|config| {
                         hybrid_jobs::coverage_from(
                             &db,
@@ -1365,7 +1662,7 @@ fn route_metadata_tool(
                 .collect::<Result<Vec<_>>>()?;
             Ok(json!(projects))
         }
-        "list_projects" => tools::list_projects(&db),
+        "list_projects" => tools::list_projects_from(&db, &shared.visible_projects(&db)?),
         "list_docs" => {
             let project = bound_project(shared, &db, session_id)?;
             tools::list_docs(&db, &project, args)
@@ -1426,6 +1723,10 @@ fn route_metadata_tool(
             current_job(&job_db, job_id)
         }
         "sync_start" => {
+            if shared.website.is_some() {
+                let bound = bound_project(shared, &db, session_id)?;
+                shared.admit_binding(opt_i64(args, "project_id")?.or(Some(bound.id)))?;
+            }
             let project = match opt_i64(args, "project_id")? {
                 Some(id) => registry::project_by_id(&db, id)?.ok_or_else(|| Error::Project {
                     message: format!("unknown project id {id}"),
@@ -1433,6 +1734,7 @@ fn route_metadata_tool(
                 })?,
                 None => bound_project(shared, &db, session_id)?,
             };
+            shared.admit_project(&project)?;
             registry::ensure_root_present(&project)?;
             // Provider construction may load models; release the shared DB
             // guard before preparing the coherent runtime snapshot.
@@ -1440,6 +1742,27 @@ fn route_metadata_tool(
             let (config, stages) = shared.project_runtime(&project)?;
             let source = shared.vector_source_for(project.id, &config);
             let db = shared.db();
+            let sync_permit = if shared.website.is_some() {
+                if shared.stopping.load(Ordering::SeqCst) {
+                    return Err(Error::Admission {
+                        message: "daemon is shutting down".to_owned(),
+                    });
+                }
+                if let Ok(permit) = Arc::clone(&shared.sync_slot).try_acquire_owned() {
+                    Some(permit)
+                } else {
+                    if let Some(job) =
+                        crate::store::repo::active_sync_job(db.connection(), project.id)?
+                    {
+                        return current_job(&db, job.id);
+                    }
+                    return Err(Error::Admission {
+                        message: "fixed-project sync is still finishing".to_owned(),
+                    });
+                }
+            } else {
+                None
+            };
             let (job_id, created) = tools::enqueue_sync(&db, &project)?;
             if created {
                 spawn_sync_job(
@@ -1449,11 +1772,22 @@ fn route_metadata_tool(
                     config,
                     stages,
                     source,
+                    (sync_permit, activity),
                 );
             }
             current_job(&db, job_id)
         }
-        "sync_status" => tools::sync_status(&db, args),
+        "sync_status" => {
+            if shared.website.is_some() {
+                let id = opt_i64(args, "job_id")?.ok_or_else(|| Error::Protocol {
+                    message: "sync_status: missing job_id".to_owned(),
+                })?;
+                let job = crate::store::repo::sync_job(db.connection(), id)?
+                    .ok_or_else(Shared::profile_denial)?;
+                shared.admit_binding(Some(job.project_id))?;
+            }
+            tools::sync_status(&db, args)
+        }
         other => Err(Error::internal(format!(
             "tool {other:?} is not implemented yet"
         ))),
@@ -1492,10 +1826,14 @@ fn spawn_sync_job(
     config: Arc<Config>,
     stages: Arc<HybridStages>,
     source: crate::vector_cache::VectorCacheSource,
+    ownership: (
+        Option<tokio::sync::OwnedSemaphorePermit>,
+        Option<Arc<Activity>>,
+    ),
 ) {
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            handle.spawn_blocking(move || {
+        Ok(_) => {
+            request::spawn(ownership.0, ownership.1, move || {
                 match tools::execute_sync_job_with_vectors(
                     &shared.cache,
                     job_id,
@@ -1514,6 +1852,7 @@ fn spawn_sync_job(
                     }
                     Err(err) => eprintln!("warning: sync job {job_id} failed: {err}"),
                 }
+                Ok(())
             });
         }
         Err(err) => {
@@ -1530,14 +1869,23 @@ fn bound_project(
     let project_id = session_id
         .and_then(|id| shared.sessions.get(id))
         .and_then(|session| session.project_id)
-        .ok_or_else(|| Error::Project {
-            message: "session is not bound to a project".to_owned(),
-            instruction: Some("register a session from your project directory".to_owned()),
+        .ok_or_else(|| {
+            if shared.website.is_some() {
+                Shared::profile_denial()
+            } else {
+                Error::Project {
+                    message: "session is not bound to a project".to_owned(),
+                    instruction: Some("register a session from your project directory".to_owned()),
+                }
+            }
         })?;
-    registry::project_by_id(db, project_id)?.ok_or_else(|| Error::Project {
+    shared.admit_binding(Some(project_id))?;
+    let project = registry::project_by_id(db, project_id)?.ok_or_else(|| Error::Project {
         message: format!("project {project_id} disappeared from the registry"),
         instruction: None,
-    })
+    })?;
+    shared.admit_project(&project)?;
+    Ok(project)
 }
 
 fn session_cwd(shared: &Arc<Shared>, session_id: Option<u64>) -> Result<PathBuf> {
@@ -1577,18 +1925,142 @@ mod tests {
     use crate::hybrid::jobs::embed_project_chunks_with;
     use crate::vector_cache::Embedder;
 
+    #[test]
+    fn invalid_file_daemon_policy_cannot_fall_back_during_legacy_shared_open() {
+        let mut violations = Vec::new();
+        for policy in ["idle_grace_ms=0", "max_events=0"] {
+            let root = tempfile::tempdir().unwrap();
+            fs::write(
+                root.path().join("config.toml"),
+                format!(
+                    "[daemon]\nprofile={{mode='website',project_root={}}}\n{policy}",
+                    toml::Value::String(root.path().to_string_lossy().into_owned())
+                ),
+            )
+            .unwrap();
+            let cache = root.path().join("cache");
+            let result = LaunchSnapshot::capture_from(root.path())
+                .legacy(DaemonPatch::default())
+                .and_then(|launch| {
+                    Shared::open_with_launch_config(
+                        &cache,
+                        &crate::store::settings::standalone().unwrap(),
+                        &crate::store::settings::standalone_read_pool().unwrap(),
+                        crate::hybrid::dense_settings::standalone()
+                            .unwrap()
+                            .settings(),
+                        launch,
+                    )
+                });
+            if result.is_ok() || cache.exists() {
+                violations.push(format!(
+                    "{policy}: opened={}, cache={}",
+                    result.is_ok(),
+                    cache.exists()
+                ));
+            }
+        }
+        assert_eq!(violations, Vec::<String>::new());
+    }
+
+    #[test]
+    fn legacy_shared_source_error_preserves_defaults_and_restart_diagnostic() {
+        for text in [
+            "not=[valid",
+            "max_file_size=0\n[daemon]\nprofile={mode='shared'}\nmax_sessions=1",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            fs::write(root.path().join("config.toml"), text).unwrap();
+            let cache = root.path().join("cache");
+            let launch = LaunchSnapshot::capture_from(root.path())
+                .legacy(DaemonPatch::default())
+                .unwrap();
+            assert!(launch.error.is_some());
+            let shared = Shared::open_with_launch_config(
+                &cache,
+                &crate::store::settings::standalone().unwrap(),
+                &crate::store::settings::standalone_read_pool().unwrap(),
+                crate::hybrid::dense_settings::standalone()
+                    .unwrap()
+                    .settings(),
+                launch,
+            )
+            .unwrap();
+            assert_eq!(
+                shared.daemon_settings().max_sessions,
+                crate::daemon::settings::DaemonSpec::DEFAULTS.max_sessions
+            );
+            assert!(shared.restart_notice().unwrap().contains("invalid"));
+            assert!(
+                shared.config_for_root(root.path()).is_err(),
+                "fallback must retain the old global-error guard"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_poll_cannot_overshoot_its_original_deadline() {
+        use std::cell::{Cell, RefCell};
+        let policy =
+            crate::config::resolve::resolve_component::<crate::daemon::settings::DaemonSpec>(
+                &crate::config::bootstrap::DefaultsContext::standalone(),
+                [(
+                    crate::config::schema::SourceId::Cli,
+                    DaemonPatch {
+                        reply_drain_ms: Some(1),
+                        drain_poll_ms: Some(60000),
+                        ..DaemonPatch::default()
+                    },
+                )],
+            )
+            .unwrap();
+        let stuck = AtomicUsize::new(2);
+        let base = tokio::time::Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let sleeps = RefCell::new(Vec::new());
+        let result = wait_for_drain_with(
+            &stuck,
+            Duration::from_millis(policy.settings().reply_drain_ms),
+            Duration::from_millis(policy.settings().drain_poll_ms),
+            || base + elapsed.get(),
+            |duration| {
+                sleeps.borrow_mut().push(duration);
+                elapsed.set(elapsed.get() + duration);
+                std::future::ready(())
+            },
+        )
+        .await;
+        assert!(!result);
+        assert_eq!(elapsed.get(), Duration::from_millis(1));
+        assert_eq!(*sleeps.borrow(), [Duration::from_millis(1)]);
+    }
+
     #[tokio::test]
     async fn drain_timeout_is_bounded() {
         let stuck = AtomicUsize::new(2);
         let started = tokio::time::Instant::now();
-        assert!(!wait_for_drain(&stuck, Duration::from_millis(50)).await);
+        assert!(
+            !wait_for_drain(
+                &stuck,
+                Duration::from_millis(50),
+                Duration::from_millis(crate::daemon::settings::DaemonSpec::DEFAULTS.drain_poll_ms)
+            )
+            .await
+        );
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "drain must stop at the timeout"
         );
 
         let idle = AtomicUsize::new(1);
-        assert!(wait_for_drain(&idle, Duration::from_millis(50)).await);
+        assert!(
+            wait_for_drain(
+                &idle,
+                Duration::from_millis(50),
+                Duration::from_millis(crate::daemon::settings::DaemonSpec::DEFAULTS.drain_poll_ms)
+            )
+            .await
+        );
     }
 
     struct FakeEmbedder;

@@ -13,6 +13,9 @@ use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
+use crate::config::bootstrap::{BootstrapContext, EntrypointFacts};
+use crate::daemon::launch::{AdmittedLaunch, LaunchConfig, LaunchSnapshot};
+use crate::daemon::settings::{DaemonPatch, DaemonSpec};
 use crate::error::{Error, Result};
 use crate::ipc::protocol::{self, Request};
 use crate::platform::{self, Endpoint, Listener};
@@ -22,21 +25,23 @@ use crate::store::migrations;
 #[path = "project_read_tests.rs"]
 mod project_read_tests;
 
+#[cfg(test)]
+#[path = "janitor_tests.rs"]
+mod janitor_tests;
+
 /// How long [`ensure_daemon`] waits for the socket after spawning a child.
 pub const START_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default grace period before the last session's exit stops the daemon
 /// (OQ-7: 5 s).
-pub const DEFAULT_GRACE_MS: u64 = 5_000;
+pub const DEFAULT_GRACE_MS: u64 = DaemonSpec::DEFAULTS.idle_grace_ms;
 
 /// Concurrent connections a daemon accepts (T46); excess clients are shed
 /// immediately so fd/memory stay bounded.
-pub const MAX_CONNECTIONS: usize = 64;
+pub const MAX_CONNECTIONS: usize = DaemonSpec::DEFAULTS.max_connections;
 
-/// Bound for the internal connection-event queue (T46).
-const MAX_EVENTS: usize = 1024;
-
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
+// Standalone start/stop adapters use the owner's default lifecycle poll policy.
+const POLL_INTERVAL: Duration = Duration::from_millis(DaemonSpec::DEFAULTS.poll_interval_ms);
 /// Upper bound for `daemon stop` while the daemon drains and exits; a busy
 /// machine can stretch the 3 s grace window well past 5 s (T32 flake).
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -77,6 +82,7 @@ pub fn ensure_daemon_with(cache: &Path, exe: Option<&Path>) -> Result<()> {
     if is_running(cache) {
         return Ok(());
     }
+    crate::daemon::launch::require_shared_without_daemon()?;
     create_state_dir(cache)?;
     let lock_file = open_lock_file(&start_lock_path(cache))?;
     let mut lock = RwLock::new(lock_file);
@@ -199,7 +205,117 @@ pub fn run_daemon_with_dense_policy(
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
 ) -> Result<()> {
+    let grace_ms = u64::try_from(grace.as_millis()).map_err(|_| Error::Admission {
+        message: "daemon grace milliseconds overflow".to_owned(),
+    })?;
+    let launch = LaunchSnapshot::capture().legacy(DaemonPatch {
+        idle_grace_ms: Some(grace_ms),
+        ..DaemonPatch::default()
+    })?;
+    run_with_launch(
+        cache,
+        settings,
+        pool_settings,
+        dense_settings,
+        launch,
+        &runtime_bootstrap()?,
+    )
+}
+
+/// Strict launch boundary. Captured config/daemon policy is validated before
+/// admission locks, cache writes, runtime construction or listener publication.
+///
+/// # Errors
+/// Invalid launch/component policy or daemon startup failure.
+pub fn run_daemon_with_launch(
+    cache: &Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+    snapshot: &LaunchSnapshot,
+    patch: DaemonPatch,
+) -> Result<()> {
+    run_with_launch(
+        cache,
+        settings,
+        pool_settings,
+        dense_settings,
+        snapshot.strict(patch)?,
+        &runtime_bootstrap()?,
+    )
+}
+
+/// Strict launch with already captured bootstrap facts. The exact Tokio worker
+/// count is checked before writes and passed to the builder without an env reread.
+///
+/// # Errors
+/// Invalid configuration, executor count overflow or daemon startup failure.
+pub fn run_daemon_with_launch_and_bootstrap(
+    cache: &Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+    snapshot: &LaunchSnapshot,
+    patch: DaemonPatch,
+    bootstrap: &BootstrapContext,
+) -> Result<()> {
+    run_with_launch(
+        cache,
+        settings,
+        pool_settings,
+        dense_settings,
+        snapshot.strict(patch)?,
+        bootstrap,
+    )
+}
+
+// The existing CLI retains its documented warning/default startup adapter.
+// S1b will add explicit profile activation at that controlling boundary.
+pub(crate) fn run_daemon_with_legacy_launch(
+    cache: &Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+    snapshot: &LaunchSnapshot,
+    patch: DaemonPatch,
+    detached: bool,
+) -> Result<()> {
+    let launch = snapshot.legacy(patch)?;
+    if detached
+        && matches!(
+            launch.config.settings().daemon.profile,
+            crate::daemon::settings::DaemonProfile::Website { .. }
+        )
+    {
+        return Err(Error::Admission { message: "website profile requires explicit foreground `docsbase serve`; --detached is inapplicable".to_owned() });
+    }
+    run_with_launch(
+        cache,
+        settings,
+        pool_settings,
+        dense_settings,
+        launch,
+        &runtime_bootstrap()?,
+    )
+}
+
+fn runtime_bootstrap() -> Result<BootstrapContext> {
+    let cores = std::thread::available_parallelism().map_err(|error| {
+        Error::internal_with_source("capture daemon runtime parallelism", error)
+    })?;
+    BootstrapContext::capture_with(cores.get(), EntrypointFacts::standalone(), std::env::var_os)
+}
+
+fn run_with_launch(
+    cache: &Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+    launch: LaunchConfig,
+    bootstrap: &BootstrapContext,
+) -> Result<()> {
     use crate::config::schema::SettingsSpec;
+    launch.config.settings().validate()?;
     crate::hybrid::dense_settings::DenseSpec::validate(
         dense_settings,
         &crate::config::schema::Capabilities::current(),
@@ -212,16 +328,35 @@ pub fn run_daemon_with_dense_policy(
         pool_settings.settings(),
         &crate::config::schema::Capabilities::current(),
     )?;
+    let workers = bootstrap.tokio_workers.value.get();
+    launch
+        .config
+        .settings()
+        .daemon
+        .max_blocking_threads
+        .checked_add(workers)
+        .ok_or_else(|| Error::Admission {
+            message: "daemon blocking plus async executor thread capacity overflow".to_owned(),
+        })?;
+    let launch = launch.admit(cache, settings)?;
     let _lease = crate::daemon::admission::Lease::acquire(
         cache,
         &protocol::build_id(),
         migrations::SCHEMA_VERSION,
     )?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .max_blocking_threads(launch.launch.config.settings().daemon.max_blocking_threads)
         .enable_all()
         .build()
         .map_err(|err| Error::internal_with_source("build tokio runtime", err))?;
-    runtime.block_on(serve(cache, grace, settings, pool_settings, dense_settings))
+    runtime.block_on(serve(
+        cache,
+        settings,
+        pool_settings,
+        dense_settings,
+        launch,
+    ))
 }
 
 /// Asks a running daemon to stop and waits for it to exit (FR-6).
@@ -295,10 +430,10 @@ pub fn daemon_pid(cache: &Path) -> Option<u32> {
 
 async fn serve(
     cache: &Path,
-    grace: Duration,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+    launch: AdmittedLaunch,
 ) -> Result<()> {
     create_state_dir(cache)?;
     if is_running(cache) {
@@ -309,11 +444,12 @@ async fn serve(
     cleanup_stale(cache)?;
 
     // Prepare resources before advertising a listener or daemon state.
-    let shared = crate::daemon::server::Shared::open_with_dense_policy(
+    let shared = crate::daemon::server::Shared::open_with_admitted_launch(
         cache,
         settings,
         pool_settings,
         dense_settings,
+        launch,
     )?;
 
     let endpoint = platform::daemon_endpoint(cache);
@@ -328,7 +464,7 @@ async fn serve(
         .map_err(|err| Error::internal_with_source("chmod 0600 socket", err))?;
     write_state(cache)?;
 
-    let result = accept_loop(shared, &listener, grace).await;
+    let result = accept_loop(shared, &listener).await;
 
     if let Err(err) = platform::remove(&endpoint) {
         eprintln!(
@@ -342,17 +478,105 @@ async fn serve(
     result
 }
 
+// Pure clock/event seam used by both session events and janitor observations.
+fn idle_deadline(
+    profile: &crate::daemon::settings::DaemonProfile,
+    current: Option<tokio::time::Instant>,
+    is_idle: bool,
+    now: tokio::time::Instant,
+    grace: Duration,
+) -> Option<tokio::time::Instant> {
+    match profile {
+        crate::daemon::settings::DaemonProfile::Shared if is_idle => {
+            current.or_else(|| Some(now + grace))
+        }
+        _ => None,
+    }
+}
+
+/// One coalesced attempt, polled in the accept loop rather than inside a tick.
+#[derive(Default)]
+struct Janitor {
+    attempt: Option<JanitorAttempt>,
+}
+
+type JanitorAttempt = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u64>>> + Send>>;
+
+impl Janitor {
+    fn tick(
+        &mut self,
+        shared: &Arc<crate::daemon::server::Shared>,
+        in_flight: &Arc<AtomicUsize>,
+        events: &mpsc::Sender<()>,
+    ) {
+        self.tick_with(shared, in_flight, events, |shared| {
+            shared.sessions.prune_dead()
+        });
+    }
+
+    fn tick_with(
+        &mut self,
+        shared: &Arc<crate::daemon::server::Shared>,
+        in_flight: &Arc<AtomicUsize>,
+        events: &mpsc::Sender<()>,
+        work: impl FnOnce(&crate::daemon::server::Shared) -> Vec<u64> + Send + 'static,
+    ) {
+        if self.attempt.is_some() {
+            return;
+        }
+        let shared = Arc::clone(shared);
+        let in_flight = Arc::clone(in_flight);
+        let events = events.clone();
+        self.attempt = Some(Box::pin(async move {
+            let permit = shared.workers.control().await?;
+            let activity = crate::daemon::request::Activity::new(&in_flight, &events, None);
+            crate::daemon::request::spawn(Some(permit), Some(activity), move || Ok(work(&shared)))
+                .await
+                .map_err(|error| Error::internal_with_source("session janitor task join", error))?
+        }));
+    }
+
+    async fn completed(&mut self) -> Result<Vec<u64>> {
+        let result = match self.attempt.as_mut() {
+            Some(attempt) => attempt.await,
+            None => std::future::pending().await,
+        };
+        self.attempt = None;
+        result
+    }
+}
+
 async fn accept_loop(
     shared: Arc<crate::daemon::server::Shared>,
     listener: &Listener,
-    grace: Duration,
 ) -> Result<()> {
-    let in_flight = Arc::new(AtomicUsize::new(0));
-    let (events_tx, mut events_rx) = mpsc::channel::<()>(MAX_EVENTS);
-    let connections = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-    let mut shutdown_signal = platform::ShutdownSignal::new()
+    let mut signal = platform::ShutdownSignal::new()
         .map_err(|err| Error::internal_with_source("install signal handlers", err))?;
+    let mut janitor = tokio::time::interval(Duration::from_millis(
+        shared.daemon_settings().janitor_interval_ms,
+    ));
+    janitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    janitor.tick().await;
+    accept_loop_with(shared, listener, signal.recv(), async || {
+        janitor.tick().await;
+    })
+    .await
+}
+
+// Private event seams drive the real loop deterministically without timer gates.
+async fn accept_loop_with(
+    shared: Arc<crate::daemon::server::Shared>,
+    listener: &Listener,
+    shutdown_signal: impl std::future::Future<Output = ()>,
+    mut tick: impl std::ops::AsyncFnMut(),
+) -> Result<()> {
+    tokio::pin!(shutdown_signal);
+    let settings = shared.daemon_settings().clone();
+    let grace = Duration::from_millis(settings.idle_grace_ms);
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let (events_tx, mut events_rx) = mpsc::channel::<()>(settings.max_events);
+    let connections = Arc::new(tokio::sync::Semaphore::new(settings.max_connections));
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let mut grace_deadline: Option<tokio::time::Instant> = None;
     // True when the loop ended because a graceful StopDaemon was requested;
     // signal-driven shutdown keeps the pre-T46 semantics (abandon in-flight).
@@ -360,9 +584,7 @@ async fn accept_loop(
 
     // Sessions whose frontend died without closing its socket must not keep
     // the daemon alive (NFR-9, C6).
-    let mut janitor = tokio::time::interval(JANITOR_INTERVAL);
-    janitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    janitor.tick().await;
+    let mut janitor = Janitor::default();
 
     loop {
         let grace_sleep = async {
@@ -372,7 +594,6 @@ async fn accept_loop(
             }
         };
         tokio::select! {
-            biased;
             accepted = listener.accept() => {
                 let stream = accepted
                     .map_err(|err| Error::internal_with_source("accept connection", err))?;
@@ -397,13 +618,8 @@ async fn accept_loop(
                 // Only live frontend sessions keep the daemon alive; plain
                 // connections (CLI handshakes) do not. A pending deadline is
                 // not extended by connection churn, only reset by a session.
-                if idle(&shared, &in_flight) {
-                    if grace_deadline.is_none() {
-                        grace_deadline = Some(tokio::time::Instant::now() + grace);
-                    }
-                } else {
-                    grace_deadline = None;
-                }
+                grace_deadline = idle_deadline(&settings.profile, grace_deadline,
+                    idle(&shared, &in_flight), tokio::time::Instant::now(), grace);
             }
             // An armed deadline must never cut off a session-less request or
             // a registration that is still running. The check happens in the
@@ -419,23 +635,26 @@ async fn accept_loop(
                 graceful_stop = true;
                 break;
             }
-            () = shutdown_signal.recv() => break,
-            _ = janitor.tick() => {
-                let shared_for_prune = Arc::clone(&shared);
-                let pruned = tokio::task::spawn_blocking(move || {
-                    shared_for_prune.sessions.prune_dead()
-                })
-                .await
-                .unwrap_or_default();
-                if !pruned.is_empty() {
-                    eprintln!("cleanup: pruned {} dead session(s)", pruned.len());
-                }
-                if idle(&shared, &in_flight) && grace_deadline.is_none() {
-                    grace_deadline = Some(tokio::time::Instant::now() + grace);
+            () = &mut shutdown_signal => break,
+            () = tick() => janitor.tick(&shared, &in_flight, &events_tx),
+            result = janitor.completed() => {
+                match result {
+                    Ok(pruned) => {
+                        if !pruned.is_empty() {
+                            eprintln!("cleanup: pruned {} dead session(s)", pruned.len());
+                        }
+                        grace_deadline = idle_deadline(&settings.profile, grace_deadline,
+                            idle(&shared, &in_flight), tokio::time::Instant::now(), grace);
+                    }
+                    Err(error) => eprintln!("warning: session janitor: {error}"),
                 }
             }
         }
     }
+    shared.workers.shutdown();
+    // Drop pending admission immediately; an already running closure keeps its
+    // own Activity/permit and remains visible to the physical drain below.
+    drop(janitor);
     // Shutdown was requested: the StopDaemon reply itself is bounded by
     // `DRAIN_TIMEOUT` (T46), but running requests must still deliver their
     // replies and publish their state before the runtime drops the handler
@@ -446,21 +665,18 @@ async fn accept_loop(
     if graceful_stop {
         let drained = async {
             while in_flight.load(Ordering::SeqCst) > 0 {
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(Duration::from_millis(settings.poll_interval_ms)).await;
             }
         };
         tokio::select! {
             () = drained => {}
-            () = shutdown_signal.recv() => {
+            () = &mut shutdown_signal => {
                 eprintln!("shutdown: signal while draining; abandoning in-flight requests");
             }
         }
     }
     Ok(())
 }
-
-/// How often dead frontends are reaped (NFR-9: cleanup within 2 s).
-const JANITOR_INTERVAL: Duration = Duration::from_millis(500);
 
 /// No live sessions and no request in flight.
 fn idle(shared: &crate::daemon::server::Shared, in_flight: &AtomicUsize) -> bool {
@@ -765,6 +981,32 @@ fn start_lock_path(cache: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn website_never_arms_an_idle_deadline_and_shared_keeps_original_deadline() {
+        use crate::daemon::settings::DaemonProfile;
+        let now = tokio::time::Instant::now();
+        let grace = Duration::from_millis(5_000);
+        let website = DaemonProfile::Website {
+            project_root: PathBuf::from("/fixed"),
+        };
+        assert_eq!(idle_deadline(&website, None, true, now, grace), None);
+        assert_eq!(idle_deadline(&website, Some(now), true, now, grace), None);
+        let deadline = idle_deadline(&DaemonProfile::Shared, None, true, now, grace);
+        assert_eq!(deadline, Some(now + grace));
+        assert_eq!(
+            idle_deadline(&DaemonProfile::Shared, deadline, true, now + grace, grace),
+            deadline
+        );
+        assert_eq!(
+            idle_deadline(&DaemonProfile::Shared, deadline, false, now, grace),
+            None
+        );
+        assert_eq!(
+            idle_deadline(&DaemonProfile::Shared, None, true, now, Duration::ZERO),
+            Some(now)
+        );
+    }
 
     #[test]
     fn state_file_lives_under_state_dir() {

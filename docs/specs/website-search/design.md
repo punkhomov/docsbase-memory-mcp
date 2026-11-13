@@ -170,3 +170,142 @@ including encoded frame JSON, preserving u64: cli-full's preserve_order changes
 ordering only. Node consumes the same fixture. Native jobs pack/extract locally,
 execute public ESM and typecheck an external consumer; no npm registry publishing.
 Real ~20k measurement deferred by user ruling in requirements delta, not verified.
+
+## Delta 2026-11-13 — ADDED: S-stage design baseline
+
+See [server-plan.md](server-plan.md) for implementation boundaries, APIs, tasks
+and challenge points. ConfigSpec already delegates to HybridSpec/SearchSpec;
+DaemonSpec joins that pattern. The config aggregate knows the owner type, but
+daemon defaults/validation/field views/impact remain in daemon/settings.rs.
+A second independent global-file parser is not introduced.
+
+The website profile is a typed launch policy for one explicit existing project.
+Its lexical-only, watcher-off and persistent lifecycle behavior are profile
+invariants. Operator resource settings remain configurable. A complete launch
+snapshot is passed to Shared before listener/state publication; project and
+hybrid admission precede registration/provider/index side effects. Legacy entry
+points remain explicit adapters, with prior behavior covered by tests.
+
+Worker admission is daemon-owned and independent from connection limits,
+PayloadBudget bytes and ReadPool handles. Search/control lanes have finite active
+and pending budgets; guards move into blocking closures and survive caller
+cancellation. Existing SearchOperation/scoped Activity are reused. This is the
+current blocking orchestration boundary; #81 will move remote waits outside it.
+
+Readiness is a bounded current observation of index health/generation and sync
+state/result. It is not a publication fence and promises no uninterrupted old
+generation serving. HTTP remains an external Node integration; daemon serves
+native IPC, not an embedded public HTTP search service.
+
+## Delta 2026-11-13 — MODIFIED: S architectural challenge decisions
+
+The amended [server-plan.md](server-plan.md) is the cold-start implementation
+contract for FR-S1a..S3b. Keep #143 -> narrow reviewed #147 -> integrated S1
+ordering. #147 supplies the explicit CLI sync selector; S1 supplies profile
+admission/no-fallback semantics. S1a/b/c have separate fresh reviews and one PR;
+accepted settings cannot merge before consumers. Same-PR source scan updates
+component-configuration/settings-inventory.md and state-dependencies.md.
+
+DaemonSpec owns explicit max_blocking_threads512 and actual Tokio count bounds,
+in addition to all earlier owner settings. Lifecycle configures the builder
+explicitly. For lexical Website, checked search-active + control-active + fixed
+sync1 + nominal helper headroom1 must fit executor capacity before writes or
+runtime construction. The closed inventory covers search, control metadata/
+bind/register, coalesced janitor and one deduplicated sync through physical
+completion. Native lexical IPC currently needs no filesystem/DNS/stdio helper;
+headroom is not permission for an untracked queue. Watcher/backfill/ANN/provider
+workers are gated off. Shared hybrid background/provider helper behavior remains
+legacy and is outside this physical reserve guarantee until #81, without a
+dense/index/provider implementation expansion. FD/connection, bytes and read
+handles remain independent limits (FR-S1b/c/d).
+
+Use new daemon/worker_admission.rs; preserve existing daemon/admission.rs::Lease
+and daemon-lifetime build/schema/lock callers. Search admission selects fair
+semaphore, original deadline and an additive Tokio Notify async wait on the
+same hybrid/work::Cancellation state. Publish cancellation before notifications;
+enable async registration before rechecking state so no cancellation window
+loses a wake. Existing blocking subscribers remain. Drop cleans pending/Notify
+ownership; a worker's permit/Activity stays in its closure. No polling or blocking
+bridge per waiter. Lifecycle retains one janitor state and polls its admission/
+completion alongside accept/shutdown/signals; busy ticks coalesce without await
+inside the tick branch or another retained task. Graceful drain counts the
+janitor and explicit sync to actual finish (FR-S1c/d).
+
+Global TOML profile is an atomic tagged Shared(no root)/Website(absolute root)
+value. CLI --project selects complete Website; --profile shared replaces the
+file profile, and CLI has full-profile precedence. Reject malformed explicit
+shapes and Website CLI mode without its CLI root; never fill it from a file.
+Compare canonical registered identity, preserving omitted/explicit Shared
+provenance. Optional CLI grace patch preserves file provenance on omission and
+explicit Shared0. Website rejects explicit idle-grace/detached flags. Fixed
+sync/status binding uses read-only existing-project lookup and BindReadOnly;
+typed live-daemon profile/admission denials never fall into Project direct-index
+fallback. Ordinary no-daemon Shared sync retains direct mode; globally selected
+Website/no-daemon and interrupted-daemon cases fail without replay/autostart.
+Backend rechecks every selected project before side effects (FR-S1a/b/d/S2b).
+
+Readiness cannot associate latest Done with current content using equal
+index_generation or timestamps: generation changes only for chunk-set changes,
+and direct partial/no-op indexing has no SyncJob today. S2 therefore waits for
+A's specific narrow all-writer outcome projection, not full CF11. Existing
+ProjectLease covers invalidating stale proof before mutation and coherent final
+status/outcome publication with existing generation, strict actual counts,
+completeness scope and attempt/job association. Direct CLI, Sync, incremental
+and recovery/rebuild writers all record quality. B consumes this read-only;
+no new search generation/publication lease or post-lease generation inference.
+If unavailable, park S2 and continue independent #81; S1 is unaffected.
+
+Only trustworthy current full-survey outcomes can establish Ready in this first
+adoption. Full surveys with skipped unchanged files can qualify; zero-error
+incremental/subset work cannot promote Unknown/Partial or carry completeness
+forward. Legacy/missing/malformed proof is UnknownNotReady and requires explicit
+Sync after the producer lands. Partial/errors>0/failed/interrupted, unreadable/
+absent/rebuild-needed index and active work are NotReady. Later direct success
+does not clear latest failed/partial Sync; a successful later full no-op Sync
+does. A later partial direct pass invalidates prior Done even at equal generation.
+The plan's truth table fixes stable reason/recovery behavior (FR-S2a/b).
+
+Observe authoritative project/status/generation/attempt/outcome/Sync metadata
+twice around one read-only ReadIndex health check, under existing project read/
+mutation admission and ReadPool/control budgets. End O1's short metadata read
+transaction before the health check; O2 uses a fresh snapshot. Any tuple change returns
+state_changed without retry. Never repair/open_or_create, initialize providers,
+register, take a writer lease or trigger hidden Sync. This bounded observation
+does not pin publication or old-generation availability during in-place writes.
+All these are planned contracts awaiting implementation evidence, with real
+~20k capacity/latency acceptance still user-deferred and unverified.
+
+## Delta 2026-11-13 — ADDED: S1a bounded launch/restart capture (#152)
+
+FR-S1b's single launch snapshot includes actual bounded I/O, not a metadata-only
+length check. Reuse/extract the existing take(cap+1) primitive from
+src/config/observe/source.rs into a crate-internal src/config/capture.rs helper.
+Legacy config/mod.rs::read_capped (global/project), daemon launch capture and
+restart checks use it with the explicit trusted MAX_STATE_BYTES=1MiB boundary.
+The observer adapter retains its current no-follow/regular-file/race checks and
+SourceState/CF5 behavior; sharing byte I/O does not activate its migration/v2 path.
+No consumer-local cap or file-defined bootstrap recursion is introduced.
+
+The helper checks cap+1 arithmetic, limits actual Read consumption/retained bytes
+to that amount, rejects >cap and derives any buffer sizing from the trusted cap,
+never metadata.len. Metadata is an optional early rejection, not proof of a
+complete bounded read. Parse resolved launch policy and compute its diagnostic
+stamp from the same captured bytes once, including legacy adapters. Post-startup
+checks apply the same actual byte limit before hashing and cannot bless a
+truncated over-budget prefix.
+
+Keep explicit Missing/Loaded(diagnostic digest)/Unavailable(reason) states,
+independent of parse-error diagnostics. Any current Unavailable reports a notice;
+only Missing->Missing and equal Loaded digests may report unchanged. Missing to
+oversized/unreadable is Unavailable and cannot disappear through None equality.
+Existing Shared fallback diagnostics and Website failure behavior remain.
+This diagnostic stamp is not CF5 authoritative source identity, publication or
+revalidation, and does not strengthen concurrent-write/ABA guarantees.
+
+S1a adds deterministic bounded-reader/growth/capture-sharing/restart-state tests
+and preserves config_observation behavior. The same S1 PR classifies I52's
+enforced current cap and diagnostic runtime state in settings-inventory and
+state-dependencies, without artifact invalidation. Full configurable bootstrap
+I52, source writes, CF5/v2 execution and strict activation stay deferred.
+Plan addendum scope/commands are in server-plan.md; original reviewer scoped
+PASS is required before runtime implementation. #152 closes with S1 integration.

@@ -6,6 +6,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::daemon::settings::{DaemonPatch, DaemonSettings, DaemonSpec};
 use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridCfg, HybridDefaults, HybridPatch, HybridSpec, ProvidersCfg};
 use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
@@ -16,6 +17,7 @@ use schema::{
 };
 
 pub mod bootstrap;
+pub(crate) mod capture;
 pub mod change;
 pub mod migrate;
 pub mod observe;
@@ -39,6 +41,8 @@ pub struct Config {
     pub max_docs_per_project: usize,
     /// Global-only policy for request deadlines and owned search payload admission.
     pub search: SearchSettings,
+    /// Complete global-only daemon launch and resource policy.
+    pub daemon: DaemonSettings,
     /// Register and index a project automatically on first connection (ADR-6: off).
     pub auto_index: bool,
     /// Hybrid retrieval feature flag (phase 2; off in v1).
@@ -72,7 +76,7 @@ pub struct ConfigOverrides {
 }
 
 /// Raw **global** file shape; every key optional so sources can be layered.
-/// Only the global file may carry `[providers.*]` (FR-1): a project file is
+/// Only the global file may carry `[daemon]`, `[search]` or `[providers.*]`: a project file is
 /// parsed by [`ProjectFileConfig`], which has no `providers` field, so a
 /// provider section in a project is a parse error, not a post-merge check.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -83,11 +87,12 @@ struct GlobalFileConfig {
     max_docs_per_project: Option<usize>,
     auto_index: Option<bool>,
     search: Option<SearchPatch>,
+    daemon: Option<DaemonPatch>,
     hybrid: Option<HybridPatch>,
     providers: Option<HashMap<String, toml::Table>>,
 }
 
-/// Raw **project** file shape excludes shared `search` policy and machine
+/// Raw **project** file shape excludes shared `daemon`/`search` policy and machine
 /// `providers` (FR-1, structural enforcement).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -109,6 +114,7 @@ impl ProjectFileConfig {
             hybrid: self.hybrid,
             providers: None,
             search: None,
+            daemon: None,
         }
     }
 }
@@ -236,6 +242,7 @@ impl Config {
         }
         crate::hybrid::config::validate_settings(&self.hybrid_cfg)?;
         SearchSpec::validate(&self.search, &Capabilities::current())?;
+        DaemonSpec::validate(&self.daemon, &Capabilities::current())?;
         Ok(())
     }
 }
@@ -243,7 +250,21 @@ impl Config {
 /// Reads the global config file (contains `[providers.*]`).
 fn read_global(path: &Path) -> Result<GlobalFileConfig> {
     let text = read_capped(path)?;
-    toml::from_str(&text)
+    parse_global(path, &text)
+}
+
+fn parse_global(path: &Path, text: &str) -> Result<GlobalFileConfig> {
+    decode_global_document(path, parse_global_document(path, text)?)
+}
+
+fn parse_global_document(path: &Path, text: &str) -> Result<toml::Table> {
+    toml::from_str(text)
+        .map_err(|err| Error::internal_with_source(format!("parse {}: {err}", path.display()), err))
+}
+
+fn decode_global_document(path: &Path, document: toml::Table) -> Result<GlobalFileConfig> {
+    toml::Value::Table(document)
+        .try_into()
         .map_err(|err| Error::internal_with_source(format!("parse {}: {err}", path.display()), err))
 }
 
@@ -280,18 +301,17 @@ fn read_project(path: &Path) -> Result<ProjectFileConfig> {
 
 /// Reads and caps a config file (repo-controlled, T48).
 fn read_capped(path: &Path) -> Result<String> {
-    match std::fs::metadata(path) {
-        Ok(metadata) if metadata.len() > crate::limits::MAX_STATE_BYTES => {
-            return Err(Error::internal(format!(
-                "config {} is {} bytes, over the {} byte limit",
+    let bytes = capture::read_file(path, crate::limits::MAX_STATE_BYTES).map_err(|err| {
+        Error::internal_with_source(
+            format!(
+                "read {} ({} byte limit): {err}",
                 path.display(),
-                metadata.len(),
                 crate::limits::MAX_STATE_BYTES
-            )));
-        }
-        _ => {}
-    }
-    std::fs::read_to_string(path)
+            ),
+            err,
+        )
+    })?;
+    String::from_utf8(bytes)
         .map_err(|err| Error::internal_with_source(format!("read {}: {err}", path.display()), err))
 }
 
@@ -301,6 +321,7 @@ struct ConfigDefaults {
     initial: Config,
     hybrid: HybridDefaults,
     search: SearchSettings,
+    daemon: DaemonSettings,
 }
 struct ConfigSpec;
 impl SettingsSpec for ConfigSpec {
@@ -319,16 +340,19 @@ impl SettingsSpec for ConfigSpec {
         let mut fields = Self::FIELDS.to_vec();
         fields.extend_from_slice(HybridSpec::FIELDS);
         fields.extend_from_slice(SearchSpec::FIELDS);
+        fields.extend_from_slice(DaemonSpec::FIELDS);
         fields
     }
     fn defaults(context: &DefaultsContext) -> Self::Defaults {
         let hybrid = HybridSpec::defaults(context);
         let search = SearchSpec::defaults(context);
+        let daemon = DaemonSpec::defaults(context);
         let initial = Config {
             ignores: Vec::new(),
             max_file_size: 1_048_576,
             max_docs_per_project: 20_000,
             search: SearchSpec::initial(&search),
+            daemon: DaemonSpec::initial(&daemon),
             auto_index: false,
             hybrid: false,
             hybrid_cfg: HybridSpec::initial(&hybrid),
@@ -338,6 +362,7 @@ impl SettingsSpec for ConfigSpec {
             initial,
             hybrid,
             search,
+            daemon,
         }
     }
     fn initial(defaults: &Self::Defaults) -> Config {
@@ -389,6 +414,15 @@ impl SettingsSpec for ConfigSpec {
                 origins,
             )?;
         }
+        if let Some(patch) = patch.daemon {
+            DaemonSpec::overlay(
+                &mut settings.daemon,
+                patch,
+                &defaults.daemon,
+                source,
+                origins,
+            )?;
+        }
         Ok(())
     }
     fn validate(settings: &Config, _: &Capabilities) -> Result<()> {
@@ -414,6 +448,7 @@ impl ConfigSpec {
             view.push(key, value, None)?;
         }
         crate::hybrid::config::view::fields(&settings.hybrid_cfg, view)?;
-        SearchSpec::view_fields(&settings.search, view)
+        SearchSpec::view_fields(&settings.search, view)?;
+        DaemonSpec::view_fields(&settings.daemon, view)
     }
 }

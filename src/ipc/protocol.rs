@@ -37,6 +37,10 @@ pub(crate) fn ensure_search_query_mode(
     Ok(())
 }
 
+/// Marks an ACTIVE fixed lexical Website daemon, not mere implementation support.
+/// Absent for Shared. Additive Hello marker; wire shape and required SDK caps stay unchanged.
+pub const ACTIVE_WEBSITE_CAPABILITY: &str = "active-website-profile-v1";
+
 /// Durations from one caller's original operation, never fresh stage budgets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

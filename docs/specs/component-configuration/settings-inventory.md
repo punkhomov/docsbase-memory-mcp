@@ -250,3 +250,111 @@ I13 factor4 используется также для bounded refill growth; н
 Candidate budget — не exhaustive recall/RSS/time claim; payload admission и
 original deadline продолжают действовать. RRF+cap один раз получает dense до
 effective ceiling, без повторного vector scan при lexical widening.
+
+## Delta 2026-11-13 — #79 S1a: daemon owner и bounded launch capture
+
+`daemon::settings::DaemonSpec` определяет один каталог defaults, complete
+`DaemonSettings`, global-only `DaemonPatch`, units/provenance, structural/count/
+duration validation и pure runtime assessment. `ConfigSpec` только компонует
+owner. `[daemon]` структурно запрещён в project files; v1/v2 source preview и
+source migration сохраняют глобальные значения/provenance без runtime activation.
+Все принятые изменения требуют restart; live executor unsupported, persisted
+artifacts не инвалидируются. Compatibility constants ссылаются на owner catalog.
+
+| Inventory | S1a adoption / consumer / units | Что ещё не завершено |
+|---|---|---|
+| I44 | `daemon.profile`: complete tagged Shared/Website, Name, D; whole-profile CLI patch, provenance default/global/CLI | В S1a только resolution/view. Website startup явно отклоняется до resources; S1b добавляет fixed-project/lexical/watcher-off/no-idle invariants и только затем снимает отказ. Отдельного watcher bool нет |
+| I45 | `daemon.idle_grace_ms=5000`, Milliseconds, D; lifecycle получает complete policy. Omitted CLI grace сохраняет file/default provenance; explicit Shared0 допустим | START10s/STOP15s/no-listener2s остаются прежними deferred caller/bootstrap policy |
+| I46 | `daemon.max_connections=64`, `max_events=1024`, `max_sessions=256`, Count, D; реальные accept-loop Semaphore/event channel/SessionRegistry используют overrides | Положительные counts проверены против actual Tokio MAX_PERMITS/channel bound и checked session allocation; worker admission отдельно |
+| I47 | `daemon.poll_interval_ms=50`, `janitor_interval_ms=500`, `reply_drain_ms=5000`, `drain_poll_ms=20`, Milliseconds, D; lifecycle/server timers используют complete policy | Coalesced nonblocking janitor и physical Activity completion относятся к S1c; S1a меняет policy forwarding, не orchestration |
+| I63 | `daemon.max_blocking_threads=512`, Count, D; lifecycle явно задаёт pinned Tokio1.54.1 Builder capacity. Existing BootstrapContext даёт captured Tokio async-worker count: checked blocking+async sum до lease/resources, ровно этот count передаётся worker_threads без повторного env read | Async-worker env/CPU default/source переиспользованы из bootstrap resolver; новые file keys/whitelist/defaults не вводятся. Остальной bootstrap adoption deferred; Shared hybrid reserve не обещается |
+| I66 subset | `daemon.search_active=4`, `search_pending=32`, `control_active=2`, `control_pending=16`, Count; `control_timeout_ms=2000`, Milliseconds, D; owner validation/provenance/views/complete forwarding | Физические consumers/zero-pending refusal/FIFO/cancellation подключаются в S1c. Эти accepted fields не могут ship до этого; provider/background orchestration — #81 |
+| I52 subset / #152 | Существующий trusted `limits::MAX_STATE_BYTES=1MiB` теперь фактически ограничивает global/project reads, one launch capture и restart hashing через общий `config::capture::read_bounded`; actual consumption/retention <= checked budget+1 | Per-type configurable bootstrap budgets остаются deferred; cap не читается из ограничиваемого файла. Observer сохраняет собственные no-follow/regular/race/CF5 semantics |
+
+Lexical executor sum проверяется checked arithmetic:
+`search-active + control-active + fixed sync1 + nominal helper1 <= blocking capacity`.
+Две единицы — closed-inventory
+implementation invariants, не дополнительные settings и не разрешение untracked
+work. Сам physical reserve и watcher/provider zero-classes требуют S1b/c и
+повторного source scan перед единственным S1 merge. Connection fds, payload bytes
+и ReadPool — независимые budgets; real-corpus capacity/RSS/latency не измерены.
+**MODIFIED 2026-11-13:** прежняя platform audit предпосылка S1c заменена
+уточнённой application ownership границей в delta «S1c application worker scope»
+ниже; platform adapter работа независима и не блокирует эту поставку.
+
+Launch parse и baseline diagnostic digest используют одни captured bytes, без
+повторного startup file read. Missing/Loaded/Unavailable различаются; текущий
+Unavailable всегда даёт notice. Это runtime/diagnostic state, не CF5 precondition,
+generation identity или publication edge. Malformed-global legacy warning/default
+adapter сохранён; strict launch отклоняет ошибки до cache/admission/listener writes.
+
+Остальные I41..I58 subsets остаются deferred: watcher debounce/queues/traversal,
+installer waits, IPC/MCP caller timeouts, config/model lock retries, per-type
+bootstrap/log/VCS budgets, root/runtime discovery, updater/debug controls.
+S1a не означает full CF12 adoption или завершение #79. Source scan:
+`rg -n 'const |DEFAULT_|Semaphore::new|mpsc::channel|spawn_blocking|block_in_place|tokio::fs|thread::spawn|thread::Builder' src/daemon src/platform src/hybrid src/watch src/web src/mcp`.
+
+S1a review round1: new daemon-owner errors и любой error после распознанного
+Website fail closed до legacy fallback/resources. Старые malformed Shared sources
+сохраняют warning/default/diagnostic adapter. Applicability/provenance marker не
+входит в effective runtime identity/impact; omitted и explicit Shared5000 дают
+одну effective policy. Reply-drain sleep ограничен remaining original deadline,
+даже если drain-poll больше timeout. Это уточнение существующих consumer contracts,
+без новых settings, artifact edges или S1c physical-drain adoption.
+
+
+## Delta 2026-11-13 — #79 S1b fixed lexical activation
+
+I44 is now consumed by canonical existing-indexed-project admission, complete CLI
+profile overlays, immutable watcher ownership, reader/session/tool scope and the
+lifecycle idle-deadline decision. The S1a temporary startup refusal is removed
+only with these gates. No independent watcher toggle or idle default is added.
+I47 retains Shared grace including explicit0; Website cannot arm an idle timer.
+Profile and all daemon operational policy remain restart-immutable; no index,
+vector, ANN, generation or CF5 publication edge is introduced by profile change.
+
+The additive `active-website-profile-v1` Hello marker reports the active Website
+profile, not a capability to enable it. It is a wire identity, not a configurable
+operational limit. Shared Hello and existing required SDK capabilities remain.
+Pre-admission SQLite reads share the real readonly/schema/WAL implementation
+with diagnostics disabled only for the narrow crate-internal admission entry;
+ordinary readonly schema-conflict diagnostics retain their existing behavior.
+
+Website composes lexical stages and disabled ANN policy without provider
+construction, vector-store opens, ANN refresh/backfill or watcher producers.
+Existing DenseCache/SearchOperation/generation/singleflight and sync-job dedup/
+ProjectLease mechanisms remain. I46/I48..I51 physical active/pending/control
+admission and coalesced janitor remain S1c; accepted unwired settings cannot
+ship before that task and integrated final review. **MODIFIED 2026-11-13:**
+platform adapter ownership is independent, outside S1c (see scope delta below).
+
+
+## Delta 2026-11-13 — MODIFIED: S1c application worker scope
+
+The I63/I66 sum and closed inventory describe application-owned Tokio blocking
+work only. They do not bound dependency-owned/native process resources or prove
+IPC retirement/control availability. Prior text making platform adapter work an
+S1c prerequisite is superseded; that independent work is parked outside S1. The
+functional worker change keeps explicit B, validated S/C active/pending counts,
+original search deadlines, same-state cancellation and closure-held ownership.
+No new configurable defaults or artifact invalidation edges are introduced.
+
+
+### Delta 2026-11-13 — S1c actual consumers
+
+I66 search/control active+pending counts now construct the two fair Semaphore
+lanes in WorkerAdmission from complete DaemonSettings; zero pending keeps
+immediate admission when active is free. control_timeout_ms sets the absolute
+control admission deadline; search uses its existing SearchOperation deadline
+and same-state cancellation. Bind/register and metadata/status/panel share C.
+I47 janitor ticks install at most one tracked admission/completion future, polled
+beside accept/Stop/signals; timer branches never await the blocking work.
+
+I63 keeps the explicit Tokio B and checked application inventory sum. The sole
+production daemon spawn_blocking call is request::spawn: permit and Activity
+move into execution through finish/unwind. Website sync uses its fixed singleton
+and parent Activity; watcher/backfill/ANN/provider classes stay disabled there.
+Legacy Shared background sync can use the helper without an application lane
+permit; its background/provider orchestration remains outside this reserve proof.
+Connection/session slots, ReadPool handles and payload bytes stay independent.
+All adopted policy changes require restart; no index/vector/ANN invalidation.

@@ -93,3 +93,107 @@ jobs already build it; preserve CLI-only builds, compile checks and selected tes
 targets that never execute the Node E2E. Verify an isolated source copy fails its
 public package self-reference without `dist`, then succeeds after the actual
 package build; validate workflow syntax without repeating unrelated Cargo suites.
+
+## Delta 2026-11-13 — S tasks
+
+The coarse follow-up list is refined by server-plan.md: S1a owner settings and
+launch snapshot; S1b fixed lexical profile and watcher/lifecycle gates; S1c bounded
+physical worker admission; S2 readiness/explicit sync; S3 Node HTTP example and
+original deadline integration; S4 native acceptance/docs. Review each task
+independently. Real-corpus FR-S4 remains deferred, not renamed into synthetic
+acceptance. No S implementation has begun at this baseline.
+
+## Delta 2026-11-13 — MODIFIED: S challenge completion gates
+
+Use the amended [server-plan.md](server-plan.md) task sections for exact files,
+interfaces, RED cases and copyable verification commands. These commands are
+future implementation gates; no Cargo/build/test execution is claimed here.
+
+1. **Prerequisites:** reviewed #143 then narrow
+   [#147](https://github.com/punkhomov/docsbase-memory-mcp/issues/147) explicit
+   sync path fix before S1 integration. #147 does not implement Website policy.
+2. **S1a / FR-S1b:** DaemonSpec owns explicit max_blocking_threads512, Tokio
+   MAX_PERMITS/channel bounds and checked lexical executor sums. Pin tagged
+   profile whole-value CLI overlay, canonical roots, omitted/explicit provenance
+   and Shared grace0. Create daemon_settings target; use config/config_resolution/
+   config_runtime/config_view plus lean checks. Source-scan and update component
+   settings inventory/dependency matrix in this same PR, including adopted vs
+   deferred I44..I47 subsets, worker limits, helper invariants and restart effects.
+3. **S1b / FR-S1a,d/S2b:** server_profile/cli_routing/lifecycle/watcher/error_codes
+   targets cover typed denial without direct fallback, fixed-path bind from
+   unrelated cwd, no-daemon ordinary direct vs Website cases, interrupted daemon
+   with no replay, backend watcher/provider gates and Shared compatibility.
+4. **S1c / FR-S1c,d:** create daemon/worker_admission.rs and server_workers target;
+   preserve existing daemon/admission.rs::Lease and admission/admission_ux targets.
+   Extend hybrid/work.rs with same-state Notify async cancellation and keep
+   blocking subscribers; test lost-wake races and drop cleanup with no bridge or
+   polling. Wire all inventory paths, actual sync/Activity completion and explicit
+   executor capacity. One coalesced janitor state polls control admission/finish
+   beside accept/stop/signals. Gate workers to prove physical control entry while
+   search/sync are full and loop progress under busy janitor/control. ipc_server/
+   lifecycle plus full Clippy/fmt complete the named gates. Shared hybrid legacy
+   background/provider behavior is outside the lexical physical reserve proof.
+5. **S1 integration:** each subtask has a separate fresh review; all owner fields
+   are wired and final inventory/matrix reconciled before the single S1 PR merges.
+6. **S2 / FR-S2a,b:** gated only on A's specific all-writer outcome projection
+   under existing ProjectLease, with coherent status/outcome, attempt/scope/job
+   attribution, strict actual counts and existing generation. No B store/index
+   implementation or equal-generation/timestamp substitute. Full survey with
+   skipped>0 may qualify; zero-error subset/incremental never promotes Unknown/
+   Partial. Failed/partial latest Sync requires later successful full Sync even
+   after direct success. server_readiness target covers every truth-table row,
+   unchanged-generation partial direct index, successful no-op Sync recovery,
+   missing/malformed/legacy proof, restart, index health and changed metadata.
+   Enforce two observations + one read-only health check, no retries/Repair.
+   Update ipc_protocol/node_client Rust fixture and client guards/tests; build
+   client before native execution. If A is unready, park S2 and continue independent
+   #81; S1 does not depend on this or full CF11.
+7. **S3 / FR-S3a:** website_http target runs the bounded example with the real
+   daemon. Named client/example Node scripts check/build/test/format:check; wire
+   generated artifacts into all full/native test entrypoints. Preserve original
+   caller budget/abort/deadline through synchronous work, no replay/tools/roots.
+8. **S4 / FR-S3b/SC-S2:** full cli-full + lean suites, opt-in target Clippy,
+   fmt/diff, client/example scripts, exact-head docs/linux/macos/windows and final
+   test-inventory/artifact audit. Fresh whole-diff review; real ~20k remains
+   user-deferred/unverified, with no synthetic capacity claim.
+
+## Delta 2026-11-13 — ADDED: S1a #152 bounded-read slice
+
+Before S1a runtime coding, obtain the original reviewer's scoped addendum PASS.
+Include #152 in the same integrated S1 PR; do not reopen closed S plan findings
+or create a standalone PR unless implementation proves it necessary.
+
+Extend S1a files with src/config/capture.rs (crate-internal shared bounded byte
+reader), src/config/mod.rs, src/config/observe/source.rs and daemon/server.rs
+launch/restart stamp integration. Reuse/extract the observer's existing bounded
+take(cap+1) primitive while preserving its no-follow/race/CF5 adapter behavior.
+Use explicit current MAX_STATE_BYTES=1MiB, no new private default/configurable
+bootstrap field. Parse startup settings and stamp from one capture; bounded
+post-startup hashing distinguishes Missing/Loaded/Unavailable and always reports
+current Unavailable. Diagnostic identity remains separate from CF5 authority.
+
+RED then GREEN in config/capture unit cases plus daemon_settings/config/
+config_observation targets: actual CountingRead/unknown-length consumption at
+most budget+1; source growth after metadata admission; misleading metadata length
+does not determine allocation; startup parse+stamp share bytes despite later
+file mutation; Missing -> oversized/unreadable restart notice; unchanged Loaded/
+Missing and changed/deleted file behavior. Use tiny trusted budgets, explicit
+seams/counters and bounded fixtures, no huge-allocation/RSS/timing thresholds.
+Copyable extra verification commands are in server-plan.md's #152 addendum;
+its existing S1a/config gates still apply. Commands are planned, not executed.
+
+Update S1's inventory/dependency matrix classification: current I52 bootstrap1MiB
+is shared and actually enforced; configurable bootstrap I52 remains deferred.
+Launch capture/restart diagnostics have runtime/diagnostic-only effects, no
+metadata/index/vector/ANN invalidation or CF5 publication dependency. No CF5/v2
+executor, source write or strict activation is in this task.
+
+
+## Delta 2026-11-13 — MODIFIED: functional delivery and proof boundary
+
+S1c remains the minimal approved application worker admission/janitor task: no
+platform adapter redesign, new transport mechanism or transport research gate.
+Its explicit executor inventory/sum bounds application-owned Tokio work, with
+original deadlines and closure-held permits/Activity; no process-wide/native IPC
+retirement/control availability claim. Complete S1a/b/c and #152 in one functional
+server PR, then readiness+HTTP in a second functional PR to close #79.

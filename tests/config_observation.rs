@@ -84,6 +84,16 @@ fn write_global(root: &Path, source: impl AsRef<[u8]>) {
     fs::create_dir_all(root.join("config")).unwrap();
     fs::write(root.join("config/config.toml"), source).unwrap();
 }
+
+#[test]
+fn shared_byte_reader_keeps_observer_limit_failure_and_no_write_policy() {
+    let root = tempfile::tempdir().unwrap();
+    write_global(root.path(), vec![b' '; 1_048_577]);
+    let view = accepted(root.path());
+    assert_eq!(view["sources"][0]["state"]["kind"], "unavailable");
+    assert_eq!(view["sources"][0]["state"]["value"], "limit_exceeded");
+    assert!(!root.path().join("cache").exists());
+}
 fn register(root: &Path, name: &str) -> PathBuf {
     let path = root.join(name);
     fs::create_dir_all(&path).unwrap();

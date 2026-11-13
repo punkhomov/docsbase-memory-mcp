@@ -111,6 +111,10 @@ impl AsyncClient {
     /// Returns transport/protocol errors or the daemon's advertised category.
     pub async fn handshake(&mut self, cwd: &Path) -> Result<()> {
         self.handshake_registry().await?;
+        self.register_session(cwd).await
+    }
+
+    pub(crate) async fn register_session(&mut self, cwd: &Path) -> Result<()> {
         value(
             self.call(Request::RegisterSession {
                 pid: std::process::id(),
@@ -146,6 +150,18 @@ impl AsyncClient {
     /// # Errors
     /// Unsupported capability, unknown project, or transport failure.
     pub async fn bind_read_only(&mut self, project_id: Option<i64>) -> Result<()> {
+        self.ensure_panel_read()?;
+        value(
+            self.call(Request::BindReadOnly {
+                pid: std::process::id(),
+                project_id,
+            })
+            .await?,
+        )
+        .map(|_| ())
+    }
+
+    pub(crate) fn ensure_panel_read(&self) -> Result<()> {
         if !self
             .capabilities
             .iter()
@@ -155,14 +171,7 @@ impl AsyncClient {
                 message: "panel-read-v1 unsupported".into(),
             });
         }
-        value(
-            self.call(Request::BindReadOnly {
-                pid: std::process::id(),
-                project_id,
-            })
-            .await?,
-        )
-        .map(|_| ())
+        Ok(())
     }
 
     /// Calls a generic tool under the caller's externally applied time budget.

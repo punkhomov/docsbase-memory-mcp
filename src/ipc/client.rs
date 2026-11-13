@@ -22,23 +22,43 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connects to the daemon endpoint under `cache`.
-    ///
-    /// Returns `None` when no daemon is listening (missing or stale socket),
-    /// which callers treat as "fall back to direct mode".
+    /// Legacy lossy connection probe. Strict CLI routing uses [`Self::try_connect`].
+    /// Returns `None` for both initial absence and post-connect setup failure.
     #[must_use]
     pub fn connect(cache: &Path) -> Option<Self> {
-        // No existence pre-check: on Windows a named pipe has no file to
-        // stat, and a failed connect already means "no daemon".
+        Self::try_connect(cache).ok().flatten()
+    }
+
+    /// Connects without confusing a connected setup failure with initial absence.
+    ///
+    /// # Errors
+    /// Returns transport errors from configuring an already connected stream.
+    pub fn try_connect(cache: &Path) -> Result<Option<Self>> {
+        Self::connect_with_setup(
+            cache,
+            |stream| stream.set_read_timeout(Some(IO_TIMEOUT)),
+            |stream| stream.set_write_timeout(Some(IO_TIMEOUT)),
+        )
+    }
+
+    // Narrow deterministic setup seam; native connection and frame state stay real.
+    pub(crate) fn connect_with_setup(
+        cache: &Path,
+        read_timeout: impl FnOnce(&BlockingStream) -> std::io::Result<()>,
+        write_timeout: impl FnOnce(&BlockingStream) -> std::io::Result<()>,
+    ) -> Result<Option<Self>> {
+        // No existence pre-check: named pipes have no file to stat.
         let endpoint = platform::daemon_endpoint(cache);
-        let stream = platform::connect_blocking(&endpoint).ok()?;
-        stream.set_read_timeout(Some(IO_TIMEOUT)).ok()?;
-        stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
-        Some(Self {
+        let Ok(stream) = platform::connect_blocking(&endpoint) else {
+            return Ok(None);
+        };
+        read_timeout(&stream).map_err(io_error)?;
+        write_timeout(&stream).map_err(io_error)?;
+        Ok(Some(Self {
             stream: BufReader::new(stream),
             capabilities: Vec::new(),
             poisoned: false,
-        })
+        }))
     }
 
     /// Adjusts the read timeout for one exchange (long tools need longer).
@@ -148,7 +168,16 @@ impl Client {
     /// unregistered project reply.
     pub fn handshake(&mut self, cwd: &Path) -> Result<()> {
         self.handshake_registry()?;
+        self.register_session(cwd)
+    }
 
+    pub(crate) fn active_website(&self) -> bool {
+        self.capabilities
+            .iter()
+            .any(|capability| capability == protocol::ACTIVE_WEBSITE_CAPABILITY)
+    }
+
+    pub(crate) fn register_session(&mut self, cwd: &Path) -> Result<()> {
         match self.call(Request::RegisterSession {
             pid: std::process::id(),
             cwd: cwd.to_path_buf(),

@@ -8,6 +8,21 @@ fn write(dir: &Path, name: &str, body: &str) {
     fs::write(dir.join(name), body).expect("write fixture");
 }
 
+#[test]
+fn legacy_global_and_project_reads_enforce_the_same_existing_byte_boundary() {
+    let global = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let oversize = vec![b' '; 1_048_577];
+    for (path, name) in [
+        (global.path(), "config.toml"),
+        (project.path(), ".docsbase.toml"),
+    ] {
+        fs::write(path.join(name), &oversize).unwrap();
+        assert!(Config::load_from(global.path(), Some(project.path())).is_err());
+        fs::remove_file(path.join(name)).unwrap();
+    }
+}
+
 /// Serializes the env-mutating tests in this binary (round-6 deepseek-2):
 /// the harness runs tests on parallel threads, so an unlocked `set_var`
 /// both races a sibling's `getenv` (UB) and lets one test restore the real

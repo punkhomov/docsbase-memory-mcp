@@ -130,3 +130,50 @@ server mode допустимость maintenance/503 при sync фиксиру�
 пула при opt-in cap. Никакой индекс/metadata/vector/query cache migration или
 инвалидации не требуется; dense query identity остаётся model+query. Каждый
 refill снова допускается под исходной generation/config/deadline.
+
+## Delta 2026-11-13 — #79 S1a / #152
+
+| Изменение / state | Runtime | Metadata / chunks | Lexical | Vectors / query | ANN |
+|---|---|---|---|---|---|
+| Daemon profile, Shared idle grace, connection/event/session caps | restart immutable DaemonSettings; S1b: Website фиксирует existing indexed ID/root, lexical-only, watcher-off, no idle deadline | — | — | — | — |
+| Lifecycle poll/janitor/reply-drain/drain-poll intervals | restart timers; physical janitor ownership остаётся S1c | — | — | — | — |
+| Search/control active/pending/timeout и blocking executor capacity | restart admission/runtime; physical lane consumers требуют S1c перед ship | — | — | — | — |
+| One bounded launch capture и baseline digest | runtime policy из тех же captured bytes; no second startup read | — | — | — | — |
+| Bounded restart stamp Missing/Loaded/Unavailable | diagnostic notice/restart-required, Unavailable никогда не приравнивается к Missing | — | — | — | — |
+| I52 existing trusted1MiB actual byte boundary | reject oversize до parse/hash; bootstrap cap пока не configurable | — | — | — | — |
+
+DaemonSpec assessment адресует только `Runtime("daemon")`, с unsupported live
+executor/restart requirement; не запускает миграцию и не активирует v2. Source
+preview/migration сохраняют owner data и provenance. Bounded primitive общий с
+observer, но observer adapter сохраняет отдельные no-follow/regular-file/race
+checks и SourceState/CF5 policy. Launch/restart digest не является source apply
+precondition, prepare revalidation, search generation либо publication authority;
+concurrent-write/ABA guarantees не усиливаются. Существующий admission::Lease,
+SearchOperation/generation/singleflight не заменяются. Итоговая S1 матрица и
+closed-inventory scan повторяются после S1b/c; full CF12/#79 не объявлены готовыми.
+
+
+### Delta 2026-11-13 — S1b profile consumers
+
+Profile changes remain runtime-only restart changes. Canonical fixed project and
+its pure startup policy are admitted before lease/runtime/listener/writer setup,
+then forwarded once. Read-only binds and metadata/sync routes recheck identity;
+project reopen keeps the existing revision/preparation authority while rejecting
+hybrid before factory/vector/watch work. Status/panel select the admitted project
+set before runtime/coverage callbacks. No new artifact invalidation edge, CF5
+consent executor, v2 activation or readiness DTO is adopted by this slice.
+
+
+### Delta 2026-11-13 — S1c ownership boundary
+
+Admission/cancellation/janitor ownership is runtime-only and restart-immutable.
+The checked executor sum covers application-owned blocking closures through
+finish/unwind. No persisted artifact edge, CF5 publication authority or
+process-wide/native transport resource guarantee follows from this bound.
+
+
+S1c actual consumers: search/control counts and control timeout construct
+WorkerAdmission; the original SearchOperation remains the deadline/cancellation
+authority. Actual closure guards own capacity/Activity until finish. Janitor
+coalescing and fixed sync ownership are transient daemon state, with no persisted
+artifact edge; connection/session/reader/payload accounting remains separate.

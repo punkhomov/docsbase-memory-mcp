@@ -8,7 +8,13 @@ use crate::error::{Error, Result};
 /// One operation's cancellation state, independent of configuration/time budgets.
 #[derive(Clone, Default)]
 pub struct Cancellation {
-    state: Arc<Mutex<State>>,
+    state: Arc<SharedState>,
+}
+
+#[derive(Default)]
+struct SharedState {
+    data: Mutex<State>,
+    notify: tokio::sync::Notify,
 }
 
 #[derive(Default)]
@@ -27,15 +33,33 @@ impl Cancellation {
     /// Cancels this operation and wakes its current subscribers.
     pub fn cancel(&self) {
         let listeners = {
-            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut state = self
+                .state
+                .data
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             if state.cancelled {
                 return;
             }
             state.cancelled = true;
             std::mem::take(&mut state.listeners)
         };
+        self.state.notify.notify_waiters();
         for wake in listeners.into_iter().filter_map(|wake| wake.upgrade()) {
             wake.notify();
+        }
+    }
+
+    /// Waits on this token's permanent state without occupying a blocking worker.
+    /// Dropping this future unregisters its Notify waiter.
+    pub async fn cancelled(&self) {
+        let notified = self.state.notify.notified();
+        tokio::pin!(notified);
+        // Register before checking the bit: cancel between these operations
+        // either sets the bit we read or wakes this already enabled waiter.
+        notified.as_mut().enable();
+        if !self.is_cancelled() {
+            notified.await;
         }
     }
 
@@ -43,6 +67,7 @@ impl Cancellation {
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.state
+            .data
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .cancelled
@@ -72,7 +97,11 @@ impl Cancellation {
         });
         let weak = Arc::downgrade(&wake);
         let cancelled = {
-            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut state = self
+                .state
+                .data
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             if !state.cancelled {
                 state.listeners.push(weak.clone());
             }
@@ -94,6 +123,7 @@ impl Cancellation {
     #[cfg(test)]
     pub(crate) fn subscriber_count(&self) -> usize {
         self.state
+            .data
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .listeners
@@ -140,9 +170,58 @@ impl Drop for Subscription {
     fn drop(&mut self) {
         self.cancellation
             .state
+            .data
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .listeners
             .retain(|wake| !Weak::ptr_eq(wake, &self.wake));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn async_drop_unsubscribes_without_a_blocking_listener() {
+        let token = Cancellation::new();
+        let listener = token.listen();
+        assert_eq!(token.subscriber_count(), 1);
+        let wake_count = Arc::new(Wakes::default());
+        let waker = Waker::from(Arc::clone(&wake_count));
+        let mut context = Context::from_waker(&waker);
+        let mut waiting = Box::pin(token.cancelled());
+        assert!(waiting.as_mut().poll(&mut context).is_pending());
+        assert_eq!(token.subscriber_count(), 1);
+        assert_eq!(Arc::strong_count(&wake_count), 3);
+        drop(waiting);
+        assert_eq!(Arc::strong_count(&wake_count), 2);
+        token.cancel();
+        listener.wait().unwrap();
+        assert_eq!(wake_count.0.load(Ordering::SeqCst), 0);
+        assert_eq!(token.subscriber_count(), 0);
+        token.cancelled().await;
+    }
+
+    #[test]
+    fn cancellation_after_construction_before_registration_is_ready() {
+        let token = Cancellation::new();
+        let mut waiting = Box::pin(token.cancelled());
+        token.cancel();
+        let mut context = Context::from_waker(Waker::noop());
+        assert_eq!(waiting.as_mut().poll(&mut context), Poll::Ready(()));
     }
 }
