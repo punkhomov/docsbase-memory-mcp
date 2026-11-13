@@ -421,3 +421,26 @@ authoritative executable count. Evidence/report/manifest are in
 Ruling: scope remains S1b only. S1c physical admission/janitor/#155, integrated
 final/native S1 review and the single public S1 PR remain pending. This local
 checkpoint does not claim S2 readiness, full CF12/#79 completion or ship approval.
+
+### 2026-11-13 — S1b fix round 1, I1 verified; scoped rereview pending
+
+The original S1b task review found one Important I1: blocking native connection
+could succeed, then timeout setup failure collapsed into absence and allowed CLI
+direct indexing. `Client::try_connect` now preserves setup failures as Transport;
+strict sync/status/list use it. The legacy Option probe retains its documented
+lossy compatibility behavior. Async search/Web have no analogous client-layer
+post-connect setup step and remain unchanged.
+
+Actual deterministic semantic RED: injected setup failure after real native
+connect returned absence and invoked the fixture-owned CLI direct action,
+creating registry state (2 failed / 2 controls passed). GREEN: all4 new tests
+pass, covering read/write setup errors, no direct action/state before Hello,
+actual absence and successful setup ordering. Affected cli-full suites pass61
+(CLI routing18/read14, profile6, IPC server18, error5); current all-target Clippy,
+fmt and diff checks pass. No full1496 rerun: combined S1 verification follows
+worker integration. Evidence is `/workspace/scratch/agent-b/79/s1b/fix1/`.
+
+Task S1b remains pending original scoped rereview PASS/APPROVED. Deferred Minor
+M1 (#155 wording) stays with the upcoming functional S1c commit; this fix changes
+no Windows transport source, setting, feature, fixture, golden, threshold or
+ignore identity and creates no separate documentation PR.

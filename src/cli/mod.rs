@@ -25,6 +25,10 @@ pub(crate) mod test_env {
     }
 }
 
+#[cfg(test)]
+#[path = "connection_tests.rs"]
+mod connection_tests;
+
 pub mod config;
 pub mod connect;
 pub mod index;
@@ -348,9 +352,26 @@ fn sync(
         .canonicalize()
         .with_context(|| format!("resolve sync target {}", target.display()))?;
     let cache = paths::cache_dir()?;
-    if let Some(mut client) = Client::connect(&cache) {
+    sync_with_connection(
+        &cache,
+        &target,
+        settings,
+        Client::try_connect(&cache),
+        || index::run_with_settings(Some(&target), settings),
+    )
+}
+
+// One captured connection result controls the existing sync route and fallback.
+fn sync_with_connection(
+    cache: &std::path::Path,
+    target: &std::path::Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    connection: crate::error::Result<Option<Client>>,
+    direct: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    if let Some(mut client) = connection? {
         client.handshake_registry()?;
-        let binding = bind_cli_project(&mut client, &cache, &target, settings);
+        let binding = bind_cli_project(&mut client, cache, target, settings);
         match binding {
             Ok(()) => {
                 let job = client.call_tool("sync_start", serde_json::json!({}))?;
@@ -372,13 +393,13 @@ fn sync(
             }
             // Not indexed yet: the direct path registers the project first.
             Err(Error::Project { .. }) if !client.active_website() => {
-                return index::run_with_settings(Some(&target), settings);
+                return direct();
             }
             Err(err) => return Err(err.into()),
         }
     }
     crate::daemon::launch::require_shared_without_daemon()?;
-    index::run_with_settings(Some(&target), settings)
+    direct()
 }
 
 /// Runs `docsbase config`: effective values for the current directory
@@ -447,7 +468,7 @@ pub(crate) fn try_daemon(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let cache = paths::cache_dir()?;
-    let Some(mut client) = Client::connect(&cache) else {
+    let Some(mut client) = Client::try_connect(&cache)? else {
         crate::daemon::launch::require_shared_without_daemon()?;
         return Ok(None);
     };
