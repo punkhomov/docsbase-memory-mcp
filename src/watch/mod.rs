@@ -84,6 +84,25 @@ pub fn spawn_watcher(
     config: Arc<Mutex<Arc<Config>>>,
     tx: std::sync::mpsc::SyncSender<Vec<PathBuf>>,
 ) -> Result<WatcherGuard> {
+    spawn_watcher_using(
+        project,
+        cache,
+        move || {
+            config
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        },
+        tx,
+    )
+}
+
+fn spawn_watcher_using(
+    project: &Project,
+    cache: &Path,
+    current_config: impl Fn() -> Arc<Config> + Send + 'static,
+    tx: std::sync::mpsc::SyncSender<Vec<PathBuf>>,
+) -> Result<WatcherGuard> {
     let root = project.canonical_root.clone();
     // Canonicalize once: notify reports verbatim paths on Windows, while the
     // configured cache dir may use the short/drive spelling. The dir itself
@@ -140,10 +159,7 @@ pub fn spawn_watcher(
     let project_id = project.id;
     let filter_root = root;
     let filter_cache = cache;
-    let initial = config
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
+    let initial = current_config();
     let forwarder = std::thread::Builder::new()
         .name(format!("docsbase-debounce-{project_id}"))
         .spawn(move || {
@@ -171,10 +187,7 @@ pub fn spawn_watcher(
                 // reopen that lands while events are still arriving must
                 // govern this batch (OQ-6; Windows CI showed the old
                 // start-of-window capture losing freshly written ignores).
-                let batch_config = config
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone();
+                let batch_config = current_config();
                 filter.set_config(&batch_config);
                 let batch = finalize(&mut filter, raw);
                 if !batch.is_empty() && tx.send(batch).is_err() {
@@ -648,13 +661,68 @@ fn expand_dir_inner(filter: &mut IndexFilter, batch: &mut Batch, dir: &Path, dep
     }
 }
 
+/// Immutable provider and vector-source snapshot supplied by the composition root.
+/// Config selects indexing limits; the prepared stages select embedding.
+pub struct WatchRuntime {
+    config: Arc<Config>,
+    stages: Arc<crate::hybrid::HybridStages>,
+    source: crate::vector_cache::VectorCacheSource,
+}
+
+impl WatchRuntime {
+    /// Captures prepared dependencies without constructing providers or storage.
+    #[must_use]
+    pub fn new(
+        config: Arc<Config>,
+        stages: Arc<crate::hybrid::HybridStages>,
+        source: crate::vector_cache::VectorCacheSource,
+    ) -> Self {
+        Self {
+            config,
+            stages,
+            source,
+        }
+    }
+}
+
+#[derive(Clone)]
+enum WatchContext {
+    Configured(Arc<Config>),
+    Prepared(Arc<WatchRuntime>),
+}
+
+impl WatchContext {
+    fn config(&self) -> &Arc<Config> {
+        match self {
+            Self::Configured(config) => config,
+            Self::Prepared(runtime) => &runtime.config,
+        }
+    }
+
+    fn validate_root(&self, cache: &Path) -> Result<()> {
+        match self {
+            Self::Configured(_) => Ok(()),
+            Self::Prepared(runtime) => runtime.source.validate_root(cache),
+        }
+    }
+
+    fn same_revision(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Configured(a), Self::Configured(b)) => Arc::ptr_eq(a, b),
+            (Self::Prepared(a), Self::Prepared(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
 /// One running watcher plus its incremental consumer.
 struct WatcherEntry {
     _guard: WatcherGuard,
     _consumer: std::thread::JoinHandle<()>,
     /// Open-time config, swappable on reopen so batch filtering follows
     /// `.docsbase.toml` edits without restarting notify/threads (OQ-6).
-    config: Arc<Mutex<Arc<Config>>>,
+    context: Arc<Mutex<WatchContext>>,
+    cache: PathBuf,
 }
 
 /// Per-project watchers owned by the daemon (design §5).
@@ -716,6 +784,37 @@ impl Watchers {
         config: Arc<Config>,
         db_settings: &Resolved<DbSettings>,
     ) -> Result<bool> {
+        self.ensure_using(
+            cache,
+            project,
+            WatchContext::Configured(config),
+            db_settings,
+        )
+    }
+
+    /// Starts a watcher using a complete, already prepared runtime snapshot.
+    ///
+    /// # Errors
+    /// Source/root or storage policy admission before watcher resources, then
+    /// the spawn failures of [`Self::ensure_with_settings`].
+    pub fn ensure_with_runtime(
+        self: &Arc<Self>,
+        cache: &Path,
+        project: &Project,
+        runtime: Arc<WatchRuntime>,
+        db_settings: &Resolved<DbSettings>,
+    ) -> Result<bool> {
+        self.ensure_using(cache, project, WatchContext::Prepared(runtime), db_settings)
+    }
+
+    fn ensure_using(
+        self: &Arc<Self>,
+        cache: &Path,
+        project: &Project,
+        context: WatchContext,
+        db_settings: &Resolved<DbSettings>,
+    ) -> Result<bool> {
+        context.validate_root(cache)?;
         DbSpec::validate(db_settings.settings(), &Capabilities::current())?;
         if project.status != ProjectStatus::Indexed {
             return Ok(false);
@@ -732,8 +831,20 @@ impl Watchers {
             return Ok(false);
         }
         let (tx, rx) = std::sync::mpsc::sync_channel(MAX_WATCH_EVENTS);
-        let slot = Arc::new(Mutex::new(config));
-        let guard = spawn_watcher(project, cache, Arc::clone(&slot), tx)?;
+        let slot = Arc::new(Mutex::new(context));
+        let producer_slot = Arc::clone(&slot);
+        let guard = spawn_watcher_using(
+            project,
+            cache,
+            move || {
+                producer_slot
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .config()
+                    .clone()
+            },
+            tx,
+        )?;
         let consumer = spawn_consumer(
             cache.to_path_buf(),
             project.clone(),
@@ -747,30 +858,83 @@ impl Watchers {
             WatcherEntry {
                 _guard: guard,
                 _consumer: consumer,
-                config: slot,
+                context: slot,
+                cache: canonicalize_allow_missing(cache),
             },
         );
         Ok(true)
     }
 
-    /// Swaps the config an existing watcher filters with (OQ-6 reopen);
-    /// returns `false` when the project is not watched.
+    /// Updates a configured compatibility watcher after reopen.
+    /// Returns false if absent or prepared; a prepared watcher must be revised
+    /// through [`Self::revise_with_runtime`] so its owner cannot be discarded.
     pub fn revise(&self, project_id: i64, config: Arc<Config>) -> bool {
         let slot = self
             .map()
             .get(&project_id)
-            .map(|entry| Arc::clone(&entry.config));
-        match slot {
-            Some(slot) => {
-                *slot.lock().unwrap_or_else(PoisonError::into_inner) = config;
-                true
-            }
-            None => false,
+            .map(|entry| entry.context.clone());
+        let Some(slot) = slot else {
+            return false;
+        };
+        let mut context = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(*context, WatchContext::Prepared(_)) {
+            return false;
         }
+        *context = WatchContext::Configured(config);
+        true
+    }
+
+    /// Atomically replaces the complete prepared revision of an existing watcher.
+    ///
+    /// # Errors
+    /// A foreign source/cache root is rejected without replacing the old revision.
+    pub fn revise_with_runtime(
+        &self,
+        cache: &Path,
+        project_id: i64,
+        runtime: Arc<WatchRuntime>,
+    ) -> Result<bool> {
+        runtime.source.validate_root(cache)?;
+        let existing = self
+            .map()
+            .get(&project_id)
+            .map(|entry| (entry.context.clone(), entry.cache.clone()));
+        let Some((slot, root)) = existing else {
+            return Ok(false);
+        };
+        if canonicalize_allow_missing(cache) != root {
+            return Err(Error::Admission {
+                message: "watcher belongs to a different cache root".to_owned(),
+            });
+        }
+        runtime.source.validate_root(&root)?;
+        *slot.lock().unwrap_or_else(PoisonError::into_inner) = WatchContext::Prepared(runtime);
+        Ok(true)
     }
 
     fn remove(&self, project_id: i64) {
         self.map().remove(&project_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runtime_for_test(
+        &self,
+        project_id: i64,
+    ) -> Option<(
+        Arc<Config>,
+        Arc<crate::hybrid::HybridStages>,
+        crate::vector_cache::VectorCacheSource,
+    )> {
+        let slot = self.map().get(&project_id)?.context.clone();
+        let context = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        match &*context {
+            WatchContext::Configured(_) => None,
+            WatchContext::Prepared(runtime) => Some((
+                runtime.config.clone(),
+                runtime.stages.clone(),
+                runtime.source.clone(),
+            )),
+        }
     }
 
     fn map(&self) -> MutexGuard<'_, HashMap<i64, WatcherEntry>> {
@@ -781,7 +945,7 @@ impl Watchers {
 fn spawn_consumer(
     cache: PathBuf,
     project: Project,
-    config: Arc<Mutex<Arc<Config>>>,
+    context: Arc<Mutex<WatchContext>>,
     db_settings: Resolved<DbSettings>,
     rx: Receiver<Vec<PathBuf>>,
     watchers: Weak<Watchers>,
@@ -818,10 +982,9 @@ fn spawn_consumer(
                         if let Some(err) = injected_watch_fault(&project.canonical_root, &cache) {
                             return Err(err);
                         }
-                        run_batch(&mut db, &cache, &project, paths, || {
-                            // Hold the slot only while cloning: reopen must
-                            // not stall behind filesystem or provider work.
-                            config.lock().unwrap_or_else(PoisonError::into_inner).clone()
+                        run_batch_using(&mut db, &cache, &project, paths, || {
+                            // Hold the slot only while cloning the complete snapshot.
+                            context.lock().unwrap_or_else(PoisonError::into_inner).clone()
                         })
                     },
                     |pending| {
@@ -865,13 +1028,26 @@ fn spawn_consumer(
         .map_err(|err| Error::internal_with_source("spawn watcher thread", err))
 }
 
+#[cfg(test)]
 fn run_batch(
     db: &mut Db,
     cache: &Path,
     project: &Project,
     batch: &[PathBuf],
     mut current_config: impl FnMut() -> Arc<Config>,
-) -> Result<crate::index::job::JobStats> {
+) -> Result<JobStats> {
+    run_batch_using(db, cache, project, batch, || {
+        WatchContext::Configured(current_config())
+    })
+}
+
+fn run_batch_using(
+    db: &mut Db,
+    cache: &Path,
+    project: &Project,
+    batch: &[PathBuf],
+    mut current_context: impl FnMut() -> WatchContext,
+) -> Result<JobStats> {
     // Incremental chunks are only valid for an index built with the current
     // schema; a stale or errored project must be rebuilt by a full index
     // first (T24). The stamp itself is only written by `registry::mark_indexed`.
@@ -893,7 +1069,10 @@ fn run_batch(
     // The writer handle is opened per batch: holding it between batches would
     // block full index jobs on the tantivy lock.
     lifecycle::with_writer_lease(cache, project.id, || {
-        let config = current_config();
+        let context = current_context();
+        context.validate_root(cache)?;
+        context.validate_root(db.cache_root())?;
+        let config = context.config();
         // The producer may have admitted these paths before a reopen. Retry
         // from the original pending paths, with no cached directory verdicts.
         let mut raw = Batch::new();
@@ -904,12 +1083,12 @@ fn run_batch(
             &mut IndexFilter::new(
                 project.canonical_root.clone(),
                 canonicalize_allow_missing(cache),
-                &config,
+                config,
             ),
             raw,
         );
         let mut check_config = || {
-            if Arc::ptr_eq(&config, &current_config()) {
+            if context.same_revision(&current_context()) {
                 Ok(())
             } else {
                 // Existing bounded transient retry keeps the raw pending
@@ -927,12 +1106,33 @@ fn run_batch(
             check_config()?;
             return Ok(JobStats::default());
         }
-        let stats =
-            run_incremental_checked(db, &mut index, project, &filtered, &config, check_config)?;
+        let stats = match &context {
+            WatchContext::Configured(_) => {
+                run_incremental_checked(db, &mut index, project, &filtered, config, check_config)?
+            }
+            WatchContext::Prepared(runtime) => {
+                let embedding = crate::index::job::IndexEmbedding::new(
+                    &runtime.source,
+                    runtime.stages.embedder.as_deref(),
+                );
+                crate::index::job::run_incremental_checked_with_embedding(
+                    db,
+                    &mut index,
+                    project,
+                    &filtered,
+                    config,
+                    &embedding,
+                    check_config,
+                )?
+            }
+        };
         registry::set_status(db, project.id, ProjectStatus::Indexed)?;
         Ok(stats)
     })
 }
+
+#[cfg(test)]
+mod runtime_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1069,8 +1269,8 @@ mod tests {
 
         // The not-yet-started consumer is an instance-local gate: the queued
         // v1 verdict is guaranteed to precede config publication and new bytes.
-        let slot = Arc::new(Mutex::new(old));
-        *slot.lock().expect("slot") = ignoring_bbb();
+        let slot = Arc::new(Mutex::new(WatchContext::Configured(old)));
+        *slot.lock().expect("slot") = WatchContext::Configured(ignoring_bbb());
         fs::write(env.path("bbb/b.md"), "betawidget9").expect("new ignored bytes");
         fs::write(env.path("a.md"), "alphawidget9").expect("allowed bytes");
         tx.send(vec![env.path("a.md")]).expect("coalesced update");

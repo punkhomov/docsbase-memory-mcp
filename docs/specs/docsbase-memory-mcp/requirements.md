@@ -401,3 +401,13 @@ job не создаётся; failure во время execution сохраняе�
 прежде. Existing valid duplicate-job/state/wire contracts сохраняются. Provider
 preparation не держит shared registry guard. Configured watcher lifetime и strict
 startup не включаются: см. component-configuration/cf7c2-plan.md.
+
+## Delta 2026-11-13 — CF7c3: watcher runtime admission
+
+FR-15/16 и W103 распространяются на целый prepared config/stages/vector-source
+snapshot. Retry заново фильтрует исходные pending paths; stale gate до markers/
+provider проверяет полную revision. Уже admitted payload завершается со своим
+captured runtime. Eligible daemon watchers готовят provider до старта, не на каждой
+batch; admission failure следует существующему warning path. Неиндексированные/
+недоступные проекты не готовят provider; shared Db/state guard не удерживается
+через construction/inference. См. component-configuration/cf7c3-plan.md.

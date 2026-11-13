@@ -552,6 +552,13 @@ impl Shared {
         let _reload = slot.reload.lock().unwrap_or_else(PoisonError::into_inner);
         let config = Arc::new(self.config_for_root(&project.canonical_root)?);
         let stages = Arc::new(build(&config)?);
+        let source = self.vector_source_for(project.id, &config);
+        source.validate_root(&self.cache)?;
+        let watch_runtime = Arc::new(crate::watch::WatchRuntime::new(
+            Arc::clone(&config),
+            Arc::clone(&stages),
+            source,
+        ));
         // Never wait for active preparation while retaining the state mutex.
         let _publication = match slot.preparation.try_write() {
             Ok(guard) => guard,
@@ -574,15 +581,24 @@ impl Shared {
         // reload leaves the last valid runtime and its policies intact.
         state.config = Some(Arc::clone(&config));
         state.stages = Some(stages);
-        if changed
-            && !self.watchers.revise(project.id, Arc::clone(&config))
-            && let Err(err) = self.watchers.ensure_with_settings(
-                &self.cache,
-                project,
-                Arc::clone(&config),
-                &self.db_settings,
-            )
-        {
+        // Provider construction may refresh credentials even when Config values
+        // are equal. Every published runtime must reach the watcher as one pair.
+        let watcher = self
+            .watchers
+            .revise_with_runtime(&self.cache, project.id, Arc::clone(&watch_runtime))
+            .and_then(|revised| {
+                if revised {
+                    Ok(false)
+                } else {
+                    self.watchers.ensure_with_runtime(
+                        &self.cache,
+                        project,
+                        watch_runtime,
+                        &self.db_settings,
+                    )
+                }
+            });
+        if let Err(err) = watcher {
             eprintln!("warning: cannot watch project {}: {err}", project.id);
         }
         Ok(config)
@@ -594,9 +610,9 @@ impl Shared {
     /// # Errors
     /// Returns [`Error::Internal`] when the registry cannot be listed.
     fn start_watchers(&self) -> Result<usize> {
-        let db = self.db();
+        let projects = registry::list_projects(&self.db())?;
         let mut started = 0;
-        for project in registry::list_projects(&db)? {
+        for project in projects {
             match self.ensure_watcher(&project) {
                 Ok(true) => started += 1,
                 Ok(false) => {}
@@ -613,11 +629,48 @@ impl Shared {
     /// # Errors
     /// Returns config/spawn errors; a failed start is not fatal to callers.
     pub fn ensure_watcher(&self, project: &crate::store::models::Project) -> Result<bool> {
+        self.ensure_watcher_observing(project, || {})
+    }
+
+    fn ensure_watcher_observing(
+        &self,
+        project: &crate::store::models::Project,
+        before_admission: impl FnOnce(),
+    ) -> Result<bool> {
+        if project.status != crate::store::models::ProjectStatus::Indexed
+            || registry::root_state(&project.canonical_root) == registry::RootState::Missing
+        {
+            return Ok(false);
+        }
         let slot = self.project_slot(project.id);
-        let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let config = self.config_in(&mut state, project)?;
-        self.watchers
-            .ensure_with_settings(&self.cache, project, config, &self.db_settings)
+        let mut before_admission = Some(before_admission);
+        loop {
+            // Model construction runs outside project/state and registry guards.
+            let (config, stages) = self.project_runtime(project)?;
+            let source = self.vector_source_for(project.id, &config);
+            if let Some(observe) = before_admission.take() {
+                observe();
+            }
+            // Serialize creation with reload publication. A later revision must
+            // not be followed by creation from this obsolete captured pair.
+            let _reload = slot.reload.lock().unwrap_or_else(PoisonError::into_inner);
+            let current = slot
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .config
+                .as_ref()
+                .is_some_and(|latest| Arc::ptr_eq(latest, &config));
+            if !current {
+                continue;
+            }
+            return self.watchers.ensure_with_runtime(
+                &self.cache,
+                project,
+                Arc::new(crate::watch::WatchRuntime::new(config, stages, source)),
+                &self.db_settings,
+            );
+        }
     }
 
     /// Message for `status` when the global config on disk differs from the

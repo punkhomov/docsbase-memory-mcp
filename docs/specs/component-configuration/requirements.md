@@ -413,3 +413,24 @@ config не переписывает budget поверх concurrent reload. CLI 
 без provider creation; status/wire shape прежние. Scope: FR-2/3/5/16 и bounded SC-3.
 Watcher source/config-reopen lifetime остаётся CF7c3; strict startup/file keys,
 persisted adoption/migration/apply и полный #78 этим slice не включаются.
+
+## Delta 2026-11-13 — CF7c3: prepared watcher runtime
+
+Watcher producer/consumer/retry используют один immutable config/stages/source
+snapshot. Prepared stages authoritative; provider не строится для каждой batch.
+Перед созданием ресурсов и заменой snapshot проверяется source/cache affinity;
+legacy revise не отбрасывает prepared owner. При retry исходные pending paths
+заново фильтруются текущей конфигурацией. Existing stale gate сравнивает полную
+revision, включая stages, до markers/provider; recreated full fallback guarded
+тем же snapshot. Уже admitted payload может закончиться с прежними dependencies.
+Slot/state/SQL transaction не удерживаются через inference.
+Actual daemon ensure готовит runtime без registry/state guards и сериализует
+создание с reload authority; устаревший ensure повторяет capture, а не публикует
+старое состояние после новой revision. Каждый successful reload обновляет watcher,
+даже при равных значениях Config: construction может обновить credentials/stages.
+Startup освобождает registry guard до
+provider preparation. Неиндексированные/недоступные roots не готовят providers.
+Stage admission может предотвратить watcher startup по существующему warning
+path; resource failures по-прежнему warning. Scope FR-2/3/5/16 и bounded SC-3.
+Старые configured APIs сохраняют lazy batch behavior. Strict startup, file-v2,
+persisted adoption/apply и оставшиеся component owners этим slice не включаются.

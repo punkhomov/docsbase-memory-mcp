@@ -470,3 +470,10 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   План [cf7c2-plan.md](cf7c2-plan.md). Runtime stage admission до enqueue; provider
   preparation без shared DB guard. Watcher reload/consumer ownership — CF7c3,
   strict startup и persisted migration по-прежнему CF5/CF7.
+
+## Delta 2026-11-13 — CF7c3: prepared watcher consumers
+
+- [x] **CF7c3:** единый WatchRuntime для producer/consumer/retry/recovery;
+  root admission, actual Shared ensure/reload и отсутствие stale creation.
+  План [cf7c3-plan.md](cf7c3-plan.md). Configured APIs сохраняют прежний режим;
+  strict startup/adoption/apply и оставшиеся CF5/CF7 задачи ещё не завершены.
