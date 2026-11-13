@@ -411,3 +411,26 @@ captured runtime. Eligible daemon watchers готовят provider до стар
 batch; admission failure следует существующему warning path. Неиндексированные/
 недоступные проекты не готовят provider; shared Db/state guard не удерживается
 через construction/inference. См. component-configuration/cf7c3-plan.md.
+
+## Delta 2026-11-13 — Выбранный sync target (#147, S147)
+
+Уточнение FR-17/FR-30: `docsbase sync PATH` выбирает PATH и для live daemon,
+и для direct indexing. Относительный PATH разрешается от cwd команды, абсолютный
+не зависит от cwd. Существующий canonical target используется при RegisterSession
+и при обычном direct fallback. Без PATH сохраняются cwd и nested-project discovery.
+Несуществующий explicit target завершается ошибкой до daemon handshake и direct
+indexing; он не подменяется cwd. Одна bound connection, job polling/errors и
+существующий Project-error fallback сохраняются. Profile-specific refusal из #79
+будет отдельным контрактом и не разрешает direct mutation.
+
+SC-S147: native IPC peer фиксирует RegisterSession.cwd из cwd A при absolute B,
+relative B и отсутствии PATH. Все четыре кадра Hello/RegisterSession/sync_start/
+sync_status идут по одной connection; peer имеет конечный сценарий и join.
+Accept и весь peer IO cancellable/watchdog-bounded на Linux/macOS/Windows;
+accepted stream сохраняется до command completion/cancellation после final reply.
+Cleanup проверяется при no-connect early CLI exit/spawn error, held-open
+no-Hello/partial frame и watchdog. Test watchdogs не являются latency contracts.
+Несуществующий explicit PATH не создаёт handshake/registry/index; no-daemon B индексирует
+B. Действительные RED до production edit, GREEN, CLI regressions, Clippy/fmt,
+fresh task/final reviews и четыре required native checks. Без новых crates,
+features/defaults, storage/index/watcher/protocol или timing-budget изменений.

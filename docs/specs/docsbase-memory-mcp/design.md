@@ -773,3 +773,41 @@ config/stages publication; SQLite/Tantivy/vector generation требует св�
 выше — исторические. Ограничения RAM, очередей, IPC и поисковых операций
 сохраняются. `cli-full` включает optional feature `web`; Cargo default=[]
 остаётся без HTTP frontend. Rust 1.88; frontend собирается явно до Cargo.
+
+## Delta 2026-11-13 — CLI sync target (#147, S147)
+
+`cli::sync` разрешает выбранный существующий target из explicit PATH либо cwd
+до подключения daemon. Тот же canonical path передаётся в handshake и existing
+`index::run_with_settings` fallback; relative PATH использует cwd команды.
+`sync_start {}` по-прежнему относится к bound session; новый wire argument/API
+не нужен. Job id, status polling, deadlines, terminal output/errors и обычный
+Project-error fallback неизменны. Nested discovery остаётся у существующих
+registry/index consumers. Будущий server-profile refusal нельзя считать обычным
+Project miss: его typed policy и интеграция остаются в #79.
+
+`tests/cli_routing.rs` использует существующий native endpoint. Sync-only peer
+binds до command и принимает одну connection в своём current-thread Tokio
+runtime. Unix использует async `platform::Listener`; Windows — existing Tokio
+NamedPipeServer/Client на том же published `platform::Endpoint::Pipe` name.
+Причина test-only adapter: interprocess async flush запускает uncancellable
+spawn_blocking FlushFileBuffers, dirty Drop — linger thread; outer cancellation
+не гарантирует завершение этих workers. Raw Tokio pipe IO/drop не используют их.
+Общий select cancellation/watchdog охватывает весь accept/read/write/flush
+future; Windows blocking timeout setters не используются.
+После четвёртого reply accepted stream остаётся owned внутри pending future,
+пока command completion не вызовет finish/cancellation либо watchdog не истечёт.
+Это сохраняет Windows reply до чтения CLI без EOF/FlushFileBuffers/linger.
+Cancellation после завершённого exchange возвращает Complete trace; остальные
+отказы сохраняют Cancelled/Watchdog/error. Guard cancels+joins до assertions,
+включая command spawn error и unwind; assert_cmd watchdog убивает и reaps child.
+Watchdogs — failure bounds теста, не performance thresholds продукта.
+Это заменяет прежний endless accept loop только в sync control, остальные fake
+peers не рефакторятся. Cleanup regressions ограничены no-connect early exit/spawn
+failure, accepted client без Hello/с partial frame при живом client и zero-duration
+watchdog: они связаны с исходным hang/cancellation. Fixture branch и catch-panic
+probes не входят в acceptance. Actual cleanup evidence и native execution pending.
+Canonical identity recorded path сравнивается в test process, без произвольного
+сравнения Windows path spellings. Invalid-target test держит nonblocking listener
+без worker и проверяет отсутствие pending connection/registry/index. Direct
+control проверяет единственный registered root B и реально indexed B document.
+Без watcher sleeps и без изменения storage/index internals или dependencies.
