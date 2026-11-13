@@ -200,18 +200,18 @@ mod tests {
         let token = Cancellation::new();
         let listener = token.listen();
         assert_eq!(token.subscriber_count(), 1);
-        let wakes = Arc::new(Wakes::default());
-        let waker = Waker::from(Arc::clone(&wakes));
+        let wake_count = Arc::new(Wakes::default());
+        let waker = Waker::from(Arc::clone(&wake_count));
         let mut context = Context::from_waker(&waker);
         let mut waiting = Box::pin(token.cancelled());
         assert!(waiting.as_mut().poll(&mut context).is_pending());
         assert_eq!(token.subscriber_count(), 1);
-        assert_eq!(Arc::strong_count(&wakes), 3);
+        assert_eq!(Arc::strong_count(&wake_count), 3);
         drop(waiting);
-        assert_eq!(Arc::strong_count(&wakes), 2);
+        assert_eq!(Arc::strong_count(&wake_count), 2);
         token.cancel();
         listener.wait().unwrap();
-        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+        assert_eq!(wake_count.0.load(Ordering::SeqCst), 0);
         assert_eq!(token.subscriber_count(), 0);
         token.cancelled().await;
     }

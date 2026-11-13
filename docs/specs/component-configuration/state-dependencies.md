@@ -170,3 +170,10 @@ Admission/cancellation/janitor ownership is runtime-only and restart-immutable.
 The checked executor sum covers application-owned blocking closures through
 finish/unwind. No persisted artifact edge, CF5 publication authority or
 process-wide/native transport resource guarantee follows from this bound.
+
+
+S1c actual consumers: search/control counts and control timeout construct
+WorkerAdmission; the original SearchOperation remains the deadline/cancellation
+authority. Actual closure guards own capacity/Activity until finish. Janitor
+coalescing and fixed sync ownership are transient daemon state, with no persisted
+artifact edge; connection/session/reader/payload accounting remains separate.

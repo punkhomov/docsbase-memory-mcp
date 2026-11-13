@@ -12,6 +12,25 @@ use crate::error::{Error, Result};
 use crate::hybrid::work::Cancellation;
 use crate::search::operation::SearchOperation;
 
+#[cfg(test)]
+#[path = "worker_spawn_tests.rs"]
+mod worker_spawn_tests;
+
+/// Transfer actual execution ownership, including unwind, into the closure.
+/// `None` permits are reserved for the legacy Shared background sync path.
+pub(super) fn spawn<T: Send + 'static>(
+    permit: Option<OwnedSemaphorePermit>,
+    activity: Option<Arc<Activity>>,
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> JoinHandle<Result<T>> {
+    tokio::task::spawn_blocking(move || {
+        // Release capacity before Activity publishes physical completion.
+        let _activity = activity;
+        let _permit = permit;
+        work()
+    })
+}
+
 /// One charge shared by the async reply and the actual blocking closure.
 pub(super) struct Activity {
     counter: Arc<AtomicUsize>,
@@ -84,7 +103,7 @@ fn joined(result: std::result::Result<Result<Value>, JoinError>) -> Result<Value
     result.map_err(|err| Error::internal_with_source("tool task join", err))?
 }
 
-struct CancelOnDrop(Option<Cancellation>);
+pub(super) struct CancelOnDrop(pub(super) Option<Cancellation>);
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {

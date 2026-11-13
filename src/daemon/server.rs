@@ -48,6 +48,10 @@ mod search_phase_tests;
 #[path = "profile_tests.rs"]
 mod profile_tests;
 
+#[cfg(test)]
+#[path = "server_worker_tests.rs"]
+mod server_worker_tests;
+
 #[path = "scoped.rs"]
 mod scoped;
 
@@ -61,6 +65,9 @@ pub struct Shared {
     db_settings: Resolved<DbSettings>,
     readers: Arc<ReadPool>,
     payload_budget: crate::search::budget::PayloadBudget,
+    pub(super) workers: crate::daemon::worker_admission::WorkerAdmission,
+    // Website has exactly one fixed-project background sync closure.
+    sync_slot: Arc<tokio::sync::Semaphore>,
     /// Live sessions.
     pub sessions: SessionRegistry,
     /// Per-project filesystem watchers (FR-15).
@@ -299,6 +306,10 @@ impl Shared {
             db_settings: settings.clone(),
             readers,
             payload_budget,
+            workers: crate::daemon::worker_admission::WorkerAdmission::with_settings(
+                &global_config.daemon,
+            )?,
+            sync_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: SessionRegistry::with_settings(&global_config.daemon)?,
             watchers,
             stopping: AtomicBool::new(false),
@@ -495,7 +506,15 @@ impl Shared {
         }
         let (job_id, created) = crate::daemon::tools::enqueue_sync(&db, project)?;
         if created {
-            spawn_sync_job(Arc::clone(self), job_id, project.id, config, stages, source);
+            spawn_sync_job(
+                Arc::clone(self),
+                job_id,
+                project.id,
+                config,
+                stages,
+                source,
+                (None, None),
+            );
         }
         Ok(())
     }
@@ -1083,6 +1102,7 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                 pid,
                 &cwd,
                 false,
+                Some(Arc::clone(&scope.activity)),
             )
             .await
         }
@@ -1097,6 +1117,7 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                 pid,
                 &cwd,
                 true,
+                Some(Arc::clone(&scope.activity)),
             )
             .await
         }
@@ -1119,10 +1140,13 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
             if let Err(error) = shared.admit_binding(project_id) {
                 return (error_response(&error), false);
             }
+            let permit = match shared.workers.control().await {
+                Ok(permit) => permit,
+                Err(error) => return (error_response(&error), false),
+            };
             let reader_shared = Arc::clone(shared);
             let activity = Arc::clone(&scope.activity);
-            let bound = tokio::task::spawn_blocking(move || {
-                let _activity = activity;
+            let bound = request::spawn(Some(permit), Some(activity), move || {
                 reader_shared.admit_binding(project_id)?;
                 let project = project_id
                     .map(|id| {
@@ -1169,6 +1193,7 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
             // (FR-5, FR-6). The drain lets every other request finish; the
             // process then lives until background jobs complete.
             if !shared.stopping.swap(true, Ordering::SeqCst) {
+                shared.workers.shutdown();
                 let settings = shared.daemon_settings();
                 wait_for_drain(
                     in_flight,
@@ -1253,8 +1278,9 @@ async fn register_and_respond(
     pid: u32,
     cwd: &Path,
     allow_unbound: bool,
+    activity: Option<Arc<Activity>>,
 ) -> (Response, bool) {
-    match register_session(shared, pid, cwd, allow_unbound).await {
+    match register_session_in(shared, pid, cwd, allow_unbound, activity).await {
         Ok((id, value, cancel)) => {
             if let Some(previous) = session_id.replace(id) {
                 shared.sessions.leave(previous);
@@ -1266,69 +1292,89 @@ async fn register_and_respond(
     }
 }
 
+#[cfg(test)]
 async fn register_session(
     shared: &Arc<Shared>,
     pid: u32,
     cwd: &Path,
     allow_unbound: bool,
 ) -> Result<(u64, Value, oneshot::Receiver<()>)> {
+    register_session_in(shared, pid, cwd, allow_unbound, None).await
+}
+
+async fn register_session_in(
+    shared: &Arc<Shared>,
+    pid: u32,
+    cwd: &Path,
+    allow_unbound: bool,
+    activity: Option<Arc<Activity>>,
+) -> Result<(u64, Value, oneshot::Receiver<()>)> {
     if shared.website.is_some() {
         return Err(Shared::profile_denial());
     }
+    let permit = shared.workers.control().await?;
     let shared_for_task = Arc::clone(shared);
     let cwd = cwd.to_path_buf();
     let cwd_for_task = cwd.clone();
-    let outcome = tokio::task::spawn_blocking(move || -> Result<crate::store::models::Project> {
-        // Own connection: the shared read connection must stay free while a
-        // full index runs (F4/NFR-1).
-        let mut db = Db::open_with_settings(&shared_for_task.cache, &shared_for_task.db_settings)?;
-        let project_err = match registry::resolve_by_cwd(&db, &cwd_for_task) {
-            Ok(project) => {
-                shared_for_task.open_project_config(&project)?;
-                shared_for_task.schedule_backfill(&project)?;
-                return Ok(project);
+    let outcome = request::spawn(
+        Some(permit),
+        activity,
+        move || -> Result<crate::store::models::Project> {
+            // Own connection: the shared read connection must stay free while a
+            // full index runs (F4/NFR-1).
+            let mut db =
+                Db::open_with_settings(&shared_for_task.cache, &shared_for_task.db_settings)?;
+            let project_err = match registry::resolve_by_cwd(&db, &cwd_for_task) {
+                Ok(project) => {
+                    shared_for_task.open_project_config(&project)?;
+                    shared_for_task.schedule_backfill(&project)?;
+                    return Ok(project);
+                }
+                Err(err) => err,
+            };
+            let Ok(root) = registry::project_root_for(&cwd_for_task, &shared_for_task.cache) else {
+                return Err(project_err);
+            };
+            let config = shared_for_task.config_for_root(&root)?;
+            if !config.auto_index {
+                return Err(project_err);
             }
-            Err(err) => err,
-        };
-        let Ok(root) = registry::project_root_for(&cwd_for_task, &shared_for_task.cache) else {
-            return Err(project_err);
-        };
-        let config = shared_for_task.config_for_root(&root)?;
-        if !config.auto_index {
-            return Err(project_err);
-        }
-        let project = registry::ensure_project(&mut db, &root)?;
-        // Publish policy only through the per-project authority; a raw config
-        // must not overwrite a concurrent reload's legacy dense budget.
-        let (config, stages) = shared_for_task.project_runtime(&project)?;
-        if !config.auto_index {
-            return Err(project_err);
-        }
-        let source = shared_for_task.vector_source_for(project.id, &config);
-        if let Err(err) = tools::run_project_index_with_vectors(
-            &mut db,
-            &shared_for_task.cache,
-            &project,
-            &config,
-            &stages,
-            &source,
-        ) {
-            // A concurrent registration may have won the writer lease and
-            // already indexed the project; bind to that result instead.
-            if let Some(indexed) = registry::resolve_by_cwd(&db, &cwd_for_task)
-                .ok()
-                .filter(|project| project.status == crate::store::models::ProjectStatus::Indexed)
-            {
-                return Ok(indexed);
+            let project = registry::ensure_project(&mut db, &root)?;
+            // Publish policy only through the per-project authority; a raw config
+            // must not overwrite a concurrent reload's legacy dense budget.
+            let (config, stages) = shared_for_task.project_runtime(&project)?;
+            if !config.auto_index {
+                return Err(project_err);
             }
-            return Err(err);
-        }
-        let project = registry::project_by_id(&db, project.id)?.ok_or_else(|| {
-            Error::internal(format!("project {} vanished after auto-index", project.id))
-        })?;
-        shared_for_task.open_project_config(&project)?;
-        Ok(project)
-    })
+            let source = shared_for_task.vector_source_for(project.id, &config);
+            if let Err(err) = tools::run_project_index_with_vectors(
+                &mut db,
+                &shared_for_task.cache,
+                &project,
+                &config,
+                &stages,
+                &source,
+            ) {
+                // A concurrent registration may have won the writer lease and
+                // already indexed the project; bind to that result instead.
+                if let Some(indexed) =
+                    registry::resolve_by_cwd(&db, &cwd_for_task)
+                        .ok()
+                        .filter(|project| {
+                            project.status == crate::store::models::ProjectStatus::Indexed
+                        })
+                {
+                    return Ok(indexed);
+                }
+                return Err(err);
+            }
+            let project = registry::project_by_id(&db, project.id)?.ok_or_else(|| {
+                Error::internal(format!("project {} vanished after auto-index", project.id))
+            })?;
+            shared_for_task.open_project_config(&project)?;
+            Ok(project)
+        },
+    )
     .await
     .map_err(|err| Error::internal_with_source("session task join", err))?;
 
@@ -1407,19 +1453,39 @@ async fn call_tool_in(
     operation: Option<crate::search::operation::SearchOperation>,
     activity: Option<Arc<Activity>>,
 ) -> Result<Value> {
+    let mut cancellation = request::CancelOnDrop(
+        operation
+            .as_ref()
+            .map(|operation| operation.cancellation().clone()),
+    );
+    let permit = match &operation {
+        Some(operation) => shared.workers.search(operation).await?,
+        None => shared.workers.control().await?,
+    };
     let shared = Arc::clone(shared);
     let name = name.to_owned();
     let worker_operation = operation.clone();
     let queued_at = Instant::now();
-    let worker = tokio::task::spawn_blocking(move || {
+    let child_activity = activity.clone();
+    if let Some(operation) = &operation {
+        operation.check()?;
+    }
+    let worker = request::spawn(Some(permit), activity, move || {
         if let Some(operation) = &worker_operation {
             operation.record_queue(queued_at.elapsed());
         }
-        let result = route_tool(&shared, session_id, &name, &args, worker_operation);
-        drop(activity);
-        result
+        route_tool(
+            &shared,
+            session_id,
+            &name,
+            &args,
+            worker_operation,
+            child_activity,
+        )
     });
-    request::run(worker, operation.as_ref()).await
+    let result = request::run(worker, operation.as_ref()).await;
+    cancellation.0 = None;
+    result
 }
 
 /// `search_docs` with the project's hybrid stages, dense cache and window.
@@ -1467,6 +1533,7 @@ fn route_tool(
     name: &str,
     args: &Value,
     operation: Option<crate::search::operation::SearchOperation>,
+    activity: Option<Arc<Activity>>,
 ) -> Result<Value> {
     if name == "search_docs" {
         return route_search(
@@ -1476,15 +1543,26 @@ fn route_tool(
             operation.ok_or_else(|| Error::internal("search request context missing"))?,
         );
     }
-    route_metadata_tool(shared, session_id, name, args)
+    route_metadata_tool_in(shared, session_id, name, args, activity)
 }
 
-#[allow(clippy::too_many_lines)] // Exhaustive tool dispatcher.
+#[cfg(test)]
 fn route_metadata_tool(
     shared: &Arc<Shared>,
     session_id: Option<u64>,
     name: &str,
     args: &Value,
+) -> Result<Value> {
+    route_metadata_tool_in(shared, session_id, name, args, None)
+}
+
+#[allow(clippy::too_many_lines)] // Exhaustive tool dispatcher.
+fn route_metadata_tool_in(
+    shared: &Arc<Shared>,
+    session_id: Option<u64>,
+    name: &str,
+    args: &Value,
+    activity: Option<Arc<Activity>>,
 ) -> Result<Value> {
     if name == "index_project" && shared.website.is_some() {
         return Err(Shared::profile_denial());
@@ -1664,6 +1742,27 @@ fn route_metadata_tool(
             let (config, stages) = shared.project_runtime(&project)?;
             let source = shared.vector_source_for(project.id, &config);
             let db = shared.db();
+            let sync_permit = if shared.website.is_some() {
+                if shared.stopping.load(Ordering::SeqCst) {
+                    return Err(Error::Admission {
+                        message: "daemon is shutting down".to_owned(),
+                    });
+                }
+                if let Ok(permit) = Arc::clone(&shared.sync_slot).try_acquire_owned() {
+                    Some(permit)
+                } else {
+                    if let Some(job) =
+                        crate::store::repo::active_sync_job(db.connection(), project.id)?
+                    {
+                        return current_job(&db, job.id);
+                    }
+                    return Err(Error::Admission {
+                        message: "fixed-project sync is still finishing".to_owned(),
+                    });
+                }
+            } else {
+                None
+            };
             let (job_id, created) = tools::enqueue_sync(&db, &project)?;
             if created {
                 spawn_sync_job(
@@ -1673,6 +1772,7 @@ fn route_metadata_tool(
                     config,
                     stages,
                     source,
+                    (sync_permit, activity),
                 );
             }
             current_job(&db, job_id)
@@ -1726,10 +1826,14 @@ fn spawn_sync_job(
     config: Arc<Config>,
     stages: Arc<HybridStages>,
     source: crate::vector_cache::VectorCacheSource,
+    ownership: (
+        Option<tokio::sync::OwnedSemaphorePermit>,
+        Option<Arc<Activity>>,
+    ),
 ) {
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            handle.spawn_blocking(move || {
+        Ok(_) => {
+            request::spawn(ownership.0, ownership.1, move || {
                 match tools::execute_sync_job_with_vectors(
                     &shared.cache,
                     job_id,
@@ -1748,6 +1852,7 @@ fn spawn_sync_job(
                     }
                     Err(err) => eprintln!("warning: sync job {job_id} failed: {err}"),
                 }
+                Ok(())
             });
         }
         Err(err) => {

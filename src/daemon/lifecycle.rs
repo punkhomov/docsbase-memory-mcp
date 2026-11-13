@@ -25,6 +25,10 @@ use crate::store::migrations;
 #[path = "project_read_tests.rs"]
 mod project_read_tests;
 
+#[cfg(test)]
+#[path = "janitor_tests.rs"]
+mod janitor_tests;
+
 /// How long [`ensure_daemon`] waits for the socket after spawning a child.
 pub const START_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -490,18 +494,89 @@ fn idle_deadline(
     }
 }
 
+/// One coalesced attempt, polled in the accept loop rather than inside a tick.
+#[derive(Default)]
+struct Janitor {
+    attempt: Option<JanitorAttempt>,
+}
+
+type JanitorAttempt = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u64>>> + Send>>;
+
+impl Janitor {
+    fn tick(
+        &mut self,
+        shared: &Arc<crate::daemon::server::Shared>,
+        in_flight: &Arc<AtomicUsize>,
+        events: &mpsc::Sender<()>,
+    ) {
+        self.tick_with(shared, in_flight, events, |shared| {
+            shared.sessions.prune_dead()
+        });
+    }
+
+    fn tick_with(
+        &mut self,
+        shared: &Arc<crate::daemon::server::Shared>,
+        in_flight: &Arc<AtomicUsize>,
+        events: &mpsc::Sender<()>,
+        work: impl FnOnce(&crate::daemon::server::Shared) -> Vec<u64> + Send + 'static,
+    ) {
+        if self.attempt.is_some() {
+            return;
+        }
+        let shared = Arc::clone(shared);
+        let in_flight = Arc::clone(in_flight);
+        let events = events.clone();
+        self.attempt = Some(Box::pin(async move {
+            let permit = shared.workers.control().await?;
+            let activity = crate::daemon::request::Activity::new(&in_flight, &events, None);
+            crate::daemon::request::spawn(Some(permit), Some(activity), move || Ok(work(&shared)))
+                .await
+                .map_err(|error| Error::internal_with_source("session janitor task join", error))?
+        }));
+    }
+
+    async fn completed(&mut self) -> Result<Vec<u64>> {
+        let result = match self.attempt.as_mut() {
+            Some(attempt) => attempt.await,
+            None => std::future::pending().await,
+        };
+        self.attempt = None;
+        result
+    }
+}
+
 async fn accept_loop(
     shared: Arc<crate::daemon::server::Shared>,
     listener: &Listener,
 ) -> Result<()> {
+    let mut signal = platform::ShutdownSignal::new()
+        .map_err(|err| Error::internal_with_source("install signal handlers", err))?;
+    let mut janitor = tokio::time::interval(Duration::from_millis(
+        shared.daemon_settings().janitor_interval_ms,
+    ));
+    janitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    janitor.tick().await;
+    accept_loop_with(shared, listener, signal.recv(), async || {
+        janitor.tick().await;
+    })
+    .await
+}
+
+// Private event seams drive the real loop deterministically without timer gates.
+async fn accept_loop_with(
+    shared: Arc<crate::daemon::server::Shared>,
+    listener: &Listener,
+    shutdown_signal: impl std::future::Future<Output = ()>,
+    mut tick: impl std::ops::AsyncFnMut(),
+) -> Result<()> {
+    tokio::pin!(shutdown_signal);
     let settings = shared.daemon_settings().clone();
     let grace = Duration::from_millis(settings.idle_grace_ms);
     let in_flight = Arc::new(AtomicUsize::new(0));
     let (events_tx, mut events_rx) = mpsc::channel::<()>(settings.max_events);
     let connections = Arc::new(tokio::sync::Semaphore::new(settings.max_connections));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-    let mut shutdown_signal = platform::ShutdownSignal::new()
-        .map_err(|err| Error::internal_with_source("install signal handlers", err))?;
     let mut grace_deadline: Option<tokio::time::Instant> = None;
     // True when the loop ended because a graceful StopDaemon was requested;
     // signal-driven shutdown keeps the pre-T46 semantics (abandon in-flight).
@@ -509,9 +584,7 @@ async fn accept_loop(
 
     // Sessions whose frontend died without closing its socket must not keep
     // the daemon alive (NFR-9, C6).
-    let mut janitor = tokio::time::interval(Duration::from_millis(settings.janitor_interval_ms));
-    janitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    janitor.tick().await;
+    let mut janitor = Janitor::default();
 
     loop {
         let grace_sleep = async {
@@ -521,7 +594,6 @@ async fn accept_loop(
             }
         };
         tokio::select! {
-            biased;
             accepted = listener.accept() => {
                 let stream = accepted
                     .map_err(|err| Error::internal_with_source("accept connection", err))?;
@@ -563,24 +635,26 @@ async fn accept_loop(
                 graceful_stop = true;
                 break;
             }
-            () = shutdown_signal.recv() => break,
-            _ = janitor.tick() => {
-                let shared_for_prune = Arc::clone(&shared);
-                let pruned = tokio::task::spawn_blocking(move || {
-                    shared_for_prune.sessions.prune_dead()
-                })
-                .await
-                .unwrap_or_default();
-                if !pruned.is_empty() {
-                    eprintln!("cleanup: pruned {} dead session(s)", pruned.len());
-                }
-                if idle(&shared, &in_flight) {
-                    grace_deadline = idle_deadline(&settings.profile, grace_deadline,
-                        true, tokio::time::Instant::now(), grace);
+            () = &mut shutdown_signal => break,
+            () = tick() => janitor.tick(&shared, &in_flight, &events_tx),
+            result = janitor.completed() => {
+                match result {
+                    Ok(pruned) => {
+                        if !pruned.is_empty() {
+                            eprintln!("cleanup: pruned {} dead session(s)", pruned.len());
+                        }
+                        grace_deadline = idle_deadline(&settings.profile, grace_deadline,
+                            idle(&shared, &in_flight), tokio::time::Instant::now(), grace);
+                    }
+                    Err(error) => eprintln!("warning: session janitor: {error}"),
                 }
             }
         }
     }
+    shared.workers.shutdown();
+    // Drop pending admission immediately; an already running closure keeps its
+    // own Activity/permit and remains visible to the physical drain below.
+    drop(janitor);
     // Shutdown was requested: the StopDaemon reply itself is bounded by
     // `DRAIN_TIMEOUT` (T46), but running requests must still deliver their
     // replies and publish their state before the runtime drops the handler
@@ -596,7 +670,7 @@ async fn accept_loop(
         };
         tokio::select! {
             () = drained => {}
-            () = shutdown_signal.recv() => {
+            () = &mut shutdown_signal => {
                 eprintln!("shutdown: signal while draining; abandoning in-flight requests");
             }
         }

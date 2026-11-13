@@ -338,3 +338,23 @@ S1c prerequisite is superseded; that independent work is parked outside S1. The
 functional worker change keeps explicit B, validated S/C active/pending counts,
 original search deadlines, same-state cancellation and closure-held ownership.
 No new configurable defaults or artifact invalidation edges are introduced.
+
+
+### Delta 2026-11-13 — S1c actual consumers
+
+I66 search/control active+pending counts now construct the two fair Semaphore
+lanes in WorkerAdmission from complete DaemonSettings; zero pending keeps
+immediate admission when active is free. control_timeout_ms sets the absolute
+control admission deadline; search uses its existing SearchOperation deadline
+and same-state cancellation. Bind/register and metadata/status/panel share C.
+I47 janitor ticks install at most one tracked admission/completion future, polled
+beside accept/Stop/signals; timer branches never await the blocking work.
+
+I63 keeps the explicit Tokio B and checked application inventory sum. The sole
+production daemon spawn_blocking call is request::spawn: permit and Activity
+move into execution through finish/unwind. Website sync uses its fixed singleton
+and parent Activity; watcher/backfill/ANN/provider classes stay disabled there.
+Legacy Shared background sync can use the helper without an application lane
+permit; its background/provider orchestration remains outside this reserve proof.
+Connection/session slots, ReadPool handles and payload bytes stay independent.
+All adopted policy changes require restart; no index/vector/ANN invalidation.

@@ -473,3 +473,32 @@ control availability claim. Independent platform adapter work is parked outside
 this task and is not a blocker. One server profile+workers PR closes #152; one
 readiness+HTTP PR follows to close #79. No docs-only PR chain or #47/#48/#117/#128
 expansion; #12 is closed not planned.
+
+
+### 2026-11-13 — S1c application wiring checkpoint
+
+Task S1c: functional implementation checkpoint, fresh review/final gates pending.
+Independent admission target GREEN8/0; actual semantic RED4/4 showed prior bind,
+register, metadata and search bypassing full lanes. After wiring all application
+paths, focused daemon GREEN104/0 includes closure detach/unwind and coalesced
+janitor accept/Stop/signal/physical-completion gates. Harness endpoint setup was
+corrected with the existing state-directory helper; no native transport change.
+The running-janitor seam had its own missing-API RED before implementation.
+
+Ruling: common request::spawn moves the lane/sync guard and existing Activity
+into actual execution; capacity releases before Activity reports completion.
+Search admission uses the original deadline/token; queued caller drop cancels
+that token. Website fixed sync acquires its singleton before enqueue and retains
+the parent Activity through completion; legacy Shared background orchestration
+remains outside the application reserve proof. Tick only installs one tracked
+future; admission/join completion poll beside accepts and shutdown without the
+former accept-first biased select. Existing daemon-lifetime Lease is untouched.
+
+
+S1c integrated checkpoint now includes approved S1b production+fixture fixes
+through74e8376, preserving both review ledgers. Current focused cli-full targets
+server_workers/ipc_server/lifecycle/admission/admission_ux/server_profile/
+daemon_settings pass. Current Clippy/fmt precede the clean functional checkpoint;
+remaining gates are frozen full cli-full, lean focused/clippies, inventory/source
+audit and fresh S1c review. This is not Task S1c completion or native ship approval.
+Final receipts may live in the task report/PR without a documentation-only rerun.

@@ -26,6 +26,7 @@ fn fixture() -> (tempfile::TempDir, tempfile::TempDir, Arc<Shared>, Listener) {
         },
     )
     .unwrap();
+    create_state_dir(cache.path()).unwrap();
     let listener = platform::bind(&platform::daemon_endpoint(cache.path())).unwrap();
     (cache, config, shared, listener)
 }
@@ -94,4 +95,36 @@ async fn queued_janitor_does_not_block_signal_shutdown() {
     signal.send(()).unwrap();
     serving.await.unwrap();
     assert!(shared.workers.control().await.is_err());
+}
+
+#[tokio::test]
+async fn running_janitor_coalesces_and_keeps_physical_ownership_after_waiter_drop() {
+    let (_cache, _config, shared, _listener) = fixture();
+    let count = Arc::new(AtomicUsize::new(0));
+    let (events, mut observed) = mpsc::channel(1);
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let (release, proceed) = std::sync::mpsc::channel();
+    let mut janitor = Janitor::default();
+    janitor.tick_with(&shared, &count, &events, move |_| {
+        entered.send(()).unwrap();
+        proceed.recv_timeout(Duration::from_mins(5)).unwrap();
+        Vec::new()
+    });
+    let mut completion = Box::pin(janitor.completed());
+    poll_pending(completion.as_mut()).await;
+    started.await.unwrap();
+    drop(completion);
+    janitor.tick_with(&shared, &count, &events, |_| {
+        panic!("busy tick must coalesce")
+    });
+    drop(janitor);
+    let charged = count.load(Ordering::SeqCst);
+    let mut competing = Box::pin(shared.workers.control());
+    poll_pending(competing.as_mut()).await;
+    drop(competing);
+    release.send(()).unwrap();
+    observed.recv().await.unwrap();
+    assert_eq!(charged, 1);
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert!(shared.workers.control().await.is_ok());
 }

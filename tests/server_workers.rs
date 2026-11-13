@@ -8,13 +8,13 @@ use std::time::Instant;
 use docsbase_memory::config::bootstrap::DefaultsContext;
 use docsbase_memory::config::resolve::resolve_component;
 use docsbase_memory::config::schema::SourceId;
-use docsbase_memory::daemon::settings::{DaemonPatch, DaemonSpec};
+use docsbase_memory::daemon::settings::{DaemonPatch, DaemonSettings, DaemonSpec};
 use docsbase_memory::daemon::worker_admission::WorkerAdmission;
 use docsbase_memory::hybrid::work::Cancellation;
 use docsbase_memory::search::operation::SearchOperation;
 
-fn admission(pending: usize) -> WorkerAdmission {
-    let settings = resolve_component::<DaemonSpec>(
+fn settings(pending: usize) -> DaemonSettings {
+    resolve_component::<DaemonSpec>(
         &DefaultsContext::standalone(),
         [(
             SourceId::Cli,
@@ -23,12 +23,17 @@ fn admission(pending: usize) -> WorkerAdmission {
                 search_pending: Some(pending),
                 control_active: Some(1),
                 control_pending: Some(pending),
+                max_blocking_threads: Some(4),
                 ..DaemonPatch::default()
             },
         )],
     )
-    .unwrap();
-    WorkerAdmission::with_settings(settings.settings()).unwrap()
+    .unwrap()
+    .into_settings()
+}
+
+fn admission(pending: usize) -> WorkerAdmission {
+    WorkerAdmission::with_settings(&settings(pending)).unwrap()
 }
 
 fn operation() -> SearchOperation {
@@ -137,8 +142,11 @@ async fn async_cancellation_observes_permanent_state_and_wakes_all_waiters() {
 async fn expired_original_operation_never_enters_worker() {
     let admission = admission(1);
     let policy = docsbase_memory::search::settings::standalone().unwrap();
-    let started =
-        Instant::now() - std::time::Duration::from_millis(policy.settings().request_timeout_ms);
+    let started = Instant::now()
+        .checked_sub(std::time::Duration::from_millis(
+            policy.settings().request_timeout_ms,
+        ))
+        .unwrap();
     let operation = SearchOperation::new(policy.settings(), started, Cancellation::new()).unwrap();
     let deadline = operation.deadline();
     let entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -195,13 +203,18 @@ fn application_control_enters_with_search_and_sync_occupied() {
     use tokio::sync::oneshot;
 
     // The daemon owner's checked inventory for S=C=1 is B=1+1+1+1.
+    let settings = settings(0);
+    assert_eq!(
+        settings.max_blocking_threads,
+        settings.search_active + settings.control_active + 1 + 1
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
-        .max_blocking_threads(4)
+        .max_blocking_threads(settings.max_blocking_threads)
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(async {
-        let admission = admission(0);
+        let admission = WorkerAdmission::with_settings(&settings).unwrap();
         let permit = admission.search(&operation()).await.unwrap();
         let (search_release, search_proceed) = mpsc::channel();
         let (sync_release, sync_proceed) = mpsc::channel();
