@@ -2133,17 +2133,21 @@ mod tests {
                 .state,
             DenseRows::Ann(_)
         ));
-        let vectors = VectorCache::open(fixture.cache.path()).unwrap();
-        assert_eq!(
-            vectors.lease_count(model).unwrap(),
-            1,
-            "only the other project remains"
-        );
-        assert_eq!(
-            vectors.lease_count("other").unwrap(),
-            1,
-            "other model remains"
-        );
+        // Reopening also proves the worker released the final native owner.
+        let _vectors = VectorCache::open(fixture.cache.path()).unwrap();
+        let connection =
+            rusqlite::Connection::open(fixture.cache.path().join("vectors.db")).unwrap();
+        let leases = |model: &str| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM vector_cache_leases WHERE model_id = ?1",
+                    [model],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(leases(model), 1, "only the other project remains");
+        assert_eq!(leases("other"), 1, "other model remains");
     }
 
     #[test]

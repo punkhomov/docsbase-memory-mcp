@@ -329,3 +329,13 @@ The local Web specification supersedes the earlier 40 MiB executable ceiling.
 Static linking and artifact routing checks remain; executable, embedded bundle
 and compressed distribution sizes are measured without a replacement ceiling.
 The official `cli-full` profile includes `web`; lean Cargo defaults remain lean.
+
+## Delta 2026-11-13 — C12: read-only watcher assertions
+
+- **FR-41:** Проверка committed search results в watcher fixture использует
+  read-only ReadIndex и не требует writer ownership/repair. Исходные config,
+  stale-recovery, SQL/generation и hit assertions сохраняются; retry/ignore нет.
+- **SC-15:** Настоящий живой writer детерминированно вызывает LockBusy у старого
+  helper; read-only observer при нём проверяет1committed hit и0missing hits.
+  Watcher/config/index regressions, fresh reviews и native CI/inventory green.
+  Это исправляет observer contract; причина transient lock исходного CI неизвестна.

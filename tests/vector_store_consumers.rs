@@ -363,11 +363,13 @@ fn backfill_and_text_embed_release_sql_before_provider() {
     )
     .unwrap();
     assert_eq!(
-        fixture
-            .owner
-            .connect()
+        rusqlite::Connection::open(fixture.cache.path().join("vectors.db"))
             .unwrap()
-            .lease_count(probe.model_id())
+            .query_row(
+                "SELECT COUNT(*) FROM vector_cache_leases WHERE model_id = ?1",
+                [probe.model_id()],
+                |row| row.get::<_, i64>(0)
+            )
             .unwrap(),
         3
     );

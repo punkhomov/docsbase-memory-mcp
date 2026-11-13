@@ -155,3 +155,12 @@ manual optional workflow; honestly record registration limits. Human merge only.
 Repair only that tests/mcp_docs.rs fixture/assertions under FR-40; sensitivity
 probe and complete final checks, without production or timeout changes.
 **Acceptance:** FR-35–FR-40; SC-14.
+
+## Delta 2026-11-13 — C12: watcher observer ownership
+
+- [x] **C12:** src/watch/mod.rs test helper через ReadIndex; real writer-held
+  RED LockBusy -> GREEN 1committed/0missing hits. Preserve original stale recovery,
+  SQL/config/generation/result assertions. Verify full11watch unit, watcher/
+  config_runtime/index_incremental integrations, lean11watch, full/lean all-target
+  Clippy/fmt/diff; fresh task/final review и native inventory перед delivery.
+  Rust1.100.0 stable, no crates/production/retry/ignore/budget/threshold changes.

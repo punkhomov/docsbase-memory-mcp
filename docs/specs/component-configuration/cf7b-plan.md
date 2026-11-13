@@ -56,7 +56,7 @@ CF7/#78 не закрываются. Нет live policy changes или новы�
   BEGIN IMMEDIATE probe; cold dense и full/scoped/too-large search; worker snapshot
   lifetime/owned unpin с сохранением чужих leases. Regression failed reload удерживает
   прежние config/stages/dense state.
-- [ ] Focused tests, full cli-full, lean focused, full/lean all-target Clippy,
+- [x] Focused tests, full cli-full, lean focused, full/lean all-target Clippy,
   fmt/diff; dated deltas и ledger, fresh task/final review, fix rounds.
 - [ ] Native docs/Linux/macOS/Windows + inventory against PR140, squash delivery.
 

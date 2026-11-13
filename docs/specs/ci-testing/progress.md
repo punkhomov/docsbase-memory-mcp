@@ -256,3 +256,26 @@
   functional passes are not a green full lean run. Full SC-14 requires pending
   GitHub compatibility and four native PR checks plus final independent review.
   No main/environment publication.
+
+## 2026-11-13 — C12: watcher assertion reader (#144)
+
+Task C12: complete (implementation/local verification; reviews/native pending).
+Required Linux run43424811833 attempt1 на CF7b head8ff8658 упал в прежнем
+stale_full_recovery_preserves_sql_until_retry: helper пытался открыть writer,
+LockBusy. Детерминированный новый regression удерживает настоящий writer при
+вызове того же helper: RED LockBusy; ReadIndex::open -> GREEN1committed/0missing.
+Ruling: observer не должен получать writer/repair state. Не заявляем устранение
+неустановленной причины transient удержания lock исходного CI; production code,
+assertions, retry policy и native coverage не менялись. Нет sleeps/ignore/threshold.
+Validation: full11watch units; full watcher/config_runtime/index_incremental suites;
+lean11watch, full/lean all-target Clippy/fmt/diff green. Свежие task/final reviews и
+новый required native run с inventory audit остаются delivery gates PR142.
+Fresh C12 task review: Spec compliance PASS, Quality APPROVED; замечаний/deferred
+minors нет. Final490unit+10consumer tests включают итоговый with_writer fixture;
+initial writer не переоткрывается в regression. Final lean/lints, combined fresh
+whole-branch review и required native inventory — следующие delivery gates.
+
+C12 combined whole-branch final review: converged, Spec PASS / Quality APPROVED,
+без замечаний/minors. Final with_writer fixture: full490unit+10consumer GREEN;
+lean11watch GREEN; release watcher regression GREEN; refreshed full/lean all-target
+Clippy/fmt/diff GREEN. Required native final-head checks/inventory pending.

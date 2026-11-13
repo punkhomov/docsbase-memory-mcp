@@ -607,3 +607,19 @@ Post-review validation: final full cli-full1372passed/0failed/18прежних i
 regressions выполнены на final source. Final lean10consumer + прежние52integration/
 15vector-filtered unit и1alias-unit pass (78distinct focused tests); full/lean
 all-target Clippy/fmt/diff GREEN. Fresh final source review и native delivery pending.
+
+CF7b delivery expansion (2026-11-13): run43424811833 attempt1 — docs/macOS/Windows
+pass, Linux488/1 fail в прежнем watcher assertion helper. Новый #144/C12 исправляет
+test observer, без production changes/retry/skip; source-backed causal RED/GREEN и
+отдельный свежий task review PASS/APPROVED. Новый native run обязателен для всей ветки.
+Отдельный #143 выявил main debug-only lease probe в release tests. В новых CF7b tests
+probe заменён test-only SQL count, production API не расширен. Старые callers/#143
+ведёт второй агент; полное закрытие #143 этим изменением не заявляется.
+
+Final CF7b/C12 source review: converged, Spec PASS / Quality APPROVED; Critical,
+Important и Minor нет. Final refresh:490unit+10consumer debug; lean11watch+
+10consumer; release1worker+10consumer+1watch regression; full/lean all-target
+Clippy/fmt/diff GREEN. Полный1372pass относится к тому же production source до
+C12; после него менялись только test observer/probes и docs. Все14новых tests
+должны выполниться в новом native run; первый run не засчитываем как final green.
+Task CF7b implementation/review complete, native delivery остаётся pending.
