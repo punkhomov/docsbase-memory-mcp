@@ -764,6 +764,90 @@ change, assertions/coverage/ignores unchanged. Independent fix/integration revie
 converged, no findings; source tree equality across prior integration confirmed.
 First native run is not acceptance; corrected head requires fresh4checks/inventory.
 
+## 2026-11-13 — CF5a: pure policy and canonical consent
+
+Task CF5a: implementation in progress, isolated branch from origin/main c8d1e90.
+Library-only policy resolution preserves Legacy and captures managed launch facts.
+ConsentReview compiles actual owner assessments, keeps plan immutable and retains
+all blockers; receipts bind canonical identity. No CLI/daemon/v2/apply changes.
+RED missing policy APIs; GREEN7integration cases covering literal10launch contexts,
+all explicit overrides, actual SearchSpec/DbSpec and migration blockers, independent
+grants, prompt answers and stale identities. Causal launch/grant-union/receipt
+mutations each failed an actual assertion; all restored and focused suites GREEN.
+One initial RED had an incorrect draft fixture signature, corrected before the
+API-only RED; it is not counted as behavioral evidence. Local full/lean/lints,
+independent reviews and native delivery remain pending. No deferred minors.
+
+CF7c3 delivery: PR148 squash6826aafd04a76a8470f7a9608221bf859e826dcf.
+Final run43442514068 attempt1 required4checks GREEN, downloaded inventory retains
+all parent146tests and18ignores/platform; all10new regressions executed.
+Linux1403+2static, macOS1399, Windows1385pass/0fail. Revieweddef6b45/tested9776b4c/
+squash tree3f45cbd826c019abef06eefd59183c8aa7d6be44 matched. First run's6macOS
+fixture failures were reproduced with Linux symlink TMPDIR, canonical paths fixed
+without assertion/production changes, alias-path full/lean18/18GREEN; independent
+fix/integration review converged. CF5/CF7/#78 remain open.
+
+CF5a verification: complete cli-full1400pass/0fail/18existing ignores on baseC2;
+first lean full failed the old CF7c2 provider child because it inherited another
+parallel test's global config directory. Controlled malformed global config RED
+confirmed the cause. Child now has its own empty config directory; controlled
+full/lean GREEN, then complete lean1206pass/0fail/11existing ignores. Each suite
+has88top-level summaries plus2nested filtered child summaries excluded. Full/lean
+all-target Clippy/fmt/diff GREEN. CF5a7integration cases and causal3mutations pass.
+
+Integrated PR148/main6826aaf with source patch unchanged. Four append-only spec
+conflicts retain both complete suffixes after exact-prefix checks. Actual Shared
+full18tests GREEN. One combined command filtered policy target to0; separate full/
+lean unfiltered policy7tests and actual Shared lean18tests are the required
+integration evidence. Native/fresh reviews remain pending; no runtime activation.
+
+Task CF5a: complete (implementation/local verification/fresh task review).
+Fresh task review: Spec PASS / Quality APPROVED; Critical/Important/Minor none.
+Ruling: library consent satisfaction intentionally preserves every original
+execution blocker; no runtime activation/readiness is claimed. The4line inherited
+config isolation correction is source-reproduced, test-only and retains exact
+Admission/no-enqueue assertions. Integrated full/lean policy7+Shared18tests,
+full/lean all-target Clippy/fmt/diff GREEN. No deferred minors. Independent final
+source review and required native inventory remain delivery gates.
+
+CF5a independent final bounded-source review converged: unmet scoped requirements,
+interface drift, Critical/Important findings and deferred minors none. Evidence
+maps pure/bounded FR-12, launch/grants FR-13, initialization FR-14 and canonical
+identity foundation FR-15; actual admission/execution/SC-4 remain future work.
+Draft PR149 first native run43446337294 precedes this docs-only review ledger;
+final required checks/inventory must cover the published final head. Source/tests
+have not changed since8112d22 integration. Full CF5/CF7/#78 remain open.
+
+## 2026-11-13 — CF5b0: adoption and recovery investigation
+
+Task CF5b0: complete (source investigation/local audit/fresh task review) in an isolated docs-only worktree
+from main6826aaf. Audited actual vector mode lifetime, daemon/project/config writer
+leases, source observer, migration proposals and writer durability. Primary
+Microsoft/SQLite/POSIX references confirm that journal commit does not cover TOML
+and REPLACEFILE_WRITE_THROUGH is unsupported; Windows replacement errors may
+change names. Selected stopped maintenance plus private SQLite control journal;
+exact SQL/schema/lease/namespace/native durability proof is a distinct required
+CF5b1 gate. No runtime source writes, activation or broad FR completion. Reference/
+source/link audit and fresh reviews pending; no runtime tests added for prose.
+
+Fresh CF5b0 task review: PASS / APPROVED. Two Minor findings fixed in-task:
+stale revalidation may leave only explicitly inventoried coordination lockfiles,
+not source/control-state mutations; repaired resource-limit spacing. Exact
+allowlist/causal assertions remain CF5b1. No deferred minors.
+
+CF5b0 independent final review: content converged, Critical/Important none;
+required native delivery pending. Minor по языку исправлен переводом investigation
+на русский. Task marker отражает completion source/review, не native acceptance.
+Link/diff audit GREEN. Исполнимые schema/lease/durability/recovery остаются CF5b1+.
+
+2026-11-13 — CF5b0 integration final-review Minor: addressed in-task. Уточнено,
+что стабильный SQLite read snapshot в WAL даёт наблюдение, но сам не исключает
+registry writers. Writer-excluding admission/control-lease/SQL-контракт на весь
+bounded maintenance интервал и causal отказ concurrent registration/root move
+остаются явным CF5b1 proof gate; механизм не выбран и runtime/durability proof
+не заявлен. Изменены только wording adoption-recovery и этот ledger append.
+Scoped fix re-review и exact-head native acceptance остаются pending.
+
 ## 2026-11-13 — IO1: attributable indexing outcome для #79
 
 Task IO1: plan/source investigation in progress. На main6826aaf подтверждено:

@@ -478,6 +478,28 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   План [cf7c3-plan.md](cf7c3-plan.md). Configured APIs сохраняют прежний режим;
   strict startup/adoption/apply и оставшиеся CF5/CF7 задачи ещё не завершены.
 
+## Delta 2026-11-13 — CF5a before operational policy/apply
+
+- [x] **CF5a:** pure controlling-boundary resolution, explicit grants, immutable
+  canonical consent review, prompt answers and stale receipts. Plan:
+  [cf5a-plan.md](cf5a-plan.md). Actual SearchSpec/DbSpec/migration assessments;
+  launch/TTY/refusal/limit/mutation evidence, full/lean checks, fresh task/final
+  review and native inventory. CLI integration, source writes, strict adoption
+  and execution readiness remain separate CF5b/CF7/CF11 work; #78 stays open.
+
+## Delta 2026-11-13 — CF5b0 before source/store mutation
+
+- [x] **CF5b0:** source-backed adoption/recovery investigation in
+  [adoption-recovery.md](adoption-recovery.md), current source map, primary platform
+  references, stopped-maintenance/SQLite-journal choice, failure/namespace/secret/
+  resource cases and explicit subsequent proof gates. Docs-only source/link audit,
+  fresh task/final review and required CI; no runtime tests for prose.
+- **CF5b1:** exact SQL/control-state/namespace/lease contract and isolated native
+  prototype before activation; details and acceptance cases in investigation.
+- **CF5b2:** native source publication/durability and failure inspection seam.
+- **CF5b3/CF5c:** stopped migration/recovery executor, then coherent CLI/startup;
+  providers/reindex/online generations remain outside initial local adoption.
+
 ## Delta 2026-11-13 — IO1: результат каждого index writer
 
 - [x] IO1: additive schema, bounded read-only outcome и all-core begin/end publication

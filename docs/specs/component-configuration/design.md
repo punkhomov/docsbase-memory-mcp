@@ -744,6 +744,47 @@ reopen с новым provider instance/credentials; native resource failure
 остаётся warning. start_watchers сначала получает список и освобождает Db guard.
 План: [cf7c3-plan.md](cf7c3-plan.md). Strict startup/adoption остаются CF5/CF7.
 
+## Delta 2026-11-13 — CF5a consent boundary
+
+`config::policy::resolve(PolicyMode, Option<InvalidationPolicy>, EntrypointFacts)`
+returns Legacy or an immutable ResolvedPolicy. Auto disappears before consumption;
+no ambient terminal/environment reads occur. Legacy is selected only for v1 with
+no explicit new policy. Apply permits a non-TTY controlling CLI, while Prompt
+requires its TTY. Non-CLI loops cannot consent to rebuilds under either policy.
+
+ConsentReview::compile delegates to the bounded canonical compiler and privately
+owns its ChangePlan. evaluate returns ConsentSatisfied, PromptRequired or Refused,
+not Ready/Applied. Routine no-grant runtime init/reconfiguration requires matching
+Runtime resource and Missing/KnownIdentity observation; InitializeStore requires
+Artifact+Missing. All other actions require consent. Observation lookup uses the
+compiler's sorted resources, O(actions×log observations), with no extra index.
+
+Fail refuses required changes with3 before grants are considered. Apply requires
+all declared permission classes. PromptRequest is constructible only by a direct
+CLI+TTY decision; its answer binds the displayed plan ID, explicit acceptance and
+union of separately supplied grants. Refusals use4 for stale identity and5 for
+missing control/TTY/grants or a declined answer. Receipts expose only revalidation
+against a newly compiled ConsentReview, not mutable plan access or execution.
+
+This is the consent gate alone: canonical IDs are not authorization tokens and
+receipt equality does not observe the filesystem. All planner blockers, including
+ExecutorUnavailable and StrictStoreAdoptionUnavailable, stay intact even when
+consent is satisfied. The future executor must reobserve actual state under its
+own admission, check receipt identity, execution capability and blockers, and
+follow recovery/publication rules. No CLI flags/apply/write or strict startup is
+introduced. Detailed implementation boundary: [cf5a-plan.md](cf5a-plan.md).
+
+## Delta 2026-11-13 — CF5b0 source-backed recovery direction
+
+[Adoption/recovery investigation](adoption-recovery.md) selects stopped maintenance
+and a separate private SQLite control journal for initial source/store adoption.
+It inventories actual admission gaps and separates journal, source replacement,
+strict mode publication and consumer startup. It records primary OS/SQLite sources,
+unknown/corrupt-state refusals, sensitive before-image handling and native failure
+cases. Exact SQL/control-state/namespace/lease/durability contract is the CF5b1 gate;
+this investigation cannot authorize implementation or activate file-v2 on its own.
+Data generation apply remains CF10/CF11; consent remains CF5a's separate gate.
+
 ## Delta 2026-11-13 — IO1 для серверной готовности
 
 Последний outcome хранится в projects row с отдельным monotonic attempt ID.
