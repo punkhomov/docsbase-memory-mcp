@@ -1,5 +1,8 @@
 //! Actual dense policy and ANN backfill leases (`CF6b`), without provider I/O.
 
+#[path = "support/vector_leases.rs"]
+mod vector_leases;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,7 +17,8 @@ use docsbase_memory::hybrid::jobs::{
     embed_project_chunks_with, embed_project_chunks_with_dense_policy,
 };
 use docsbase_memory::store::Db;
-use docsbase_memory::vector_cache::{CacheLimits, Embedder, VectorCache};
+use docsbase_memory::vector_cache::{CacheLimits, Embedder};
+use vector_leases::lease_count;
 
 fn policy() -> DenseSettings {
     standalone().unwrap().into_settings()
@@ -61,9 +65,8 @@ impl Embedder for LeaseProbe {
         if let Some(gate) = &self.gate {
             gate.wait();
         }
-        let cache = VectorCache::open(&self.root)?;
         self.during
-            .store(cache.lease_count(self.model_id())?, Ordering::SeqCst);
+            .store(lease_count(&self.root, self.model_id())?, Ordering::SeqCst);
         Ok(texts.iter().map(|_| vec![1., 0., 0.]).collect())
     }
 }
@@ -197,13 +200,7 @@ fn static_ann_ineligibility_never_takes_pins_during_real_embedding() {
         )
         .unwrap();
         assert_eq!(probe.during.load(Ordering::SeqCst), 0, "{limits:?}");
-        assert_eq!(
-            VectorCache::open(root.path())
-                .unwrap()
-                .lease_count(probe.model_id())
-                .unwrap(),
-            0
-        );
+        assert_eq!(lease_count(root.path(), probe.model_id()).unwrap(), 0);
     }
 }
 
@@ -226,10 +223,7 @@ fn eligible_duplicate_chunk_rows_keep_their_pins_after_embedding() {
         "five rows include four distinct hashes"
     );
     assert_eq!(
-        VectorCache::open(root.path())
-            .unwrap()
-            .lease_count(probe.model_id())
-            .unwrap(),
+        lease_count(root.path(), probe.model_id()).unwrap(),
         4,
         "renew by chunk rows, not distinct hashes"
     );

@@ -284,3 +284,25 @@ Env::assert_search_count открывает existing ReadIndex::open. Он чи�
 Tantivy snapshot, не создаёт writer и не восстанавливает index перед проверкой.
 Детерминированный test удерживает IndexHandle writer при двух hit assertions.
 Production IndexHandle/lifecycle не меняются; transient-lock root cause не заявлен.
+
+## Delta 2026-11-13 — C13: test-owned vector lease observer
+
+Три integration targets явно подключают tests/support/vector_leases.rs.
+Helper открывает existing VECTOR_DB_FILE через rusqlite READ_ONLY и выполняет
+parameterized COUNT(*) по model_id. Он считает все сохранённые строки, как
+прежний debug-only helper, без нового expiry filter. Ошибки открытия/query
+сохраняют source и контекст в Error::Internal; неверный count не маскируется.
+SQLite управляет locking; raw File для DB не открывается (#133). Отдельный
+VectorCache для наблюдения не создаётся: это исключает incidental eviction.
+Production helper/ownership/leases/API и dependency graph не меняются.
+Отклонены cfg skips, debug_assertions в release и расширение публичного API:
+они скрывают regression либо добавляют ненужный production surface.
+
+### C13 design amendment — admitted control validity
+
+Проверка admitted control в hybrid_jobs получает отдельный fresh indexed fixture
+с теми же corpus/model/policy. Старый shared fixture уже полностью embedded:
+callback не вызывается, а u64::MAX sentinel ошибочно проходит прежнее `> 0`.
+Точный expected count 4 требует реального наблюдения при fake Embedder execution.
+Сначала sensitivity RED с stronger assertion и старым fixture, затем fresh fixture
+GREEN. Остальные counts 0/1/2/4, model independence, TTL/failure cleanup неизменны.

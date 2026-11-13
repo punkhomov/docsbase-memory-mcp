@@ -1,4 +1,8 @@
 //! Construction-owned ANN lifetimes against real metadata, leases and status.
+
+#[path = "support/vector_leases.rs"]
+mod vector_leases;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,6 +18,7 @@ use docsbase_memory::hybrid::jobs::embed_project_chunks_with_dense_policy;
 use docsbase_memory::hybrid::meta::AnnState;
 use docsbase_memory::store::Db;
 use docsbase_memory::vector_cache::{CacheLimits, Embedder, VectorCache};
+use vector_leases::lease_count;
 
 #[test]
 fn lifetimes_reject_unrepresentable_or_immediately_expired_leases() {
@@ -220,10 +225,10 @@ fn backfill(fail: bool, pin_ttl: Option<Duration>) {
         assert!(expires >= before + expected_ttl && expires <= seconds() + expected_ttl);
     }
     assert_eq!(
-        vectors.lease_count(probe.model_id()).unwrap(),
+        lease_count(cache.path(), probe.model_id()).unwrap(),
         if fail { 1 } else { 2 }
     );
-    assert_eq!(vectors.lease_count("unrelated").unwrap(), 1);
+    assert_eq!(lease_count(cache.path(), "unrelated").unwrap(), 1);
 }
 
 #[test]

@@ -339,3 +339,23 @@ The official `cli-full` profile includes `web`; lean Cargo defaults remain lean.
   helper; read-only observer при нём проверяет1committed hit и0missing hits.
   Watcher/config/index regressions, fresh reviews и native CI/inventory green.
   Это исправляет observer contract; причина transient lock исходного CI неизвестна.
+
+## Delta 2026-11-13 — C13: release lease assertions (#143)
+
+- **FR-42:** Lease/pin assertions в hybrid_jobs, cache_settings и ann_lifetimes
+  выполняются и в настоящем release profile без debug-only production API.
+  Сохраняются исходные model keys, counts, TTL и момент наблюдения при embedding.
+  Test observer читает существующую SQLite DB без создания, eviction или записи.
+- **SC-16:** Зафиксировать E0599 RED; выполнить все три targets в release и debug,
+  lean release probe и полный cli-full release functional suite. Debug assertions
+  в release выключены; никаких skips/threshold/default/API/dependency изменений.
+  Fresh task/final reviews и четыре required native checks перед merge.
+
+### C13 amendment 2026-11-13 — positive admission observation
+
+- **FR-42 clarification:** admitted hybrid_jobs control использует fresh indexed
+  fixture с прежним corpus/model/policy и проверяет ровно 4 leases при embedding.
+  Sentinel u64::MAX не считается наблюдением; остальные counts/TTL/cleanup
+  assertions сохраняются.
+- **SC-16 clarification:** stronger exact-count assertion на старом shared fixture
+  должна дать sensitivity RED до исправления fixture; затем focused GREEN.
