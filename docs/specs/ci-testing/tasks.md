@@ -164,3 +164,20 @@ probe and complete final checks, without production or timeout changes.
   config_runtime/index_incremental integrations, lean11watch, full/lean all-target
   Clippy/fmt/diff; fresh task/final review и native inventory перед delivery.
   Rust1.100.0 stable, no crates/production/retry/ignore/budget/threshold changes.
+
+## Delta 2026-11-13 — C13: release lease regression
+
+- [ ] **C13 (FR-42, SC-16):** add explicitly imported test-only
+  tests/support/vector_leases.rs; replace six debug-only calls in hybrid_jobs,
+  cache_settings, ann_lifetimes. Preserve every existing assertion. Test helper
+  readonly/missing-file behavior and model isolation through real SQLite.
+  Verify affected release/debug targets, lean release, full cli-full release,
+  all-target Clippy/fmt, fresh task/final reviews and four native CI checks.
+  See c13-plan.md for commands/evidence. No new crates or production edits.
+
+### C13 amendment 2026-11-13 — positive control
+
+Before observer implementation, capture exact-count 4 sensitivity RED in
+hybrid_jobs with the old shared fixture. Give that control a fresh indexed
+fixture of the same corpus/policy and keep the stronger assertion for GREEN.
+This retains actual fake Embedder execution; no other test semantics change.

@@ -3,6 +3,9 @@
 //! build. The provider-backed plan-embed path is exercised by the T5 live
 //! smoke, not here.
 
+#[path = "support/vector_leases.rs"]
+mod vector_leases;
+
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -18,6 +21,7 @@ use docsbase_memory::store::Db;
 use docsbase_memory::vector_cache::Embedder;
 use docsbase_memory::vector_cache::VectorCache;
 use tempfile::TempDir;
+use vector_leases::lease_count;
 
 struct FakeEmbedder {
     calls: AtomicUsize,
@@ -157,9 +161,8 @@ impl Embedder for LeaseProbe {
 
     #[allow(clippy::cast_precision_loss)]
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        let cache = VectorCache::open(&self.root)?;
         self.seen
-            .store(cache.lease_count(self.model_id())?, Ordering::SeqCst);
+            .store(lease_count(&self.root, self.model_id())?, Ordering::SeqCst);
         Ok(texts
             .iter()
             .map(|text| vec![text.len() as f32, 0.5, 0.25])
@@ -194,7 +197,8 @@ fn backfill_leases_only_when_the_build_can_be_admitted() {
         "a corpus the build cannot admit must not take a backfill lease"
     );
 
-    // Control: the default cap admits the same corpus, so the lease is taken.
+    // Control: a fresh cache forces embedding for the same admitted corpus.
+    let (cache, db, project_id) = indexed_project();
     let admitted = docsbase_memory::hybrid::dense::DenseCacheLimits {
         min_vectors: 1,
         ..docsbase_memory::hybrid::dense::DenseCacheLimits::default()
@@ -209,8 +213,9 @@ fn backfill_leases_only_when_the_build_can_be_admitted() {
         &admitted,
     )
     .expect("backfill");
-    assert!(
-        probe.seen() > 0,
+    assert_eq!(
+        probe.seen(),
+        4,
         "an admitted corpus must pin its vectors before embedding"
     );
 }
@@ -254,5 +259,98 @@ fn below_threshold_backfill_does_not_suspend_the_vector_budget() {
         probe.seen(),
         0,
         "a corpus below the ANN threshold needs no ANN pin"
+    );
+}
+
+#[test]
+fn vector_lease_observer_does_not_create_a_missing_database() {
+    let root = TempDir::new().expect("cache root");
+    let path = root
+        .path()
+        .join(docsbase_memory::vector_cache::VECTOR_DB_FILE);
+    let error = lease_count(root.path(), "missing-model").expect_err("missing database");
+    assert!(matches!(
+        &error,
+        docsbase_memory::error::Error::Internal { .. }
+    ));
+    assert!(std::error::Error::source(&error).is_some());
+    assert!(error.to_string().contains("open vector lease database"));
+    assert!(error.to_string().contains(&path.display().to_string()));
+    assert!(!path.exists());
+    assert_eq!(
+        fs::read_dir(root.path()).expect("cache contents").count(),
+        0
+    );
+}
+
+#[test]
+fn vector_lease_observer_counts_model_rows_without_changing_them() {
+    let root = TempDir::new().expect("cache root");
+    let model = "quoted' OR 1=1 --";
+    // Real cache writes leave committed leases in the active WAL while the
+    // independent observer reads. Expire one row only after pin's purge step.
+    let mut cache = VectorCache::open(root.path()).expect("seed cache");
+    cache
+        .pin(
+            1,
+            model,
+            &["expired".into(), "active".into()],
+            std::time::Duration::from_secs(3600),
+        )
+        .expect("seed model leases");
+    cache
+        .pin(
+            2,
+            "other-model",
+            &["other".into()],
+            std::time::Duration::from_secs(3600),
+        )
+        .expect("seed independent model");
+    let conn = rusqlite::Connection::open(
+        root.path()
+            .join(docsbase_memory::vector_cache::VECTOR_DB_FILE),
+    )
+    .expect("fixture writer");
+    conn.execute(
+        "UPDATE vector_cache_leases SET expires_at = 0 WHERE model_id = ?1 AND chunk_hash = ?2",
+        rusqlite::params![model, "expired"],
+    )
+    .expect("expire fixture row");
+    let rows = || {
+        let mut statement = conn
+            .prepare(
+                "SELECT lease_id, model_id, chunk_hash, expires_at FROM vector_cache_leases
+                 ORDER BY lease_id, model_id, chunk_hash",
+            )
+            .expect("lease snapshot");
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .expect("read snapshot")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("snapshot rows")
+    };
+    let before = rows();
+    let version: i64 = conn
+        .pragma_query_value(None, "data_version", |row| row.get(0))
+        .expect("data version");
+    assert_eq!(lease_count(root.path(), model).expect("quoted model"), 2);
+    assert_eq!(
+        lease_count(root.path(), "other-model").expect("independent model"),
+        1
+    );
+    assert_eq!(lease_count(root.path(), "absent").expect("absent model"), 0);
+    assert_eq!(rows(), before, "observation must preserve expired rows too");
+    assert_eq!(
+        conn.pragma_query_value::<i64, _>(None, "data_version", |row| row.get(0))
+            .expect("data version after reads"),
+        version,
+        "the observer must not commit any writes"
     );
 }
