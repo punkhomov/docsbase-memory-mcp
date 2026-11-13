@@ -275,7 +275,7 @@ pub(crate) fn uninstall_with_settings(
 /// when the daemon process really exits; retries while a blocking job winds
 /// down (FR-5).
 fn acquire_after_stop(cache: &Path) -> anyhow::Result<Lease> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(600);
+    let deadline = std::time::Instant::now() + Duration::from_mins(10);
     let mut cleared_stale = false;
     loop {
         let _ = lifecycle::stop_daemon(cache);

@@ -170,6 +170,14 @@ required в Linux. Этот согласованный с пользовател
 остаётся без HTTP frontend. Rust 1.88; frontend собирается явно до Cargo.
 
 
+## Delta 2026-11-12 — первый этап Rig (ADR-RIG1)
+
+MSRV и native CI: Rust 1.97.1, по требованию rig-core 0.45.0. Пользователь
+разрешил повышение MSRV. Nightly остаётся инструментом разрешения зависимостей
+с 14-дневным min-publish-age; повышение MSRV не отменяет cooldown. Rig optional
+только в hybrid-remote; default и локальный FastEmbed остаются без него.
+Подробности: docs/specs/rig-providers/{requirements,design,tasks,progress}.md.
+
 ## Delta 2026-11-13 — stable Cargo cooldown
 
 Supersedes the nightly/MSRV and deferred age-enforcement statements above.

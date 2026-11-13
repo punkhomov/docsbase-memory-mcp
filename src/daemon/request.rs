@@ -109,7 +109,7 @@ mod tests {
 
     use super::*;
 
-    const WATCHDOG: Duration = Duration::from_secs(300);
+    const WATCHDOG: Duration = Duration::from_mins(5);
 
     fn operation() -> SearchOperation {
         SearchOperation::new(

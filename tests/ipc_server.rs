@@ -195,7 +195,7 @@ fn hello_advertises_scoped_search_capability() {
     );
 }
 
-const SCOPED_WATCHDOG: Duration = Duration::from_secs(300);
+const SCOPED_WATCHDOG: Duration = Duration::from_mins(5);
 
 async fn async_exchange(
     client: &mut tokio::io::BufReader<platform::Stream>,

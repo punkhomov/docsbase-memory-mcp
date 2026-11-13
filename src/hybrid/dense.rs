@@ -1666,7 +1666,7 @@ impl TestBuildGate {
     fn wait(&self) {
         let (lock, ready) = &*self.0;
         if let Ok(open) = lock.lock() {
-            let _ = ready.wait_timeout_while(open, Duration::from_secs(120), |open| !*open);
+            let _ = ready.wait_timeout_while(open, Duration::from_mins(2), |open| !*open);
         }
     }
 }

@@ -36,7 +36,7 @@ pub const DEBOUNCE: Duration = Duration::from_millis(1_500);
 
 /// Hard upper bound from the first event of a batch to its flush, so
 /// continuous churn cannot starve indexing (NFR-4).
-pub const MAX_DEBOUNCE: Duration = Duration::from_millis(2_000);
+pub const MAX_DEBOUNCE: Duration = Duration::from_secs(2);
 
 /// Watcher tracing: set `DOCSBASE_WATCH_DEBUG=1` to log raw events and
 /// batches to stderr (diagnostics; no behavior change).

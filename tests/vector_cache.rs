@@ -248,7 +248,7 @@ fn unpinning_reclaims_the_budget_without_waiting_for_the_next_put() {
     // Pin first, exactly like the backfill does: leases exist before the rows
     // arrive, so growing the cache cannot evict them.
     cache
-        .pin(1, "m", &hashes, std::time::Duration::from_secs(60))
+        .pin(1, "m", &hashes, std::time::Duration::from_mins(1))
         .expect("pin");
     for hash in &hashes {
         cache.put("m", hash, &[1.0, 2.0]).expect("put");
@@ -287,7 +287,7 @@ fn pinned_vectors_survive_the_byte_cap_until_unpinned() {
             1,
             "m",
             &["h1".to_owned()],
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_mins(1),
         )
         .expect("pin h1");
     cache.put("m", "h2", &[3.0, 4.0]).expect("put h2");

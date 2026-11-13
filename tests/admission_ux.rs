@@ -156,7 +156,7 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
 const DOC: &str = "# Guide\n\ninstaller prose about widgets.\n";
 
 // A failure watchdog, not an expected processing time or a mandatory delay.
-const WATCHER_WATCHDOG: Duration = Duration::from_secs(60);
+const WATCHER_WATCHDOG: Duration = Duration::from_mins(1);
 
 #[derive(Debug, PartialEq, Eq)]
 struct IndexedState {

@@ -216,7 +216,7 @@ mod tests {
     use std::time::Duration;
 
     fn deadline() -> Instant {
-        Instant::now() + Duration::from_secs(300)
+        Instant::now() + Duration::from_mins(5)
     }
 
     #[test]
@@ -241,7 +241,7 @@ mod tests {
                     .map(|reader| reader.connection().is_autocommit())
             });
             entered
-                .recv_timeout(Duration::from_secs(300))
+                .recv_timeout(Duration::from_mins(5))
                 .expect("waiting after observing empty pool");
             drop(reader);
             assert!(worker.join().expect("join").expect("reused reader"));

@@ -1456,7 +1456,7 @@ mod tests {
     use std::fmt::Write as _;
     use std::sync::mpsc::{self as std_mpsc, TryRecvError};
 
-    const REFRESH_WATCHDOG: Duration = Duration::from_secs(300);
+    const REFRESH_WATCHDOG: Duration = Duration::from_mins(5);
 
     // Drop shared state and DB handles before removing directories on Windows.
     struct RefreshFixture {
@@ -1620,7 +1620,7 @@ mod tests {
         assert_eq!(shared.read_pool().settings(), &pool);
         let reader = shared
             .read_pool()
-            .acquire(Instant::now() + Duration::from_secs(300))
+            .acquire(Instant::now() + Duration::from_mins(5))
             .expect("reader");
         let timeout: u32 = reader
             .connection()

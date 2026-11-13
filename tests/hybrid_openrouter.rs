@@ -60,6 +60,7 @@ fn strings(value: &Value, key: &str) -> Vec<String> {
 }
 
 type ScriptedResponse = (u16, String, Option<u64>);
+type HeaderLog = Arc<Mutex<Vec<Vec<(String, String)>>>>;
 type ResponseQueue = Arc<Mutex<VecDeque<ScriptedResponse>>>;
 
 /// Mock transport: a FIFO of scripted responses, plus a call log.
@@ -67,6 +68,7 @@ type ResponseQueue = Arc<Mutex<VecDeque<ScriptedResponse>>>;
 struct MockTransport {
     responses: ResponseQueue,
     calls: Arc<Mutex<Vec<(String, String)>>>,
+    headers: HeaderLog,
 }
 
 impl MockTransport {
@@ -98,9 +100,10 @@ impl Transport for MockTransport {
     fn post_json(
         &self,
         url: &str,
-        _headers: &[(String, String)],
+        headers: &[(String, String)],
         body: &str,
     ) -> Result<TransportResponse> {
+        self.headers.lock().expect("headers").push(headers.to_vec());
         self.calls
             .lock()
             .expect("calls")
@@ -492,4 +495,163 @@ fn embeddings_without_indices_are_read_in_input_order() {
     let error = blocking::enter(|| client.embed_texts("m", 1024, false, &input))
         .expect_err("mixed index forms are drift");
     assert!(format!("{error}").contains("mixed"), "{error}");
+}
+
+#[test]
+fn rig_migration_preserves_shuffled_embedding_indices() {
+    let mock = MockTransport::default();
+    mock.push(
+        200,
+        r#"{"data":[{"index":1,"embedding":[3.0,4.0]},{"index":0,"embedding":[1.0,0.0]}]}"#,
+        None,
+    );
+    let client = make_client(&mock);
+    let input = vec!["first".to_owned(), "second".to_owned()];
+    let vectors = blocking::enter(|| client.embed_texts("test", 2, false, &input)).expect("embed");
+    assert_eq!(vectors, vec![vec![1.0, 0.0], vec![3.0, 4.0]]);
+}
+
+#[test]
+fn rig_migration_rejects_nonrepresentable_f32_vectors_and_scores() {
+    let mock = MockTransport::default();
+    mock.push(200, r#"{"data":[{"index":0,"embedding":[1e100]}]}"#, None);
+    let client = make_client(&mock);
+    assert!(blocking::enter(|| client.embed_texts("test", 1, false, &["input".into()])).is_err());
+
+    let mock = MockTransport::default();
+    mock.push(
+        200,
+        r#"{"results":[{"index":0,"relevance_score":1e100}]}"#,
+        None,
+    );
+    let client = make_client(&mock);
+    assert!(blocking::enter(|| client.rerank("test", "q", &["input".into()], 1)).is_err());
+}
+
+#[test]
+fn rig_migration_rejects_duplicate_rerank_indices() {
+    let mock = MockTransport::default();
+    mock.push(
+        200,
+        r#"{"results":[{"index":0,"relevance_score":0.9},{"index":0,"relevance_score":0.8}]}"#,
+        None,
+    );
+    let client = make_client(&mock);
+    assert!(
+        blocking::enter(|| client.rerank("test", "q", &["first".into(), "second".into()], 2))
+            .is_err()
+    );
+}
+
+#[test]
+fn rig_migration_rejects_wrong_embedding_count_and_width() {
+    for body in [
+        r#"{"data":[]}"#,
+        r#"{"data":[{"embedding":[1.0]}]}"#,
+        r#"{"data":[{"embedding":[]}]}"#,
+    ] {
+        let mock = MockTransport::default();
+        mock.push(200, body, None);
+        let client = make_client(&mock);
+        assert!(
+            blocking::enter(|| client.embed_texts("test", 2, false, &["input".into()])).is_err(),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn rig_migration_keeps_batch_boundaries_and_empty_shortcut() {
+    let mock = MockTransport::default();
+    let first = serde_json::json!({"data": (0_u16..128).rev().map(|i| serde_json::json!({"index":i,"embedding":[f32::from(i)]})).collect::<Vec<_>>()});
+    mock.push(200, &first.to_string(), None);
+    mock.push(200, r#"{"data":[{"index":0,"embedding":[128.0]}]}"#, None);
+    let client = make_client(&mock);
+    let input = (0_u16..129).map(|i| format!("doc {i}")).collect::<Vec<_>>();
+    let vectors = blocking::enter(|| client.embed_texts("test", 1, false, &input)).expect("embed");
+    assert_eq!(
+        vectors,
+        (0_u16..129).map(|i| vec![f32::from(i)]).collect::<Vec<_>>()
+    );
+    assert_eq!(mock.calls().len(), 2);
+    let empty = blocking::enter(|| client.embed_texts("test", 1, false, &[])).expect("empty");
+    assert_eq!(empty, [] as [std::vec::Vec<f32>; 0]);
+    assert_eq!(mock.calls().len(), 2);
+}
+
+#[test]
+fn rig_migration_preserves_auth_attribution_and_request_shapes() {
+    let mock = MockTransport::default();
+    mock.push(200, r#"{"data":[{"embedding":[1.0]}]}"#, None);
+    mock.push(
+        200,
+        r#"{"results":[{"index":0,"relevance_score":0.5}]}"#,
+        None,
+    );
+    let client = make_client(&mock);
+    blocking::enter(|| client.embed_texts("test", 1, false, &["input".into()])).expect("embed");
+    blocking::enter(|| client.rerank("test", "q", &["input".into()], 1)).expect("rerank");
+    let headers = mock.headers.lock().expect("headers");
+    for sent in headers.iter() {
+        for (key, value) in [
+            ("authorization", "Bearer test-key"),
+            ("content-type", "application/json"),
+            (
+                "http-referer",
+                "https://github.com/punkhomov/docsbase-memory-mcp",
+            ),
+            ("x-title", "docsbase-memory-mcp"),
+        ] {
+            assert!(
+                sent.iter()
+                    .any(|(name, actual)| name.eq_ignore_ascii_case(key) && actual == value),
+                "missing {key}"
+            );
+        }
+    }
+    let calls = mock.calls();
+    assert_eq!(calls[0].0, format!("{BASE_URL}/embeddings"));
+    assert_eq!(calls[1].0, format!("{BASE_URL}/rerank"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&calls[0].1).expect("JSON"),
+        serde_json::json!({"model":"test", "input":["input"], "dimensions":1, "input_type":"search_document"})
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&calls[1].1).expect("JSON"),
+        serde_json::json!({"model":"test", "query":"q", "documents":["input"], "top_n":1})
+    );
+}
+
+#[test]
+fn rig_migration_rejects_non_object_responses_without_panicking() {
+    for body in ["null", "[]", "42", r#""string""#, "true"] {
+        let mock = MockTransport::default();
+        mock.push(200, body, None);
+        mock.push(200, body, None);
+        let client = make_client(&mock);
+        assert!(
+            blocking::enter(|| client.embed_texts("test", 1, false, &["input".into()])).is_err(),
+            "{body}"
+        );
+        assert!(
+            blocking::enter(|| client.rerank("test", "q", &["input".into()], 1)).is_err(),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn rig_migration_ignores_unconsumed_provider_metadata() {
+    let mock = MockTransport::default();
+    mock.push(200, r#"{"usage":{"different_vendor_schema":true},"model":42,"data":[{"embedding":[1.0],"object":42}]}"#, None);
+    mock.push(200, r#"{"usage":"unknown","model":42,"results":[{"index":0,"relevance_score":0.5,"document":{"text":"echo"}}]}"#, None);
+    let client = make_client(&mock);
+    assert_eq!(
+        blocking::enter(|| client.embed_texts("test", 1, false, &["input".into()])).expect("embed"),
+        vec![vec![1.0]]
+    );
+    assert_eq!(
+        blocking::enter(|| client.rerank("test", "q", &["input".into()], 1)).expect("rerank"),
+        vec![(0, 0.5)]
+    );
 }

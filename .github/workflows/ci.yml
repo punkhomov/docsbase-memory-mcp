@@ -91,7 +91,7 @@ jobs:
             echo "::error::cargo tree returned an empty dependency graph"
             exit 1
           fi
-          if grep -wE 'axum|ts-rs|fastembed|ort|tokenizers|hf-hub|image|native-tls|ureq|reqwest' target/ci-observations/lean-dependency-tree.txt; then
+          if grep -wE 'axum|ts-rs|fastembed|ort|tokenizers|hf-hub|image|native-tls|ureq|reqwest|rig-core|rig-http' target/ci-observations/lean-dependency-tree.txt; then
             echo "::error::forbidden crate leaked into the default build (NFR-1)"
             exit 1
           fi

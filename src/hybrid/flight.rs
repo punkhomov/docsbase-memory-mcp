@@ -383,7 +383,7 @@ mod tests {
 
     fn receive<T>(receiver: &Receiver<T>) -> T {
         receiver
-            .recv_timeout(Duration::from_secs(300))
+            .recv_timeout(Duration::from_mins(5))
             .expect("flight boundary watchdog")
     }
 

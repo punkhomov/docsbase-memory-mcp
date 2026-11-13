@@ -143,7 +143,7 @@ fn exact_paths(db: &Db, cache: &Path, project: &Project, window: u32) -> Vec<Str
 }
 
 fn wait_for_ann(dense: &DenseCache, db: &Db, project_id: i64) -> Arc<AnnIndex> {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         match dense
             .get(db, project_id, SpreadEmbedder.model_id())
