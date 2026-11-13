@@ -387,3 +387,60 @@ fresh whole-branch final review converged, Critical/Important none. M1 fixture
 cleanup deferred above. Completion here records implementation/local verification;
 delivery still requires final-head docs/linux/macos/windows success and pinned-SHA
 squash merge, with native artifact inventories and merged SHA recorded in PR #104.
+
+## 2026-11-13 — T56 / S147: selected CLI sync target (#147)
+
+Task T56: planned/drafting; base0c6d707cae9207d370514c5ab53a8ae3ae9c7144.
+Source-confirmed: daemon `cli::sync` ignores PATH and binds cwd; only direct
+fallback receives PATH. User authorized bounded queue work. Plan and native
+test drafts may proceed while #143 owns Cargo; no production edit before actual
+RED and no Cargo/build until controller releases slot. Existing direct sync test
+only omits PATH, so add a distinct selected-B control; no runtime claim yet.
+
+T56 Ruling I1 (draft review): прежний blocking accept+join мог зависнуть без
+connection, Windows stream timeouts — no-op. Draft заменён existing async native
+Listener/Stream и whole-future cancellation/watchdog; guard cancels+joins также
+при command failure/unwind. Добавлены draft cleanup fault probes без elapsed-time
+assertions. No production edits/Cargo/build; actual RED/GREEN и scoped re-review
+ещё pending, прежний prep package не считается approved/runtime evidence.
+I1 source audit additionally found interprocess async flush/dirty Drop workers.
+Windows draft therefore uses existing Tokio native pipe server/client at the
+same published endpoint; Unix keeps platform async seam. No platform production
+edit, dependency/feature change or leaked flush/linger worker is introduced by
+this adapter's source design; actual native/runtime proof remains pending.
+
+T56 scoped draft review round2: I1 addressed in source; I2 final-reply lifetime
+and I3 helper-test scope require corrections. Raw native accepted stream now
+remains held after four replies until command completion/cancellation or original
+watchdog; normal completion retains Complete trace. Removed unknown-request,
+duplex-write-error and catch-only-unwind probes plus expanded gates; retained
+no-connect, held native partial/no-Hello, watchdog and actual CLI path cases.
+No production edits or Cargo/build/runtime execution; source awaits scoped review
+and controller rebase before actual target-selection RED.
+
+T56 execution 2026-11-13: draft checkpoint e25d9f7 rebased to main6826aaf as
+73c2e0f. Requirements conflict resolved by retaining upstream #146/#148 appends
+in full before S147. Node/Web/SDK prep exit0 confirmed by controller. Before any
+production edit, actual absolute/relative target RED exit101: both compiled and
+observed cwd A instead of selected B at the exact equality assertion; cleanup3/3
+GREEN with production CLI still main blob. Minimal CLI resolution before connect,
+same canonical target for handshake/direct fallback and PATH help correction ->
+sync8/8 GREEN. No polling/error-fallback block change (byte-checked), API/crate/
+feature/default/threshold/store/index/protocol edits or new watcher sleep.
+
+T56 local verification GREEN: cli_routing13 + cli_read14 + cli_index4; observer
+regressions11; cli-full all-target Clippy -D warnings and fmt. Five fixture-style
+lint diagnostics corrected without semantic changes, diff/evidence retained.
+Full cli-full debug: prepare52.468s/inventory2.162s/execute181.478s, all exit0;
+1410passed/0failed/18existingignored,87target summaries,1428inventory entries =
+passed+ignored. All original CLI test names retained; seven meaningful cases added.
+211 production/manifest/frontend/SDK/workflow blobs match main outside CLI module;
+all tracked changes in seven planned files. Logs/report/manifest in
+/workspace/scratch/agent-b/147. Implementation/local verification ready for fresh
+task/final reviews; Windows/macOS execution and four required native checks/
+inventory/delivery remain controller gates. No C13 or #79 tree edits, no GitHub action.
+
+T56 fresh task review: Spec PASS / Quality APPROVED, no Critical/Important.
+Minor M1 addressed: design now records executed Linux cleanup3/3 GREEN while
+keeping native Windows/macOS execution pending. Documentation only; product
+and fixture bytes remain frozen at tested implementation553793b.

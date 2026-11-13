@@ -108,7 +108,7 @@ pub enum Command {
     List,
     /// Synchronize (re-index) the current project.
     Sync {
-        /// Project directory (direct mode only).
+        /// Project directory (defaults to the current directory).
         path: Option<PathBuf>,
     },
     /// Print the effective configuration for the current directory.
@@ -308,10 +308,14 @@ fn sync(
     path: Option<&std::path::Path>,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("resolve current directory")?;
+    let target = cwd.join(path.unwrap_or(std::path::Path::new(".")));
+    let target = target
+        .canonicalize()
+        .with_context(|| format!("resolve sync target {}", target.display()))?;
     let cache = paths::cache_dir()?;
     if let Some(mut client) = Client::connect(&cache) {
-        let cwd = std::env::current_dir().context("resolve current directory")?;
-        match client.handshake(&cwd) {
+        match client.handshake(&target) {
             Ok(()) => {
                 let job = client.call_tool("sync_start", serde_json::json!({}))?;
                 let id = job["job_id"].as_i64().context("sync_start: job_id")?;
@@ -335,7 +339,7 @@ fn sync(
             Err(err) => return Err(err.into()),
         }
     }
-    index::run_with_settings(path, settings)
+    index::run_with_settings(Some(&target), settings)
 }
 
 /// Runs `docsbase config`: effective values for the current directory

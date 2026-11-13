@@ -992,3 +992,28 @@ markers/provider execution; prepared-old-payload boundary documented and tested.
 **Verify:** Rust1.88 `cargo test --locked --features cli-full` (shared-host slack3),
 `cargo clippy --locked --features cli-full --all-targets -- -D warnings`, fmt;
 fresh task/final reviews and docs/Linux/macOS/Windows PR CI before squash merge.
+
+## Delta 2026-11-13 — T56: sync выбранного PATH (#147, S147)
+
+**Scope:** bounded bugfix FR-17/FR-30 / SC-S147; new crates: none.
+**Files:** `src/cli/mod.rs`, `tests/cli_routing.rs`, текущие spec/ledger.
+**RED:** native finite peer + joined trace; cwd A / absolute B и relative B
+должны показать прежнюю ошибочную binding A. Сохранить no-PATH polling control,
+добавить missing-target no-handshake/no-direct и no-daemon selected-B controls.
+Запустить focused RED до production edit после освобождения shared Cargo slot.
+**Cleanup I1 amendment:** async native peer с cancellation/watchdog вокруг всего
+accept/IO и retention final reply до command completion; guard cancel+join на
+normal/error/unwind. Cleanup evidence ограничено no-connect early exit/spawn error,
+held-open no-Hello/partial frame и watchdog; fixture branch/catch-panic probes
+исключены. Test failure bounds не меняют product budgets.
+Windows adapter использует existing Tokio native pipe на published endpoint,
+исключая interprocess blocking flush/linger при cancellation; Unix platform seam.
+**GREEN:** минимально разрешить target до connect и использовать его для daemon
+handshake/direct fallback; обновить устаревший CLI help «direct mode only».
+Остальные routing/polling/errors и nested discovery не менять.
+**Verify:** Rust1.100.0, build Web + client SDK before cli-full Cargo; affected
+`cli_routing`, `cli_read`, `cli_index`; relevant/full Clippy -D warnings, fmt/diff;
+full functional/native checks and fresh task/final reviews before delivery.
+**Constraint:** scoped plan/test review PASS и controller rebase на latest main
+(сейчас6826) предшествуют Cargo. Production edit только после actual selected-target
+RED. До handoff controller — только plan/test drafts, без Cargo/build.
