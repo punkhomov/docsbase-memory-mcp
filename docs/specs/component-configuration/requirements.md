@@ -453,3 +453,13 @@ persisted adoption/apply и оставшиеся component owners этим slice
   construction, v2 activation or strict adoption occurs. Reobserving actual state,
   validating blockers/capabilities and applying under admission remain CF5b/CF7/
   CF11. The complete FR-13/14/15 and #78 are not satisfied by this slice alone.
+
+## Delta 2026-11-13 — CF5b0 adoption/recovery investigation
+
+Source/store adoption will first use explicit stopped local maintenance, persistent
+recovery state and bounded private before/after images. Satisfied consent and an
+in-memory vector owner do not establish durable activation. Per-source publication
+and SQLite control commits are separate durable boundaries. Exact schema/namespace/
+lease/native durability proofs remain owning implementation gates before any v2
+startup or source write. Investigation and acceptance boundary:
+[adoption-recovery.md](adoption-recovery.md). No runtime FR/SC completion claimed.

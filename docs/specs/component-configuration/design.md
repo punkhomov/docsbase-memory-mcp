@@ -773,3 +773,14 @@ consent is satisfied. The future executor must reobserve actual state under its
 own admission, check receipt identity, execution capability and blockers, and
 follow recovery/publication rules. No CLI flags/apply/write or strict startup is
 introduced. Detailed implementation boundary: [cf5a-plan.md](cf5a-plan.md).
+
+## Delta 2026-11-13 — CF5b0 source-backed recovery direction
+
+[Adoption/recovery investigation](adoption-recovery.md) selects stopped maintenance
+and a separate private SQLite control journal for initial source/store adoption.
+It inventories actual admission gaps and separates journal, source replacement,
+strict mode publication and consumer startup. It records primary OS/SQLite sources,
+unknown/corrupt-state refusals, sensitive before-image handling and native failure
+cases. Exact SQL/control-state/namespace/lease/durability contract is the CF5b1 gate;
+this investigation cannot authorize implementation or activate file-v2 on its own.
+Data generation apply remains CF10/CF11; consent remains CF5a's separate gate.
