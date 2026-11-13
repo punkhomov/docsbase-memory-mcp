@@ -7,7 +7,6 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::Duration;
 
 use crate::error::Result;
 use crate::store::Db;
@@ -17,9 +16,6 @@ use crate::vector_cache::{CacheLimits, Embedder, VectorCache};
 use super::config::Ranking;
 use super::dense::DenseCacheLimits;
 use super::{HybridCfg, blocking, from_config};
-
-/// Backfill lease duration: covers a remote 75k backfill + ANN build/retry.
-const BACKFILL_PIN_TTL: Duration = Duration::from_hours(1);
 
 /// Coverage of one project under the configured embedding model (FR-15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,7 +201,12 @@ pub fn embed_project_chunks_with_dense_policy(
     // Lease the project's vectors for the ANN build; without this a
     // concurrent backfill can evict them and coverage never reaches 100%.
     if pin_for_ann {
-        cache.pin(project_id, embedder.model_id(), &hashes, BACKFILL_PIN_TTL)?;
+        cache.pin(
+            project_id,
+            embedder.model_id(),
+            &hashes,
+            dense.ann_lifetimes.backfill_pin_ttl(),
+        )?;
     }
     let result = blocking::enter(|| cache.embed_missing(embedder, &texts));
     match result {
@@ -213,7 +214,12 @@ pub fn embed_project_chunks_with_dense_policy(
             if pin_for_ann {
                 // The backfill may have taken close to the lease duration;
                 // restart it so the ANN build has the full window.
-                cache.pin(project_id, embedder.model_id(), &hashes, BACKFILL_PIN_TTL)?;
+                cache.pin(
+                    project_id,
+                    embedder.model_id(),
+                    &hashes,
+                    dense.ann_lifetimes.backfill_pin_ttl(),
+                )?;
             }
             Ok(vectors.len() as u64)
         }

@@ -328,3 +328,23 @@ preflight/NOFOLLOW flags одни недостаточны для reparse races.
 - Builder and backfill share static eligibility: chunk-row count, minimum/maximum vectors, project capacity, model width and graph+exact peak bytes. Unrepresentable peak arithmetic rejects admission, including an explicit u64::MAX cap. Actual resident/live-worker accounting remains authoritative; eligibility reserves no memory.
 - Ineligible corpora do not take ANN pins, including small/default corpora. Eligible duplicate-text corpora retain pins according to chunk rows, not distinct hashes. Explicit per-call policy replaces the debug process-global cap override.
 - Existing zero dense-limit semantics are preserved; query capacities remain positive. No new TOML keys, live shrink, strict-store activation, backfill TTL configuration or source/apply changes. See [cf6b-plan.md](cf6b-plan.md).
+
+
+## Delta 2026-11-13 — CF6c: сроки жизни при создании компонентов
+
+- DenseSpec владеет I35 defaults и daemon-scope provenance; оба прежних интервала
+  равны одному часу. Проверенный immutable AnnLifetimes передаётся с полной dense
+  policy настоящим backfill/status consumers, включая compatibility adapters.
+- Pin TTL — положительные целые секунды, представимые в i64; outcome TTL — любой
+  положительный Duration. Невалидные интервалы нельзя передать infallible raw-limit
+  constructor. Partial overlay сохраняет второй интервал; invalid/project layers
+  не меняют предыдущие settings/origins. Проверка не читает часы или filesystem.
+- Первый pin и успешное продление используют один переданный TTL. Отказ embedding
+  удаляет только соответствующие project/model/hash lease keys, сохраняя другие
+  owners. Прежние expiration saturation и ownership не меняются; старые pins
+  не отзываются по новой настройке.
+- Daemon/local-panel status использует монотонный outcome TTL своего cache. Stale
+  reason описывает настроенный TTL, а не произвольный один час. State names и
+  default transitions прежние; is_stale/ANN_OUTCOME_TTL остаются adapters.
+- Нет новых source keys, live TTL/shrink, strict-store adoption, artifact invalidation
+  или migration/apply. План: [cf6c-plan.md](cf6c-plan.md).

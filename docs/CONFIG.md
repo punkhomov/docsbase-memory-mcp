@@ -422,3 +422,16 @@ observation hashes describe exact file bytes, not semantic artifact fingerprints
 See [WEB.md](WEB.md) for `docsbase web --open`, session security, Web settings,
 source-build frontend preparation and diagnostics. Official cli-full includes
 Web; Cargo default stays lean.
+
+
+### ANN lifetime construction policy
+
+The internal typed DenseSpec also owns the existing one-hour backfill-pin and
+ANN-status windows. AnnLifetimes validates positive whole signed seconds for pins
+and a positive Duration for status before construction; partial typed overrides
+preserve the other value. The policy follows actual dense cache/sync ownership,
+with no new file keys or live mutation. Both initial backfill pins and successful
+renewal use it. Existing leases keep their expiry/ownership; this does not revoke
+leases or invalidate vectors, query caches or ANN graphs. Status uses the cache's
+monotonic authority window and describes stale observations as older than the
+configured TTL. Compatibility helpers retain their one-hour defaults.

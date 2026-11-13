@@ -464,3 +464,42 @@ policies and CLI/daemon propagation. No baseline/threshold/dependency/workflow
 changes or live inference/downloads. Final whole-branch review and native delivery
 gates follow. Live shrink, new source keys/apply, strict-store/TTL adoption and
 remaining #78 tasks are not completed by CF6b.
+
+
+CF6b delivery (2026-11-13): PR137 влит как f027b382a31e1e5c3766454b842f12d55dca0bd7.
+Первый native run43392113171 выявил Web readiness race #138; W7 устранил
+воспроизведённый интервал до регистрации signal handler. Оба task review и свежее
+combined final review завершились без замечаний. Final native run43394892652,
+attempt1: docs/Linux/macOS/Windows green. Аудит: Linux1333+2static/macOS1329/
+Windows1316 passed,18прежних ignores/platform; все parent tests сохранены,
+12новых Unix/11Windows выполнены. Reviewed source/tested merge/squash имеют tree
+b290007c129489fbbff0e0a5dfd1dca6a987cfc2. #138 закрыт; #78 остаётся открытым.
+#71 только offline; #109/#113 остаются отдельными задачами.
+
+## 2026-11-13 — CF6c: сроки жизни ANN при создании
+
+Task CF6c: complete (реализация, RED/GREEN и свежее task review).
+AnnLifetimes проверяет положительные целые signed seconds для pins и положительный
+Duration для монотонных outcomes; закрытые поля сохраняют инварианты raw-limit
+constructors. DenseSpec владеет обоими часовыми defaults, origins и daemon scope.
+Полная policy уже проходит через CLI/lifecycle/Shared/sync.
+Ruling: первый pin и продление берут TTL у реального cache; error cleanup сохраняет
+leases другого проекта той же модели и другой модели того же проекта. Прежние
+saturation/ownership/identities/accounting сохраняются; нет live update/revocation.
+Status использует фактический outcome TTL и generic stale reason; state names и
+legacy default helper прежние. Нет второго catalog/runtime defaults/нового lock.
+TDD: absent API compile RED; initial lease3600 вместо600 и status ready вместоstale.
+После исправления первого pin отдельный renewal RED всё ещё давал3600 вместо600.
+Теперь GREEN. Настоящий SQL probe укорачивает owned lease во время fake embedding
+без sleep/clock override; настоящий metadata/status сравнивает custom и default cache.
+Validation: Rust1.100.0, upstream lock/frontend прежние. Full cli-full1339passed/
+0failed/18прежних ignores,82targets; финальные усиленные6lifetime+9cache и direct
+CLI propagation проходят; lean50focused pass. Full/lean all-target Clippy/fmt/diff
+GREEN. Шесть новых тестов: domain/transactional origins/scope, initial/renewed/default
+lease, error ownership и actual status. Без dependency/workflow/baseline/threshold,
+source keys/apply, inference/download changes. Остальные CF6–CF14/#78 открыты;
+#71 только offline, #109/#113 не затронуты.
+
+Fresh task review: Spec compliance PASS; Quality APPROVED; замечаний и deferred
+minors нет. Reviewer сверил точный worktree с immutable diff. Fresh final review
+и required native CI/inventory audit остаются условиями доставки.

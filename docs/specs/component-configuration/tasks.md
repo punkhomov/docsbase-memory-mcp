@@ -430,3 +430,12 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   builder/pin eligibility, preserve live worker accounting and legacy vector
   budget precedence. Explicitly correct small-corpus pins and duplicate-row pin
   retention. Plan: [cf6b-plan.md](cf6b-plan.md). No live shrink or CF7 activation.
+
+
+## Delta 2026-11-13 — CF6c: внедрение I35 при создании
+
+- [x] **CF6c:** единая проверенная policy для первого/повторного backfill pin и
+  актуальности ANN outcome; сохранить compatibility/default windows и настоящую
+  daemon/direct передачу. Реальные lease/status regressions, transactional
+  patch/provenance/scope tests. План: [cf6c-plan.md](cf6c-plan.md).
+  Нет новых source keys/live updates, CF7 activation или artifact invalidation.

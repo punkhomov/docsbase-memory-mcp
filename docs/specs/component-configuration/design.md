@@ -621,3 +621,21 @@ maximum explicit cap. Pin admission and renewal use chunk rows, including repeat
 temporary pins for below-threshold corpora and premature unpinning of eligible
 duplicate corpora. No live settings publication or strict-store semantics implied.
 See [cf6b-plan.md](cf6b-plan.md).
+
+
+## Delta 2026-11-13 — CF6c: владение сроками жизни
+
+AnnLifetimes — проверенный immutable value в DenseSettings/DenseCacheLimits:
+закрытые Duration-поля и fallible constructor сохраняют инварианты даже при
+передаче raw limits в прежние infallible constructors. Defaults определены один
+раз в DenseSpec. Partial typed patches создают новый value перед transactional
+публикацией resolution; provenance остаётся отдельным для каждого поля. Второй
+settings catalog и дополнительный lock не нужны.
+
+Существующие CLI/lifecycle/Shared пути передают полный policy; production sync
+уже использует реальные DenseCacheLimits. Jobs берут оттуда pin TTL для первого
+pin и продления. Status передаёт outcome TTL в явную монотонную проверку AnnOutcome;
+старый helper сохраняется как default adapter. Новый stale reason — описательный
+текст, без смены state names/protocol. Домены времени прежние: wall-clock seconds
+для сохранённых leases, Instant для наблюдений. Live revocation или изменение
+artifact identities этой задачей не предоставляются.
