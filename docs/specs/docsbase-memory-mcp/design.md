@@ -805,7 +805,8 @@ Watchdogs — failure bounds теста, не performance thresholds проду�
 peers не рефакторятся. Cleanup regressions ограничены no-connect early exit/spawn
 failure, accepted client без Hello/с partial frame при живом client и zero-duration
 watchdog: они связаны с исходным hang/cancellation. Fixture branch и catch-panic
-probes не входят в acceptance. Actual cleanup evidence и native execution pending.
+probes не входят в acceptance. Linux cleanup3/3 GREEN; native Windows/macOS
+execution остаётся pending.
 Canonical identity recorded path сравнивается в test process, без произвольного
 сравнения Windows path spellings. Invalid-target test держит nonblocking listener
 без worker и проверяет отсутствие pending connection/registry/index. Direct
