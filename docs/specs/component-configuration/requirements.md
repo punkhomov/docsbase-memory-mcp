@@ -434,3 +434,22 @@ Stage admission может предотвратить watcher startup по су�
 path; resource failures по-прежнему warning. Scope FR-2/3/5/16 и bounded SC-3.
 Старые configured APIs сохраняют lazy batch behavior. Strict startup, file-v2,
 persisted adoption/apply и оставшиеся component owners этим slice не включаются.
+
+## Delta 2026-11-13 — CF5a: pure consent decisions before execution
+
+- FR-13/14 foundation resolves supplied entrypoint/TTY facts once. V1 with no
+  policy stays Legacy; Managed Auto is Prompt only for direct CLI+TTY. Service,
+  MCP, autostart and standalone loops cannot acquire rebuild consent by inheriting
+  a terminal or selecting Apply/Prompt.
+- ConsentReview compiles bounded actual owner assessments and privately retains
+  the canonical plan. No-grant runtime creation/reconfiguration and observed-missing
+  store creation need no consent. Other actions respect Fail and independent
+  Remote/Downloads/Destructive grants; prompt answers bind the displayed plan ID.
+- Changed observed facts/actions/grants/blockers invalidate receipts with code4;
+  Fail refusal is3, other consent refusals5. These codes are library refusal
+  metadata, not new behavior of existing CLI commands. Satisfied consent is not
+  successful execution or exit0.
+- Every original blocker remains; no source write, terminal I/O, runtime/provider
+  construction, v2 activation or strict adoption occurs. Reobserving actual state,
+  validating blockers/capabilities and applying under admission remain CF5b/CF7/
+  CF11. The complete FR-13/14/15 and #78 are not satisfied by this slice alone.

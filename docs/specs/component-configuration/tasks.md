@@ -477,3 +477,12 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   root admission, actual Shared ensure/reload и отсутствие stale creation.
   План [cf7c3-plan.md](cf7c3-plan.md). Configured APIs сохраняют прежний режим;
   strict startup/adoption/apply и оставшиеся CF5/CF7 задачи ещё не завершены.
+
+## Delta 2026-11-13 — CF5a before operational policy/apply
+
+- [x] **CF5a:** pure controlling-boundary resolution, explicit grants, immutable
+  canonical consent review, prompt answers and stale receipts. Plan:
+  [cf5a-plan.md](cf5a-plan.md). Actual SearchSpec/DbSpec/migration assessments;
+  launch/TTY/refusal/limit/mutation evidence, full/lean checks, fresh task/final
+  review and native inventory. CLI integration, source writes, strict adoption
+  and execution readiness remain separate CF5b/CF7/CF11 work; #78 stays open.
