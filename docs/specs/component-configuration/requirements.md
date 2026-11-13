@@ -395,3 +395,21 @@ Legacy APIs сохраняют lazy configured resolution и прежние ош
 path завершён этим slice; daemon/sync/watcher composition — следующий CF7c2.
 Новых keys/strict startup/persisted adoption/apply нет, migration blockers прежние.
 План: [cf7c1-plan.md](cf7c1-plan.md); общий FR-16/SC-3 принят только в этой границе.
+
+## Delta 2026-11-13 — CF7c2: prepared sync composition
+
+Actual daemon index/sync paths захватывают coherent Config/HybridStages и source
+до выполнения/постановки job. Source проходит через changed-plan embedding, полный
+backfill и child Db. Root admission предшествует project/job/index mutations и
+child registry open. Legacy sync/source budgets принадлежат захваченному Config,
+а не более новой dense map после reload. Owned использует immutable owner без
+project override. Ошибки inference по-прежнему сохраняют job Error/retry markers;
+legacy public wrappers сохраняют lazy configured timing и state semantics.
+Runtime stage preparation теперь отказывает до enqueue и не держит shared DB
+mutex; это явное уточнение fail-fast hybrid-providers FR-14, не silent fallback.
+Auto-index получает policy только через per-project publication authority; raw
+config не переписывает budget поверх concurrent reload. CLI index повторно не
+строит уже подготовленный provider. Все3daemon coverage callers используют source,
+без provider creation; status/wire shape прежние. Scope: FR-2/3/5/16 и bounded SC-3.
+Watcher source/config-reopen lifetime остаётся CF7c3; strict startup/file keys,
+persisted adoption/migration/apply и полный #78 этим slice не включаются.

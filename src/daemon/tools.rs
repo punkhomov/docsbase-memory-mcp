@@ -1608,7 +1608,7 @@ pub fn enqueue_sync(db: &Db, project: &Project) -> Result<(i64, bool)> {
 
 /// Runs a queued job to completion on its own database connection (daemon
 /// background task, FR-17); job state survives restarts.
-/// Compatibility adapter; runtime uses [`execute_sync_job_with_dense_policy`].
+/// Compatibility adapter; runtime uses [`execute_sync_job_with_vectors`].
 ///
 /// Setup failures (missing project, unreadable config) also record `error`,
 /// so the project never keeps a stuck `queued` job that would block FR-17
@@ -1664,6 +1664,40 @@ pub fn execute_sync_job_with_dense_policy(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     dense: &crate::hybrid::dense::DenseCacheLimits,
 ) -> Result<Project> {
+    execute_sync_job_using(cache, job_id, project_id, settings, |db, project| {
+        run_sync_job_in_with_dense_policy(db, cache, job_id, project, config, dense)
+    })
+}
+
+/// Execute a sync with one prepared config, provider and vector-source snapshot.
+/// The source is admitted before opening the child registry connection.
+///
+/// # Errors
+/// Root admission and the setup/indexing failures of [`execute_sync_job`].
+#[allow(clippy::too_many_arguments)] // Explicit snapshots and component policies.
+pub fn execute_sync_job_with_vectors(
+    cache: &Path,
+    job_id: i64,
+    project_id: i64,
+    config: &Config,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    dense: &crate::hybrid::dense::DenseCacheLimits,
+    stages: &HybridStages,
+    source: &crate::vector_cache::VectorCacheSource,
+) -> Result<Project> {
+    source.validate_root(cache)?;
+    execute_sync_job_using(cache, job_id, project_id, settings, |db, project| {
+        run_sync_job_in_with_vectors(db, cache, job_id, project, config, dense, stages, source)
+    })
+}
+
+fn execute_sync_job_using(
+    cache: &Path,
+    job_id: i64,
+    project_id: i64,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    run: impl FnOnce(&mut Db, &Project) -> Result<JobStats>,
+) -> Result<Project> {
     let mut db = Db::open_with_settings(cache, settings)?;
     let setup = (|| -> Result<Project> {
         registry::project_by_id(&db, project_id)?.ok_or_else(|| Error::Project {
@@ -1672,9 +1706,7 @@ pub fn execute_sync_job_with_dense_policy(
         })
     })();
     let outcome = match setup {
-        Ok(project) => {
-            run_sync_job_in_with_dense_policy(&mut db, cache, job_id, &project, config, dense)
-        }
+        Ok(project) => run(&mut db, &project),
         Err(err) => {
             let stats = json!({ "error": err.to_string() }).to_string();
             if let Err(record) =
@@ -1727,20 +1759,64 @@ pub fn run_sync_job_in_with_dense_policy(
     config: &Config,
     dense: &crate::hybrid::dense::DenseCacheLimits,
 ) -> Result<JobStats> {
-    repo::mark_sync_running(db.connection(), job_id)?;
-    // After the index pass, a full embedding sweep over every project chunk
-    // completes the coverage a previous offline period left behind (FR-15);
-    // cached chunks cost nothing, so this is a no-op once covered.
-    let outcome = run_project_index(db, cache, project, config).and_then(|stats| {
-        hybrid_jobs::embed_project_chunks_with_policy(
-            db,
-            &config.hybrid_cfg,
-            &config.providers,
-            project.id,
-            dense,
-        )?;
+    run_sync_job_using(db, job_id, |db| {
+        // After the index pass, a full embedding sweep over every project chunk
+        // completes the coverage a previous offline period left behind (FR-15);
+        // cached chunks cost nothing, so this is a no-op once covered.
+        run_project_index(db, cache, project, config).and_then(|stats| {
+            hybrid_jobs::embed_project_chunks_with_policy(
+                db,
+                &config.hybrid_cfg,
+                &config.providers,
+                project.id,
+                dense,
+            )?;
+            Ok(stats)
+        })
+    })
+}
+
+/// Sync through prepared stages, carrying the source into indexing and backfill.
+/// Config supplies indexing limits; the supplied stages select embedding.
+///
+/// # Errors
+/// Root admission before state changes, or persisted indexing/provider failures.
+#[allow(clippy::too_many_arguments)] // Explicit snapshots and component policies.
+pub fn run_sync_job_in_with_vectors(
+    db: &mut Db,
+    cache: &Path,
+    job_id: i64,
+    project: &Project,
+    config: &Config,
+    dense: &crate::hybrid::dense::DenseCacheLimits,
+    stages: &HybridStages,
+    source: &crate::vector_cache::VectorCacheSource,
+) -> Result<JobStats> {
+    source.validate_root(cache)?;
+    source.validate_root(db.cache_root())?;
+    run_sync_job_using(db, job_id, |db| {
+        let stats = run_project_index_with_vectors(db, cache, project, config, stages, source)?;
+        if let Some(embedder) = &stages.embedder {
+            hybrid_jobs::embed_project_chunks_from(
+                db,
+                embedder.as_ref(),
+                project.id,
+                stages.ranking == Ranking::Rrf,
+                dense,
+                source,
+            )?;
+        }
         Ok(stats)
-    });
+    })
+}
+
+fn run_sync_job_using(
+    db: &mut Db,
+    job_id: i64,
+    run: impl FnOnce(&mut Db) -> Result<JobStats>,
+) -> Result<JobStats> {
+    repo::mark_sync_running(db.connection(), job_id)?;
+    let outcome = run(db);
     let (state, stats_json) = match &outcome {
         Ok(stats) => (SyncState::Done, serde_json::to_string(stats).ok()),
         Err(err) => (
@@ -1806,13 +1882,45 @@ pub fn run_project_index(
     project: &Project,
     config: &Config,
 ) -> Result<JobStats> {
+    run_project_index_using(db, cache, project, |db, index| {
+        run_full(db, index, project, config)
+    })
+}
+
+/// Index with the composition root's prepared provider and vector owner.
+/// Both cache paths are admitted before project status or index files change.
+///
+/// # Errors
+/// Root admission, writer-lease, indexing and status errors.
+pub fn run_project_index_with_vectors(
+    db: &mut Db,
+    cache: &Path,
+    project: &Project,
+    config: &Config,
+    stages: &HybridStages,
+    source: &crate::vector_cache::VectorCacheSource,
+) -> Result<JobStats> {
+    source.validate_root(cache)?;
+    source.validate_root(db.cache_root())?;
+    let embedding = crate::index::job::IndexEmbedding::new(source, stages.embedder.as_deref());
+    run_project_index_using(db, cache, project, |db, index| {
+        crate::index::job::run_full_with_embedding(db, index, project, config, &embedding)
+    })
+}
+
+fn run_project_index_using(
+    db: &mut Db,
+    cache: &Path,
+    project: &Project,
+    run: impl FnOnce(&mut Db, &mut crate::index::tantivy_index::IndexHandle) -> Result<JobStats>,
+) -> Result<JobStats> {
     lifecycle::with_writer_lease(cache, project.id, || {
         registry::set_status(db, project.id, ProjectStatus::Indexing)?;
         let outcome = (|| -> Result<JobStats> {
             let mut index = crate::index::tantivy_index::IndexHandle::open_or_create(
                 &lifecycle::index_dir(cache, project.id),
             )?;
-            run_full(db, &mut index, project, config)
+            run(db, &mut index)
         })();
         match outcome {
             Ok(stats) => {

@@ -44,7 +44,7 @@ component-configuration/{requirements,design,tasks,progress}.md; plan здесь
   lexical-only prepared context не разрешает Config providers самостоятельно.
 - [x] Crate-private controlled stale gate: rejected payload не пишет markers,
   не вызывает embedder и не меняет generation; recreated fallback тоже guarded.
-- [ ] Focused full/lean, complete cli-full, full/lean all-target Clippy/fmt/diff;
+- [x] Focused full/lean, complete cli-full, full/lean all-target Clippy/fmt/diff;
   fresh task review/fix round и most-capable final review. Native four checks и
   inventory retaining parent tests/new regressions; authorized squash delivery.
 

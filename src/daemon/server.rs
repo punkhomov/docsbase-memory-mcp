@@ -328,6 +328,22 @@ impl Shared {
         }
     }
 
+    // Legacy policy belongs to the captured config, not a newer reload's map.
+    // Owned policy is immutable and must never receive a project override here.
+    fn vector_source_for(
+        &self,
+        project_id: i64,
+        config: &Config,
+    ) -> crate::vector_cache::VectorCacheSource {
+        use crate::vector_cache::VectorCacheSource;
+        match self.dense.vector_source(project_id) {
+            VectorCacheSource::Legacy(_) => {
+                VectorCacheSource::Legacy(config.hybrid_cfg.cache.limits())
+            }
+            owned @ VectorCacheSource::Owned(_) => owned,
+        }
+    }
+
     /// Enqueues the open-time backfill sync job when the embedding stage is
     /// on and the project is not fully covered (FR-15); cached chunks make a
     /// fully covered project a cheap no-op.
@@ -342,7 +358,10 @@ impl Shared {
             return Ok(());
         }
         let db = self.db();
-        let Some(coverage) = hybrid_jobs::coverage(&db, &config.hybrid_cfg, project.id)? else {
+        let source = self.vector_source_for(project.id, &config);
+        let Some(coverage) =
+            hybrid_jobs::coverage_from(&db, &config.hybrid_cfg, project.id, &source)?
+        else {
             return Ok(());
         };
         if coverage.cached >= coverage.total {
@@ -353,7 +372,7 @@ impl Shared {
         }
         let (job_id, created) = crate::daemon::tools::enqueue_sync(&db, project)?;
         if created {
-            spawn_sync_job(Arc::clone(self), job_id, project.id, config);
+            spawn_sync_job(Arc::clone(self), job_id, project.id, config, stages, source);
         }
         Ok(())
     }
@@ -1024,9 +1043,21 @@ async fn register_session(
             return Err(project_err);
         }
         let project = registry::ensure_project(&mut db, &root)?;
-        if let Err(err) =
-            tools::run_project_index(&mut db, &shared_for_task.cache, &project, &config)
-        {
+        // Publish policy only through the per-project authority; a raw config
+        // must not overwrite a concurrent reload's legacy dense budget.
+        let (config, stages) = shared_for_task.project_runtime(&project)?;
+        if !config.auto_index {
+            return Err(project_err);
+        }
+        let source = shared_for_task.vector_source_for(project.id, &config);
+        if let Err(err) = tools::run_project_index_with_vectors(
+            &mut db,
+            &shared_for_task.cache,
+            &project,
+            &config,
+            &stages,
+            &source,
+        ) {
             // A concurrent registration may have won the writer lease and
             // already indexed the project; bind to that result instead.
             if let Some(indexed) = registry::resolve_by_cwd(&db, &cwd_for_task)
@@ -1215,9 +1246,14 @@ fn route_metadata_tool(
                     let Ok(config) = shared.project_config(project) else {
                         return None;
                     };
-                    hybrid_jobs::coverage(&db, &config.hybrid_cfg, project.id)
-                        .ok()
-                        .flatten()
+                    hybrid_jobs::coverage_from(
+                        &db,
+                        &config.hybrid_cfg,
+                        project.id,
+                        &shared.vector_source_for(project.id, &config),
+                    )
+                    .ok()
+                    .flatten()
                 },
                 Some(&shared.dense),
             )
@@ -1246,9 +1282,14 @@ fn route_metadata_tool(
                     let count = crate::store::repo::project_counts(db.connection(), p.id)?;
                     let config = shared.project_config(&p).ok();
                     let coverage = config.as_ref().and_then(|config| {
-                        hybrid_jobs::coverage(&db, &config.hybrid_cfg, p.id)
-                            .ok()
-                            .flatten()
+                        hybrid_jobs::coverage_from(
+                            &db,
+                            &config.hybrid_cfg,
+                            p.id,
+                            &shared.vector_source_for(p.id, config),
+                        )
+                        .ok()
+                        .flatten()
                     });
                     Ok(crate::ipc::panel::ProjectView {
                         watched: shared.watchers.watching(p.id),
@@ -1301,17 +1342,20 @@ fn route_metadata_tool(
             let root = registry::project_root_for(&path, &shared.cache)?;
             let mut job_db = Db::open_with_settings(&shared.cache, &shared.db_settings)?;
             let project = registry::ensure_project(&mut job_db, &root)?;
-            let config = shared.project_config(&project)?;
+            let (config, stages) = shared.project_runtime(&project)?;
+            let source = shared.vector_source_for(project.id, &config);
             let (job_id, created) = tools::enqueue_sync(&job_db, &project)?;
             let mut just_indexed = false;
             if created {
-                tools::run_sync_job_in_with_dense_policy(
+                tools::run_sync_job_in_with_vectors(
                     &mut job_db,
                     &shared.cache,
                     job_id,
                     &project,
                     &config,
                     &shared.dense.limits(),
+                    &stages,
+                    &source,
                 )?;
                 just_indexed = true;
             }
@@ -1337,12 +1381,22 @@ fn route_metadata_tool(
                 None => bound_project(shared, &db, session_id)?,
             };
             registry::ensure_root_present(&project)?;
-            // Fail fast on a broken project config instead of leaving a job
-            // that would only error out in the background.
-            let config = shared.project_config(&project)?;
+            // Provider construction may load models; release the shared DB
+            // guard before preparing the coherent runtime snapshot.
+            drop(db);
+            let (config, stages) = shared.project_runtime(&project)?;
+            let source = shared.vector_source_for(project.id, &config);
+            let db = shared.db();
             let (job_id, created) = tools::enqueue_sync(&db, &project)?;
             if created {
-                spawn_sync_job(Arc::clone(shared), job_id, project.id, config);
+                spawn_sync_job(
+                    Arc::clone(shared),
+                    job_id,
+                    project.id,
+                    config,
+                    stages,
+                    source,
+                );
             }
             current_job(&db, job_id)
         }
@@ -1378,17 +1432,26 @@ fn current_job(db: &Db, job_id: i64) -> Result<Value> {
     Ok(tools::sync_job_value(&job))
 }
 
-fn spawn_sync_job(shared: Arc<Shared>, job_id: i64, project_id: i64, config: Arc<Config>) {
+fn spawn_sync_job(
+    shared: Arc<Shared>,
+    job_id: i64,
+    project_id: i64,
+    config: Arc<Config>,
+    stages: Arc<HybridStages>,
+    source: crate::vector_cache::VectorCacheSource,
+) {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
             handle.spawn_blocking(move || {
-                match tools::execute_sync_job_with_dense_policy(
+                match tools::execute_sync_job_with_vectors(
                     &shared.cache,
                     job_id,
                     project_id,
                     &config,
                     &shared.db_settings,
                     &shared.dense.limits(),
+                    &stages,
+                    &source,
                 ) {
                     Ok(project) => {
                         if let Err(err) = shared.ensure_watcher(&project) {
