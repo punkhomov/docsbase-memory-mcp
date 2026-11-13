@@ -135,7 +135,7 @@ refill снова допускается под исходной generation/conf
 
 | Изменение / state | Runtime | Metadata / chunks | Lexical | Vectors / query | ANN |
 |---|---|---|---|---|---|
-| Daemon profile, Shared idle grace, connection/event/session caps | restart immutable DaemonSettings; профиль Website пока явно unsupported startup до S1b gates | — | — | — | — |
+| Daemon profile, Shared idle grace, connection/event/session caps | restart immutable DaemonSettings; S1b: Website фиксирует existing indexed ID/root, lexical-only, watcher-off, no idle deadline | — | — | — | — |
 | Lifecycle poll/janitor/reply-drain/drain-poll intervals | restart timers; physical janitor ownership остаётся S1c | — | — | — | — |
 | Search/control active/pending/timeout и blocking executor capacity | restart admission/runtime; physical lane consumers требуют S1c перед ship | — | — | — | — |
 | One bounded launch capture и baseline digest | runtime policy из тех же captured bytes; no second startup read | — | — | — | — |
@@ -151,3 +151,14 @@ precondition, prepare revalidation, search generation либо publication autho
 concurrent-write/ABA guarantees не усиливаются. Существующий admission::Lease,
 SearchOperation/generation/singleflight не заменяются. Итоговая S1 матрица и
 closed-inventory scan повторяются после S1b/c; full CF12/#79 не объявлены готовыми.
+
+
+### Delta 2026-11-13 — S1b profile consumers
+
+Profile changes remain runtime-only restart changes. Canonical fixed project and
+its pure startup policy are admitted before lease/runtime/listener/writer setup,
+then forwarded once. Read-only binds and metadata/sync routes recheck identity;
+project reopen keeps the existing revision/preparation authority while rejecting
+hybrid before factory/vector/watch work. Status/panel select the admitted project
+set before runtime/coverage callbacks. No new artifact invalidation edge, CF5
+consent executor, v2 activation or readiness DTO is adopted by this slice.

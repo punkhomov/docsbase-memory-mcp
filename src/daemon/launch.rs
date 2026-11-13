@@ -36,19 +36,82 @@ pub(crate) struct LaunchConfig {
     pub stamp: ConfigStamp,
     pub error: Option<String>,
 }
+/// Existing fixed identity and pure project policy, captured before startup resources.
+pub(crate) struct FixedProject {
+    pub project: crate::store::models::Project,
+    pub config: std::sync::Arc<Config>,
+}
+
+/// Admission is consumed once; lifecycle forwards it without reopening sources.
+pub(crate) struct AdmittedLaunch {
+    pub launch: LaunchConfig,
+    pub website: Option<FixedProject>,
+}
+
+pub(crate) fn lexical_only(config: &Config) -> Result<()> {
+    if config.hybrid_cfg.enabled {
+        return Err(Error::Admission {
+            message: "website profile requires lexical-only global and project policy".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 impl LaunchConfig {
-    pub(crate) fn admit_startup(&self) -> Result<()> {
-        // Intermediate S1a boundary: S1b removes this refusal only when all fixed
-        // project, hybrid, watcher and lifecycle gates protect startup and requests.
-        if matches!(
-            self.config.settings().daemon.profile,
-            crate::daemon::settings::DaemonProfile::Website { .. }
-        ) {
-            return Err(Error::Admission {
-                message: "website profile startup is not supported by this build".to_owned(),
-            });
-        }
-        Ok(())
+    pub(crate) fn admit(
+        self,
+        cache: &Path,
+        settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    ) -> Result<AdmittedLaunch> {
+        self.config.settings().validate()?;
+        let website = match &self.config.settings().daemon.profile {
+            crate::daemon::settings::DaemonProfile::Shared => None,
+            crate::daemon::settings::DaemonProfile::Website { project_root } => {
+                lexical_only(self.config.settings())?;
+                let root = project_root
+                    .canonicalize()
+                    .map_err(|error| Error::Admission {
+                        message: format!("website project root must exist: {error}"),
+                    })?;
+                if !root.is_dir() {
+                    return Err(Error::Admission {
+                        message: "website project root must be a directory".to_owned(),
+                    });
+                }
+                let db = crate::store::Db::open_readonly_for_admission(cache, settings).map_err(
+                    |error| Error::Admission {
+                        message: format!(
+                            "website requires an existing registered indexed project: {error}"
+                        ),
+                    },
+                )?;
+                let project = crate::daemon::registry::list_projects(&db)?
+                    .into_iter()
+                    .find(|project| {
+                        crate::platform::paths::normalize_for_compare(&project.canonical_root)
+                            == crate::platform::paths::normalize_for_compare(&root)
+                    })
+                    .ok_or_else(|| Error::Admission {
+                        message: "website root must match an existing registered project"
+                            .to_owned(),
+                    })?;
+                if project.status != crate::store::models::ProjectStatus::Indexed {
+                    return Err(Error::Admission {
+                        message: "website project must already be indexed".to_owned(),
+                    });
+                }
+                let config = Config::for_project(self.config.settings(), &project.canonical_root)?;
+                lexical_only(&config)?;
+                Some(FixedProject {
+                    project,
+                    config: std::sync::Arc::new(config),
+                })
+            }
+        };
+        Ok(AdmittedLaunch {
+            launch: self,
+            website,
+        })
     }
 }
 
@@ -165,6 +228,23 @@ fn stamp(bytes: &CapturedBytes) -> ConfigStamp {
         CapturedBytes::Loaded(bytes) => ConfigStamp::Loaded(blake3::hash(bytes)),
         CapturedBytes::Unavailable(reason) => ConfigStamp::Unavailable(reason.clone()),
     }
+}
+
+pub(crate) fn website_unavailable() -> Error {
+    Error::Admission { message: "website daemon unavailable; start it in the foreground with `docsbase serve` (or `docsbase serve --project ABS`)".to_owned() }
+}
+
+pub(crate) fn require_shared_without_daemon() -> Result<()> {
+    // Preserve the intentional malformed-Shared warning/default adapter. Valid
+    // recognized Website and owner errors never enter that fallback.
+    let launch = LaunchSnapshot::capture().legacy(DaemonPatch::default())?;
+    if matches!(
+        launch.config.settings().daemon.profile,
+        crate::daemon::settings::DaemonProfile::Website { .. }
+    ) {
+        return Err(website_unavailable());
+    }
+    Ok(())
 }
 
 pub(crate) fn restart_notice(path: Option<&Path>, baseline: &ConfigStamp) -> Option<String> {

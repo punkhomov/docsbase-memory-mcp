@@ -71,7 +71,14 @@ impl DaemonClient {
             .await
             .map_err(|e| Error::transport_with_source("daemon unavailable", e))?;
         client.handshake_registry().await?;
-        client.bind_read_only(None).await?;
+        client.ensure_panel_read()?;
+        if !client
+            .capabilities()
+            .iter()
+            .any(|capability| capability == crate::ipc::protocol::ACTIVE_WEBSITE_CAPABILITY)
+        {
+            client.bind_read_only(None).await?;
+        }
         Ok(Connection {
             client,
             project: None,
@@ -123,7 +130,18 @@ impl DaemonClient {
                 Some(conn) => conn,
                 None => Self::connection(&self.cache).await?,
             };
-            if conn.project != project {
+            // Website registry reads are already filtered by the backend. Keep
+            // the actual binding when a pooled connection was previously bound;
+            // project-required tools still go through explicit ID/null admission.
+            let registry_read = project.is_none()
+                && matches!(
+                    tool,
+                    "panel_info" | "panel_projects" | "list_projects" | "status"
+                )
+                && conn.client.capabilities().iter().any(|capability| {
+                    capability == crate::ipc::protocol::ACTIVE_WEBSITE_CAPABILITY
+                });
+            if conn.project != project && !registry_read {
                 conn.client.bind_read_only(project).await?;
                 conn.project = project;
             }

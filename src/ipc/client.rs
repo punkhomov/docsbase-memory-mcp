@@ -148,7 +148,16 @@ impl Client {
     /// unregistered project reply.
     pub fn handshake(&mut self, cwd: &Path) -> Result<()> {
         self.handshake_registry()?;
+        self.register_session(cwd)
+    }
 
+    pub(crate) fn active_website(&self) -> bool {
+        self.capabilities
+            .iter()
+            .any(|capability| capability == protocol::ACTIVE_WEBSITE_CAPABILITY)
+    }
+
+    pub(crate) fn register_session(&mut self, cwd: &Path) -> Result<()> {
         match self.call(Request::RegisterSession {
             pid: std::process::id(),
             cwd: cwd.to_path_buf(),

@@ -121,6 +121,12 @@ pub enum Command {
     Status,
     /// Run the shared daemon in the foreground (hidden `--detached` for autostart).
     Serve {
+        /// Complete daemon profile selector (shared|website).
+        #[arg(long, value_enum)]
+        profile: Option<ServeProfile>,
+        /// Existing indexed absolute root; selects a complete Website profile.
+        #[arg(long)]
+        project: Option<PathBuf>,
         /// Marker flag used by autostart; detaching is done by the parent.
         #[arg(long, hide = true)]
         detached: bool,
@@ -181,6 +187,13 @@ pub enum Command {
     },
 }
 
+/// Complete CLI profile selection; a Website selector always supplies its own root.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum ServeProfile {
+    Shared,
+    Website,
+}
+
 /// Daemon control subcommands.
 #[derive(Debug, Subcommand)]
 pub enum DaemonCommand {
@@ -233,9 +246,16 @@ pub fn run() -> anyhow::Result<()> {
             command: Some(command),
         } => config::run(&command, &db_settings),
         Command::Status => status::status_with_settings(&db_settings),
-        Command::Serve { detached, grace_ms } => serve(
+        Command::Serve {
             detached,
             grace_ms,
+            profile,
+            project,
+        } => serve(
+            detached,
+            grace_ms,
+            profile,
+            project,
             &db_settings,
             &pool_settings,
             dense_settings.settings(),
@@ -281,12 +301,20 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 fn serve(
-    _detached: bool,
+    detached: bool,
     grace_ms: Option<u64>,
+    profile: Option<ServeProfile>,
+    project: Option<PathBuf>,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
 ) -> anyhow::Result<()> {
+    let selected_profile = match (profile, project) {
+        (None, None) => None,
+        (Some(ServeProfile::Shared), None) => Some(crate::daemon::settings::DaemonProfile::Shared),
+        (None | Some(ServeProfile::Website), Some(project_root)) => Some(crate::daemon::settings::DaemonProfile::Website { project_root }),
+        _ => return Err(Error::Admission { message: "serve --profile website requires its own --project ABS; --profile shared cannot have --project".to_owned() }.into()),
+    };
     let cache = paths::cache_dir()?;
     crate::daemon::lifecycle::run_daemon_with_legacy_launch(
         &cache,
@@ -295,9 +323,11 @@ fn serve(
         dense_settings,
         &crate::daemon::launch::LaunchSnapshot::capture(),
         crate::daemon::settings::DaemonPatch {
+            profile: selected_profile,
             idle_grace_ms: grace_ms,
             ..crate::daemon::settings::DaemonPatch::default()
         },
+        detached,
     )?;
     Ok(())
 }
@@ -319,7 +349,9 @@ fn sync(
         .with_context(|| format!("resolve sync target {}", target.display()))?;
     let cache = paths::cache_dir()?;
     if let Some(mut client) = Client::connect(&cache) {
-        match client.handshake(&target) {
+        client.handshake_registry()?;
+        let binding = bind_cli_project(&mut client, &cache, &target, settings);
+        match binding {
             Ok(()) => {
                 let job = client.call_tool("sync_start", serde_json::json!({}))?;
                 let id = job["job_id"].as_i64().context("sync_start: job_id")?;
@@ -339,10 +371,13 @@ fn sync(
                 return Ok(());
             }
             // Not indexed yet: the direct path registers the project first.
-            Err(Error::Project { .. }) => {}
+            Err(Error::Project { .. }) if !client.active_website() => {
+                return index::run_with_settings(Some(&target), settings);
+            }
             Err(err) => return Err(err.into()),
         }
     }
+    crate::daemon::launch::require_shared_without_daemon()?;
     index::run_with_settings(Some(&target), settings)
 }
 
@@ -409,16 +444,56 @@ pub(crate) fn try_daemon(
     tool: &str,
     args: serde_json::Value,
     bind_session: bool,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let cache = paths::cache_dir()?;
     let Some(mut client) = Client::connect(&cache) else {
+        crate::daemon::launch::require_shared_without_daemon()?;
         return Ok(None);
     };
+    client.handshake_registry()?;
     if bind_session {
         let cwd = std::env::current_dir().context("resolve current directory")?;
-        client.handshake(&cwd)?;
-    } else {
-        client.handshake_registry()?;
+        bind_cli_project(&mut client, &cache, &cwd, settings)?;
     }
     Ok(Some(client.call_tool(tool, args)?))
+}
+
+// Live Hello selects routing. The file cannot override an active daemon profile.
+fn bind_cli_project(
+    client: &mut Client,
+    cache: &std::path::Path,
+    target: &std::path::Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> crate::error::Result<()> {
+    if !client.active_website() {
+        return client.register_session(target);
+    }
+    let project = existing_website_project(cache, target, settings)?;
+    match client.call(crate::ipc::protocol::Request::BindReadOnly {
+        pid: std::process::id(),
+        project_id: Some(project.id),
+    })? {
+        crate::ipc::protocol::Response::ToolResult { .. } => Ok(()),
+        crate::ipc::protocol::Response::Error {
+            code,
+            message,
+            instruction,
+        } => Err(Error::from_mcp_code(code, message, instruction)),
+        other @ crate::ipc::protocol::Response::Hello { .. } => Err(Error::Protocol {
+            message: format!("unexpected binding reply: {other:?}"),
+        }),
+    }
+}
+
+pub(crate) fn existing_website_project(
+    cache: &std::path::Path,
+    target: &std::path::Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> crate::error::Result<crate::store::models::Project> {
+    let result = crate::store::Db::open_readonly_for_admission(cache, settings)
+        .and_then(|db| crate::daemon::registry::resolve_by_cwd(&db, target));
+    result.map_err(|error| Error::Admission {
+        message: format!("website requires an existing fixed project: {error}"),
+    })
 }

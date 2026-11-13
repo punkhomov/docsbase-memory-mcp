@@ -123,11 +123,17 @@ pub(crate) fn run_with_policies(
     let cwd = std::env::current_dir()
         .map_err(|error| Error::internal_with_source("resolve current directory", error))?;
     let args = options.args(query, mode);
-    if let Some(value) = try_daemon_search(&cache, &cwd, args.clone(), &operation)? {
+    if let Some(value) = try_daemon_search(&cache, &cwd, args.clone(), &operation, settings)? {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
 
+    if matches!(
+        global.daemon.profile,
+        crate::daemon::settings::DaemonProfile::Website { .. }
+    ) {
+        return Err(crate::daemon::launch::website_unavailable().into());
+    }
     operation.check()?;
     let (db, project) = read_project_with_settings(settings)?;
     // Direct mode honors the project's hybrid configuration exactly like the
@@ -173,13 +179,25 @@ fn try_daemon_search(
     cwd: &Path,
     args: Value,
     operation: &SearchOperation,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> Result<Option<Value>> {
     block_on_io(within_operation(operation, async {
         let Ok(mut client) = AsyncClient::connect(cache).await else {
             operation.check()?;
             return Ok(None);
         };
-        client.handshake(cwd).await?;
+        client.handshake_registry().await?;
+        if client
+            .capabilities()
+            .iter()
+            .any(|capability| capability == crate::ipc::protocol::ACTIVE_WEBSITE_CAPABILITY)
+        {
+            let project = crate::cli::existing_website_project(cache, cwd, settings)?;
+            operation.check()?;
+            client.bind_read_only(Some(project.id)).await?;
+        } else {
+            client.register_session(cwd).await?;
+        }
         client.search(args, operation).await.map(Some)
     }))
 }

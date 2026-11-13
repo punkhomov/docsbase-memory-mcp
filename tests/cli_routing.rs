@@ -268,6 +268,22 @@ struct SyncTrace {
     exit: SyncPeerExit,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum SyncRefusal {
+    #[default]
+    None,
+    Bind,
+    Start,
+    SharedProject,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SyncPolicy {
+    website: bool,
+    refusal: SyncRefusal,
+    disconnect_after: Option<usize>,
+}
+
 struct SyncPeer {
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
     handle: Option<thread::JoinHandle<SyncTrace>>,
@@ -280,6 +296,10 @@ impl SyncPeer {
     }
 
     fn with_watchdog(cache: &Path, watchdog: Duration) -> Self {
+        Self::with_policy(cache, watchdog, SyncPolicy::default())
+    }
+
+    fn with_policy(cache: &Path, watchdog: Duration, policy: SyncPolicy) -> Self {
         let runtime = sync_runtime();
         let endpoint = platform::daemon_endpoint(cache);
         fs::create_dir_all(cache.join("state")).expect("mkdir state");
@@ -300,7 +320,7 @@ impl SyncPeer {
                     result = async {
                         let mut stream = listener.accept().await?;
                         let _ = accepted.send(());
-                        serve_sync_stream(&mut stream, &mut requests).await?;
+                        serve_sync_stream(&mut stream, &mut requests, policy).await?;
                         protocol_complete = true;
                         // Raw Windows pipe flush does not acknowledge delivery.
                         // Keep its reply handle until command completion causes
@@ -358,6 +378,7 @@ impl Drop for SyncPeer {
 async fn serve_sync_stream(
     stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
     requests: &mut Vec<Request>,
+    policy: SyncPolicy,
 ) -> std::io::Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     let mut stream = tokio::io::BufReader::new(stream);
@@ -369,16 +390,48 @@ async fn serve_sync_stream(
         let request: Request = serde_json::from_str(line.trim())
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         requests.push(request);
+        if policy.disconnect_after == Some(requests.len()) {
+            return Err(std::io::ErrorKind::ConnectionAborted.into());
+        }
+        let denied = |message: &str| Response::Error {
+            code: -32010,
+            message: message.to_owned(),
+            instruction: None,
+        };
         let response = match requests.last().expect("recorded request") {
             Request::Hello { .. } => Response::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 build_id: "test-daemon".to_owned(),
                 schema_version: 1,
-                capabilities: Vec::new(),
+                capabilities: if policy.website {
+                    vec!["active-website-profile-v1".to_owned()]
+                } else {
+                    Vec::new()
+                },
             },
-            Request::RegisterSession { .. } => Response::ToolResult {
-                value: serde_json::Value::Null,
-            },
+            Request::RegisterSession { .. } if policy.refusal == SyncRefusal::SharedProject => {
+                Response::Error {
+                    code: -32012,
+                    message: "not registered".to_owned(),
+                    instruction: None,
+                }
+            }
+            Request::RegisterSession { .. } if policy.website => {
+                denied("Website mutating registration denied")
+            }
+            Request::BindReadOnly { .. } if policy.refusal == SyncRefusal::Bind => {
+                denied("Website binding denied")
+            }
+            Request::CallTool { name, .. }
+                if name == "sync_start" && policy.refusal == SyncRefusal::Start =>
+            {
+                denied("Website sync denied")
+            }
+            Request::RegisterSession { .. } | Request::BindReadOnly { .. } => {
+                Response::ToolResult {
+                    value: serde_json::Value::Null,
+                }
+            }
             Request::CallTool { name, .. } if name == "sync_start" => Response::ToolResult {
                 value: serde_json::json!({
                     "job_id": 7, "state": "running", "stats": null
@@ -391,9 +444,13 @@ async fn serve_sync_stream(
             },
             _ => return Err(std::io::ErrorKind::InvalidData.into()),
         };
+        let refused = matches!(response, Response::Error { .. });
         let bytes = encode(&response).map_err(std::io::Error::other)?;
         stream.get_mut().write_all(&bytes).await?;
         stream.get_mut().flush().await?;
+        if refused {
+            return Ok(());
+        }
     }
     Ok(())
 }
@@ -676,4 +733,192 @@ fn connected_search_failure_does_not_fall_back_to_valid_local_index() {
         .clone();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("backend rejected this search"), "{stderr}");
+}
+
+fn global_website(env: &Env) {
+    let config = env.cache.path().join("config");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        format!(
+            "[daemon]\nprofile={{mode='website',project_root={}}}\n",
+            toml::Value::String(env.root.path().to_string_lossy().into_owned())
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn unavailable_global_website_never_direct_syncs_or_reads_direct_status() {
+    for command in ["sync", "status"] {
+        let env = Env::new(&[("docs/a.md", DOC)]);
+        global_website(&env);
+        let output = env
+            .cmd()
+            .arg(command)
+            .timeout(SYNC_PEER_WATCHDOG)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "Website {command} requires its foreground daemon: {output:?}"
+        );
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            diagnostic.contains("foreground") && diagnostic.contains("serve"),
+            "{diagnostic}"
+        );
+        for name in ["registry.db", "state", "projects", "vectors.db", "logs"] {
+            assert!(
+                !env.cache.path().join(name).exists(),
+                "{command} created {name}"
+            );
+        }
+    }
+}
+
+fn website_sync(env: &Env, policy: SyncPolicy) -> (std::process::Output, SyncTrace) {
+    let peer = SyncPeer::with_policy(env.cache.path(), SYNC_PEER_WATCHDOG, policy);
+    let output = env
+        .cmd()
+        .arg("sync")
+        .arg(env.root.path())
+        .timeout(SYNC_PEER_WATCHDOG)
+        .output();
+    let trace = peer.finish();
+    (output.unwrap(), trace)
+}
+
+fn generation(env: &Env) -> i64 {
+    let db = docsbase_memory::store::Db::open_readonly(env.cache.path()).unwrap();
+    let project = docsbase_memory::daemon::registry::resolve_by_cwd(&db, env.root.path()).unwrap();
+    docsbase_memory::store::repo::index_generation(db.connection(), project.id).unwrap()
+}
+
+#[test]
+fn live_website_sync_uses_readonly_binding_even_with_shared_global_file() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    env.index();
+    let (output, trace) = website_sync(
+        &env,
+        SyncPolicy {
+            website: true,
+            ..SyncPolicy::default()
+        },
+    );
+    assert!(output.status.success(), "{output:?} {trace:?}");
+    assert_eq!(trace.exit, SyncPeerExit::Complete);
+    assert_eq!(trace.requests.len(), 4);
+    assert!(matches!(trace.requests[0], Request::Hello { .. }));
+    assert!(matches!(
+        trace.requests[1],
+        Request::BindReadOnly {
+            project_id: Some(_),
+            ..
+        }
+    ));
+    assert!(
+        matches!(&trace.requests[2], Request::CallTool { name, args } if name == "sync_start" && args == &serde_json::json!({}))
+    );
+}
+
+#[test]
+fn website_denials_and_disconnects_at_every_contact_stage_never_replay_directly() {
+    let policies = [
+        SyncPolicy {
+            website: true,
+            refusal: SyncRefusal::Bind,
+            ..SyncPolicy::default()
+        },
+        SyncPolicy {
+            website: true,
+            refusal: SyncRefusal::Start,
+            ..SyncPolicy::default()
+        },
+        SyncPolicy {
+            website: true,
+            disconnect_after: Some(1),
+            ..SyncPolicy::default()
+        },
+        SyncPolicy {
+            website: true,
+            disconnect_after: Some(2),
+            ..SyncPolicy::default()
+        },
+        SyncPolicy {
+            website: true,
+            disconnect_after: Some(3),
+            ..SyncPolicy::default()
+        },
+        SyncPolicy {
+            website: true,
+            disconnect_after: Some(4),
+            ..SyncPolicy::default()
+        },
+    ];
+    for policy in policies {
+        let env = Env::new(&[("docs/a.md", DOC)]);
+        env.index();
+        let before = generation(&env);
+        write_file(env.root.path(), "docs/a.md", b"replacementwidget");
+        let (output, trace) = website_sync(&env, policy);
+        assert!(!output.status.success(), "{output:?} {trace:?}");
+        assert_eq!(
+            generation(&env),
+            before,
+            "failure replayed direct indexing: {trace:?}"
+        );
+        if policy.refusal == SyncRefusal::Bind {
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("binding denied"),
+                "{output:?} {trace:?}"
+            );
+        }
+        if policy.refusal == SyncRefusal::Start {
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("sync denied"),
+                "{output:?} {trace:?}"
+            );
+        }
+        if let Some(stage) = policy.disconnect_after {
+            assert_eq!(trace.requests.len(), stage, "{trace:?}");
+        }
+    }
+}
+
+#[test]
+fn active_shared_project_fallback_keeps_direct_behavior_despite_website_file() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    global_website(&env);
+    let (output, trace) = website_sync(
+        &env,
+        SyncPolicy {
+            refusal: SyncRefusal::SharedProject,
+            ..SyncPolicy::default()
+        },
+    );
+    assert!(output.status.success(), "{output:?} {trace:?}");
+    assert_eq!(trace.requests.len(), 2);
+    assert!(env.cache.path().join("registry.db").exists());
+}
+
+#[test]
+fn active_website_unknown_target_fails_before_binding_or_direct_registration() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    let (output, trace) = website_sync(
+        &env,
+        SyncPolicy {
+            website: true,
+            ..SyncPolicy::default()
+        },
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("admission refused"));
+    assert_eq!(
+        trace.requests.len(),
+        1,
+        "no mutating registration/bind/start: {trace:?}"
+    );
+    assert!(!env.cache.path().join("registry.db").exists());
+    assert!(!env.cache.path().join("projects").exists());
 }

@@ -671,3 +671,33 @@ fn literal_mcp_refuses_an_old_scoped_daemon_without_replaying_search() {
             .any(|name| name == "search_docs")
     );
 }
+
+#[test]
+fn global_website_refuses_reader_autostart_before_cache_resources() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    let config = env.cache.path().join("config");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        format!(
+            "[daemon]\nprofile={{mode='website',project_root={}}}\n",
+            toml::Value::String(env.root.path().to_string_lossy().into_owned())
+        ),
+    )
+    .unwrap();
+    let mut mcp = Mcp::start(&env);
+    mcp.initialize();
+    let response = mcp.request(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"status","arguments":{}}}));
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    let message = response["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        message.contains("foreground") && message.contains("serve"),
+        "{message}"
+    );
+    for name in ["state", "registry.db", "projects", "logs", "vectors.db"] {
+        assert!(
+            !env.cache.path().join(name).exists(),
+            "reader autostart created {name}"
+        );
+    }
+}

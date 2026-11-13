@@ -49,6 +49,15 @@ Hello, validates protocol/build/schema and additive capabilities, then uses
 providers, schedule backfill or index. Unsupported literal mode fails before
 Search; it never silently becomes Syntax.
 
+A foreground Website daemon advertises `active-website-profile-v1` in Hello.
+This marks its **active profile**, not general implementation support. Shared
+omits it; the Hello shape and the client's required capabilities are unchanged.
+Website accepts `BindReadOnly` only for its existing fixed project, rejects
+mutating registration with Admission (`-32010`), and keeps watchers disabled.
+CLI sync uses that binding and the existing explicit sync job; an unavailable
+globally selected Website requires foreground `docsbase serve`, without direct
+sync or autostart. A connected denial or interruption is never replayed directly.
+
 ## Lifetime, concurrency and errors
 
 See the package README for complete typed options. The application configuration

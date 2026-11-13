@@ -60,6 +60,7 @@ fn expired_cli_operation_cannot_turn_missing_endpoint_into_direct_fallback() {
         std::path::Path::new("."),
         json!({"query":"widgets"}),
         &operation,
+        &crate::store::settings::standalone().unwrap(),
     );
     assert!(matches!(result, Err(Error::Admission { .. })));
     assert!(operation.cancellation().is_cancelled());
@@ -82,6 +83,7 @@ fn missing_endpoint_leaves_original_operation_live_for_direct_search() {
         std::path::Path::new("."),
         json!({"query":"widgets"}),
         &operation,
+        &crate::store::settings::standalone().unwrap(),
     )
     .expect("direct fallback");
     assert!(result.is_none());

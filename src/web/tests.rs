@@ -242,35 +242,41 @@ fn web_policy_validation_and_provenance() {
 
 #[tokio::test]
 async fn missing_panel_capability_refuses_before_binding() {
-    let cache = tempfile::tempdir().unwrap();
-    let endpoint = platform::daemon_endpoint(cache.path());
-    if let platform::Endpoint::Unix(path) = &endpoint {
-        platform::fs::secure_dir(path.parent().unwrap()).unwrap();
+    for active_website in [false, true] {
+        let cache = tempfile::tempdir().unwrap();
+        let endpoint = platform::daemon_endpoint(cache.path());
+        if let platform::Endpoint::Unix(path) = &endpoint {
+            platform::fs::secure_dir(path.parent().unwrap()).unwrap();
+        }
+        let listener = platform::bind(&endpoint).unwrap();
+        let peer = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            let (read, mut write) = tokio::io::split(stream);
+            let mut reader = FrameReader::new(BufReader::new(read));
+            assert!(matches!(reader.read_frame().await.unwrap(), Frame::Line(_)));
+            write
+                .write_all(
+                    &protocol::encode(&Response::Hello {
+                        protocol_version: protocol::PROTOCOL_VERSION,
+                        build_id: protocol::build_id(),
+                        schema_version: 1,
+                        capabilities: if active_website {
+                            vec![protocol::ACTIVE_WEBSITE_CAPABILITY.into()]
+                        } else {
+                            vec![]
+                        },
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(reader.read_frame().await.unwrap(), Frame::Eof));
+        });
+        let policy = settings::WebSpec::defaults(&DefaultsContext::standalone());
+        let outcome = daemon_client::DaemonClient::connect(cache.path().to_owned(), policy).await;
+        assert!(matches!(outcome, Err(crate::error::Error::Protocol { .. })));
+        peer.await.unwrap();
     }
-    let listener = platform::bind(&endpoint).unwrap();
-    let peer = tokio::spawn(async move {
-        let stream = listener.accept().await.unwrap();
-        let (read, mut write) = tokio::io::split(stream);
-        let mut reader = FrameReader::new(BufReader::new(read));
-        assert!(matches!(reader.read_frame().await.unwrap(), Frame::Line(_)));
-        write
-            .write_all(
-                &protocol::encode(&Response::Hello {
-                    protocol_version: protocol::PROTOCOL_VERSION,
-                    build_id: protocol::build_id(),
-                    schema_version: 1,
-                    capabilities: vec![],
-                })
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(reader.read_frame().await.unwrap(), Frame::Eof));
-    });
-    let policy = settings::WebSpec::defaults(&DefaultsContext::standalone());
-    let outcome = daemon_client::DaemonClient::connect(cache.path().to_owned(), policy).await;
-    assert!(matches!(outcome, Err(crate::error::Error::Protocol { .. })));
-    peer.await.unwrap();
 }
 
 #[test]
@@ -292,4 +298,123 @@ fn safe_config_excludes_entire_provider_records_and_marks_unknown_origins() {
     assert!(!wire.contains("password"));
     assert!(!wire.contains("api_key"));
     assert!(view.fields.iter().all(|field| field.source.is_none()));
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Complete native-socket profile/binding sequence.
+async fn active_website_panel_uses_hello_only_registry_reads_and_fixed_id_bindings() {
+    let cache = tempfile::tempdir().unwrap();
+    let endpoint = platform::daemon_endpoint(cache.path());
+    if let platform::Endpoint::Unix(path) = &endpoint {
+        platform::fs::secure_dir(path.parent().unwrap()).unwrap();
+    }
+    let listener = platform::bind(&endpoint).unwrap();
+    let policy = crate::search::settings::standalone()
+        .unwrap()
+        .into_settings();
+    let peer = tokio::spawn(async move {
+        let stream = listener.accept().await.unwrap();
+        let (read, mut writer) = tokio::io::split(stream);
+        let mut reader = FrameReader::new(BufReader::new(read));
+        let mut requests = Vec::new();
+        while let Frame::Line(line) = reader.read_frame().await.unwrap() {
+            let request = protocol::decode_request(&line).unwrap();
+            let response = match &request {
+                Request::Hello { .. } => Response::Hello {
+                    protocol_version: protocol::PROTOCOL_VERSION,
+                    build_id: protocol::build_id(),
+                    schema_version: 1,
+                    capabilities: vec![
+                        protocol::PANEL_READ_CAPABILITY.into(),
+                        protocol::SEARCH_CONTEXT_CAPABILITY.into(),
+                        protocol::ACTIVE_WEBSITE_CAPABILITY.into(),
+                    ],
+                },
+                Request::BindReadOnly {
+                    project_id: Some(1),
+                    ..
+                } => Response::ToolResult { value: json!({}) },
+                Request::BindReadOnly { .. } => Response::Error {
+                    code: -32010,
+                    message: "Website fixed ID required".into(),
+                    instruction: None,
+                },
+                Request::CallTool { name, .. } if name == "panel_info" => Response::ToolResult {
+                    value: json!({"capabilities":[protocol::PANEL_READ_CAPABILITY],"request_timeout_ms":policy.request_timeout_ms,"dedupe_max_candidates":policy.dedupe_max_candidates,"max_request_payload_bytes":policy.max_request_payload_bytes,"max_retained_payload_bytes":policy.max_retained_payload_bytes,"max_hits":1000}),
+                },
+                Request::CallTool { .. } => Response::ToolResult {
+                    value: json!([{"id":1}]),
+                },
+                _ => unreachable!(),
+            };
+            requests.push(request);
+            writer
+                .write_all(&protocol::encode(&response).unwrap())
+                .await
+                .unwrap();
+        }
+        requests
+    });
+    let mut settings = settings::WebSpec::defaults(&DefaultsContext::standalone());
+    settings.control_connections = 1;
+    let client = daemon_client::DaemonClient::connect(cache.path().to_owned(), settings)
+        .await
+        .unwrap();
+    for (project, tool) in [
+        (None, "panel_projects"),
+        (Some(1), "panel_config"),
+        (None, "panel_projects"),
+    ] {
+        assert_eq!(
+            client
+                .call(project, tool, json!({}), Instant::now())
+                .await
+                .unwrap(),
+            json!([{"id":1}])
+        );
+    }
+    assert!(matches!(
+        client
+            .call(None, "panel_config", json!({}), Instant::now())
+            .await,
+        Err(crate::error::Error::Admission { .. })
+    ));
+    drop(client);
+    let requests = peer.await.unwrap();
+    assert!(
+        matches!(
+            requests.last().unwrap(),
+            Request::BindReadOnly {
+                project_id: None,
+                ..
+            }
+        ),
+        "project-required tool must not reuse a prior fixed binding for None: {requests:?}"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| matches!(
+                request,
+                Request::BindReadOnly {
+                    project_id: None,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| matches!(
+                request,
+                Request::BindReadOnly {
+                    project_id: Some(1),
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
 }

@@ -144,6 +144,24 @@ impl Db {
         cache_dir: &Path,
         settings: &Resolved<DbSettings>,
     ) -> Result<Self> {
+        Self::open_readonly_using(cache_dir, settings, true)
+    }
+
+    // Startup admission must observe SQLite's actual live WAL/schema without
+    // creating conflict diagnostics before the daemon is admitted. Ordinary
+    // readonly callers retain their existing diagnostics through the adapter.
+    pub(crate) fn open_readonly_for_admission(
+        cache_dir: &Path,
+        settings: &Resolved<DbSettings>,
+    ) -> Result<Self> {
+        Self::open_readonly_using(cache_dir, settings, false)
+    }
+
+    fn open_readonly_using(
+        cache_dir: &Path,
+        settings: &Resolved<DbSettings>,
+        report_conflict: bool,
+    ) -> Result<Self> {
         DbSpec::validate(settings.settings(), &Capabilities::current())?;
         let path = cache_dir.join(DB_FILE);
         if !path.exists() {
@@ -161,21 +179,23 @@ impl Db {
             let expected = migrations::SCHEMA_VERSION.to_string();
             let actual = version.to_string();
             let newer = version > migrations::SCHEMA_VERSION;
-            crate::conflict::record(
-                cache_dir,
-                &crate::conflict::Conflict {
-                    kind: "db_schema_mismatch",
-                    expected: &expected,
-                    actual: &actual,
-                    build_id: &crate::ipc::protocol::build_id(),
-                    schema_version: migrations::SCHEMA_VERSION,
-                    cache_root: cache_dir,
-                    pid: std::process::id(),
-                    recorded_build_id: None,
-                    recorded_schema_version: Some(version),
-                    holder_pid: None,
-                },
-            );
+            if report_conflict {
+                crate::conflict::record(
+                    cache_dir,
+                    &crate::conflict::Conflict {
+                        kind: "db_schema_mismatch",
+                        expected: &expected,
+                        actual: &actual,
+                        build_id: &crate::ipc::protocol::build_id(),
+                        schema_version: migrations::SCHEMA_VERSION,
+                        cache_root: cache_dir,
+                        pid: std::process::id(),
+                        recorded_build_id: None,
+                        recorded_schema_version: Some(version),
+                        holder_pid: None,
+                    },
+                );
+            }
             let hint = if newer {
                 "run `docsbase install` (this database was written by a newer build)"
             } else {
@@ -280,6 +300,81 @@ mod tests {
         )
         .expect("hold rollback-mode shared lock");
         (cache, conn)
+    }
+
+    #[test]
+    fn admission_reader_wrong_schema_creates_no_conflict_state() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = cache.path().join(DB_FILE);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "user_version", migrations::SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(connection);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            Db::open_readonly_for_admission(cache.path(), &settings::standalone().unwrap()),
+            Err(Error::Admission { .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(cache.path()).unwrap().count(), 1);
+        assert!(!cache.path().join("logs").exists());
+        assert!(
+            Db::open_readonly_with_settings(cache.path(), &settings::standalone().unwrap())
+                .is_err()
+        );
+        assert!(
+            cache.path().join("logs/conflicts.ndjson").exists(),
+            "ordinary readonly callers retain diagnostics"
+        );
+    }
+
+    #[test]
+    fn admission_reader_uses_live_wal_schema_and_rows() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = cache.path().join(DB_FILE);
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; PRAGMA user_version=2; CREATE TABLE admission_probe (value INTEGER); PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        writer
+            .pragma_update(None, "user_version", migrations::SCHEMA_VERSION)
+            .unwrap();
+        writer
+            .execute("INSERT INTO admission_probe VALUES (7)", [])
+            .unwrap();
+        assert_eq!(
+            &std::fs::read(&path).unwrap()[60..64],
+            &2_u32.to_be_bytes(),
+            "main-only inspection would see an obsolete schema"
+        );
+        let reader =
+            Db::open_readonly_for_admission(cache.path(), &settings::standalone().unwrap())
+                .unwrap();
+        assert_eq!(reader.schema_version().unwrap(), migrations::SCHEMA_VERSION);
+        assert_eq!(
+            reader
+                .connection()
+                .query_row("SELECT value FROM admission_probe", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+        assert!(
+            reader
+                .connection()
+                .execute("INSERT INTO admission_probe VALUES (8)", [])
+                .is_err()
+        );
+        assert!(!cache.path().join("logs").exists());
+    }
+
+    #[test]
+    fn admission_reader_missing_database_does_not_create_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let absent = root.path().join("missing");
+        assert!(
+            Db::open_readonly_for_admission(&absent, &settings::standalone().unwrap()).is_err()
+        );
+        assert!(!absent.exists());
     }
 
     #[test]

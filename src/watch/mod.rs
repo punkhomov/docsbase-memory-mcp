@@ -729,6 +729,7 @@ struct WatcherEntry {
 #[derive(Default)]
 pub struct Watchers {
     inner: Mutex<HashMap<i64, WatcherEntry>>,
+    disabled: bool,
 }
 
 impl Watchers {
@@ -736,6 +737,15 @@ impl Watchers {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Immutable owner policy. Disabled owners cannot start or revise watchers.
+    #[must_use]
+    pub fn with_enabled(enabled: bool) -> Self {
+        Self {
+            disabled: !enabled,
+            ..Self::default()
+        }
     }
 
     /// Number of watched projects (`status`).
@@ -764,6 +774,9 @@ impl Watchers {
         project: &Project,
         config: Arc<Config>,
     ) -> Result<bool> {
+        if self.disabled {
+            return Ok(false);
+        }
         self.ensure_with_settings(
             cache,
             project,
@@ -814,6 +827,9 @@ impl Watchers {
         context: WatchContext,
         db_settings: &Resolved<DbSettings>,
     ) -> Result<bool> {
+        if self.disabled {
+            return Ok(false);
+        }
         context.validate_root(cache)?;
         DbSpec::validate(db_settings.settings(), &Capabilities::current())?;
         if project.status != ProjectStatus::Indexed {
@@ -869,6 +885,9 @@ impl Watchers {
     /// Returns false if absent or prepared; a prepared watcher must be revised
     /// through [`Self::revise_with_runtime`] so its owner cannot be discarded.
     pub fn revise(&self, project_id: i64, config: Arc<Config>) -> bool {
+        if self.disabled {
+            return false;
+        }
         let slot = self
             .map()
             .get(&project_id)
@@ -894,6 +913,9 @@ impl Watchers {
         project_id: i64,
         runtime: Arc<WatchRuntime>,
     ) -> Result<bool> {
+        if self.disabled {
+            return Ok(false);
+        }
         runtime.source.validate_root(cache)?;
         let existing = self
             .map()
@@ -1244,6 +1266,54 @@ mod tests {
             ignores: vec!["bbb/**".to_owned()],
             ..Config::default()
         })
+    }
+
+    #[test]
+    fn disabled_owner_blocks_every_watcher_entry_before_validation() {
+        let env = Env::new();
+        let watchers = Arc::new(Watchers::with_enabled(false));
+        let config = Arc::new(Config::default());
+        let mut raw = env.db.settings().settings().clone();
+        raw.wal_attempts = 0;
+        let invalid = Resolved::new(raw, env.db.settings().provenance().clone());
+        let runtime = Arc::new(WatchRuntime::new(
+            Arc::clone(&config),
+            Arc::new(crate::hybrid::HybridStages::default()),
+            crate::vector_cache::VectorCacheSource::Legacy(config.hybrid_cfg.cache.limits()),
+        ));
+        assert!(
+            !watchers
+                .ensure(env.cache.path(), &env.project, Arc::clone(&config))
+                .unwrap()
+        );
+        assert!(
+            !watchers
+                .ensure_with_settings(
+                    env.cache.path(),
+                    &env.project,
+                    Arc::clone(&config),
+                    &invalid
+                )
+                .unwrap()
+        );
+        assert!(
+            !watchers
+                .ensure_with_runtime(
+                    env.cache.path(),
+                    &env.project,
+                    Arc::clone(&runtime),
+                    &invalid
+                )
+                .unwrap()
+        );
+        assert!(!watchers.revise(env.project.id, config));
+        assert!(
+            !watchers
+                .revise_with_runtime(env.cache.path(), env.project.id, runtime)
+                .unwrap()
+        );
+        assert_eq!(watchers.count(), 0);
+        assert!(!watchers.watching(env.project.id));
     }
 
     #[test]

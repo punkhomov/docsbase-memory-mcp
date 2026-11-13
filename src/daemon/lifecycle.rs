@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use crate::config::bootstrap::{BootstrapContext, EntrypointFacts};
-use crate::daemon::launch::{LaunchConfig, LaunchSnapshot};
+use crate::daemon::launch::{AdmittedLaunch, LaunchConfig, LaunchSnapshot};
 use crate::daemon::settings::{DaemonPatch, DaemonSpec};
 use crate::error::{Error, Result};
 use crate::ipc::protocol::{self, Request};
@@ -78,6 +78,7 @@ pub fn ensure_daemon_with(cache: &Path, exe: Option<&Path>) -> Result<()> {
     if is_running(cache) {
         return Ok(());
     }
+    crate::daemon::launch::require_shared_without_daemon()?;
     create_state_dir(cache)?;
     let lock_file = open_lock_file(&start_lock_path(cache))?;
     let mut lock = RwLock::new(lock_file);
@@ -273,13 +274,23 @@ pub(crate) fn run_daemon_with_legacy_launch(
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
     snapshot: &LaunchSnapshot,
     patch: DaemonPatch,
+    detached: bool,
 ) -> Result<()> {
+    let launch = snapshot.legacy(patch)?;
+    if detached
+        && matches!(
+            launch.config.settings().daemon.profile,
+            crate::daemon::settings::DaemonProfile::Website { .. }
+        )
+    {
+        return Err(Error::Admission { message: "website profile requires explicit foreground `docsbase serve`; --detached is inapplicable".to_owned() });
+    }
     run_with_launch(
         cache,
         settings,
         pool_settings,
         dense_settings,
-        snapshot.legacy(patch)?,
+        launch,
         &runtime_bootstrap()?,
     )
 }
@@ -300,7 +311,6 @@ fn run_with_launch(
     bootstrap: &BootstrapContext,
 ) -> Result<()> {
     use crate::config::schema::SettingsSpec;
-    launch.admit_startup()?;
     launch.config.settings().validate()?;
     crate::hybrid::dense_settings::DenseSpec::validate(
         dense_settings,
@@ -324,6 +334,7 @@ fn run_with_launch(
         .ok_or_else(|| Error::Admission {
             message: "daemon blocking plus async executor thread capacity overflow".to_owned(),
         })?;
+    let launch = launch.admit(cache, settings)?;
     let _lease = crate::daemon::admission::Lease::acquire(
         cache,
         &protocol::build_id(),
@@ -331,7 +342,7 @@ fn run_with_launch(
     )?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers)
-        .max_blocking_threads(launch.config.settings().daemon.max_blocking_threads)
+        .max_blocking_threads(launch.launch.config.settings().daemon.max_blocking_threads)
         .enable_all()
         .build()
         .map_err(|err| Error::internal_with_source("build tokio runtime", err))?;
@@ -418,7 +429,7 @@ async fn serve(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
-    launch: LaunchConfig,
+    launch: AdmittedLaunch,
 ) -> Result<()> {
     create_state_dir(cache)?;
     if is_running(cache) {
@@ -429,7 +440,7 @@ async fn serve(
     cleanup_stale(cache)?;
 
     // Prepare resources before advertising a listener or daemon state.
-    let shared = crate::daemon::server::Shared::open_with_launch_config(
+    let shared = crate::daemon::server::Shared::open_with_admitted_launch(
         cache,
         settings,
         pool_settings,
@@ -461,6 +472,22 @@ async fn serve(
         eprintln!("warning: cannot remove state file: {err}");
     }
     result
+}
+
+// Pure clock/event seam used by both session events and janitor observations.
+fn idle_deadline(
+    profile: &crate::daemon::settings::DaemonProfile,
+    current: Option<tokio::time::Instant>,
+    is_idle: bool,
+    now: tokio::time::Instant,
+    grace: Duration,
+) -> Option<tokio::time::Instant> {
+    match profile {
+        crate::daemon::settings::DaemonProfile::Shared if is_idle => {
+            current.or_else(|| Some(now + grace))
+        }
+        _ => None,
+    }
 }
 
 async fn accept_loop(
@@ -519,13 +546,8 @@ async fn accept_loop(
                 // Only live frontend sessions keep the daemon alive; plain
                 // connections (CLI handshakes) do not. A pending deadline is
                 // not extended by connection churn, only reset by a session.
-                if idle(&shared, &in_flight) {
-                    if grace_deadline.is_none() {
-                        grace_deadline = Some(tokio::time::Instant::now() + grace);
-                    }
-                } else {
-                    grace_deadline = None;
-                }
+                grace_deadline = idle_deadline(&settings.profile, grace_deadline,
+                    idle(&shared, &in_flight), tokio::time::Instant::now(), grace);
             }
             // An armed deadline must never cut off a session-less request or
             // a registration that is still running. The check happens in the
@@ -552,8 +574,9 @@ async fn accept_loop(
                 if !pruned.is_empty() {
                     eprintln!("cleanup: pruned {} dead session(s)", pruned.len());
                 }
-                if idle(&shared, &in_flight) && grace_deadline.is_none() {
-                    grace_deadline = Some(tokio::time::Instant::now() + grace);
+                if idle(&shared, &in_flight) {
+                    grace_deadline = idle_deadline(&settings.profile, grace_deadline,
+                        true, tokio::time::Instant::now(), grace);
                 }
             }
         }
@@ -884,6 +907,32 @@ fn start_lock_path(cache: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn website_never_arms_an_idle_deadline_and_shared_keeps_original_deadline() {
+        use crate::daemon::settings::DaemonProfile;
+        let now = tokio::time::Instant::now();
+        let grace = Duration::from_millis(5_000);
+        let website = DaemonProfile::Website {
+            project_root: PathBuf::from("/fixed"),
+        };
+        assert_eq!(idle_deadline(&website, None, true, now, grace), None);
+        assert_eq!(idle_deadline(&website, Some(now), true, now, grace), None);
+        let deadline = idle_deadline(&DaemonProfile::Shared, None, true, now, grace);
+        assert_eq!(deadline, Some(now + grace));
+        assert_eq!(
+            idle_deadline(&DaemonProfile::Shared, deadline, true, now + grace, grace),
+            deadline
+        );
+        assert_eq!(
+            idle_deadline(&DaemonProfile::Shared, deadline, false, now, grace),
+            None
+        );
+        assert_eq!(
+            idle_deadline(&DaemonProfile::Shared, None, true, now, Duration::ZERO),
+            Some(now)
+        );
+    }
 
     #[test]
     fn state_file_lives_under_state_dir() {

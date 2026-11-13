@@ -15,7 +15,9 @@ use tokio::sync::{mpsc, watch};
 
 use crate::config::Config;
 use crate::config::schema::Resolved;
-use crate::daemon::launch::{ConfigStamp, LaunchConfig, LaunchSnapshot};
+use crate::daemon::launch::{
+    AdmittedLaunch, ConfigStamp, FixedProject, LaunchConfig, LaunchSnapshot,
+};
 use crate::daemon::request::{self, Activity};
 use crate::daemon::session::SessionRegistry;
 use crate::daemon::settings::{DaemonPatch, DaemonSettings};
@@ -42,6 +44,10 @@ use crate::watch::Watchers;
 #[path = "search_phase_tests.rs"]
 mod search_phase_tests;
 
+#[cfg(test)]
+#[path = "profile_tests.rs"]
+mod profile_tests;
+
 #[path = "scoped.rs"]
 mod scoped;
 
@@ -63,6 +69,7 @@ pub struct Shared {
     stopping: AtomicBool,
     /// Global config snapshot taken at daemon start (OQ-6).
     global_config: Config,
+    website: Option<FixedProject>,
     /// Why the global config could not be loaded; surfaced by `status`.
     global_config_error: Option<String>,
     /// Fingerprint of the global config file at daemon start (OQ-6).
@@ -229,8 +236,24 @@ impl Shared {
         dense_settings: &crate::hybrid::dense_settings::DenseSettings,
         launch: LaunchConfig,
     ) -> Result<Arc<Self>> {
+        Self::open_with_admitted_launch(
+            cache,
+            settings,
+            pool_settings,
+            dense_settings,
+            launch.admit(cache, settings)?,
+        )
+    }
+
+    pub(crate) fn open_with_admitted_launch(
+        cache: &Path,
+        settings: &Resolved<DbSettings>,
+        pool_settings: &Resolved<ReadPoolSettings>,
+        dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+        admitted: AdmittedLaunch,
+    ) -> Result<Arc<Self>> {
         use crate::config::schema::{Capabilities, SettingsSpec};
-        launch.admit_startup()?;
+        let AdmittedLaunch { launch, website } = admitted;
         launch.config.settings().validate()?;
         crate::hybrid::dense_settings::DenseSpec::validate(
             dense_settings,
@@ -252,6 +275,24 @@ impl Shared {
         effective_dense.vector_cache_max_bytes = global_config.hybrid_cfg.cache.max_bytes;
         let payload_budget =
             crate::search::budget::PayloadBudget::new(global_config.search.clone())?;
+        let project_states = website.as_ref().map_or_else(HashMap::new, |fixed| {
+            HashMap::from([(
+                fixed.project.id,
+                Arc::new(ProjectCell {
+                    state: Mutex::new(ProjectState {
+                        config: Some(Arc::clone(&fixed.config)),
+                        stages: Some(Arc::new(HybridStages::default())),
+                    }),
+                    ..ProjectCell::default()
+                }),
+            )])
+        });
+        let watchers = Arc::new(Watchers::with_enabled(website.is_none()));
+        let ann_policy = if website.is_some() {
+            AnnPolicy::Disabled
+        } else {
+            AnnPolicy::BuildOrLoad
+        };
         let shared = Arc::new(Self {
             cache: cache.to_path_buf(),
             db: Mutex::new(db),
@@ -259,14 +300,15 @@ impl Shared {
             readers,
             payload_budget,
             sessions: SessionRegistry::with_settings(&global_config.daemon)?,
-            watchers: Arc::new(Watchers::new()),
+            watchers,
             stopping: AtomicBool::new(false),
             global_config,
+            website,
             global_config_error: launch.error,
             global_config_stamp: launch.stamp,
             global_config_path: launch.path,
-            project_states: Mutex::new(HashMap::new()),
-            dense: DenseCache::with_settings(AnnPolicy::BuildOrLoad, cache, &effective_dense)?,
+            project_states: Mutex::new(project_states),
+            dense: DenseCache::with_settings(ann_policy, cache, &effective_dense)?,
         });
         match shared.start_watchers() {
             Ok(started) if started > 0 => eprintln!("watching {started} indexed project(s)"),
@@ -287,6 +329,41 @@ impl Shared {
     #[must_use]
     pub fn daemon_settings(&self) -> &DaemonSettings {
         &self.global_config.daemon
+    }
+
+    fn profile_denial() -> Error {
+        Error::Admission { message: "website profile permits only its fixed project through read-only binding and explicit sync".to_owned() }
+    }
+
+    fn admit_project(&self, project: &crate::store::models::Project) -> Result<()> {
+        if let Some(fixed) = &self.website
+            && (fixed.project.id != project.id
+                || crate::platform::paths::normalize_for_compare(&fixed.project.canonical_root)
+                    != crate::platform::paths::normalize_for_compare(&project.canonical_root))
+        {
+            return Err(Self::profile_denial());
+        }
+        Ok(())
+    }
+
+    fn admit_binding(&self, project_id: Option<i64>) -> Result<()> {
+        if let Some(fixed) = &self.website
+            && project_id != Some(fixed.project.id)
+        {
+            return Err(Self::profile_denial());
+        }
+        Ok(())
+    }
+
+    fn visible_projects(&self, db: &Db) -> Result<Vec<crate::store::models::Project>> {
+        if let Some(fixed) = &self.website {
+            let project =
+                registry::project_by_id(db, fixed.project.id)?.ok_or_else(Self::profile_denial)?;
+            self.admit_project(&project)?;
+            Ok(vec![project])
+        } else {
+            registry::list_projects(db)
+        }
     }
 
     fn db(&self) -> MutexGuard<'_, Db> {
@@ -335,6 +412,7 @@ impl Shared {
     where
         F: FnMut(&Config) -> Result<HybridStages>,
     {
+        self.admit_project(project)?;
         let slot = self.project_slot(project.id);
         loop {
             let config = {
@@ -346,7 +424,11 @@ impl Shared {
                 config
             };
             // Construction can load models: do not hold the project lock.
-            let outcome = build(&config);
+            let outcome = if self.website.is_some() {
+                Ok(HybridStages::default())
+            } else {
+                build(&config)
+            };
             let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
             if !state
                 .config
@@ -388,6 +470,10 @@ impl Shared {
     /// # Errors
     /// Stage admission errors (propagated to the open) and registry failures.
     fn schedule_backfill(self: &Arc<Self>, project: &crate::store::models::Project) -> Result<()> {
+        self.admit_project(project)?;
+        if self.website.is_some() {
+            return Ok(());
+        }
         let (config, stages) = self.project_runtime(project)?;
         if stages.embedder.is_none()
             || project.status != crate::store::models::ProjectStatus::Indexed
@@ -431,7 +517,19 @@ impl Shared {
         if let Some(err) = self.global_error() {
             return Err(err);
         }
-        Config::for_project(&self.global_config, root)
+        if let Some(fixed) = &self.website {
+            let root = root.canonicalize().map_err(|_| Self::profile_denial())?;
+            if crate::platform::paths::normalize_for_compare(&root)
+                != crate::platform::paths::normalize_for_compare(&fixed.project.canonical_root)
+            {
+                return Err(Self::profile_denial());
+            }
+        }
+        let config = Config::for_project(&self.global_config, root)?;
+        if self.website.is_some() {
+            crate::daemon::launch::lexical_only(&config)?;
+        }
+        Ok(config)
     }
 
     fn config_in(
@@ -439,12 +537,15 @@ impl Shared {
         state: &mut ProjectState,
         project: &crate::store::models::Project,
     ) -> Result<Arc<Config>> {
+        self.admit_project(project)?;
         if let Some(config) = &state.config {
             return Ok(Arc::clone(config));
         }
         let config = Arc::new(self.config_for_root(&project.canonical_root)?);
-        self.dense
-            .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
+        if self.website.is_none() {
+            self.dense
+                .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
+        }
         state.config = Some(Arc::clone(&config));
         Ok(config)
     }
@@ -455,6 +556,7 @@ impl Shared {
     /// # Errors
     /// Returns config read/parse errors.
     pub fn project_config(&self, project: &crate::store::models::Project) -> Result<Arc<Config>> {
+        self.admit_project(project)?;
         let slot = self.project_slot(project.id);
         let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
         self.config_in(&mut state, project)
@@ -497,6 +599,9 @@ impl Shared {
         B: FnOnce() + Send + 'static,
         F: FnOnce(&Db, i64, &str) -> Result<()> + Send + 'static,
     {
+        if self.website.is_some() {
+            return None;
+        }
         let config = self.project_config(project).ok()?;
         let slot = self.project_slot(project.id);
         let embed_cfg = config.hybrid_cfg.embedding.as_ref()?;
@@ -583,19 +688,28 @@ impl Shared {
         F: FnOnce(&Config) -> Result<HybridStages>,
         O: FnOnce(),
     {
+        self.admit_project(project)?;
         let slot = self.project_slot(project.id);
         // Only same-project reloads wait for construction. Existing runtime
         // reads and unrelated projects keep their last coherent state.
         let _reload = slot.reload.lock().unwrap_or_else(PoisonError::into_inner);
         let config = Arc::new(self.config_for_root(&project.canonical_root)?);
-        let stages = Arc::new(build(&config)?);
-        let source = self.vector_source_for(project.id, &config);
-        source.validate_root(&self.cache)?;
-        let watch_runtime = Arc::new(crate::watch::WatchRuntime::new(
-            Arc::clone(&config),
-            Arc::clone(&stages),
-            source,
-        ));
+        let stages = Arc::new(if self.website.is_some() {
+            HybridStages::default()
+        } else {
+            build(&config)?
+        });
+        let watch_runtime = if self.website.is_none() {
+            let source = self.vector_source_for(project.id, &config);
+            source.validate_root(&self.cache)?;
+            Some(Arc::new(crate::watch::WatchRuntime::new(
+                Arc::clone(&config),
+                Arc::clone(&stages),
+                source,
+            )))
+        } else {
+            None
+        };
         // Never wait for active preparation while retaining the state mutex.
         let _publication = match slot.preparation.try_write() {
             Ok(guard) => guard,
@@ -608,10 +722,12 @@ impl Shared {
             }
         };
         let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
-        self.dense
-            .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
+        if self.website.is_none() {
+            self.dense
+                .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
+        }
         let changed = state.config.as_deref() != Some(config.as_ref());
-        if changed {
+        if changed && self.website.is_none() {
             self.dense.invalidate_memory(project.id);
         }
         // All fallible preparation steps precede publication: a rejected
@@ -620,23 +736,25 @@ impl Shared {
         state.stages = Some(stages);
         // Provider construction may refresh credentials even when Config values
         // are equal. Every published runtime must reach the watcher as one pair.
-        let watcher = self
-            .watchers
-            .revise_with_runtime(&self.cache, project.id, Arc::clone(&watch_runtime))
-            .and_then(|revised| {
-                if revised {
-                    Ok(false)
-                } else {
-                    self.watchers.ensure_with_runtime(
-                        &self.cache,
-                        project,
-                        watch_runtime,
-                        &self.db_settings,
-                    )
-                }
-            });
-        if let Err(err) = watcher {
-            eprintln!("warning: cannot watch project {}: {err}", project.id);
+        if let Some(watch_runtime) = watch_runtime {
+            let watcher = self
+                .watchers
+                .revise_with_runtime(&self.cache, project.id, Arc::clone(&watch_runtime))
+                .and_then(|revised| {
+                    if revised {
+                        Ok(false)
+                    } else {
+                        self.watchers.ensure_with_runtime(
+                            &self.cache,
+                            project,
+                            watch_runtime,
+                            &self.db_settings,
+                        )
+                    }
+                });
+            if let Err(err) = watcher {
+                eprintln!("warning: cannot watch project {}: {err}", project.id);
+            }
         }
         Ok(config)
     }
@@ -647,6 +765,9 @@ impl Shared {
     /// # Errors
     /// Returns [`Error::Internal`] when the registry cannot be listed.
     fn start_watchers(&self) -> Result<usize> {
+        if self.website.is_some() {
+            return Ok(0);
+        }
         let projects = registry::list_projects(&self.db())?;
         let mut started = 0;
         for project in projects {
@@ -674,6 +795,10 @@ impl Shared {
         project: &crate::store::models::Project,
         before_admission: impl FnOnce(),
     ) -> Result<bool> {
+        self.admit_project(project)?;
+        if self.website.is_some() {
+            return Ok(false);
+        }
         if project.status != crate::store::models::ProjectStatus::Indexed
             || registry::root_state(&project.canonical_root) == registry::RootState::Missing
         {
@@ -932,11 +1057,17 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                     protocol_version: PROTOCOL_VERSION,
                     build_id: protocol::build_id(),
                     schema_version: migrations::SCHEMA_VERSION,
-                    capabilities: vec![
-                        protocol::SEARCH_CONTEXT_CAPABILITY.to_owned(),
-                        protocol::LITERAL_QUERY_CAPABILITY.to_owned(),
-                        protocol::PANEL_READ_CAPABILITY.to_owned(),
-                    ],
+                    capabilities: {
+                        let mut capabilities = vec![
+                            protocol::SEARCH_CONTEXT_CAPABILITY.to_owned(),
+                            protocol::LITERAL_QUERY_CAPABILITY.to_owned(),
+                            protocol::PANEL_READ_CAPABILITY.to_owned(),
+                        ];
+                        if shared.website.is_some() {
+                            capabilities.push(protocol::ACTIVE_WEBSITE_CAPABILITY.to_owned());
+                        }
+                        capabilities
+                    },
                 },
                 false,
             )
@@ -985,10 +1116,14 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
             if !peer.hello_done {
                 return (hello_required(), true);
             }
+            if let Err(error) = shared.admit_binding(project_id) {
+                return (error_response(&error), false);
+            }
             let reader_shared = Arc::clone(shared);
             let activity = Arc::clone(&scope.activity);
             let bound = tokio::task::spawn_blocking(move || {
                 let _activity = activity;
+                reader_shared.admit_binding(project_id)?;
                 let project = project_id
                     .map(|id| {
                         registry::project_by_id(&reader_shared.db(), id)?.ok_or_else(|| {
@@ -999,6 +1134,12 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                         })
                     })
                     .transpose()?;
+                if let Some(project) = &project {
+                    reader_shared.admit_project(project)?;
+                    if reader_shared.website.is_some() {
+                        reader_shared.open_project_config(project)?;
+                    }
+                }
                 Ok::<_, Error>(
                     project.map_or_else(|| reader_shared.cache.clone(), |p| p.canonical_root),
                 )
@@ -1131,6 +1272,9 @@ async fn register_session(
     cwd: &Path,
     allow_unbound: bool,
 ) -> Result<(u64, Value, oneshot::Receiver<()>)> {
+    if shared.website.is_some() {
+        return Err(Shared::profile_denial());
+    }
     let shared_for_task = Arc::clone(shared);
     let cwd = cwd.to_path_buf();
     let cwd_for_task = cwd.clone();
@@ -1342,18 +1486,26 @@ fn route_metadata_tool(
     name: &str,
     args: &Value,
 ) -> Result<Value> {
+    if name == "index_project" && shared.website.is_some() {
+        return Err(Shared::profile_denial());
+    }
     let db = shared.db();
     match name {
         "status" => {
             let stats = shared.sessions.stats();
             let notice = shared.restart_notice();
-            tools::status(
+            let projects = shared.visible_projects(&db)?;
+            tools::status_for_projects(
                 &db,
+                &projects,
                 &stats,
                 shared.watchers.count(),
                 notice.as_deref(),
                 &|id| shared.watchers.watching(id),
                 &|project| {
+                    if shared.website.is_some() {
+                        return None;
+                    }
                     let Ok(config) = shared.project_config(project) else {
                         return None;
                     };
@@ -1366,7 +1518,11 @@ fn route_metadata_tool(
                     .ok()
                     .flatten()
                 },
-                Some(&shared.dense),
+                if shared.website.is_none() {
+                    Some(&shared.dense)
+                } else {
+                    None
+                },
             )
         }
         "panel_info" => Ok(json!(crate::ipc::panel::PanelInfo {
@@ -1387,11 +1543,16 @@ fn route_metadata_tool(
             Ok(json!(crate::ipc::panel::ConfigView::from_config(&config)))
         }
         "panel_projects" => {
-            let projects = registry::list_projects(&db)?
+            let projects = shared
+                .visible_projects(&db)?
                 .into_iter()
                 .map(|p| {
                     let count = crate::store::repo::project_counts(db.connection(), p.id)?;
-                    let config = shared.project_config(&p).ok();
+                    let config = if shared.website.is_none() {
+                        shared.project_config(&p).ok()
+                    } else {
+                        None
+                    };
                     let coverage = config.as_ref().and_then(|config| {
                         hybrid_jobs::coverage_from(
                             &db,
@@ -1423,7 +1584,7 @@ fn route_metadata_tool(
                 .collect::<Result<Vec<_>>>()?;
             Ok(json!(projects))
         }
-        "list_projects" => tools::list_projects(&db),
+        "list_projects" => tools::list_projects_from(&db, &shared.visible_projects(&db)?),
         "list_docs" => {
             let project = bound_project(shared, &db, session_id)?;
             tools::list_docs(&db, &project, args)
@@ -1484,6 +1645,10 @@ fn route_metadata_tool(
             current_job(&job_db, job_id)
         }
         "sync_start" => {
+            if shared.website.is_some() {
+                let bound = bound_project(shared, &db, session_id)?;
+                shared.admit_binding(opt_i64(args, "project_id")?.or(Some(bound.id)))?;
+            }
             let project = match opt_i64(args, "project_id")? {
                 Some(id) => registry::project_by_id(&db, id)?.ok_or_else(|| Error::Project {
                     message: format!("unknown project id {id}"),
@@ -1491,6 +1656,7 @@ fn route_metadata_tool(
                 })?,
                 None => bound_project(shared, &db, session_id)?,
             };
+            shared.admit_project(&project)?;
             registry::ensure_root_present(&project)?;
             // Provider construction may load models; release the shared DB
             // guard before preparing the coherent runtime snapshot.
@@ -1511,7 +1677,17 @@ fn route_metadata_tool(
             }
             current_job(&db, job_id)
         }
-        "sync_status" => tools::sync_status(&db, args),
+        "sync_status" => {
+            if shared.website.is_some() {
+                let id = opt_i64(args, "job_id")?.ok_or_else(|| Error::Protocol {
+                    message: "sync_status: missing job_id".to_owned(),
+                })?;
+                let job = crate::store::repo::sync_job(db.connection(), id)?
+                    .ok_or_else(Shared::profile_denial)?;
+                shared.admit_binding(Some(job.project_id))?;
+            }
+            tools::sync_status(&db, args)
+        }
         other => Err(Error::internal(format!(
             "tool {other:?} is not implemented yet"
         ))),
@@ -1588,14 +1764,23 @@ fn bound_project(
     let project_id = session_id
         .and_then(|id| shared.sessions.get(id))
         .and_then(|session| session.project_id)
-        .ok_or_else(|| Error::Project {
-            message: "session is not bound to a project".to_owned(),
-            instruction: Some("register a session from your project directory".to_owned()),
+        .ok_or_else(|| {
+            if shared.website.is_some() {
+                Shared::profile_denial()
+            } else {
+                Error::Project {
+                    message: "session is not bound to a project".to_owned(),
+                    instruction: Some("register a session from your project directory".to_owned()),
+                }
+            }
         })?;
-    registry::project_by_id(db, project_id)?.ok_or_else(|| Error::Project {
+    shared.admit_binding(Some(project_id))?;
+    let project = registry::project_by_id(db, project_id)?.ok_or_else(|| Error::Project {
         message: format!("project {project_id} disappeared from the registry"),
         instruction: None,
-    })
+    })?;
+    shared.admit_project(&project)?;
+    Ok(project)
 }
 
 fn session_cwd(shared: &Arc<Shared>, session_id: Option<u64>) -> Result<PathBuf> {

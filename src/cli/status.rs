@@ -41,7 +41,7 @@ pub fn status() -> anyhow::Result<()> {
 pub(crate) fn status_with_settings(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
-    if let Some(value) = crate::cli::try_daemon("status", serde_json::json!({}), false)? {
+    if let Some(value) = crate::cli::try_daemon("status", serde_json::json!({}), false, settings)? {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
@@ -98,7 +98,7 @@ pub(crate) fn list_with_settings(
             Some(cursor) => serde_json::json!({ "limit": PAGE, "cursor": cursor }),
             None => serde_json::json!({ "limit": PAGE }),
         };
-        let daemon_value = crate::cli::try_daemon("list_docs", args.clone(), true)?;
+        let daemon_value = crate::cli::try_daemon("list_docs", args.clone(), true, settings)?;
         let value = if let Some(value) = daemon_value {
             value
         } else {

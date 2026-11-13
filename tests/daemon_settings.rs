@@ -531,7 +531,7 @@ fn restart_diagnostics_distinguish_missing_loaded_and_unavailable() {
 }
 
 #[test]
-fn website_data_resolves_but_startup_is_refused_until_backend_gates_exist() {
+fn website_data_resolves_but_missing_registry_is_refused_before_resources() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
     std::fs::write(&path, website_source(dir.path())).unwrap();
@@ -550,7 +550,7 @@ fn website_data_resolves_but_startup_is_refused_until_backend_gates_exist() {
     );
     assert!(
         matches!(result, Err(docsbase_memory::error::Error::Admission { .. })),
-        "S1a must not start an ungated Website service"
+        "Website must not create a registry or bootstrap a project"
     );
     assert!(!cache.exists());
 }

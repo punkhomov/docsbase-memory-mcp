@@ -301,3 +301,28 @@ Website fail closed до legacy fallback/resources. Старые malformed Share
 одну effective policy. Reply-drain sleep ограничен remaining original deadline,
 даже если drain-poll больше timeout. Это уточнение существующих consumer contracts,
 без новых settings, artifact edges или S1c physical-drain adoption.
+
+
+## Delta 2026-11-13 — #79 S1b fixed lexical activation
+
+I44 is now consumed by canonical existing-indexed-project admission, complete CLI
+profile overlays, immutable watcher ownership, reader/session/tool scope and the
+lifecycle idle-deadline decision. The S1a temporary startup refusal is removed
+only with these gates. No independent watcher toggle or idle default is added.
+I47 retains Shared grace including explicit0; Website cannot arm an idle timer.
+Profile and all daemon operational policy remain restart-immutable; no index,
+vector, ANN, generation or CF5 publication edge is introduced by profile change.
+
+The additive `active-website-profile-v1` Hello marker reports the active Website
+profile, not a capability to enable it. It is a wire identity, not a configurable
+operational limit. Shared Hello and existing required SDK capabilities remain.
+Pre-admission SQLite reads share the real readonly/schema/WAL implementation
+with diagnostics disabled only for the narrow crate-internal admission entry;
+ordinary readonly schema-conflict diagnostics retain their existing behavior.
+
+Website composes lexical stages and disabled ANN policy without provider
+construction, vector-store opens, ANN refresh/backfill or watcher producers.
+Existing DenseCache/SearchOperation/generation/singleflight and sync-job dedup/
+ProjectLease mechanisms remain. I46/I48..I51 physical active/pending/control
+admission, coalesced janitor and #155 transport ownership remain S1c; accepted
+unwired settings cannot ship before that task and integrated final review.

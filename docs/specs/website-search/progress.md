@@ -359,3 +359,65 @@ checkpoint before S1b coding. Local #147 source is not a claim that PR157 is
 merged or native-qualified; S1b/c, their reviews, public dependency/native gates
 and the single S1 integration PR remain pending. No full CF12/#79 completion,
 S2 readiness or Windows #155 physical-reserve/transport proof is claimed.
+
+
+### 2026-11-13 — S1a integration gate passed; S1b implementation
+
+S1a integrated checkpoint `17494b4` (tree `e357af1`) is independently reviewed:
+spec PASS / quality APPROVED, no Critical/Important/Minor findings. The fresh
+integration review is `/workspace/scratch/agent-b/79/s1a/integrated147/review.md`.
+#147 landed as `92c3b6` with all four native checks; B-only reparenting preserved
+the verified tree. S1b BASE is `17494b43a198cf4f856e998c218dceed9dfeb809`.
+
+Task S1b: implementation in progress; no completion or public S1 ship claim.
+Actual REDs cover the former startup refusal, missing no-diagnostics reader API,
+immutable watcher owner API, pure idle transition, absent CLI selector,
+unavailable Website direct sync, mutating live-Website CLI binding, async CLI
+search binding and the live-Shared/file-Website fallback distinction. Raw logs
+are in `/workspace/scratch/agent-b/79/s1b/`; current focused GREEN includes real
+index edit/explicit sync/restart with watchers0 and ordinary Shared lifecycle.
+
+Ruling: Hello's additive `active-website-profile-v1` reports ACTIVE Website only,
+with Shared shape/trace and required SDK capabilities preserved. Reuse Admission
+`-32010`; do not encode policy denial as Project/direct-fallback permission.
+A narrow crate-internal readonly/no-diagnostics store entry reuses actual SQLite
+schema/live-WAL validation; legacy readonly diagnostics remain. Refusal tests
+check concrete absence of registry mutations, conflict/listener/runtime state or
+provider/vector/ANN effects; valid startup still opens its ordinary resources.
+
+Ruling: S1c physical worker lanes, pending admission, coalesced janitor and #155
+transport work remain separate. No physical reserve, full CF12, readiness DTO,
+v2/consent activation or complete #79 claim follows from S1b functional gates.
+
+
+Ruling (S1b Web composition): source audit found Web's unconditional initial and
+registry-wide `BindReadOnly(None)` conflicted with the fixed-ID backend gate.
+Actual native-socket RED reproduced Admission at connection setup. Web now
+validates panel-read capability before any panel calls, skips null binds only
+for active-Website registry-wide reads, and retains real fixed-ID/project-required
+binding admission. Shared framing/order, explicit wrong/None IPC denial, SDK API
+and S2 scope remain unchanged. Socket regression and affected Web/CLI/backend
+suites are included in this task's verification; no Windows transport change.
+
+### 2026-11-13 — S1b verified checkpoint; fresh task review pending
+
+Task S1b: verified implementation checkpoint, **not complete before fresh task
+review PASS / quality APPROVED**. Frozen Debug cli-full observer: 1496 passed /
+0 failed / 18 ignored, 91 target records, 253.365s including relinking; inventory
+1514. Lean focused CLI18/profile6/owner18/resolution23/policy7 (72 total), backend
+profile8 and admission reader3 passed. Full library532 and focused integration77
+were also observed. Current all-target and opt-in artifact/perf Clippy, fmt and
+diff checks passed; no release/LTO/performance run was required or performed.
+
+Source/test freeze hashes for372 files are unchanged across final verification.
+All non-S1b paths match BASE exactly; no crate/feature/fixture/golden/threshold or
+ignore change. Raw inventory adds28 names and removes1: the former S1a temporary
+startup-refusal test is renamed to the retained missing-registry/no-resources
+admission test. Net27 tests; all18 ignored identities/reasons are unchanged. The
+comments-aware source declaration scan finds1515→1542; raw Cargo inventory is the
+authoritative executable count. Evidence/report/manifest are in
+`/workspace/scratch/agent-b/79/s1b/`.
+
+Ruling: scope remains S1b only. S1c physical admission/janitor/#155, integrated
+final/native S1 review and the single public S1 PR remain pending. This local
+checkpoint does not claim S2 readiness, full CF12/#79 completion or ship approval.
