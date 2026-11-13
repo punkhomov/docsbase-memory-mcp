@@ -1,6 +1,7 @@
 packages:
   - web
   - packages/*
+  - examples/website-search
 
 # Enforced for the whole graph, including frozen-lockfile installs.
 minimumReleaseAge: 20160 # 14 days, in minutes

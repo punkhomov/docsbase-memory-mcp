@@ -519,3 +519,31 @@ selects `ann_recall`; release builds the CLI and selects platform/artifact tests
 Those paths do not execute `node_client` E2E and need no client build. Existing
 jobs/check names, Rust suite selectors, release profiles and test policies stay
 unchanged.
+
+
+## Delta 2026-11-13 — Website HTTP functional acceptance
+
+The existing docs/linux/macos/windows check names remain unchanged. Native jobs
+also check/build/test/format the dependency-free `examples/website-search` using
+the same locked workspace/dev tools. `tests/website_http.rs` imports its built
+artifacts and executes actual HTTP→SDK→native IPC→fixed Website daemon updates,
+partial readiness, bounded admission/disconnect and restart. Build Web, client,
+and example before full cli-full or a selected website_http run; nightly,
+release/feature-compatibility preparation and AGENTS.md carry the same explicit
+build prerequisites. Selective release/compatibility tests do not gain a new Rust
+suite/job or a performance requirement. Lean website_http contains no Node E2E.
+Existing client tarball/export/no-runtime-dependency checks remain in place.
+
+```sh
+pnpm --dir web build
+pnpm --dir packages/client build
+pnpm --dir examples/website-search build
+cargo test --locked --features cli-full --test website_http --test node_client
+```
+
+Clock/admission races use deterministic Node mocks/events; native HTTP uses a
+legitimate incomplete upload as the admission gate while readiness traverses the
+real daemon. No test-only production delay endpoint, tiny sleep threshold or
+paid provider is introduced. Final full suites/inventory/source freeze and native
+checks still govern delivery. Real ~20k load/capacity evidence remains explicitly
+deferred and unverified.

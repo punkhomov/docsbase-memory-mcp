@@ -177,3 +177,17 @@ WorkerAdmission; the original SearchOperation remains the deadline/cancellation
 authority. Actual closure guards own capacity/Activity until finish. Janitor
 coalescing and fixed sync ownership are transient daemon state, with no persisted
 artifact edge; connection/session/reader/payload accounting remains separate.
+
+### Delta 2026-11-13 — Website readiness and HTTP request budgets
+
+| Input/state | Runtime consumer | Persisted/index effect |
+| --- | --- | --- |
+| Current A outcome/attempt/recipe + authoritative project and Sync tuple | S2 read-only readiness, O1/health/O2 under existing read admission | observation only; never repair/create/register or synthesize proof |
+| Sync lexical result captured before existing writer-lease release | existing Sync stats_json gains minimal exact attribution beside actual counters; terminal backfill failure stays Error | quality evidence only, no new generation/publication protocol |
+| Complete example HTTP policy | one Node configuration boundary and listener/lanes/body/result/timers | application restart only; no lexical/vector/ANN invalidation |
+| Optional caller start/deadline + abort | same SDK operation across preprocessing/queue/Hello/bind/write/read | transient narrowing/cancellation only, no replay or persisted artifact edge |
+
+Ready covers the indexed full-survey corpus/recipe; watcher-off filesystem edits
+remain unknown until explicit Sync. In-place mutation can refuse search, without
+old-generation continuous availability. No CF5/v2 activation or full CF12/CF13
+adoption is claimed by these application consumers.

@@ -2,8 +2,10 @@
 
 Official Node.js/TypeScript connector to the **local docsbase daemon**. Node
 24.22.3 or newer, ESM. No runtime npm dependencies; the package contains compiled
-JavaScript and TypeScript declarations. This first client stage does not yet
-provide a complete website server profile or a corpus-publication readiness fence.
+JavaScript and TypeScript declarations. The fixed lexical Website service and
+bounded HTTP integration are documented in the repository's
+[website example](../../examples/website-search/README.md). Readiness is a current
+observation, not a corpus-publication fence or continuous availability promise.
 
 ```ts
 import { DocsbaseClient, DocsbaseError } from '@docsbase/client';
@@ -62,7 +64,12 @@ Each queued request is bounded by the 8MiB protocol frame limit; configure queue
 counts with the corresponding retained input memory in mind.
 
 One original monotonic deadline covers preparation, queue, connect, negotiation,
-execution and response validation. `AbortSignal`, timeout or `close()` destroys an
+execution and response validation. An optional `CallOptions.budget` carries finite
+`{startedAtMs, deadlineAtMs}` in Node's `performance.now()` clock domain. Capture
+start before upstream preparation; start must be nonnegative and no later than
+SDK ingress, and deadline must be at least start. The SDK copies the values and
+uses min(caller deadline, caller start + configured timeout). Spent budgets fail
+before I/O; omitting budget preserves existing ingress behavior. `AbortSignal`, timeout or `close()` destroys an
 interrupted connection. Actual backend work may outlive transport cancellation
 until a cooperative checkpoint; this does not promise cancellation of provider
 billing. The library itself never invokes providers, indexes, autostarts docsbase,
@@ -87,7 +94,13 @@ With `explain:true`, results are `{hits,meta}`; otherwise they are a citation ar
 
 `status()` returns only the configured project, `restart_required` and `notice`.
 It exposes current generation diagnostics; it does not prove sync completeness or
-continuous availability during index mutation. `metadata` is the last successful
+continuous availability during index mutation. `serverStatus()` adds fixed Website readiness under `server-status-v1`: schema1,
+current generation/attempt/outcome, health, active/latest Sync quality and stable
+reason. Healthy current full zero-error survey proof is required; unchanged skips
+can qualify, while legacy/partial/subset/failed/interrupted/moving evidence cannot.
+A later direct success does not clear a failed latest Sync; a later successful
+full Sync, including no-op, can. It does not repair/index or detect watcher-off
+filesystem edits. `metadata` is the last successful
 Hello for diagnostics, not fresh liveness or capability admission for a new socket.
 
 `DocsbaseError.kind`: `validation`, `protocol`, `transport`, `daemon`, `deadline`,
@@ -105,5 +118,5 @@ pnpm --dir packages/client test
 ```
 
 Distribution is prepared locally/CI; this change does not publish an npm package.
-Server lifecycle/watcher policy, explicit sync/readiness, HTTP example and real
-~20k corpus acceptance remain tracked in #79.
+The real ~20k corpus/load/machine acceptance was explicitly deferred and remains
+unverified; small native functional fixtures establish no capacity or latency SLO.

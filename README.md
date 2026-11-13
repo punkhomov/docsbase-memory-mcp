@@ -75,6 +75,11 @@ register the binary — the scripts above already do it for you.
 
 Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 
+For a Node website, use the [fixed lexical Website service and bounded HTTP
+example](examples/website-search/README.md): provision with `docsbase index ABS`,
+run `docsbase serve --project ABS`, update explicitly with `docsbase sync ABS`,
+and inspect `docsbase status --project ABS`. The SDK uses read-only native IPC.
+
 ### Optional: local embeddings (fastembed, `hybrid-local`)
 
 Build with the feature, install the ONNX Runtime, fetch the pinned models,

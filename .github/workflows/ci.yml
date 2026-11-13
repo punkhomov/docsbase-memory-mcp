@@ -75,6 +75,10 @@ jobs:
           pnpm --dir packages/client build
           pnpm --dir packages/client check
           pnpm --dir packages/client test
+          pnpm --dir examples/website-search format:check
+          pnpm --dir examples/website-search check
+          pnpm --dir examples/website-search build
+          pnpm --dir examples/website-search test
           client_pack="$RUNNER_TEMP/docsbase-client-package"
           mkdir -p "$client_pack"
           pnpm --dir packages/client pack --pack-destination "$client_pack"
@@ -178,6 +182,10 @@ jobs:
           pnpm --dir packages/client build
           pnpm --dir packages/client check
           pnpm --dir packages/client test
+          pnpm --dir examples/website-search format:check
+          pnpm --dir examples/website-search check
+          pnpm --dir examples/website-search build
+          pnpm --dir examples/website-search test
           client_pack="$RUNNER_TEMP/docsbase-client-package"
           mkdir -p "$client_pack"
           pnpm --dir packages/client pack --pack-destination "$client_pack"
@@ -245,6 +253,10 @@ jobs:
           pnpm --dir packages/client build
           pnpm --dir packages/client check
           pnpm --dir packages/client test
+          pnpm --dir examples/website-search format:check
+          pnpm --dir examples/website-search check
+          pnpm --dir examples/website-search build
+          pnpm --dir examples/website-search test
           client_pack="$RUNNER_TEMP/docsbase-client-package"
           mkdir -p "$client_pack"
           pnpm --dir packages/client pack --pack-destination "$client_pack"

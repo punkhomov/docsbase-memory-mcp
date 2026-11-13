@@ -56,9 +56,9 @@ class Operation {
   private readonly upstream: AbortSignal | undefined;
   private readonly onAbort = () =>
     this.controller.abort(new DocsbaseError('cancelled', 'docsbase request cancelled'));
-  constructor(startedAt: number, timeoutMs: number, upstream: AbortSignal | undefined) {
+  constructor(startedAt: number, deadline: number, upstream: AbortSignal | undefined) {
     this.startedAt = startedAt;
-    this.deadline = startedAt + timeoutMs;
+    this.deadline = deadline;
     this.upstream = upstream;
     if (upstream) {
       upstream.addEventListener('abort', this.onAbort, { once: true });
@@ -257,14 +257,38 @@ export class DocsbaseClient {
   }
   private begin(startedAt: number, call: CallOptions): Operation {
     if (this.closed) throw new DocsbaseError('closed', 'docsbase client closed');
-    if (!object(call) || Object.keys(call).some((key) => key !== 'signal')) {
+    if (!object(call) || Object.keys(call).some((key) => key !== 'signal' && key !== 'budget')) {
       throw new DocsbaseError('validation', 'invalid docsbase call options');
     }
     const signal = call.signal;
     if (signal !== undefined && !(signal instanceof AbortSignal)) {
       throw new DocsbaseError('validation', 'invalid docsbase AbortSignal');
     }
-    const operation = new Operation(startedAt, this.options.settings.requestTimeoutMs, signal);
+    let originalStart = startedAt;
+    let deadline = startedAt + this.options.settings.requestTimeoutMs;
+    const budget = call.budget;
+    if (budget !== undefined) {
+      if (
+        !object(budget) ||
+        Object.keys(budget).some((key) => key !== 'startedAtMs' && key !== 'deadlineAtMs')
+      )
+        throw new DocsbaseError('validation', 'invalid docsbase caller budget');
+      const callerStart = budget.startedAtMs;
+      const callerDeadline = budget.deadlineAtMs;
+      if (
+        typeof callerStart !== 'number' ||
+        !Number.isFinite(callerStart) ||
+        callerStart < 0 ||
+        callerStart > startedAt ||
+        typeof callerDeadline !== 'number' ||
+        !Number.isFinite(callerDeadline) ||
+        callerDeadline < callerStart
+      )
+        throw new DocsbaseError('validation', 'invalid docsbase caller budget');
+      originalStart = callerStart;
+      deadline = Math.min(callerDeadline, callerStart + this.options.settings.requestTimeoutMs);
+    }
+    const operation = new Operation(originalStart, deadline, signal);
     try {
       operation.check();
     } catch (error) {

@@ -1,0 +1,21 @@
+{
+  "name": "@docsbase/website-search-example",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.22.3"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.test.json",
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.ts",
+    "format": "biome format --write .",
+    "format:check": "biome format ."
+  },
+  "devDependencies": {
+    "@docsbase/client": "workspace:*",
+    "@types/node": "24.19.2",
+    "typescript": "5.9.3",
+    "@biomejs/biome": "2.6.3"
+  }
+}

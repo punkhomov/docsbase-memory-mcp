@@ -21,7 +21,9 @@ here.
 Official CLI builds use `--features cli-full` (both provider implementations and Web).
 Use the exact Node.js version in `.node-version`. At the repository root, run
 `corepack enable`, `corepack install`, `pnpm install --frozen-lockfile`, then
-`pnpm --dir web build` and `pnpm --dir packages/client build` before Cargo.
+`pnpm --dir web build`, `pnpm --dir packages/client build`, and
+`pnpm --dir examples/website-search build` before Cargo. The cli-full suite runs
+the real HTTP example against the native daemon (`tests/website_http.rs`).
 See `docs/IPC-CLIENT.md` for the Node connector and native acceptance;
 see `docs/WEB.md` for frontend checks and
 browser acceptance.

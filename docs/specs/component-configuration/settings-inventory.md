@@ -358,3 +358,28 @@ Legacy Shared background sync can use the helper without an application lane
 permit; its background/provider orchestration remains outside this reserve proof.
 Connection/session slots, ReadPool handles and payload bytes stay independent.
 All adopted policy changes require restart; no index/vector/ANN invalidation.
+
+### Delta 2026-11-13 — S2/S3 Website consumers and application boundary
+
+S2 adds no daemon runtime default: existing control/ReadPool/project read admission
+observes two fresh bounded metadata snapshots around one read-only index check.
+The existing coordination file is opened without creation. A's actual full-survey
+outcome/recipe and durable Sync attribution govern readiness; no generation,
+writer/publication protocol, provider or watcher mechanism is introduced.
+
+The Node example's `config.ts` owns a complete explicit HTTP policy, resolved once:
+
+| Policy group | Consumer / units | Effect |
+| --- | --- | --- |
+| host/port/maxConnections/maxRequestsPerSocket | Node listener/socket admission; address/count | application restart; no artifact invalidation |
+| search/control active+pending | independent FIFO HTTP lanes; count, pending0 valid | queue before body retention; slot held through actual completion |
+| header byte/count, body/query/result bytes, maxHits | parser/upload/JSON/response/search boundary | rejection before unbounded retention; maxHits owns HTTP default/cap |
+| request/header/check-interval/idle/keep-alive times | Node/request-operation timers; milliseconds | finite original deadline, no new stage budget |
+| complete SDK client options | existing SDK owner / immutable project and native endpoint | SDK validates once without I/O; no consumer fallback |
+
+Node timer ranges, header-pair count+one overflow detection and keep-alive buffer0
+are API/implementation invariants, not additional hidden operational defaults.
+`CallOptions.budget` is optional caller-owned monotonic start/deadline data; it can
+only narrow the existing SDK operation. Connection/session/worker/reader/byte caps
+stay independent. No new external runtime dependency is added. Full CF12/CF13,
+remote async #81 and process-wide/native-resource guarantees remain separate.

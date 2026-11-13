@@ -31,6 +31,8 @@ export interface SearchOptions {
 }
 export interface CallOptions {
   readonly signal?: AbortSignal;
+  /** Original caller times in Node performance.now()'s monotonic clock domain. */
+  readonly budget?: { readonly startedAtMs: number; readonly deadlineAtMs: number };
 }
 export interface SearchHit {
   /** Exact Rust u64 rendered in canonical decimal notation; never a JS number. */

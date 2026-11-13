@@ -527,3 +527,16 @@ existing writer lease ends; bounded O1/health/O2 observation never repairs/retri
 Full cli-full, lean, inventory/source freeze and fresh task review remain pending.
 Ready covers the indexed corpus/recipe, not watcher-off filesystem freshness or
 continuous availability. S3 HTTP, native final delivery and deferred FR-S4 remain separate.
+
+### 2026-11-13 — S2 accepted; S3/S4 functional checkpoint
+
+Task S2: complete (bc845df; fresh review PASS/APPROVED, no findings; exact native
+checks docs/linux/macos/windows green). Readiness scope and FR-S4 deferral stand.
+Task S3/S4: functional HTTP/original-budget/native-preparation/docs bundle
+implemented after SDK and HTTP missing-contract REDs. SDK69 and HTTP8 pass;
+real native website_http1 + node_client2 pass; current cli-full all-target Clippy,
+fmt/diff and actionlint pass. Full/lean inventories, final Node/artifact checks,
+fresh task review and combined native/final delivery gates remain pending.
+Ruling: known-closed idle SDK connections may be retired before dispatch; native
+restart assertions now fail both pools while absent, then verify later fresh
+calls. This corrected a test assumption; production no-replay behavior is intact.

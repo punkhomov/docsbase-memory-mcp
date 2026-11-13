@@ -51,6 +51,7 @@ jobs:
           pnpm --dir web test:unit
           pnpm --dir web build
           pnpm --dir packages/client build
+          pnpm --dir examples/website-search build
       - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy

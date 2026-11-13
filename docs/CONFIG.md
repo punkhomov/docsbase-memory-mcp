@@ -496,3 +496,21 @@ Consent satisfaction only records consent. Every plan blocker remains, including
 missing executors and strict-store adoption. This API does not observe freshness,
 apply changes, write source files, start providers or activate configuration v2.
 An executor must enforce admission, capabilities, blockers and recovery separately.
+
+
+## Website service configuration
+
+`docsbase serve --project ABS` selects the complete lexical Website profile over
+the global profile; `--profile shared` selects complete Shared. Website requires
+an existing indexed canonical root, rejects hybrid/provider policy, and owns
+watcher-off/no-idle invariants. Explicit Shared grace0 remains valid; Website
+cannot take an idle-grace override. Daemon resources remain complete restart-time
+`[daemon]` policy; they do not become HTTP settings.
+
+The [Node HTTP example](../examples/website-search/README.md) has a separate
+complete application-owned JSON policy, passed through `DOCSBASE_WEBSITE_CONFIG`.
+Its config owner validates every HTTP count/byte/timer and constructs the existing
+SDK's immutable fixed-project client once, with no fallback operational values.
+This does not activate v2 configuration or change index/vector/ANN invalidation.
+Use explicit `docsbase sync ABS` and read-only `docsbase status --project ABS` for
+updates/readiness; watcher-off filesystem freshness is not inferred.

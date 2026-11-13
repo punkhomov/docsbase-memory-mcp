@@ -1,0 +1,9 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.3/schema.json",
+  "vcs": { "enabled": false },
+  "files": { "includes": ["**", "!dist/**", "!node_modules/**", "!test/fixtures/**"] },
+  "formatter": { "enabled": true, "indentStyle": "space", "lineWidth": 100 },
+  "javascript": { "formatter": { "quoteStyle": "single" } },
+  "linter": { "enabled": false },
+  "assist": { "enabled": false }
+}
