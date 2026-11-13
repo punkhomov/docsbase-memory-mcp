@@ -499,3 +499,19 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - **CF5b2:** native source publication/durability and failure inspection seam.
 - **CF5b3/CF5c:** stopped migration/recovery executor, then coherent CLI/startup;
   providers/reindex/online generations remain outside initial local adoption.
+
+## Delta 2026-11-13 — CF5b1 bounded research task
+
+- [x] **CF5b1:** [control-contract.md](control-contract.md), exact SQL schema1,
+  state/namespace/session/lease/allowlist contract; isolated Rust1.100.0 scratch
+  using existing pinned rusqlite bundled. Verify actual PRAGMAs, process-exit
+  before/after commit, hot-journal readonly/no-mutation and explicit recovery,
+  native shared/exclusive cross-process exclusion. Record evidence and gaps.
+  Source/link/schema/experiment audit, fresh task/final reviews and required CI.
+  No product activation or runtime behavior change. Product tests are not added
+  for this prose; experiment stays outside product build/test inventory.
+- **CF5b2/3/5c remain mandatory:** latch and source durability/attributes on each
+  OS; product bounded store/executor/causal crash matrix; session-before-capture
+  in all consumers, no strict fallback, native retained-handle/alias tests.
+  CF5b2 must extend the research schema with versioned bounded native target
+  attribute evidence before any CF5b3 executor; schema1 captures bytes/state only.
