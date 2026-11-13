@@ -444,3 +444,15 @@ Task S1b remains pending original scoped rereview PASS/APPROVED. Deferred Minor
 M1 (#155 wording) stays with the upcoming functional S1c commit; this fix changes
 no Windows transport source, setting, feature, fixture, golden, threshold or
 ignore identity and creates no separate documentation PR.
+
+### 2026-11-13 — S1b fix round 2, fixture I2 verified; rereview pending
+
+Original I1 rereview is spec PASS/addressed; quality found one new Important I2
+in the test fixture's accepted-stream read/timeout setup on macOS. The fixture
+now only holds a bound native listener. Setup callbacks prove native connection;
+the four existing tests retain strict Transport/no-direct-action/no-state,
+absence and callback-order assertions. Accepted-stream IO, threads, sleeps and
+retries are removed. I1 production files remain byte-identical to `63df8aa`.
+Targeted cli-full `cli::connection_tests`: 4 passed / 0 failed; fmt/diff checks
+passed. No full repeat or native probe. Evidence:
+`/workspace/scratch/agent-b/79/s1b/fix2/`. Original scoped rereview remains pending.

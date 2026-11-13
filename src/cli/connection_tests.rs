@@ -1,59 +1,25 @@
 //! Post-connect setup must never become permission to index directly.
 use std::cell::Cell;
-use std::io::Read;
 use std::path::Path;
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 use crate::ipc::client::Client;
 use crate::platform;
 
+// A bound listener is sufficient: setup callbacks run only after native connect.
+// No accepted-stream IO is needed to classify the constructor's result.
 struct Peer {
+    _listener: platform::BlockingListener,
     cache: tempfile::TempDir,
-    handle: Option<JoinHandle<usize>>,
 }
 impl Peer {
     fn new() -> Self {
         let cache = tempfile::tempdir().unwrap();
         platform::fs::secure_dir(&cache.path().join("state")).unwrap();
         let listener = platform::bind_blocking(&platform::daemon_endpoint(cache.path())).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let handle = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok(stream) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "native fixture never connected");
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    Err(error) => panic!("native fixture accept: {error}"),
-                }
-            };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            stream.read(&mut [0_u8; 1]).unwrap()
-        });
         Self {
+            _listener: listener,
             cache,
-            handle: Some(handle),
-        }
-    }
-    fn finish(&mut self) {
-        assert_eq!(
-            self.handle.take().unwrap().join().unwrap(),
-            0,
-            "setup failure must close before Hello"
-        );
-    }
-}
-
-impl Drop for Peer {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
         }
     }
 }
@@ -83,9 +49,8 @@ fn injected_setup(cache: &Path, fail_read: bool) -> Result<Option<Client>> {
 #[test]
 fn setup_errors_after_native_connect_remain_transport_errors() {
     for fail_read in [true, false] {
-        let mut peer = Peer::new();
+        let peer = Peer::new();
         let error = injected_setup(peer.cache.path(), fail_read).err();
-        peer.finish();
         let error = error.expect("post-connect setup error collapsed into absence");
         assert!(matches!(error, Error::Transport { .. }));
         assert!(error.to_string().contains(if fail_read {
@@ -99,7 +64,7 @@ fn setup_errors_after_native_connect_remain_transport_errors() {
 #[test]
 fn connected_setup_error_cannot_replay_cli_sync_or_create_index_state() {
     for fail_read in [true, false] {
-        let mut peer = Peer::new();
+        let peer = Peer::new();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("guide.md"), "replacementwidget").unwrap();
         let connection = injected_setup(peer.cache.path(), fail_read);
@@ -117,7 +82,6 @@ fn connected_setup_error_cannot_replay_cli_sync_or_create_index_state() {
                 Ok(())
             },
         );
-        peer.finish();
         let registry_created = peer.cache.path().join("registry.db").exists();
         let Err(error) = result else {
             panic!(
@@ -161,7 +125,7 @@ fn absent_connect_never_runs_setup_or_creates_state() {
 
 #[test]
 fn successful_native_setup_keeps_read_before_write_order() {
-    let mut peer = Peer::new();
+    let peer = Peer::new();
     let stage = Cell::new(0);
     let result = Client::connect_with_setup(
         peer.cache.path(),
@@ -178,5 +142,4 @@ fn successful_native_setup_keeps_read_before_write_order() {
     assert!(result.is_some());
     assert_eq!(stage.get(), 2);
     drop(result);
-    peer.finish();
 }
