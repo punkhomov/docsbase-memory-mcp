@@ -99,21 +99,24 @@ pub fn read(db: &Db, project_id: i64) -> Result<Option<IndexOutcome>> {
             "SELECT index_attempt, index_generation, schema_version,
                 CASE WHEN typeof(canonical_root) = 'text'
                     AND length(CAST(canonical_root AS BLOB)) <= ?2
-                    THEN canonical_root END,
+                    THEN CAST(canonical_root AS BLOB) END,
                 CASE WHEN typeof(index_outcome_json) = 'text'
                     AND length(CAST(index_outcome_json AS BLOB)) <= ?2
-                    THEN index_outcome_json END,
+                    THEN CAST(index_outcome_json AS BLOB) END,
                 status = 'indexed',
                 EXISTS(SELECT 1 FROM docs WHERE project_id = ?1 AND content_hash = '')
-             FROM projects WHERE id = ?1",
+             FROM projects WHERE id = ?1
+                AND typeof(index_attempt) = 'integer'
+                AND typeof(index_generation) = 'integer'
+                AND typeof(schema_version) = 'integer'",
             params![project_id, byte_bound],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get::<_, Option<Vec<u8>>>(4)?,
                     row.get::<_, bool>(5)?,
                     row.get::<_, bool>(6)?,
                 ))
@@ -124,7 +127,7 @@ pub fn read(db: &Db, project_id: i64) -> Result<Option<IndexOutcome>> {
     let Some((attempt, generation, stamp, Some(root), Some(json), indexed, pending)) = raw else {
         return Ok(None);
     };
-    let Ok(outcome) = serde_json::from_str::<IndexOutcome>(&json) else {
+    let Ok(outcome) = serde_json::from_slice::<IndexOutcome>(&json) else {
         return Ok(None);
     };
     let recipe = outcome.recipe_id.strip_prefix(RECIPE_PREFIX);
@@ -136,7 +139,7 @@ pub fn read(db: &Db, project_id: i64) -> Result<Option<IndexOutcome>> {
         || outcome.schema_version != OUTCOME_VERSION
         || outcome.attempt_id != attempt
         || outcome.index_generation != generation
-        || outcome.canonical_root != root
+        || outcome.canonical_root.as_bytes() != root
         || outcome.stats.warnings.len() > MAX_WARNINGS
         || !recipe.is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
     {

@@ -532,3 +532,33 @@ fn embedding_observes_revoked_proof_and_writer_lease_without_a_sql_transaction()
     assert_eq!(env.read().stats, stats);
     assert!(env.read().is_complete());
 }
+
+#[test]
+fn malformed_numeric_and_non_utf8_metadata_is_unknown() {
+    let mut env = Env::new();
+    env.full(&Config::default());
+    let original = env.read();
+    let json = serde_json::to_string(&original).unwrap();
+    for (column, value) in [
+        ("index_generation", "'not-an-integer'"),
+        ("index_generation", "1.25"),
+        ("schema_version", "'not-an-integer'"),
+        ("schema_version", "3.25"),
+        ("canonical_root", "CAST(X'80' AS TEXT)"),
+        ("index_outcome_json", "CAST(X'80' AS TEXT)"),
+    ] {
+        env.db()
+            .connection()
+            .execute(
+                &format!("UPDATE projects SET {column}={value} WHERE id=1"),
+                [],
+            )
+            .unwrap();
+        assert!(
+            matches!(outcome::read(env.db(), 1), Ok(None)),
+            "corrupt {column} must be unknown"
+        );
+        env.db().connection().execute("UPDATE projects SET index_generation=?1, schema_version=?2, canonical_root=?3, index_outcome_json=?4 WHERE id=1", rusqlite::params![original.index_generation, docsbase_memory::store::migrations::SCHEMA_VERSION, original.canonical_root, json]).unwrap();
+    }
+    assert!(env.read().is_complete());
+}

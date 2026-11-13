@@ -792,3 +792,10 @@ summaries на конфигурацию, nested child summaries не сумми�
 Node58/0, real Node2/0, full/lean all-target Clippy/fmt/diff GREEN. Первый полный
 прогон с outdated protocol fixture не является acceptance; final проход использует
 только2обновлённых schema values. Independent final/native delivery pending.
+
+IO1 independent final review: scoped source converged, Critical/Important none.
+Minor по corrupt numeric columns принят: controlled real-SQL RED, затем SQL typeof
+filters и bounded byte projection также для malformed UTF-8;14outcome tests full/
+lean GREEN, final full/lean all-target Clippy GREEN. Новая regression —20йnew test.
+Final integration с actual main150 и required native остаются gates;1422/1228 выше
+относятся к source до этого узкого observer fix, не к новому integrated head.
