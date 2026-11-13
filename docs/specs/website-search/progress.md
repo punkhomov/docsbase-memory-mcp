@@ -118,3 +118,15 @@ reviewer scoped re-review ADDRESSED/PASS/APPROVED, no new findings. Evidence
 PR exact-head native4 and most-capable whole-stage review remain required before
 merge; no other-OS or full #79 completion claim. Next rebase onto A's CF7 main254af73
 and verify combined source; no changes to A-owned storage implementation here.
+
+2026-11-13 nativeCI43422791379 head570d704: docs/linux/macos passed, Windows failed
+new native fixture's project lookup before daemon startup/search. Original log
+has no actual compared path spellings, so exact spelling cause not established.
+Separate implementer replaced fixture-only string equality with followed bigint
+filesystem dev/ino identity and exactly-one matching registered row; same-name
+wrong root/ambiguity cannot select a project. Three test files only, no SDK/Rust
+production changes. Actual Windows RED retained; extra lookup RED before fix;
+Node55/0, local native2/0, build/check/format/diff0. Original C3 task scoped review
+and most-capable final scoped review PASS/APPROVED, no new findings/minors.
+Evidence /workspace/scratch/agent-b/79/windows-fix/. Fresh exact-head native4 still
+required, no blind rerun or Windows skip. User-deferred corpus remains unverified.

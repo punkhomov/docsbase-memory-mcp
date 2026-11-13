@@ -2,18 +2,11 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import {
-  watch,
-  mkdirSync,
-  writeFileSync,
-  readFileSync,
-  existsSync,
-  symlinkSync,
-  realpathSync,
-} from 'node:fs';
+import { watch, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { DocsbaseClient } from '@docsbase/client';
+import { registeredProject } from './native-project.ts';
 
 const [binary, root, endpoint, expectedBuildId, rawSchema] = process.argv.slice(2);
 assert.ok(binary && root && endpoint && expectedBuildId && rawSchema);
@@ -109,9 +102,9 @@ try {
   await run(['index', alpha]);
   await run(['index', beta]);
   const direct = JSON.parse(await run(['status']));
-  const project = direct.projects.find((p) => realpathSync(p.root) === realpathSync(alpha));
-  const other = direct.projects.find((p) => realpathSync(p.root) === realpathSync(beta));
-  assert.ok(project && other);
+  const project = registeredProject(direct.projects, alpha);
+  const other = registeredProject(direct.projects, beta);
+  assert.notEqual(project.id, other.id);
   config.projectId = project.id;
   await start();
   const client = make();
