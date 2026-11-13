@@ -689,9 +689,13 @@ fn sync_stage_admission_failure_precedes_enqueue() {
     // Isolate this consumer from other unit tests that mutate that env.
     const CHILD: &str = "DOCSBASE_CF7C2_PREFLIGHT_CHILD";
     if std::env::var_os(CHILD).is_none() {
+        // Other unit tests temporarily redirect the process-global config path.
+        // The child needs a fixed empty launch config as well as isolated keys.
+        let config = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "daemon::server::project_state_tests::sync_stage_admission_failure_precedes_enqueue"])
             .env(CHILD, "1")
+            .env("DOCSBASE_CONFIG_DIR", config.path())
             .env_remove("ORT_DYLIB_PATH")
             .env_remove("OPENROUTER_API_KEY")
             .output().unwrap();

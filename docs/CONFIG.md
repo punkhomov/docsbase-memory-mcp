@@ -477,3 +477,22 @@ rejected before provider work. `DenseCache::set_vector_cache_max_bytes` now retu
 without changing policy or published config. Legacy adapters still accept them.
 This does not yet select strict ownership in daemon startup, sync/status factories
 or CLI configuration; those await the migration and recovery rollout.
+
+### Consent policy library foundation
+
+The experimental `config::policy` API resolves explicitly supplied launch facts
+and consent policy without terminal I/O. Legacy v1 startup remains unchanged.
+Managed Auto prompts only for a direct CLI with a TTY; services, MCP and autostart
+cannot consent to rebuilding through an inherited terminal or explicit Apply.
+
+`ConsentReview::compile` owns a bounded canonical plan from component assessments.
+It evaluates no-consent initialization, Fail, explicit Apply grants, or a prompt
+request. Remote expense, downloads and destructive changes have independent
+permissions. Answers bind the displayed plan ID; receipts must be checked against
+newly observed and compiled state. Changed identity is refusal4, required change
+under Fail is3 and other consent refusals5; existing commands gain no new exits.
+
+Consent satisfaction only records consent. Every plan blocker remains, including
+missing executors and strict-store adoption. This API does not observe freshness,
+apply changes, write source files, start providers or activate configuration v2.
+An executor must enforce admission, capabilities, blockers and recovery separately.
