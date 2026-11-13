@@ -15,6 +15,42 @@ use tokio::{
     sync::mpsc,
 };
 
+#[cfg(unix)]
+#[test]
+fn shutdown_is_armed_before_announcement() {
+    const CHILD_SIGNAL: &str = "DOCSBASE_TEST_WEB_READY_SIGNAL";
+    if let Some(signal) = std::env::var_os(CHILD_SIGNAL) {
+        // A fresh process has no signal handlers from other Tokio tests.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(serve_until_shutdown(std::future::pending(), || {
+                // Deliver while the production announcement/browser callback
+                // is still running, before the service future can be polled.
+                assert!(
+                    std::process::Command::new("/bin/kill")
+                        .arg(signal)
+                        .arg(std::process::id().to_string())
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }))
+            .unwrap();
+        return;
+    }
+    for signal in ["-INT", "-TERM"] {
+        assert_cmd::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "web::tests::shutdown_is_armed_before_announcement",
+            ])
+            .env(CHILD_SIGNAL, signal)
+            .timeout(Duration::from_secs(10))
+            .assert()
+            .success();
+    }
+}
+
 #[tokio::test]
 async fn http_disconnect_closes_ipc_and_control_capacity_survives() {
     transport_scenario(60_000, true).await;

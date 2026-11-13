@@ -532,3 +532,19 @@ Prefer Biome when its Svelte support works on this application; formatting must
 remain covered by typechecking, builds and browser tests. Document official
 Svelte/shadcn AI documentation, skills and MCP options without implicitly
 activating remote integrations or executing unpinned tooling.
+
+## Delta 2026-11-13 — W7: shutdown до готовности (#138)
+
+- Обработчики завершения устанавливаются синхронно до публикации launch URL и
+  запуска браузера. Ошибка регистрации не сопровождается объявлением готовности.
+- Сохраняется существующий OS seam: SIGINT/SIGTERM на Unix, Ctrl+C/закрытие консоли
+  на Windows. Сигнал, пришедший во время объявления/запуска браузера, сохраняется
+  для завершения Web после возврата callback. Немедленная отмена блокирующего
+  browser spawn этой задачей не обещается.
+- Завершение frontend не останавливает общий демон; runtime shutdown остаётся
+  ограничен действующим `shutdown_timeout_ms`.
+- Проверка опасного интервала выполняется в свежем subprocess, без обработчиков
+  от других тестов. Настоящий real-daemon lifecycle test сохраняется; при отказе
+  он сообщает фактический статус завершения. Нет retries, skips, новых runtime
+  таймаутов или ослабления существующих проверок. Новый subprocess-test ограничен
+  десятью секундами для обнаружения зависания.

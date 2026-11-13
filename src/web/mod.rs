@@ -82,22 +82,37 @@ pub fn run(port: Option<u16>, open: bool) -> anyhow::Result<()> {
             initial_project,
             serial: AtomicU64::new(1),
         });
-        println!("docsbase Web: {url}");
-        if open && let Err(error) = crate::platform::web::open_browser(&url) {
-            eprintln!("Browser could not be opened: {error}. Use the launch URL above.");
-        }
         let serving = axum::serve(listener, server::router(state)).into_future();
-        tokio::pin!(serving);
-        tokio::select! {
-            result = &mut serving => result?,
-            result = tokio::signal::ctrl_c() => { result?; }
-        }
+        serve_until_shutdown(serving, || {
+            println!("docsbase Web: {url}");
+            if open && let Err(error) = crate::platform::web::open_browser(&url) {
+                eprintln!("Browser could not be opened: {error}. Use the launch URL above.");
+            }
+        })
+        .await?;
         // Dropping the HTTP service cancels its request futures; the runtime
         // shutdown below bounds any blocking startup helpers still finishing.
         Ok::<(), anyhow::Error>(())
     });
     runtime.shutdown_timeout(Duration::from_millis(shutdown_ms));
     result
+}
+
+async fn serve_until_shutdown(
+    serving: impl Future<Output = std::io::Result<()>>,
+    announce: impl FnOnce(),
+) -> anyhow::Result<()> {
+    // Install synchronously before readiness or browser launch. A ctrl_c()
+    // future registers only on its first poll, leaving that boundary unarmed.
+    let mut shutdown =
+        crate::platform::ShutdownSignal::new().context("cannot install Web shutdown handlers")?;
+    announce();
+    tokio::pin!(serving);
+    tokio::select! {
+        result = &mut serving => result?,
+        () = shutdown.recv() => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]

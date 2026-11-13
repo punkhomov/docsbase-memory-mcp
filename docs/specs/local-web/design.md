@@ -49,3 +49,17 @@ keyboard and browser behavior. Tailwind utilities use the existing sage theme
 without a global reset. Third-party notices are embedded and linked in the footer.
 See docs/supply-chain.md for the unpatched low-severity development-only advisory
 and docs/AI-TOOLING.md for optional official documentation integrations.
+
+## Delta 2026-11-13 — W7: eager shutdown registration
+
+`serve_until_shutdown` владеет существующим `platform::ShutdownSignal`, создавая
+его до синхронного announcement/browser callback. После callback он ожидает
+HTTP service либо уже зарегистрированный receiver. Async `ctrl_c()` не подходит
+для этой границы: регистрация происходит только при первом poll, который раньше
+следовал после URL/browser. Сохраняются прежняя отмена HTTP при drop и ограниченный
+runtime shutdown; IPC/daemon lifetime не меняется. Новых зависимостей нет.
+
+Свежий тестовый subprocess посылает себе SIGINT/SIGTERM непосредственно из
+production callback до первого poll HTTP future. Старый порядок завершается
+сигналом; новый receiver сохраняет событие, и процесс выходит успешно. Pending
+service задаёт только границу ожидания, без подмены механизма сигналов.
