@@ -285,3 +285,55 @@ C12 delivery/SC-15: PR142 squash bbf650d, native run43427786037 attempt1 —
 0fail/18прежних ignores/OS. Audit относительно PR140 сохранил весь inventory и
 выполнение всех14добавленных CF7b/C12 tests. Reviewed/tested/squash tree совпали.
 Task C12: complete; #144closed. Исходный transient lock holder по-прежнему unknown.
+
+## 2026-11-13 — C13: release-compatible lease assertions (#143)
+
+Task C13: planned; FR-42/SC-16, c13-plan.md. Actual nightly43413584035 and local
+release no-run compile RED E0599 at all six callers across three integration
+targets. Debug-only production probe remains unchanged. User authorized the
+autonomous queue/PR/merge; no additional approval gate is required for this fix.
+
+C13 Ruling: accept plan-review Important finding — the admitted hybrid_jobs
+control reused a filled cache and accepted an untouched u64::MAX sentinel.
+Strengthen to exact 4, record sensitivity RED with shared fixture, then use a
+fresh indexed fixture with the same corpus/policy. This is a narrow test-validity
+repair within FR-42; production leases, thresholds, model keys and TTLs unchanged.
+
+C13 local evidence (base3b347320): current-base release no-run RED exit101 at all
+six E0599 sites; stronger admission assertion on the old shared fixture RED
+exit101, observed u64::MAX versus expected4. Fresh admitted fixture and readonly
+helper GREEN: cli-full affected debug22/22 and actual optimized release22/22,
+0fail/0ignored. Two added helper cases cover missing-file/source/no-creation and
+quoted-model isolation/expired stored row/unchanged SQL rows+data_version with a
+live WAL owner. All original test names retained; no production/profile/crate/
+threshold/TTL edits. Evidence: /workspace/scratch/agent-b/143/commands.md and logs.
+Scoped plan rereview PASS/APPROVED; implementation/final reviews, remaining local
+checks, integrated full release and native CI/inventory still pending. No C13
+completion claim from these affected-target results.
+
+C13 remaining local checks GREEN: lean optimized release helper2/2 and admitted
+control1/1; cli-full all-target Clippy -D warnings; final fmt --check/diff-check.
+No Cargo process left after these checks. Local affected implementation evidence
+is ready for fresh review; full cli-full release is deferred to the controller
+after #141 integration/SDK build, followed by final reviews/native CI/inventory.
+Task C13 remains open until those delivery gates are evidenced.
+
+
+C13 local close-out: complete (implementation/local verification; delivery pending).
+Full actual cli-full release checkpoint27c80a4/base0c6d707:1384passed/0failed/
+18existingignored,86targets,2916.987s including cold LTO compilation. Raw final
+summary per target reconciles with observer JSON; both SDK native tests and both
+new SQLite observers actually passed.409recorded source hashes matched.
+After A146 rebase, actual release affected22 +vector_sync_context7 =29/0/0;
+Clippy/fmt GREEN. Final A148 base6826aaf/source73d3486 all-release-tests typecheck,
+all-target cli-full Clippy and fmt exit0. All4C13 Rust files remain byte-identical
+to the full runtime checkpoint; final411source manifest matches.
+Ruling: full release runtime belongs to the recorded earlier checkpoint, not to
+final head. A146/A148 changed other production consumers; targeted combined release,
+final all-release typecheck and independent final/native integration gates retain
+that distinction. No profile/cfg/assertion/baseline changes or test removals.
+Fresh C13 task review: Spec PASS / Quality APPROVED, no findings/minors. Whole-diff
+final review and final-head docs/linux/macos/windows plus inventory audit remain
+delivery gates before issue143 closure/normal squash merge. No completion claim for
+those pending gates. Evidence: /workspace/scratch/agent-b/143/task-review.md and
+full-release-observation/ (raw+JSON), final-source-sha256.json.
