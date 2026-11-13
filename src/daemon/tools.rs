@@ -175,14 +175,14 @@ fn dense_candidates<Guard>(
                     Some("ann returned fewer candidates than the window"),
                 );
                 operation.check()?;
-                stream_exact(source, project, query.generation, model_id, &vector, fetch)
+                stream_exact(context, source, query.generation, model_id, &vector, fetch)
             }
             Err(err) => {
                 eprintln!("warning: ann search failed: {err}; falling back to exact");
                 degrade(degraded, Degraded::AnnError);
                 dense.record_outcome(project.id, AnnState::Fallback, Some("ann search failed"));
                 operation.check()?;
-                stream_exact(source, project, query.generation, model_id, &vector, fetch)
+                stream_exact(context, source, query.generation, model_id, &vector, fetch)
             }
         },
         DenseRows::TooLarge(hashes) => {
@@ -194,7 +194,7 @@ fn dense_candidates<Guard>(
                 AnnState::TooLarge,
                 Some("above the resident cap"),
             );
-            stream_hashes(context.cache, model_id, &hashes, &vector, fetch)
+            stream_hashes(context, model_id, &hashes, &vector, fetch)
         }
         DenseRows::Building(building) => {
             degrade(degraded, Degraded::AnnBuilding);
@@ -203,7 +203,7 @@ fn dense_candidates<Guard>(
                 AnnState::Building,
                 Some("background build in flight"),
             );
-            stream_hashes(context.cache, model_id, &building.hashes, &vector, fetch)
+            stream_hashes(context, model_id, &building.hashes, &vector, fetch)
         }
         DenseRows::Failed(failed) => {
             degrade(degraded, Degraded::AnnError);
@@ -212,7 +212,7 @@ fn dense_candidates<Guard>(
                 AnnState::Fallback,
                 Some("the last build failed"),
             );
-            stream_hashes(context.cache, model_id, &failed.hashes, &vector, fetch)
+            stream_hashes(context, model_id, &failed.hashes, &vector, fetch)
         }
     }
 }
@@ -253,7 +253,10 @@ fn scoped_dense<Guard>(
             .dense
             .query_embedding(embedder, query.text, context.operation.cancellation())?;
     context.operation.check()?;
-    let mut cache = crate::vector_cache::VectorCache::open(context.cache)?;
+    let mut cache = context
+        .dense
+        .vector_source(context.project.id)
+        .connect(context.cache)?;
     let mut top = dense::TopK::new(&vector, query.fetch)?;
     for documents in scope.documents().chunks(repo::BATCH_KEYS) {
         let mut after = (0_i64, 0_u32);
@@ -294,31 +297,28 @@ fn scoped_dense<Guard>(
 }
 
 fn stream_exact(
+    context: &SearchContext<'_>,
     source: MetadataSource<'_>,
-    project: &Project,
     generation: i64,
     model_id: &str,
     vector: &[f32],
     fetch: usize,
 ) -> Result<Vec<(u64, f32)>> {
-    let metadata = capture_dense(source, project, generation)?;
-    stream_hashes(
-        source.cache_root(),
-        model_id,
-        metadata.chunks(),
-        vector,
-        fetch,
-    )
+    let metadata = capture_dense(source, context.project, generation)?;
+    stream_hashes(context, model_id, metadata.chunks(), vector, fetch)
 }
 
 fn stream_hashes(
-    root: &Path,
+    context: &SearchContext<'_>,
     model_id: &str,
     hashes: &[(u64, String)],
     vector: &[f32],
     fetch: usize,
 ) -> Result<Vec<(u64, f32)>> {
-    let mut cache = crate::vector_cache::VectorCache::open(root)?;
+    let mut cache = context
+        .dense
+        .vector_source(context.project.id)
+        .connect(context.cache)?;
     let rows = hashes
         .iter()
         .filter_map(move |(chunk_id, hash)| match cache.get(model_id, hash) {
@@ -415,6 +415,10 @@ pub fn search_docs_from<Guard>(
             message: "search metadata belongs to a different cache root".to_owned(),
         });
     }
+    context
+        .dense
+        .vector_source(context.project.id)
+        .validate_root(context.cache)?;
     ensure_indexed(context.project)?;
     let arguments = parse_search_args(args)?;
     if arguments.limit == 0 {

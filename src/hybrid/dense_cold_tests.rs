@@ -523,3 +523,86 @@ fn paused_old_metadata_completion_cannot_replace_new_generation() {
         assert_eq!(cache.cold_flights.active(), 0);
     });
 }
+
+#[test]
+fn owned_root_aliases_share_one_cold_flight_and_metadata_identity() {
+    let fixture = MetadataFixture::new();
+    let owner = VectorStore::acquire(
+        fixture.cache.path(),
+        crate::vector_cache::settings::standalone()
+            .unwrap()
+            .settings(),
+    )
+    .unwrap();
+    {
+        let mut vectors = owner.connect().unwrap();
+        for (_, hash) in fixture.original_hashes() {
+            vectors.put(MODEL, &hash, &[1.0, 0.0, 0.0]).unwrap();
+        }
+    }
+    let cache = DenseCache::with_vector_store(
+        AnnPolicy::Disabled,
+        &owner,
+        crate::hybrid::dense_settings::standalone()
+            .unwrap()
+            .settings(),
+    )
+    .unwrap();
+    let generation = repo::index_generation(fixture.writer.connection(), fixture.project).unwrap();
+    let child = fixture.cache.path().join("alias-child");
+    std::fs::create_dir(&child).unwrap();
+    let roots = [fixture.cache.path().to_path_buf(), child.join("..")];
+    let pool = single_reader_pool(&fixture);
+    let loads = AtomicUsize::new(0);
+    let (joined, joins) = mpsc::channel();
+    cache.cold_flights.observe_joins(joined);
+    let project = fixture.project;
+    let results = std::thread::scope(|scope| {
+        let (release, proceed) = mpsc::channel();
+        let proceed = Arc::new(Mutex::new(proceed));
+        let (loaded, loading) = mpsc::channel();
+        let mut workers = Vec::new();
+        for (index, root) in roots.iter().enumerate() {
+            let (cache, pool, loads) = (&cache, &pool, &loads);
+            let proceed = Arc::clone(&proceed);
+            let loaded = loaded.clone();
+            workers.push(scope.spawn(move || {
+                cache.get_with_metadata(
+                    request(root, project, generation),
+                    &Cancellation::new(),
+                    || {
+                        loads.fetch_add(1, AtomicOrdering::SeqCst);
+                        let metadata = {
+                            let reader = pool.acquire(Instant::now() + WATCHDOG)?;
+                            DenseMetadata::capture(&reader, project)?
+                        };
+                        loaded.send(()).unwrap();
+                        proceed
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(WATCHDOG)
+                            .map_err(|err| Error::internal_with_source("alias gate", err))?;
+                        Ok(metadata)
+                    },
+                )
+            }));
+            if index == 0 {
+                loading.recv_timeout(WATCHDOG).unwrap();
+            }
+        }
+        for _ in 0..2 {
+            joins.recv_timeout(WATCHDOG).unwrap();
+        }
+        // Multiple tokens also release an accidentally duplicated initializer.
+        for _ in 0..2 {
+            let _ = release.send(());
+        }
+        workers
+            .into_iter()
+            .map(|worker| ready(worker.join().unwrap().unwrap()))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(loads.load(AtomicOrdering::SeqCst), 1);
+    assert!(Arc::ptr_eq(&results[0], &results[1]));
+    assert_eq!(results[0].rows().len(), 2);
+}

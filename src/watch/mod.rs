@@ -953,6 +953,12 @@ mod tests {
 
     impl Env {
         fn new() -> Self {
+            let (env, index) = Self::with_writer();
+            drop(index); // Windows needs the writer released before consumer open.
+            env
+        }
+
+        fn with_writer() -> (Self, IndexHandle) {
             let cache = TempDir::new().expect("cache");
             let root = TempDir::new().expect("root");
             fs::create_dir(root.path().join(".git")).expect("project boundary");
@@ -965,13 +971,15 @@ mod tests {
                     .expect("index");
             run_full(&mut db, &mut index, &project, &Config::default()).expect("seed index");
             registry::mark_indexed(&db, project.id).expect("indexed");
-            drop(index); // Windows needs the writer released before consumer open.
-            Self {
-                cache,
-                _root: root,
-                db,
-                project,
-            }
+            (
+                Self {
+                    cache,
+                    _root: root,
+                    db,
+                    project,
+                },
+                index,
+            )
         }
 
         fn path(&self, rel: &str) -> PathBuf {
@@ -994,7 +1002,7 @@ mod tests {
         }
 
         fn assert_search_count(&self, query: &str, expected: usize) {
-            let index = IndexHandle::open_or_create(&lifecycle::index_dir(
+            let index = crate::index::tantivy_index::ReadIndex::open(&lifecycle::index_dir(
                 self.cache.path(),
                 self.project.id,
             ))
@@ -1152,6 +1160,16 @@ mod tests {
         assert_eq!(env.generation(), generation);
         env.assert_search_count("betawidget", 1);
         env.assert_search_count("betawidget9", 0);
+    }
+
+    #[test]
+    fn search_assertion_reads_committed_index_without_acquiring_a_writer() {
+        // Keep the fixture's initial writer; do not reopen another writer.
+        let (env, _writer) = Env::with_writer();
+        // This observer must work while the real writer remains alive, using
+        // only committed data and without repair or writer ownership.
+        env.assert_search_count("betawidget", 1);
+        env.assert_search_count("unindexedwidget", 0);
     }
 
     #[test]

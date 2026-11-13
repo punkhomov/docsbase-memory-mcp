@@ -277,3 +277,10 @@ The local Web specification supersedes the earlier 40 MiB executable ceiling.
 Static linking and artifact routing checks remain; executable, embedded bundle
 and compressed distribution sizes are measured without a replacement ceiling.
 The official `cli-full` profile includes `web`; lean Cargo defaults remain lean.
+
+## Delta 2026-11-13 — C12: observer без writer
+
+Env::assert_search_count открывает existing ReadIndex::open. Он читает committed
+Tantivy snapshot, не создаёт writer и не восстанавливает index перед проверкой.
+Детерминированный test удерживает IndexHandle writer при двух hit assertions.
+Production IndexHandle/lifecycle не меняются; transient-lock root cause не заявлен.

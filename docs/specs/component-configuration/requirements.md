@@ -373,3 +373,11 @@ preflight/NOFOLLOW flags одни недостаточны для reparse races.
 - Production startup остаётся legacy, включая zero-cap поведение. Это первый slice
   CF7, не v2 activation, persisted mode adoption, consent/apply или полный consumer
   rollout. CF5/CF7 и #78 остаются открытыми. План: [cf7a-plan.md](cf7a-plan.md).
+
+## Delta 2026-11-13 — CF7b: явный источник vector connections
+
+Владелец передаётся core dense/backfill/coverage и search streaming путям без
+connection-local policy. Strict root mismatch и project override дают Admission;
+failed reload сохраняет опубликованные config/stages/dense. Legacy adapters прежние.
+См. [cf7b-plan.md](cf7b-plan.md). Startup/status/sync composition и persisted adoption
+ещё не включены; migration blockers сохраняются. Новых file keys нет.

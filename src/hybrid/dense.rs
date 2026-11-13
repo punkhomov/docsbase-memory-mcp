@@ -30,7 +30,9 @@ use crate::hybrid::meta::{AnnOutcome, AnnState};
 use crate::hybrid::work::Cancellation;
 use crate::store::Db;
 use crate::store::repo;
-use crate::vector_cache::{CacheLimits, VectorCache};
+#[cfg(test)]
+use crate::vector_cache::VectorCache;
+use crate::vector_cache::{CacheLimits, VectorCacheSource, VectorStore};
 
 #[cfg(test)]
 #[path = "query_flight_tests.rs"]
@@ -551,6 +553,7 @@ pub struct DenseCache {
     active_build_bytes: Arc<AtomicU64>,
     digests: Arc<Mutex<DigestCache>>,
     vector_cache_limits: Arc<Mutex<HashMap<i64, u64>>>,
+    vector_store: Option<VectorStore>,
     outcomes: Arc<Mutex<HashMap<i64, AnnOutcome>>>,
     query_cache: Arc<Mutex<QueryCache>>,
     clock: Arc<AtomicU64>,
@@ -598,6 +601,44 @@ impl DenseCache {
             DenseCacheLimits::from(settings),
             &settings.query_cache_settings(),
         )
+    }
+
+    /// Construct dense/query state bound to an existing vector-store owner.
+    /// The legacy vector budget in `settings` is not used in this mode.
+    ///
+    /// # Errors
+    /// Invalid dense or query policy, before resource construction.
+    pub fn with_vector_store(
+        policy: AnnPolicy,
+        owner: &VectorStore,
+        settings: &DenseSettings,
+    ) -> Result<Self> {
+        let mut cache = Self::with_settings(policy, owner.root(), settings)?;
+        cache.vector_store = Some(owner.clone());
+        Ok(cache)
+    }
+
+    /// Explicit connection policy for jobs, coverage and streaming fallback.
+    #[must_use]
+    pub fn vector_source(&self, project_id: i64) -> VectorCacheSource {
+        self.vector_store.as_ref().map_or_else(
+            || {
+                VectorCacheSource::Legacy(CacheLimits {
+                    max_bytes: self.vector_cache_max_bytes(project_id),
+                    ..CacheLimits::default()
+                })
+            },
+            |owner| VectorCacheSource::Owned(owner.clone()),
+        )
+    }
+
+    fn root_identity(&self, root: &Path) -> Result<PathBuf> {
+        if let Some(owner) = &self.vector_store {
+            VectorCacheSource::Owned(owner.clone()).validate_root(root)?;
+            Ok(owner.root().to_path_buf())
+        } else {
+            Ok(root.to_path_buf())
+        }
     }
 
     /// The immutable policy used by this cache and its worker snapshots.
@@ -701,6 +742,7 @@ impl DenseCache {
             active_build_bytes: Arc::new(AtomicU64::new(0)),
             digests: Arc::new(Mutex::new(HashMap::new())),
             vector_cache_limits: Arc::new(Mutex::new(HashMap::new())),
+            vector_store: None,
             outcomes: Arc::new(Mutex::new(HashMap::new())),
             query_cache: Arc::new(Mutex::new(QueryCache::new(query))),
             clock: Arc::new(AtomicU64::new(0)),
@@ -886,6 +928,7 @@ impl DenseCache {
             active_build_bytes: Arc::new(AtomicU64::new(0)),
             digests: Arc::new(Mutex::new(HashMap::new())),
             vector_cache_limits: Arc::new(Mutex::new(HashMap::new())),
+            vector_store: self.vector_store.clone(),
             outcomes: Arc::new(Mutex::new(HashMap::new())),
             query_cache: Arc::clone(&self.query_cache),
             clock: Arc::new(AtomicU64::new(0)),
@@ -971,6 +1014,8 @@ impl DenseCache {
     /// # Errors
     /// Registry failures (generation, chunk rows) and vector-cache failures.
     pub fn get(&self, db: &Db, project_id: i64, model_id: &str) -> Result<DenseRows> {
+        self.vector_source(project_id)
+            .validate_root(db.cache_root())?;
         let generation = repo::index_generation(db.connection(), project_id)?;
         self.get_with_metadata(
             DenseRequest {
@@ -1014,21 +1059,22 @@ impl DenseCache {
         self.access(request, cancellation, Lookup::Get, load, admit)
     }
 
-    fn bind_root(&self, root: &Path) -> Result<()> {
+    fn bind_root(&self, root: &Path) -> Result<PathBuf> {
+        let root = self.root_identity(root)?;
         let mut bound = self
             .bound_root
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if let Some(bound) = bound.as_ref() {
-            if bound != root {
+            if bound != &root {
                 return Err(Error::Admission {
                     message: "dense cache belongs to a different cache root".to_owned(),
                 });
             }
         } else {
-            *bound = Some(root.to_path_buf());
+            *bound = Some(root.clone());
         }
-        Ok(())
+        Ok(root)
     }
 
     fn cached_rows(&self, request: DenseRequest<'_>, lookup: Lookup) -> Option<DenseRows> {
@@ -1057,7 +1103,7 @@ impl DenseCache {
         admit: impl Fn() -> Result<Guard>,
     ) -> Result<DenseRows> {
         cancellation.check()?;
-        self.bind_root(request.cache_root)?;
+        let root = self.bind_root(request.cache_root)?;
         {
             let _revision = admit()?;
             if let Some(rows) = self.cached_rows(request, lookup) {
@@ -1066,7 +1112,7 @@ impl DenseCache {
             }
         }
         let key = ColdKey {
-            root: request.cache_root.to_path_buf(),
+            root: root.clone(),
             project_id: request.project_id,
             generation: request.generation,
             model_id: request.model_id.to_owned(),
@@ -1081,7 +1127,7 @@ impl DenseCache {
                 interest.check()?;
                 let metadata = load()?;
                 interest.check()?;
-                if metadata.cache_root() != request.cache_root
+                if self.root_identity(metadata.cache_root())? != root
                     || metadata.project_id() != request.project_id
                     || metadata.generation() != request.generation
                 {
@@ -1206,14 +1252,9 @@ impl DenseCache {
         chunks: Vec<(u64, String)>,
         digest: String,
     ) -> Result<DenseInput> {
-        let vector_cache_max_bytes = self.vector_cache_max_bytes(request.project_id);
-        let mut cache = VectorCache::open_with_limits(
-            request.cache_root,
-            CacheLimits {
-                max_bytes: vector_cache_max_bytes,
-                ..CacheLimits::default()
-            },
-        )?;
+        let mut cache = self
+            .vector_source(request.project_id)
+            .connect(request.cache_root)?;
         let mut rows = Vec::with_capacity(chunks.len());
         let mut full_coverage = true;
         for (chunk_id, hash) in &chunks {
@@ -1490,6 +1531,8 @@ impl DenseCache {
     /// # Errors
     /// Registry or vector-cache failures on the way to a build.
     pub fn warm(&self, db: &Db, project_id: i64, model_id: &str) -> Result<()> {
+        self.vector_source(project_id)
+            .validate_root(db.cache_root())?;
         let generation = repo::index_generation(db.connection(), project_id)?;
         self.warm_with_metadata(
             DenseRequest {
@@ -1541,12 +1584,21 @@ impl DenseCache {
             .unwrap_or(self.limits.vector_cache_max_bytes)
     }
 
-    /// Applies a project-level vector-cache budget (daemon config reload).
-    pub fn set_vector_cache_max_bytes(&self, project_id: i64, max_bytes: u64) {
+    /// Apply a legacy project-level vector-cache budget before config publication.
+    ///
+    /// # Errors
+    /// Admission in owner-backed mode: project overrides cannot change shared policy.
+    pub fn set_vector_cache_max_bytes(&self, project_id: i64, max_bytes: u64) -> Result<()> {
+        if self.vector_store.is_some() {
+            return Err(Error::Admission {
+                message: "project vector budget cannot override the shared vector store".into(),
+            });
+        }
         self.vector_cache_limits
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(project_id, max_bytes);
+        Ok(())
     }
 
     /// Invalidates a project: drops the cached entry/digest and the on-disk
@@ -1740,6 +1792,7 @@ impl DenseCache {
             active_build_bytes: Arc::clone(&self.active_build_bytes),
             digests: Arc::clone(&self.digests),
             vector_cache_limits: Arc::clone(&self.vector_cache_limits),
+            vector_store: self.vector_store.clone(),
             outcomes: Arc::clone(&self.outcomes),
             query_cache: Arc::clone(&self.query_cache),
             clock: Arc::clone(&self.clock),
@@ -1871,14 +1924,7 @@ fn build_in_background(
         // The dump is READY: release the backfill lease. On failure the pins
         // stay until their TTL so the retry still sees full coverage. Do this
         // without holding the entries lock (the vector DB may be busy).
-        let max_bytes = cache.vector_cache_max_bytes(project_id);
-        if let Ok(mut vectors) = VectorCache::open_with_limits(
-            &vector_root,
-            CacheLimits {
-                max_bytes,
-                ..CacheLimits::default()
-            },
-        ) {
+        if let Ok(mut vectors) = cache.vector_source(project_id).connect(&vector_root) {
             let hashes: Vec<String> = unpin_hashes.iter().map(|(_, hash)| hash.clone()).collect();
             if let Err(err) = vectors.unpin(project_id, &key.model_id, &hashes) {
                 eprintln!("warning: cannot release ann vector lease: {err}");
@@ -1925,7 +1971,7 @@ fn build_in_background(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vector_cache::Embedder;
+    use crate::vector_cache::{Embedder, VectorCache};
 
     fn dense_input(rows: Vec<(u64, Arc<[f32]>)>, dim: usize) -> DenseInput {
         let chunks = rows.iter().map(|(id, _)| (*id, format!("h{id}"))).collect();
@@ -2009,6 +2055,99 @@ mod tests {
 
     fn small_input() -> DenseInput {
         dense_input(wide_rows(4, 128), 128)
+    }
+
+    #[test]
+    fn worker_snapshot_retains_owner_and_unpins_only_its_own_leases() {
+        use crate::hybrid::dense_metadata::MetadataFixture;
+        use crate::vector_cache::settings::VectorStoreSettings;
+
+        let fixture = MetadataFixture::new();
+        let owner =
+            VectorStore::acquire(fixture.cache.path(), &VectorStoreSettings::owner_defaults())
+                .unwrap();
+        let hashes: Vec<_> = fixture
+            .original_hashes()
+            .into_iter()
+            .map(|(_, hash)| hash)
+            .collect();
+        let model = "test/worker@d3@l2";
+        {
+            let mut vectors = owner.connect().unwrap();
+            for hash in &hashes {
+                vectors.put(model, hash, &[1.0, 0.0, 0.0]).unwrap();
+            }
+            vectors
+                .pin(fixture.project, model, &hashes, Duration::from_secs(600))
+                .unwrap();
+            vectors
+                .pin(
+                    fixture.project + 1,
+                    model,
+                    &hashes[..1],
+                    Duration::from_secs(600),
+                )
+                .unwrap();
+            vectors
+                .pin(
+                    fixture.project,
+                    "other",
+                    &hashes[..1],
+                    Duration::from_secs(600),
+                )
+                .unwrap();
+        }
+        let settings = DenseSettings {
+            min_vectors: 1,
+            ..crate::hybrid::dense_settings::standalone()
+                .unwrap()
+                .settings()
+                .clone()
+        };
+        let mut cache =
+            DenseCache::with_vector_store(AnnPolicy::BuildOrLoad, &owner, &settings).unwrap();
+        cache.test_build_gate = Some(TestBuildGate::new());
+        let mut paused = PausedBuilds { cache };
+        assert!(matches!(
+            paused
+                .cache
+                .get(&fixture.writer, fixture.project, model)
+                .unwrap(),
+            DenseRows::Building(_)
+        ));
+        // Leave the worker snapshot as the only owner. Independent caches and
+        // connections have all dropped; no global registry can retain it.
+        paused.cache.vector_store = None;
+        drop(owner);
+        assert!(matches!(
+            VectorCache::open(fixture.cache.path()),
+            Err(Error::Admission { .. })
+        ));
+        paused.finish();
+        assert!(matches!(
+            paused
+                .cache
+                .lock_entries()
+                .get(&fixture.project)
+                .unwrap()
+                .state,
+            DenseRows::Ann(_)
+        ));
+        // Reopening also proves the worker released the final native owner.
+        let _vectors = VectorCache::open(fixture.cache.path()).unwrap();
+        let connection =
+            rusqlite::Connection::open(fixture.cache.path().join("vectors.db")).unwrap();
+        let leases = |model: &str| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM vector_cache_leases WHERE model_id = ?1",
+                    [model],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(leases(model), 1, "only the other project remains");
+        assert_eq!(leases("other"), 1, "other model remains");
     }
 
     #[test]

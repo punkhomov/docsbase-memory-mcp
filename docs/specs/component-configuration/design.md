@@ -674,3 +674,15 @@ external cache/lock replacement не участвуют. Пока guard жив, 
 должны интегрировать owner во все daemon/dense/jobs/coverage/streaming consumers,
 quiescence, recovery и migration consent до включения v2. Первый slice не снимает
 strict_store_adoption_unavailable/executor_unavailable из migration plan.
+
+## Delta 2026-11-13 — CF7b: source и consumer lifetime
+
+VectorCacheSource хранит Legacy(CacheLimits) либо Owned(VectorStore). Owned root
+проверяется canonicalize без создания другого каталога. Dense immutable owner
+клонируется в worker snapshots и sharing_query_cache; strict cold keys/metadata
+сравниваются canonical, legacy raw identity прежняя. Source-taking jobs не читают
+config и используют те же embedding/pin/coverage core operations, что adapters.
+Search full/scoped/streaming paths используют source и проверяют root до provider.
+Project-budget setter становится fallible: Owned отказывает до runtime publication.
+Library signature experimental; stable CLI/MCP/file/IPC не меняются. Startup factory,
+sync/status composition и persisted adoption следуют отдельно по CF5/CF7.

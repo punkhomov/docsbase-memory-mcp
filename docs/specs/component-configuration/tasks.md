@@ -448,3 +448,10 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   настоящие SQLite/OS/subprocess regressions. План: [cf7a-plan.md](cf7a-plan.md).
   Полный CF7 не завершён: production consumer rollout, persisted adoption,
   consent/apply/quiescence и live resource changes выполняются отдельно.
+
+## Delta 2026-11-13 — CF7b: consumers до startup adoption
+
+- [x] **CF7b:** explicit VectorCacheSource, owner-backed DenseCache и реальные
+  backfill/coverage/search consumers, strict project-budget refusal до publication.
+  План [cf7b-plan.md](cf7b-plan.md). Без strict startup/file-v2/apply activation;
+  production sync/status composition остаётся следующим этапом CF5/CF7.
