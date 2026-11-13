@@ -279,3 +279,9 @@ C12 combined whole-branch final review: converged, Spec PASS / Quality APPROVED,
 без замечаний/minors. Final with_writer fixture: full490unit+10consumer GREEN;
 lean11watch GREEN; release watcher regression GREEN; refreshed full/lean all-target
 Clippy/fmt/diff GREEN. Required native final-head checks/inventory pending.
+
+C12 delivery/SC-15: PR142 squash bbf650d, native run43427786037 attempt1 —
+все4required checks GREEN; Linux1373+2static, macOS1369, Windows1355 passed,
+0fail/18прежних ignores/OS. Audit относительно PR140 сохранил весь inventory и
+выполнение всех14добавленных CF7b/C12 tests. Reviewed/tested/squash tree совпали.
+Task C12: complete; #144closed. Исходный transient lock holder по-прежнему unknown.

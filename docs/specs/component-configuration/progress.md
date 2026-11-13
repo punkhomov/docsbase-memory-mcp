@@ -623,3 +623,42 @@ Clippy/fmt/diff GREEN. Полный1372pass относится к тому же 
 C12; после него менялись только test observer/probes и docs. Все14новых tests
 должны выполниться в новом native run; первый run не засчитываем как final green.
 Task CF7b implementation/review complete, native delivery остаётся pending.
+
+## 2026-11-13 — CF7c1: embedding context в index jobs
+
+Task CF7c1: implementation in progress. Предварительная база — reviewed6d6e3bc
+CF7b/C12, чей native delivery продолжается отдельно. Перед PR новый task будет
+перенесён на актуальный origin/main. IndexEmbedding заимствует immutable source и
+explicit optional embedder; новые prepared full/incremental adapters сохраняют
+общий core и прежние configured compatibility APIs.
+TDD API RED — отсутствующие symbols;6real integration cases GREEN. Causal accidental
+legacy-open RED даёт Admission mode conflict; late stale gate RED меняет persisted
+metadata до отказа. Возвращены настоящие sources. Unit gate контролирует incremental
+и recreated full recovery; rejected state/provider/markers неизменны. Provider probe
+открывает BEGIN IMMEDIATE в registry и vectors.db во время actual callback.
+Production daemon/watcher/sync composition и persisted migration не заявлены; #78 открыт.
+
+CF7c1 implementation/local verification: complete. Полный cli-full1380passed/
+0failed/18прежних ignores,85top-level summaries (2nested filtered subprocess
+summaries исключены). После full run добавлен только1root-ordering regression:
+causal removed-admission RED с unusable foreign registry, затем7consumer full/lean
+GREEN. Итого8новых tests:7integration+1unit. Lean50focused tests (gate+49integration,
+включая final extra case); final full/lean all-target Clippy/fmt/diff GREEN.
+New full/incremental callbacks не меняют legacy provider timing; core R2/W103
+semantics сохранены. Fresh task/final reviews и native delivery pending.
+
+CF7b/C12 delivery: PR142 squash bbf650dad6923c2536fcd617cd887973e948c93e.
+Required docs/Linux/macOS/Windows GREEN в run43427786037 attempt1. Скачанный
+native inventory относительно PR140 сохраняет каждого parent test,18ignores/OS;
+все14new tests executed. Linux1373+2static, macOS1369, Windows1355pass/0fail.
+Reviewed6d6e3bc/tested mergea4bd885/actual squash tree совпали:
+515907dde54c0412c457b58b7228629c50f59d63. #144 закрыт, #78 открыт.
+CF7c1 перенесён на этот main без изменения code tree. Его final7integration
+release GREEN; task review идёт, final/native delivery остаются pending.
+
+Fresh CF7c1 task review: Spec PASS / Quality APPROVED, findings/minors none.
+Final whole-branch review и native delivery остаются gates.
+
+Task CF7c1: complete (implementation/local verification/fresh task review).
+Independent final source review и required native inventory остаются delivery gates;
+полное завершение CF7/#78 не заявляется. No deferred minors.

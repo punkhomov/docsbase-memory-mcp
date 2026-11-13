@@ -381,3 +381,17 @@ connection-local policy. Strict root mismatch и project override дают Admis
 failed reload сохраняет опубликованные config/stages/dense. Legacy adapters прежние.
 См. [cf7b-plan.md](cf7b-plan.md). Startup/status/sync composition и persisted adoption
 ещё не включены; migration blockers сохраняются. Новых file keys нет.
+
+## Delta 2026-11-13 — CF7c1: embedding context в index jobs
+
+Full/incremental prepared-context APIs получают явные source и optional embedder
+от composition root. Config supplies indexing limits; hybrid config повторно не
+разрешается. Явный None означает lexical-only. Root admission предшествует SQL/
+markers/index writes даже при пустом payload/None. Ошибка не включает legacy
+fallback. Один core сохраняет hash-skip, marker-before-embedding, Tantivy-before-
+SQLite commits, generation publication и gated full recovery. Stale attempt
+отказывается до marker/provider work. Provider работает вне обеих SQL transactions.
+Legacy APIs сохраняют lazy configured resolution и прежние ошибки. Embedded owner
+path завершён этим slice; daemon/sync/watcher composition — следующий CF7c2.
+Новых keys/strict startup/persisted adoption/apply нет, migration blockers прежние.
+План: [cf7c1-plan.md](cf7c1-plan.md); общий FR-16/SC-3 принят только в этой границе.

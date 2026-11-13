@@ -13,6 +13,33 @@ use crate::index::walk;
 use crate::store::Db;
 use crate::store::models::{ChunkKind as StoredChunkKind, Project};
 use crate::store::repo::{self, DocState, NewChunk, NewDoc};
+use crate::vector_cache::{Embedder, VectorCacheSource};
+
+/// Embedding decision prepared by the composition root for one index job.
+///
+/// The caller supplies the embedder matching its config snapshot; `None`
+/// explicitly selects lexical-only indexing. These jobs use `Config` for
+/// indexing limits and never resolve another provider from it. The borrowed
+/// source retains its owner's lifetime for the complete synchronous job.
+pub struct IndexEmbedding<'a> {
+    source: &'a VectorCacheSource,
+    embedder: Option<&'a dyn Embedder>,
+}
+
+impl<'a> IndexEmbedding<'a> {
+    /// Bind an already selected provider and connection owner, without I/O.
+    #[must_use]
+    pub fn new(source: &'a VectorCacheSource, embedder: Option<&'a dyn Embedder>) -> Self {
+        Self { source, embedder }
+    }
+
+    fn embed(&self, root: &Path, texts: &[String]) -> Result<u64> {
+        self.source.validate_root(root)?;
+        self.embedder.map_or(Ok(0), |embedder| {
+            crate::hybrid::jobs::embed_texts_from(root, embedder, texts, self.source)
+        })
+    }
+}
 
 /// Longest section body kept in one chunk when no paragraph boundary splits
 /// it, in Unicode characters (not bytes; FR-5). Initial calibration ≈300–500
@@ -90,15 +117,52 @@ pub fn run_full(
     project: &Project,
     config: &Config,
 ) -> Result<JobStats> {
-    run_full_checked(db, index, project, config, || Ok(()))
+    run_full_using(
+        db,
+        index,
+        project,
+        config,
+        || Ok(()),
+        |root, texts| {
+            crate::hybrid::jobs::embed_texts(root, &config.hybrid_cfg, &config.providers, texts)
+        },
+    )
 }
 
-fn run_full_checked(
+/// Full index through an explicit embedding decision and vector owner.
+///
+/// Config supplies indexing limits; its hybrid stage is not resolved here.
+/// Root admission precedes registry reads, markers and index writes, even
+/// when the supplied decision is lexical-only.
+///
+/// # Errors
+/// Admission for another owner root, plus the failures of [`run_full`] and
+/// the supplied embedder. Failed embedding leaves retry markers intact.
+pub fn run_full_with_embedding(
+    db: &mut Db,
+    index: &mut IndexHandle,
+    project: &Project,
+    config: &Config,
+    embedding: &IndexEmbedding<'_>,
+) -> Result<JobStats> {
+    embedding.source.validate_root(db.cache_root())?;
+    run_full_using(
+        db,
+        index,
+        project,
+        config,
+        || Ok(()),
+        |root, texts| embedding.embed(root, texts),
+    )
+}
+
+fn run_full_using(
     db: &mut Db,
     index: &mut IndexHandle,
     project: &Project,
     config: &Config,
     before_apply: impl FnOnce() -> Result<()>,
+    embed: impl FnOnce(&Path, &[String]) -> Result<u64>,
 ) -> Result<JobStats> {
     // A recreated index needs every document re-added (T27). Delay the SQL
     // wipe until the prepared payload has passed the caller's config check.
@@ -196,7 +260,7 @@ fn run_full_checked(
         );
     }
     finish_plan(
-        db, index, project.id, &mut plan, &removed, &mut stats, config,
+        db, index, project.id, &mut plan, &removed, &mut stats, embed,
     )?;
     if index.was_recreated() {
         index.mark_rebuilt()?;
@@ -249,10 +313,78 @@ pub(crate) fn run_incremental_checked(
     config: &Config,
     before_apply: impl FnOnce() -> Result<()>,
 ) -> Result<JobStats> {
+    run_incremental_using(
+        db,
+        index,
+        project,
+        changed,
+        config,
+        before_apply,
+        |root, texts| {
+            crate::hybrid::jobs::embed_texts(root, &config.hybrid_cfg, &config.providers, texts)
+        },
+    )
+}
+
+/// Incremental index through the same explicit embedding decision as full jobs.
+/// A recreated index falls back to a full rebuild with this decision.
+///
+/// # Errors
+/// Same admission/provider/index failures as [`run_full_with_embedding`].
+pub fn run_incremental_with_embedding(
+    db: &mut Db,
+    index: &mut IndexHandle,
+    project: &Project,
+    changed: &[PathBuf],
+    config: &Config,
+    embedding: &IndexEmbedding<'_>,
+) -> Result<JobStats> {
+    run_incremental_checked_with_embedding(
+        db,
+        index,
+        project,
+        changed,
+        config,
+        embedding,
+        || Ok(()),
+    )
+}
+
+/// Admit the prepared payload before markers or embedding, including full recovery.
+pub(crate) fn run_incremental_checked_with_embedding(
+    db: &mut Db,
+    index: &mut IndexHandle,
+    project: &Project,
+    changed: &[PathBuf],
+    config: &Config,
+    embedding: &IndexEmbedding<'_>,
+    before_apply: impl FnOnce() -> Result<()>,
+) -> Result<JobStats> {
+    embedding.source.validate_root(db.cache_root())?;
+    run_incremental_using(
+        db,
+        index,
+        project,
+        changed,
+        config,
+        before_apply,
+        |root, texts| embedding.embed(root, texts),
+    )
+}
+
+fn run_incremental_using(
+    db: &mut Db,
+    index: &mut IndexHandle,
+    project: &Project,
+    changed: &[PathBuf],
+    config: &Config,
+    before_apply: impl FnOnce() -> Result<()>,
+    embed: impl FnOnce(&Path, &[String]) -> Result<u64>,
+) -> Result<JobStats> {
     if index.was_recreated() {
         // Incremental batches cannot repopulate a freshly recreated index;
         // rebuild everything under the same writer lease instead (T27).
-        return run_full_checked(db, index, project, config, before_apply);
+        return run_full_using(db, index, project, config, before_apply, embed);
     }
     let existing = repo::doc_states(db.connection(), project.id)?;
     let by_path: HashMap<&str, &DocState> = existing
@@ -360,7 +492,7 @@ pub(crate) fn run_incremental_checked(
 
     before_apply()?;
     finish_plan(
-        db, index, project.id, &mut plan, &removed, &mut stats, config,
+        db, index, project.id, &mut plan, &removed, &mut stats, embed,
     )?;
     Ok(stats)
 }
@@ -373,7 +505,7 @@ fn finish_plan(
     plan: &mut [Pending],
     removed: &[&DocState],
     stats: &mut JobStats,
-    config: &Config,
+    embed: impl FnOnce(&Path, &[String]) -> Result<u64>,
 ) -> Result<()> {
     mark_pending(db, project_id, plan, removed)?;
 
@@ -404,12 +536,7 @@ fn finish_plan(
         .iter()
         .flat_map(|pending| pending.chunks.iter().map(|chunk| chunk.text.clone()))
         .collect();
-    crate::hybrid::jobs::embed_texts(
-        db.cache_root(),
-        &config.hybrid_cfg,
-        &config.providers,
-        &texts,
-    )?;
+    embed(db.cache_root(), &texts)?;
     // Tantivy first, then a short SQLite write transaction (R2): the marker
     // rows make a crash in between reprocess on the next run.
     index.commit()?;
@@ -633,6 +760,111 @@ mod tests {
     use super::*;
     use crate::store::{DB_FILE, Db};
     use rusqlite::Connection;
+
+    #[test]
+    fn prepared_embedding_gate_precedes_markers_in_incremental_and_full_recovery() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counting(AtomicUsize);
+        impl Embedder for Counting {
+            fn model_id(&self) -> &'static str {
+                "index-gate@d2@l2"
+            }
+            fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+            }
+        }
+
+        for recovery in [false, true] {
+            let cache = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("a.md");
+            std::fs::write(&path, "alphawidget").unwrap();
+            std::fs::write(root.path().join("b.md"), "betawidget").unwrap();
+            let mut db = Db::open(cache.path()).unwrap();
+            let project = crate::daemon::registry::ensure_project(&mut db, root.path()).unwrap();
+            let dir = crate::daemon::lifecycle::index_dir(cache.path(), project.id);
+            let mut index = IndexHandle::open_or_create(&dir).unwrap();
+            let config = Config::default();
+            run_full(&mut db, &mut index, &project, &config).unwrap();
+            let original: Vec<_> = repo::doc_states(db.connection(), project.id)
+                .unwrap()
+                .into_iter()
+                .map(|state| (state.id, state.content_hash))
+                .collect();
+            if recovery {
+                drop(index);
+                std::fs::write(
+                    dir.join(crate::index::tantivy_index::TOKENIZER_VERSION_FILE),
+                    b"1\n",
+                )
+                .unwrap();
+                index = IndexHandle::open_or_create(&dir).unwrap();
+                assert!(index.was_recreated());
+            }
+            std::fs::write(&path, "gammawidget").unwrap();
+            let settings = crate::vector_cache::settings::standalone().unwrap();
+            let source = VectorCacheSource::Owned(
+                crate::vector_cache::VectorStore::acquire(cache.path(), settings.settings())
+                    .unwrap(),
+            );
+            let provider = Counting(AtomicUsize::new(0));
+            let embedding = IndexEmbedding::new(&source, Some(&provider));
+            let error = run_incremental_checked_with_embedding(
+                &mut db,
+                &mut index,
+                &project,
+                std::slice::from_ref(&path),
+                &config,
+                &embedding,
+                || Err(Error::internal("stale prepared config")),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("stale prepared config"));
+            let after: Vec<_> = repo::doc_states(db.connection(), project.id)
+                .unwrap()
+                .into_iter()
+                .map(|state| (state.id, state.content_hash))
+                .collect();
+            assert_eq!(after, original, "gate before invalidation/deletion");
+            assert_eq!(
+                repo::index_generation(db.connection(), project.id).unwrap(),
+                1
+            );
+            assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                source
+                    .connect(cache.path())
+                    .unwrap()
+                    .count_present(
+                        provider.model_id(),
+                        &[crate::vector_cache::chunk_hash("gammawidget")]
+                    )
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                dir.join(crate::index::tantivy_index::REBUILD_MARKER)
+                    .exists(),
+                recovery
+            );
+            let stats = run_incremental_checked_with_embedding(
+                &mut db,
+                &mut index,
+                &project,
+                &[path],
+                &config,
+                &embedding,
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(stats.docs, if recovery { 2 } else { 1 });
+            assert_eq!(index.search("gammawidget", 10).unwrap().len(), 1);
+            assert_eq!(index.search("alphawidget", 10).unwrap().len(), 0);
+            assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+        }
+    }
 
     /// Deferred read-then-write upgrades fail with `SQLITE_BUSY_SNAPSHOT`
     /// (extended 517; the busy handler does not cover them) once another
