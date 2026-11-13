@@ -99,6 +99,23 @@ pub(crate) fn run_with_settings_and_mode(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     mode: QueryMode,
 ) -> anyhow::Result<()> {
+    run_with_policies(
+        query,
+        options,
+        settings,
+        mode,
+        &crate::hybrid::dense_settings::standalone_query_cache()?,
+    )
+}
+
+pub(crate) fn run_with_policies(
+    query: &str,
+    options: &Options,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    mode: QueryMode,
+    query_settings: &crate::hybrid::dense_settings::QueryCacheSettings,
+) -> anyhow::Result<()> {
+    query_settings.validate()?;
     let started = std::time::Instant::now();
     let global = Config::global()?;
     let operation = SearchOperation::new(&global.search, started, Cancellation::new())?;
@@ -130,15 +147,7 @@ pub(crate) fn run_with_settings_and_mode(
     // Direct mode loads a persisted ANN index if one exists and never builds
     // one (FR-8, FR-5): a one-shot process must not pay for HNSW build
     // latency.
-    let limits = crate::hybrid::dense::DenseCacheLimits {
-        vector_cache_max_bytes: config.hybrid_cfg.cache.max_bytes,
-        ..crate::hybrid::dense::DenseCacheLimits::default()
-    };
-    let dense = crate::hybrid::dense::DenseCache::with_policy_limits(
-        crate::hybrid::dense::AnnPolicy::LoadOnly,
-        &cache,
-        limits,
-    );
+    let dense = direct_dense_cache(&cache, config.hybrid_cfg.cache.max_bytes, query_settings)?;
     let budget = crate::search::budget::PayloadBudget::new(config.search.clone())?;
     let value = tools::search_docs_in(
         &tools::SearchContext {
@@ -191,6 +200,23 @@ fn block_on_io<T>(work: impl Future<Output = Result<T>>) -> Result<T> {
             message: "synchronous CLI search cannot run inside a current-thread Tokio runtime; use AsyncClient".to_owned(),
         }),
     }
+}
+
+fn direct_dense_cache(
+    cache: &Path,
+    vector_cache_max_bytes: u64,
+    query_settings: &crate::hybrid::dense_settings::QueryCacheSettings,
+) -> Result<crate::hybrid::dense::DenseCache> {
+    let limits = crate::hybrid::dense::DenseCacheLimits {
+        vector_cache_max_bytes,
+        ..crate::hybrid::dense::DenseCacheLimits::default()
+    };
+    crate::hybrid::dense::DenseCache::with_policy_limits_and_query_settings(
+        crate::hybrid::dense::AnnPolicy::LoadOnly,
+        cache,
+        limits,
+        query_settings,
+    )
 }
 
 #[cfg(test)]

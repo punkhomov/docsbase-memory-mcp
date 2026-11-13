@@ -595,3 +595,14 @@ source revision. All source inputs, registry and selected roots enter envelope
 identity. Raw source edits are discarded after safe projection; no public raw
 export/apply API. Future execution must revalidate complete inputs and serialize
 publication; this read-only survey cannot authorize later writes.
+
+## Delta 2026-11-13 — CF6a query-cache policy
+
+Use the existing DenseSpec catalog and project QueryCacheSettings into the shared
+QueryCache resource. Its immutable limits travel with entries, eviction order and
+query singleflight across sharing_query_cache. CLI → direct search / lifecycle →
+Shared passes explicit complete policy; checked constructors validate before
+resource creation. Legacy signatures resolve owner defaults at compatibility
+boundaries. No duplicate SettingsSpec or default source is introduced.
+See [cf6a-plan.md](cf6a-plan.md). Vector payload bytes remain the cache accounting
+unit, without claiming coverage of external Arc holders or allocator/key overhead.

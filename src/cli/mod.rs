@@ -196,6 +196,7 @@ pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let db_settings = crate::store::settings::standalone()?;
     let pool_settings = crate::store::settings::standalone_read_pool()?;
+    let query_settings = crate::hybrid::dense_settings::standalone_query_cache()?;
     match cli.command {
         #[cfg(feature = "web")]
         Command::Web { open, port } => crate::web::run(port, open),
@@ -210,7 +211,7 @@ pub fn run() -> anyhow::Result<()> {
             n_per_doc,
             path_prefix,
             tags,
-        } => search::run_with_settings_and_mode(
+        } => search::run_with_policies(
             &query,
             &search::Options {
                 limit,
@@ -223,6 +224,7 @@ pub fn run() -> anyhow::Result<()> {
             },
             &db_settings,
             query_mode,
+            &query_settings,
         ),
         Command::List => status::list_with_settings(&db_settings),
         Command::Sync { path } => sync(path.as_deref(), &db_settings),
@@ -231,9 +233,13 @@ pub fn run() -> anyhow::Result<()> {
             command: Some(command),
         } => config::run(&command, &db_settings),
         Command::Status => status::status_with_settings(&db_settings),
-        Command::Serve { detached, grace_ms } => {
-            serve(detached, grace_ms, &db_settings, &pool_settings)
-        }
+        Command::Serve { detached, grace_ms } => serve(
+            detached,
+            grace_ms,
+            &db_settings,
+            &pool_settings,
+            &query_settings,
+        ),
         Command::Mcp => crate::mcp::frontend::run_blocking(),
         Command::Daemon { command } => match command {
             DaemonCommand::Stop => daemon_stop(),
@@ -279,13 +285,15 @@ fn serve(
     grace_ms: u64,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
+    query_settings: &crate::hybrid::dense_settings::QueryCacheSettings,
 ) -> anyhow::Result<()> {
     let cache = paths::cache_dir()?;
-    crate::daemon::lifecycle::run_daemon_with_policies(
+    crate::daemon::lifecycle::run_daemon_with_resource_policies(
         &cache,
         std::time::Duration::from_millis(grace_ms),
         settings,
         pool_settings,
+        query_settings,
     )?;
     Ok(())
 }

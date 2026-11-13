@@ -23,6 +23,7 @@ use crate::hybrid::ann::{self, ANN_MIN_VECTORS, AnnIndex};
 use crate::hybrid::ann_store;
 use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore};
 use crate::hybrid::dense_metadata::DenseMetadata;
+use crate::hybrid::dense_settings::QueryCacheSettings;
 use crate::hybrid::flight::{Flights, WorkResult};
 use crate::hybrid::meta::{AnnOutcome, AnnState};
 use crate::hybrid::work::Cancellation;
@@ -47,10 +48,10 @@ mod admission_tests;
 pub const DENSE_CACHE_MAX_VECTORS: usize = 1_000_000;
 
 /// Longest-lived query-vector cache entries (`search-cost` FR-2).
-pub const QUERY_CACHE_MAX_ENTRIES: usize = 256;
+pub const QUERY_CACHE_MAX_ENTRIES: usize = super::dense_settings::DEFAULT_QUERY_CACHE_MAX_ENTRIES;
 
 /// Byte budget for cached query vectors (`search-cost` FR-2).
-pub const QUERY_CACHE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+pub const QUERY_CACHE_MAX_BYTES: u64 = super::dense_settings::DEFAULT_QUERY_CACHE_MAX_BYTES;
 
 /// Backoff after a failed background ANN build before retrying.
 const BUILD_BACKOFF: Duration = Duration::from_secs(30);
@@ -443,14 +444,28 @@ struct DenseInput {
 /// `(model_id, blake3(query))` — the cache key.
 type QueryKey = (String, String);
 
-#[derive(Default)]
 struct QueryCache {
+    settings: QueryCacheSettings,
     entries: HashMap<QueryKey, (std::sync::Arc<[f32]>, u64)>,
     order: std::collections::VecDeque<QueryKey>,
     bytes: u64,
     hits: u64,
     misses: u64,
     flights: Arc<Flights<QueryKey, Arc<[f32]>>>,
+}
+
+impl QueryCache {
+    fn new(settings: QueryCacheSettings) -> Self {
+        Self {
+            settings,
+            entries: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            bytes: 0,
+            hits: 0,
+            misses: 0,
+            flights: Arc::new(Flights::default()),
+        }
+    }
 }
 
 /// Explicit identity for lazy dense initialization. The loader must supply a
@@ -570,11 +585,49 @@ impl DenseCache {
         Self::with_policy_and_limits(policy, store, limits, Some(cache_root))
     }
 
+    /// Construct using explicit dense limits and shared query-cache policy.
+    ///
+    /// # Errors
+    /// Zero query capacities are rejected before constructing cache resources.
+    pub fn with_policy_limits_and_query_settings(
+        policy: AnnPolicy,
+        cache_root: &Path,
+        limits: DenseCacheLimits,
+        query: &QueryCacheSettings,
+    ) -> Result<Self> {
+        query.validate()?;
+        let store =
+            (policy != AnnPolicy::Disabled).then(|| AnnStore::new(cache_root.to_path_buf()));
+        Ok(Self::with_explicit_query_settings(
+            policy,
+            store,
+            limits,
+            Some(cache_root),
+            *query,
+        ))
+    }
+
     fn with_policy_and_limits(
         policy: AnnPolicy,
         store: Option<AnnStore>,
         limits: DenseCacheLimits,
         root: Option<&Path>,
+    ) -> Self {
+        Self::with_explicit_query_settings(
+            policy,
+            store,
+            limits,
+            root,
+            QueryCacheSettings::owner_defaults(),
+        )
+    }
+
+    fn with_explicit_query_settings(
+        policy: AnnPolicy,
+        store: Option<AnnStore>,
+        limits: DenseCacheLimits,
+        root: Option<&Path>,
+        query: QueryCacheSettings,
     ) -> Self {
         Self {
             limits,
@@ -587,7 +640,7 @@ impl DenseCache {
             digests: Arc::new(Mutex::new(HashMap::new())),
             vector_cache_limits: Arc::new(Mutex::new(HashMap::new())),
             outcomes: Arc::new(Mutex::new(HashMap::new())),
-            query_cache: Arc::new(Mutex::new(QueryCache::default())),
+            query_cache: Arc::new(Mutex::new(QueryCache::new(query))),
             clock: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             test_build_gate: None,
@@ -723,16 +776,19 @@ impl DenseCache {
         bytes: u64,
         make: impl FnOnce() -> Arc<[f32]>,
     ) -> Option<Arc<[f32]>> {
-        if bytes == 0 || bytes > QUERY_CACHE_MAX_BYTES {
+        if bytes == 0 {
             return None;
         }
         let mut cache = self.lock_query_cache();
+        if bytes > cache.settings.max_bytes {
+            return None;
+        }
         if let Some((vector, _)) = cache.entries.get(&key) {
             return Some(Arc::clone(vector));
         }
         let arc = make();
-        while (!cache.entries.is_empty() && cache.entries.len() >= QUERY_CACHE_MAX_ENTRIES)
-            || cache.bytes.saturating_add(bytes) > QUERY_CACHE_MAX_BYTES
+        while (!cache.entries.is_empty() && cache.entries.len() >= cache.settings.max_entries)
+            || cache.bytes.saturating_add(bytes) > cache.settings.max_bytes
         {
             let Some(oldest) = cache.order.pop_front() else {
                 break;

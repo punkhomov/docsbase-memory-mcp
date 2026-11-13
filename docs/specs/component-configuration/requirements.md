@@ -313,3 +313,11 @@ preflight/NOFOLLOW flags одни недостаточны для reparse races.
 - Observe missing and existing-empty sources distinctly. Bind context, registry and every surveyed source (including unchanged inputs) into the plan identity. Recheck registry after source reads; no atomic multi-file snapshot or future freshness is promised.
 - Explicit owner limits bound project count, path metadata, source bytes and serialized output. Source reads reject nonregular/final symlink paths and never create files, locks, DB sidecars or directories. No provider/runtime construction.
 - Default JSON exposes safe source revision/version/budget changes, not original/proposed TOML or arbitrary values/comments. Invalid-source diagnostics omit source text. Explicit budget choice is not apply consent; strict-store and executor blockers remain.
+
+## Delta 2026-11-13 — CF6a query-cache consumer adoption
+
+- Rust/toolchain verification uses exact stable 1.100.0 per constitution Delta 2026-11-13.
+- DenseSpec remains the owner of query-cache entry/byte defaults and typed overrides. Query-cache construction consumes a complete projected policy; zero limits fail admission.
+- The policy and state share one resource across cache clones/sharing_query_cache. Actual eviction/bypass uses the supplied limits. Default behavior remains 256 entries/4MiB.
+- Daemon and direct CLI receive policy resolved at their controlling boundary. Invalid policy is rejected before filesystem/admission resources. Compatibility signatures remain adapters.
+- This construction-only adoption may precede CF5. Public TOML activation, live shrink, strict-store adoption and remaining resident/ANN/backfill limits keep their separate consent/owner gates.

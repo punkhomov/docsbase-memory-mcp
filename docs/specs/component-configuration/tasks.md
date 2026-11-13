@@ -411,3 +411,14 @@ FIFO/sidecar cases; full/lean checks, fresh task/final review и native inventor
   explicit Missing preconditions, safe output, complete persisted registry,
   context-sensitive identity and remaining strict-store/executor blockers.
   Plan: [cf4c2-plan.md](cf4c2-plan.md). No runtime activation/apply.
+
+## Delta 2026-11-13 — CF6a construction-only query policy
+
+CF6 is split for independently reviewable adoption. CF6a consumes I30 at existing
+construction boundaries before configurable CF5 apply. This ordering does not
+activate new source settings or permit live resource updates. Remaining dense,
+resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
+
+- [x] **CF6a:** shared query-cache policy from existing DenseSpec, positive validation,
+  explicit daemon/direct CLI propagation, measured eviction/bypass/sharing behavior.
+  Plan: [cf6a-plan.md](cf6a-plan.md). Rust 1.100.0 stable / updated main 9d12a72.
