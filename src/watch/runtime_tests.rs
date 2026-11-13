@@ -24,7 +24,7 @@ struct Fixture {
     source: VectorCacheSource,
     provider: Arc<Provider>,
     cache: tempfile::TempDir,
-    root: tempfile::TempDir,
+    _root: tempfile::TempDir,
 }
 impl Fixture {
     fn new() -> Self {
@@ -58,7 +58,7 @@ impl Fixture {
             source,
             provider: Arc::new(Provider::default()),
             cache,
-            root,
+            _root: root,
         }
     }
     fn runtime(&self, config: Config) -> Arc<WatchRuntime> {
@@ -103,7 +103,7 @@ impl Fixture {
 fn prepared_consumer_uses_owner_and_reuses_stages_on_noop() {
     let fixture = Fixture::new();
     let runtime = fixture.runtime(Config::default());
-    let path = fixture.root.path().join("bbb/b.md");
+    let path = fixture.project.canonical_root.join("bbb/b.md");
     fs::write(&path, "betawidget9").unwrap();
     fixture.consume(vec![path.clone()], runtime.clone());
     assert_eq!(fixture.search("betawidget9"), 1);
@@ -182,8 +182,8 @@ fn queued_prepared_paths_use_revised_ignores_and_provider() {
     let fixture = Fixture::new();
     let before = repo::doc_states(fixture.db.connection(), fixture.project.id).unwrap();
     let old = fixture.runtime(Config::default());
-    let ignored = fixture.root.path().join("bbb/b.md");
-    let allowed = fixture.root.path().join("a.md");
+    let ignored = fixture.project.canonical_root.join("bbb/b.md");
+    let allowed = fixture.project.canonical_root.join("a.md");
     fs::write(&ignored, "betawidget9").unwrap();
     fs::write(&allowed, "alphawidget9").unwrap();
     let config = Arc::new(Config {
@@ -242,7 +242,7 @@ fn complete_prepared_revision_guards_incremental_and_full_recovery() {
         let before = repo::doc_states(fixture.db.connection(), fixture.project.id).unwrap();
         let generation =
             repo::index_generation(fixture.db.connection(), fixture.project.id).unwrap();
-        let path = fixture.root.path().join("bbb/b.md");
+        let path = fixture.project.canonical_root.join("bbb/b.md");
         fs::write(&path, "betawidget9").unwrap();
         let marker = lifecycle::index_dir(fixture.cache.path(), fixture.project.id)
             .join(crate::index::tantivy_index::REBUILD_MARKER);
@@ -312,7 +312,7 @@ fn provider_failure_preserves_marker_for_same_byte_retry() {
         }),
         fixture.source.clone(),
     ));
-    let path = fixture.root.path().join("bbb/b.md");
+    let path = fixture.project.canonical_root.join("bbb/b.md");
     fs::write(&path, "betawidget9").unwrap();
     let generation = repo::index_generation(fixture.db.connection(), fixture.project.id).unwrap();
     let error = run_batch_using(
@@ -374,7 +374,7 @@ fn admitted_provider_keeps_snapshot_without_slot_or_sql_guards() {
         }
     }
     let mut fixture = Fixture::new();
-    let path = fixture.root.path().join("bbb/b.md");
+    let path = fixture.project.canonical_root.join("bbb/b.md");
     fs::write(&path, "betawidget8").unwrap();
     let next = fixture.runtime(Config {
         ignores: vec!["bbb/**".into()],
@@ -434,7 +434,7 @@ fn captured_runtime_retains_vector_owner_until_consumer_finishes() {
         crate::vector_cache::VectorCache::open(fixture.cache.path()),
         Err(Error::Admission { .. })
     ));
-    let path = fixture.root.path().join("bbb/b.md");
+    let path = fixture.project.canonical_root.join("bbb/b.md");
     fs::write(&path, "betawidget9").unwrap();
     fixture.consume(vec![path], runtime.clone());
     assert_eq!(fixture.search("betawidget9"), 1);

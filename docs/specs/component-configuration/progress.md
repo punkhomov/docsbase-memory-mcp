@@ -753,3 +753,13 @@ CF7c3 integrated this actual main;6duplicated-append conflicts resolved only aft
 reviewed/tested e4c9385: db2bd1a6891d51d0502e791c44f552ff513baf11.
 После integration меняются только delivery ledger/plan markers; production source
 не менялся. Native four checks/inventory CF7c3 ещё pending.
+
+CF7c3 first native run43441656055 rejected: macOS failed6new watcher tests.
+Root cause reproduced on Linux with symlinked TMPDIR: fixture submitted alias
+paths unlike producer canonical-root paths. Test-only correction uses registered
+project.canonical_root for all7injected event paths, matching existing Env::path;
+TempDir lifetime retained as _root. Same alias-path reproduction now18/18GREEN
+in both cli-full and lean; final full all-target Clippy/fmt/diff GREEN. No production
+change, assertions/coverage/ignores unchanged. Independent fix/integration review
+converged, no findings; source tree equality across prior integration confirmed.
+First native run is not acceptance; corrected head requires fresh4checks/inventory.
