@@ -1,0 +1,31 @@
+{
+  "buildId": "docsbase 0.1.0-alpha.5",
+  "capabilities": [
+    "search-context-v1",
+    "panel-read-v1",
+    "literal-query-v1"
+  ],
+  "errors": [
+    "{\"data\":{\"code\":-32010,\"instruction\":null,\"message\":\"admission\"},\"kind\":\"Error\"}\n",
+    "{\"data\":{\"code\":-32011,\"instruction\":null,\"message\":\"protocol\"},\"kind\":\"Error\"}\n",
+    "{\"data\":{\"code\":-32012,\"instruction\":\"index explicitly\",\"message\":\"project\"},\"kind\":\"Error\"}\n",
+    "{\"data\":{\"code\":-32013,\"instruction\":null,\"message\":\"index\"},\"kind\":\"Error\"}\n",
+    "{\"data\":{\"code\":-32014,\"instruction\":null,\"message\":\"query\"},\"kind\":\"Error\"}\n",
+    "{\"data\":{\"code\":-32603,\"instruction\":null,\"message\":\"internal\"},\"kind\":\"Error\"}\n"
+  ],
+  "maxFrameBytes": 8388608,
+  "protocolVersion": 1,
+  "requests": {
+    "bind": "{\"method\":\"BindReadOnly\",\"params\":{\"pid\":1234,\"project_id\":7}}\n",
+    "hello": "{\"method\":\"Hello\",\"params\":{\"build_id\":\"docsbase 0.1.0-alpha.5\",\"client\":\"docsbase-node\",\"protocol_version\":1}}\n",
+    "search": "{\"method\":\"Search\",\"params\":{\"args\":{\"query\":\"widgets\",\"query_mode\":\"literal\",\"snippet\":true},\"context\":{\"elapsed_ms\":20,\"queue_ms\":10,\"remaining_ms\":1000}}}\n",
+    "status": "{\"method\":\"CallTool\",\"params\":{\"args\":{},\"name\":\"status\"}}\n"
+  },
+  "responses": {
+    "bind": "{\"data\":{\"value\":{\"session_id\":1}},\"kind\":\"ToolResult\"}\n",
+    "explained": "{\"data\":{\"value\":{\"hits\":[{\"chunk_id\":18446744073709551615,\"heading_path\":\"Guide > Привет\",\"lines\":[1,3],\"path\":\"guides/привет.md\",\"score\":1.25,\"snippet\":\"widgets stay local\",\"snippet_truncated\":false}],\"meta\":{\"index_generation\":3}}},\"kind\":\"ToolResult\"}\n",
+    "hello": "{\"data\":{\"build_id\":\"docsbase 0.1.0-alpha.5\",\"capabilities\":[\"search-context-v1\",\"panel-read-v1\",\"literal-query-v1\"],\"protocol_version\":1,\"schema_version\":2},\"kind\":\"Hello\"}\n",
+    "hits": "{\"data\":{\"value\":[{\"chunk_id\":18446744073709551615,\"heading_path\":\"Guide > Привет\",\"lines\":[1,3],\"path\":\"guides/привет.md\",\"score\":1.25,\"snippet\":\"widgets stay local\",\"snippet_truncated\":false}]},\"kind\":\"ToolResult\"}\n"
+  },
+  "schemaVersion": 2
+}

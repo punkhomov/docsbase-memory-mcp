@@ -1,0 +1,39 @@
+{
+  "name": "@docsbase/client",
+  "version": "0.1.0-alpha.1",
+  "description": "Bounded local IPC client for docsbase on Node.js",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24.22.3"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.test.json",
+    "test": "node --test test/*.test.ts",
+    "format": "biome format --write .",
+    "format:check": "biome format ."
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "5.9.3",
+    "@biomejs/biome": "2.6.3"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/punkhomov/docsbase-memory-mcp.git",
+    "directory": "packages/client"
+  }
+}

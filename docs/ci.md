@@ -488,3 +488,34 @@ ran before a pinned pnpm executable existed. No additional cache/action is added
 for the small frontend dependency graph; Rust caching and native job structure
 remain unchanged. Dependabot monitors the root pnpm lock using its npm ecosystem;
 security PRs still have to pass the workspace's age and trust checks.
+
+## Delta 2026-11-13 — official Node IPC connector
+
+Required jobs/check names stay docs/linux/macos/windows. Every native job uses its
+existing exact Node/pnpm setup to build/typecheck/test `packages/client`, format
+check, pack a local npm tarball and run `check-node-package.py`. The tarball is
+validated offline for public ESM exports, declarations (including string u64 IDs),
+MIT license and absence of runtime dependencies or source/test/transport exports.
+No npm publish or new CI job is introduced. The ordinary Rust functional suite
+runs `tests/node_client.rs`: Rust-owned wire fixture plus actual Node→native IPC→
+daemon search/restart E2E in cli-full. Lean Rust runs only the fixture gate, without
+requiring Node. No duplicated daemon Rust build is needed for the Node acceptance.
+Real-corpus workload measurement is deferred by user decision and is not claimed
+by these small native functional fixtures.
+
+### Delta 2026-11-13 — client prerequisite for nightly execution
+
+Nightly's existing preparation explicitly builds `packages/client` before its
+full release `cli-full` suite. The native E2E is enabled by `web` (also included
+in `cli-full`) and imports the public `dist/index.js` export; a frozen workspace
+install provides dependencies but does not generate that ignored output. Required
+native jobs already build the package. Local full-suite preparation is documented
+in `AGENTS.md` and [Web build/test instructions](WEB.md#building-and-testing).
+
+The entrypoint audit found no other missing execution prerequisite:
+feature-compatibility only compiles Web in the powerset and executes lean/provider
+selections; flake-stress, soak and bench-live execute without Web; ann-investigation
+selects `ann_recall`; release builds the CLI and selects platform/artifact tests.
+Those paths do not execute `node_client` E2E and need no client build. Existing
+jobs/check names, Rust suite selectors, release profiles and test policies stay
+unchanged.

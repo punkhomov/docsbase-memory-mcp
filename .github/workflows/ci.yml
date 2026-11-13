@@ -60,7 +60,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
-      - name: Prepare embedded Web assets
+      - name: Prepare Web assets and Node IPC client
         shell: bash
         run: |
           corepack enable
@@ -71,6 +71,14 @@ jobs:
           pnpm --dir web check
           pnpm --dir web test:unit
           pnpm --dir web build
+          pnpm --dir packages/client format:check
+          pnpm --dir packages/client build
+          pnpm --dir packages/client check
+          pnpm --dir packages/client test
+          client_pack="$RUNNER_TEMP/docsbase-client-package"
+          mkdir -p "$client_pack"
+          pnpm --dir packages/client pack --pack-destination "$client_pack"
+          python3 .github/scripts/check-node-package.py "$client_pack"
       - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
@@ -155,7 +163,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
-      - name: Prepare embedded Web assets
+      - name: Prepare Web assets and Node IPC client
         shell: bash
         run: |
           corepack enable
@@ -166,6 +174,14 @@ jobs:
           pnpm --dir web check
           pnpm --dir web test:unit
           pnpm --dir web build
+          pnpm --dir packages/client format:check
+          pnpm --dir packages/client build
+          pnpm --dir packages/client check
+          pnpm --dir packages/client test
+          client_pack="$RUNNER_TEMP/docsbase-client-package"
+          mkdir -p "$client_pack"
+          pnpm --dir packages/client pack --pack-destination "$client_pack"
+          python3 .github/scripts/check-node-package.py "$client_pack"
       - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
@@ -214,7 +230,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
-      - name: Prepare embedded Web assets
+      - name: Prepare Web assets and Node IPC client
         shell: bash
         run: |
           corepack enable
@@ -225,6 +241,14 @@ jobs:
           pnpm --dir web check
           pnpm --dir web test:unit
           pnpm --dir web build
+          pnpm --dir packages/client format:check
+          pnpm --dir packages/client build
+          pnpm --dir packages/client check
+          pnpm --dir packages/client test
+          client_pack="$RUNNER_TEMP/docsbase-client-package"
+          mkdir -p "$client_pack"
+          pnpm --dir packages/client pack --pack-destination "$client_pack"
+          python3 .github/scripts/check-node-package.py "$client_pack"
       - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
