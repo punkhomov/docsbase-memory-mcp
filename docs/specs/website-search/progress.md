@@ -343,3 +343,19 @@ Sourceguard at taskbase `cd28b8b`:1462 -> 1467 source names,5 additions / 0 remo
 verification. Base remains `cd28b8b` despite newer main; no dependency integration
 or rebase was mixed into this round. Original I1/I2/I3 approval remains the next
 gate; neither S1a nor the later integrated S1/#79 is marked complete here.
+
+### 2026-11-13 — S1a local task review complete; integration separate
+
+Task S1a: complete (local implementation `5f86e46..290df36`; full Debug cli-full
+1435 passed / 0 failed / 18 ignored, inventory1453; lean owner18/resolution23/
+server17/capture5; current Clippy/fmt/diff/protected audits passed). Original fresh
+Task review FAIL/CHANGES was fixed in one bounded round; original scoped rereview
+at `/workspace/scratch/agent-b/79/s1a/fix1/rereview.md` is spec PASS / quality
+APPROVED, I1/I2/I3 addressed, no new Critical/Important and no minors recorded.
+
+Ruling: completion is limited to the reviewed local S1a owner/capture slice on
+its tested base. Current-main plus local #147 source integration is a separate
+checkpoint before S1b coding. Local #147 source is not a claim that PR157 is
+merged or native-qualified; S1b/c, their reviews, public dependency/native gates
+and the single S1 integration PR remain pending. No full CF12/#79 completion,
+S2 readiness or Windows #155 physical-reserve/transport proof is claimed.
