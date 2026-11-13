@@ -417,3 +417,25 @@ duplex-write-error and catch-only-unwind probes plus expanded gates; retained
 no-connect, held native partial/no-Hello, watchdog and actual CLI path cases.
 No production edits or Cargo/build/runtime execution; source awaits scoped review
 and controller rebase before actual target-selection RED.
+
+T56 execution 2026-11-13: draft checkpoint e25d9f7 rebased to main6826aaf as
+73c2e0f. Requirements conflict resolved by retaining upstream #146/#148 appends
+in full before S147. Node/Web/SDK prep exit0 confirmed by controller. Before any
+production edit, actual absolute/relative target RED exit101: both compiled and
+observed cwd A instead of selected B at the exact equality assertion; cleanup3/3
+GREEN with production CLI still main blob. Minimal CLI resolution before connect,
+same canonical target for handshake/direct fallback and PATH help correction ->
+sync8/8 GREEN. No polling/error-fallback block change (byte-checked), API/crate/
+feature/default/threshold/store/index/protocol edits or new watcher sleep.
+
+T56 local verification GREEN: cli_routing13 + cli_read14 + cli_index4; observer
+regressions11; cli-full all-target Clippy -D warnings and fmt. Five fixture-style
+lint diagnostics corrected without semantic changes, diff/evidence retained.
+Full cli-full debug: prepare52.468s/inventory2.162s/execute181.478s, all exit0;
+1410passed/0failed/18existingignored,87target summaries,1428inventory entries =
+passed+ignored. All original CLI test names retained; seven meaningful cases added.
+211 production/manifest/frontend/SDK/workflow blobs match main outside CLI module;
+all tracked changes in seven planned files. Logs/report/manifest in
+/workspace/scratch/agent-b/147. Implementation/local verification ready for fresh
+task/final reviews; Windows/macOS execution and four required native checks/
+inventory/delivery remain controller gates. No C13 or #79 tree edits, no GitHub action.

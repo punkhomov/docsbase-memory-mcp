@@ -313,7 +313,7 @@ impl SyncPeer {
                         Err(error) => SyncPeerExit::Failed(error.kind()),
                     },
                     _ = &mut cancelled => SyncPeerExit::Cancelled,
-                    _ = tokio::time::sleep(watchdog) => SyncPeerExit::Watchdog,
+                    () = tokio::time::sleep(watchdog) => SyncPeerExit::Watchdog,
                 };
                 let exit = if protocol_complete && exit == SyncPeerExit::Cancelled {
                     SyncPeerExit::Complete
@@ -459,7 +459,7 @@ fn sync_peer_joins_when_command_finishes_without_connecting() {
     });
     assert!(output.expect("early exit").status.success());
     assert_eq!(trace.exit, SyncPeerExit::Cancelled);
-    assert!(trace.requests.is_empty());
+    assert_eq!(trace.requests, Vec::<Request>::new());
 
     let env = Env::new(&[]);
     let missing = env.cache.path().join("missing-executable");
@@ -469,7 +469,7 @@ fn sync_peer_joins_when_command_finishes_without_connecting() {
         std::io::ErrorKind::NotFound
     );
     assert_eq!(trace.exit, SyncPeerExit::Cancelled);
-    assert!(trace.requests.is_empty());
+    assert_eq!(trace.requests, Vec::<Request>::new());
 }
 
 #[test]
@@ -491,7 +491,7 @@ fn sync_peer_cancels_native_clients_without_a_complete_frame() {
             // may be responsible for ending the peer's blocked read.
             drop(client);
             assert_eq!(trace.exit, SyncPeerExit::Cancelled, "{prefix:?}");
-            assert!(trace.requests.is_empty());
+            assert_eq!(trace.requests, Vec::<Request>::new());
         });
     }
 }
@@ -501,7 +501,7 @@ fn sync_peer_watchdog_bounds_accept_without_cancellation() {
     let env = Env::new(&[]);
     let trace = SyncPeer::with_watchdog(env.cache.path(), Duration::ZERO).join();
     assert_eq!(trace.exit, SyncPeerExit::Watchdog);
-    assert!(trace.requests.is_empty());
+    assert_eq!(trace.requests, Vec::<Request>::new());
 }
 
 #[test]
