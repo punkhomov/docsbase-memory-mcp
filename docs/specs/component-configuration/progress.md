@@ -741,3 +741,15 @@ requirements/findings/deferred minors none. Final cli-full1403passed/0failed/
 по2nested filtered child summaries исключены. Все10new tests executed. Final
 full/lean all-target Clippy/fmt/diff GREEN. Required native inventory/delivery и
 обновление на actual CF7c2 squash остаются gates; CF5/CF7/#78 ещё не завершены.
+
+CF7c2 delivery: PR146 squash c8d1e90121e10397d0f99a99d7ce601ede984dba.
+Refreshed run43438407813 attempt1 required docs/Linux/macOS/Windows GREEN.
+Скачанные diagnostics сохранили каждый parent141 test и18existing ignores/OS;
+все10new tests executed, включая actual Node daemon acceptance. Linux1393+2static,
+macOS1389, Windows1375pass/0fail. Reviewed0517793/tested8a5e70c/squash share tree
+486ee88361e9c0ee27fd728d927749b28b7b1874. #78 остаётся open.
+CF7c3 integrated this actual main;6duplicated-append conflicts resolved only after
+проверки, что incoming content целиком сохранён. Entire resulting tree совпал с
+reviewed/tested e4c9385: db2bd1a6891d51d0502e791c44f552ff513baf11.
+После integration меняются только delivery ledger/plan markers; production source
+не менялся. Native four checks/inventory CF7c3 ещё pending.

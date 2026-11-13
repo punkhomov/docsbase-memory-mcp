@@ -2,7 +2,8 @@
 
 > Execution: executing-plans/TDD in the existing isolated worktree; fresh task
 > and independent final review. Source base d5601d4 (reviewed PR146), native
-> delivery pending. Rebase onto current origin/main before this PR.
+> delivery complete as c8d1e90 (PR146, after Node PR141). Integrated current
+> origin/main before this PR; reviewed and integrated source trees identical.
 
 Goal: watcher producer, retry and incremental/full recovery use one coherent
 prepared Config/HybridStages/VectorCacheSource snapshot without rebuilding a
