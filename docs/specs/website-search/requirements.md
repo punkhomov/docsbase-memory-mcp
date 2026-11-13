@@ -158,3 +158,138 @@ and documented agent/local commands. Preserve full-suite execution and release
 profiles; no test skip, cfg weakening, npm publishing or new job/check is needed.
 CLI-only builds, compile-only feature checks, lean suites and selected targets
 that do not execute the Node E2E have no client-build prerequisite.
+
+## Delta 2026-11-13 — ADDED: server-stage acceptance details
+
+This is the S-stage design baseline, not an implemented capability.
+
+- **FR-S1a:** Explicit foreground website profile binds one existing registered
+  project and performs lexical search only. It starts no watchers, never exits
+  merely because sessions are absent, and never registers/indexes/downloads a
+  model because a reader connects or searches. Reject incompatible global/project
+  hybrid policy and other project bindings before their side effects. Preserve
+  ordinary CLI/MCP shared-daemon behavior outside the explicit website profile.
+- **FR-S1b:** Daemon owner defines all new operational defaults, validation,
+  provenance and runtime-change assessment. Parse the global launch snapshot
+  once and pass complete immutable settings into lifecycle/Shared/session/admission;
+  consumers do not reread a raw patch or fill missing settings. New global owner
+  fields are rejected in project files and appear in effective views. Changes
+  require restart, not index invalidation or automatic strict-v2 activation.
+- **FR-S1c:** Bound physical search/control workers and pending waiters before
+  spawn_blocking, with distinct reserved control-worker capacity. A queued search
+  consumes its original SearchOperation deadline and cancellation; an expired or
+  cancelled waiter starts no worker. Cancelling a caller does not release a live
+  physical worker's permit. Bound connections/sessions separately; finite worker
+  queues are not a promise against all connection slots being occupied.
+- **FR-S1d:** Read-only binding, registration and metadata blocking paths obey
+  control admission. Website sync remains explicit and fixed-project, using the
+  existing sync-job deduplication/lease. Shutdown tracks actual outstanding work;
+  no claim that dropping a blocking future stops execution. Preserve existing
+  documented generation refusal/retry while index mutation occurs.
+- **FR-S2a:** Expose a versioned fixed-project server readiness result. Ready
+  requires a healthy readable current index and no current failed/partial sync.
+  SyncState::Done with stats.errors>0 is incomplete. stats.skipped means unchanged
+  content, not failure; warnings are capped and cannot replace the error count.
+  Account for running/queued/interrupted sync, daemon restart, absent index and
+  generation changes. This is a checked observation, not a CF11 snapshot lease.
+- **FR-S2b:** Explicit CLI sync/status can inspect and update the fixed corpus
+  while watchers stay disabled. Do not add mutating operations to the read-only
+  SDK public API. Report failure/partial results without silently declaring ready.
+- **FR-S3a:** Runnable Node HTTP example uses the official client, a fixed server
+  project and complete operator-supplied configuration. Validate routes, methods,
+  query/options and bounded headers/body/active requests before IPC dispatch.
+  Propagate disconnect and one original HTTP deadline through preparation and SDK
+  writes; synchronous work must not gain a fresh deadline. No replay/autostart,
+  arbitrary tools, roots, provider controls or query/document logging. Auth and
+  deployment policy remain the embedding website's responsibility.
+- **FR-S3b:** Native E2E covers watcher-off explicit updates, incomplete sync,
+  overload with independent control work, cancellation while queued/running,
+  disconnect, restart/reconnect and shutdown accounting. Use real files/daemon
+  and gated fake workers where deterministic; no paid APIs/model downloads.
+
+**SC-S2:** Each S task has actual RED/GREEN and fresh task review. Final S-stage
+acceptance requires relevant full suites, lint/format, native docs/linux/macos/
+windows and independent whole-diff review. Preserve existing test inventory and
+retrieval baselines. Real ~20k FR-S4 remains user-deferred, unverified and carries
+no capacity/latency claim. Full CF12 and #81 remain separately tracked.
+
+## Delta 2026-11-13 — MODIFIED: S challenge contracts
+
+This amendment resolves the five Important and three Minor plan findings; it
+does not claim implementation or passed runtime acceptance.
+
+- **FR-S1a/b (MODIFIED):** Global `[daemon] profile` is a complete tagged value:
+  Shared has no root; Website requires one absolute existing registered root.
+  Missing Shared and explicitly selected Shared preserve different provenance.
+  CLI `serve --project ABS` selects complete Website; `--profile shared` replaces
+  the complete file profile. Website without its explicit CLI root, Shared with
+  a root, relative roots and unknown selector shapes are rejected. CLI highest
+  precedence permits file Website(A) -> CLI Website(B), subject to B's normal
+  existing-project/lexical admission. Canonical aliases identify the same root.
+  Omitted `--grace-ms` preserves file value/provenance; Shared explicit0 remains
+  valid. Website rejects explicit idle-grace/`--detached` options as inapplicable.
+- **FR-S1b/c (MODIFIED):** Daemon owner resolves an explicit blocking executor
+  capacity (default512), active/pending lane counts and their complete consumer
+  limits before writes/runtime construction. Validate checked sums and actual
+  Tokio semaphore/channel limits. The physical control-reserve guarantee is
+  scoped to lexical Website's closed inventory: search S + control C + one
+  fixed-project sync + one reserved nominal helper slot <= executor capacity.
+  Janitor/bind/register/metadata share C; no unbounded helper may bypass the
+  inventory. Shared hybrid background/provider behavior keeps legacy semantics
+  and is outside this reserve proof until separately reviewed #81 work.
+- **FR-S1c (MODIFIED):** Queued search cancellation has a lost-wake-safe async
+  wait on the existing Cancellation state, preserving blocking subscribers and
+  the original SearchOperation deadline. No blocking bridge, polling worker,
+  second token or worker spawn for a cancelled/expired waiter. Drop retires
+  pending ownership; physical permits remain owned through closure completion.
+- **FR-S1d (MODIFIED):** The lifecycle loop retains at most one janitor attempt,
+  skips/coalesces busy ticks and polls its admission/completion beside accept,
+  StopDaemon and signals. Busy control admission must never suspend the tick
+  branch. Janitor and fixed sync keep physical Activity/permits until finish,
+  and graceful shutdown counts them. Existing daemon-lifetime Lease is preserved.
+- **FR-S1d/S2b (MODIFIED):** Land narrow CLI selector dependency
+  [#147](https://github.com/punkhomov/docsbase-memory-mcp/issues/147) after #143
+  and before S1. Explicit `sync ABS` uses ABS from any cwd; Website binds the
+  existing fixed project read-only before its allowed explicit Sync, without
+  registration. Different-root/profile denial has a typed stable code and never
+  triggers direct fallback. Interruption after daemon contact never replays a
+  mutation. No-daemon ordinary Shared sync retains deliberate direct indexing;
+  globally selected Website requires an explicitly started daemon and does not
+  direct-fallback/autostart. `status --project ABS` is a live-daemon read-only
+  fixed-project route; ordinary direct registry status is preserved.
+- **FR-S2a (MODIFIED):** Readiness requires trustworthy current **full-survey**
+  quality evidence as well as healthy readable index, Indexed status, no active
+  attempt/Sync and no latest failed/partial Sync. Missing/malformed counts or
+  association, legacy-only/direct-only evidence without proof, and zero-error
+  incremental/subset scope are UnknownNotReady. A full survey may count unchanged
+  files as skipped and still be complete. Failed/partial/interrupted work,
+  errors>0, absent/corrupt/rebuild-needed index and moving metadata are NotReady.
+  A later direct success does not clear a failed/partial latest Sync; a later
+  successful attributable full Sync, including no-op, does. A later partial
+  direct attempt invalidates an older Done even without a generation change.
+  Legacy indexes need an explicit Sync after the new producer is available.
+- **FR-S2a (ADDED dependency):** S2 adoption requires A's narrow all-writer
+  outcome projection, recorded under the existing ProjectLease for direct full
+  index, Sync, incremental and recovery/rebuild writers. It invalidates prior
+  proof before mutation and coherently publishes final status/outcome with
+  strict actual counts, completeness scope, attempt identity and association
+  to existing index_generation/job. Nonterminal/crash state cannot reuse stale
+  success. Attempt identity attributes outcomes, not a new search generation or
+  publication lease. B consumes read-only; timestamps/equal generations/post-lease
+  inference are not evidence. This specific producer gate does not block S1 or
+  require all CF11; park S2 and continue independent #81 if it is unavailable.
+- **FR-S2a (MODIFIED observation):** Use two bounded authoritative metadata
+  observations around one read-only ReadIndex health check under existing read/
+  mutation admission, using fresh short metadata snapshots rather than carrying
+  O1's SQLite snapshot into O2. Changes in project/status/generation/attempt/outcome/Sync
+  tuple return state_changed with no retry. No readiness-triggered Repair,
+  writer lease, provider, registration or hidden Sync. This remains an
+  observation and preserves current mutation refusal semantics.
+
+**SC-S2 (MODIFIED):** S1 updates the component settings inventory and state
+dependency matrix in the same integrated PR after a source scan; identify
+adopted/deferred subsets and runtime restart effects. S1a/b/c keep separate fresh
+reviews and merge only together with all accepted fields wired. Named test
+targets and exact implementation verification commands are in the amended
+[server-plan.md](server-plan.md). No S runtime acceptance or real ~20k result is
+claimed by this plan amendment.

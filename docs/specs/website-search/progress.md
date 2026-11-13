@@ -144,3 +144,51 @@ negative retained. Staleendpoint RED→GREEN, Node58/0, native2/0, build/check/f
 diff0. Original task and most-capable final scoped reviewers PASS/APPROVED, no new
 findings. Evidence /workspace/scratch/agent-b/79/windows-endpoint-fix/.
 No production SDK/Rust behavior change, no retry/skip; fresh exactheadnative4 pending.
+
+## 2026-11-13 — client delivery and S-stage baseline
+
+Task C delivery: complete. PR141 squash0c6d707, final source6b5f6a8 on main3b34732;
+required run43434043274 docs/linux/macos/windows GREEN. Linux1383/0/18 +static2/0;
+macOS1379/0/18, Windows1365/0/18; Node58/0 eachOS. Raw/JSON counts, ZIP digests,
+tested tree, baseline inventory (+exact2native tests, no removals/new ignores),
+407source hashes checked. Independent final acceptance CONVERGED for C; no open
+findings/minors. Receipt /workspace/scratch/agent-b/79/final-acceptance-6b5f6a8.md.
+
+Task S plan: draft; requirements FR-S1a..S3b/SC-S2 and server-plan.md. B owns this
+daemon/lifecycle/watcher/IPC/CLI integration; A owns store/index/config migration.
+User's autonomous authorization covers design/implementation/review/PR/merge;
+FR-S4 real corpus stays explicitly deferred/unverified. S challenge review pending.
+
+## 2026-11-13 — S plan architectural challenge amendment
+
+Task S plan challenge: original review FAIL/CHANGES, no Critical, five Important
+and three Minor findings; evidence
+/workspace/scratch/agent-b/79/server-plan-review.md. Separate plan implementer
+amended server-plan.md plus requirements/design/tasks only: same-state Notify
+async cancellation; coalesced janitor polled with accept/stop; explicit owner
+blocking capacity512 and checked lexical closed inventory; #143 -> #147 -> S1
+CLI route/typed denial contract; full-profile overlay/optional grace0 semantics;
+preserved daemon/admission.rs::Lease; named commands/targets and same-PR owner
+inventory/matrix adoption audit. Shared hybrid background/provider helpers are
+explicitly outside lexical physical-reserve claims until #81.
+
+Readiness amendment records the specific A-owned all-writer outcome prerequisite:
+existing ProjectLease, existing index_generation, strict actual counts and
+attempt/scope/job attribution, with final status/outcome coherently published.
+No stale Done/equal-generation/timestamp proof; later direct partial (including
+no generation change) invalidates success. Full survey with skipped unchanged
+may qualify; zero-error incremental/subset cannot promote Unknown/Partial.
+Missing/legacy/malformed proof requires explicit Sync after producer lands;
+latest failed/partial Sync remains not-ready after direct success until a later
+successful full Sync, including no-op. Two metadata observations around a
+read-only health check, changed tuple -> state_changed without retries/Repair.
+S2 waits for that narrow A projection, not all CF11; S1 is independent and #81
+can proceed if S2 is parked. No B storage/index runtime work is authorized by
+this amendment.
+
+Ruling: all eight original findings have concrete proposed plan fixes, pending
+the original reviewer's scoped rereview. No implementation, runtime tests,
+Cargo, commits or GitHub operations were performed by the plan implementer.
+Evidence/diff/report: /workspace/scratch/agent-b/79/server-plan-fix/.
+No runtime/native acceptance, capacity/latency or real ~20k claim; S1a/b/c still
+require separate fresh reviews and one fully wired integration PR.
