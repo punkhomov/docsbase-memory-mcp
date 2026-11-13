@@ -26,7 +26,7 @@ version = "0.0.0"
 edition = "2024"
 rust-version = "1.100.0"
 
-[dependencies]
+[dev-dependencies]
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 TOML
 CF5B1_SCRATCH="$cf5_scratch/runs" CARGO_TARGET_DIR="$cf5_scratch/target" \

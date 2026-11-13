@@ -893,3 +893,10 @@ CF5b1 final fix re-review: Important and Minor ADDRESSED, new Critical/Important
 none. Task and independent final source reviews converged; deferred minors none.
 Final scratch8/0/0, Clippy/rustfmt/link/diff checks GREEN. Preparing a stacked PR
 on PR151; final native acceptance will follow integration with the current base.
+
+CF5b1 integration update: rebased onto B's exact PR151 head ef46ebe (main149/
+Rust1.100 current base); task patch content/context identical after excluding
+Git blob IDs/hunk offsets. Corrected scratch reproduction to dev-dependencies:
+research is test-only and normal dependency produced Cargo's unused warning.
+No product/source/schema/experiment behavior changed; final manifest revalidation
+and native delivery follow this head.
