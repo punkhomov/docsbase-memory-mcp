@@ -9,6 +9,11 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 ## [Unreleased]
 
 ### Added
+
+- Official `@docsbase/client` Node/TypeScript local IPC connector: fixed-project
+  read-only binding, bounded search/control pools, original deadlines/cancellation,
+  lossless citation IDs and native integration/package checks. Server lifecycle
+  profile and publication readiness remain follow-ups in #79.
 - A local, read-only Web panel (`docsbase web [--open] [--port N]`) in official
   binaries: registered projects, cancellable Syntax/Literal search and safe
   effective configuration. Embedded assets need no Node.js at runtime.
