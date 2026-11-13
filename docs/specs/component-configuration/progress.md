@@ -817,3 +817,33 @@ identity foundation FR-15; actual admission/execution/SC-4 remain future work.
 Draft PR149 first native run43446337294 precedes this docs-only review ledger;
 final required checks/inventory must cover the published final head. Source/tests
 have not changed since8112d22 integration. Full CF5/CF7/#78 remain open.
+
+## 2026-11-13 — CF5b0: adoption and recovery investigation
+
+Task CF5b0: complete (source investigation/local audit/fresh task review) in an isolated docs-only worktree
+from main6826aaf. Audited actual vector mode lifetime, daemon/project/config writer
+leases, source observer, migration proposals and writer durability. Primary
+Microsoft/SQLite/POSIX references confirm that journal commit does not cover TOML
+and REPLACEFILE_WRITE_THROUGH is unsupported; Windows replacement errors may
+change names. Selected stopped maintenance plus private SQLite control journal;
+exact SQL/schema/lease/namespace/native durability proof is a distinct required
+CF5b1 gate. No runtime source writes, activation or broad FR completion. Reference/
+source/link audit and fresh reviews pending; no runtime tests added for prose.
+
+Fresh CF5b0 task review: PASS / APPROVED. Two Minor findings fixed in-task:
+stale revalidation may leave only explicitly inventoried coordination lockfiles,
+not source/control-state mutations; repaired resource-limit spacing. Exact
+allowlist/causal assertions remain CF5b1. No deferred minors.
+
+CF5b0 independent final review: content converged, Critical/Important none;
+required native delivery pending. Minor по языку исправлен переводом investigation
+на русский. Task marker отражает completion source/review, не native acceptance.
+Link/diff audit GREEN. Исполнимые schema/lease/durability/recovery остаются CF5b1+.
+
+2026-11-13 — CF5b0 integration final-review Minor: addressed in-task. Уточнено,
+что стабильный SQLite read snapshot в WAL даёт наблюдение, но сам не исключает
+registry writers. Writer-excluding admission/control-lease/SQL-контракт на весь
+bounded maintenance интервал и causal отказ concurrent registration/root move
+остаются явным CF5b1 proof gate; механизм не выбран и runtime/durability proof
+не заявлен. Изменены только wording adoption-recovery и этот ledger append.
+Scoped fix re-review и exact-head native acceptance остаются pending.
