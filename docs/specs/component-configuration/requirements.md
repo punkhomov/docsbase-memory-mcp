@@ -482,3 +482,16 @@ alone loses target metadata, and a post-replacement flush error can leave new
 bytes. The required versioned journal extension must bind native target attributes
 and stage identities, with bounded capture and recovery. This investigation does
 not implement that extension, a publisher, CF5b3 executor or CF5c activation.
+
+## Delta 2026-11-13 — IO1: metadata результата индексации для #79
+
+ADDED: FR-IO1. Все actual full/subset indexing cores отзывают прежний outcome до
+работы и записывают actual scope/JobStats/attempt/root/recipe/index_generation.
+Успешные Indexed и outcome публикуются одной короткой SQL transaction до release
+существующего writer lease. No-op/full, partial/error/interrupted и legacy evidence
+различаются без вывода о полноте из generation/status/sync timestamp.
+Первый slice считает полным только zero-error full survey; subset отзывает proof.
+Read-only bounded projection консервативна при absent/corrupt/mismatched evidence.
+Additive schema migration сохраняет совместимые existing lexical indexes, не
+придумывая историческую полноту. План: [index-outcome-plan.md](index-outcome-plan.md).
+Readiness endpoint, server profile и continuous generation publication не входят.

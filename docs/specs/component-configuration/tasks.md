@@ -529,3 +529,9 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   source publication seam. Explicit support/refusal and truthful result states.
 - **CF5b2c:** real native attributes/namespace/recovery/failure acceptance on all3OS
   before CF5b3 executor/CF5c activation. Linux process evidence is not this gate.
+
+## Delta 2026-11-13 — IO1: результат каждого index writer
+
+- [x] IO1: additive schema, bounded read-only outcome и all-core begin/end publication
+  для #79 FR-S2. План: [index-outcome-plan.md](index-outcome-plan.md). Scope — A-owned
+  index/store плюс существующие wrapper endings; server/readiness/IPC остаются B.

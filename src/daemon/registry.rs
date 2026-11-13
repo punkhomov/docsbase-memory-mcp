@@ -88,6 +88,8 @@ pub fn list_projects(db: &Db) -> Result<Vec<Project>> {
 
 /// Records a successful full index: `Indexed`, `last_indexed_at` and the
 /// schema version the index was built with (FR-26, T24).
+/// This manual lifecycle update revokes any prior attributable outcome; only
+/// the actual indexing core can publish new corpus coverage evidence.
 ///
 /// # Errors
 /// Returns [`Error::Project`] for an unknown id and [`Error::Internal`] on
@@ -96,7 +98,8 @@ pub fn mark_indexed(db: &Db, id: i64) -> Result<()> {
     let conn = db.connection();
     let updated = conn
         .execute(
-            "UPDATE projects SET status = ?1, last_indexed_at = ?2, schema_version = ?3 WHERE id = ?4",
+            "UPDATE projects SET status = ?1, last_indexed_at = ?2, schema_version = ?3,
+                index_attempt = index_attempt + 1, index_outcome_json = NULL WHERE id = ?4",
             params![
                 ProjectStatus::Indexed.as_str(),
                 unix_now(),
@@ -117,6 +120,7 @@ pub fn mark_indexed(db: &Db, id: i64) -> Result<()> {
 /// Updates the lifecycle status of one project (FR-26). Incremental runs must
 /// not touch `schema_version`, so a schema bump keeps refusing reads until a
 /// full rebuild (T24).
+/// Every manual update revokes outcome evidence and fences a late publisher.
 ///
 /// # Errors
 /// Returns [`Error::Project`] for an unknown id and [`Error::Internal`] on
@@ -125,12 +129,14 @@ pub fn set_status(db: &Db, id: i64, status: ProjectStatus) -> Result<()> {
     let conn = db.connection();
     let updated = if status == ProjectStatus::Indexed {
         conn.execute(
-            "UPDATE projects SET status = ?1, last_indexed_at = ?2 WHERE id = ?3",
+            "UPDATE projects SET status = ?1, last_indexed_at = ?2,
+                index_attempt = index_attempt + 1, index_outcome_json = NULL WHERE id = ?3",
             params![status.as_str(), unix_now(), id],
         )
     } else {
         conn.execute(
-            "UPDATE projects SET status = ?1 WHERE id = ?2",
+            "UPDATE projects SET status = ?1,
+                index_attempt = index_attempt + 1, index_outcome_json = NULL WHERE id = ?2",
             params![status.as_str(), id],
         )
     }

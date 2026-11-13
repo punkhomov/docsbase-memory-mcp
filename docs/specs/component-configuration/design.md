@@ -817,3 +817,14 @@ in-place overwrite and metadata-blind rename are rejected. Missing-target
 no-replace and post-attempt inspection remain distinct cases. Research schema1
 must be extended with bounded attribute/stage evidence before an executor; exact
 platform implementation and native three-OS acceptance remain CF5b2b/c gates.
+
+## Delta 2026-11-13 — IO1 для серверной готовности
+
+Последний outcome хранится в projects row с отдельным monotonic attempt ID.
+Indexing cores инвалидируют proof до работы и атомарно публикуют outcome/status
+по окончании, не удерживая SQL transaction через walk/provider/Tantivy. Existing
+writer lease остаётся authority. Projection проверяет root/recipe/schema/attempt/
+generation и crash markers; FullSurvey/errors0 — единственное initial completeness
+evidence. Subset не наследует полноту. DB3 additive migration сохраняет project
+stamp2→3 без rebuild; absent legacy outcome остаётся unknown. Детали и проверка:
+[index-outcome-plan.md](index-outcome-plan.md). Это prerequisite #79, а не CF11.

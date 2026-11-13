@@ -164,6 +164,23 @@ fn run_full_using(
     before_apply: impl FnOnce() -> Result<()>,
     embed: impl FnOnce(&Path, &[String]) -> Result<u64>,
 ) -> Result<JobStats> {
+    super::outcome::run(
+        db,
+        project,
+        config,
+        super::outcome::SurveyScope::FullSurvey,
+        |db| run_full_core(db, index, project, config, before_apply, embed),
+    )
+}
+
+fn run_full_core(
+    db: &mut Db,
+    index: &mut IndexHandle,
+    project: &Project,
+    config: &Config,
+    before_apply: impl FnOnce() -> Result<()>,
+    embed: impl FnOnce(&Path, &[String]) -> Result<u64>,
+) -> Result<JobStats> {
     // A recreated index needs every document re-added (T27). Delay the SQL
     // wipe until the prepared payload has passed the caller's config check.
     let existing = if index.was_recreated() {
@@ -386,6 +403,24 @@ fn run_incremental_using(
         // rebuild everything under the same writer lease instead (T27).
         return run_full_using(db, index, project, config, before_apply, embed);
     }
+    super::outcome::run(
+        db,
+        project,
+        config,
+        super::outcome::SurveyScope::Subset,
+        |db| run_incremental_core(db, index, project, changed, config, before_apply, embed),
+    )
+}
+
+fn run_incremental_core(
+    db: &mut Db,
+    index: &mut IndexHandle,
+    project: &Project,
+    changed: &[PathBuf],
+    config: &Config,
+    before_apply: impl FnOnce() -> Result<()>,
+    embed: impl FnOnce(&Path, &[String]) -> Result<u64>,
+) -> Result<JobStats> {
     let existing = repo::doc_states(db.connection(), project.id)?;
     let by_path: HashMap<&str, &DocState> = existing
         .iter()
@@ -747,7 +782,7 @@ fn mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
         })
 }
 
-fn unix_now() -> i64 {
+pub(super) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
