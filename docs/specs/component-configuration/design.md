@@ -639,3 +639,38 @@ pin и продления. Status передаёт outcome TTL в явную м�
 текст, без смены state names/protocol. Домены времени прежние: wall-clock seconds
 для сохранённых leases, Instant для наблюдений. Live revocation или изменение
 artifact identities этой задачей не предоставляются.
+
+
+## Delta 2026-11-13 — CF7a: policy owner и native lifetime
+
+`vector_cache::settings` — единственный каталог VectorStoreSpec. CacheLimits::default
+проецирует его прежние limits; descriptor source preview ссылается на того же owner.
+Constructor принимает полный VectorStoreSettings и валидирует его перед I/O.
+`VectorStore::acquire(root, settings)` возвращает cloneable Arc-owner;
+`connect()` создаёт отдельную SQLite connection без per-connection overrides.
+Политика и saturating atomic LRU clock живут в owner, а не process-global registry.
+Начальный MAX(used_at) читается под exclusive mode lease. Между операциями owner
+не удерживает SQL transaction; краткая immediate reservation упорядочивает touch/write
+и выдачу recency. Пропуски clock при rollback допустимы; identities не меняются.
+
+Постоянный `vectors.lock` использует stable std::fs::File locks без unsafe/new crate.
+Каждый legacy constructor получает shared lease, strict acquire — exclusive; конфликт
+даёт Admission до SQLite. Native guard создаётся только после успешного try-lock;
+failed probes не вызывают unlock. Guard при Drop явно unlock-ит приобретённый lock,
+затем закрывает file: transient fork-inherited descriptor иначе способен задержать
+release до exec. SQLite field объявлен перед guard, поэтому закрывается первым.
+Failed initialization освобождает lease. Root canonicalization объединяет aliases.
+Не unlink/replace lockfile при release; его наличие само по себе не означает owner.
+
+Strict put+evict и unpin+evict — одна immediate transaction; error откатывает весь
+набор. Legacy mutation/zero-cap semantics остаются прежними. Pin identities и
+временное превышение caps leased rows сохранены. Eviction учитывает vector BLOB bytes,
+не физический SQLite/WAL size, allocator или resident copies. Shared policy не равна
+жёсткой физической квоте. Нет одного mutex вокруг общей connection.
+
+Это cooperative lifetime exclusion, не persisted mode/ACL. Старые binaries, raw SQL,
+external cache/lock replacement не участвуют. Пока guard жив, strict/legacy не могут
+сосуществовать; после последнего release mode не закреплён на диске. Будущие CF5/CF7
+должны интегрировать owner во все daemon/dense/jobs/coverage/streaming consumers,
+quiescence, recovery и migration consent до включения v2. Первый slice не снимает
+strict_store_adoption_unavailable/executor_unavailable из migration plan.

@@ -348,3 +348,28 @@ preflight/NOFOLLOW flags одни недостаточны для reparse races.
   default transitions прежние; is_stale/ANN_OUTCOME_TTL остаются adapters.
 - Нет новых source keys, live TTL/shrink, strict-store adoption, artifact invalidation
   или migration/apply. План: [cf6c-plan.md](cf6c-plan.md).
+
+
+## Delta 2026-11-13 — CF7a: явный владелец vector store
+
+- VectorStoreSpec владеет daemon-scoped max_entries=1000000, max_bytes=1GiB и
+  busy_timeout=5s. Strict capacities положительны; zero timeout допустим, значение
+  milliseconds не превышает i32::MAX. Проверка предшествует filesystem/SQLite.
+  Невалидный typed patch сохраняет предыдущие settings/provenance. Новых TOML keys нет.
+- Один VectorStore владеет canonical cache root и immutable policy. Его clones и
+  дочерние соединения продлевают владение. Соединения независимы, используют общий
+  LRU clock с восстановлением из persisted MAX(used_at), общие entry/byte caps и timeout.
+- Каждый cooperating legacy handle удерживает shared native lease; strict owner —
+  exclusive. Оба конфликтных направления отклоняются до открытия SQLite. Разные roots
+  независимы; aliases координируются. Failed acquisition/open освобождает ресурсы,
+  не снимая чужой lock. Coordination file не удаляется при release. Дубликат native
+  descriptor не должен задерживать release последнего owning guard.
+- Strict get/touch, put+evict и unpin+evict выполняются короткими BEGIN IMMEDIATE
+  SQL-фазами; recency выдаётся после reservation. SQL failure откатывает vectors/leases.
+  Provider work вне транзакций. Существующие model/hash/lease identities сохраняются.
+- Leased rows могут превышать eviction caps; это не hard disk/RSS quota. Протокол
+  advisory для cooperating current callers: raw SQL, старые binaries и внешняя замена
+  cache/lock files вне гарантии. После последнего handle legacy mode снова доступен.
+- Production startup остаётся legacy, включая zero-cap поведение. Это первый slice
+  CF7, не v2 activation, persisted mode adoption, consent/apply или полный consumer
+  rollout. CF5/CF7 и #78 остаются открытыми. План: [cf7a-plan.md](cf7a-plan.md).

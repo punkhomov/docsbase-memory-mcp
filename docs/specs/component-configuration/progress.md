@@ -503,3 +503,54 @@ source keys/apply, inference/download changes. Остальные CF6–CF14/#78
 Fresh task review: Spec compliance PASS; Quality APPROVED; замечаний и deferred
 minors нет. Reviewer сверил точный worktree с immutable diff. Fresh final review
 и required native CI/inventory audit остаются условиями доставки.
+
+
+CF6c delivery (2026-11-13): PR139 влит как 4c9ff9f4ce421c6290eb81f578d051d71c2d74ad.
+Fresh final review converged без замечаний. Native run43400126108 attempt1:
+docs/Linux/macOS/Windows green; Linux1339+2static/macOS1335/Windows1322 passed,
+18 прежних ignores/platform. Все parent tests сохранены и все6 lifetime tests
+выполнены. Reviewed source/tested merge/squash имеют tree
+bb81f3bf5542e791dd68dc837a6655054390ee8b. #78 остаётся открытым.
+
+## 2026-11-13 — CF7a: владелец общей базы векторов
+
+Task CF7a: complete (implementation, verification и fresh task/fix review).
+VectorStoreSpec владеет entry/byte/timeout policy и origins; legacy defaults
+проецируют тот же каталог. VectorStore удерживает immutable policy, canonical root,
+shared atomic recency и native exclusive lease. Его отдельные connections/клоны
+удерживают lifetime; legacy constructors используют shared leases без смены v1 caps.
+Ruling: lifetime exclusion advisory для cooperating current callers, не persisted
+v2 activation/ACL. Lockfile не удаляется. Raw SQL/older binaries/external namespace
+replacement вне гарантии; после последнего release legacy снова доступен. Нельзя
+включать v2/migration до CF5/CF7 consumer rollout и recovery/quiescence. Strict
+put+evict и unpin+evict атомарны; get/page/write берут recency после immediate
+reservation. Leased rows могут превышать caps; payload budget не равен disk/RSS cap.
+
+TDD: baseline28 passed; API compile RED. Независимые consumer RED: idle handle
+вытеснял recent вместо old; failed put оставлял2 rows вместо1; failed unpin удалял
+2 leases вместо rollback. Native descriptor duplicate RED показал задержку release
+после close — acquired guard теперь явно unlock-ит lock перед закрытием; failed
+probes не unlock-ят чужое владение. Все случаи GREEN. Полный suite выявил ADR-9
+boundary violation: private nofollow/nonblocking open перенесён в platform seam.
+Точечные Clippy fixes: актуальный Atomic::try_update для Rust1.100, doc markup и
+static literal lifetime тестового embedder; без подавления lints.
+
+Validation: exact stable Rust1.100.0, upstream Cargo.lock и pinned frontend.
+Full cli-full1358 passed/0 failed/18 прежних ignores;83 top-level summaries,
+вложенный filtered subprocess summary не считается отдельным тестом. Lean82 focused
+passed; full/lean all-target Clippy, fmt/diff GREEN. Новые18 Unix/17 Windows
+integration tests и2 native unit tests проверяют real SQLite/OS/subprocess/threads,
+общие caps/LRU/reopen/leases/rollback, zero-timeout BUSY, no-I/O admission/scope/origins,
+отсутствие скрытого eviction при acquire и legacy zero-cap. Нет зависимости,
+workflow/baseline/threshold, file source keys/apply или inference/download changes.
+Fresh task/final review и required native CI/inventory audit — следующие gates.
+Полные CF7/#78, #71 beyond offline, #109/#113 этим slice не закрываются.
+
+Fresh task review: Spec compliance PASS; Quality APPROVED; Critical/Important нет.
+Minor: BUSY сам по себе не доказывает timeout=0. Исправлено direct PRAGMA проверкой
+двух actual owned connections, включая clone, для0/17/5000ms. Re-review: ADDRESSED,
+новых Critical/Important нет; deferred minors нет. После test-only добавления
+final7 vector unit +18 integration pass; оба all-target Clippy/fmt/diff GREEN.
+Production source совпадает с full1358 suite; native inventory теперь ожидает
+19 Unix/18 Windows новых tests + первоначальный native unit, всего20/19 additions.
+Fresh final review и native delivery следуют отдельно; #78/CF7 остаются открытыми.
