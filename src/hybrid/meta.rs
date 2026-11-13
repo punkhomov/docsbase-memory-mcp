@@ -136,7 +136,7 @@ impl AnnState {
 }
 
 /// How long a recorded observation stays authoritative (FR-6).
-pub const ANN_OUTCOME_TTL: std::time::Duration = std::time::Duration::from_hours(1);
+pub const ANN_OUTCOME_TTL: std::time::Duration = super::dense_settings::DEFAULT_ANN_OUTCOME_TTL;
 
 /// The last ANN outcome the search path observed for one project (FR-6).
 #[derive(Debug, Clone, Copy)]
@@ -153,7 +153,13 @@ impl AnnOutcome {
     /// True once the observation is older than [`ANN_OUTCOME_TTL`].
     #[must_use]
     pub fn is_stale(&self) -> bool {
-        self.at.elapsed() > ANN_OUTCOME_TTL
+        self.is_stale_after(ANN_OUTCOME_TTL)
+    }
+
+    /// True once the observation is older than the supplied authority window.
+    #[must_use]
+    pub fn is_stale_after(&self, ttl: std::time::Duration) -> bool {
+        self.at.elapsed() > ttl
     }
 }
 

@@ -362,6 +362,8 @@ pub struct DenseCacheLimits {
     pub vector_cache_max_bytes: u64,
     /// Global ANN dump budget (T9).
     pub max_ann_disk_bytes: u64,
+    /// Validated backfill-lease and ANN status authority windows.
+    pub ann_lifetimes: super::dense_settings::AnnLifetimes,
 }
 
 impl Default for DenseCacheLimits {
@@ -382,6 +384,7 @@ impl From<&DenseSettings> for DenseCacheLimits {
             build_backoff: settings.build_backoff,
             vector_cache_max_bytes: settings.vector_cache_max_bytes,
             max_ann_disk_bytes: settings.max_ann_disk_bytes,
+            ann_lifetimes: settings.ann_lifetimes,
         }
     }
 }

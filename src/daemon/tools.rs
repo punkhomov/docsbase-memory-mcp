@@ -855,9 +855,10 @@ pub(super) fn classified_ann_state(
     hybrid_on: bool,
 ) -> (AnnState, Option<&'static str>) {
     match dense.outcome(project_id) {
-        Some(outcome) if outcome.is_stale() => {
-            (AnnState::Stale, Some("last search is older than one hour"))
-        }
+        Some(outcome) if outcome.is_stale_after(dense.limits().ann_lifetimes.outcome_ttl()) => (
+            AnnState::Stale,
+            Some("last search is older than configured TTL"),
+        ),
         Some(outcome) => (outcome.state, outcome.reason),
         None if !hybrid_on => (AnnState::Disabled, Some("hybrid off")),
         None => (AnnState::Loading, Some("no search yet")),

@@ -121,6 +121,11 @@ fn direct_cache_factory_consumes_resident_policy_and_legacy_vector_budget() {
     settings.max_projects = 2;
     settings.min_vectors = 3;
     settings.vector_cache_max_bytes = 99;
+    settings.ann_lifetimes = crate::hybrid::dense_settings::AnnLifetimes::new(
+        std::time::Duration::from_secs(120),
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
     let dense = super::direct_dense_cache(root.path(), 1024, &settings).unwrap();
     let actual = dense.limits();
     assert_eq!(actual.max_vectors, 7);
@@ -128,5 +133,6 @@ fn direct_cache_factory_consumes_resident_policy_and_legacy_vector_budget() {
     assert_eq!(actual.max_projects, 2);
     assert_eq!(actual.min_vectors, 3);
     assert_eq!(actual.vector_cache_max_bytes, 1024);
+    assert_eq!(actual.ann_lifetimes, settings.ann_lifetimes);
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
 }

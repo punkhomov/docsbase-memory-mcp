@@ -125,6 +125,11 @@ fn explicit_daemon_policy_reaches_dense_and_query_resources() {
         max_vectors: 4,
         min_vectors: 1,
         query_cache_max_entries: 1,
+        ann_lifetimes: docsbase_memory::hybrid::dense_settings::AnnLifetimes::new(
+            std::time::Duration::from_secs(120),
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap(),
         ..policy()
     };
     let shared = docsbase_memory::daemon::server::Shared::open_with_dense_policy(
@@ -134,6 +139,7 @@ fn explicit_daemon_policy_reaches_dense_and_query_resources() {
         &settings,
     )
     .unwrap();
+    assert_eq!(shared.dense.limits().ann_lifetimes, settings.ann_lifetimes);
     assert!(matches!(
         shared.dense.get(&db, id, "settings-probe@d3@l2").unwrap(),
         DenseRows::TooLarge(_)
