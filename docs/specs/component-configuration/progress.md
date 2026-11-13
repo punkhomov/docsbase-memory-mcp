@@ -900,3 +900,35 @@ Git blob IDs/hunk offsets. Corrected scratch reproduction to dev-dependencies:
 research is test-only and normal dependency produced Cargo's unused warning.
 No product/source/schema/experiment behavior changed; final manifest revalidation
 and native delivery follow this head.
+
+Task CF5b2a: in progress (2026-11-13). Separate worktree based on reviewed CF5b1
+head dea1d11/PR154. Audited POSIX/Apple/Microsoft primary semantics; isolated
+libc0.2.191 scratch reproduces naive rename xattr loss and new source despite an
+injected post-rename parent-flush error. Known single-xattr same-owner positive
+case, old reader, process boundaries, Missing no-replace and nofollow/hardlink/
+bounded-capture evidence; first7/0/0 (6substantive+helper), Clippy clean. Added
+between-rename-and-parent-flush process exit before final validation. Product
+dependencies/lock/src/test inventory, real configs and baseline untouched.
+Ruling: research contract and versioned attribute/stage-extension requirements
+only; full metadata/ACL/native namespace/storage/three-OS proof remains CF5b2b/c.
+Fresh task/final review and required native delivery pending; no activation claim.
+
+Task CF5b2a: complete (research/source/task-review scope, 2026-11-13).
+Fresh task review PASS/APPROVED; no Critical/Important. Minor scratch manifest
+dependency belongs in dev-dependencies because harness is test-only; corrected
+reproduction and scratch manifest, including equivalent CF5b1 recipe in PR154.
+Final7/0/0 covers all3process boundaries; no deferred minors. Independent final
+review/native delivery pending; whole CF5b2/CF5b3/CF5c/#78 remain unfinished.
+
+CF5b2a independent final review: converged, no Critical/Important. Minor Windows
+reference wording corrected: ignore-merge/ACL flags permit ACL loss, so future
+adapter prohibits them. Additional primary Linux listxattr audit records omitted
+inaccessible names: visible enumeration alone cannot prove complete native
+metadata preservation; CF5b2b must resolve this contract before product code.
+No deferred minors; source unchanged, final narrow documentation review pending.
+
+CF5b2a final documentation re-review: Minor ADDRESSED; added Linux enumeration
+limitation preserves the future proof gate; no new Critical/Important. Task/final
+source review converged, no deferred minors. Final test-only-manifest run7/0/0
+and Clippy have no compiler/manifest warnings. Preparing stacked native delivery;
+this is not whole CF5b2 or activation acceptance.

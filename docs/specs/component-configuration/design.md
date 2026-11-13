@@ -806,3 +806,14 @@ WAL experiment showed BEGIN IMMEDIATE creates sidecars before stale validation;
 it cannot satisfy the coordination-only allowlist. The native lease admits only
 sidecar-free quiescent stores and is retained through bounded local publication.
 No operational Db open, migration/recovery or second POSIX DB descriptor is used.
+
+## Delta 2026-11-13 — CF5b2a native source evidence
+
+[Source-publication research](source-publication.md) and its isolated existing-libc
+experiment distinguish actual rename/metadata/flush/process behavior from future
+product guarantees. Selected direction is private same-volume stage, admitted full
+native metadata, native replacement and separately verified parent durability;
+in-place overwrite and metadata-blind rename are rejected. Missing-target
+no-replace and post-attempt inspection remain distinct cases. Research schema1
+must be extended with bounded attribute/stage evidence before an executor; exact
+platform implementation and native three-OS acceptance remain CF5b2b/c gates.
