@@ -144,3 +144,22 @@ negative retained. Staleendpoint RED→GREEN, Node58/0, native2/0, build/check/f
 diff0. Original task and most-capable final scoped reviewers PASS/APPROVED, no new
 findings. Evidence /workspace/scratch/agent-b/79/windows-endpoint-fix/.
 No production SDK/Rust behavior change, no retry/skip; fresh exactheadnative4 pending.
+
+2026-11-13 Task 155-static-draft: Ruling: temporary characterization draft only,
+base92c3b61 (main after #157), experiment/windows-transport-retirement-155. Windows-only four-case
+owned-thread FlushFileBuffers probe, supervisor-owned CandidateFrozen/shared
+records and finite external containment drafted; dispatch-only Windows workflow
+must never merge into main. Explicit existing windows-sys IO/Security/Memory
+features are probe-only and controller-authorized; no src/lock/product feature
+changes. Direct Rust1.100 rustfmt/static verification only; local Cargo slot
+belongs to S1a. No production TDD/compile/native pass or task-complete claim.
+Fresh static whole-diff review/controller permission required before push or
+one exact-ref Windows dispatch. #155 and production owner/E2E obligations open.
+Protocol: experiments/transport155-native-probe.md. Draft review/evidence package:
+/workspace/scratch/agent-b/155/. Any failed/missing candidate, forced termination,
+or unreaped child is failure/inconclusive; no rerun to obtain favorable evidence.
+
+Task 155-static-draft: Ruling: clean rebase onto main92c3b61 before fresh draft
+review — CLI147/#157 is inherited intact; sourceguard compares the draft to92,
+with all src/** and Cargo.lock unchanged. Approved plan's original1da8 baseline
+is retained as provenance; no local Cargo/native claim or remote action added.

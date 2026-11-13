@@ -1,285 +1,140 @@
-name: ci
+# TEMPORARY #155 PROBE BRANCH ONLY. NEVER MERGE THIS WORKFLOW INTO MAIN.
+# Replaces the normal four-job CI only on experiment/windows-transport-retirement-155.
+name: transport155-native-probe
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
+    inputs:
+      expected_revision:
+        description: Exact static-reviewed probe commit (40 hex characters)
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: "ci-${{ github.ref }}"
-  cancel-in-progress: true
+  group: transport155-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
-  CARGO_TERM_COLOR: always
-  # rust-toolchain.toml pins stable 1.100.0 for local development; CI validates the
-  # MSRV toolchain explicitly (the env var overrides the file).
+  CARGO_TERM_COLOR: never
   RUSTUP_TOOLCHAIN: "1.100.0"
 
 jobs:
-  docs:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-      - name: Repo hygiene (README/docs/installers/version)
-        run: |
-          set -e
-          test -f README.md
-          test -f README.ru.md
-          test -f CHANGELOG.md
-          test -f install.sh
-          test -f install.ps1
-          test -f docs/INSTALL.md
-          test -f docs/QUICKSTART.md
-          test -f docs/CONFIG.md
-          test -f docs/MCP.md
-          test -f docs/ARCHITECTURE.md
-          test -f docs/ci.md
-          sh -n install.sh
-          VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
-          grep -q "\[$VERSION\]" CHANGELOG.md || (echo "::error::CHANGELOG.md has no [$VERSION] entry" && exit 1)
-          grep -q 'README.ru.md' README.md
-          grep -q 'README.md' README.ru.md
-          echo "docs gate OK (version $VERSION)"
-      - name: Audit locked Cargo publication ages
-        run: python3 .github/scripts/check-cargo-age.py
-      - name: CI observer regression checks
-        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
-
-  linux:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      DOCSBASE_BENCH_LATENCY_SLACK: "3"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .node-version
-      - name: Prepare Web assets and Node IPC client
-        shell: bash
-        run: |
-          corepack enable
-          corepack install
-          pnpm install --frozen-lockfile
-          pnpm run audit
-          pnpm --dir web format:check
-          pnpm --dir web check
-          pnpm --dir web test:unit
-          pnpm --dir web build
-          pnpm --dir packages/client format:check
-          pnpm --dir packages/client build
-          pnpm --dir packages/client check
-          pnpm --dir packages/client test
-          client_pack="$RUNNER_TEMP/docsbase-client-package"
-          mkdir -p "$client_pack"
-          pnpm --dir packages/client pack --pack-destination "$client_pack"
-          python3 .github/scripts/check-node-package.py "$client_pack"
-      - uses: dtolnay/rust-toolchain@1.100.0
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        id: rust-cache
-      - name: Initialize test diagnostics
-        shell: bash
-        run: |
-          # Never publish observations restored from an earlier cache entry.
-          rm -rf target/ci-observations target/cargo-timings
-          echo "CI_RUST_CACHE_HIT=${{ steps.rust-cache.outputs.cache-hit }}" >> "$GITHUB_ENV"
-      - name: Lean dependency boundary (NFR-1, SC-1)
-        run: |
-          mkdir -p target/ci-observations
-          # Separate the producer so a failed cargo tree cannot look offline.
-          cargo tree --locked --color never -e normal > target/ci-observations/lean-dependency-tree.txt
-          if [ ! -s target/ci-observations/lean-dependency-tree.txt ]; then
-            echo "::error::cargo tree returned an empty dependency graph"
-            exit 1
-          fi
-          if grep -wE 'axum|ts-rs|fastembed|ort|tokenizers|hf-hub|image|native-tls|ureq|reqwest|rig-core|rig-http' target/ci-observations/lean-dependency-tree.txt; then
-            echo "::error::forbidden crate leaked into the default build (NFR-1)"
-            exit 1
-          fi
-          echo "default build has no network/ML crates"
-      - name: Lints (Linux)
-        run: |
-          cargo fmt --check
-          cargo clippy --locked --features cli-full --all-targets -- -D warnings
-          # Opt-in test targets are not selected by --all-targets.
-          cargo clippy --locked --features cli-full --test perf_budget -- -D warnings
-          cargo clippy --locked --features cli-full --test artifact -- -D warnings
-      - name: Prepare functional suite (Linux)
-        run: python3 .github/scripts/observe-tests.py --suite cli-full --phase prepare -- cargo test --locked --features cli-full --no-run --timings
-      - name: Inventory functional suite (Linux)
-        run: python3 .github/scripts/observe-tests.py --suite cli-full --phase inventory -- cargo test --locked --features cli-full -- --list
-      - name: Functional suite (Linux)
-        run: python3 .github/scripts/observe-tests.py --suite cli-full --phase execute -- cargo test --locked --features cli-full
-
-      - name: Browser acceptance (real daemon)
-        run: |
-          pnpm --dir web exec playwright install --with-deps chromium
-          pnpm --dir web test
-      - name: Upload browser evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: web-browser-evidence
-          path: |
-            web/test-results/
-            web/playwright-report/
-      - name: Full CLI provider capabilities (offline)
-        run: python3 .github/scripts/check-cli-capabilities.py target/debug/docsbase
-      - name: Embedded Web artifact smoke
-        run: python3 .github/scripts/check-web-artifact.py target/debug/docsbase
-      - name: Build static CLI (NFR-6, ADR-8)
-        run: python3 .github/scripts/observe-tests.py --suite static-artifact-build --phase prepare -- cargo release-static --locked --timings
-      - name: Static artifact checks (NFR-2, NFR-6)
-        run: |
-          python3 .github/scripts/observe-tests.py --suite static-artifact --phase prepare -- cargo test --locked --features cli-full --test artifact --no-run --timings
-          python3 .github/scripts/observe-tests.py --suite static-artifact --phase inventory -- cargo test --locked --features cli-full --test artifact -- --list
-          python3 .github/scripts/observe-tests.py --suite static-artifact --phase execute -- cargo test --locked --features cli-full --test artifact -- --nocapture
-      - name: Static CLI provider capabilities (offline)
-        run: python3 .github/scripts/check-cli-capabilities.py target/x86_64-unknown-linux-gnu/release/docsbase
-      - name: Embedded Web artifact smoke
-        run: python3 .github/scripts/check-web-artifact.py target/x86_64-unknown-linux-gnu/release/docsbase
-      - name: Upload test diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-diagnostics-${{ github.job }}-${{ github.run_attempt }}
-          retention-days: 14
-          path: |
-            target/ci-observations/
-            target/cargo-timings/
-
-  windows:
+  windows-probe:
+    if: github.ref == 'refs/heads/experiment/windows-transport-retirement-155'
+    # GitHub-hosted Windows jobs use a fresh disposable VM. No self-hosted runner
+    # is permitted. The job timeout/disposal is independent of all probe processes.
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+      - name: Establish exact ref and disposable-host provenance
+        shell: pwsh
+        env:
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force target/probe155 | Out-Null
+          if ($env:EXPECTED_REVISION -notmatch '^[0-9a-f]{40}$' -or $env:EXPECTED_REVISION -cne '${{ github.sha }}') {
+            throw 'Dispatch revision is not the exact static-reviewed commit'
+          }
+          if ('${{ runner.environment }}' -ne 'github-hosted') { throw 'Disposable hosted VM required' }
+          $os = Get-CimInstance Win32_OperatingSystem
+          @{
+            schema = 1; revision = '${{ github.sha }}'; ref = '${{ github.ref }}'
+            run_id = '${{ github.run_id }}'; run_attempt = '${{ github.run_attempt }}'
+            runner_environment = '${{ runner.environment }}'; runner_os = '${{ runner.os }}'
+            image_os = $env:ImageOS; image_version = $env:ImageVersion
+            windows_caption = $os.Caption; windows_version = $os.Version; windows_build = $os.BuildNumber
+            architecture = $env:PROCESSOR_ARCHITECTURE
+            job_timeout_minutes = 60; external_probe_watchdog_ms = 180000
+            disposal_contract = 'GitHub-hosted fresh VM per job; job timeout then runner disposal'
+          } | ConvertTo-Json | Set-Content -Encoding utf8 target/probe155/host.json
+          "PROBE_WINDOWS_BUILD=$($os.Caption) $($os.Version) build $($os.BuildNumber)" >> $env:GITHUB_ENV
+          "PROBE_GIT_REVISION=${{ github.sha }}" >> $env:GITHUB_ENV
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
-      - name: Prepare Web assets and Node IPC client
+      - name: Prepare locked assets and Node client with repository cooldown policy
         shell: bash
         run: |
+          set -euo pipefail
           corepack enable
           corepack install
           pnpm install --frozen-lockfile
           pnpm run audit
-          pnpm --dir web format:check
-          pnpm --dir web check
-          pnpm --dir web test:unit
           pnpm --dir web build
-          pnpm --dir packages/client format:check
           pnpm --dir packages/client build
-          pnpm --dir packages/client check
-          pnpm --dir packages/client test
-          client_pack="$RUNNER_TEMP/docsbase-client-package"
-          mkdir -p "$client_pack"
-          pnpm --dir packages/client pack --pack-destination "$client_pack"
-          python3 .github/scripts/check-node-package.py "$client_pack"
+          node --version > target/probe155/node-version.txt
+          pnpm --version > target/probe155/pnpm-version.txt
       - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-        id: rust-cache
-      - name: Initialize test diagnostics
-        shell: bash
+        with:
+          shared-key: transport155-probe-rust-1.100.0
+          # Never restore old experiment evidence from a target directory.
+          cache-targets: false
+      - name: Compile only the Windows characterization target
+        timeout-minutes: 45
+        shell: pwsh
         run: |
-          # Never publish observations restored from an earlier cache entry.
-          rm -rf target/ci-observations target/cargo-timings
-          echo "CI_RUST_CACHE_HIT=${{ steps.rust-cache.outputs.cache-hit }}" >> "$GITHUB_ENV"
-      - name: Lints (ADR-10)
+          $ErrorActionPreference = 'Stop'
+          rustc -Vv | Set-Content target/probe155/rustc.txt
+          cargo -Vv | Set-Content target/probe155/cargo.txt
+          cargo test --locked --features cli-full --test windows_transport_probe --no-run --message-format=json 1> target/probe155/build.jsonl 2> target/probe155/build.stderr.log
+          if ($LASTEXITCODE -ne 0) { throw "Probe compilation failed: $LASTEXITCODE" }
+          $artifacts = @(Get-Content target/probe155/build.jsonl | ForEach-Object {
+            $item = $_ | ConvertFrom-Json
+            if ($item.reason -eq 'compiler-artifact' -and $item.target.name -eq 'windows_transport_probe' -and $item.executable) { $item.executable }
+          })
+          if ($artifacts.Count -ne 1) { throw 'Expected exactly one probe test executable' }
+          $artifacts[0] | Set-Content target/probe155/executable.txt
+          Get-FileHash -Algorithm SHA256 $artifacts[0] | ConvertTo-Json | Set-Content target/probe155/executable-sha256.json
+      - name: Run the four cases once under an independent process watchdog
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          DOCSBASE_155_DISPOSABLE_HOST: github-hosted-windows
         run: |
-          cargo fmt --check
-          cargo clippy --locked --features cli-full --all-targets -- -D warnings
-      - name: Prepare functional suite (Windows)
-        run: python .github/scripts/observe-tests.py --suite cli-full --phase prepare -- cargo test --locked --features cli-full --no-run --timings
-      - name: Inventory functional suite (Windows)
-        run: python .github/scripts/observe-tests.py --suite cli-full --phase inventory -- cargo test --locked --features cli-full -- --list
-      - name: Functional suite (daemon + CLI + MCP, ADR-10)
-        run: python .github/scripts/observe-tests.py --suite cli-full --phase execute -- cargo test --locked --features cli-full
-
-      - name: Full CLI provider capabilities (offline)
-        run: python .github/scripts/check-cli-capabilities.py target/debug/docsbase.exe
-      - name: Embedded Web artifact smoke
-        run: python .github/scripts/check-web-artifact.py target/debug/docsbase.exe
-      - name: Upload test diagnostics
+          $ErrorActionPreference = 'Stop'
+          $env:DOCSBASE_155_EVIDENCE = Join-Path $PWD 'target/probe155/cases'
+          New-Item -ItemType Directory -Force $env:DOCSBASE_155_EVIDENCE | Out-Null
+          $executable = (Get-Content target/probe155/executable.txt -Raw).Trim()
+          $watchdogFile = Join-Path $PWD 'target/probe155/external-watchdog.jsonl'
+          function Record-Watchdog($kind, $data) {
+            $line = @{schema=1; kind=$kind; utc=[DateTime]::UtcNow.ToString('o'); data=$data} | ConvertTo-Json -Compress
+            $stream = [System.IO.FileStream]::new($watchdogFile, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+            try {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($line + "`n")
+              $stream.Write($bytes, 0, $bytes.Length)
+              $stream.Flush($true)
+            } finally { $stream.Dispose() }
+            Write-Host $line
+            [Console]::Out.Flush()
+          }
+          Record-Watchdog 'SupervisorLaunch' @{executable=$executable; deadline_ms=180000}
+          $process = Start-Process -FilePath $executable -ArgumentList @('--exact','windows_transport_probe','--nocapture','--test-threads=1') -PassThru -NoNewWindow -RedirectStandardOutput target/probe155/supervisor.stdout.log -RedirectStandardError target/probe155/supervisor.stderr.log
+          Record-Watchdog 'SupervisorStarted' @{pid=$process.Id}
+          if (-not $process.WaitForExit(180000)) {
+            Record-Watchdog 'ExternalWatchdogExpired' @{failure=$true; candidate_missing_is_inconclusive=$true}
+            # Only the owned supervisor is targeted, once. Killing it is not proof
+            # its child or pending native I/O retired; VM disposal remains required.
+            try { $process.Kill(); Record-Watchdog 'SupervisorKillRequested' @{pid=$process.Id} }
+            catch { Record-Watchdog 'SupervisorKillError' @{message=$_.Exception.Message} }
+            $reaped = $process.WaitForExit(5000)
+            Record-Watchdog 'SupervisorReap' @{signaled=$reaped; failure=$true}
+            throw 'Native probe external watchdog expired; stop, retain evidence, dispose VM'
+          }
+          Record-Watchdog 'SupervisorExited' @{exit_code=$process.ExitCode}
+          if ($process.ExitCode -ne 0) { throw "Native probe failed/inconclusive: $($process.ExitCode)" }
+      - name: Preserve raw evidence even on compile, probe or cleanup failure
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-diagnostics-${{ github.job }}-${{ github.run_attempt }}
+          name: transport155-${{ github.sha }}-${{ github.run_attempt }}
+          path: target/probe155/
+          if-no-files-found: error
           retention-days: 14
-          path: |
-            target/ci-observations/
-            target/cargo-timings/
-
-  macos:
-    # Native shipped CLI profile (macOS aarch64).
-    runs-on: macos-latest
-    timeout-minutes: 60
-    env:
-      # Documented floor (requirements.md): enforce it in the build.
-      MACOSX_DEPLOYMENT_TARGET: "12.0"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .node-version
-      - name: Prepare Web assets and Node IPC client
-        shell: bash
-        run: |
-          corepack enable
-          corepack install
-          pnpm install --frozen-lockfile
-          pnpm run audit
-          pnpm --dir web format:check
-          pnpm --dir web check
-          pnpm --dir web test:unit
-          pnpm --dir web build
-          pnpm --dir packages/client format:check
-          pnpm --dir packages/client build
-          pnpm --dir packages/client check
-          pnpm --dir packages/client test
-          client_pack="$RUNNER_TEMP/docsbase-client-package"
-          mkdir -p "$client_pack"
-          pnpm --dir packages/client pack --pack-destination "$client_pack"
-          python3 .github/scripts/check-node-package.py "$client_pack"
-      - uses: dtolnay/rust-toolchain@1.100.0
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        id: rust-cache
-      - name: Initialize test diagnostics
-        shell: bash
-        run: |
-          # Never publish observations restored from an earlier cache entry.
-          rm -rf target/ci-observations target/cargo-timings
-          echo "CI_RUST_CACHE_HIT=${{ steps.rust-cache.outputs.cache-hit }}" >> "$GITHUB_ENV"
-      - name: Lints (macOS)
-        run: |
-          cargo fmt --check
-          cargo clippy --locked --features cli-full --all-targets -- -D warnings
-      - name: Prepare functional suite (macOS)
-        run: python3 .github/scripts/observe-tests.py --suite cli-full --phase prepare -- cargo test --locked --features cli-full --no-run --timings
-      - name: Inventory functional suite (macOS)
-        run: python3 .github/scripts/observe-tests.py --suite cli-full --phase inventory -- cargo test --locked --features cli-full -- --list
-      - name: Functional suite (macOS, aarch64)
-        run: python3 .github/scripts/observe-tests.py --suite cli-full --phase execute -- cargo test --locked --features cli-full
-      - name: Full CLI provider capabilities (offline)
-        run: python3 .github/scripts/check-cli-capabilities.py target/debug/docsbase
-      - name: Embedded Web artifact smoke
-        run: python3 .github/scripts/check-web-artifact.py target/debug/docsbase
-      - name: Upload test diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-diagnostics-${{ github.job }}-${{ github.run_attempt }}
-          retention-days: 14
-          path: |
-            target/ci-observations/
-            target/cargo-timings/
