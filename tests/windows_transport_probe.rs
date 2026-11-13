@@ -242,6 +242,8 @@ impl Records {
         {
             std::hint::spin_loop();
         }
+        // Diagnostic sample only: supervisor classifies late commits against
+        // its immutable frozen snapshot, never against this pre-commit load.
         slot.cleanup.store(self.cleanup.load(SeqCst), SeqCst);
         for (field, value) in slot.args.iter().zip(args) {
             field.store(value, SeqCst);
@@ -1271,7 +1273,12 @@ impl Evidence {
         writeln!(output)?;
         output.flush()
     }
-    fn pump(&mut self, records: &Records, seen: &mut [bool; SLOT_COUNT]) -> io::Result<()> {
+    fn pump(
+        &mut self,
+        records: &Records,
+        seen: &mut [bool; SLOT_COUNT],
+        frozen: Option<&Snapshot>,
+    ) -> io::Result<()> {
         let mut published = Vec::with_capacity(SLOT_COUNT);
         for (index, observed) in seen.iter().enumerate() {
             if !observed && let Some((sequence, cleanup, args)) = records.get_index(index) {
@@ -1281,10 +1288,20 @@ impl Evidence {
         published.sort_by_key(|record| record.0);
         for (sequence, index, cleanup, args) in published {
             let event = event_name(index);
+            // The child's cleanup sample precedes its commit and is diagnostic
+            // only. After freeze, exact owned snapshot membership is authoritative:
+            // a stalled writer absent there cannot later become Candidate.
+            let (phase, phase_basis) = match frozen {
+                None => ("Candidate", "BeforeCandidateFreeze"),
+                Some(snapshot) if snapshot.contains(index, sequence) => {
+                    ("Candidate", "FrozenSnapshot")
+                }
+                Some(_) => ("Cleanup", "AbsentFromFrozenSnapshot"),
+            };
             self.emit(
                 "NativeRecord",
                 json!({"publication_sequence":sequence, "event":event,
-                "phase":if cleanup == 0 {"Candidate"} else {"Cleanup"}, "args":args,
+                "phase":phase, "phase_basis":phase_basis, "child_cleanup_sample":cleanup, "args":args,
                     "error_message":if index == Event::ChildError as usize {Some(records.error_message(0))}
                         else if index == Event::CleanupError as usize {Some(records.error_message(1))} else {None}}),
             )?;
@@ -1309,33 +1326,92 @@ fn event_name(index: usize) -> String {
     }
     .to_owned()
 }
-fn snapshot(records: &Records) -> Value {
-    let slots: Vec<Value> = (0..SLOT_COUNT)
-        .filter_map(|index| {
-            records.get_index(index).map(|(sequence, cleanup, args)| {
-                json!({"slot":index,
-            "publication_sequence":sequence,"cleanup":cleanup,"args":args})
-            })
-        })
-        .collect();
-    json!({"slots":slots,"duplicate_publication":records.duplicate_publication.load(SeqCst),
-        "read_released":records.read_released.load(SeqCst),"read_started":records.read_started.load(SeqCst),
-        "candidate_error":records.get(Event::ChildError).map(|_| records.error_message(0)),
-        "cleanup_error":records.get(Event::CleanupError).map(|_| records.error_message(1))})
+#[derive(Clone, Copy)]
+struct CapturedSlot {
+    sequence: u32,
+    child_cleanup_sample: u32,
+    args: [u64; 8],
 }
-fn validate_candidate(records: &Records, case: Case) -> bool {
-    let Some(ready) = records.get(Event::CandidateReady) else {
+// Supervisor-owned evidence, captured once. This is not an atomic native-state
+// observation. Validation, reason and serialized CandidateFrozen all use this
+// same immutable value; none can pick up a later live record or flag.
+struct Snapshot {
+    slots: [Option<CapturedSlot>; SLOT_COUNT],
+    duplicate_publication: u32,
+    read_released: u32,
+    read_started: u32,
+    candidate_error: Option<String>,
+    cleanup_error: Option<String>,
+    child_exited_before_candidate: bool,
+}
+impl Snapshot {
+    fn capture(records: &Records, child_exited_before_candidate: bool) -> Self {
+        let slots: [Option<CapturedSlot>; SLOT_COUNT] = std::array::from_fn(|index| {
+            records
+                .get_index(index)
+                .map(|(sequence, child_cleanup_sample, args)| CapturedSlot {
+                    sequence,
+                    child_cleanup_sample,
+                    args,
+                })
+        });
+        Self {
+            duplicate_publication: records.duplicate_publication.load(SeqCst),
+            read_released: records.read_released.load(SeqCst),
+            read_started: records.read_started.load(SeqCst),
+            candidate_error: slots[Event::ChildError as usize]
+                .is_some()
+                .then(|| records.error_message(0)),
+            cleanup_error: slots[Event::CleanupError as usize]
+                .is_some()
+                .then(|| records.error_message(1)),
+            child_exited_before_candidate,
+            slots,
+        }
+    }
+    fn get(&self, event: Event) -> Option<[u64; 8]> {
+        self.slots[event as usize].map(|slot| slot.args)
+    }
+    fn get_index(&self, index: usize) -> Option<(u32, u32, [u64; 8])> {
+        self.slots[index].map(|slot| (slot.sequence, slot.child_cleanup_sample, slot.args))
+    }
+    fn contains(&self, index: usize, sequence: u32) -> bool {
+        self.slots[index].is_some_and(|slot| slot.sequence == sequence)
+    }
+    fn to_json(&self) -> Value {
+        let slots: Vec<Value> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                slot.map(|slot| {
+                    json!({"slot":index, "publication_sequence":slot.sequence,
+                "child_cleanup_sample":slot.child_cleanup_sample, "args":slot.args})
+                })
+            })
+            .collect();
+        json!({"slots":slots,"duplicate_publication":self.duplicate_publication,
+            "read_released":self.read_released,"read_started":self.read_started,
+            "candidate_error":self.candidate_error.as_deref(),"cleanup_error":self.cleanup_error.as_deref(),
+            "child_exited_before_candidate":self.child_exited_before_candidate})
+    }
+}
+fn validate_candidate(snapshot: &Snapshot, case: Case) -> bool {
+    if snapshot.child_exited_before_candidate {
+        return false;
+    }
+    let Some(ready) = snapshot.get(Event::CandidateReady) else {
         return false;
     };
     if ready[0] != case as u64
-        || records.duplicate_publication.load(SeqCst) != 0
-        || records.get(Event::ChildError).is_some()
-        || records.get(Event::WorkerFault).is_some()
-        || records.get(Event::ClientFault).is_some()
+        || snapshot.duplicate_publication != 0
+        || snapshot.get(Event::ChildError).is_some()
+        || snapshot.get(Event::WorkerFault).is_some()
+        || snapshot.get(Event::ClientFault).is_some()
     {
         return false;
     }
-    let Some(pending) = records.get(Event::PendingObserved) else {
+    let Some(pending) = snapshot.get(Event::PendingObserved) else {
         return false;
     };
     if !(1..=QUERY_CAP).contains(&pending[0])
@@ -1346,46 +1422,46 @@ fn validate_candidate(records: &Records, case: Case) -> bool {
     {
         return false;
     }
-    if records.get(Event::SetupComplete).is_none_or(|s| {
+    if snapshot.get(Event::SetupComplete).is_none_or(|s| {
         s[0] != u64::from(PIPE_FLAGS) || s[1] != u64::from(PIPE_MODE) || s[3] != FRAME.len() as u64
-    }) || records
+    }) || snapshot
         .get(Event::ConnectCompleted)
         .is_none_or(|c| c[0] == 0)
-        || records
+        || snapshot
             .get(Event::WriteCompleted)
             .is_none_or(|w| w[0] == 0 || w[2] != FRAME.len() as u64)
-        || records
+        || snapshot
             .get(Event::ControlQuery)
             .is_none_or(|q| q[0] == 0 || q[1] != 0)
-        || records.get(Event::WorkerCreated).is_none()
-        || records.get(Event::ClientCreated).is_none()
-        || records
+        || snapshot.get(Event::WorkerCreated).is_none()
+        || snapshot.get(Event::ClientCreated).is_none()
+        || snapshot
             .get(Event::AbortSignaled)
             .is_none_or(|a| a[0] != u64::from(WAIT_OBJECT_0))
     {
         return false;
     }
-    let Some(abort) = records.get(Event::AbortReturned) else {
+    let Some(abort) = snapshot.get(Event::AbortReturned) else {
         return false;
     };
     if case == Case::CancelBeforeEntry {
         return abort[0] == 0
             && abort[1] == u64::from(ERROR_NOT_FOUND)
             && abort[2] == 0
-            && records.get(Event::FlushReturned).is_none()
-            && records.read_started.load(SeqCst) == 0
-            && records.read_released.load(SeqCst) == 0;
+            && snapshot.get(Event::FlushReturned).is_none()
+            && snapshot.read_started == 0
+            && snapshot.read_released == 0;
     }
-    if records
+    if snapshot
         .get(Event::WorkerSignaled)
         .is_none_or(|w| w[0] != u64::from(WAIT_OBJECT_0))
-        || records
+        || snapshot
             .get(Event::WorkerExitWait)
             .is_none_or(|w| w[0] != u64::from(WAIT_OBJECT_0))
     {
         return false;
     }
-    let Some(flush) = records.get(Event::FlushReturned) else {
+    let Some(flush) = snapshot.get(Event::FlushReturned) else {
         return false;
     };
     if case == Case::NormalDrain {
@@ -1393,15 +1469,15 @@ fn validate_candidate(records: &Records, case: Case) -> bool {
             && abort[0] == 0
             && abort[1] == u64::from(ERROR_NOT_FOUND)
             && abort[2] == 0
-            && records
+            && snapshot
                 .get(Event::ReadComplete)
                 .is_some_and(|r| r[0] == FRAME.len() as u64 && r[1] == 1)
             && (READ_CHUNK_BASE..READ_CHUNK_BASE + FRAME.len())
-                .all(|i| records.get_index(i).is_none_or(|(_, _, a)| a[0] != 0))
-            && records.read_started.load(SeqCst) == 1
-            && records.read_released.load(SeqCst) == 1;
+                .all(|i| snapshot.get_index(i).is_none_or(|(_, _, a)| a[0] != 0))
+            && snapshot.read_started == 1
+            && snapshot.read_released == 1;
     }
-    if records.read_started.load(SeqCst) != 0 || records.read_released.load(SeqCst) != 0 {
+    if snapshot.read_started != 0 || snapshot.read_released != 0 {
         return false;
     }
     if case == Case::DisconnectAfterPositivePending {
@@ -1450,7 +1526,7 @@ fn run_case(case: Case, directory: &Path, suite_deadline: Instant) -> io::Result
     let mut seen = [false; SLOT_COUNT];
     let mut early_exit = false;
     loop {
-        evidence.pump(records, &mut seen)?;
+        evidence.pump(records, &mut seen, None)?;
         if records.get(Event::CandidateReady).is_some() {
             break;
         }
@@ -1470,21 +1546,33 @@ fn run_case(case: Case, directory: &Path, suite_deadline: Instant) -> io::Result
             break;
         }
     }
-    evidence.pump(records, &mut seen)?;
-    let candidate_good = validate_candidate(records, case) && !early_exit;
-    // Sole immutable candidate boundary. This disk/stdout record is flushed before
-    // any cleanup flag/event, endpoint cleanup, late drain or kill request.
-    evidence.emit("CandidateFrozen", json!({"valid":candidate_good,
-        "reason":if candidate_good {"RequiredCandidateRecords"} else if early_exit {"ChildExitedBeforeCandidate"}
-            else if records.get(Event::CandidateReady).is_none() {"MissingCandidateOrWatchdog"} else {"CandidateFailed"},
-        "snapshot":snapshot(records)}))?;
+    evidence.pump(records, &mut seen, None)?;
+    let frozen_snapshot = Snapshot::capture(records, early_exit);
+    let candidate_good = validate_candidate(&frozen_snapshot, case);
+    let candidate_reason = if candidate_good {
+        "RequiredCandidateRecords"
+    } else if frozen_snapshot.child_exited_before_candidate {
+        "ChildExitedBeforeCandidate"
+    } else if frozen_snapshot.get(Event::CandidateReady).is_none() {
+        "MissingCandidateOrWatchdog"
+    } else {
+        "CandidateFailed"
+    };
+    // Sole immutable candidate boundary. The owned snapshot is the only input
+    // to validity, reason and payload, and later records cannot change it. This
+    // disk/stdout record is flushed before cleanup flag/event, drain, close/kill.
+    evidence.emit(
+        "CandidateFrozen",
+        json!({"valid":candidate_good,
+        "reason":candidate_reason, "snapshot":frozen_snapshot.to_json()}),
+    )?;
     evidence.emit("CleanupBegin", json!({}))?;
     records.cleanup.store(1, SeqCst);
     signal(raw(&cleanup_event))?;
     let cleanup_deadline = (Instant::now() + Duration::from_millis(CLEANUP_MS)).min(suite_deadline);
     let mut signaled = false;
     while Instant::now() < cleanup_deadline {
-        evidence.pump(records, &mut seen)?;
+        evidence.pump(records, &mut seen, Some(&frozen_snapshot))?;
         let (result, error) = wait(process_handle, 10);
         if result == WAIT_OBJECT_0 {
             signaled = true;
@@ -1509,7 +1597,7 @@ fn run_case(case: Case, directory: &Path, suite_deadline: Instant) -> io::Result
         evidence.emit("TerminateReturned", json!({"bool":ok,"error":error}))?;
         let reap_deadline = (Instant::now() + Duration::from_millis(REAP_MS)).min(suite_deadline);
         while Instant::now() < reap_deadline {
-            evidence.pump(records, &mut seen)?;
+            evidence.pump(records, &mut seen, Some(&frozen_snapshot))?;
             let (result, error) = wait(process_handle, 10);
             if result == WAIT_OBJECT_0 {
                 signaled = true;
@@ -1521,11 +1609,11 @@ fn run_case(case: Case, directory: &Path, suite_deadline: Instant) -> io::Result
             }
         }
     }
-    evidence.pump(records, &mut seen)?;
+    evidence.pump(records, &mut seen, Some(&frozen_snapshot))?;
     if !signaled {
         evidence.emit(
             "ChildNotReaped",
-            json!({"failure":true,"snapshot":snapshot(records),
+            json!({"failure":true,"snapshot":Snapshot::capture(records, early_exit).to_json(),
             "disposition":"StopSuiteAndDisposeHostedRunner"}),
         )?;
         return Err(io::Error::other("ChildNotReaped; no more cases permitted"));
@@ -1547,7 +1635,7 @@ fn run_case(case: Case, directory: &Path, suite_deadline: Instant) -> io::Result
     evidence.emit(
         "CaseVerdict",
         json!({"pass":pass,"child_signaled":true,"exit_code":exit.code(),
-        "forced":forced,"candidate_unchanged":candidate_good,"snapshot":snapshot(records)}),
+        "forced":forced,"candidate_unchanged":candidate_good,"snapshot":Snapshot::capture(records, early_exit).to_json()}),
     )?;
     mapping.unmap()?;
     Ok(pass)

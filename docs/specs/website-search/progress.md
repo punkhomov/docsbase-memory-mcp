@@ -163,3 +163,10 @@ Task 155-static-draft: Ruling: clean rebase onto main92c3b61 before fresh draft
 review — CLI147/#157 is inherited intact; sourceguard compares the draft to92,
 with all src/** and Cargo.lock unchanged. Approved plan's original1da8 baseline
 is retained as provenance; no local Cargo/native claim or remote action added.
+
+Task 155-static-draft: Ruling: fix1 addresses fresh static review I1/I2 only —
+CandidateFrozen validation/reason/payload share one owned snapshot; post-capture
+record phase uses exact frozen membership, retaining child phase sample only as
+diagnostic data. Direct pinned rustfmt/static interleaving proofs only; native
+compilation/execution remain unverified, no Cargo or remote action. Ready for
+original scoped re-review; report/diff/evidence: /workspace/scratch/agent-b/155/fix1/.

@@ -96,7 +96,7 @@ manual-reset cleanup event, initially unsignaled. Mapping collision — failure
 x64 lock-free `AtomicU32`/`AtomicU64` — явные предпосылки реализации.
 
 Каждый slot имеет одного writer, CAS `0 → u32::MAX` claim, atomic payload,
-cleanup phase и final nonzero publication sequence. `u32::MAX` не является
+diagnostic `child_cleanup_sample` и final nonzero publication sequence. `u32::MAX` не является
 опубликованным record. Короткий child-only SeqCst atomic publication lock
 сериализует заполнение и sequence publication; под ним нет native call.
 Это interlocked publication посредством Rust x64 atomics, без handwritten ABI
@@ -144,17 +144,31 @@ disconnect отложен за snapshot; actual worker signaling проверя�
 
 ## Candidate boundary, failure и watchdogs
 
-Только supervisor создаёт immutable JSONL `CandidateFrozen`, включая valid/reason
-и snapshot опубликованных slots. `flush`, `sync_data` и stdout flush завершаются
+MODIFIED 2026-11-13 (fix1, review I1/I2): supervisor один раз копирует slots,
+flags, опубликованные error texts и parent early-exit observation в собственный
+fixed `Snapshot`. Validation, reason и сериализованный `CandidateFrozen.snapshot`
+читают только этот immutable owned value, без повторных чтений mapping. Это
+снимок evidence, а не atomic native-state observation. Только supervisor создаёт
+immutable JSONL `CandidateFrozen`, включая valid/reason и именно этот snapshot.
+`flush`, `sync_data` и stdout flush завершаются
 **до** `CleanupBegin`, shared cleanup flag и `SetEvent(cleanup)`. Child никогда
 сам не открывает cleanup. NormalDrain reads — часть candidate delivery action;
 любые cleanup drain/read/close/kill следуют за freeze. Даже hung query/abort или
 child controller не мешает parent заморозить failure по отсутствующим records.
 
-Phase в native record означает phase в момент publication. Возврат native call,
-опубликованный после cleanup flag, консервативно относится к cleanup; это
-`CompletedDuringCleanup`, даже если kernel вернул чуть раньше. Поздние records
-не пересчитывают `CandidateFrozen.valid`. Candidate pass дополнительно требует
+После capture phase определяется supervisor по точному membership
+`(slot, publication_sequence)` в frozen snapshot. Slot, отсутствующий в нём,
+публикуется как `phase=Cleanup`, `phase_basis=AbsentFromFrozenSnapshot`, даже если
+writer успел прочитать shared cleanup=0 до freeze, а commit сделал после начала
+cleanup. Included slot получает Candidate/FrozenSnapshot. До capture supervisor
+может печатать уже захваченные records как Candidate/BeforeCandidateFreeze;
+неизменность published slots гарантирует, что они будут включены в frozen
+snapshot. Child `child_cleanup_sample` сохраняется отдельно и не определяет phase.
+Late label консервативен: он включает commit между capture и release cleanup,
+не утверждает, что cleanup вызвал native return, и не является atomic kernel
+ordering. Запоздалый commit не может стать Candidate после cleanup. Поздние
+records не пересчитывают `CandidateFrozen.valid`. Candidate pass дополнительно
+требует
 ожидаемых control/setup/pending records и signaling. Final case pass требует
 неизменного valid candidate, successful child exit, observed worker/client
 signaling, `CleanupComplete`, отсутствия duplicate publication и forced kill.
@@ -227,10 +241,15 @@ Kinds: `CaseLaunch`, `ChildSpawned`, `NativeRecord`, `CandidateFrozen`,
 `TerminateReturned`, `ReapWaitFailure`, `ChildNotReaped`, `CaseVerdict`.
 `CandidateFrozen.data` содержит `valid`, `reason`, `snapshot`; `CaseVerdict`
 содержит final pass, child_signaled, exit_code, forced, candidate_unchanged,
-final snapshot. Snapshot содержит slots (index, publication_sequence, cleanup,
-args), duplicate_publication, current read flags и опубликованные error texts.
-`NativeRecord.data`: publication_sequence, event, phase (`Candidate`/`Cleanup`),
-восемь unsigned u64 `args`, optional error_message. BOOL сохраняется как
+final snapshot. Snapshot содержит slots (index, publication_sequence,
+child_cleanup_sample,
+args), duplicate_publication, captured read flags, опубликованные error texts и
+child_exited_before_candidate. MODIFIED 2026-11-13 (fix1, I1/I2): эти поля копируются
+один раз; именно их использует candidate validator.
+`NativeRecord.data`: publication_sequence, event, supervisor phase (`Candidate`/`Cleanup`),
+phase_basis (`BeforeCandidateFreeze`/`FrozenSnapshot`/`AbsentFromFrozenSnapshot`),
+независимый diagnostic child_cleanup_sample, восемь unsigned u64 `args`, optional
+error_message. BOOL сохраняется как
 32-bit bit pattern внутри u64; zero означает FALSE, nonzero TRUE. Last error
 равен 0 при BOOL success и валиден только при failure. Pending output BOOL
 валиден только при query success. Wait args сохраняют raw WAIT_* и immediate
