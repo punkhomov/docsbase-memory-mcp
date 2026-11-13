@@ -686,3 +686,18 @@ Search full/scoped/streaming paths используют source и проверя
 Project-budget setter становится fallible: Owned отказывает до runtime publication.
 Library signature experimental; stable CLI/MCP/file/IPC не меняются. Startup factory,
 sync/status composition и persisted adoption следуют отдельно по CF5/CF7.
+
+## Delta 2026-11-13 — CF7c1: prepared index embedding
+
+IndexEmbedding<'a> заимствует source и Option<&dyn Embedder>. Владелец composition
+отвечает за соответствие embedder/config snapshot, как в explicit search adapters;
+None — явное решение, не fallback после ошибки. Lifetime source удерживает strict
+owner весь синхронный job. Новые run_full_with_embedding и
+run_incremental_with_embedding проверяют root до чтения metadata/markers.
+Crate-private checked variant передаёт тот же stale gate через recreated-index
+full fallback. Существующие APIs выбирают configured callback jobs::embed_texts;
+prepared APIs — jobs::embed_texts_from. Общие full/incremental/finish cores
+принимают FnOnce(&Path,&[String])->Result<u64>; algorithm не дублируется и не
+содержит optional legacy fallback. Marker/provider/commit порядок прежний.
+Это additive embedded API adoption; production daemon/sync/watcher будут явно
+собирать coherent context следующим slice. V2/migration activation отсутствует.

@@ -455,3 +455,10 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   backfill/coverage/search consumers, strict project-budget refusal до publication.
   План [cf7b-plan.md](cf7b-plan.md). Без strict startup/file-v2/apply activation;
   production sync/status composition остаётся следующим этапом CF5/CF7.
+
+## Delta 2026-11-13 — CF7c1: source-aware index jobs
+
+- [ ] **CF7c1:** borrowed IndexEmbedding; реальные full/incremental prepared APIs
+  с общим core, owner admission до mutations, stale-gated recovery и retry markers.
+  План [cf7c1-plan.md](cf7c1-plan.md). Additive embedded path; daemon/sync/watcher
+  composition следует CF7c2, strict startup/file activation остаётся CF5/CF7.

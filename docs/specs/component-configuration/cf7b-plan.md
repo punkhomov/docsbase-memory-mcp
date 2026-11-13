@@ -58,7 +58,7 @@ CF7/#78 не закрываются. Нет live policy changes или новы�
   прежние config/stages/dense state.
 - [x] Focused tests, full cli-full, lean focused, full/lean all-target Clippy,
   fmt/diff; dated deltas и ledger, fresh task/final review, fix rounds.
-- [ ] Native docs/Linux/macOS/Windows + inventory against PR140, squash delivery.
+- [x] Native docs/Linux/macOS/Windows + inventory against PR140, squash delivery.
 
 Команды: source /tmp/docsbase-rust100-env.sh; cargo test --locked --features cli-full
 --test vector_store_consumers; cargo test --locked --features cli-full --lib;
