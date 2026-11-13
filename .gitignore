@@ -13,3 +13,10 @@ __pycache__/
 
 # Local agent harness (review panel prompts, machine-mode config)
 /.pi/
+/web/node_modules/
+/web/dist/
+/web/test-results/
+/web/playwright-report/
+/work/
+
+/node_modules/

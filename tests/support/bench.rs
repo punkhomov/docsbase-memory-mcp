@@ -371,7 +371,7 @@ fn check_notes_reviewers(cases: &[QueryCase]) -> anyhow::Result<()> {
             );
         }
         if case.reviewed_by.is_empty() {
-            anyhow::bail!("case {:?}: needs >=1 reviewer (FR-2), found none", case.id,);
+            anyhow::bail!("case {:?}: needs >=1 reviewer (FR-2), found none", case.id);
         }
         let needs_notes = critical || case.expected.iter().any(|hit| hit.grade == 1);
         if needs_notes && case.notes.trim().is_empty() {
@@ -1002,8 +1002,7 @@ impl VectorFixture {
             let path = entry.path();
             let name = path
                 .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
+                .map_or_default(|name| name.to_string_lossy().into_owned());
             let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
             let stale_bin = name.starts_with("vectors-")
                 && extension.eq_ignore_ascii_case("bin")
@@ -1053,11 +1052,13 @@ impl VectorFixture {
 }
 
 fn bytes_to_f32_le(bytes: &[u8]) -> anyhow::Result<Vec<f32>> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         anyhow::bail!("vector blob length {} is not a multiple of 4", bytes.len());
     }
     Ok(bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect())
 }
@@ -2546,8 +2547,7 @@ pub fn latency_allowed_ms(baseline_p95_ms: f64) -> f64 {
 fn unix_timestamp() -> String {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs().to_string())
-        .unwrap_or_default()
+        .map_or_default(|elapsed| elapsed.as_secs().to_string())
 }
 
 /// Hard-fail gate: every [`FailureKind`] carries config/slice/case context
@@ -3122,14 +3122,14 @@ pub fn load_baseline(path: &std::path::Path) -> anyhow::Result<Baseline> {
 /// Bails on serialization or filesystem failures.
 pub fn write_baseline(baseline: &Baseline, path: &std::path::Path) -> anyhow::Result<()> {
     let mut canonical = canonical_baseline_value(baseline)?;
-    if let Ok(existing) = std::fs::read_to_string(path) {
-        if let Ok(existing_value) = serde_json::from_str::<serde_json::Value>(&existing) {
-            strip_volatile(&mut canonical);
-            let mut existing_canonical = existing_value;
-            strip_volatile(&mut existing_canonical);
-            if existing_canonical == canonical {
-                return Ok(());
-            }
+    if let Ok(existing) = std::fs::read_to_string(path)
+        && let Ok(existing_value) = serde_json::from_str::<serde_json::Value>(&existing)
+    {
+        strip_volatile(&mut canonical);
+        let mut existing_canonical = existing_value;
+        strip_volatile(&mut existing_canonical);
+        if existing_canonical == canonical {
+            return Ok(());
         }
     }
     let payload = serde_json::to_string_pretty(baseline).context("serialize baseline")?;
@@ -3375,8 +3375,7 @@ pub fn regenerate_from_fixtures(
     let self_report = build_report(&baseline, None);
     let fresh_known = gate_failures(&self_report, &baseline);
     let old_known = load_baseline(&root.join("baseline.json"))
-        .map(|previous| previous.known_failures)
-        .unwrap_or_default();
+        .map_or_default(|previous| previous.known_failures);
     check_known_growth(&old_known, &fresh_known, accept_new_known)?;
     baseline.known_failures = fresh_known;
     Ok(baseline)
@@ -3685,19 +3684,13 @@ pub mod live_transport {
         /// Snapshot of recorded usage so far.
         #[must_use]
         pub fn usage(&self) -> LiveUsage {
-            self.usage
-                .lock()
-                .map(|guard| guard.clone())
-                .unwrap_or_default()
+            self.usage.lock().map_or_default(|guard| guard.clone())
         }
 
         /// Dollars spent so far (estimated from recorded usage).
         #[must_use]
         pub fn spent_usd(&self) -> f64 {
-            self.spent_usd
-                .lock()
-                .map(|guard| *guard)
-                .unwrap_or_default()
+            self.spent_usd.lock().map_or_default(|guard| *guard)
         }
     }
 
@@ -3818,7 +3811,7 @@ impl<R: Reranker> Reranker for PacingReranker<R> {
             if let Some(previous) = *last {
                 let elapsed = previous.elapsed();
                 if elapsed < self.min_interval {
-                    std::thread::sleep(self.min_interval - elapsed);
+                    std::thread::sleep(self.min_interval.checked_sub(elapsed).unwrap());
                 }
             }
             *last = Some(std::time::Instant::now());
@@ -3849,7 +3842,7 @@ impl<E: Embedder> PacingEmbedder<E> {
             if let Some(previous) = *last {
                 let elapsed = previous.elapsed();
                 if elapsed < self.min_interval {
-                    std::thread::sleep(self.min_interval - elapsed);
+                    std::thread::sleep(self.min_interval.checked_sub(elapsed).unwrap());
                 }
             }
             *last = Some(std::time::Instant::now());

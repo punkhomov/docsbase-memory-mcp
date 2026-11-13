@@ -61,9 +61,8 @@ fn jobs_embed_texts_threads_real_providers() {
         }
     }
     drop(env_guard);
-    let err = match result {
-        Ok(_) => panic!("expected admission, got embeddings"),
-        Err(e) => e,
+    let Err(err) = result else {
+        panic!("expected admission, got embeddings")
     };
     let text = err.to_string();
     assert!(text.contains("fastembed runtime"), "{text}");

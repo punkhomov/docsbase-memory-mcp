@@ -314,3 +314,13 @@ trigger — индексация/запрос; observable outcome — метри
   `snippet`/`snippet_truncated` в `hits[]`, `meta.filters`/`meta.trimmed` в
   конверте `explain`. `baseline.json` не перегенерируется, гейт
   `metrics_match_baseline` остаётся зелёным.
+
+
+## Delta 2026-11-11 — локальная Web-панель
+
+По ТЗ `docs/specs/local-web/requirements.md` прежний предел 40 МиБ для
+бинаря/поставки снят. Размер бинаря, встроенного frontend и архива продолжают
+измеряться; новый произвольный предел не вводится. Прежние записи бюджета
+выше — исторические. Ограничения RAM, очередей, IPC и поисковых операций
+сохраняются. `cli-full` включает optional feature `web`; Cargo default=[]
+остаётся без HTTP frontend. Rust 1.88; frontend собирается явно до Cargo.

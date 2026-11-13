@@ -60,6 +60,16 @@ pub struct Cli {
 /// Supported top-level commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Open the local documentation panel (loopback only).
+    #[cfg(feature = "web")]
+    Web {
+        /// Open the launch URL in your default browser.
+        #[arg(long)]
+        open: bool,
+        /// Local port (0 selects an available port).
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Register and index a project (default: current directory).
     Index {
         /// Project directory.
@@ -187,6 +197,8 @@ pub fn run() -> anyhow::Result<()> {
     let db_settings = crate::store::settings::standalone()?;
     let pool_settings = crate::store::settings::standalone_read_pool()?;
     match cli.command {
+        #[cfg(feature = "web")]
+        Command::Web { open, port } => crate::web::run(port, open),
         Command::Index { path } => index::run_with_settings(path.as_deref(), &db_settings),
         Command::Search {
             query,

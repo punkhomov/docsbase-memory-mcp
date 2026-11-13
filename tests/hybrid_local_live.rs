@@ -6,7 +6,7 @@
 //! Run (release for realistic numbers):
 //! ```sh
 //! cargo build --release --features hybrid-local
-//! RUSTUP_TOOLCHAIN=1.88.0 cargo test --release --locked --features hybrid-local \
+//! RUSTUP_TOOLCHAIN=1.100.0 cargo test --release --locked --features hybrid-local \
 //!   --test hybrid_local_live -- --ignored --nocapture
 //! ```
 //! Prerequisite: the ONNX Runtime must be installed (`docsbase connect

@@ -17,7 +17,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTUP_TOOLCHAIN: "1.88.0"
+  RUSTUP_TOOLCHAIN: "1.100.0"
 
 jobs:
   feature-compatibility:
@@ -28,7 +28,21 @@ jobs:
       DOCSBASE_BENCH_LATENCY_SLACK: "3"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: Prepare embedded Web assets
+        shell: bash
+        run: |
+          corepack enable
+          corepack install
+          pnpm install --frozen-lockfile
+          pnpm run audit
+          pnpm --dir web format:check
+          pnpm --dir web check
+          pnpm --dir web test:unit
+          pnpm --dir web build
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2

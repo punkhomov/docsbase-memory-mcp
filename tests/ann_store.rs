@@ -353,7 +353,7 @@ fn failed_publish_removes_the_temporary_directory() {
     let err = store
         .persist_dump(&k, |dir| Ok(write_dump(dir)))
         .expect_err("publish must fail");
-    assert!(!err.to_string().is_empty());
+    assert_ne!(err.to_string(), "");
 
     let leftovers: Vec<String> = fs::read_dir(store.project_ann_root(1))
         .expect("read ann root")

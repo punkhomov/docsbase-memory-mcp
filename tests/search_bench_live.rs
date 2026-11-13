@@ -96,7 +96,7 @@ fn live_record_and_replay() {
         eprintln!("SKIP: export OPENROUTER_API_KEY to run the live record smoke test");
         return;
     };
-    assert!(!key.trim().is_empty());
+    assert_ne!(key.trim(), "");
     let tmp = tempfile::TempDir::new().expect("tmp");
     let corpus = tmp.path().join("corpus");
     std::fs::create_dir_all(&corpus).expect("mkdir corpus");

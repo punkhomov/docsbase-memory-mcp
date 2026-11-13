@@ -293,3 +293,11 @@ tests/
 | FR-12/13/14 | `tokenizer.rs`, `textnorm.rs` | `tokenizer.rs` |
 | FR-15 | отсутствие сетевых крейтов | SC-7 |
 | FR-16 | `tokenizer.rs` | `tokenizer.rs` |
+
+
+## Delta 2026-11-11 — Local Web distribution
+
+The local Web specification supersedes the earlier 40 MiB executable ceiling.
+Static linking and artifact routing checks remain; executable, embedded bundle
+and compressed distribution sizes are measured without a replacement ceiling.
+The official `cli-full` profile includes `web`; lean Cargo defaults remain lean.

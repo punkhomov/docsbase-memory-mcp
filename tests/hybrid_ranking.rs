@@ -761,7 +761,7 @@ fn snippet_is_a_prefix_of_the_chunk_text() {
     )
     .expect("snippet search");
     let rows = value.as_array().expect("array");
-    assert!(!rows.is_empty());
+    assert_ne!(rows.len(), 0);
     for row in rows {
         let snippet = row["snippet"].as_str().expect("snippet");
         assert!(!snippet.is_empty(), "snippet is not empty: {row}");

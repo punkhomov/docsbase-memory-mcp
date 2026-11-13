@@ -125,3 +125,6 @@ pub fn pipe_name(cache: &Path) -> String {
     let hash = blake3::hash(key.to_string_lossy().as_bytes());
     format!("docsbase-{}", &hash.to_hex()[..32])
 }
+
+#[cfg(feature = "web")]
+pub(crate) mod web;

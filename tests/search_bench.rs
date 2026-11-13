@@ -234,7 +234,7 @@ fn validator_rejects_mixed_model_pins() {
     assert!(matches!(rerank, ModelPin::Rerank { .. }));
     validate_model_pins(&[same_a.clone(), same_b]).expect("identical pins pass");
     let err = validate_model_pins(&[same_a, other]).expect_err("mixed pins must fail");
-    assert!(!err.to_string().is_empty());
+    assert_ne!(err.to_string(), "");
 }
 
 #[test]
@@ -901,11 +901,11 @@ fn replay_reranker_requires_exact_candidate_set() {
     // Same docs, different order: a different candidate set.
     let err = rerank_call(&reranker, "q", &["b".to_owned(), "a".to_owned()], 2)
         .expect_err("reordered set must fail");
-    assert!(!err.to_string().is_empty());
+    assert_ne!(err.to_string(), "");
     // Same docs, different top_n: the recorded window changed.
     let err = rerank_call(&reranker, "q", &["a".to_owned(), "b".to_owned()], 1)
         .expect_err("top_n mismatch must fail");
-    assert!(!err.to_string().is_empty());
+    assert_ne!(err.to_string(), "");
     // Superset: extra candidates change the set.
     let err = rerank_call(
         &reranker,
@@ -914,7 +914,7 @@ fn replay_reranker_requires_exact_candidate_set() {
         3,
     )
     .expect_err("superset must fail");
-    assert!(!err.to_string().is_empty());
+    assert_ne!(err.to_string(), "");
 }
 
 #[test]
@@ -1016,7 +1016,7 @@ fn run_config_uses_fetch_window_fifty_for_hybrid() {
     };
     for cfg in [ConfigId::Bm25Rerank, ConfigId::RrfRerank] {
         let stages = stages_for(cfg, Some(fake.clone()), Some(probe.clone()));
-        run_config(&env, &[case.clone()], cfg, &stages).expect("run");
+        run_config(&env, std::slice::from_ref(&case), cfg, &stages).expect("run");
     }
     let seen = probe.seen.lock().expect("lock");
     // Warm-up + case call per hybrid config, each seeing the full window.
@@ -1175,7 +1175,7 @@ fn run_config_returns_citations_for_four_configs() {
     ];
     let mut tops = Vec::new();
     for (cfg, stages, msg) in &cfgs {
-        let run = run_config(&env, &[case.clone()], *cfg, stages).expect("run");
+        let run = run_config(&env, std::slice::from_ref(&case), *cfg, stages).expect("run");
         assert_eq!(run.cases.len(), 1);
         let citations = &run.cases[0].citations;
         assert!(!citations.is_empty(), "{msg}");
@@ -1640,7 +1640,7 @@ fn record_mode_writes_replayable_fixtures() {
     });
     let direct_bm25 = run_config(
         &env,
-        &[case.clone()],
+        std::slice::from_ref(&case),
         ConfigId::Bm25Rerank,
         &stages_for(
             ConfigId::Bm25Rerank,
@@ -1654,7 +1654,7 @@ fn record_mode_writes_replayable_fixtures() {
     let rerank_path = tmp.path().join("rerank.json");
     record_fixtures_with(
         &env,
-        &[case.clone()],
+        std::slice::from_ref(&case),
         &fake_embedder,
         fake_reranker.as_ref(),
         "test/rerank",
@@ -1666,7 +1666,7 @@ fn record_mode_writes_replayable_fixtures() {
     let loaded_rerank = RerankFixture::load(&rerank_path).expect("load rerank");
     let replay = run_config(
         &env,
-        &[case.clone()],
+        std::slice::from_ref(&case),
         ConfigId::Bm25Rerank,
         &stages_for(
             ConfigId::Bm25Rerank,
@@ -1684,7 +1684,10 @@ fn record_mode_writes_replayable_fixtures() {
         direct_bm25.cases[0].citations, replay.cases[0].citations,
         "replay must reproduce the recorded run"
     );
-    assert!(!replay.cases[0].citations.is_empty());
+    assert_ne!(
+        replay.cases[0].citations,
+        [] as [support::bench::Citation; 0]
+    );
 }
 
 #[test]
@@ -1701,7 +1704,7 @@ fn record_mode_is_atomic_on_failure() {
     let emb: Arc<dyn Embedder> = Arc::new(FailingEmbedder::working(4, 0.0));
     record_fixtures_with(
         &env,
-        &[case.clone()],
+        std::slice::from_ref(&case),
         &emb,
         Arc::new(FailingReranker {
             fail: AtomicBool::new(false),
@@ -1718,7 +1721,7 @@ fn record_mode_is_atomic_on_failure() {
     let emb_fail: Arc<dyn Embedder> = Arc::new(FailingEmbedder::failing(4));
     let err = record_fixtures_with(
         &env,
-        &[case.clone()],
+        std::slice::from_ref(&case),
         &emb_fail,
         Arc::new(FailingReranker {
             fail: AtomicBool::new(false),
@@ -1739,7 +1742,7 @@ fn record_mode_is_atomic_on_failure() {
     let emb2: Arc<dyn Embedder> = Arc::new(FailingEmbedder::working(4, 0.0));
     let err = record_fixtures_with(
         &env,
-        &[case.clone()],
+        std::slice::from_ref(&case),
         &emb2,
         Arc::new(FailingReranker {
             fail: AtomicBool::new(true),
@@ -1794,7 +1797,7 @@ fn record_mode_does_not_mix_model_pins() {
     let emb_a: Arc<dyn Embedder> = Arc::new(FailingEmbedder::working(4, 0.0));
     record_fixtures_with(
         &env,
-        &[case.clone()],
+        std::slice::from_ref(&case),
         &emb_a,
         fake.as_ref(),
         "test/rerank",
@@ -2165,14 +2168,15 @@ fn gate_tolerates_known_failures_but_not_new_ones() {
     let known = vec![known_trap("hn-99")];
     // Same failure again: no regression, no fix.
     let (new, fixed) = gate_new_failures(&[known_trap("hn-99")], &known);
-    assert!(new.is_empty() && fixed.is_empty());
+    assert_eq!(new.len(), 0);
+    assert_eq!(fixed.len(), 0);
     // A different trap: regression.
     let (new, _) = gate_new_failures(&[known_trap("hn-99"), known_trap("hn-100")], &known);
     assert_eq!(new.len(), 1);
     assert_eq!(new[0].case_id.as_deref(), Some("hn-100"));
     // Trap gone: classified as healed; check_gate_allowances enforces retirement.
     let (new, fixed) = gate_new_failures(&[], &known);
-    assert!(new.is_empty());
+    assert_eq!(new, [] as [support::bench::Failure; 0]);
     assert_eq!(fixed.len(), 1);
     // Production strings round-trip: a real gate Failure tolerates itself.
     let mut base = toy_baseline();
@@ -2185,7 +2189,7 @@ fn gate_tolerates_known_failures_but_not_new_ones() {
     let current = support::bench::build_report(&base, None);
     let real: Vec<support::bench::Failure> =
         support::bench::gate_failures(&current, &toy_baseline());
-    assert!(!real.is_empty());
+    assert_ne!(real, [] as [support::bench::Failure; 0]);
     let (new, _) = gate_new_failures(&real, &real);
     assert!(new.is_empty(), "gate output must tolerate itself");
 }
@@ -2364,9 +2368,10 @@ fn gate_rejects_sabotaged_reranker() {
         Some(good.clone() as Arc<dyn docsbase_memory::hybrid::Reranker>),
     );
     let (run, lat) =
-        support::bench::run_config_timed(&env, &[case.clone()], cfg, &stages).expect("good run");
+        support::bench::run_config_timed(&env, std::slice::from_ref(&case), cfg, &stages)
+            .expect("good run");
     let baseline_like = support::bench::build_baseline_like(
-        &[case.clone()],
+        std::slice::from_ref(&case),
         &[(cfg, run, lat)],
         support::bench::ReportMeta::synthetic(),
         0.0,
@@ -2386,7 +2391,7 @@ fn gate_rejects_sabotaged_reranker() {
         Some(evil as Arc<dyn docsbase_memory::hybrid::Reranker>),
     );
     let (evil_run, evil_lat) =
-        support::bench::run_config_timed(&env, &[case.clone()], cfg, &evil_stages)
+        support::bench::run_config_timed(&env, std::slice::from_ref(&case), cfg, &evil_stages)
             .expect("evil run");
     let evil_like = support::bench::build_baseline_like(
         &[case],
@@ -2499,7 +2504,7 @@ fn observe_pools_is_deterministic() {
     let case = record_case();
     let first = support::bench::observe_rerank_pools(
         &env,
-        &[case.clone()],
+        std::slice::from_ref(&case),
         &replay,
         &reranker,
         "test/rerank",
@@ -2555,10 +2560,11 @@ fn gate_rejects_shuffled_embedder() {
         .collect();
     assert_eq!(top2.len(), 2, "good run must return 2 citations at k=2");
     let case = sabotage_case("alpha beta", 2, &[top2[0].as_str(), top2[1].as_str()]);
-    let (run, lat) = support::bench::run_config_timed(&good_env, &[case.clone()], cfg, &stages)
-        .expect("good run");
+    let (run, lat) =
+        support::bench::run_config_timed(&good_env, std::slice::from_ref(&case), cfg, &stages)
+            .expect("good run");
     let baseline_like = support::bench::build_baseline_like(
-        &[case.clone()],
+        std::slice::from_ref(&case),
         &[(cfg, run, lat)],
         support::bench::ReportMeta::synthetic(),
         0.0,
@@ -2574,7 +2580,7 @@ fn gate_rejects_shuffled_embedder() {
     // order changes and the expected set breaks.
     let evil_stages = support::bench::stages_for(cfg, Some(good), None);
     let (evil_run, evil_lat) =
-        support::bench::run_config_timed(&evil_env, &[case.clone()], cfg, &evil_stages)
+        support::bench::run_config_timed(&evil_env, std::slice::from_ref(&case), cfg, &evil_stages)
             .expect("evil run");
     let evil_top2: Vec<String> = evil_run.cases[0]
         .citations
@@ -2835,7 +2841,7 @@ fn missing_baseline_is_hard_fail() {
     let dir = TempDir::new().expect("tmp");
     let err = support::bench::load_baseline(&dir.path().join("baseline.json"))
         .expect_err("absent baseline must fail");
-    assert!(!err.to_string().is_empty());
+    assert_ne!(err.to_string(), "");
 }
 
 #[test]
@@ -2843,7 +2849,7 @@ fn missing_vectors_is_hard_fail() {
     let dir = TempDir::new().expect("tmp");
     let err = support::bench::VectorFixture::load(&dir.path().join("vectors"))
         .expect_err("absent vectors must fail");
-    assert!(!err.to_string().is_empty());
+    assert_ne!(err.to_string(), "");
 }
 
 /// Copy only inputs; reports and build products never participate in provenance.
@@ -3204,8 +3210,7 @@ fn regenerate_baseline() {
     let accept_new =
         std::env::var("DOCSBASE_BENCH_ACCEPT_NEW_KNOWN").is_ok_and(|value| value == "1");
     let old_known = support::bench::load_baseline(&root.join("baseline.json"))
-        .map(|previous| previous.known_failures)
-        .unwrap_or_default();
+        .map_or_default(|previous| previous.known_failures);
     let baseline = support::bench::regenerate_from_fixtures(&root, accept_new).expect("regenerate");
     let (new, fixed) = support::bench::gate_new_failures(&baseline.known_failures, &old_known);
     println!(
@@ -3396,7 +3401,7 @@ fn record_mode_preserves_query_role_for_the_same_text_as_a_document() {
         fixture: Arc::new(loaded),
     };
     assert_eq!(
-        replay.embed(&[text.clone()]).unwrap(),
+        replay.embed(std::slice::from_ref(&text)).unwrap(),
         vec![vec![1.0, 0.0, 0.0, 0.0]]
     );
     assert_eq!(replay.embed_query(&text).unwrap(), vec![0.0, 1.0, 0.0, 0.0]);
@@ -3500,7 +3505,7 @@ fn record_rejects_wrong_cardinality_and_query_failures_before_publication() {
     };
     record_fixtures_with(
         &env,
-        &[case.clone()],
+        std::slice::from_ref(&case),
         &working,
         &ranker,
         "test/rerank",
@@ -3514,7 +3519,7 @@ fn record_rejects_wrong_cardinality_and_query_failures_before_publication() {
         let bad: Arc<dyn Embedder> = Arc::new(BadRecord(mode));
         let err = record_fixtures_with(
             &env,
-            &[case.clone()],
+            std::slice::from_ref(&case),
             &bad,
             &ranker,
             "test/rerank",

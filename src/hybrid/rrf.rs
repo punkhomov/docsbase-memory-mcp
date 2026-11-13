@@ -140,7 +140,7 @@ mod tests {
         approx(fused[1].1, 1.0 / 62.0, "rank 2");
 
         let both: [(u64, f32); 0] = [];
-        assert!(rrf_merge(&both, &both).is_empty());
+        assert_eq!(rrf_merge(&both, &both).len(), 0);
     }
 
     #[test]

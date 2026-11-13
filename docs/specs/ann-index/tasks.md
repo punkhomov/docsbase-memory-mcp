@@ -644,3 +644,11 @@ manual native stress с fail-on-first-failure. Порог0.99 и required covera
 сохраняются. Проверки: ann_recall, unchanged baseline gate, MSRV fmt/clippy,
 fresh reviews и required CI. Детальный план: `recall-investigation-plan.md`.
 Root-cause fix и закрытие #109 в этот milestone не входят.
+
+
+## Delta 2026-11-11 — Local Web distribution
+
+The local Web specification supersedes the earlier 40 MiB executable ceiling.
+Static linking and artifact routing checks remain; executable, embedded bundle
+and compressed distribution sizes are measured without a replacement ceiling.
+The official `cli-full` profile includes `web`; lean Cargo defaults remain lean.

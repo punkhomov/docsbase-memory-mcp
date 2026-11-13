@@ -15,9 +15,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # rust-toolchain.toml pins nightly for local development; CI validates the
+  # rust-toolchain.toml pins stable 1.100.0 for local development; CI validates the
   # MSRV toolchain explicitly (the env var overrides the file).
-  RUSTUP_TOOLCHAIN: "1.88.0"
+  RUSTUP_TOOLCHAIN: "1.100.0"
 
 jobs:
   docs:
@@ -45,6 +45,8 @@ jobs:
           grep -q 'README.ru.md' README.md
           grep -q 'README.md' README.ru.md
           echo "docs gate OK (version $VERSION)"
+      - name: Audit locked Cargo publication ages
+        run: python3 .github/scripts/check-cargo-age.py
       - name: CI observer regression checks
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
@@ -55,7 +57,21 @@ jobs:
       DOCSBASE_BENCH_LATENCY_SLACK: "3"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: Prepare embedded Web assets
+        shell: bash
+        run: |
+          corepack enable
+          corepack install
+          pnpm install --frozen-lockfile
+          pnpm run audit
+          pnpm --dir web format:check
+          pnpm --dir web check
+          pnpm --dir web test:unit
+          pnpm --dir web build
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -75,7 +91,7 @@ jobs:
             echo "::error::cargo tree returned an empty dependency graph"
             exit 1
           fi
-          if grep -wE 'fastembed|ort|tokenizers|hf-hub|image|native-tls|ureq|reqwest' target/ci-observations/lean-dependency-tree.txt; then
+          if grep -wE 'axum|ts-rs|fastembed|ort|tokenizers|hf-hub|image|native-tls|ureq|reqwest' target/ci-observations/lean-dependency-tree.txt; then
             echo "::error::forbidden crate leaked into the default build (NFR-1)"
             exit 1
           fi
@@ -94,8 +110,22 @@ jobs:
       - name: Functional suite (Linux)
         run: python3 .github/scripts/observe-tests.py --suite cli-full --phase execute -- cargo test --locked --features cli-full
 
+      - name: Browser acceptance (real daemon)
+        run: |
+          pnpm --dir web exec playwright install --with-deps chromium
+          pnpm --dir web test
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-browser-evidence
+          path: |
+            web/test-results/
+            web/playwright-report/
       - name: Full CLI provider capabilities (offline)
         run: python3 .github/scripts/check-cli-capabilities.py target/debug/docsbase
+      - name: Embedded Web artifact smoke
+        run: python3 .github/scripts/check-web-artifact.py target/debug/docsbase
       - name: Build static CLI (NFR-6, ADR-8)
         run: python3 .github/scripts/observe-tests.py --suite static-artifact-build --phase prepare -- cargo release-static --locked --timings
       - name: Static artifact checks (NFR-2, NFR-6)
@@ -105,6 +135,8 @@ jobs:
           python3 .github/scripts/observe-tests.py --suite static-artifact --phase execute -- cargo test --locked --features cli-full --test artifact -- --nocapture
       - name: Static CLI provider capabilities (offline)
         run: python3 .github/scripts/check-cli-capabilities.py target/x86_64-unknown-linux-gnu/release/docsbase
+      - name: Embedded Web artifact smoke
+        run: python3 .github/scripts/check-web-artifact.py target/x86_64-unknown-linux-gnu/release/docsbase
       - name: Upload test diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -120,7 +152,21 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: Prepare embedded Web assets
+        shell: bash
+        run: |
+          corepack enable
+          corepack install
+          pnpm install --frozen-lockfile
+          pnpm run audit
+          pnpm --dir web format:check
+          pnpm --dir web check
+          pnpm --dir web test:unit
+          pnpm --dir web build
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -144,6 +190,8 @@ jobs:
 
       - name: Full CLI provider capabilities (offline)
         run: python .github/scripts/check-cli-capabilities.py target/debug/docsbase.exe
+      - name: Embedded Web artifact smoke
+        run: python .github/scripts/check-web-artifact.py target/debug/docsbase.exe
       - name: Upload test diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -163,7 +211,21 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "12.0"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: Prepare embedded Web assets
+        shell: bash
+        run: |
+          corepack enable
+          corepack install
+          pnpm install --frozen-lockfile
+          pnpm run audit
+          pnpm --dir web format:check
+          pnpm --dir web check
+          pnpm --dir web test:unit
+          pnpm --dir web build
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -186,6 +248,8 @@ jobs:
         run: python3 .github/scripts/observe-tests.py --suite cli-full --phase execute -- cargo test --locked --features cli-full
       - name: Full CLI provider capabilities (offline)
         run: python3 .github/scripts/check-cli-capabilities.py target/debug/docsbase
+      - name: Embedded Web artifact smoke
+        run: python3 .github/scripts/check-web-artifact.py target/debug/docsbase
       - name: Upload test diagnostics
         if: always()
         uses: actions/upload-artifact@v4

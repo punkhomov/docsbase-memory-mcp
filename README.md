@@ -3,7 +3,7 @@
 [![CI](https://github.com/punkhomov/docsbase-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/punkhomov/docsbase-memory-mcp/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/punkhomov/docsbase-memory-mcp?include_prereleases)](https://github.com/punkhomov/docsbase-memory-mcp/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![MSRV 1.88](https://img.shields.io/badge/MSRV-1.88-blue.svg)](rust-toolchain.toml)
+[![MSRV 1.100.0](https://img.shields.io/badge/MSRV-1.100.0-blue.svg)](rust-toolchain.toml)
 
 > **Alpha:** current version [`0.1.0-alpha.5`](CHANGELOG.md). Breaking changes
 > are expected before `0.1.0`. Git tag `v<version>` always equals
@@ -39,7 +39,7 @@ Official release binaries include both local and remote providers (`cli-full`).
 For a full CLI built from source, use `cargo build --release --features cli-full`;
 plain Cargo builds retain the lean dependency set. Provider use remains opt-in
 through configuration, and local models/ONNX Runtime are provisioned separately.
-The already published alpha.5 assets omit these providers; use a full source build
+The already published alpha.5 assets omit these providers and the Web panel; use a full source build
 until a corrected release is available.
 
 ## Quickstart (5 minutes)
@@ -82,6 +82,10 @@ then point the stages at them (all provisioning commands are offline-safe and
 idempotent):
 
 ```sh
+corepack enable
+corepack install
+pnpm install --frozen-lockfile
+pnpm --dir web build
 cargo build --release --features cli-full
 # 1. Install the pinned ONNX Runtime (downloads once; `--check` reports state)
 docsbase connect fastembed
@@ -143,11 +147,16 @@ prompts (notarization is not needed for this path).
 ```sh
 git clone https://github.com/punkhomov/docsbase-memory-mcp.git
 cd docsbase-memory-mcp
+corepack enable
+corepack install
+pnpm install --frozen-lockfile
+pnpm --dir web build
 cargo install --path . --locked --features cli-full
 docsbase install   # register the binary with the daemon
 ```
 
-Requires Rust 1.88+ (MSRV). Local development pins nightly in
+Requires Rust 1.100.0+ (MSRV) and the exact Node.js version in `.node-version`
+for building embedded Web assets. Local development pins stable 1.100.0 in
 `rust-toolchain.toml`; CI validates the MSRV toolchain.
 
 ### Manual
@@ -268,8 +277,8 @@ cargo test --locked
 cargo test --locked --release   # incl. perf budgets (single-threaded)
 ```
 
-Toolchain: `rust-toolchain.toml` pins nightly for local dev; CI validates
-MSRV 1.88 explicitly. `Cargo.lock` is committed; new crates need an ADR and
+Toolchain: `rust-toolchain.toml` pins stable 1.100.0 for local dev; CI validates
+MSRV 1.100.0 explicitly. `Cargo.lock` is committed; new crates need an ADR and
 must satisfy `min-publish-age = 14 days`.
 
 Branching: GitHub Flow (`main` + PR + `v*` tags). Conventional Commits.
@@ -287,3 +296,10 @@ Report issues per [`SECURITY.md`](SECURITY.md).
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Local Web panel
+
+`docsbase web --open` opens the local projects, search and safe configuration panel.
+Included in official `cli-full` binaries; no Node.js needed at runtime.
+Git source builds prepare embedded assets with the pinned Node.js/pnpm toolchain
+before Cargo. See [Web setup and testing](docs/WEB.md).

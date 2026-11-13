@@ -85,3 +85,10 @@ docsbase uninstall --yes  # actually delete
 
 Next: `CONFIG.md` (tuning), `MCP.md` (tool catalogue), `ARCHITECTURE.md`
 (how it works).
+
+
+## Local Web panel
+
+See [WEB.md](WEB.md) for `docsbase web --open`, session security, Web settings,
+source-build frontend preparation and diagnostics. Official cli-full includes
+Web; Cargo default stays lean.

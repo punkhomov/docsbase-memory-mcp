@@ -67,11 +67,17 @@ $env:DOCSBASE_VERSION = "v0.1.0-alpha.5"; iex (irm .../install.ps1)
 ```sh
 git clone https://github.com/punkhomov/docsbase-memory-mcp.git
 cd docsbase-memory-mcp
+corepack enable
+corepack install
+pnpm install --frozen-lockfile
+pnpm --dir web build
 cargo install --path . --locked --features cli-full
 docsbase install
 ```
 
-Requires Rust 1.88+. Local dev uses the nightly pinned in
+Requires Rust 1.100.0+ and the exact Node.js version in `.node-version`.
+Corepack uses the pnpm version and checksum pinned in the root `package.json`.
+Local dev uses the stable 1.100.0 pinned in
 `rust-toolchain.toml`; MSRV builds use `--locked`.
 
 ## Option C — manual
@@ -165,5 +171,12 @@ For a full source build use `cargo build --release --locked --features cli-full`
 the lean dependency set.
 
 The published `v0.1.0-alpha.5` assets predate this correction and omit both
-provider implementations; installed copies require a corrected release or a
+provider implementations and the Web panel; installed copies require a corrected release or a
 source rebuild to use them.
+
+
+## Local Web panel
+
+See [WEB.md](WEB.md) for `docsbase web --open`, session security, Web settings,
+source-build frontend preparation and diagnostics. Official cli-full includes
+Web; Cargo default stays lean.

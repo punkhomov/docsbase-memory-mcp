@@ -127,7 +127,10 @@ fn versioned_preview_reports_legacy_scope_conflict_under_v2_global() {
         preview.effective.settings().hybrid_cfg.cache.max_bytes,
         8192
     );
-    assert!(preview.conflicts.is_empty());
+    assert_eq!(
+        preview.conflicts,
+        [] as [docsbase_memory::config::source::PreviewConflict; 0]
+    );
 }
 
 #[test]
@@ -247,7 +250,10 @@ fn migration_draft_preserves_actual_v1_settings_and_never_writes_sources() {
             .blockers
             .contains(&MigrationBlocker::VectorBudgetDecisionRequired)
     );
-    assert!(blocked.edits.is_empty());
+    assert_eq!(
+        blocked.edits,
+        [] as [docsbase_memory::config::migrate::SourceEdit; 0]
+    );
     let draft = draft_migration(
         &source,
         &registry,
@@ -260,7 +266,10 @@ fn migration_draft_preserves_actual_v1_settings_and_never_writes_sources() {
     assert_eq!(draft.selected_vector_max_bytes, Some(16384));
     assert_eq!(draft.edits.len(), 3);
     assert_eq!(draft.budgets.len(), 4);
-    assert!(!draft.warnings.is_empty());
+    assert_ne!(
+        draft.warnings,
+        [] as [docsbase_memory::config::migrate::MigrationWarning; 0]
+    );
     let gedit = draft
         .edits
         .iter()
@@ -276,7 +285,10 @@ fn migration_draft_preserves_actual_v1_settings_and_never_writes_sources() {
         let actual = preview_sources(&proposed_global, proposed.as_ref()).unwrap();
         expected.hybrid_cfg.cache.max_bytes = 16384;
         assert_eq!(actual.effective.settings(), &expected);
-        assert!(actual.conflicts.is_empty());
+        assert_eq!(
+            actual.conflicts,
+            [] as [docsbase_memory::config::source::PreviewConflict; 0]
+        );
     }
     for edit in &draft.edits {
         assert_eq!(
@@ -306,7 +318,10 @@ fn migration_requires_complete_explicit_registry_observations() {
         vec![MigrationBlocker::UninspectedProject(b)]
     );
     assert!(!draft.source_proposal_complete());
-    assert!(draft.edits.is_empty());
+    assert_eq!(
+        draft.edits,
+        [] as [docsbase_memory::config::migrate::SourceEdit; 0]
+    );
     assert!(draft_migration(&g, &[a.clone(), a.clone()], &observations, None).is_err());
     assert!(
         draft_migration(
@@ -406,7 +421,10 @@ fn migration_v2_budget_does_not_reintroduce_legacy_defaults() {
     assert_eq!(draft.suggested_vector_max_bytes, 4096);
     assert_eq!(draft.selected_vector_max_bytes, Some(4096));
     assert!(draft.budgets.iter().all(|row| row.max_bytes == 4096));
-    assert!(draft.budget_changes.is_empty());
+    assert_eq!(
+        draft.budget_changes,
+        [] as [docsbase_memory::config::migrate::BudgetChange; 0]
+    );
     let reordered = draft_migration(
         &g,
         &[registry[1].clone(), registry[0].clone()],

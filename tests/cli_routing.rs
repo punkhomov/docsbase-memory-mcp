@@ -95,11 +95,11 @@ fn spawn_fake_daemon_with_reply(
                             Vec::new()
                         },
                     },
-                    Request::RegisterSession { .. } | Request::RegisterUnbound { .. } => {
-                        Response::ToolResult {
-                            value: serde_json::Value::Null,
-                        }
-                    }
+                    Request::RegisterSession { .. }
+                    | Request::RegisterUnbound { .. }
+                    | Request::BindReadOnly { .. } => Response::ToolResult {
+                        value: serde_json::Value::Null,
+                    },
                     Request::CallTool { name, .. } if name == "search_docs" && capable => {
                         Response::Error {
                             code: -32011,
@@ -217,11 +217,11 @@ fn sync_via_daemon_polls_until_done() {
                         schema_version: 1,
                         capabilities: Vec::new(),
                     },
-                    Request::RegisterSession { .. } | Request::RegisterUnbound { .. } => {
-                        Response::ToolResult {
-                            value: serde_json::Value::Null,
-                        }
-                    }
+                    Request::RegisterSession { .. }
+                    | Request::RegisterUnbound { .. }
+                    | Request::BindReadOnly { .. } => Response::ToolResult {
+                        value: serde_json::Value::Null,
+                    },
                     Request::CallTool { name, .. } if name == "sync_start" => {
                         Response::ToolResult {
                             value: serde_json::json!({

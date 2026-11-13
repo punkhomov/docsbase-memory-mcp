@@ -382,3 +382,13 @@ SC-W103: детерминированные тесты реального consum
 Отдельно покрываются retry/coalescing, missing-file/directory purge и config swap
 между подготовкой и применением, включая incremental→full recovery. Без sleeps,
 расширения deadlines, отключения существующего Windows regression или baseline delta.
+
+
+## Delta 2026-11-11 — локальная Web-панель
+
+По ТЗ `docs/specs/local-web/requirements.md` прежний предел 40 МиБ для
+бинаря/поставки снят. Размер бинаря, встроенного frontend и архива продолжают
+измеряться; новый произвольный предел не вводится. Прежние записи бюджета
+выше — исторические. Ограничения RAM, очередей, IPC и поисковых операций
+сохраняются. `cli-full` включает optional feature `web`; Cargo default=[]
+остаётся без HTTP frontend. Rust 1.88; frontend собирается явно до Cargo.

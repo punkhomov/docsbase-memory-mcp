@@ -5,11 +5,20 @@ updates:
     schedule:
       interval: weekly
     # Solo-maintainer policy (docs/supply-chain.md): version churn is off,
-    # security updates still flow. Manual bumps happen under nightly where
+    # security updates still flow. Manual bumps happen under stable 1.100.0 where
     # min-publish-age = 14 days bites.
     open-pull-requests-limit: 0
     # Mirror min-publish-age: a new release is not proposed until 14 days
     # after publish. Security updates bypass cooldown automatically.
+    cooldown:
+      default-days: 14
+  # Dependabot's npm ecosystem also understands the root pnpm workspace lock.
+  # Security PRs may be opened immediately; the pnpm age/trust gates still apply.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
     cooldown:
       default-days: 14
   - package-ecosystem: github-actions

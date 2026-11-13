@@ -468,7 +468,7 @@ fn stem_occupies_the_segment_position() {
 /// never split it.
 #[test]
 fn script_runs_edge_cases() {
-    assert!(split_script_runs("").is_empty());
+    assert_eq!(split_script_runs(""), [] as [(usize, &str); 0]);
     let runs = split_script_runs("123 !?");
     assert_eq!(runs.len(), 1, "letter-less input stays one run: {runs:?}");
     assert_eq!(runs[0], (0, "123 !?"), "digits and punctuation attach");

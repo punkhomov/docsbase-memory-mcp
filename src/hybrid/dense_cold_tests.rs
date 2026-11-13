@@ -250,7 +250,7 @@ fn wrong_metadata_identity_has_no_vector_io() {
                 .join(crate::vector_cache::VECTOR_DB_FILE)
                 .exists()
         );
-        assert!(cache.lock_entries().is_empty());
+        assert_eq!(cache.lock_entries().len(), 0);
         assert_eq!(cache.cold_flights.active(), 0);
     }
 }
@@ -371,7 +371,7 @@ fn wrong_snapshot_root_is_rejected_before_vector_io() {
             .join(crate::vector_cache::VECTOR_DB_FILE)
             .exists()
     );
-    assert!(cache.lock_entries().is_empty());
+    assert_eq!(cache.lock_entries().len(), 0);
 }
 
 #[test]

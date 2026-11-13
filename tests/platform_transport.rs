@@ -154,15 +154,13 @@ fn oversized_socket_path_is_rejected() {
     let long = dir.path().join("x".repeat(200));
     std::fs::create_dir_all(&long).expect("mkdir long");
     let endpoint = Endpoint::Unix(long.join("daemon.sock"));
-    let err = match platform::bind_blocking(&endpoint) {
-        Ok(_) => panic!("bind must reject an over-long path"),
-        Err(err) => err,
+    let Err(err) = platform::bind_blocking(&endpoint) else {
+        panic!("bind must reject an over-long path")
     };
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
     assert!(err.to_string().contains("socket path"), "{err}");
-    let err = match platform::connect_blocking(&endpoint) {
-        Ok(_) => panic!("connect must reject an over-long path"),
-        Err(err) => err,
+    let Err(err) = platform::connect_blocking(&endpoint) else {
+        panic!("connect must reject an over-long path")
     };
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
     assert!(!platform::connect_probe(&endpoint), "probe must be false");

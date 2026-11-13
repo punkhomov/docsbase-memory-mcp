@@ -244,7 +244,7 @@ fn rrf_and_rerank_refill_once_and_keep_the_late_best_chunk() {
                     .contains("winner")
             );
         } else {
-            assert!(inputs.is_empty());
+            assert_eq!(inputs.len(), 0);
             let first = hits(&result)[0]["score"].as_f64().expect("score");
             assert!((first - 2.0 / 61.0).abs() < 1e-6, "scoped RRF source ranks");
         }
@@ -424,7 +424,7 @@ fn cancellation_at_refill_admission_releases_scope_without_calling_rerank() {
         Ok(())
     });
     assert!(matches!(result, Err(Error::Admission { .. })), "{result:?}");
-    assert!(winner.inputs.lock().expect("inputs").is_empty());
+    assert_eq!(winner.inputs.lock().expect("inputs").len(), 0);
     drop(
         budget
             .reserve(budget.settings().max_request_payload_bytes)
@@ -457,7 +457,7 @@ fn expanded_payload_refusal_is_an_error_before_any_rerank_and_releases_admission
     };
     let result = tools::search_docs_in(&context, &f.db, &args());
     assert!(matches!(result, Err(Error::Admission { .. })), "{result:?}");
-    assert!(winner.inputs.lock().expect("inputs").is_empty());
+    assert_eq!(winner.inputs.lock().expect("inputs").len(), 0);
     drop(budget.reserve(1).expect("released"));
 }
 
@@ -498,6 +498,8 @@ fn unfiltered_rrf_uses_one_dense_source_and_scoped_single_doc_proves_exhaustion(
 
 #[test]
 #[ignore = "manual release-only local refill diagnostic; no network or thresholds"]
+// This ignored diagnostic must compile in debug, but reject a debug execution.
+#[allow(clippy::assertions_on_constants)]
 fn release_refill_diagnostics() {
     assert!(!cfg!(debug_assertions), "run with --release");
     for (label, chunks, others) in [

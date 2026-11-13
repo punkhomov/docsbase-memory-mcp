@@ -321,3 +321,11 @@ Cargo-native opt-in selection replaces the initially planned metadata selector.
   ref is allowed with identical app/test/job blobs, never merged). No baseline,
   factor, skip or gate change in delivered CI. Fresh task/final reviews pass;
   ready PR, human merge.
+
+
+## Delta 2026-11-11 — Local Web distribution
+
+The local Web specification supersedes the earlier 40 MiB executable ceiling.
+Static linking and artifact routing checks remain; executable, embedded bundle
+and compressed distribution sizes are measured without a replacement ceiling.
+The official `cli-full` profile includes `web`; lean Cargo defaults remain lean.

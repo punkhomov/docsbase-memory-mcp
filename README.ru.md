@@ -3,7 +3,7 @@
 [![CI](https://github.com/punkhomov/docsbase-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/punkhomov/docsbase-memory-mcp/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/punkhomov/docsbase-memory-mcp?include_prereleases)](https://github.com/punkhomov/docsbase-memory-mcp/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![MSRV 1.88](https://img.shields.io/badge/MSRV-1.88-blue.svg)](rust-toolchain.toml)
+[![MSRV 1.100.0](https://img.shields.io/badge/MSRV-1.100.0-blue.svg)](rust-toolchain.toml)
 
 > **Альфа:** текущая версия [`0.1.0-alpha.5`](CHANGELOG.md). До `0.1.0`
 > возможны ломающие изменения. Git-тег `v<version>` всегда равен
@@ -40,7 +40,7 @@ scope (`x86_64-apple-darwin` — Tier 2 у upstream, Intel-железо EOL).
 Обычная Cargo-сборка сохраняет минимальный набор зависимостей. Использование
 providers включается конфигурацией; локальные модели и ONNX Runtime
 устанавливаются отдельно.
-Уже опубликованные assets alpha.5 не содержат эти providers; до исправленного
+Уже опубликованные assets alpha.5 не содержат эти providers и Web-панель; до исправленного
 релиза используйте полную сборку из исходников.
 
 ## Быстрый старт (5 минут)
@@ -81,6 +81,10 @@ $env:DOCSBASE_CHANNEL = "prerelease"; irm https://raw.githubusercontent.com/punk
 укажите стадии (все шаги provisioning офлайн-безопасны и идемпотентны):
 
 ```sh
+corepack enable
+corepack install
+pnpm install --frozen-lockfile
+pnpm --dir web build
 cargo build --release --features cli-full
 # 1. Установка закреплённого ONNX Runtime (скачивается один раз; `--check` показывает состояние)
 docsbase connect fastembed
@@ -143,12 +147,17 @@ curl -fsSL https://raw.githubusercontent.com/punkhomov/docsbase-memory-mcp/main/
 ```sh
 git clone https://github.com/punkhomov/docsbase-memory-mcp.git
 cd docsbase-memory-mcp
+corepack enable
+corepack install
+pnpm install --frozen-lockfile
+pnpm --dir web build
 cargo install --path . --locked --features cli-full
 docsbase install   # зарегистрировать бинарь в демоне
 ```
 
-Требуется Rust 1.88+ (MSRV). Для локальной разработки в `rust-toolchain.toml`
-зафиксирован nightly; CI проверяет MSRV-тулчейн.
+Требуется Rust 1.100.0+ (MSRV) и точная версия Node.js из `.node-version`
+для сборки Web-ресурсов. Для локальной разработки в `rust-toolchain.toml`
+зафиксирован stable 1.100.0; CI проверяет MSRV-тулчейн.
 
 ### Вручную
 
@@ -260,8 +269,8 @@ cargo test --locked
 cargo test --locked --release   # включая перф-бюджеты (однопоточно)
 ```
 
-Тулчейн: `rust-toolchain.toml` пинит nightly для локальной разработки; CI
-проверяет MSRV 1.88 явно. `Cargo.lock` коммитится; новые крейты — только
+Тулчейн: `rust-toolchain.toml` пинит stable 1.100.0 для локальной разработки; CI
+проверяет MSRV 1.100.0 явно. `Cargo.lock` коммитится; новые крейты — только
 через ADR и при `min-publish-age = 14 days`.
 
 Ветки: GitHub Flow (`main` + PR + теги `v*`). Conventional Commits. Релизы
@@ -280,3 +289,10 @@ cargo test --locked --release   # включая перф-бюджеты (одн
 ## Лицензия
 
 MIT — см. [LICENSE](LICENSE).
+
+## Локальная Web-панель
+
+`docsbase web --open` открывает локальную панель проектов, поиска и безопасной
+эффективной конфигурации. Она доступна только на `127.0.0.1`, работает через
+общий daemon и включена в официальные бинарники. Node.js при запуске не нужен.
+Подробности запуска, сборки, настроек и диагностики — [docs/WEB.md](docs/WEB.md).

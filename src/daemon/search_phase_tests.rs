@@ -509,13 +509,11 @@ fn explain_counts_time_before_search_preparation_without_real_waiting() {
             "limit={limit}"
         );
         if limit == 0 {
-            assert!(response["hits"].as_array().expect("hits").is_empty());
+            assert_eq!(response["hits"].as_array().expect("hits").len(), 0);
             assert_eq!(response["meta"]["window"], 0);
-            assert!(
-                response["meta"]["stages"]
-                    .as_array()
-                    .expect("stages")
-                    .is_empty()
+            assert_eq!(
+                response["meta"]["stages"].as_array().expect("stages").len(),
+                0
             );
         }
     }

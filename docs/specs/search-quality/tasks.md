@@ -512,3 +512,11 @@ emit (безвредно); headroom бюджетов SQ12; defensive-ветки 
 - **Порядок:** строго зависимый: SQ1→SQ2→(SQ3,SQ4)→SQ5→SQ6→SQ7→SQ8;
   SQ9→(SQ10,SQ11); SQ12 — последняя. (SQ5 до SQ6: механизм версии раньше
   первой смены пайплайна.)
+
+
+## Delta 2026-11-11 — Local Web distribution
+
+The local Web specification supersedes the earlier 40 MiB executable ceiling.
+Static linking and artifact routing checks remain; executable, embedded bundle
+and compressed distribution sizes are measured without a replacement ceiling.
+The official `cli-full` profile includes `web`; lean Cargo defaults remain lean.

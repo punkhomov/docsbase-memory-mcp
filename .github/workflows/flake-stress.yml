@@ -36,10 +36,10 @@ jobs:
             suite: error_surface
             filter: mcp_error_codes_stable
     env:
-      RUSTUP_TOOLCHAIN: "1.88.0"
+      RUSTUP_TOOLCHAIN: "1.100.0"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - name: Build test target
         run: cargo test --locked --test ${{ matrix.suite }} --no-run

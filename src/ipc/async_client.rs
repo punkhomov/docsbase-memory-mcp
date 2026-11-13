@@ -136,6 +136,35 @@ impl AsyncClient {
         .map(|_| ())
     }
 
+    /// Negotiated additive capabilities.
+    #[must_use]
+    pub fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+
+    /// Binds by registry ID without indexing or loading provider models.
+    /// # Errors
+    /// Unsupported capability, unknown project, or transport failure.
+    pub async fn bind_read_only(&mut self, project_id: Option<i64>) -> Result<()> {
+        if !self
+            .capabilities
+            .iter()
+            .any(|c| c == protocol::PANEL_READ_CAPABILITY)
+        {
+            return Err(Error::Protocol {
+                message: "panel-read-v1 unsupported".into(),
+            });
+        }
+        value(
+            self.call(Request::BindReadOnly {
+                pid: std::process::id(),
+                project_id,
+            })
+            .await?,
+        )
+        .map(|_| ())
+    }
+
     /// Calls a generic tool under the caller's externally applied time budget.
     /// Scoped search callers use [`Self::search`] instead.
     ///

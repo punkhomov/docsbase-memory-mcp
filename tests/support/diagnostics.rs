@@ -77,13 +77,12 @@ pub fn diagnose(current: &Baseline, baseline: Option<&Baseline>) -> QualityDiagn
     for (cfg, report) in &current.configs {
         let previous: BTreeMap<&str, bool> = baseline
             .and_then(|base| base.configs.get(cfg))
-            .map(|r| {
+            .map_or_default(|r| {
                 r.cases
                     .iter()
                     .map(|c| (c.id.as_str(), c.metrics.hit))
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         let all: Vec<&CaseReport> = report.cases.iter().collect();
         let mut grouped: BTreeMap<&str, Vec<&CaseReport>> = BTreeMap::new();
         for case in &report.cases {

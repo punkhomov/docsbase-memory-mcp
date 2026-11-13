@@ -1109,7 +1109,7 @@ mod tests {
         let path = env.path("bbb/b.md");
         fs::remove_file(&path).expect("delete");
         assert_eq!(env.run(&[path], &ignoring_bbb()).removed, 1);
-        assert!(env.states().is_empty());
+        assert_eq!(env.states().len(), 0);
         env.assert_search_count("betawidget", 0);
     }
 
@@ -1122,7 +1122,7 @@ mod tests {
         let dir = env.path("bbb");
         fs::remove_dir_all(&dir).expect("delete subtree");
         assert_eq!(env.run(&[dir], &ignoring_bbb()).removed, 2);
-        assert!(env.states().is_empty());
+        assert_eq!(env.states().len(), 0);
         env.assert_search_count("betawidget", 0);
         env.assert_search_count("secondwidget", 0);
     }

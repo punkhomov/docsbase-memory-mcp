@@ -9,6 +9,16 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 ## [Unreleased]
 
 ### Added
+- A local, read-only Web panel (`docsbase web [--open] [--port N]`) in official
+  binaries: registered projects, cancellable Syntax/Literal search and safe
+  effective configuration. Embedded assets need no Node.js at runtime.
+- Web-owned policy in `web.toml`, bounded async IPC pools, session/Host/Origin
+  protection, native artifact smoke and real-daemon browser acceptance checks.
+  Executable, bundle and distribution sizes remain measured; the old 40 MiB
+  executable ceiling is removed.
+- Lucide icons and shadcn-svelte components in the Web panel; exact Node 24.22.3
+  and pnpm 12.16.1 build tooling with a strict 14-day dependency cooldown,
+  denied dependency install scripts and Biome formatting.
 - A bounded query-embedding cache inside the dense path: a repeated query with the
   same model no longer calls the provider. 256 entries / 4 MiB, LRU eviction, and a
   failed embed is never cached. `status` now reports

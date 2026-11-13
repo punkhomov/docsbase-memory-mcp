@@ -537,10 +537,10 @@ fn verify_hashes(entry: &ModelEntry<'_>, dir: &Path) -> Result<bool> {
         let map = memo
             .lock()
             .map_err(|poison| Error::internal(format!("verify memo lock poisoned: {poison}")))?;
-        if let Some((verdict, cached_stamp)) = map.get(dir) {
-            if *cached_stamp == stamp {
-                return Ok(*verdict);
-            }
+        if let Some((verdict, cached_stamp)) = map.get(dir)
+            && *cached_stamp == stamp
+        {
+            return Ok(*verdict);
         }
     }
     let verdict = verify_hashes_full(entry, dir)?;
@@ -1324,9 +1324,9 @@ mod tests {
                 assert!(spec.size <= MAX_FILE_BYTES);
             }
             assert!(entry.total_size() <= MAX_TOTAL_BYTES);
-            assert!(!entry.repo.is_empty());
+            assert_ne!(entry.repo.len(), 0);
             assert!(entry.revision.len() >= 8, "pinned revision short");
-            assert!(!entry.license.is_empty());
+            assert_ne!(entry.license.len(), 0);
             assert!(entry.prompt_version >= 1);
         }
     }

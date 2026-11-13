@@ -401,10 +401,10 @@ fn selected_pins() -> (Option<String>, Option<String>) {
     if let Ok(Some(root)) = read_global_toml() {
         collect(&root);
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Ok(Some(root)) = read_project_toml(&cwd.join(".docsbase.toml")) {
-            collect(&root);
-        }
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(Some(root)) = read_project_toml(&cwd.join(".docsbase.toml"))
+    {
+        collect(&root);
     }
     (embed, rerank)
 }
@@ -480,10 +480,10 @@ pub fn run(args: &UseArgs) -> anyhow::Result<()> {
     if let Some(note) = free_route_note(&table) {
         eprintln!("{note}");
     }
-    if stage_key == "embedding" {
-        if let Some(note) = repin_embedding_note(existing.as_ref(), &table) {
-            eprintln!("{note}");
-        }
+    if stage_key == "embedding"
+        && let Some(note) = repin_embedding_note(existing.as_ref(), &table)
+    {
+        eprintln!("{note}");
     }
     if args.dry_run {
         // Preview the full merged file exactly as the write would produce it
@@ -856,15 +856,16 @@ fn preview_merged(existing: Option<&toml::Value>, table: &toml::Value) -> toml::
 fn validate_hybrid_table(hybrid: &toml::map::Map<String, toml::Value>) -> anyhow::Result<()> {
     validate_embedding_stage(hybrid)?;
     validate_reranker_stage(hybrid)?;
-    if let Some(ranking) = hybrid.get("ranking").and_then(toml::Value::as_str) {
-        if ranking != "lexical" && ranking != "rrf" {
-            return Err(Error::Admission {
+    if let Some(ranking) = hybrid.get("ranking").and_then(toml::Value::as_str)
+        && ranking != "lexical"
+        && ranking != "rrf"
+    {
+        return Err(Error::Admission {
                 message: format!(
                     "existing hybrid.ranking {ranking:?} is unknown (want \"lexical\" or \"rrf\"); edit .docsbase.toml"
                 ),
             }
             .into());
-        }
     }
     Ok(())
 }

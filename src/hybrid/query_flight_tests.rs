@@ -276,7 +276,7 @@ fn completed_query_vector_is_shared_without_warming_dense_rows() {
         .expect("second");
     assert!(Arc::ptr_eq(&first, &second));
     assert_eq!(embedder.0.load(AtomicOrdering::SeqCst), 1);
-    assert!(other.lock_entries().is_empty());
+    assert_eq!(other.lock_entries().len(), 0);
 }
 
 #[test]

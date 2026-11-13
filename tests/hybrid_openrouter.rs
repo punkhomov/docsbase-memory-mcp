@@ -238,7 +238,7 @@ fn reranking_no_candidates_never_calls_the_provider() {
     let client = Arc::new(make_client(&mock));
     let reranker = OpenRouterReranker::with_client(RerankerCfg::default(), client);
     let ranked = blocking::enter(|| reranker.rerank("query", &[], 10)).expect("empty ok");
-    assert!(ranked.is_empty());
+    assert_eq!(ranked, [] as [(usize, f32); 0]);
     assert!(mock.calls().is_empty(), "no HTTP call for empty candidates");
 }
 

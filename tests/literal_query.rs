@@ -187,12 +187,12 @@ fn literal_without_terms_is_query_error_but_limit_zero_still_skips_search() {
             .search_with_mode(punctuation, 10, QueryMode::Literal),
         Err(Error::Query { .. })
     ));
-    assert!(
+    assert_eq!(
         fixture
             .reader
             .search_with_mode(punctuation, 0, QueryMode::Literal)
-            .expect("limit zero")
-            .is_empty()
+            .expect("limit zero"),
+        [] as [docsbase_memory::index::tantivy_index::Hit; 0]
     );
     assert!(matches!(
         fixture.reader.search_with_mode("  ", 0, QueryMode::Literal),
@@ -361,7 +361,7 @@ fn literal_without_terms_stops_before_embedding_work() {
         10,
     );
     assert!(matches!(result, Err(Error::Query { .. })), "{result:?}");
-    assert!(embedder.0.lock().expect("query inputs").is_empty());
+    assert_eq!(embedder.0.lock().expect("query inputs").len(), 0);
 }
 
 #[test]

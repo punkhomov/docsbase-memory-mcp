@@ -46,7 +46,7 @@ GitHub должен сначала зарегистрировать новый w
 local model command и remote credential-validation path. Не требует сети,
 моделей и установленной ORT. Native CI проверяет свой test-build binary;
 release workflow распаковывает созданный archive и проверяет файл из него.
-Linux release-static alias включает cli-full и сохраняет static/40 MiB checks.
+Linux release-static alias включает cli-full и сохраняет static linking and size measurements.
 Windows/macOS release build указывает cli-full явно.
 
 Так проверка не зависит от того, с какими features собран сам тестовый harness.
@@ -365,7 +365,7 @@ watchdog и завершаются на наблюдаемом прогресс�
 
 `artifact` теперь opt-in target (`test = false`). Обычный функциональный
 `cargo test` не собирает static release CLI из теста. Required Linux сохраняет
-обе проверки — static linking и40MiB — после отдельного успешного
+обе проверки — static linking и измерение размера — после отдельного успешного
 `cargo release-static --locked`. Этот alias по-прежнему включает cli-full.
 Оба providers дополнительно проверяются offline именно в static binary;
 прежний smoke debug CLI и проверка packaged release CLI остаются.
@@ -459,3 +459,32 @@ cli-full ann_recall suite до указанного числа раз (default20
 Обычный separated-cluster test при quality failure сохраняет граф и queries
 в уже загружаемый `target/ci-observations/ann-recall`. Replay-команда и
 ограничения: `docs/specs/ann-index/reports/recall-investigation-2026-11-11.md`.
+
+
+## Delta 2026-11-11 — Web acceptance
+
+Native jobs explicitly prepare the same locked Svelte bundle before cli-full.
+Linux runs Playwright against the already built debug binary, with no retries;
+traces/screenshots/console/Web logs are retained. Each native capability smoke
+also opens the embedded Web artifact from an empty directory. Default dependency
+boundary additionally excludes axum/ts-rs. The 40 MiB cap is removed; Cargo/Vite
+report bundle bytes, artifact tests report executable bytes, release packaging
+reports archive bytes. Historical cap references are superseded.
+
+
+## Delta 2026-11-11 — Pinned frontend toolchain
+
+Every Web preparation step reads the exact Node.js version from `.node-version`.
+Corepack installs the pnpm version and integrity hash in the root `package.json`;
+installation runs at the repository root with `--frozen-lockfile`. The root pnpm
+workspace rechecks locked dependency publication dates (14 days) and provenance,
+rejects unknown dependency build scripts, and checks the exact toolchain and peer
+requirements. Formatting is checked through the frontend's `format:check` script.
+Playwright is invoked with `pnpm --dir web exec`, so no unpinned `npx` download is
+part of browser acceptance.
+
+The former npm cache setup is removed: it named the obsolete npm lockfile and
+ran before a pinned pnpm executable existed. No additional cache/action is added
+for the small frontend dependency graph; Rust caching and native job structure
+remain unchanged. Dependabot monitors the root pnpm lock using its npm ecosystem;
+security PRs still have to pass the workspace's age and trust checks.

@@ -417,3 +417,13 @@ quality guarantee. Manual-only native macOS stress ограничен1..50 по�
 Это observability milestone, не исправление #109. Причина macOS0.945 пока
 не установлена; Linux stress без сбоев не доказывает её устранение. Runtime
 параметры, graph/AnnKey format, invalidation, настройки и ranking не меняются.
+
+
+## Delta 2026-11-11 — локальная Web-панель
+
+По ТЗ `docs/specs/local-web/requirements.md` прежний предел 40 МиБ для
+бинаря/поставки снят. Размер бинаря, встроенного frontend и архива продолжают
+измеряться; новый произвольный предел не вводится. Прежние записи бюджета
+выше — исторические. Ограничения RAM, очередей, IPC и поисковых операций
+сохраняются. `cli-full` включает optional feature `web`; Cargo default=[]
+остаётся без HTTP frontend. Rust 1.88; frontend собирается явно до Cargo.

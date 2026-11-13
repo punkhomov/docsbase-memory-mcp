@@ -136,7 +136,7 @@ impl AnnState {
 }
 
 /// How long a recorded observation stays authoritative (FR-6).
-pub const ANN_OUTCOME_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+pub const ANN_OUTCOME_TTL: std::time::Duration = std::time::Duration::from_hours(1);
 
 /// The last ANN outcome the search path observed for one project (FR-6).
 #[derive(Debug, Clone, Copy)]
