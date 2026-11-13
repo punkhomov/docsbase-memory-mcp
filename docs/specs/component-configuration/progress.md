@@ -428,3 +428,39 @@ Fresh task review: Spec compliance PASS; Quality APPROVED; no findings or deferr
 minors. Final whole-branch review and native docs/linux/macos/windows delivery
 gates remain required. No dependency, workflow, baseline or threshold changes;
 no live inference/model downloads. #78 stays open for the remaining tasks.
+
+
+CF6a delivery (2026-11-13): PR136 merged as b0c820dfc62fc33e2ba2da2a25b96b01ee51b1c4.
+Fresh final review converged without findings. Native run43386029380 attempt1:
+docs/Linux/macOS/Windows green; inventory retained every parent test and ran all10
+new tests/platform. Linux1321+2static/macOS1317/Windows1305 passed,18 existing
+ignores/platform. Reviewed source/tested merge/squash share tree
+9994e24f5203271a2ddc9cdbe8b46a7398027dab. #78 stays open.
+
+## 2026-11-13 — CF6b dense construction and ANN backfill policy
+
+Task CF6b: complete (construction-only implementation + fresh task/fix review).
+DenseCacheLimits defaults project the existing DenseSpec, whose complete immutable
+policy passes through CLI/lifecycle/Shared; production synchronous/background sync
+uses that cache's actual limits. Compatibility APIs remain adapters. Legacy Config
+vector-store budget keeps its explicit precedence over the dense-path fallback.
+Ruling: shared static builder/backfill eligibility covers chunk-row count, min/max
+vectors, project capacity, encoded model width and graph+exact peak bytes. It is
+not a reservation: existing resident/live-worker accounting is unchanged. Small
+corpora do not take temporary ANN pins; eligible duplicate rows retain pins using
+row count rather than distinct hashes. The debug global cap hook is removed in
+favor of per-call policy. Existing leases/TTL are not revoked by eligibility.
+TDD: missing APIs compile RED; actual small backfill held4 leases instead of0;
+maximum-cap overflow erroneously admitted; inner width/overhead boundary panicked.
+All now GREEN. Fresh task review found that inner overflow (Important) and a
+masked count-gate fixture (Minor); checked owner estimator plus isolated fixture
+fixed both. Re-review: both ADDRESSED, no new Critical/Important, no deferred minors.
+Validation: exact stable Rust1.100.0, upstream locked dependencies and pinned Web
+assets. Final cli-full1332passed/0failed/18existing ignores,81targets; lean65 focused
+passes; full/lean all-target Clippy/fmt/diff GREEN. Frozen benchmark and worker
+reservation/invalidation/load/build/cancellation regressions pass. 11 net new tests
+exercise actual SQLite metadata/vector leases/cache fallback/eviction/concurrent
+policies and CLI/daemon propagation. No baseline/threshold/dependency/workflow
+changes or live inference/downloads. Final whole-branch review and native delivery
+gates follow. Live shrink, new source keys/apply, strict-store/TTL adoption and
+remaining #78 tasks are not completed by CF6b.

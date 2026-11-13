@@ -1603,7 +1603,7 @@ pub fn enqueue_sync(db: &Db, project: &Project) -> Result<(i64, bool)> {
 
 /// Runs a queued job to completion on its own database connection (daemon
 /// background task, FR-17); job state survives restarts.
-/// Compatibility adapter; runtime uses [`execute_sync_job_with_settings`].
+/// Compatibility adapter; runtime uses [`execute_sync_job_with_dense_policy`].
 ///
 /// Setup failures (missing project, unreadable config) also record `error`,
 /// so the project never keeps a stuck `queued` job that would block FR-17
@@ -1637,6 +1637,28 @@ pub fn execute_sync_job_with_settings(
     config: &Config,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> Result<Project> {
+    execute_sync_job_with_dense_policy(
+        cache,
+        job_id,
+        project_id,
+        config,
+        settings,
+        &crate::hybrid::dense::DenseCacheLimits::default(),
+    )
+}
+
+/// Execute a sync with the owning daemon's storage and immutable dense policy.
+///
+/// # Errors
+/// Same setup/indexing failures as [`execute_sync_job_with_settings`].
+pub fn execute_sync_job_with_dense_policy(
+    cache: &Path,
+    job_id: i64,
+    project_id: i64,
+    config: &Config,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    dense: &crate::hybrid::dense::DenseCacheLimits,
+) -> Result<Project> {
     let mut db = Db::open_with_settings(cache, settings)?;
     let setup = (|| -> Result<Project> {
         registry::project_by_id(&db, project_id)?.ok_or_else(|| Error::Project {
@@ -1645,7 +1667,9 @@ pub fn execute_sync_job_with_settings(
         })
     })();
     let outcome = match setup {
-        Ok(project) => run_sync_job_in(&mut db, cache, job_id, &project, config),
+        Ok(project) => {
+            run_sync_job_in_with_dense_policy(&mut db, cache, job_id, &project, config, dense)
+        }
         Err(err) => {
             let stats = json!({ "error": err.to_string() }).to_string();
             if let Err(record) =
@@ -1676,12 +1700,40 @@ pub fn run_sync_job_in(
     project: &Project,
     config: &Config,
 ) -> Result<JobStats> {
+    run_sync_job_in_with_dense_policy(
+        db,
+        cache,
+        job_id,
+        project,
+        config,
+        &crate::hybrid::dense::DenseCacheLimits::default(),
+    )
+}
+
+/// Run a sync using the runtime's dense policy for ANN backfill pins.
+///
+/// # Errors
+/// Same indexing/persistence failures as [`run_sync_job_in`].
+pub fn run_sync_job_in_with_dense_policy(
+    db: &mut Db,
+    cache: &Path,
+    job_id: i64,
+    project: &Project,
+    config: &Config,
+    dense: &crate::hybrid::dense::DenseCacheLimits,
+) -> Result<JobStats> {
     repo::mark_sync_running(db.connection(), job_id)?;
     // After the index pass, a full embedding sweep over every project chunk
     // completes the coverage a previous offline period left behind (FR-15);
     // cached chunks cost nothing, so this is a no-op once covered.
     let outcome = run_project_index(db, cache, project, config).and_then(|stats| {
-        hybrid_jobs::embed_project_chunks(db, &config.hybrid_cfg, &config.providers, project.id)?;
+        hybrid_jobs::embed_project_chunks_with_policy(
+            db,
+            &config.hybrid_cfg,
+            &config.providers,
+            project.id,
+            dense,
+        )?;
         Ok(stats)
     });
     let (state, stats_json) = match &outcome {

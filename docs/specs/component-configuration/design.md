@@ -606,3 +606,18 @@ resource creation. Legacy signatures resolve owner defaults at compatibility
 boundaries. No duplicate SettingsSpec or default source is introduced.
 See [cf6a-plan.md](cf6a-plan.md). Vector payload bytes remain the cache accounting
 unit, without claiming coverage of external Arc holders or allocator/key overhead.
+
+## Delta 2026-11-13 — CF6b dense resource propagation
+
+DenseCacheLimits projects DenseSettings; its compatibility Default reads only
+DenseSpec. Daemon and direct CLI receive one owner-resolved dense/query policy.
+Legacy Config vector budget is composed explicitly at the same boundary and still
+overrides the dense-path fallback; project budgets retain their existing precedence.
+Shared passes its actual immutable limits to sync/backfill helpers without another
+settings lookup or lock. A common pure eligibility predicate gates both ANN builder
+and backfill pins; live reservation/accounting remains the existing separate gate.
+Unrepresentable graph-plus-row peak arithmetic rejects admission even with a
+maximum explicit cap. Pin admission and renewal use chunk rows, including repeated hashes. This corrects
+temporary pins for below-threshold corpora and premature unpinning of eligible
+duplicate corpora. No live settings publication or strict-store semantics implied.
+See [cf6b-plan.md](cf6b-plan.md).

@@ -196,7 +196,7 @@ pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let db_settings = crate::store::settings::standalone()?;
     let pool_settings = crate::store::settings::standalone_read_pool()?;
-    let query_settings = crate::hybrid::dense_settings::standalone_query_cache()?;
+    let dense_settings = crate::hybrid::dense_settings::standalone()?;
     match cli.command {
         #[cfg(feature = "web")]
         Command::Web { open, port } => crate::web::run(port, open),
@@ -224,7 +224,7 @@ pub fn run() -> anyhow::Result<()> {
             },
             &db_settings,
             query_mode,
-            &query_settings,
+            dense_settings.settings(),
         ),
         Command::List => status::list_with_settings(&db_settings),
         Command::Sync { path } => sync(path.as_deref(), &db_settings),
@@ -238,7 +238,7 @@ pub fn run() -> anyhow::Result<()> {
             grace_ms,
             &db_settings,
             &pool_settings,
-            &query_settings,
+            dense_settings.settings(),
         ),
         Command::Mcp => crate::mcp::frontend::run_blocking(),
         Command::Daemon { command } => match command {
@@ -285,15 +285,15 @@ fn serve(
     grace_ms: u64,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
-    query_settings: &crate::hybrid::dense_settings::QueryCacheSettings,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
 ) -> anyhow::Result<()> {
     let cache = paths::cache_dir()?;
-    crate::daemon::lifecycle::run_daemon_with_resource_policies(
+    crate::daemon::lifecycle::run_daemon_with_dense_policy(
         &cache,
         std::time::Duration::from_millis(grace_ms),
         settings,
         pool_settings,
-        query_settings,
+        dense_settings,
     )?;
     Ok(())
 }

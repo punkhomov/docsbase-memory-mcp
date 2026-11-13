@@ -27,7 +27,7 @@ const _: () = assert!(
 
 /// Projects below this vector count always use exact `top_k` (OQ-3,
 /// provisional; calibrated in T6).
-pub const ANN_MIN_VECTORS: usize = 4096;
+pub const ANN_MIN_VECTORS: usize = super::dense_settings::DEFAULT_ANN_MIN_VECTORS;
 
 /// Indexes at or below this size are built sequentially: the parallel insert
 /// is racy on tiny graphs (two points can lose a neighbour) and provides no
@@ -257,7 +257,15 @@ impl AnnIndex {
 /// §8): vectors plus a per-point graph overhead.
 #[must_use]
 pub(crate) fn ann_estimated_bytes(count: usize, dim: usize) -> usize {
-    count.saturating_mul(dim * 4 + GRAPH_OVERHEAD_BYTES)
+    checked_ann_estimated_bytes(count, dim).unwrap_or(usize::MAX)
+}
+
+/// The same estimate with explicit overflow refusal for admission decisions.
+#[must_use]
+pub(crate) fn checked_ann_estimated_bytes(count: usize, dim: usize) -> Option<usize> {
+    dim.checked_mul(std::mem::size_of::<f32>())
+        .and_then(|bytes| bytes.checked_add(GRAPH_OVERHEAD_BYTES))
+        .and_then(|per_point| count.checked_mul(per_point))
 }
 
 /// Loads a dump with `mmap` storage; panics and load errors are unified into

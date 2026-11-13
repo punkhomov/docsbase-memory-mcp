@@ -1,11 +1,11 @@
-//! Pure dense policy, ungated. Query-cache construction consumes its projection;
-//! remaining dense resource adoption belongs to the later CF6 slices.
+//! Pure dense policy, ungated. Dense/query construction consumes owner projections;
+//! live updates and backfill TTL remain later resource-policy work.
 //! The legacy vector budget is per dense path/project, not a strict global quota.
 
 use crate::config::bootstrap::DefaultsContext;
 use crate::config::schema::{
-    ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Scope, SettingsSpec,
-    SourceId, Unit,
+    ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Resolved, Scope,
+    SettingsSpec, SourceId, Unit,
 };
 use crate::error::{Error, Result};
 use std::time::Duration;
@@ -14,6 +14,10 @@ use std::time::Duration;
 pub const DEFAULT_QUERY_CACHE_MAX_ENTRIES: usize = 256;
 /// Default cached query vector payload bytes (allocator/key overhead excluded).
 pub const DEFAULT_QUERY_CACHE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// Default dense row-count cap.
+pub const DEFAULT_DENSE_MAX_VECTORS: usize = 1_000_000;
+/// Default lower threshold for ANN construction and persisted lookup.
+pub const DEFAULT_ANN_MIN_VECTORS: usize = 4096;
 
 /// Complete immutable policy for one shared query-cache resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,9 +49,15 @@ impl QueryCacheSettings {
 /// # Errors
 /// The owner's policy is invalid.
 pub fn standalone_query_cache() -> Result<QueryCacheSettings> {
-    let dense =
-        crate::config::resolve::resolve_component::<DenseSpec>(&DefaultsContext::standalone(), [])?;
-    Ok(dense.settings().query_cache_settings())
+    Ok(standalone()?.settings().query_cache_settings())
+}
+
+/// Resolve complete standalone dense policy at a composition boundary.
+///
+/// # Errors
+/// The owner's policy is invalid.
+pub fn standalone() -> Result<Resolved<DenseSettings>> {
+    crate::config::resolve::resolve_component::<DenseSpec>(&DefaultsContext::standalone(), [])
 }
 
 /// Complete dense policy; remaining runtime adoption follows in its owning task.
@@ -124,10 +134,10 @@ impl SettingsSpec for DenseSpec {
     ];
     fn defaults(_: &DefaultsContext) -> Self::Defaults {
         DenseSettings {
-            max_vectors: 1_000_000,
+            max_vectors: DEFAULT_DENSE_MAX_VECTORS,
             max_bytes: 1536 * 1024 * 1024,
             max_projects: 8,
-            min_vectors: 4096,
+            min_vectors: DEFAULT_ANN_MIN_VECTORS,
             build_backoff: Duration::from_secs(30),
             vector_cache_max_bytes: 1024 * 1024 * 1024,
             max_ann_disk_bytes: 4 * 1024 * 1024 * 1024,
