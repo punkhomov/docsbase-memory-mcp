@@ -424,3 +424,153 @@ fn cli_website_root_overlay_selects_an_independently_indexed_other_project() {
     drop(client);
     env.stop(&mut daemon);
 }
+
+#[derive(Debug)]
+struct StartupFailure {
+    failed: bool,
+    published: bool,
+    timed_out: bool,
+    diagnostic: String,
+}
+
+// A broken Website startup can stay alive forever. Stop observation as soon as
+// it publishes an endpoint; otherwise use a startup watchdog and always reap.
+fn observe_startup_failure(env: &ProfileEnv, args: &[&str]) -> StartupFailure {
+    let mut daemon = Daemon(
+        cli(env.cache.path(), env.config.path())
+            .arg("serve")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut status = None;
+    let mut published = false;
+    while Instant::now() < deadline {
+        if let Some(exited) = daemon.0.try_wait().unwrap() {
+            status = Some(exited);
+            break;
+        }
+        if matches!(Client::try_connect(env.cache.path()), Ok(Some(_))) {
+            published = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let timed_out = status.is_none() && !published;
+    if status.is_none() {
+        let _ = daemon.0.kill();
+        daemon.0.wait().unwrap();
+    }
+    let mut diagnostic = String::new();
+    daemon
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut diagnostic)
+        .unwrap();
+    StartupFailure {
+        failed: status.is_some_and(|status| !status.success()),
+        published,
+        timed_out,
+        diagnostic,
+    }
+}
+
+#[test]
+fn cli_website_rejects_captured_legacy_source_errors_before_startup_resources() {
+    let mut violations = Vec::new();
+    for scenario in [
+        "malformed",
+        "oversized",
+        "unavailable",
+        "invalid_shared_legacy",
+    ] {
+        let env = ProfileEnv::indexed();
+        let path = env.config.path().join("config.toml");
+        match scenario {
+            "malformed" => std::fs::write(&path, "[daemon\n").unwrap(),
+            "oversized" => std::fs::write(&path, vec![b' '; 1_048_577]).unwrap(),
+            "unavailable" => {
+                std::fs::remove_file(&path).unwrap();
+                std::fs::create_dir(&path).unwrap();
+            }
+            _ => std::fs::write(
+                &path,
+                "max_file_size=0\n[daemon]\nprofile={mode='shared'}\n",
+            )
+            .unwrap(),
+        }
+        let registry = env.cache.path().join("registry.db");
+        let before = std::fs::read(&registry).unwrap();
+        let outcome =
+            observe_startup_failure(&env, &["--project", env.root.path().to_str().unwrap()]);
+        let effects: Vec<_> = ["state", "logs", "vectors.db", "data"]
+            .into_iter()
+            .filter(|name| env.cache.path().join(name).exists())
+            .collect();
+        if !outcome.failed
+            || outcome.published
+            || outcome.timed_out
+            || !effects.is_empty()
+            || std::fs::read(registry).unwrap() != before
+        {
+            violations.push(format!("{scenario}: {outcome:?}, effects={effects:?}"));
+        }
+    }
+    assert_eq!(violations, Vec::<String>::new());
+}
+
+#[test]
+fn explicit_shared_retains_legacy_source_fallback_and_readonly_unbound_binding() {
+    for source in [
+        "[daemon\n",
+        "max_file_size=0\n[daemon]\nprofile={mode='shared'}\n",
+    ] {
+        let env = ProfileEnv::indexed();
+        std::fs::write(env.config.path().join("config.toml"), source).unwrap();
+        let mut daemon = env.start(&["--profile", "shared", "--grace-ms", "60000"]);
+        let mut client = env.connect();
+        assert!(matches!(
+            client
+                .call(Request::BindReadOnly {
+                    pid: std::process::id(),
+                    project_id: None
+                })
+                .unwrap(),
+            docsbase_memory::ipc::protocol::Response::ToolResult { .. }
+        ));
+        drop(client);
+        env.stop(&mut daemon);
+    }
+}
+
+#[test]
+fn cli_shared_cannot_mask_recognized_website_source_policy_errors() {
+    for (prefix, suffix) in [
+        ("max_file_size=0\n", ""),
+        ("", "idle_grace_ms=0\n"),
+        ("", "max_events=0\n"),
+    ] {
+        let env = ProfileEnv::indexed();
+        std::fs::write(
+            env.config.path().join("config.toml"),
+            format!(
+                "{prefix}[daemon]\nprofile={{mode='website',project_root={}}}\n{suffix}",
+                toml::Value::String(env.root.path().to_string_lossy().into_owned())
+            ),
+        )
+        .unwrap();
+        let outcome = observe_startup_failure(&env, &["--profile", "shared"]);
+        assert!(
+            outcome.failed && !outcome.published && !outcome.timed_out,
+            "{outcome:?}"
+        );
+        assert_ne!(outcome.diagnostic, "");
+        assert!(!env.cache.path().join("state").exists());
+    }
+}

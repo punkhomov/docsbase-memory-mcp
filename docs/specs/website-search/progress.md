@@ -502,3 +502,17 @@ daemon_settings pass. Current Clippy/fmt precede the clean functional checkpoint
 remaining gates are frozen full cli-full, lean focused/clippies, inventory/source
 audit and fresh S1c review. This is not Task S1c completion or native ship approval.
 Final receipts may live in the task report/PR without a documentation-only rerun.
+
+
+### 2026-11-13 — PR158 final-review I1 focused fix
+
+An explicit CLI Website selector now propagates a captured legacy global-source
+error before admission/resources; warning/default fallback remains Shared-only.
+Causal RED with an existing real indexed project observed endpoint/state
+publication for malformed, oversized, unavailable and invalid Shared legacy
+sources. Focused GREEN83/0 preserves Shared fallback, valid Shared overlay of
+Website, recognized Website source-policy rejection and grace/provenance rules.
+Current all-target Clippy, fmt and diff checks pass. Full current cli-full/lean
+verification and original final scoped rereview remain pending. Evidence:
+`/workspace/scratch/agent-b/79/server-delivery/fix1/`. No dependency, budget,
+ignore, native adapter or S2 scope change.

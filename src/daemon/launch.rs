@@ -189,6 +189,13 @@ impl LaunchSnapshot {
             }),
             Err(LaunchFailure::Daemon(error)) => Err(error),
             Err(LaunchFailure::Legacy(error)) => {
+                // Shared alone retains the source-error compatibility adapter.
+                if matches!(
+                    &patch.profile,
+                    Some(crate::daemon::settings::DaemonProfile::Website { .. })
+                ) {
+                    return Err(error);
+                }
                 eprintln!("warning: global config unavailable: {error}");
                 let config =
                     crate::config::resolve::launch_resolution(Path::new("config.toml"), None)
