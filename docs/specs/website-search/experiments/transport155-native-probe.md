@@ -113,6 +113,26 @@ atomic поля; sequence описывает порядок harness publication,
 одним atomic kernel-state снимком. `CandidateReady` — барьер завершения child
 candidate protocol; на watchdog неполный snapshot никогда не означает pass.
 
+## ADDED 2026-11-13 — native feedback fix1
+
+Run43499988847 на reviewed7fa2754 успешно скомпилирован на Windows Server2025
+build26100 AMD64. NormalDrain сохранил valid CandidateFrozen: положительный
+pending sample, все14 байт, successful flush, post-terminal FALSE/1168 и worker
+signaling. После successful NormalDisconnect cleanup read вернул FALSE/233,
+0bytes; client close/signaling прошли. Прежний cleanup predicate ошибочно отверг
+этот documented-disconnect outcome; run остался RED без forced kill. Остальные
+три case не запускались. Raw artifacts сохранены без изменений.
+
+В существующей normal post-drain cleanup ветке (NormalDrain и cleanup drain
+CancelBeforeEntry), только после full frame, successful flush/worker retirement
+и successful NormalDisconnect дополнительно допускается FALSE/
+ERROR_PIPE_NOT_CONNECTED233 с0bytes. Raw ClientEndRead233 не нормализуется.
+Official DisconnectNamedPipe remarks обещают ошибку доступа forced-off client,
+но не конкретный код;233 установлен actual run и locked binding. Candidate
+predicates, pending cancel/disconnect acceptance, phase boundaries и watchdogs
+не меняются. Этот новый commit ещё не compile/native GREEN; нужен fresh scoped
+review и один новый exact-head Windows run. #155 не закрывается.
+
 ## Точные четыре case
 
 Общее начало: worker публикует `AtEntryGate`, сигналит event и ждёт. Controller

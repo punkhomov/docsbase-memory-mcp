@@ -170,3 +170,12 @@ record phase uses exact frozen membership, retaining child phase sample only as
 diagnostic data. Direct pinned rustfmt/static interleaving proofs only; native
 compilation/execution remain unverified, no Cargo or remote action. Ready for
 original scoped re-review; report/diff/evidence: /workspace/scratch/agent-b/155/fix1/.
+
+Task 155-native-feedback-fix1: Ruling: run43499988847 reviewed7fa compiled on
+Windows26100; NormalDrain candidate valid, cleanup alone rejected actual zero-byte
+ReadFile FALSE/233 after successful normal disconnect. Native RED/artifacts kept;
+other3 cases unexecuted. Narrow normal post-drain cleanup acceptance adds233 only,
+retaining raw status and all full-frame/flush/control/retirement checks. Pending
+abort predicates, phases/timeouts/retries unchanged. Directfmt/static only here;
+new-head native GREEN pending, no Cargo/remote action or #155 completion claim.
+Fresh scoped review package: /workspace/scratch/agent-b/155/native-fix1/.

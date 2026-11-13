@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NOT_FOUND,
-    ERROR_OPERATION_ABORTED, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE,
-    INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_OPERATION_ABORTED, ERROR_PIPE_NOT_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError,
+    HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FlushFileBuffers,
@@ -1182,7 +1182,10 @@ fn cleanup(fixture: &Fixture, records: &Records, case: Case) -> io::Result<()> {
             let end = records
                 .get(Event::ClientEndRead)
                 .ok_or_else(|| io::Error::other("missing end-read"))?;
+            // After full drain and successful normal disconnect, the client
+            // read may report a disconnected pipe. Preserve its raw 233 record.
             if !(end[0] == 0 && end[1] == u64::from(ERROR_BROKEN_PIPE)
+                || end[0] == 0 && end[1] == u64::from(ERROR_PIPE_NOT_CONNECTED) && end[2] == 0
                 || end[0] != 0 && end[2] == 0)
             {
                 return Err(io::Error::other("unexpected normal end-read status"));
