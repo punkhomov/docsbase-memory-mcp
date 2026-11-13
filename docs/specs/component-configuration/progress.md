@@ -662,3 +662,42 @@ Final whole-branch review и native delivery остаются gates.
 Task CF7c1: complete (implementation/local verification/fresh task review).
 Independent final source review и required native inventory остаются delivery gates;
 полное завершение CF7/#78 не заявляется. No deferred minors.
+
+CF7c1 delivery: PR145 squash3b347320d9399edebbb3d597df74fd720d2f7f14,
+required4checks run43430656050 attempt1 GREEN. Downloaded parent inventory PR142
+сохранён полностью,18ignores/OS;8new tests executed. Linux1381+2static, macOS1377,
+Windows1363pass/0fail. Reviewed7c2c9b7/testedc71e052/squash tree совпали:
+7bd2b66cbb1acca2401e104154194a64787278aa. #78 остаётся open.
+
+## 2026-11-13 — CF7c2: prepared sync/index/status composition
+
+Task CF7c2: implementation in progress на актуальном main3b34732. Новые prepared
+API несут Config/stages/source через index и полный backfill/child Db; callback
+cores сохраняют legacy state/error timing. Actual daemon/CLI callers используют
+prepared paths, stage admission до enqueue без shared DB guard. Captured legacy
+policy не читается из более новой dense map. Auto-index проходит authority; raw
+config не публикует budget. Source-aware coverage не строит provider.
+TDD: missing API/method RED; real owner-backed core7integration GREEN. Actual
+status old coverage дал Null вместо1/1 (causal RED), fixed source propagation GREEN.
+3new project-state regressions среди15unit GREEN; valid disabled local provider
+fixture не делает inference/downloads. Initial malformed fixtures были исправлены,
+не засчитываются causal RED. Omitted stage preparation mutation RED возвращает job
+вместо Admission, source restored. Full/lean/local lint/review/native gates pending.
+Legacy mode остаётся production startup; watcher CF7c3, CF5 adoption и #78 open.
+
+CF7c2 local verification: complete cli-full1391passed/0failed/18existing ignores,
+lean1198passed/0failed/11existing ignores;86top-level summaries в каждом прогоне,
+по2nested filtered subprocess summaries исключены. Все10new regressions выполнены;
+full/lean all-target Clippy/fmt/diff GREEN. Provider-admission regression изолирован
+в child process от ORT_DYLIB_PATH/OPENROUTER_API_KEY и повторно прошёл full/lean.
+Fresh task/final reviews и required native inventory остаются delivery gates.
+
+Fresh CF7c2 task review: Spec PASS / Quality APPROVED;1Minor исправлен: failed
+provider test теперь требует ровно2persisted retry rows перед проверкой hashes.
+Final7integration full/lean GREEN, test-only assertion delta после full suites.
+Independent final source review и required native delivery/inventory pending.
+
+Task CF7c2: complete (implementation/local verification/fresh task review).
+Ruling: Minor по vacuous marker assertion исправлен, re-review ADDRESSED;
+новых Critical/Important нет. No deferred minors. Final/native delivery остаются
+gates; полное завершение CF7/#78 не заявляется.

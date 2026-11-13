@@ -701,3 +701,23 @@ prepared APIs — jobs::embed_texts_from. Общие full/incremental/finish cor
 содержит optional legacy fallback. Marker/provider/commit порядок прежний.
 Это additive embedded API adoption; production daemon/sync/watcher будут явно
 собирать coherent context следующим slice. V2/migration activation отсутствует.
+
+## Delta 2026-11-13 — CF7c2: captured sync context
+
+Новые tools *_with_vectors принимают Config + HybridStages + VectorCacheSource
+и explicit DB/dense policies; embedding decision authoritative в supplied stages.
+Root проверяется для index cache и Db.cache_root до writes/lease/index open.
+Private callback cores объединяют status/writer lease, child-connection setup и
+persistent terminal jobs со старыми compatibility APIs. Реальный index body —
+CF7c1 prepared path; полный backfill — jobs::embed_project_chunks_from с тем же
+source/ANN policy и ranking. SQL не удерживается через provider work.
+Shared::vector_source_for клонирует Owned либо проецирует complete legacy limits
+из captured Config. Map нового reload не меняет budget старой job. Runtime stages
+из project_runtime согласованы с Config Arc; spawn держит обе Arc и source до конца.
+Sync_start освобождает shared Db guard до model construction; stage failure не
+создаёт queued job. Auto-index после регистрации получает runtime через authority
+и повторно проверяет auto_index, не меняет project budget вне slot mutex. Status,
+panel_projects и schedule_backfill читают coverage через тот же source без model
+construction. Direct CLI использует уже существующий startup from_config result.
+Legacy wrappers сохраняют старый lazy resolve и errors; startup остаётся legacy.
+Watcher dynamic config/retry и strict activation — отдельные последующие slices.

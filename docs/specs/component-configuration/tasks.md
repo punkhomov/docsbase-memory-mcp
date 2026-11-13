@@ -458,7 +458,15 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 
 ## Delta 2026-11-13 — CF7c1: source-aware index jobs
 
-- [ ] **CF7c1:** borrowed IndexEmbedding; реальные full/incremental prepared APIs
+- [x] **CF7c1:** borrowed IndexEmbedding; реальные full/incremental prepared APIs
   с общим core, owner admission до mutations, stale-gated recovery и retry markers.
   План [cf7c1-plan.md](cf7c1-plan.md). Additive embedded path; daemon/sync/watcher
   composition следует CF7c2, strict startup/file activation остаётся CF5/CF7.
+
+## Delta 2026-11-13 — CF7c2: coherent sync/index/status consumers
+
+- [x] **CF7c2:** prepared config/stages/source для project index, sync/backfill и
+  child Db; actual daemon/CLI propagation и source-aware configured coverage.
+  План [cf7c2-plan.md](cf7c2-plan.md). Runtime stage admission до enqueue; provider
+  preparation без shared DB guard. Watcher reload/consumer ownership — CF7c3,
+  strict startup и persisted migration по-прежнему CF5/CF7.

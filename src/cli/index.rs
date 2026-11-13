@@ -41,9 +41,17 @@ pub(crate) fn run_with_settings(
     let config = Config::load(Some(&project.canonical_root))?;
     // Fail fast (FR-14): a hybrid misconfiguration must surface on command
     // start, not after the index commit already happened.
-    crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)?;
+    let stages = crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)?;
     let cache_root = db.cache_root().to_path_buf();
-    let stats = tools::run_project_index(&mut db, &cache_root, &project, &config)?;
+    let source = crate::vector_cache::VectorCacheSource::Legacy(config.hybrid_cfg.cache.limits());
+    let stats = tools::run_project_index_with_vectors(
+        &mut db,
+        &cache_root,
+        &project,
+        &config,
+        &stages,
+        &source,
+    )?;
 
     let payload = serde_json::json!({ "project_id": project.id, "stats": stats });
     println!("{payload}");

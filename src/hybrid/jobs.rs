@@ -280,6 +280,25 @@ pub fn embed_project_chunks_from(
 /// # Errors
 /// Registry/cache failures; feature errors when enabled in an offline build.
 pub fn coverage(db: &Db, cfg: &HybridCfg, project_id: i64) -> Result<Option<Coverage>> {
+    coverage_from(
+        db,
+        cfg,
+        project_id,
+        &VectorCacheSource::Legacy(cfg.cache.limits()),
+    )
+}
+
+/// Configured coverage through an explicit source; no provider is constructed.
+///
+/// # Errors
+/// Root admission, registry and vector-cache failures.
+pub fn coverage_from(
+    db: &Db,
+    cfg: &HybridCfg,
+    project_id: i64,
+    source: &VectorCacheSource,
+) -> Result<Option<Coverage>> {
+    source.validate_root(db.cache_root())?;
     if !cfg.enabled {
         return Ok(None);
     }
@@ -290,11 +309,11 @@ pub fn coverage(db: &Db, cfg: &HybridCfg, project_id: i64) -> Result<Option<Cove
     // stays cheap and never builds runtimes per status call (NFR-1). The
     // canonical key (FR-9) keeps coverage aligned with the embedder and the
     // ANN warm path (SC-10).
-    coverage_for_key_with_limits(
+    coverage_for_key_from(
         db,
         &super::config::embedding_model_id(embedding),
         project_id,
-        cfg.cache.limits(),
+        source,
     )
     .map(Some)
 }

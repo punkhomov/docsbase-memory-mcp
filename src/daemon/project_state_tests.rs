@@ -593,3 +593,146 @@ fn rejected_project_vector_budget_preserves_published_runtime_and_dense_rows() {
         "failed reload must not invalidate dense state"
     );
 }
+
+#[test]
+fn captured_legacy_sync_source_keeps_its_budget_after_dense_override() {
+    let fixture = Fixture::new();
+    let mut captured = Config::default();
+    captured.hybrid_cfg.cache.max_bytes = 8;
+    fixture
+        .shared
+        .dense
+        .set_vector_cache_max_bytes(fixture.project.id, 64)
+        .unwrap();
+    let source = fixture
+        .shared
+        .vector_source_for(fixture.project.id, &captured);
+    let mut vectors = source.connect(fixture.cache.path()).unwrap();
+    vectors.put("snapshot@d2", "first", &[1.0, 0.0]).unwrap();
+    vectors.put("snapshot@d2", "second", &[0.0, 1.0]).unwrap();
+    assert!(vectors.get("snapshot@d2", "first").unwrap().is_none());
+    assert!(vectors.get("snapshot@d2", "second").unwrap().is_some());
+}
+
+#[test]
+fn daemon_status_and_backfill_coverage_use_owned_source() {
+    struct Embed;
+    impl crate::vector_cache::Embedder for Embed {
+        fn model_id(&self) -> &'static str {
+            "openrouter/model@d2@l2"
+        }
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+    }
+    let mut fixture = Fixture::new();
+    fixture.write_config("[hybrid]\nenabled=true\n[hybrid.embedding]\nprovider=\"openrouter\"\nmodel=\"model\"\ndimensions=2\nnormalize=true\n");
+    std::fs::write(fixture.root.path().join("a.md"), "alphawidget").unwrap();
+    fixture
+        .shared
+        .open_project_config_with(&fixture.project, |_| {
+            Ok(HybridStages {
+                embedder: Some(Arc::new(Embed)),
+                ..HybridStages::default()
+            })
+        })
+        .unwrap();
+    let (config, stages) = fixture.shared.project_runtime(&fixture.project).unwrap();
+    let owner = crate::vector_cache::VectorStore::acquire(
+        fixture.cache.path(),
+        crate::vector_cache::settings::standalone()
+            .unwrap()
+            .settings(),
+    )
+    .unwrap();
+    Arc::get_mut(&mut fixture.shared).unwrap().dense = DenseCache::with_vector_store(
+        AnnPolicy::Disabled,
+        &owner,
+        crate::hybrid::dense_settings::standalone()
+            .unwrap()
+            .settings(),
+    )
+    .unwrap();
+    let source = crate::vector_cache::VectorCacheSource::Owned(owner);
+    let mut db = Db::open(fixture.cache.path()).unwrap();
+    tools::run_project_index_with_vectors(
+        &mut db,
+        fixture.cache.path(),
+        &fixture.project,
+        &config,
+        &stages,
+        &source,
+    )
+    .unwrap();
+    let project = registry::project_by_id(&db, fixture.project.id)
+        .unwrap()
+        .unwrap();
+    let status = route_metadata_tool(&fixture.shared, None, "status", &json!({})).unwrap();
+    assert_eq!(
+        status["projects"][0]["embed_coverage"],
+        json!({"cached":1,"total":1})
+    );
+    let panel = route_metadata_tool(&fixture.shared, None, "panel_projects", &json!({})).unwrap();
+    assert_eq!(panel[0]["cached_vectors"], 1);
+    assert_eq!(panel[0]["vector_chunks"], 1);
+    fixture.shared.schedule_backfill(&project).unwrap();
+    assert!(
+        crate::store::repo::active_sync_job(db.connection(), project.id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn sync_stage_admission_failure_precedes_enqueue() {
+    // The runtime's documented env override outranks a disabled provider.
+    // Isolate this consumer from other unit tests that mutate that env.
+    const CHILD: &str = "DOCSBASE_CF7C2_PREFLIGHT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "daemon::server::project_state_tests::sync_stage_admission_failure_precedes_enqueue"])
+            .env(CHILD, "1")
+            .env_remove("ORT_DYLIB_PATH")
+            .env_remove("OPENROUTER_API_KEY")
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let mut fixture = Fixture::new();
+    Arc::get_mut(&mut fixture.shared)
+        .unwrap()
+        .global_config
+        .providers = crate::hybrid::ProvidersCfg::default().with(
+        "fastembed",
+        crate::hybrid::FastembedProvider {
+            enabled: false,
+            runtime: None,
+            runtime_path: None,
+        }
+        .to_record(),
+    );
+    fixture.write_config("[hybrid]\nenabled=true\n[hybrid.embedding]\nprovider=\"fastembed\"\nmodel=\"bge-small-en-v1.5\"\ndimensions=384\nnormalize=true\n");
+    // Full builds admit the file shape, then reject the disabled runtime.
+    // Lean builds refuse the unavailable feature during config admission.
+    if cfg!(feature = "hybrid-local") {
+        fixture.shared.project_config(&fixture.project).unwrap();
+    }
+    let result = route_metadata_tool(
+        &fixture.shared,
+        None,
+        "sync_start",
+        &json!({"project_id":fixture.project.id}),
+    );
+    assert!(matches!(result, Err(Error::Admission { .. })));
+    let db = Db::open(fixture.cache.path()).unwrap();
+    assert!(
+        crate::store::repo::active_sync_job(db.connection(), fixture.project.id)
+            .unwrap()
+            .is_none()
+    );
+}

@@ -392,3 +392,12 @@ SC-W103: детерминированные тесты реального consum
 выше — исторические. Ограничения RAM, очередей, IPC и поисковых операций
 сохраняются. `cli-full` включает optional feature `web`; Cargo default=[]
 остаётся без HTTP frontend. Rust 1.88; frontend собирается явно до Cargo.
+
+## Delta 2026-11-13 — CF7c2: sync runtime admission
+
+Уточнение FR-17 и hybrid-providers FR-14: daemon sync_start/index_project готовят
+согласованные config/stages до enqueue. Stage admission error возвращается сразу,
+job не создаётся; failure во время execution сохраняется в persistent job как
+прежде. Existing valid duplicate-job/state/wire contracts сохраняются. Provider
+preparation не держит shared registry guard. Configured watcher lifetime и strict
+startup не включаются: см. component-configuration/cf7c2-plan.md.
