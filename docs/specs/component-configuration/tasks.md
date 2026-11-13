@@ -515,3 +515,17 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   in all consumers, no strict fallback, native retained-handle/alias tests.
   CF5b2 must extend the research schema with versioned bounded native target
   attribute evidence before any CF5b3 executor; schema1 captures bytes/state only.
+
+## Delta 2026-11-13 — CF5b2 source-publication slices
+
+- [x] **CF5b2a:** bounded [research plan](source-publication-plan.md) and
+  [source-publication.md](source-publication.md); primary platform references,
+  isolated existing-libc Linux experiments for rename/xattrs, open old reader,
+  before/between/after process exits, post-rename flush error, missing no-replace
+  and bounded/nofollow/hardlink refusal. Document what journal/native evidence
+  remains missing. Link/source/experiment audit, fresh task/final review, required
+  CI. No product code/dependency/test inventory/activation changes.
+- **CF5b2b:** reviewed bounded native metadata/control-format extension and platform
+  source publication seam. Explicit support/refusal and truthful result states.
+- **CF5b2c:** real native attributes/namespace/recovery/failure acceptance on all3OS
+  before CF5b3 executor/CF5c activation. Linux process evidence is not this gate.
