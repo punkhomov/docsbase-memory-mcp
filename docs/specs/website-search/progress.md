@@ -516,3 +516,14 @@ Current all-target Clippy, fmt and diff checks pass. Full current cli-full/lean
 verification and original final scoped rereview remain pending. Evidence:
 `/workspace/scratch/agent-b/79/server-delivery/fix1/`. No dependency, budget,
 ignore, native adapter or S2 scope change.
+
+### 2026-11-13 — S2 functional checkpoint; final verification/review pending
+
+Task S2: implemented fixed-project read-only readiness/CLI/SDK after actual API,
+CLI and causal association REDs. Targeted Rust: readiness units10 + integration41
+passed; SDK63 passed; current cli-full all-target Clippy/fmt/diff checks passed.
+The durable Sync association records A's exact attempt/actual counters before the
+existing writer lease ends; bounded O1/health/O2 observation never repairs/retries.
+Full cli-full, lean, inventory/source freeze and fresh task review remain pending.
+Ready covers the indexed corpus/recipe, not watcher-off filesystem freshness or
+continuous availability. S3 HTTP, native final delivery and deferred FR-S4 remain separate.

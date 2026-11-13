@@ -1791,7 +1791,10 @@ pub fn run_sync_job_in_with_dense_policy(
         // After the index pass, a full embedding sweep over every project chunk
         // completes the coverage a previous offline period left behind (FR-15);
         // cached chunks cost nothing, so this is a no-op once covered.
-        run_project_index(db, cache, project, config).and_then(|stats| {
+        run_project_index_using(db, cache, project, Some(job_id), |db, index| {
+            run_full(db, index, project, config)
+        })
+        .and_then(|stats| {
             hybrid_jobs::embed_project_chunks_with_policy(
                 db,
                 &config.hybrid_cfg,
@@ -1823,7 +1826,10 @@ pub fn run_sync_job_in_with_vectors(
     source.validate_root(cache)?;
     source.validate_root(db.cache_root())?;
     run_sync_job_using(db, job_id, |db| {
-        let stats = run_project_index_with_vectors(db, cache, project, config, stages, source)?;
+        let embedding = crate::index::job::IndexEmbedding::new(source, stages.embedder.as_deref());
+        let stats = run_project_index_using(db, cache, project, Some(job_id), |db, index| {
+            crate::index::job::run_full_with_embedding(db, index, project, config, &embedding)
+        })?;
         if let Some(embedder) = &stages.embedder {
             hybrid_jobs::embed_project_chunks_from(
                 db,
@@ -1844,20 +1850,90 @@ fn run_sync_job_using(
     run: impl FnOnce(&mut Db) -> Result<JobStats>,
 ) -> Result<JobStats> {
     repo::mark_sync_running(db.connection(), job_id)?;
-    let outcome = run(db);
-    let (state, stats_json) = match &outcome {
-        Ok(stats) => (SyncState::Done, serde_json::to_string(stats).ok()),
-        Err(err) => (
-            SyncState::Error,
-            Some(json!({ "error": err.to_string() }).to_string()),
-        ),
-    };
-    if let Err(finish_err) =
-        repo::finish_sync_job(db.connection(), job_id, state, stats_json.as_deref())
-    {
-        eprintln!("warning: cannot finish sync job {job_id}: {finish_err}");
+    let mut outcome = run(db);
+    // This is the exact record captured before the lexical lease ended. Never
+    // sample the project's current generation/outcome here: another direct
+    // writer may already have completed before terminal/backfill persistence.
+    let mut record = retained_sync_record(db, job_id)?;
+    if let Ok(stats) = &outcome {
+        let valid = serde_json::from_value::<JobStats>(record.clone())
+            .ok()
+            .as_ref()
+            == Some(stats)
+            && record
+                .get("index_outcome")
+                .cloned()
+                .and_then(|identity| {
+                    serde_json::from_value::<super::readiness::SyncAttribution>(identity).ok()
+                })
+                .is_some_and(|identity| identity.valid());
+        if !valid {
+            outcome = Err(Error::internal("sync lexical attribution is unavailable"));
+        }
     }
+    let state = match &outcome {
+        Ok(_) => SyncState::Done,
+        Err(err) => {
+            record["error"] = json!(err.to_string());
+            SyncState::Error
+        }
+    };
+    let stats_json = serde_json::to_string(&record)
+        .map_err(|err| Error::internal_with_source("serialize terminal sync result", err))?;
+    repo::finish_sync_job(db.connection(), job_id, state, Some(&stats_json))?;
     outcome
+}
+
+// The association envelope is bounded by the existing state-record boundary.
+fn retained_sync_record(db: &Db, job_id: i64) -> Result<Value> {
+    let bound = i64::try_from(crate::limits::MAX_STATE_BYTES)
+        .map_err(|_| Error::internal("sync record bound overflow"))?;
+    let raw: Option<Vec<u8>> = db
+        .connection()
+        .query_row(
+            "SELECT CASE WHEN typeof(stats_json)='text' AND length(CAST(stats_json AS BLOB))<=?2
+            THEN CAST(stats_json AS BLOB) END FROM sync_jobs WHERE id=?1",
+            rusqlite::params![job_id, bound],
+            |row| row.get(0),
+        )
+        .map_err(crate::store::repo::db_error)?;
+    Ok(raw
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({})))
+}
+
+fn associate_sync_index(db: &Db, job_id: i64, project_id: i64, stats: &JobStats) -> Result<()> {
+    let outcome = crate::index::outcome::read(db, project_id)?
+        .ok_or_else(|| Error::internal("completed sync has no current lexical outcome"))?;
+    if outcome.stats != *stats {
+        return Err(Error::internal(
+            "sync counters differ from its lexical outcome",
+        ));
+    }
+    let mut record = serde_json::to_value(stats)
+        .map_err(|err| Error::internal_with_source("serialize sync counters", err))?;
+    record["index_outcome"] =
+        serde_json::to_value(super::readiness::SyncAttribution::from(&outcome))
+            .map_err(|err| Error::internal_with_source("serialize sync attribution", err))?;
+    let raw = serde_json::to_string(&record)
+        .map_err(|err| Error::internal_with_source("serialize sync record", err))?;
+    if u64::try_from(raw.len()).map_or(true, |length| length > crate::limits::MAX_STATE_BYTES) {
+        return Err(Error::internal(
+            "sync attribution exceeds state-record bound",
+        ));
+    }
+    let changed = db
+        .connection()
+        .execute(
+            "UPDATE sync_jobs SET stats_json=?1 WHERE id=?2 AND project_id=?3 AND state='running'",
+            rusqlite::params![raw, job_id, project_id],
+        )
+        .map_err(crate::store::repo::db_error)?;
+    if changed != 1 {
+        return Err(Error::internal("sync attribution job is not running"));
+    }
+    Ok(())
 }
 
 /// `sync_status(job_id)`: persistent job state and statistics (FR-17).
@@ -1910,7 +1986,7 @@ pub fn run_project_index(
     project: &Project,
     config: &Config,
 ) -> Result<JobStats> {
-    run_project_index_using(db, cache, project, |db, index| {
+    run_project_index_using(db, cache, project, None, |db, index| {
         run_full(db, index, project, config)
     })
 }
@@ -1931,7 +2007,7 @@ pub fn run_project_index_with_vectors(
     source.validate_root(cache)?;
     source.validate_root(db.cache_root())?;
     let embedding = crate::index::job::IndexEmbedding::new(source, stages.embedder.as_deref());
-    run_project_index_using(db, cache, project, |db, index| {
+    run_project_index_using(db, cache, project, None, |db, index| {
         crate::index::job::run_full_with_embedding(db, index, project, config, &embedding)
     })
 }
@@ -1940,6 +2016,7 @@ fn run_project_index_using(
     db: &mut Db,
     cache: &Path,
     project: &Project,
+    sync_job_id: Option<i64>,
     run: impl FnOnce(&mut Db, &mut crate::index::tantivy_index::IndexHandle) -> Result<JobStats>,
 ) -> Result<JobStats> {
     lifecycle::with_writer_lease(cache, project.id, || {
@@ -1951,7 +2028,12 @@ fn run_project_index_using(
             run(db, &mut index)
         })();
         match outcome {
-            Ok(stats) => Ok(stats),
+            Ok(stats) => {
+                if let Some(job_id) = sync_job_id {
+                    associate_sync_index(db, job_id, project.id, &stats)?;
+                }
+                Ok(stats)
+            }
             Err(err) => {
                 if let Err(status_err) = registry::set_status(db, project.id, ProjectStatus::Error)
                 {
@@ -2280,3 +2362,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "sync_readiness_tests.rs"]
+mod sync_readiness_tests;

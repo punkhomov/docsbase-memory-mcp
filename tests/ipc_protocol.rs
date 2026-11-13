@@ -136,3 +136,17 @@ fn tool_result_round_trips_payloads() {
     let decoded = decode_response(&line).expect("decode");
     assert_eq!(decoded, response);
 }
+
+#[test]
+fn fixed_project_readiness_is_an_allowlisted_readonly_tool() {
+    let request = Request::CallTool {
+        name: "server_status".into(),
+        args: json!({}),
+    };
+    let bytes = encode(&request).unwrap();
+    assert_eq!(decode_request(&bytes).unwrap(), request);
+    assert_eq!(
+        docsbase_memory::ipc::protocol::SERVER_STATUS_CAPABILITY,
+        "server-status-v1"
+    );
+}

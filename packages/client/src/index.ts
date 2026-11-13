@@ -4,6 +4,7 @@ import { Pool } from './pool.ts';
 import { resolveClientOptions } from './settings.ts';
 import {
   LITERAL_QUERY,
+  SERVER_STATUS,
   MAX_FRAME_BYTES,
   encodeRequest,
   object,
@@ -11,6 +12,7 @@ import {
   toolValue,
   searchResult,
   daemonStatus,
+  serverStatus,
   type WireRequest,
 } from './protocol.ts';
 import {
@@ -21,6 +23,7 @@ import {
   type SearchOptions,
   type SearchResult,
   type DaemonStatus,
+  type ServerStatus,
   type HelloMetadata,
 } from './types.ts';
 export { DocsbaseError } from './types.ts';
@@ -33,6 +36,11 @@ export type {
   SearchResult,
   ProjectStatus,
   DaemonStatus,
+  ServerStatus,
+  ServerSync,
+  IndexOutcome,
+  IndexStats,
+  ReadinessReason,
   HelloMetadata,
   ErrorKind,
 } from './types.ts';
@@ -215,6 +223,26 @@ export class DocsbaseClient {
         operation,
         () => ({ method: 'CallTool', params: { name: 'status', args: {} } }),
         (value) => daemonStatus(value, this.options.projectId),
+      );
+    } finally {
+      this.end(operation);
+    }
+  }
+  /** Current fixed Website readiness. Requires server-status-v1 support. */
+  async serverStatus(call: CallOptions = {}): Promise<ServerStatus> {
+    const startedAt = performance.now();
+    const operation = this.begin(startedAt, call);
+    try {
+      operation.check();
+      return await this.invoke(
+        this.controls,
+        operation,
+        (connection) => {
+          if (!connection.metadata.capabilities.includes(SERVER_STATUS))
+            throw new DocsbaseError('protocol', 'daemon does not support server-status-v1');
+          return { method: 'CallTool', params: { name: 'server_status', args: {} } };
+        },
+        (value) => serverStatus(value, this.options.projectId),
       );
     } finally {
       this.end(operation);

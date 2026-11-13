@@ -121,8 +121,12 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<config::ConfigCommand>,
     },
-    /// Show registry-wide status.
-    Status,
+    /// Show registry status or the selected Website project's readiness.
+    Status {
+        /// Existing absolute project root; requires its live Website daemon.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
     /// Run the shared daemon in the foreground (hidden `--detached` for autostart).
     Serve {
         /// Complete daemon profile selector (shared|website).
@@ -249,7 +253,10 @@ pub fn run() -> anyhow::Result<()> {
         Command::Config {
             command: Some(command),
         } => config::run(&command, &db_settings),
-        Command::Status => status::status_with_settings(&db_settings),
+        Command::Status { project: None } => status::status_with_settings(&db_settings),
+        Command::Status {
+            project: Some(project),
+        } => status::project_status_with_settings(&project, &db_settings),
         Command::Serve {
             detached,
             grace_ms,

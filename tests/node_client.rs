@@ -2,7 +2,7 @@
 use docsbase_memory::{
     error::Error,
     ipc::{
-        panel::SearchHit,
+        panel::{IndexHealth, SearchHit, ServerProject, ServerStatus},
         protocol::{self, Request, Response, SearchCallContext},
     },
     store::migrations::SCHEMA_VERSION,
@@ -71,6 +71,7 @@ fn fixture() -> Value {
     json!({
         "protocolVersion": protocol::PROTOCOL_VERSION, "schemaVersion": SCHEMA_VERSION,
         "buildId": build, "maxFrameBytes": protocol::MAX_FRAME_BYTES, "capabilities": caps,
+        "serverCapabilities": [protocol::ACTIVE_WEBSITE_CAPABILITY, protocol::SERVER_STATUS_CAPABILITY],
         "requests": {
             "hello": frame(&Request::Hello { protocol_version: protocol::PROTOCOL_VERSION,
                 build_id: protocol::build_id(), client: "docsbase-node".into() }),
@@ -78,12 +79,25 @@ fn fixture() -> Value {
             "search": frame(&Request::Search { args: json!({"query":"widgets", "query_mode":"literal", "snippet":true}),
                 context: SearchCallContext { remaining_ms: 1000, elapsed_ms: 20, queue_ms: 10 } }),
             "status": frame(&Request::CallTool { name: "status".into(), args: json!({}) }),
+            "serverStatus": frame(&Request::CallTool { name: "server_status".into(), args: json!({}) }),
         },
         "responses": {
             "hello": frame(&Response::Hello { protocol_version: protocol::PROTOCOL_VERSION,
                 build_id: protocol::build_id(), schema_version: SCHEMA_VERSION,
                 capabilities: caps.iter().map(|s| (*s).to_owned()).collect() }),
             "bind": frame(&Response::ToolResult { value: json!({"session_id": 1}) }),
+            "serverStatus": frame(&Response::ToolResult { value: json!(ServerStatus {
+                schema_version: 1, profile: "website".into(),
+                project: ServerProject { id: 7, name: "docs".into(), root: "/docs".into(), status: "indexed".into() },
+                index_generation: 3, index_attempt: 4, index_health: IndexHealth::Healthy,
+                outcome: Some(docsbase_memory::index::outcome::IndexOutcome {
+                    schema_version: 1, attempt_id: 4, index_generation: 3,
+                    canonical_root: "/docs".into(), recipe_id: format!("index-recipe-v1:{}", "a".repeat(64)),
+                    scope: docsbase_memory::index::outcome::SurveyScope::FullSurvey,
+                    stats: docsbase_memory::index::job::JobStats { skipped: 2, ..Default::default() },
+                }), active_sync: None, latest_sync: None, ready: true, reason: None,
+                restart_required: false, notice: None,
+            }) }),
             "hits": frame(&Response::ToolResult { value: json!([hit]) }),
             "explained": frame(&Response::ToolResult { value: json!({"hits":[hit],"meta":{"index_generation":3}}) }),
         },
@@ -149,6 +163,7 @@ fn official_node_client_searches_real_daemon_and_reconnects() {
     let output = node.assert().success().get_output().clone();
     let summary: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(summary["nativeIpc"], true);
+    assert_eq!(summary["serverReadiness"], true);
     assert_eq!(summary["searchesAccepted"], 11);
     assert_eq!(summary["overloaded"], 1);
     assert_eq!(summary["reconnected"], true);
