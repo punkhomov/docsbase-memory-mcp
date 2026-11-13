@@ -104,7 +104,7 @@ pub(crate) fn run_with_settings_and_mode(
         options,
         settings,
         mode,
-        &crate::hybrid::dense_settings::standalone_query_cache()?,
+        crate::hybrid::dense_settings::standalone()?.settings(),
     )
 }
 
@@ -113,9 +113,9 @@ pub(crate) fn run_with_policies(
     options: &Options,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     mode: QueryMode,
-    query_settings: &crate::hybrid::dense_settings::QueryCacheSettings,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
 ) -> anyhow::Result<()> {
-    query_settings.validate()?;
+    dense_settings.query_cache_settings().validate()?;
     let started = std::time::Instant::now();
     let global = Config::global()?;
     let operation = SearchOperation::new(&global.search, started, Cancellation::new())?;
@@ -147,7 +147,7 @@ pub(crate) fn run_with_policies(
     // Direct mode loads a persisted ANN index if one exists and never builds
     // one (FR-8, FR-5): a one-shot process must not pay for HNSW build
     // latency.
-    let dense = direct_dense_cache(&cache, config.hybrid_cfg.cache.max_bytes, query_settings)?;
+    let dense = direct_dense_cache(&cache, config.hybrid_cfg.cache.max_bytes, dense_settings)?;
     let budget = crate::search::budget::PayloadBudget::new(config.search.clone())?;
     let value = tools::search_docs_in(
         &tools::SearchContext {
@@ -205,17 +205,15 @@ fn block_on_io<T>(work: impl Future<Output = Result<T>>) -> Result<T> {
 fn direct_dense_cache(
     cache: &Path,
     vector_cache_max_bytes: u64,
-    query_settings: &crate::hybrid::dense_settings::QueryCacheSettings,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
 ) -> Result<crate::hybrid::dense::DenseCache> {
-    let limits = crate::hybrid::dense::DenseCacheLimits {
-        vector_cache_max_bytes,
-        ..crate::hybrid::dense::DenseCacheLimits::default()
-    };
-    crate::hybrid::dense::DenseCache::with_policy_limits_and_query_settings(
+    // v1 project/global vector-store policy retains precedence over this fallback.
+    let mut effective = dense_settings.clone();
+    effective.vector_cache_max_bytes = vector_cache_max_bytes;
+    crate::hybrid::dense::DenseCache::with_settings(
         crate::hybrid::dense::AnnPolicy::LoadOnly,
         cache,
-        limits,
-        query_settings,
+        &effective,
     )
 }
 

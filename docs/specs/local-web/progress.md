@@ -73,3 +73,26 @@ Windows CI's previous generated-contract failure was solely CRLF checkout
 conversion. Frontend source attributes now enforce LF, preserving exact contract
 comparison and consistent formatting on all native runners. Final CI results
 remain recorded in PR #126 checks.
+# 2026-11-13 — W7 shutdown readiness (#138)
+
+Task W7: complete (implementation, causal RED/GREEN and fresh task review).
+Native PR137 run43392113171 attempt1 passed Linux/Windows but failed macOS's
+real-daemon Ctrl+C lifecycle assertion. That old assertion omitted the exit
+status, so its historical signal cannot be recovered. Source inspection found
+the unarmed interval: async ctrl_c registers only on first poll, after URL and
+browser launch. A fresh subprocess sending SIGINT from the extracted production
+announcement callback exits interrupted with the old ordering; the eager native
+receiver makes SIGINT/SIGTERM return success. No sleeps/retries hide the interval.
+Ruling: reuse platform::ShutdownSignal before announcement and retain it through
+callback/service; Unix SIGINT/SIGTERM and Windows Ctrl+C/console close follow the
+existing seam. Signals buffer during synchronous browser spawn; immediate spawn
+cancellation is not claimed. Shared daemon lifetime/runtime shutdown budget stay
+unchanged; real-daemon test now includes actual exit diagnostics on failure.
+Validation: exact Rust1.100.0 stable, cli-full1333passed/0failed/18existing ignores,
+81targets, frozen benchmark and real Web lifecycle pass; full/lean all-target
+Clippy/fmt/diff GREEN. Fresh task review: Spec PASS, Quality APPROVED; one minor
+timeout wording ambiguity clarified, no remaining findings or deferred minors.
+One new Unix-only test runs two isolated native signal cases. No dependency,
+workflow, source-setting, baseline or threshold changes. Delivery is bundled with
+CF6b in PR137; fresh combined final review/native CI/inventory audit remain gates.
+#109/#113 are not resolved by this repair; #78 remains open.

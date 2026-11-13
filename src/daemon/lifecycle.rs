@@ -160,12 +160,12 @@ pub fn run_daemon_with_policies(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
 ) -> Result<()> {
-    run_daemon_with_resource_policies(
+    run_daemon_with_dense_policy(
         cache,
         grace,
         settings,
         pool_settings,
-        &crate::hybrid::dense_settings::standalone_query_cache()?,
+        crate::hybrid::dense_settings::standalone()?.settings(),
     )
 }
 
@@ -181,8 +181,29 @@ pub fn run_daemon_with_resource_policies(
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
     query_settings: &crate::hybrid::dense_settings::QueryCacheSettings,
 ) -> Result<()> {
+    let mut dense = crate::hybrid::dense_settings::standalone()?.into_settings();
+    dense.query_cache_max_entries = query_settings.max_entries;
+    dense.query_cache_max_bytes = query_settings.max_bytes;
+    run_daemon_with_dense_policy(cache, grace, settings, pool_settings, &dense)
+}
+
+/// Run with complete owner-resolved dense/query policy, immutable for this daemon.
+///
+/// # Errors
+/// Invalid component policies fail before admission/state creation; startup
+/// failures otherwise match [`run_daemon_with_policies`].
+pub fn run_daemon_with_dense_policy(
+    cache: &Path,
+    grace: Duration,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+) -> Result<()> {
     use crate::config::schema::SettingsSpec;
-    query_settings.validate()?;
+    crate::hybrid::dense_settings::DenseSpec::validate(
+        dense_settings,
+        &crate::config::schema::Capabilities::current(),
+    )?;
     crate::store::settings::DbSpec::validate(
         settings.settings(),
         &crate::config::schema::Capabilities::current(),
@@ -200,7 +221,7 @@ pub fn run_daemon_with_resource_policies(
         .enable_all()
         .build()
         .map_err(|err| Error::internal_with_source("build tokio runtime", err))?;
-    runtime.block_on(serve(cache, grace, settings, pool_settings, query_settings))
+    runtime.block_on(serve(cache, grace, settings, pool_settings, dense_settings))
 }
 
 /// Asks a running daemon to stop and waits for it to exit (FR-6).
@@ -277,7 +298,7 @@ async fn serve(
     grace: Duration,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
-    query_settings: &crate::hybrid::dense_settings::QueryCacheSettings,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
 ) -> Result<()> {
     create_state_dir(cache)?;
     if is_running(cache) {
@@ -288,11 +309,11 @@ async fn serve(
     cleanup_stale(cache)?;
 
     // Prepare resources before advertising a listener or daemon state.
-    let shared = crate::daemon::server::Shared::open_with_resource_policies(
+    let shared = crate::daemon::server::Shared::open_with_dense_policy(
         cache,
         settings,
         pool_settings,
-        query_settings,
+        dense_settings,
     )?;
 
     let endpoint = platform::daemon_endpoint(cache);

@@ -4,9 +4,7 @@
 //! smoke, not here.
 
 use std::fs;
-#[cfg(debug_assertions)]
 use std::path::PathBuf;
-#[cfg(debug_assertions)]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -15,12 +13,9 @@ use docsbase_memory::daemon::registry;
 use docsbase_memory::daemon::tools::run_project_index;
 use docsbase_memory::error::Result;
 use docsbase_memory::hybrid::HybridCfg;
-#[cfg(debug_assertions)]
-use docsbase_memory::hybrid::jobs::set_test_ann_max_bytes;
 use docsbase_memory::hybrid::jobs::{coverage_with, embed_project_chunks_with, embed_texts};
 use docsbase_memory::store::Db;
 use docsbase_memory::vector_cache::Embedder;
-#[cfg(debug_assertions)]
 use docsbase_memory::vector_cache::VectorCache;
 use tempfile::TempDir;
 
@@ -137,13 +132,11 @@ fn enabled_hybrid_in_the_offline_build_is_an_admission_error() {
 
 /// Embedder that records how many leases the cache held while it ran: the
 /// backfill pins *before* embedding, so this observes the admission decision.
-#[cfg(debug_assertions)]
 struct LeaseProbe {
     root: PathBuf,
     seen: AtomicU64,
 }
 
-#[cfg(debug_assertions)]
 impl LeaseProbe {
     fn new(root: &std::path::Path) -> Self {
         Self {
@@ -157,7 +150,6 @@ impl LeaseProbe {
     }
 }
 
-#[cfg(debug_assertions)]
 impl Embedder for LeaseProbe {
     fn model_id(&self) -> &'static str {
         "fake/model@d3@l2"
@@ -175,27 +167,27 @@ impl Embedder for LeaseProbe {
     }
 }
 
-#[cfg(debug_assertions)]
-struct CapReset;
-
-#[cfg(debug_assertions)]
-impl Drop for CapReset {
-    fn drop(&mut self) {
-        set_test_ann_max_bytes(0);
-    }
-}
-
-#[cfg(debug_assertions)]
 #[test]
 fn backfill_leases_only_when_the_build_can_be_admitted() {
-    let _reset = CapReset;
     let (cache, db, project_id) = indexed_project();
     // Dim 3 costs 1048 bytes per row (graph 1036 + exact 12): 4 distinct hashes
     // fit 4500 bytes, 5 chunk rows do not. The lease must follow the row count
     // (what `resolve_rows` admits), not the deduped hash count.
-    set_test_ann_max_bytes(4_500);
+    let small = docsbase_memory::hybrid::dense::DenseCacheLimits {
+        max_bytes: 4_500,
+        min_vectors: 1,
+        ..docsbase_memory::hybrid::dense::DenseCacheLimits::default()
+    };
     let probe = LeaseProbe::new(cache.path());
-    embed_project_chunks_with(&db, &probe, project_id).expect("backfill");
+    docsbase_memory::hybrid::jobs::embed_project_chunks_with_dense_policy(
+        &db,
+        &probe,
+        project_id,
+        docsbase_memory::vector_cache::CacheLimits::default(),
+        true,
+        &small,
+    )
+    .expect("backfill");
     assert_eq!(
         probe.seen(),
         0,
@@ -203,9 +195,20 @@ fn backfill_leases_only_when_the_build_can_be_admitted() {
     );
 
     // Control: the default cap admits the same corpus, so the lease is taken.
-    set_test_ann_max_bytes(0);
+    let admitted = docsbase_memory::hybrid::dense::DenseCacheLimits {
+        min_vectors: 1,
+        ..docsbase_memory::hybrid::dense::DenseCacheLimits::default()
+    };
     let probe = LeaseProbe::new(cache.path());
-    embed_project_chunks_with(&db, &probe, project_id).expect("backfill");
+    docsbase_memory::hybrid::jobs::embed_project_chunks_with_dense_policy(
+        &db,
+        &probe,
+        project_id,
+        docsbase_memory::vector_cache::CacheLimits::default(),
+        true,
+        &admitted,
+    )
+    .expect("backfill");
     assert!(
         probe.seen() > 0,
         "an admitted corpus must pin its vectors before embedding"
@@ -239,5 +242,17 @@ fn duplicate_chunk_texts_do_not_block_full_coverage() {
         embedder.calls.load(Ordering::SeqCst),
         calls,
         "converged coverage stays a no-op"
+    );
+}
+
+#[test]
+fn below_threshold_backfill_does_not_suspend_the_vector_budget() {
+    let (cache, db, project_id) = indexed_project();
+    let probe = LeaseProbe::new(cache.path());
+    embed_project_chunks_with(&db, &probe, project_id).expect("backfill");
+    assert_eq!(
+        probe.seen(),
+        0,
+        "a corpus below the ANN threshold needs no ANN pin"
     );
 }

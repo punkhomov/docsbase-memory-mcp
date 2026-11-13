@@ -17,13 +17,14 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use crate::config::schema::SettingsSpec;
 use crate::error::{Error, Result};
-use crate::hybrid::ann::{self, ANN_MIN_VECTORS, AnnIndex};
+use crate::hybrid::ann::{self, AnnIndex};
 #[cfg(test)]
 use crate::hybrid::ann_store;
 use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore};
 use crate::hybrid::dense_metadata::DenseMetadata;
-use crate::hybrid::dense_settings::QueryCacheSettings;
+use crate::hybrid::dense_settings::{DenseSettings, DenseSpec, QueryCacheSettings};
 use crate::hybrid::flight::{Flights, WorkResult};
 use crate::hybrid::meta::{AnnOutcome, AnnState};
 use crate::hybrid::work::Cancellation;
@@ -45,7 +46,7 @@ mod admission_tests;
 
 /// Hard per-project cap on cached vectors (DELTA-7): above it the cache
 /// refuses to build and callers stream the scan instead.
-pub const DENSE_CACHE_MAX_VECTORS: usize = 1_000_000;
+pub const DENSE_CACHE_MAX_VECTORS: usize = super::dense_settings::DEFAULT_DENSE_MAX_VECTORS;
 
 /// Longest-lived query-vector cache entries (`search-cost` FR-2).
 pub const QUERY_CACHE_MAX_ENTRIES: usize = super::dense_settings::DEFAULT_QUERY_CACHE_MAX_ENTRIES;
@@ -53,17 +54,26 @@ pub const QUERY_CACHE_MAX_ENTRIES: usize = super::dense_settings::DEFAULT_QUERY_
 /// Byte budget for cached query vectors (`search-cost` FR-2).
 pub const QUERY_CACHE_MAX_BYTES: u64 = super::dense_settings::DEFAULT_QUERY_CACHE_MAX_BYTES;
 
-/// Backoff after a failed background ANN build before retrying.
-const BUILD_BACKOFF: Duration = Duration::from_secs(30);
-
 /// Whether a background ANN build for `count` vectors of width `dim` fits the
 /// resident cap: the graph estimate plus the exact rows the build thread keeps
 /// alive. Mirrors the admission check in [`DenseCache::resolve_rows_checked`].
 #[must_use]
 pub fn ann_build_admitted(count: usize, dim: usize, max_bytes: u64) -> bool {
-    let exact = u64::try_from(count.saturating_mul(dim).saturating_mul(4)).unwrap_or(u64::MAX);
-    let estimated = u64::try_from(ann::ann_estimated_bytes(count, dim)).unwrap_or(u64::MAX);
-    estimated.saturating_add(exact) <= max_bytes
+    let Some(exact) = count
+        .checked_mul(dim)
+        .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+    else {
+        return false;
+    };
+    let Some(estimated) =
+        ann::checked_ann_estimated_bytes(count, dim).and_then(|bytes| u64::try_from(bytes).ok())
+    else {
+        return false;
+    };
+    estimated
+        .checked_add(exact)
+        .is_some_and(|peak| peak <= max_bytes)
 }
 
 /// [`ann_build_admitted`] for a cache model id that encodes the width
@@ -344,7 +354,7 @@ pub struct DenseCacheLimits {
     /// Maximum cached projects; oldest entries are evicted (LRU).
     pub max_projects: usize,
     /// ANN is considered only at or above this vector count (OQ-3, T6
-    /// calibrates; defaults to [`ANN_MIN_VECTORS`]).
+    /// calibrates; defaults to [`crate::hybrid::ann::ANN_MIN_VECTORS`]).
     pub min_vectors: usize,
     /// Backoff after a failed background build before the next retry.
     pub build_backoff: Duration,
@@ -356,18 +366,43 @@ pub struct DenseCacheLimits {
 
 impl Default for DenseCacheLimits {
     fn default() -> Self {
+        Self::from(&DenseSpec::defaults(
+            &crate::config::bootstrap::DefaultsContext::standalone(),
+        ))
+    }
+}
+
+impl From<&DenseSettings> for DenseCacheLimits {
+    fn from(settings: &DenseSettings) -> Self {
         Self {
-            max_vectors: DENSE_CACHE_MAX_VECTORS,
-            // 75k x 2048 needs 1.22 GiB while a background build keeps the
-            // exact rows alive; 1.5 GiB leaves headroom without changing the
-            // steady-state ANN model (691 MB, see NFR-4).
-            max_bytes: 1536 * 1024 * 1024,
-            max_projects: 8,
-            min_vectors: ANN_MIN_VECTORS,
-            build_backoff: BUILD_BACKOFF,
-            vector_cache_max_bytes: CacheLimits::default().max_bytes,
-            max_ann_disk_bytes: 4 * 1024 * 1024 * 1024,
+            max_vectors: settings.max_vectors,
+            max_bytes: settings.max_bytes,
+            max_projects: settings.max_projects,
+            min_vectors: settings.min_vectors,
+            build_backoff: settings.build_backoff,
+            vector_cache_max_bytes: settings.vector_cache_max_bytes,
+            max_ann_disk_bytes: settings.max_ann_disk_bytes,
         }
+    }
+}
+
+impl DenseCacheLimits {
+    /// Static ANN eligibility shared by builder and backfill; not a reservation
+    /// against other resident projects or live workers.
+    #[must_use]
+    pub fn ann_build_eligible(&self, count: usize, dim: usize) -> bool {
+        count > 0
+            && dim > 0
+            && self.max_projects > 0
+            && count >= self.min_vectors
+            && count <= self.max_vectors
+            && ann_build_admitted(count, dim, self.max_bytes)
+    }
+
+    /// Static eligibility using the width encoded in a model identity.
+    #[must_use]
+    pub fn ann_build_eligible_for_model(&self, count: usize, model: &str) -> bool {
+        model_dim(model).is_some_and(|dim| self.ann_build_eligible(count, dim))
     }
 }
 
@@ -544,6 +579,30 @@ impl Default for DenseCache {
 }
 
 impl DenseCache {
+    /// Construct a cache using the complete component-owned dense/query policy.
+    ///
+    /// # Errors
+    /// Invalid query capacities are rejected before resource construction.
+    pub fn with_settings(
+        policy: AnnPolicy,
+        cache_root: &Path,
+        settings: &DenseSettings,
+    ) -> Result<Self> {
+        DenseSpec::validate(settings, &crate::config::schema::Capabilities::current())?;
+        Self::with_policy_limits_and_query_settings(
+            policy,
+            cache_root,
+            DenseCacheLimits::from(settings),
+            &settings.query_cache_settings(),
+        )
+    }
+
+    /// The immutable policy used by this cache and its worker snapshots.
+    #[must_use]
+    pub const fn limits(&self) -> DenseCacheLimits {
+        self.limits
+    }
+
     /// Cache with default limits and ANN disabled (exact-only, as before the
     /// ANN iteration). Daemon/CLI opt into ANN via [`Self::with_policy`].
     #[must_use]
@@ -1089,8 +1148,9 @@ impl DenseCache {
             && self.store.is_some()
             && chunks.len() >= self.limits.min_vectors
             && let Some(dim) = model_dim(model_id)
-            && u64::try_from(ann::ann_estimated_bytes(chunks.len(), dim)).unwrap_or(u64::MAX)
-                <= self.limits.max_bytes
+            && ann::checked_ann_estimated_bytes(chunks.len(), dim)
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .is_some_and(|bytes| bytes <= self.limits.max_bytes)
         {
             let key = ann_key(
                 project_id,
@@ -1217,12 +1277,11 @@ impl DenseCache {
             .saturating_add(exact_bytes);
         let seek_ann = self.policy != AnnPolicy::Disabled
             && self.store.is_some()
-            && chunks.len() >= self.limits.min_vectors
+            && self.limits.ann_build_eligible(chunks.len(), dim)
             && full_coverage
             && !in_backoff
             && building_bytes <= self.limits.max_bytes
-            && building_bytes.saturating_add(other_resident) <= self.limits.max_bytes
-            && ann_build_admitted(chunks.len(), dim, self.limits.max_bytes);
+            && building_bytes.saturating_add(other_resident) <= self.limits.max_bytes;
         check()?;
         if !seek_ann {
             if exact_bytes > self.limits.max_bytes {

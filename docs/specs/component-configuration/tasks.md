@@ -422,3 +422,11 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - [x] **CF6a:** shared query-cache policy from existing DenseSpec, positive validation,
   explicit daemon/direct CLI propagation, measured eviction/bypass/sharing behavior.
   Plan: [cf6a-plan.md](cf6a-plan.md). Rust 1.100.0 stable / updated main 9d12a72.
+
+## Delta 2026-11-13 — CF6b construction-only dense policy
+
+- [x] **CF6b:** project existing DenseSpec defaults into actual dense construction;
+  propagate daemon/direct CLI policy through real sync/backfill, share static
+  builder/pin eligibility, preserve live worker accounting and legacy vector
+  budget precedence. Explicitly correct small-corpus pins and duplicate-row pin
+  retention. Plan: [cf6b-plan.md](cf6b-plan.md). No live shrink or CF7 activation.

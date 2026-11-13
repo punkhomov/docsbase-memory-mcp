@@ -96,15 +96,37 @@ fn missing_endpoint_leaves_original_operation_live_for_direct_search() {
 #[test]
 fn direct_cache_constructor_consumes_supplied_query_policy() {
     let root = tempfile::tempdir().unwrap();
-    let query = crate::hybrid::dense_settings::QueryCacheSettings {
-        max_entries: 1,
-        max_bytes: 16,
-    };
+    let mut query = crate::hybrid::dense_settings::standalone()
+        .unwrap()
+        .into_settings();
+    query.query_cache_max_entries = 1;
+    query.query_cache_max_bytes = 16;
     let dense = super::direct_dense_cache(root.path(), 1024, &query).unwrap();
     dense.store_query_vector("model", "a", &[1., 2.]);
     dense.store_query_vector("model", "b", &[3., 4.]);
     assert!(dense.query_vector("model", "a").is_none());
     assert!(dense.query_vector("model", "b").is_some());
     assert_eq!(dense.query_cache_stats().entries, 1);
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn direct_cache_factory_consumes_resident_policy_and_legacy_vector_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = crate::hybrid::dense_settings::standalone()
+        .unwrap()
+        .into_settings();
+    settings.max_vectors = 7;
+    settings.max_bytes = 12_345;
+    settings.max_projects = 2;
+    settings.min_vectors = 3;
+    settings.vector_cache_max_bytes = 99;
+    let dense = super::direct_dense_cache(root.path(), 1024, &settings).unwrap();
+    let actual = dense.limits();
+    assert_eq!(actual.max_vectors, 7);
+    assert_eq!(actual.max_bytes, 12_345);
+    assert_eq!(actual.max_projects, 2);
+    assert_eq!(actual.min_vectors, 3);
+    assert_eq!(actual.vector_cache_max_bytes, 1024);
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
 }

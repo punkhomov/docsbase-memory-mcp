@@ -89,7 +89,8 @@ fn ctrl_c_leaves_shared_daemon_alive_and_open_failure_is_nonfatal() {
         .unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || tx.send(child.wait().unwrap()).unwrap());
-    assert!(rx.recv_timeout(Duration::from_secs(10)).unwrap().success());
+    let exit = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(exit.success(), "Web frontend terminated: {exit:?}");
     assert!(
         client
             .call_tool("panel_projects", serde_json::json!({}))

@@ -2,8 +2,8 @@
 //! full backfill passes and coverage reporting.
 //!
 //! The config-resolving wrappers build the stages (`from_config`) and run the
-//! cache calls inside [`super::blocking::enter`]; the `*_with` variants take
-//! an explicit embedder so tests can run without the network.
+//! cache calls inside [`super::blocking::enter`]; embedder-taking variants allow
+//! an explicit provider so tests can run without the network.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -14,36 +14,12 @@ use crate::store::Db;
 use crate::store::repo;
 use crate::vector_cache::{CacheLimits, Embedder, VectorCache};
 
-use super::ann::ANN_MIN_VECTORS;
 use super::config::Ranking;
-use super::dense::{DenseCacheLimits, ann_build_admitted_for_model};
+use super::dense::DenseCacheLimits;
 use super::{HybridCfg, blocking, from_config};
 
 /// Backfill lease duration: covers a remote 75k backfill + ANN build/retry.
 const BACKFILL_PIN_TTL: Duration = Duration::from_hours(1);
-
-/// Debug-only override of the resident ANN cap used by the lease gate, so a
-/// test can exercise the admission boundary without a 92k-chunk corpus.
-#[cfg(debug_assertions)]
-static TEST_ANN_MAX_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Test-only hook; `0` restores the default cap. Absent in release builds.
-#[cfg(debug_assertions)]
-#[doc(hidden)]
-pub fn set_test_ann_max_bytes(max_bytes: u64) {
-    TEST_ANN_MAX_BYTES.store(max_bytes, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn ann_max_bytes() -> u64 {
-    #[cfg(debug_assertions)]
-    {
-        let override_bytes = TEST_ANN_MAX_BYTES.load(std::sync::atomic::Ordering::Relaxed);
-        if override_bytes > 0 {
-            return override_bytes;
-        }
-    }
-    DenseCacheLimits::default().max_bytes
-}
 
 /// Coverage of one project under the configured embedding model (FR-15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +92,20 @@ pub fn embed_project_chunks(
     providers: &crate::hybrid::config::ProvidersCfg,
     project_id: i64,
 ) -> Result<u64> {
+    embed_project_chunks_with_policy(db, cfg, providers, project_id, &DenseCacheLimits::default())
+}
+
+/// Full backfill with the owning runtime's actual dense policy.
+///
+/// # Errors
+/// Same configuration, cache and provider failures as [`embed_project_chunks`].
+pub fn embed_project_chunks_with_policy(
+    db: &Db,
+    cfg: &HybridCfg,
+    providers: &crate::hybrid::config::ProvidersCfg,
+    project_id: i64,
+    dense: &DenseCacheLimits,
+) -> Result<u64> {
     if !cfg.enabled || cfg.embedding.is_none() {
         return Ok(0);
     }
@@ -123,12 +113,13 @@ pub fn embed_project_chunks(
     let Some(embedder) = stages.embedder else {
         return Ok(0);
     };
-    embed_project_chunks_with_limits_and_pin(
+    embed_project_chunks_with_dense_policy(
         db,
         embedder.as_ref(),
         project_id,
         cfg.cache.limits(),
         cfg.enabled && cfg.ranking == Ranking::Rrf,
+        dense,
     )
 }
 
@@ -170,6 +161,29 @@ pub fn embed_project_chunks_with_limits_and_pin(
     limits: CacheLimits,
     pin_for_ann: bool,
 ) -> Result<u64> {
+    embed_project_chunks_with_dense_policy(
+        db,
+        embedder,
+        project_id,
+        limits,
+        pin_for_ann,
+        &DenseCacheLimits::default(),
+    )
+}
+
+/// Backfill with explicit vector-store limits and runtime ANN eligibility.
+/// Eligibility is static policy, not a reservation against live build memory.
+///
+/// # Errors
+/// Registry, cache and embedder failures.
+pub fn embed_project_chunks_with_dense_policy(
+    db: &Db,
+    embedder: &dyn Embedder,
+    project_id: i64,
+    limits: CacheLimits,
+    pin_for_ann: bool,
+    dense: &DenseCacheLimits,
+) -> Result<u64> {
     let texts = repo::chunk_texts(db.connection(), project_id)?;
     if texts.is_empty() {
         return Ok(0);
@@ -183,14 +197,10 @@ pub fn embed_project_chunks_with_limits_and_pin(
     // Pin only when a build can actually follow: the resident cap must admit
     // graph plus exact rows, otherwise the lease would suspend the cache budget
     // for nothing (Delta 0.3.1).
-    let pin_for_ann = pin_for_ann
-        && ann_build_admitted_for_model(
-            // Chunk rows, not distinct hashes: `resolve_rows` admits by
-            // `chunks.len()`, and duplicate texts still produce one row each.
-            texts.len(),
-            embedder.model_id(),
-            ann_max_bytes(),
-        );
+    // Chunk rows, not distinct hashes: duplicate texts still occupy one row each
+    // in the exact view and graph. Use the same static policy as the builder.
+    let pin_for_ann =
+        pin_for_ann && dense.ann_build_eligible_for_model(texts.len(), embedder.model_id());
     let mut cache = VectorCache::open_with_limits(db.cache_root(), limits)?;
     // Lease the project's vectors for the ANN build; without this a
     // concurrent backfill can evict them and coverage never reaches 100%.
@@ -200,13 +210,10 @@ pub fn embed_project_chunks_with_limits_and_pin(
     let result = blocking::enter(|| cache.embed_missing(embedder, &texts));
     match result {
         Ok(vectors) => {
-            if pin_for_ann && hashes.len() >= ANN_MIN_VECTORS {
+            if pin_for_ann {
                 // The backfill may have taken close to the lease duration;
                 // restart it so the ANN build has the full window.
                 cache.pin(project_id, embedder.model_id(), &hashes, BACKFILL_PIN_TTL)?;
-            } else if pin_for_ann {
-                // No ANN tier will use these vectors; do not pin small caches.
-                cache.unpin(project_id, embedder.model_id(), &hashes)?;
             }
             Ok(vectors.len() as u64)
         }

@@ -23,7 +23,9 @@ use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
 use crate::hybrid::HybridStages;
 use crate::hybrid::config::{Ranking, embedding_model_id};
-use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits, DenseRequest};
+#[cfg(test)]
+use crate::hybrid::dense::DenseCacheLimits;
+use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseRequest};
 use crate::hybrid::jobs as hybrid_jobs;
 use crate::ipc::framing::{Frame, FrameReader};
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
@@ -121,7 +123,7 @@ struct ProjectState {
 
 impl Shared {
     /// Opens the registry database and prepares shared state.
-    /// Compatibility adapter; production passes policies to [`Self::open_with_resource_policies`].
+    /// Compatibility adapter; production passes policies to [`Self::open_with_dense_policy`].
     ///
     /// # Errors
     /// Returns [`Error::Internal`]/[`Error::Admission`] from [`Db::open`].
@@ -142,7 +144,7 @@ impl Shared {
     }
 
     /// Constructs writer and prepared readers using explicit owner policies.
-    /// Compatibility adapter; query policy is resolved at this boundary.
+    /// Compatibility adapter; dense/query policy is resolved at this boundary.
     ///
     /// # Errors
     /// Invalid policies are rejected before filesystem access. Other failures
@@ -152,15 +154,15 @@ impl Shared {
         settings: &Resolved<DbSettings>,
         pool_settings: &Resolved<ReadPoolSettings>,
     ) -> Result<Arc<Self>> {
-        Self::open_with_resource_policies(
+        Self::open_with_dense_policy(
             cache,
             settings,
             pool_settings,
-            &crate::hybrid::dense_settings::standalone_query_cache()?,
+            crate::hybrid::dense_settings::standalone()?.settings(),
         )
     }
 
-    /// Construct storage/readers/cache with explicit component policies.
+    /// Compatibility adapter with explicit storage/readers/query policy.
     ///
     /// # Errors
     /// Invalid policies fail before filesystem access; other startup errors match
@@ -171,8 +173,29 @@ impl Shared {
         pool_settings: &Resolved<ReadPoolSettings>,
         query_settings: &crate::hybrid::dense_settings::QueryCacheSettings,
     ) -> Result<Arc<Self>> {
+        let mut dense = crate::hybrid::dense_settings::standalone()?.into_settings();
+        dense.query_cache_max_entries = query_settings.max_entries;
+        dense.query_cache_max_bytes = query_settings.max_bytes;
+        Self::open_with_dense_policy(cache, settings, pool_settings, &dense)
+    }
+
+    /// Construct with component-owned dense/query policy. The legacy Config
+    /// vector-store budget retains precedence over its dense-path fallback.
+    ///
+    /// # Errors
+    /// Invalid component policies fail before filesystem access; startup failures
+    /// otherwise match [`Self::open_with_policies`].
+    pub fn open_with_dense_policy(
+        cache: &Path,
+        settings: &Resolved<DbSettings>,
+        pool_settings: &Resolved<ReadPoolSettings>,
+        dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+    ) -> Result<Arc<Self>> {
         use crate::config::schema::{Capabilities, SettingsSpec};
-        query_settings.validate()?;
+        crate::hybrid::dense_settings::DenseSpec::validate(
+            dense_settings,
+            &Capabilities::current(),
+        )?;
         crate::store::settings::DbSpec::validate(settings.settings(), &Capabilities::current())?;
         crate::store::settings::ReadPoolSpec::validate(
             pool_settings.settings(),
@@ -195,10 +218,8 @@ impl Shared {
                 (Config::default(), Some(err.to_string()))
             }
         };
-        let dense_limits = DenseCacheLimits {
-            vector_cache_max_bytes: global_config.hybrid_cfg.cache.max_bytes,
-            ..DenseCacheLimits::default()
-        };
+        let mut effective_dense = dense_settings.clone();
+        effective_dense.vector_cache_max_bytes = global_config.hybrid_cfg.cache.max_bytes;
         let payload_budget =
             crate::search::budget::PayloadBudget::new(global_config.search.clone())?;
         let shared = Arc::new(Self {
@@ -214,12 +235,7 @@ impl Shared {
             global_config_error,
             global_config_stamp: stamp,
             project_states: Mutex::new(HashMap::new()),
-            dense: DenseCache::with_policy_limits_and_query_settings(
-                AnnPolicy::BuildOrLoad,
-                cache,
-                dense_limits,
-                query_settings,
-            )?,
+            dense: DenseCache::with_settings(AnnPolicy::BuildOrLoad, cache, &effective_dense)?,
         });
         match shared.start_watchers() {
             Ok(started) if started > 0 => eprintln!("watching {started} indexed project(s)"),
@@ -1289,7 +1305,14 @@ fn route_metadata_tool(
             let (job_id, created) = tools::enqueue_sync(&job_db, &project)?;
             let mut just_indexed = false;
             if created {
-                tools::run_sync_job_in(&mut job_db, &shared.cache, job_id, &project, &config)?;
+                tools::run_sync_job_in_with_dense_policy(
+                    &mut job_db,
+                    &shared.cache,
+                    job_id,
+                    &project,
+                    &config,
+                    &shared.dense.limits(),
+                )?;
                 just_indexed = true;
             }
             let fresh =
@@ -1359,12 +1382,13 @@ fn spawn_sync_job(shared: Arc<Shared>, job_id: i64, project_id: i64, config: Arc
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
             handle.spawn_blocking(move || {
-                match tools::execute_sync_job_with_settings(
+                match tools::execute_sync_job_with_dense_policy(
                     &shared.cache,
                     job_id,
                     project_id,
                     &config,
                     &shared.db_settings,
+                    &shared.dense.limits(),
                 ) {
                     Ok(project) => {
                         if let Err(err) = shared.ensure_watcher(&project) {

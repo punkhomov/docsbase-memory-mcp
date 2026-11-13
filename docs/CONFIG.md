@@ -92,6 +92,22 @@ Both capacities must be positive. CLI search and daemon startup receive the
 owner's defaults at their composition boundary. These settings have no TOML
 keys yet; changing a live cache's policy is a later configuration task.
 
+Dense resident, count, backoff and disk policy also comes from `DenseSpec`.
+Rust callers can pass complete `DenseSettings` to `DenseCache::with_settings` or
+`Shared::open_with_dense_policy`; snapshots retain immutable limits. At daemon
+and direct CLI composition, the existing `hybrid.cache.max_bytes` still overrides
+the dense-path vector-store fallback. This does not activate strict shared-store
+quotas or live settings updates.
+
+ANN backfill pins use the same static eligibility as construction: chunk-row
+count, minimum/maximum vectors, project capacity, model width and graph plus exact
+row bytes. Small or otherwise ineligible corpora take no ANN pins; duplicate text
+hashes do not reduce the chunk-row count used for admission or pin renewal.
+Eligibility reserves no memory: the builder still checks actual resident and
+live-worker charges before admission.
+This check does not revoke pre-existing leases; their ownership and expiry
+remain unchanged.
+
 ## Hybrid stages (opt-in, spec `docs/specs/hybrid-providers`)
 
 Hybrid search is opt-in per project. Official `cli-full` binaries include both

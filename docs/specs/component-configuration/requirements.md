@@ -321,3 +321,10 @@ preflight/NOFOLLOW flags одни недостаточны для reparse races.
 - The policy and state share one resource across cache clones/sharing_query_cache. Actual eviction/bypass uses the supplied limits. Default behavior remains 256 entries/4MiB.
 - Daemon and direct CLI receive policy resolved at their controlling boundary. Invalid policy is rejected before filesystem/admission resources. Compatibility signatures remain adapters.
 - This construction-only adoption may precede CF5. Public TOML activation, live shrink, strict-store adoption and remaining resident/ANN/backfill limits keep their separate consent/owner gates.
+
+## Delta 2026-11-13 — CF6b dense construction and ANN pin eligibility
+
+- Existing DenseSpec values reach dense runtime construction explicitly; compatibility defaults project the owner. Legacy project/global vector-cache budget precedence remains v1.
+- Builder and backfill share static eligibility: chunk-row count, minimum/maximum vectors, project capacity, model width and graph+exact peak bytes. Unrepresentable peak arithmetic rejects admission, including an explicit u64::MAX cap. Actual resident/live-worker accounting remains authoritative; eligibility reserves no memory.
+- Ineligible corpora do not take ANN pins, including small/default corpora. Eligible duplicate-text corpora retain pins according to chunk rows, not distinct hashes. Explicit per-call policy replaces the debug process-global cap override.
+- Existing zero dense-limit semantics are preserved; query capacities remain positive. No new TOML keys, live shrink, strict-store activation, backfill TTL configuration or source/apply changes. See [cf6b-plan.md](cf6b-plan.md).
