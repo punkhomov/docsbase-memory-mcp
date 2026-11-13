@@ -14,6 +14,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Error, Result};
 
+mod owner;
+pub mod settings;
+pub use owner::VectorStore;
+
 #[cfg(test)]
 #[path = "vector_cache_batch_tests.rs"]
 mod batch_tests;
@@ -22,12 +26,7 @@ mod batch_tests;
 pub const VECTOR_DB_FILE: &str = "vectors.db";
 
 /// Strict source-preview identity. Runtime adoption remains a separate migration.
-pub(crate) const V2_MAX_BYTES_FIELD: crate::config::schema::FieldSpec =
-    crate::config::schema::FieldSpec::new(
-        "vector_cache.max_bytes",
-        crate::config::schema::Scope::Daemon,
-        crate::config::schema::Unit::Bytes,
-    );
+pub(crate) const V2_MAX_BYTES_FIELD: crate::config::schema::FieldSpec = settings::MAX_BYTES_FIELD;
 
 /// Cache size bounds; eviction drops the least recently used rows first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,12 +39,7 @@ pub struct CacheLimits {
 
 impl Default for CacheLimits {
     fn default() -> Self {
-        Self {
-            max_entries: 1_000_000,
-            // 75k x 2048 f32 is ~586 MiB; ANN requires full coverage
-            // (ann-index FR-6), so the default must hold the target corpus.
-            max_bytes: 1024 * 1024 * 1024,
-        }
+        settings::VectorStoreSettings::owner_defaults().limits()
     }
 }
 
@@ -81,67 +75,64 @@ pub fn chunk_hash(text: &str) -> String {
 /// Content-addressed vector cache backed by `vectors.db`.
 pub struct VectorCache {
     conn: Connection,
-    sequence: i64,
     limits: CacheLimits,
     /// Emits the over-budget warning once per operation instead of once per
     /// `put` (a 75k backfill must not print 75k warnings).
     warned_over_budget: bool,
+    // Field order matters: SQLite closes before the native mode lease.
+    access: owner::Access,
 }
 
 impl VectorCache {
     /// Opens (creating if needed) the cache under `cache_root`.
     ///
     /// # Errors
-    /// Returns [`Error::Internal`] on directory or `SQLite` failures.
+    /// Returns [`Error::Admission`] if a strict store owns this root, or
+    /// [`Error::Internal`] on directory, locking or `SQLite` failures.
     pub fn open(cache_root: &Path) -> Result<Self> {
         Self::open_with_limits(cache_root, CacheLimits::default())
     }
 
-    /// [`Self::open`] with explicit eviction bounds (tests).
+    /// Legacy [`Self::open`] with explicit eviction bounds. Zero caps remain valid.
     ///
     /// # Errors
-    /// Returns [`Error::Internal`] on directory or `SQLite` failures.
+    /// Returns [`Error::Admission`] if a strict store owns this root, or
+    /// [`Error::Internal`] on directory, locking or `SQLite` failures.
     pub fn open_with_limits(cache_root: &Path, limits: CacheLimits) -> Result<Self> {
-        crate::platform::fs::secure_dir(cache_root)
-            .map_err(|err| Error::internal_with_source("create vector cache dir", err))?;
-        let path = cache_root.join(VECTOR_DB_FILE);
-        let conn = Connection::open(&path)
-            .map_err(|err| Error::internal_with_source("open vector cache", err))?;
-        conn.busy_timeout(Duration::from_secs(5))
-            .map_err(|err| Error::internal_with_source("set vector cache timeout", err))?;
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|err| Error::internal_with_source("set vector cache journal", err))?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS vector_cache (
-                 model_id TEXT NOT NULL,
-                 chunk_hash TEXT NOT NULL,
-                 dim INTEGER NOT NULL,
-                 vector BLOB NOT NULL,
-                 used_at INTEGER NOT NULL,
-                 PRIMARY KEY (model_id, chunk_hash)
-             );
-             CREATE TABLE IF NOT EXISTS vector_cache_leases (
-                 lease_id INTEGER NOT NULL,
-                 model_id TEXT NOT NULL,
-                 chunk_hash TEXT NOT NULL,
-                 expires_at INTEGER NOT NULL,
-                 PRIMARY KEY (lease_id, model_id, chunk_hash)
-             );",
-        )
-        .map_err(|err| Error::internal_with_source("create vector cache schema", err))?;
-        let sequence: i64 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(used_at), 0) FROM vector_cache",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|err| Error::internal_with_source("read vector cache sequence", err))?;
-        Ok(Self {
+        let root = owner::prepare_root(cache_root)?;
+        let lease = owner::ModeLease::legacy(&root)?;
+        let conn = open_connection(
+            &root,
+            settings::VectorStoreSettings::owner_defaults().busy_timeout,
+        )?;
+        let sequence = read_sequence(&conn)?;
+        Ok(Self::from_connection(
             conn,
-            sequence,
+            limits,
+            owner::Access::Legacy {
+                sequence,
+                _lease: lease,
+            },
+        ))
+    }
+
+    fn open_owned(owner: VectorStore) -> Result<Self> {
+        let conn = open_connection(owner.root(), owner.settings().busy_timeout)?;
+        let limits = owner.settings().limits();
+        Ok(Self::from_connection(
+            conn,
+            limits,
+            owner::Access::Owned { owner },
+        ))
+    }
+
+    fn from_connection(conn: Connection, limits: CacheLimits, access: owner::Access) -> Self {
+        Self {
+            conn,
             limits,
             warned_over_budget: false,
-        })
+            access,
+        }
     }
 
     /// Looks a vector up and refreshes its recency.
@@ -149,30 +140,20 @@ impl VectorCache {
     /// # Errors
     /// Returns [`Error::Internal`] on `SQLite` failures or a corrupt row.
     pub fn get(&mut self, model_id: &str, chunk_hash: &str) -> Result<Option<Vec<f32>>> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT dim, vector FROM vector_cache
-                 WHERE model_id = ?1 AND chunk_hash = ?2",
-                params![model_id, chunk_hash],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )
-            .optional()
-            .map_err(|err| Error::internal_with_source("read vector", err))?;
-        let Some((dim, bytes)) = row else {
-            return Ok(None);
-        };
-        let used_at = self.next_use();
-        self.conn
-            .execute(
-                "UPDATE vector_cache SET used_at = ?3
-                 WHERE model_id = ?1 AND chunk_hash = ?2",
-                params![model_id, chunk_hash, used_at],
-            )
-            .map_err(|err| Error::internal_with_source("touch vector", err))?;
-        let dim = usize::try_from(dim)
-            .map_err(|_| Error::internal(format!("vector dim {dim} does not fit usize")))?;
-        Ok(Some(decode_vector(dim, &bytes)?))
+        if self.access.is_owned() {
+            // Reserve the writer before issuing a recency number. Otherwise an
+            // older blocked touch could commit after a more recent operation.
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|err| Error::internal_with_source("begin vector lookup", err))?;
+            let result = lookup(&tx, &mut self.access, model_id, chunk_hash)?;
+            tx.commit()
+                .map_err(|err| Error::internal_with_source("commit vector lookup", err))?;
+            Ok(result)
+        } else {
+            lookup(&self.conn, &mut self.access, model_id, chunk_hash)
+        }
     }
 
     /// Visits a caller-bounded hash page, decoding one vector at a time.
@@ -220,9 +201,9 @@ impl VectorCache {
                 let dim = usize::try_from(dim)
                     .map_err(|_| Error::internal(format!("vector dim {dim} does not fit usize")))?;
                 let vector = decode_vector(dim, &bytes)?;
-                self.sequence = self.sequence.saturating_add(1);
+                let used_at = self.access.next_use();
                 touch
-                    .execute(params![model_id, hash, self.sequence])
+                    .execute(params![model_id, hash, used_at])
                     .map_err(|err| Error::internal_with_source("touch vector page", err))?;
                 visitor(*id, Some(&vector))?;
             }
@@ -232,6 +213,7 @@ impl VectorCache {
     }
 
     /// Stores one vector and evicts least-recently-used rows over the limits.
+    /// Owned connections commit the write and eviction atomically.
     ///
     /// # Errors
     /// Returns [`Error::Internal`] on `SQLite` failures or an empty vector.
@@ -239,15 +221,15 @@ impl VectorCache {
         if vector.is_empty() {
             return Err(Error::internal("refusing to cache an empty vector"));
         }
-        let used_at = self.next_use();
         let mut bytes = Vec::with_capacity(vector.len() * 4);
         for value in vector {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         let dim = i64::try_from(vector.len())
             .map_err(|_| Error::internal("vector dim does not fit i64"))?;
-        self.conn
-            .execute(
+        let mut warned = self.warned_over_budget;
+        let store = |conn: &Connection, used_at: i64, warned: &mut bool| -> Result<()> {
+            conn.execute(
                 "INSERT INTO vector_cache (model_id, chunk_hash, dim, vector, used_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(model_id, chunk_hash) DO UPDATE SET
@@ -257,7 +239,21 @@ impl VectorCache {
                 params![model_id, chunk_hash, dim, bytes, used_at],
             )
             .map_err(|err| Error::internal_with_source("store vector", err))?;
-        self.evict()
+            evict(conn, self.limits, warned)
+        };
+        if self.access.is_owned() {
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|err| Error::internal_with_source("begin vector write", err))?;
+            store(&tx, self.access.next_use(), &mut warned)?;
+            tx.commit()
+                .map_err(|err| Error::internal_with_source("commit vector write", err))?;
+        } else {
+            store(&self.conn, self.access.next_use(), &mut warned)?;
+        }
+        self.warned_over_budget = warned;
+        Ok(())
     }
 
     /// Protects `hashes` from LRU eviction until `ttl` expires (backfill
@@ -300,14 +296,21 @@ impl VectorCache {
             .map_err(|err| Error::internal_with_source("commit pins", err))
     }
 
-    /// Releases a backfill lease.
+    /// Releases a backfill lease. Owned connections atomically commit the release
+    /// and any resulting eviction; failures preserve both vectors and leases.
     ///
     /// # Errors
     /// Returns [`Error::Internal`] on `SQLite` failures.
     pub fn unpin(&mut self, lease_id: i64, model_id: &str, hashes: &[String]) -> Result<()> {
+        let strict = self.access.is_owned();
+        let behavior = if strict {
+            rusqlite::TransactionBehavior::Immediate
+        } else {
+            rusqlite::TransactionBehavior::Deferred
+        };
         let tx = self
             .conn
-            .transaction()
+            .transaction_with_behavior(behavior)
             .map_err(|err| Error::internal_with_source("begin unpin transaction", err))?;
         for hash in hashes {
             tx.execute(
@@ -317,11 +320,19 @@ impl VectorCache {
             )
             .map_err(|err| Error::internal_with_source("unpin vector", err))?;
         }
+        // Releasing leases immediately makes rows evictable again. Strict mode
+        // rolls back both release and eviction when any statement fails.
+        let mut warned = self.warned_over_budget;
+        if strict {
+            evict(&tx, self.limits, &mut warned)?;
+        }
         tx.commit()
             .map_err(|err| Error::internal_with_source("commit unpins", err))?;
-        // Releasing leases is the moment the cache becomes evictable again;
-        // without this the over-budget rows would survive until the next put.
-        self.evict()
+        if !strict {
+            evict(&self.conn, self.limits, &mut warned)?;
+        }
+        self.warned_over_budget = warned;
+        Ok(())
     }
 
     /// Debug-only: rows currently protected by a lease for `model_id`.
@@ -461,40 +472,63 @@ impl VectorCache {
     pub fn is_empty(&self) -> Result<bool> {
         Ok(self.len()? == 0)
     }
+}
 
-    fn next_use(&mut self) -> i64 {
-        self.sequence = self.sequence.saturating_add(1);
-        self.sequence
-    }
+fn lookup(
+    conn: &Connection,
+    access: &mut owner::Access,
+    model_id: &str,
+    chunk_hash: &str,
+) -> Result<Option<Vec<f32>>> {
+    let row = conn
+        .query_row(
+            "SELECT dim, vector FROM vector_cache
+                 WHERE model_id = ?1 AND chunk_hash = ?2",
+            params![model_id, chunk_hash],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()
+        .map_err(|err| Error::internal_with_source("read vector", err))?;
+    let Some((dim, bytes)) = row else {
+        return Ok(None);
+    };
+    let used_at = access.next_use();
+    conn.execute(
+        "UPDATE vector_cache SET used_at = ?3
+                 WHERE model_id = ?1 AND chunk_hash = ?2",
+        params![model_id, chunk_hash, used_at],
+    )
+    .map_err(|err| Error::internal_with_source("touch vector", err))?;
+    let dim = usize::try_from(dim)
+        .map_err(|_| Error::internal(format!("vector dim {dim} does not fit usize")))?;
+    Ok(Some(decode_vector(dim, &bytes)?))
+}
 
-    fn evict(&mut self) -> Result<()> {
-        loop {
-            let (count, bytes): (i64, i64) = self
-                .conn
-                .query_row(
-                    "SELECT COUNT(*), COALESCE(SUM(LENGTH(vector)), 0) FROM vector_cache",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(|err| Error::internal_with_source("measure vector cache", err))?;
-            let count = u64::try_from(count).unwrap_or(u64::MAX);
-            let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
-            if count <= self.limits.max_entries && bytes <= self.limits.max_bytes {
-                self.warned_over_budget = false;
-                return Ok(());
-            }
-            let now = now_secs();
-            let purged = self
-                .conn
-                .execute(
-                    "DELETE FROM vector_cache_leases WHERE expires_at <= ?1",
-                    params![now],
-                )
-                .map_err(|err| Error::internal_with_source("purge expired vector leases", err))?;
-            let removed = self
-                .conn
-                .execute(
-                    "DELETE FROM vector_cache WHERE rowid = (
+fn evict(conn: &Connection, limits: CacheLimits, warned_over_budget: &mut bool) -> Result<()> {
+    loop {
+        let (count, bytes): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(vector)), 0) FROM vector_cache",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|err| Error::internal_with_source("measure vector cache", err))?;
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        if count <= limits.max_entries && bytes <= limits.max_bytes {
+            *warned_over_budget = false;
+            return Ok(());
+        }
+        let now = now_secs();
+        let purged = conn
+            .execute(
+                "DELETE FROM vector_cache_leases WHERE expires_at <= ?1",
+                params![now],
+            )
+            .map_err(|err| Error::internal_with_source("purge expired vector leases", err))?;
+        let removed = conn
+            .execute(
+                "DELETE FROM vector_cache WHERE rowid = (
                          SELECT v.rowid FROM vector_cache v
                          WHERE NOT EXISTS (
                              SELECT 1 FROM vector_cache_leases p
@@ -504,31 +538,68 @@ impl VectorCache {
                          )
                          ORDER BY v.used_at ASC, v.rowid ASC LIMIT 1
                      )",
-                    params![now],
-                )
-                .map_err(|err| Error::internal_with_source("evict vector", err))?;
-            if removed > 0 {
-                self.warned_over_budget = false;
+                params![now],
+            )
+            .map_err(|err| Error::internal_with_source("evict vector", err))?;
+        if removed > 0 {
+            *warned_over_budget = false;
+        }
+        if removed == 0 {
+            if purged > 0 {
+                // Expired leases may have freed rows in this round; recheck
+                // before giving up (Delta 0.3, FR-9 diagnostics).
+                continue;
             }
-            if removed == 0 {
-                if purged > 0 {
-                    // Expired leases may have freed rows in this round; recheck
-                    // before giving up (Delta 0.3, FR-9 diagnostics).
-                    continue;
-                }
-                if !self.warned_over_budget {
-                    self.warned_over_budget = true;
-                    eprintln!(
-                        "warning: vector cache over budget with every candidate leased \
+            if !*warned_over_budget {
+                *warned_over_budget = true;
+                eprintln!(
+                    "warning: vector cache over budget with every candidate leased \
                          ({bytes} > {} bytes, {count} > {} entries); keeping leased rows \
                          until their leases are released or expire",
-                        self.limits.max_bytes, self.limits.max_entries
-                    );
-                }
-                return Ok(());
+                    limits.max_bytes, limits.max_entries
+                );
             }
+            return Ok(());
         }
     }
+}
+
+/// Open SQLite only after the caller has acquired its mode lease.
+fn open_connection(root: &Path, busy_timeout: Duration) -> Result<Connection> {
+    let conn = Connection::open(root.join(VECTOR_DB_FILE))
+        .map_err(|err| Error::internal_with_source("open vector cache", err))?;
+    conn.busy_timeout(busy_timeout)
+        .map_err(|err| Error::internal_with_source("set vector cache timeout", err))?;
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|err| Error::internal_with_source("set vector cache journal", err))?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS vector_cache (
+             model_id TEXT NOT NULL,
+             chunk_hash TEXT NOT NULL,
+             dim INTEGER NOT NULL,
+             vector BLOB NOT NULL,
+             used_at INTEGER NOT NULL,
+             PRIMARY KEY (model_id, chunk_hash)
+         );
+         CREATE TABLE IF NOT EXISTS vector_cache_leases (
+             lease_id INTEGER NOT NULL,
+             model_id TEXT NOT NULL,
+             chunk_hash TEXT NOT NULL,
+             expires_at INTEGER NOT NULL,
+             PRIMARY KEY (lease_id, model_id, chunk_hash)
+         );",
+    )
+    .map_err(|err| Error::internal_with_source("create vector cache schema", err))?;
+    Ok(conn)
+}
+
+fn read_sequence(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(used_at), 0) FROM vector_cache",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|err| Error::internal_with_source("read vector cache sequence", err))
 }
 
 /// Unix seconds for pin expiry.

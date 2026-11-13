@@ -435,3 +435,34 @@ renewal use it. Existing leases keep their expiry/ownership; this does not revok
 leases or invalidate vectors, query caches or ANN graphs. Status uses the cache's
 monotonic authority window and describes stale observations as older than the
 configured TTL. Compatibility helpers retain their one-hour defaults.
+
+
+### Shared vector-store construction policy
+
+The library exposes `vector_cache::VectorStore` for explicit shared ownership.
+Resolve `vector_cache::settings::standalone()`, or provide a complete validated
+`VectorStoreSettings`, acquire the cache root once, then call `connect()` for
+independent connections. Entry/byte limits and SQLite timeout belong to the owner;
+connections cannot override them. Defaults remain 1,000,000 vectors, 1 GiB of
+vector payload and a five-second busy timeout. Strict capacities must be positive;
+timeout zero means immediate failure on writer contention.
+
+An owner and its connections retain an exclusive native `vectors.lock` lease.
+Current legacy `VectorCache::open/open_with_limits` connections retain shared
+leases, so either mode rejects the other before SQLite opens. Clones and live
+connections retain ownership after the original owner drops. Failed opens release
+only their own resources. The coordination file remains after release; never
+remove or replace it while a cache is in use. After all handles close, a legacy
+caller can open the store again. This advisory protocol covers cooperating current
+callers, not older binaries, raw SQL or external cache/lock file replacement.
+
+Owned connections share LRU recency restored from persisted rows. Writes and
+resulting eviction, and lease release with resulting eviction, commit atomically.
+Leased rows can temporarily exceed eviction limits; vector payload limits are not
+physical database/WAL/disk or RSS quotas. Provider calls hold no SQLite transaction.
+
+This library construction step does not activate file-v2, rewrite configuration,
+change ordinary legacy startup, or implement migration/apply/live policy updates.
+Legacy project budgets and zero-cap semantics remain supported. Migration planning
+still reports strict-store-adoption and executor blockers until the complete
+consumer rollout and consent/recovery protocol are implemented.

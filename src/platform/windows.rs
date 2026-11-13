@@ -478,6 +478,22 @@ pub fn open_readonly_nofollow(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// Opens a persistent read/write coordination file without truncation, opening
+/// a final reparse point itself. Privacy follows the cache-directory ACL policy.
+///
+/// # Errors
+/// Raw IO errors opening the file. Callers must reject nonregular/reparse handles.
+pub fn open_private_lock(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
 /// Checks the normalized filename of an existing borrowed native file handle.
 /// The expected path must already have its parent directory canonicalized.
 /// No file is opened/closed; output allocation is bounded by the expected path.

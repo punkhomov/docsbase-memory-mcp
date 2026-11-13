@@ -526,3 +526,21 @@ pub fn open_private_log(path: &Path) -> io::Result<File> {
     file.set_permissions(fs::Permissions::from_mode(0o600))?;
     Ok(file)
 }
+
+/// Opens a persistent read/write coordination file without truncation or final
+/// symlink traversal. Nonblocking open permits rejecting special files safely.
+///
+/// # Errors
+/// Raw IO errors opening or tightening the file. Callers must check file type.
+pub fn open_private_lock(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}

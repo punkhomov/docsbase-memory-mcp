@@ -439,3 +439,12 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   daemon/direct передачу. Реальные lease/status regressions, transactional
   patch/provenance/scope tests. План: [cf6c-plan.md](cf6c-plan.md).
   Нет новых source keys/live updates, CF7 activation или artifact invalidation.
+
+
+## Delta 2026-11-13 — CF7a: construction-only vector-store owner
+
+- [x] **CF7a:** pure VectorStoreSpec, native legacy/strict exclusion и удержание
+  lifetime дочерними connections; общая policy/recency, transactional strict eviction,
+  настоящие SQLite/OS/subprocess regressions. План: [cf7a-plan.md](cf7a-plan.md).
+  Полный CF7 не завершён: production consumer rollout, persisted adoption,
+  consent/apply/quiescence и live resource changes выполняются отдельно.
