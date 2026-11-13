@@ -293,3 +293,11 @@ installer waits, IPC/MCP caller timeouts, config/model lock retries, per-type
 bootstrap/log/VCS budgets, root/runtime discovery, updater/debug controls.
 S1a не означает full CF12 adoption или завершение #79. Source scan:
 `rg -n 'const |DEFAULT_|Semaphore::new|mpsc::channel|spawn_blocking|block_in_place|tokio::fs|thread::spawn|thread::Builder' src/daemon src/platform src/hybrid src/watch src/web src/mcp`.
+
+S1a review round1: new daemon-owner errors и любой error после распознанного
+Website fail closed до legacy fallback/resources. Старые malformed Shared sources
+сохраняют warning/default/diagnostic adapter. Applicability/provenance marker не
+входит в effective runtime identity/impact; omitted и explicit Shared5000 дают
+одну effective policy. Reply-drain sleep ограничен remaining original deadline,
+даже если drain-poll больше timeout. Это уточнение существующих consumer contracts,
+без новых settings, artifact edges или S1c physical-drain adoption.

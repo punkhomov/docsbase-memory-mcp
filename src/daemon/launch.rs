@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::capture::{ReadFailure, read_file};
+use crate::config::resolve::LaunchFailure;
 use crate::config::schema::Resolved;
 use crate::config::{Config, paths};
 use crate::daemon::settings::DaemonPatch;
@@ -81,23 +82,26 @@ impl LaunchSnapshot {
     /// # Errors
     /// Unavailable/invalid global source or invalid daemon patch.
     pub fn resolve(&self, patch: DaemonPatch) -> Result<Resolved<Config>> {
-        self.resolution()?.finish(patch)
+        self.resolution()
+            .map_err(LaunchFailure::into_error)?
+            .finish(patch)
     }
 
-    fn resolution(&self) -> Result<crate::config::resolve::LaunchResolution> {
+    fn resolution(
+        &self,
+    ) -> std::result::Result<crate::config::resolve::LaunchResolution, LaunchFailure> {
         let bytes = match &self.bytes {
             CapturedBytes::Missing => None,
             CapturedBytes::Loaded(bytes) => Some(bytes.as_slice()),
             CapturedBytes::Unavailable(reason) => {
-                return Err(Error::internal(format!(
+                return Err(LaunchFailure::Legacy(Error::internal(format!(
                     "global config unavailable: {reason}"
-                )));
+                ))));
             }
         };
-        let path = self
-            .path
-            .as_deref()
-            .ok_or_else(|| Error::internal("global config path unavailable"))?;
+        let path = self.path.as_deref().ok_or_else(|| {
+            LaunchFailure::Legacy(Error::internal("global config path unavailable"))
+        })?;
         crate::config::resolve::launch_resolution(path, bytes)
     }
 
@@ -120,10 +124,12 @@ impl LaunchSnapshot {
                 stamp: self.stamp(),
                 error: None,
             }),
-            Err(error) => {
+            Err(LaunchFailure::Daemon(error)) => Err(error),
+            Err(LaunchFailure::Legacy(error)) => {
                 eprintln!("warning: global config unavailable: {error}");
                 let config =
-                    crate::config::resolve::launch_resolution(Path::new("config.toml"), None)?
+                    crate::config::resolve::launch_resolution(Path::new("config.toml"), None)
+                        .map_err(LaunchFailure::into_error)?
                         .finish(patch)?;
                 Ok(LaunchConfig {
                     config,

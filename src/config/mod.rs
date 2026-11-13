@@ -254,7 +254,17 @@ fn read_global(path: &Path) -> Result<GlobalFileConfig> {
 }
 
 fn parse_global(path: &Path, text: &str) -> Result<GlobalFileConfig> {
+    decode_global_document(path, parse_global_document(path, text)?)
+}
+
+fn parse_global_document(path: &Path, text: &str) -> Result<toml::Table> {
     toml::from_str(text)
+        .map_err(|err| Error::internal_with_source(format!("parse {}: {err}", path.display()), err))
+}
+
+fn decode_global_document(path: &Path, document: toml::Table) -> Result<GlobalFileConfig> {
+    toml::Value::Table(document)
+        .try_into()
         .map_err(|err| Error::internal_with_source(format!("parse {}: {err}", path.display()), err))
 }
 

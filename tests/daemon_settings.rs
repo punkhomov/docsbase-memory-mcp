@@ -234,12 +234,14 @@ fn malformed_explicit_profiles_are_rejected_before_overlay() {
 #[test]
 fn website_rejects_explicit_idle_grace_even_when_zero() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("config.toml"),
-        format!("{}\nidle_grace_ms=0", website_source(dir.path())),
-    )
-    .unwrap();
-    assert!(docsbase_memory::config::resolve::global_from(dir.path()).is_err());
+    for grace in [0, 5000] {
+        std::fs::write(
+            dir.path().join("config.toml"),
+            format!("{}\nidle_grace_ms={grace}", website_source(dir.path())),
+        )
+        .unwrap();
+        assert!(docsbase_memory::config::resolve::global_from(dir.path()).is_err());
+    }
 }
 
 #[test]
@@ -354,6 +356,49 @@ fn daemon_assessment_only_changes_runtime_and_requires_an_executor() {
             .iter()
             .any(|b| b.code == docsbase_memory::config::change::BlockerCode::ExecutorUnavailable)
     );
+}
+
+#[test]
+fn identical_effective_shared_policy_has_equal_identity_despite_distinct_origins() {
+    use docsbase_memory::config::schema::{ArtifactFacts, ComponentImpact, SettingsSpec};
+    let omitted = resolve(DaemonPatch::default());
+    let explicit = resolve(DaemonPatch {
+        idle_grace_ms: Some(5000),
+        ..DaemonPatch::default()
+    });
+    assert_eq!(
+        omitted
+            .provenance()
+            .get("daemon.idle_grace_ms")
+            .unwrap()
+            .source,
+        SourceId::Defaults
+    );
+    assert_eq!(
+        explicit
+            .provenance()
+            .get("daemon.idle_grace_ms")
+            .unwrap()
+            .source,
+        SourceId::Cli
+    );
+    let omitted_initialization = DaemonSpec::assess_change(None, omitted.settings()).unwrap();
+    let explicit_initialization = DaemonSpec::assess_change(None, explicit.settings()).unwrap();
+    assert_eq!(
+        omitted_initialization.actions[0].target, explicit_initialization.actions[0].target,
+        "source applicability markers must not change effective runtime identity"
+    );
+    assert_eq!(
+        DaemonSpec::impact(
+            Some(omitted.settings()),
+            explicit.settings(),
+            &ArtifactFacts::default()
+        ),
+        ComponentImpact::Unchanged
+    );
+    let change = DaemonSpec::assess_change(Some(omitted.settings()), explicit.settings()).unwrap();
+    assert_eq!(change.actions, []);
+    assert_eq!(change.blockers, []);
 }
 
 fn open(snapshot: &LaunchSnapshot) -> (tempfile::TempDir, std::sync::Arc<Shared>) {
@@ -528,6 +573,49 @@ fn legacy_cli_cannot_fall_back_to_shared_for_a_recognized_website() {
     );
     assert!(!cache.exists());
     assert!(!dir.path().join("data").exists());
+}
+
+#[test]
+fn invalid_file_daemon_policy_cannot_fall_back_during_legacy_cli_startup() {
+    let mut violations = Vec::new();
+    for (profile, policy) in [
+        ("website", "idle_grace_ms=0"),
+        ("website", "max_events=0"),
+        ("website", "max_file_size=0"),
+        ("shared", "max_events=0"),
+        ("shared", "max_events='invalid'"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = if profile == "website" {
+            website_source(dir.path())
+        } else {
+            "[daemon]\nprofile={mode='shared'}".to_owned()
+        };
+        let text = if policy.starts_with("max_file_size") {
+            format!("{policy}\n{profile}")
+        } else {
+            format!("{profile}\n{policy}")
+        };
+        std::fs::write(dir.path().join("config.toml"), text).unwrap();
+        let cache = dir.path().join("cache");
+        let data = dir.path().join("data");
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_docsbase"))
+            .args(["serve", "--grace-ms", "0"])
+            .env("DOCSBASE_CONFIG_DIR", dir.path())
+            .env("DOCSBASE_CACHE_DIR", &cache)
+            .env("DOCSBASE_DATA_DIR", &data)
+            .output()
+            .unwrap();
+        if output.status.success() || cache.exists() || data.exists() {
+            violations.push(format!(
+                "{policy}: status={}, cache={}, data={}",
+                output.status,
+                cache.exists(),
+                data.exists()
+            ));
+        }
+    }
+    assert_eq!(violations, Vec::<String>::new());
 }
 
 fn website_source(root: &std::path::Path) -> String {

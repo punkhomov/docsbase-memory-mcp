@@ -287,3 +287,59 @@ is saved in `s1a/source-scan.txt` and the component inventory/state matrix. No n
 crates/features, retrieval/golden changes, release/LTO run, model downloads or
 paid API calls. Windows/macOS runtime acceptance and fresh review remain pending;
 S1a cannot ship apart from connected S1b/c and their integrated final review.
+
+### S1a fix round 1 — three Important review findings
+
+Fresh Task review at `cd28b8b`: spec FAIL / quality CHANGES, three Important,
+no Critical/Minor; `/workspace/scratch/agent-b/79/s1a/task-review.md`. This bounded
+round addresses I1/I2/I3; original reviewer's scoped rereview remains pending.
+No task-complete claim is made.
+
+Actual semantic REDs in `s1a/fix1/`: `i1-i2-red.log` shows five invalid file-policy
+CLI starts succeeded and created cache state, and omitted/explicit default Shared
+grace produced different identities; `i1-shared-red.log` shows the same Website
+file-policy bypass through legacy Shared. I3 first had a missing seam API RED,
+then a faithful old-loop extraction produced `i3-semantic-red.log`: fake clock
+advanced60s for timeout1ms/poll60000ms, with no wall-clock threshold/new Tokio
+feature. Only then were behavior fixes applied. An initial GREEN compile attempt
+had a stray generated comment character; it was corrected, not counted as RED.
+
+I1: one canonical TOML document parse feeds typed daemon decoding/validation
+before legacy fields. Error classification preserves new-owner failures and
+recognized Website selection through later legacy-field errors; neither may enter
+Shared defaults. Existing malformed Shared source warning/default/global-error
+diagnostic behavior remains, including explicit Shared plus bad legacy fields.
+The once-computed ConfigSpec defaults/provenance catalog is retained; no regex,
+second source parse/read, private fallback/default or v2/apply behavior is added.
+
+I2: a named effective-policy projection is shared by runtime hashing and impact
+equality. Applicability marker/provenance and provided-snapshot validation remain
+separate; omitted vs explicit Shared5000 has equal identity/no runtime action,
+while origins differ and Website explicit0/5000 are still invalid. Byte-change
+restart diagnostics remain a source observation, not a runtime identity.
+
+I3: the existing reply-drain consumer clamps each sleep to the original deadline's
+remaining budget. Injected clock/sleeper tests exercise the actual loop, not a
+copied model. No physical Activity/worker drain, queue, transport or #155 work
+is included; S1c scope remains deferred.
+
+Focused GREEN: config32/migration14/observation13/resolution24/runtime14/view6,
+daemon_settings18/lifecycle11; server unit slice17, including both new legacy
+source cases and deterministic drain. Final full/lean/lint/inventory gates follow
+before the fix checkpoint and scoped rereview package.
+
+Fix round1 final verification (still pending original scoped rereview): full Debug
+cli-full inventory1453 / execute1435 passed,0 failed,18 ignored,88 target summaries,
+183.910s, both command exits0. Raw:
+`s1a/fix1/observations/s1a-fix1-cli-full/{inventory,execute}.{json,log}`.
+Lean owner18 + resolution23 passed; after interruption the completed original log
+was preserved and a warm completion check explicitly returned0. Lean server17
+(including deterministic drain/legacy policy tests) and capture5 passed. Final
+cli-full all-target and explicit artifact/perf_budget Clippy -D warnings passed;
+fmt/protected-path/diff/source audits are recorded in the fix package.
+
+Sourceguard at taskbase `cd28b8b`:1462 -> 1467 source names,5 additions / 0 removals,
+18 ignore attributes unchanged; no Rust source changes during or after final full
+verification. Base remains `cd28b8b` despite newer main; no dependency integration
+or rebase was mixed into this round. Original I1/I2/I3 approval remains the next
+gate; neither S1a nor the later integrated S1/#79 is marked complete here.

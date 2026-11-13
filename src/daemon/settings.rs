@@ -86,6 +86,48 @@ pub struct DaemonSettings {
     // Applicability is semantic: an explicit Shared grace cannot be ignored by Website.
     idle_grace_explicit: bool,
 }
+// Runtime identity excludes source/applicability facts retained by Settings and
+// Provenance. Hashing and equality must use this same effective projection.
+#[derive(PartialEq, Eq, serde::Serialize)]
+struct EffectiveDaemonPolicy<'a> {
+    profile: &'a DaemonProfile,
+    max_connections: usize,
+    max_events: usize,
+    max_sessions: usize,
+    search_active: usize,
+    search_pending: usize,
+    control_active: usize,
+    control_pending: usize,
+    max_blocking_threads: usize,
+    idle_grace_ms: u64,
+    control_timeout_ms: u64,
+    poll_interval_ms: u64,
+    janitor_interval_ms: u64,
+    reply_drain_ms: u64,
+    drain_poll_ms: u64,
+}
+impl DaemonSettings {
+    fn effective_policy(&self) -> EffectiveDaemonPolicy<'_> {
+        EffectiveDaemonPolicy {
+            profile: &self.profile,
+            max_connections: self.max_connections,
+            max_events: self.max_events,
+            max_sessions: self.max_sessions,
+            search_active: self.search_active,
+            search_pending: self.search_pending,
+            control_active: self.control_active,
+            control_pending: self.control_pending,
+            max_blocking_threads: self.max_blocking_threads,
+            idle_grace_ms: self.idle_grace_ms,
+            control_timeout_ms: self.control_timeout_ms,
+            poll_interval_ms: self.poll_interval_ms,
+            janitor_interval_ms: self.janitor_interval_ms,
+            reply_drain_ms: self.reply_drain_ms,
+            drain_poll_ms: self.drain_poll_ms,
+        }
+    }
+}
+
 /// Optional global or typed CLI daemon overrides.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -156,7 +198,7 @@ impl DaemonSpec {
         };
         let identity = |settings: &DaemonSettings| {
             Self::validate(settings, &Capabilities::current())?;
-            policy_identity("daemon-policy-v1", settings)
+            policy_identity("daemon-policy-v1", &settings.effective_policy())
         };
         let mut assessment = runtime_assessment(
             "daemon",
@@ -448,7 +490,10 @@ impl SettingsSpec for DaemonSpec {
         next: &Self::Settings,
         _: &ArtifactFacts,
     ) -> ComponentImpact {
-        ComponentImpact::between(old, next)
+        ComponentImpact::between(
+            old.map(DaemonSettings::effective_policy).as_ref(),
+            &next.effective_policy(),
+        )
     }
 }
 fn validate_applicability(settings: &DaemonSettings) -> Result<()> {

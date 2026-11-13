@@ -134,24 +134,93 @@ pub fn global_from(config_dir: &Path) -> Result<Resolved<Config>> {
 }
 
 /// Resolve a launch's already captured v1 bytes; no filesystem access or v2 activation.
-pub(crate) fn launch_resolution(path: &Path, bytes: Option<&[u8]>) -> Result<LaunchResolution> {
+pub(crate) fn launch_resolution(
+    path: &Path,
+    bytes: Option<&[u8]>,
+) -> std::result::Result<LaunchResolution, LaunchFailure> {
     let mut resolution = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone());
+    let mut website = false;
     if let Some(bytes) = bytes {
         let text = std::str::from_utf8(bytes).map_err(|err| {
-            Error::internal_with_source(format!("read {}: {err}", path.display()), err)
+            LaunchFailure::Legacy(Error::internal_with_source(
+                format!("read {}: {err}", path.display()),
+                err,
+            ))
         })?;
-        resolution.apply(
-            &SourceId::Global(path.to_owned()),
-            super::parse_global(path, text)?,
-        )?;
+        // Parse the canonical document once. Decode/validate the owner section
+        // first so neither its errors nor a recognized Website selector can be
+        // erased by the legacy Shared source-error adapter.
+        let mut document =
+            super::parse_global_document(path, text).map_err(LaunchFailure::Legacy)?;
+        let source = SourceId::Global(path.to_owned());
+        if let Some(daemon) = document.remove("daemon") {
+            let owner_patch = daemon
+                .try_into::<crate::daemon::settings::DaemonPatch>()
+                .map_err(|error| {
+                    LaunchFailure::Daemon(Error::internal_with_source(
+                        format!("parse {} daemon policy: {error}", path.display()),
+                        error,
+                    ))
+                })?;
+            resolution
+                .apply(
+                    &source,
+                    super::GlobalFileConfig {
+                        daemon: Some(owner_patch),
+                        ..super::GlobalFileConfig::default()
+                    },
+                )
+                .map_err(LaunchFailure::Daemon)?;
+            crate::daemon::settings::DaemonSpec::validate(
+                &resolution.settings.daemon,
+                &resolution.capabilities,
+            )
+            .map_err(LaunchFailure::Daemon)?;
+            website = matches!(
+                resolution.settings.daemon.profile,
+                crate::daemon::settings::DaemonProfile::Website { .. }
+            );
+        }
+        resolution
+            .apply(
+                &source,
+                super::decode_global_document(path, document)
+                    .map_err(|error| LaunchFailure::classify(error, website))?,
+            )
+            .map_err(|error| LaunchFailure::classify(error, website))?;
     }
     // Invalid globals never disappear behind a later CLI selector.
-    resolution.validate()?;
+    resolution
+        .validate()
+        .map_err(|error| LaunchFailure::classify(error, website))?;
     Ok(LaunchResolution(resolution))
 }
 
+#[derive(Debug)]
+pub(crate) enum LaunchFailure {
+    // Existing malformed Shared sources retain their compatibility adapter.
+    Legacy(Error),
+    // New owner errors and every recognized Website failure must fail closed.
+    Daemon(Error),
+}
+impl LaunchFailure {
+    fn classify(error: Error, website: bool) -> Self {
+        if website {
+            Self::Daemon(error)
+        } else {
+            Self::Legacy(error)
+        }
+    }
+    pub(crate) fn into_error(self) -> Error {
+        match self {
+            Self::Legacy(error) | Self::Daemon(error) => error,
+        }
+    }
+}
+
 // Retain the same once-computed defaults catalog between source validation and
-// the CLI patch. Legacy fallback applies only to source errors, never CLI errors.
+// the CLI patch. Legacy fallback applies only to classified Shared legacy-source
+// errors, never daemon owner, recognized Website or CLI errors.
 pub(crate) struct LaunchResolution(Resolution<ConfigSpec>);
 impl LaunchResolution {
     pub(crate) fn finish(

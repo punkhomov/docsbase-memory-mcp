@@ -1072,12 +1072,35 @@ async fn call_and_respond(
 /// timeout so a wedged request cannot hold shutdown forever (T46). SIGTERM
 /// remains the operator's escalation path.
 async fn wait_for_drain(in_flight: &AtomicUsize, timeout: Duration, poll: Duration) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
+    wait_for_drain_with(
+        in_flight,
+        timeout,
+        poll,
+        tokio::time::Instant::now,
+        tokio::time::sleep,
+    )
+    .await
+}
+
+async fn wait_for_drain_with<N, S, F>(
+    in_flight: &AtomicUsize,
+    timeout: Duration,
+    poll: Duration,
+    mut now: N,
+    mut sleep: S,
+) -> bool
+where
+    N: FnMut() -> tokio::time::Instant,
+    S: FnMut(Duration) -> F,
+    F: std::future::Future<Output = ()>,
+{
+    let deadline = now() + timeout;
     while in_flight.load(Ordering::SeqCst) > 1 {
-        if tokio::time::Instant::now() >= deadline {
+        let current = now();
+        if current >= deadline {
             return false;
         }
-        tokio::time::sleep(poll).await;
+        sleep(poll.min(deadline.duration_since(current))).await;
     }
     true
 }
@@ -1611,6 +1634,116 @@ mod tests {
     use crate::hybrid::dense::DenseRows;
     use crate::hybrid::jobs::embed_project_chunks_with;
     use crate::vector_cache::Embedder;
+
+    #[test]
+    fn invalid_file_daemon_policy_cannot_fall_back_during_legacy_shared_open() {
+        let mut violations = Vec::new();
+        for policy in ["idle_grace_ms=0", "max_events=0"] {
+            let root = tempfile::tempdir().unwrap();
+            fs::write(
+                root.path().join("config.toml"),
+                format!(
+                    "[daemon]\nprofile={{mode='website',project_root={}}}\n{policy}",
+                    toml::Value::String(root.path().to_string_lossy().into_owned())
+                ),
+            )
+            .unwrap();
+            let cache = root.path().join("cache");
+            let result = LaunchSnapshot::capture_from(root.path())
+                .legacy(DaemonPatch::default())
+                .and_then(|launch| {
+                    Shared::open_with_launch_config(
+                        &cache,
+                        &crate::store::settings::standalone().unwrap(),
+                        &crate::store::settings::standalone_read_pool().unwrap(),
+                        crate::hybrid::dense_settings::standalone()
+                            .unwrap()
+                            .settings(),
+                        launch,
+                    )
+                });
+            if result.is_ok() || cache.exists() {
+                violations.push(format!(
+                    "{policy}: opened={}, cache={}",
+                    result.is_ok(),
+                    cache.exists()
+                ));
+            }
+        }
+        assert_eq!(violations, Vec::<String>::new());
+    }
+
+    #[test]
+    fn legacy_shared_source_error_preserves_defaults_and_restart_diagnostic() {
+        for text in [
+            "not=[valid",
+            "max_file_size=0\n[daemon]\nprofile={mode='shared'}\nmax_sessions=1",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            fs::write(root.path().join("config.toml"), text).unwrap();
+            let cache = root.path().join("cache");
+            let launch = LaunchSnapshot::capture_from(root.path())
+                .legacy(DaemonPatch::default())
+                .unwrap();
+            assert!(launch.error.is_some());
+            let shared = Shared::open_with_launch_config(
+                &cache,
+                &crate::store::settings::standalone().unwrap(),
+                &crate::store::settings::standalone_read_pool().unwrap(),
+                crate::hybrid::dense_settings::standalone()
+                    .unwrap()
+                    .settings(),
+                launch,
+            )
+            .unwrap();
+            assert_eq!(
+                shared.daemon_settings().max_sessions,
+                crate::daemon::settings::DaemonSpec::DEFAULTS.max_sessions
+            );
+            assert!(shared.restart_notice().unwrap().contains("invalid"));
+            assert!(
+                shared.config_for_root(root.path()).is_err(),
+                "fallback must retain the old global-error guard"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_poll_cannot_overshoot_its_original_deadline() {
+        use std::cell::{Cell, RefCell};
+        let policy =
+            crate::config::resolve::resolve_component::<crate::daemon::settings::DaemonSpec>(
+                &crate::config::bootstrap::DefaultsContext::standalone(),
+                [(
+                    crate::config::schema::SourceId::Cli,
+                    DaemonPatch {
+                        reply_drain_ms: Some(1),
+                        drain_poll_ms: Some(60000),
+                        ..DaemonPatch::default()
+                    },
+                )],
+            )
+            .unwrap();
+        let stuck = AtomicUsize::new(2);
+        let base = tokio::time::Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let sleeps = RefCell::new(Vec::new());
+        let result = wait_for_drain_with(
+            &stuck,
+            Duration::from_millis(policy.settings().reply_drain_ms),
+            Duration::from_millis(policy.settings().drain_poll_ms),
+            || base + elapsed.get(),
+            |duration| {
+                sleeps.borrow_mut().push(duration);
+                elapsed.set(elapsed.get() + duration);
+                std::future::ready(())
+            },
+        )
+        .await;
+        assert!(!result);
+        assert_eq!(elapsed.get(), Duration::from_millis(1));
+        assert_eq!(*sleeps.borrow(), [Duration::from_millis(1)]);
+    }
 
     #[tokio::test]
     async fn drain_timeout_is_bounded() {
