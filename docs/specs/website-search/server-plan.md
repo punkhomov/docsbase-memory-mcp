@@ -541,3 +541,70 @@ deferral. Queue #81 / remaining CF12-CF13 separately, subject to S2 park rule.
 - Worker slots do not imply free connection fds, machine-wide resources, real
   capacity or latency. New defaults and HTTP caller budgets require actual task
   tests/reviews. Real ~20k evidence remains unavailable and unverified.
+
+## Delta 2026-11-13 — ADDED: S1a bounded capture / #152 (FR-S1b)
+
+Include [#152](https://github.com/punkhomov/docsbase-memory-mcp/issues/152) in the
+existing S1 integration PR, with S1a's implementation/review gates; no standalone
+PR is planned. This addendum awaits the original reviewer's scoped PASS before
+S1a runtime coding and leaves the closed I1..I5/M1..M3 contracts unchanged.
+
+Source evidence: config/mod.rs::read_capped currently checks metadata.len then
+uses unbounded read_to_string, so growth/unknown length bypasses the cap.
+daemon/server.rs::global_config_stamp separately uses unbounded fs::read and
+maps missing and failed reads to the same None. config/observe/source.rs already
+has a bounded take(cap+1) reader and Captured/SourceState observation machinery.
+Reuse its bounded byte-I/O primitive by extracting a crate-internal helper in
+src/config/capture.rs for that observer, legacy global/project read_capped,
+launch capture and restart hashing. Preserve the observer's existing no-follow,
+regular-file, race checks and CF5 semantics in its adapter; do not invoke migration
+planning/SourceLayer-v2 activation just to capture a daemon launch source.
+
+The trusted current bootstrap budget is crate::limits::MAX_STATE_BYTES (1MiB),
+passed explicitly to the shared helper before reading. Check budget+1 arithmetic
+and actual consumed/retained bytes: at most budget+1 may be read, regardless of
+metadata size, source growth or unknown stream length. Reject >budget instead of
+parsing/hashing a truncated prefix as a valid source. Metadata may reject early
+but cannot authorize an unbounded read or set allocation capacity; buffers are
+bounded from the trusted budget, never metadata.len. No daemon-private cap/default
+and no config key read from the file whose initial read it would govern.
+
+Startup parses/resolves and computes its diagnostic stamp from the **same one
+bounded capture** (including legacy launch adapters), with no second file read.
+Post-startup restart checks use the same bounded I/O helper and trusted budget.
+Model capture/stamp state explicitly as Missing, Loaded(diagnostic digest), or
+Unavailable(reason); raw bytes are Loaded only if the byte read was complete
+within budget, while parse errors retain existing diagnostics/fail-closed policy.
+Missing is a confirmed not-found outcome, not any I/O failure. Current Unavailable
+always reports unavailable/restart-required, even if a prior unavailable reason
+compares equal. Missing -> Missing and equal Loaded digests can report unchanged;
+Missing -> Loaded/Unavailable, Loaded -> Missing/Unavailable or a changed digest
+must report a diagnostic change/unavailability. Startup fallback errors remain
+visible under existing Shared policy; Website still fails closed. This stamp
+is restart diagnostics only, distinct from CF5 authoritative source identity,
+prepare/apply revalidation or publication; it adds no consistency/ABA guarantee.
+
+S1a RED cases: CountingRead with a tiny trusted budget proves actual bytes read
+stop at budget+1 for a longer/unknown-size stream; a deterministic growth seam
+after metadata admission proves growth cannot bypass that bound; misleading
+large metadata cannot drive allocation. Changing the file after capture proves
+launch settings and baseline stamp still derive from captured bytes. Restart
+checks cover unchanged Loaded/Missing, changed/deleted files and initial Missing
+becoming oversized/unreadable: these must produce a notice, never None equality.
+Use explicit I/O seams/counters and a bounded oversized fixture, no huge-allocation,
+RSS or elapsed-time threshold test. Extend tests/daemon_settings.rs, tests/config.rs,
+tests/config_observation.rs and config/capture.rs unit cases. Additional S1a gates:
+
+```sh
+RUSTUP_TOOLCHAIN=1.100.0 cargo test --locked --features cli-full --lib config::capture
+RUSTUP_TOOLCHAIN=1.100.0 cargo test --locked --features cli-full --test daemon_settings --test config --test config_observation
+RUSTUP_TOOLCHAIN=1.100.0 cargo test --locked --lib config::capture
+```
+
+S1's same-PR inventory/state-dependency update must classify I52 as the existing
+shared 1MiB bootstrap/read boundary now actually enforced on config/stamp reads;
+full configurable bootstrap budgets remain deferred. Classify launch capture and
+restart stamp as runtime/diagnostic state only, with no metadata/lexical/vector/
+ANN invalidation or CF5 publication edge. No source writes, CF5/v2 executor or
+strict activation are added. These are future runtime acceptance gates, not
+executed tests or a claim that #152 is fixed already.

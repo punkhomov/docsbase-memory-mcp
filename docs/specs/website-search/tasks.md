@@ -156,3 +156,34 @@ future implementation gates; no Cargo/build/test execution is claimed here.
    fmt/diff, client/example scripts, exact-head docs/linux/macos/windows and final
    test-inventory/artifact audit. Fresh whole-diff review; real ~20k remains
    user-deferred/unverified, with no synthetic capacity claim.
+
+## Delta 2026-11-13 — ADDED: S1a #152 bounded-read slice
+
+Before S1a runtime coding, obtain the original reviewer's scoped addendum PASS.
+Include #152 in the same integrated S1 PR; do not reopen closed S plan findings
+or create a standalone PR unless implementation proves it necessary.
+
+Extend S1a files with src/config/capture.rs (crate-internal shared bounded byte
+reader), src/config/mod.rs, src/config/observe/source.rs and daemon/server.rs
+launch/restart stamp integration. Reuse/extract the observer's existing bounded
+take(cap+1) primitive while preserving its no-follow/race/CF5 adapter behavior.
+Use explicit current MAX_STATE_BYTES=1MiB, no new private default/configurable
+bootstrap field. Parse startup settings and stamp from one capture; bounded
+post-startup hashing distinguishes Missing/Loaded/Unavailable and always reports
+current Unavailable. Diagnostic identity remains separate from CF5 authority.
+
+RED then GREEN in config/capture unit cases plus daemon_settings/config/
+config_observation targets: actual CountingRead/unknown-length consumption at
+most budget+1; source growth after metadata admission; misleading metadata length
+does not determine allocation; startup parse+stamp share bytes despite later
+file mutation; Missing -> oversized/unreadable restart notice; unchanged Loaded/
+Missing and changed/deleted file behavior. Use tiny trusted budgets, explicit
+seams/counters and bounded fixtures, no huge-allocation/RSS/timing thresholds.
+Copyable extra verification commands are in server-plan.md's #152 addendum;
+its existing S1a/config gates still apply. Commands are planned, not executed.
+
+Update S1's inventory/dependency matrix classification: current I52 bootstrap1MiB
+is shared and actually enforced; configurable bootstrap I52 remains deferred.
+Launch capture/restart diagnostics have runtime/diagnostic-only effects, no
+metadata/index/vector/ANN invalidation or CF5 publication dependency. No CF5/v2
+executor, source write or strict activation is in this task.

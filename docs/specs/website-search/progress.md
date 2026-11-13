@@ -192,3 +192,21 @@ Cargo, commits or GitHub operations were performed by the plan implementer.
 Evidence/diff/report: /workspace/scratch/agent-b/79/server-plan-fix/.
 No runtime/native acceptance, capacity/latency or real ~20k claim; S1a/b/c still
 require separate fresh reviews and one fully wired integration PR.
+
+## 2026-11-13 — S1a #152 bounded-capture plan addendum
+
+Source-confirmed #152 adds a narrow FR-S1b/S1a slice before runtime code:
+actual trusted cap+1 input consumption, shared bounded primitive from the config
+observer, same captured startup bytes for parse/stamp, bounded restart hashing
+and distinct Missing/Loaded/Unavailable diagnostics. Current MAX_STATE_BYTES1MiB
+remains the bootstrap boundary; configurable I52 is deferred. S1 must record
+its actual-enforcement slice and runtime/diagnostic-only dependency effect.
+Diagnostic stamps do not become CF5 authority/publication; no CF5/v2/source-write
+or strict-activation scope is added. Deterministic counter/growth/stream and
+oversized-restart-notice cases are planned; no huge-allocation/RSS/timing gates.
+
+Ruling: this docs-only addendum awaits original reviewer scoped PASS before S1a
+runtime coding and closes #152 with the existing S1 integration PR. I1..I5 and
+three Minor plan contracts remain closed/untouched. Review package:
+/workspace/scratch/agent-b/79/s1a/plan152/. No product/test code, Cargo, commits,
+GitHub operations, runtime tests or build commands by the addendum implementer.

@@ -274,3 +274,38 @@ register, take a writer lease or trigger hidden Sync. This bounded observation
 does not pin publication or old-generation availability during in-place writes.
 All these are planned contracts awaiting implementation evidence, with real
 ~20k capacity/latency acceptance still user-deferred and unverified.
+
+## Delta 2026-11-13 — ADDED: S1a bounded launch/restart capture (#152)
+
+FR-S1b's single launch snapshot includes actual bounded I/O, not a metadata-only
+length check. Reuse/extract the existing take(cap+1) primitive from
+src/config/observe/source.rs into a crate-internal src/config/capture.rs helper.
+Legacy config/mod.rs::read_capped (global/project), daemon launch capture and
+restart checks use it with the explicit trusted MAX_STATE_BYTES=1MiB boundary.
+The observer adapter retains its current no-follow/regular-file/race checks and
+SourceState/CF5 behavior; sharing byte I/O does not activate its migration/v2 path.
+No consumer-local cap or file-defined bootstrap recursion is introduced.
+
+The helper checks cap+1 arithmetic, limits actual Read consumption/retained bytes
+to that amount, rejects >cap and derives any buffer sizing from the trusted cap,
+never metadata.len. Metadata is an optional early rejection, not proof of a
+complete bounded read. Parse resolved launch policy and compute its diagnostic
+stamp from the same captured bytes once, including legacy adapters. Post-startup
+checks apply the same actual byte limit before hashing and cannot bless a
+truncated over-budget prefix.
+
+Keep explicit Missing/Loaded(diagnostic digest)/Unavailable(reason) states,
+independent of parse-error diagnostics. Any current Unavailable reports a notice;
+only Missing->Missing and equal Loaded digests may report unchanged. Missing to
+oversized/unreadable is Unavailable and cannot disappear through None equality.
+Existing Shared fallback diagnostics and Website failure behavior remain.
+This diagnostic stamp is not CF5 authoritative source identity, publication or
+revalidation, and does not strengthen concurrent-write/ABA guarantees.
+
+S1a adds deterministic bounded-reader/growth/capture-sharing/restart-state tests
+and preserves config_observation behavior. The same S1 PR classifies I52's
+enforced current cap and diagnostic runtime state in settings-inventory and
+state-dependencies, without artifact invalidation. Full configurable bootstrap
+I52, source writes, CF5/v2 execution and strict activation stay deferred.
+Plan addendum scope/commands are in server-plan.md; original reviewer scoped
+PASS is required before runtime implementation. #152 closes with S1 integration.

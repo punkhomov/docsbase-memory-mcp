@@ -293,3 +293,34 @@ reviews and merge only together with all accepted fields wired. Named test
 targets and exact implementation verification commands are in the amended
 [server-plan.md](server-plan.md). No S runtime acceptance or real ~20k result is
 claimed by this plan amendment.
+
+## Delta 2026-11-13 — MODIFIED: FR-S1b bounded capture (#152)
+
+S1a must close [#152](https://github.com/punkhomov/docsbase-memory-mcp/issues/152)
+inside the existing S1 integration PR. Global/project config input and daemon
+restart-diagnostic reads must enforce an actual byte bound before parsing or
+hashing: consume/retain at most trusted budget+1 bytes and reject over-budget
+input, even if the source grows after metadata inspection or has unknown length.
+Do not size allocations from untrusted metadata.len. Reuse the existing bounded
+configuration observation reader/cap where possible; no private daemon default.
+The current trusted boundary stays MAX_STATE_BYTES=1MiB, established before
+reading the file; configurable bootstrap I52 remains deferred, with no recursive
+file-defined initial-read budget.
+
+Launch parsing/resolution and the baseline diagnostic stamp use the same captured
+bytes, without a second source read. Later restart checks are also bounded.
+Distinguish Missing, Loaded and Unavailable: Missing becoming oversized/unreadable
+must produce change/unavailability diagnostics, never silently compare equal as
+None. Any current Unavailable reports a diagnostic even if its reason repeats;
+unchanged Missing or equal Loaded digests may report unchanged. Preserve legacy
+Shared parse-error diagnostics/fallback policy and Website fail-closed startup.
+Diagnostic stamps are not CF5 authoritative identity/revalidation/publication.
+
+Acceptance: deterministic growth and CountingRead/stream tests assert the actual
+budget+1 consumption limit; misleading metadata does not drive buffer sizing;
+startup parse/stamp share capture even when the file changes afterwards; and
+oversized/unreadable restart checks after initial Missing produce a notice.
+Use bounded fixtures/counters, not huge allocations, RSS or timing thresholds.
+S1's inventory/dependency classification records the enforced current I52 slice
+and runtime/diagnostic-only effect; no CF5/v2/source-write/strict-activation scope
+is added. The original reviewer's scoped plan-addendum PASS precedes runtime code.
