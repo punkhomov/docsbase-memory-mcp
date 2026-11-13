@@ -25,3 +25,25 @@ fraction/exponent tests. Production parser ещё не реализован.
 Requirements/design/tasks изменены с dated delta markers. Production code/tests
 не добавлялись; фиксируется план тестов, а не их выполнение. Fix diff и notes:
 /workspace/scratch/agent-b/79/plan-fix.{diff,md}; independent review делает controller.
+
+2026-11-13 C1 verification (review pending): actual RED c1-red.log shows missing
+connection.ts; additional schema-range RED c1-schema-red.log. GREEN: Node24.22.3,
+17 passed /0 failed; package tsc build/check exit0, diff check exit0. Evidence:
+/workspace/scratch/agent-b/79/c1-{red,schema-red,green}.log. Complete mandatory policy,
+read-only bind, exact schema/build/capabilities, capped contiguous framing buffer,
+lossless u64 and runtime citation checks. Dev-only @types/node24.19.2 and existing
+TS5.9.3; pnpm normal 14-day policy accepted. Generated dist/node_modules ignored.
+C2/C3 and whole #79 remain incomplete.
+
+Task C1: complete (2026-11-13): transport + checked DTOs/settings, actual RED→GREEN,
+final27 passed/0 failed; tsc build/check, package-local Biome format check and
+source diff check exit0. Web check0errors/0warnings; pnpm audit moderate gate0
+(existing Web dev deepmerge low advisory unchanged). Fresh review initially found
+3 Important: Windows UNC endpoint, unsafe score integer exemption, missing schema/
+u64 boundary tests. Separate implementer fixed all with actual RED23pass/4fail
+thenGREEN27/0; original reviewer scoped re-review PASS/APPROVED, no new findings.
+Evidence /workspace/scratch/agent-b/79/c1/{review.md,fix-rereview.md,fix/}.
+Ruling: native schema/version fields have the Rust u32 representability bound;
+platform is a captured capability, not runtime configurable policy. Biome sibling
+path invocation hit upstream ignore-root panic; package-local VCS-disabled scratch
+config works without changing repo settings. No deferred C1 minors.

@@ -20,3 +20,5 @@ __pycache__/
 /work/
 
 /node_modules/
+/packages/client/node_modules/
+/packages/client/dist/
