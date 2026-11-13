@@ -839,3 +839,11 @@ CF5b0 independent final review: content converged, Critical/Important none;
 required native delivery pending. Minor по языку исправлен переводом investigation
 на русский. Task marker отражает completion source/review, не native acceptance.
 Link/diff audit GREEN. Исполнимые schema/lease/durability/recovery остаются CF5b1+.
+
+2026-11-13 — CF5b0 integration final-review Minor: addressed in-task. Уточнено,
+что стабильный SQLite read snapshot в WAL даёт наблюдение, но сам не исключает
+registry writers. Writer-excluding admission/control-lease/SQL-контракт на весь
+bounded maintenance интервал и causal отказ concurrent registration/root move
+остаются явным CF5b1 proof gate; механизм не выбран и runtime/durability proof
+не заявлен. Изменены только wording adoption-recovery и этот ledger append.
+Scoped fix re-review и exact-head native acceptance остаются pending.

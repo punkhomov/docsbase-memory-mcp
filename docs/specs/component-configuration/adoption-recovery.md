@@ -33,9 +33,12 @@ native durability proofs рассматриваются в CF5b1 до mutation A
   Это факты аудита, а не исправление этих writers в данном slice.
 - Daemon admission исключает демоны. Direct index/read leases действуют per project;
   остальные direct CLI/vector users не исключаются одной проверкой daemon liveness.
-- Изменения registry должны быть исключены стабильной SQLite transaction/snapshot
-  во время maintenance. Её владение отлично от no-write observer. PID check или
-  заимствованного результата наблюдения недостаточно.
+- Стабильный SQLite read snapshot даёт согласованное наблюдение, но в WAL сам
+  по себе не исключает registry writers. Для всего bounded maintenance интервала
+  нужен отдельный доказанный writer-excluding admission/control-lease или
+  SQL-контракт. Конкретный механизм и отказ concurrent registration/root move
+  должны быть определены и проверены в CF5b1; это исследование их не доказывает.
+  PID check или заимствованного результата наблюдения недостаточно.
 
 ## Решение и альтернативы
 
