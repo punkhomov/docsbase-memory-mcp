@@ -49,5 +49,5 @@ Files: src/daemon/{tools,server}.rs, src/hybrid/jobs.rs, src/cli/index.rs;
 - [x] Actual server/direct CLI propagation; old snapshot legacy budget не берётся из
   более нового dense map; owned source retains lifetime. Нет нового startup mode.
 - [x] Full/lean focused+full suite, Clippy/fmt/diff и fresh task review.
-- [ ] Fresh final review, native four checks и inventory сохранения parent/
+- [x] Fresh final review, native four checks и inventory сохранения parent/
   выполнения всех additions; squash delivery.

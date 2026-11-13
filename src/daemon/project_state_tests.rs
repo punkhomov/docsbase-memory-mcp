@@ -736,3 +736,147 @@ fn sync_stage_admission_failure_precedes_enqueue() {
             .is_none()
     );
 }
+
+#[test]
+fn daemon_watcher_uses_owner_and_rejected_reload_preserves_snapshot() {
+    let mut fixture = Fixture::new();
+    fixture.write_config("hybrid=false\n");
+    std::fs::write(fixture.root.path().join("a.md"), "alphawidget").unwrap();
+    let (config, stages) = fixture.shared.project_runtime(&fixture.project).unwrap();
+    let mut db = Db::open(fixture.cache.path()).unwrap();
+    tools::run_project_index(&mut db, fixture.cache.path(), &fixture.project, &config).unwrap();
+    let project = registry::project_by_id(&db, fixture.project.id)
+        .unwrap()
+        .unwrap();
+    let owner = crate::vector_cache::VectorStore::acquire(
+        fixture.cache.path(),
+        crate::vector_cache::settings::standalone()
+            .unwrap()
+            .settings(),
+    )
+    .unwrap();
+    Arc::get_mut(&mut fixture.shared).unwrap().dense = DenseCache::with_vector_store(
+        AnnPolicy::Disabled,
+        &owner,
+        crate::hybrid::dense_settings::standalone()
+            .unwrap()
+            .settings(),
+    )
+    .unwrap();
+    assert!(fixture.shared.ensure_watcher(&project).unwrap());
+    let first = fixture
+        .shared
+        .watchers
+        .runtime_for_test(project.id)
+        .expect("prepared daemon watcher");
+    assert!(Arc::ptr_eq(&first.0, &config));
+    assert!(Arc::ptr_eq(&first.1, &stages));
+    let crate::vector_cache::VectorCacheSource::Owned(source) = first.2 else {
+        panic!("owner source")
+    };
+    let _connection = source.connect().unwrap();
+    // Strict reload refuses legacy project budgets, leaving watcher state intact.
+    fixture.write_config("hybrid=false\nmax_docs_per_project=23\n");
+    assert!(matches!(
+        fixture.shared.open_project_config(&project),
+        Err(Error::Admission { .. })
+    ));
+    let unchanged = fixture
+        .shared
+        .watchers
+        .runtime_for_test(project.id)
+        .unwrap();
+    assert!(Arc::ptr_eq(&unchanged.0, &config));
+    assert!(Arc::ptr_eq(&unchanged.1, &stages));
+}
+
+#[test]
+fn stale_watcher_ensure_uses_current_runtime_after_reload() {
+    let fixture = Fixture::new();
+    fixture.write_config("hybrid=false\n");
+    let mut db = Db::open(fixture.cache.path()).unwrap();
+    tools::run_project_index(
+        &mut db,
+        fixture.cache.path(),
+        &fixture.project,
+        &Config::default(),
+    )
+    .unwrap();
+    let indexed = registry::project_by_id(&db, fixture.project.id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        fixture
+            .shared
+            .ensure_watcher_observing(&indexed, || {
+                fixture.write_config("hybrid=false\nmax_docs_per_project=23\n");
+                // A legitimate stale registry value does not itself start a watcher.
+                fixture
+                    .shared
+                    .open_project_config(&fixture.project)
+                    .unwrap();
+            })
+            .unwrap()
+    );
+    let current = fixture.shared.project_runtime(&indexed).unwrap();
+    let watched = fixture
+        .shared
+        .watchers
+        .runtime_for_test(indexed.id)
+        .unwrap();
+    assert_eq!(watched.0.max_docs_per_project, 23);
+    assert!(Arc::ptr_eq(&current.0, &watched.0));
+    assert!(Arc::ptr_eq(&current.1, &watched.1));
+    fixture.write_config("hybrid=false\nmax_docs_per_project=24\n");
+    fixture.shared.open_project_config(&indexed).unwrap();
+    let current = fixture.shared.project_runtime(&indexed).unwrap();
+    let revised = fixture
+        .shared
+        .watchers
+        .runtime_for_test(indexed.id)
+        .unwrap();
+    assert_eq!(revised.0.max_docs_per_project, 24);
+    assert!(Arc::ptr_eq(&current.0, &revised.0));
+    assert!(Arc::ptr_eq(&current.1, &revised.1));
+    assert!(!Arc::ptr_eq(&watched.0, &revised.0));
+}
+
+#[test]
+fn identical_config_reload_revises_prepared_watcher_stages() {
+    let fixture = Fixture::new();
+    let mut db = Db::open(fixture.cache.path()).unwrap();
+    tools::run_project_index(
+        &mut db,
+        fixture.cache.path(),
+        &fixture.project,
+        &Config::default(),
+    )
+    .unwrap();
+    let indexed = registry::project_by_id(&db, fixture.project.id)
+        .unwrap()
+        .unwrap();
+    fixture
+        .shared
+        .open_project_config_with(&indexed, |_| Ok(old_stages()))
+        .unwrap();
+    let first = fixture
+        .shared
+        .watchers
+        .runtime_for_test(indexed.id)
+        .unwrap();
+    // Reconstructing a provider can refresh credentials with identical TOML.
+    fixture
+        .shared
+        .open_project_config_with(&indexed, |_| Ok(old_stages()))
+        .unwrap();
+    let current = fixture.shared.project_runtime(&indexed).unwrap();
+    assert_eq!(*first.0, *current.0);
+    assert!(!Arc::ptr_eq(&first.1, &current.1));
+    let watched = fixture
+        .shared
+        .watchers
+        .runtime_for_test(indexed.id)
+        .unwrap();
+    assert!(Arc::ptr_eq(&watched.0, &current.0));
+    assert!(Arc::ptr_eq(&watched.1, &current.1));
+}

@@ -721,3 +721,25 @@ panel_projects и schedule_backfill читают coverage через тот же
 construction. Direct CLI использует уже существующий startup from_config result.
 Legacy wrappers сохраняют старый lazy resolve и errors; startup остаётся legacy.
 Watcher dynamic config/retry и strict activation — отдельные последующие slices.
+
+## Delta 2026-11-13 — CF7c3: watcher snapshot ownership
+
+WatchRuntime содержит Config Arc, HybridStages Arc и VectorCacheSource; Prepared
+variant WatchContext хранит одну Arc этого набора. Configured variant сохраняет
+старую конфигурационную lazy path. Один slot принадлежит producer и consumer;
+producer получает config через общий private spawn_watcher_using, consumer
+клонирует целый context для каждой writer-lease attempt. Общий run_batch_using
+сохраняет status/schema check, raw-path refilter и pre-marker stale gate. Prepared
+path использует run_incremental_checked_with_embedding; same_revision сравнивает
+runtime Arc целиком, а не только Config. Recovery не меняет source/stages.
+ensure_with_runtime/revise_with_runtime проверяют cache affinity до ресурсов/
+замены. Старый revise отказывает для prepared mode вместо сброса owner.
+Consumer держит dependencies до конца batch, включая provider error/retry, без
+slot guard/SQL transaction через provider. Уже admitted bytes остаются captured.
+Shared::ensure_watcher готовит coherent runtime до reload mutex, затем проверяет
+config revision под authority и при изменении повторяет capture. Создание watcher
+сериализовано с reload без удержания state lock через provider. Reload проверяет
+source до публикации и всегда заменяет весь watcher context, включая Config-equal
+reopen с новым provider instance/credentials; native resource failure
+остаётся warning. start_watchers сначала получает список и освобождает Db guard.
+План: [cf7c3-plan.md](cf7c3-plan.md). Strict startup/adoption остаются CF5/CF7.

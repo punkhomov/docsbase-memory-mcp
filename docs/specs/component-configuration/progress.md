@@ -701,3 +701,65 @@ Task CF7c2: complete (implementation/local verification/fresh task review).
 Ruling: Minor по vacuous marker assertion исправлен, re-review ADDRESSED;
 новых Critical/Important нет. No deferred minors. Final/native delivery остаются
 gates; полное завершение CF7/#78 не заявляется.
+
+CF7c2 final review converged at d5601d4, findings/deferred minors none. Первый
+native run43435698037 attempt1 GREEN: Linux1391+2static, macOS1387, Windows1373
+pass/0fail/18existing ignores; каждый parent145 test сохранён,10new tests/OS
+выполнены. Во время delivery merged upstream PR141 (Node IPC); branch обновлён
+обычным merge до0517793. Diff против нового main0c6d707 byte-identical прежнему
+reviewed patch; independent integration re-review converged, no findings.
+Refreshed native run43438407813/inventory обязателен; первый run не final acceptance.
+
+## 2026-11-13 — CF7c3: prepared watcher runtime
+
+Task CF7c3: implementation in progress. Source base — reviewed CF7c2, затем
+обновление с main0c6d707/PR141 без конфликтов. WatchRuntime несёт config/stages/
+source через общий producer/consumer/retry core. Actual Shared ensure готовит
+stages без DB/state guards и не создаёт watcher из устаревшей revision; reload
+меняет целый snapshot. Configured compatibility APIs сохранены.
+RED missing APIs и actual daemon observer без prepared context; GREEN7real
+watcher regressions+2daemon regressions. Causal mutations: legacy consumer теряет
+vector coverage; config-only revision identity пропускает obsolete stages; missing
+ensure revision check создаёт watcher со старой policy. Sources restored;18watch
+и17project-state tests GREEN. Local full/lean/lints, fresh reviews/native pending.
+Strict startup/file-v2/persisted adoption/apply и полный #78 остаются open.
+
+CF7c3 initial local suites: full1402pass/18existing ignores, lean1208pass/11existing
+ignores,0failures; full/lean all-target Clippy/fmt/diff GREEN. Fresh task review
+выявил Important: Config-equal reopen публиковал new stages в Shared, сохраняя old
+watcher runtime. Новый actual Shared regression RED, затем watcher обновляется
+при каждой успешной runtime publication; dense invalidation остаётся semantic.
+Final18watch+18project-state GREEN,10new tests. Полные suites/lints повторяются
+после production fix; re-review/final/native pending. Первый локальный run не
+final verification изменённого source.
+
+Task CF7c3: complete (implementation/local verification/fresh task review).
+Ruling: Config-equal publication Important ADDRESSED, re-review новых Critical/
+Important не нашёл. Independent final bounded-source review converged; unmet
+requirements/findings/deferred minors none. Final cli-full1403passed/0failed/
+18existing ignores, lean1209passed/0failed/11existing ignores;87top-level summaries,
+по2nested filtered child summaries исключены. Все10new tests executed. Final
+full/lean all-target Clippy/fmt/diff GREEN. Required native inventory/delivery и
+обновление на actual CF7c2 squash остаются gates; CF5/CF7/#78 ещё не завершены.
+
+CF7c2 delivery: PR146 squash c8d1e90121e10397d0f99a99d7ce601ede984dba.
+Refreshed run43438407813 attempt1 required docs/Linux/macOS/Windows GREEN.
+Скачанные diagnostics сохранили каждый parent141 test и18existing ignores/OS;
+все10new tests executed, включая actual Node daemon acceptance. Linux1393+2static,
+macOS1389, Windows1375pass/0fail. Reviewed0517793/tested8a5e70c/squash share tree
+486ee88361e9c0ee27fd728d927749b28b7b1874. #78 остаётся open.
+CF7c3 integrated this actual main;6duplicated-append conflicts resolved only after
+проверки, что incoming content целиком сохранён. Entire resulting tree совпал с
+reviewed/tested e4c9385: db2bd1a6891d51d0502e791c44f552ff513baf11.
+После integration меняются только delivery ledger/plan markers; production source
+не менялся. Native four checks/inventory CF7c3 ещё pending.
+
+CF7c3 first native run43441656055 rejected: macOS failed6new watcher tests.
+Root cause reproduced on Linux with symlinked TMPDIR: fixture submitted alias
+paths unlike producer canonical-root paths. Test-only correction uses registered
+project.canonical_root for all7injected event paths, matching existing Env::path;
+TempDir lifetime retained as _root. Same alias-path reproduction now18/18GREEN
+in both cli-full and lean; final full all-target Clippy/fmt/diff GREEN. No production
+change, assertions/coverage/ignores unchanged. Independent fix/integration review
+converged, no findings; source tree equality across prior integration confirmed.
+First native run is not acceptance; corrected head requires fresh4checks/inventory.
