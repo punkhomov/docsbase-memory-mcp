@@ -1,13 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
-import { Connection } from '../src/connection.ts';
+import { Connection, type OperationGuard } from '../src/connection.ts';
+import { abortError } from '../src/types.ts';
 import { resolveClientOptions } from '../src/settings.ts';
 import { decodeResponse, searchResult, MAX_FRAME_BYTES } from '../src/protocol.ts';
 import { peer, hello, ok, options, line, deferred } from './peer.ts';
 
 const control = { method: 'CallTool', params: { name: 'status', args: {} } } as const;
-const signal = () => new AbortController().signal;
+// These transport-only calls use an explicit caller-owned abort guard, without a deadline.
+const operation = (signal = new AbortController().signal): OperationGuard => ({
+  signal,
+  check() {
+    if (signal.aborted) throw abortError(signal);
+  },
+});
 const nativeEndpoint =
   process.platform === 'win32' ? String.raw`\\.\pipe\docsbase-client-test` : '/tmp/client.sock';
 
@@ -39,7 +46,7 @@ test('native Hello + read-only binding, including fragmented UTF-8', {
       socket.write(line(ok));
     }
   });
-  const connection = await Connection.open(resolveClientOptions(options(endpoint)), signal());
+  const connection = await Connection.open(resolveClientOptions(options(endpoint)), operation());
   t.after(() => connection.close());
   assert.equal(connection.metadata.schema_version, 2);
   assert.ok(connection.metadata.capabilities.includes('привет'));
@@ -71,7 +78,7 @@ for (const [name, data] of Object.entries({
       socket.once('close', () => closed.resolve());
       socket.write(line({ kind: 'Hello', data }));
     });
-    await assert.rejects(Connection.open(resolveClientOptions(options(endpoint)), signal()), {
+    await assert.rejects(Connection.open(resolveClientOptions(options(endpoint)), operation()), {
       kind: 'protocol',
     });
     await closed.promise;
@@ -158,11 +165,11 @@ for (const [name, response] of Object.entries({
       else if (request.method === 'BindReadOnly') socket.write(line(ok));
       else socket.end(response);
     });
-    const connection = await Connection.open(resolveClientOptions(options(endpoint)), signal());
+    const connection = await Connection.open(resolveClientOptions(options(endpoint)), operation());
     t.after(() => connection.close());
-    await assert.rejects(connection.exchange(control, signal()));
+    await assert.rejects(connection.exchange(control, operation()));
     assert.equal(connection.alive, false);
-    await assert.rejects(connection.exchange(control, signal()));
+    await assert.rejects(connection.exchange(control, operation()));
   });
 
 test('outbound frame cap checked before write', { timeout: 10000 }, async (t) => {
@@ -171,7 +178,7 @@ test('outbound frame cap checked before write', { timeout: 10000 }, async (t) =>
     calls++;
     socket.write(line(request.method === 'Hello' ? hello : ok));
   });
-  const connection = await Connection.open(resolveClientOptions(options(endpoint)), signal());
+  const connection = await Connection.open(resolveClientOptions(options(endpoint)), operation());
   t.after(() => connection.close());
   await assert.rejects(
     connection.exchange(
@@ -182,7 +189,7 @@ test('outbound frame cap checked before write', { timeout: 10000 }, async (t) =>
           context: { remaining_ms: 100, elapsed_ms: 0, queue_ms: 0 },
         },
       },
-      signal(),
+      operation(),
     ),
     { kind: 'validation' },
   );
@@ -259,7 +266,7 @@ test('aborted Hello closes exchange without binding', { timeout: 10000 }, async 
     controller.abort();
   });
   await assert.rejects(
-    Connection.open(resolveClientOptions(options(endpoint)), controller.signal),
+    Connection.open(resolveClientOptions(options(endpoint)), operation(controller.signal)),
     { kind: 'cancelled' },
   );
   assert.deepEqual(requests, ['Hello']);

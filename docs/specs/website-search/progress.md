@@ -47,3 +47,22 @@ Ruling: native schema/version fields have the Rust u32 representability bound;
 platform is a captured capability, not runtime configurable policy. Biome sibling
 path invocation hit upstream ignore-root panic; package-local VCS-disabled scratch
 config works without changing repo settings. No deferred C1 minors.
+
+2026-11-13 C2 verification (review pending): RED missing index.ts, additional
+RED pre-aborted work prepared args; RED custom tags.toJSON invoked twice.
+Implemented ingress operation across preparation/queue/connect/Hello/bind/reply,
+separate bounded FIFO pools, owned bounded search args, no replay/autostart/admin,
+explicit close and typed errors. GREEN44/0 (17client+27transport), tsc build/check0,
+diffcheck0. Deterministic clocks/timers cover preprocessing, Hello, queued expiry
+and context elapsed/remaining/queue, without sleeps or latency assertions.
+Evidence /workspace/scratch/agent-b/79/c2-{red,aborted-red,owned-red,green,build,check}.log.
+
+Task C2: complete (2026-11-13): public typed client, search/control FIFO pools,
+original operation and cancellation, no replay, explicit close, bounded owned args,
+package API/docs. Fresh review Important: timer-only transport could write after
+synchronous encoding/Hello decode crossed deadline. Separate implementer added
+mandatory caller-owned OperationGuard and checks through connection/open/exchange;
+4 actual late-frame regressions RED0/4→GREEN48/0, build/check/format/diff0. Original
+reviewer scoped re-review ADDRESSED, PASS/APPROVED, no new findings. Evidence:
+/workspace/scratch/agent-b/79/c2/{review.md,fix-rereview.md,fix/}. No deferred minors.
+C3/native/package acceptance and FR-S* still pending; #79 remains open.
