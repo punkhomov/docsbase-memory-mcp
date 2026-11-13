@@ -848,6 +848,91 @@ bounded maintenance интервал и causal отказ concurrent registratio
 не заявлен. Изменены только wording adoption-recovery и этот ledger append.
 Scoped fix re-review и exact-head native acceptance остаются pending.
 
+CF5b0 native delivery: run43451712803 attempt1 docs/Linux/macOS/Windows GREEN;
+head dd533dc and tested merge ee937178f share tree dc6de826dbd081038124bb2bc542b3f8c56fed54.
+Downloaded reports preserve the exact parent148 inventory and18ignores/OS:
+Linux1403+2static, macOS1399, Windows1385pass/0fail. Delivery evidence posted in
+PR151. This later ledger entry records acceptance without changing its tested head.
+
+Task CF5b1: in progress (2026-11-13). Exact research SQL schema, permanent namespace
+latch and session-before-config-capture contract, complete policy, bounded decode,
+state/recovery/allowlist and explicit multi-installation scope. Isolated scratch
+using existing pinned rusqlite0.40.2/bundled SQLite3.53.2:5top-level pass/0fail,
+including helper and4substantive tests; actual hot-journal extended776, unchanged
+readonly bytes, explicit recovery, committed process exit and native cross-process
+shared/exclusive evidence. Final schema correction revalidated5/0; scratch Clippy
+clean. No product dependency/API/runtime/test/baseline changes or source writes.
+Ruling: source/schema/link audit and fresh task/final reviews pending; Linux-only
+process evidence cannot authorize CF5b2/3/5c activation or power-durability claims.
+
+CF5b1 fresh task review: Important registry BEGIN IMMEDIATE effects contradicted
+the pre-stale coordination-only allowlist; Minor initial-plan revalidation was
+not distinguished from mixed-source resume/restore. Fixed with retained existing
+native SQLite exclusive inspector reservation, no operational Db/SQL BEGIN or
+second DB descriptor, and explicit journal-driven recovery admission. Added real
+WAL-format experiment proving rejected SQL creates WAL/SHM and chosen native
+lease excludes writers before/after immutable read without sidecars/byte changes;
+writer succeeds after release. Final scratch6/0/0 and Clippy clean. Re-review pending.
+
+Task CF5b1: complete (research/source/task-review scope, 2026-11-13).
+Fresh fix re-review: both findings ADDRESSED, no new Critical/Important. No
+deferred minors. Before final review clarified per-record SQLite value limit34MiB
+to include32MiB images plus aggregate metadata and encoding overhead; no runtime
+settings changed. Ruling: independent final review/native delivery pending;
+CF5b2/3/5c and broad CF5/CF7/#78 remain unfinished.
+
+CF5b1 independent final review: Important INSERT OR REPLACE could bypass DELETE
+guards with recursive_triggers unset and reset namespace/strict operation. Two
+separate scratch regressions RED (actual assertions, no compile errors), then
+BEFORE INSERT existing-singleton guards produce8/0/0 GREEN with recursive_triggers
+explicitly OFF; final scratch Clippy clean. Minor target-attribute evidence fixed
+by an explicit mandatory CF5b2 versioned bounded journal extension before executor;
+schema1 is byte/state research only. Final fix re-review pending, no deferred minors.
+
+CF5b1 final fix re-review: Important and Minor ADDRESSED, new Critical/Important
+none. Task and independent final source reviews converged; deferred minors none.
+Final scratch8/0/0, Clippy/rustfmt/link/diff checks GREEN. Preparing a stacked PR
+on PR151; final native acceptance will follow integration with the current base.
+
+CF5b1 integration update: rebased onto B's exact PR151 head ef46ebe (main149/
+Rust1.100 current base); task patch content/context identical after excluding
+Git blob IDs/hunk offsets. Corrected scratch reproduction to dev-dependencies:
+research is test-only and normal dependency produced Cargo's unused warning.
+No product/source/schema/experiment behavior changed; final manifest revalidation
+and native delivery follow this head.
+
+Task CF5b2a: in progress (2026-11-13). Separate worktree based on reviewed CF5b1
+head dea1d11/PR154. Audited POSIX/Apple/Microsoft primary semantics; isolated
+libc0.2.191 scratch reproduces naive rename xattr loss and new source despite an
+injected post-rename parent-flush error. Known single-xattr same-owner positive
+case, old reader, process boundaries, Missing no-replace and nofollow/hardlink/
+bounded-capture evidence; first7/0/0 (6substantive+helper), Clippy clean. Added
+between-rename-and-parent-flush process exit before final validation. Product
+dependencies/lock/src/test inventory, real configs and baseline untouched.
+Ruling: research contract and versioned attribute/stage-extension requirements
+only; full metadata/ACL/native namespace/storage/three-OS proof remains CF5b2b/c.
+Fresh task/final review and required native delivery pending; no activation claim.
+
+Task CF5b2a: complete (research/source/task-review scope, 2026-11-13).
+Fresh task review PASS/APPROVED; no Critical/Important. Minor scratch manifest
+dependency belongs in dev-dependencies because harness is test-only; corrected
+reproduction and scratch manifest, including equivalent CF5b1 recipe in PR154.
+Final7/0/0 covers all3process boundaries; no deferred minors. Independent final
+review/native delivery pending; whole CF5b2/CF5b3/CF5c/#78 remain unfinished.
+
+CF5b2a independent final review: converged, no Critical/Important. Minor Windows
+reference wording corrected: ignore-merge/ACL flags permit ACL loss, so future
+adapter prohibits them. Additional primary Linux listxattr audit records omitted
+inaccessible names: visible enumeration alone cannot prove complete native
+metadata preservation; CF5b2b must resolve this contract before product code.
+No deferred minors; source unchanged, final narrow documentation review pending.
+
+CF5b2a final documentation re-review: Minor ADDRESSED; added Linux enumeration
+limitation preserves the future proof gate; no new Critical/Important. Task/final
+source review converged, no deferred minors. Final test-only-manifest run7/0/0
+and Clippy have no compiler/manifest warnings. Preparing stacked native delivery;
+this is not whole CF5b2 or activation acceptance.
+
 ## 2026-11-13 — IO1: attributable indexing outcome для #79
 
 Task IO1: plan/source investigation in progress. На main6826aaf подтверждено:

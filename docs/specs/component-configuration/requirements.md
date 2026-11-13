@@ -464,6 +464,25 @@ lease/native durability proofs remain owning implementation gates before any v2
 startup or source write. Investigation and acceptance boundary:
 [adoption-recovery.md](adoption-recovery.md). No runtime FR/SC completion claimed.
 
+## Delta 2026-11-13 — CF5b1 control-state and session contract
+
+[control-contract.md](control-contract.md) defines the exact private SQLite schema,
+namespace latch, all-caller session lifetime, ordered maintenance admission,
+bounded decode and initial adoption/resume/restore states. Its isolated bundled
+SQLite/native-lock experiment is research evidence only. Activation requires
+CF5b2 source/directory durability on each platform, CF5b3 product control/executor
+and CF5c participation before config capture in every construction path. No
+source mutation, product API/startup or FR-13–16 completion is claimed here.
+
+## Delta 2026-11-13 — CF5b2a source-publication research
+
+[source-publication.md](source-publication.md) records primary platform semantics
+and isolated Linux counterexamples before product source mutation APIs: rename
+alone loses target metadata, and a post-replacement flush error can leave new
+bytes. The required versioned journal extension must bind native target attributes
+and stage identities, with bounded capture and recovery. This investigation does
+not implement that extension, a publisher, CF5b3 executor or CF5c activation.
+
 ## Delta 2026-11-13 — IO1: metadata результата индексации для #79
 
 ADDED: FR-IO1. Все actual full/subset indexing cores отзывают прежний outcome до
