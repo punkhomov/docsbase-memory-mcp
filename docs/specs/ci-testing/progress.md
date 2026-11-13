@@ -317,3 +317,23 @@ No Cargo process left after these checks. Local affected implementation evidence
 is ready for fresh review; full cli-full release is deferred to the controller
 after #141 integration/SDK build, followed by final reviews/native CI/inventory.
 Task C13 remains open until those delivery gates are evidenced.
+
+
+C13 local close-out: complete (implementation/local verification; delivery pending).
+Full actual cli-full release checkpoint27c80a4/base0c6d707:1384passed/0failed/
+18existingignored,86targets,2916.987s including cold LTO compilation. Raw final
+summary per target reconciles with observer JSON; both SDK native tests and both
+new SQLite observers actually passed.409recorded source hashes matched.
+After A146 rebase, actual release affected22 +vector_sync_context7 =29/0/0;
+Clippy/fmt GREEN. Final A148 base6826aaf/source73d3486 all-release-tests typecheck,
+all-target cli-full Clippy and fmt exit0. All4C13 Rust files remain byte-identical
+to the full runtime checkpoint; final411source manifest matches.
+Ruling: full release runtime belongs to the recorded earlier checkpoint, not to
+final head. A146/A148 changed other production consumers; targeted combined release,
+final all-release typecheck and independent final/native integration gates retain
+that distinction. No profile/cfg/assertion/baseline changes or test removals.
+Fresh C13 task review: Spec PASS / Quality APPROVED, no findings/minors. Whole-diff
+final review and final-head docs/linux/macos/windows plus inventory audit remain
+delivery gates before issue143 closure/normal squash merge. No completion claim for
+those pending gates. Evidence: /workspace/scratch/agent-b/143/task-review.md and
+full-release-observation/ (raw+JSON), final-source-sha256.json.

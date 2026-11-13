@@ -39,3 +39,15 @@ Review focus: observer does not mutate cache or bypass ownership writes; no cfg
 skips, weaker counts, TTL changes, hidden errors, new production API/dependencies.
 Existing release-gated ANN graph diagnostics are intentionally debug-only and
 are not broadened by this fix. No latency baseline or threshold is changed.
+
+
+## Delta 2026-11-13 — verification checkpoints and integration
+
+The full optimized runtime suite passed on27c80a4/base0c6d707:1384/0/18,
+86targets. Following independent A146/A148 merges, the four changed C13 Rust
+files remain byte-identical. A146 combined runtime release targets passed29/0;
+A148 final all-release-tests typecheck, all-target Clippy and fmt passed. The full
+runtime result is not relabelled as final-head runtime. Fresh task review passed;
+whole-diff final review and four final-head native checks/inventory are retained
+as integration/delivery gates. No skipped test, weaker assertion or changed
+release profile is used to satisfy the debug-only API regression.

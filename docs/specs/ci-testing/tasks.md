@@ -167,7 +167,7 @@ probe and complete final checks, without production or timeout changes.
 
 ## Delta 2026-11-13 — C13: release lease regression
 
-- [ ] **C13 (FR-42, SC-16):** add explicitly imported test-only
+- [x] **C13 (implementation/local complete; delivery gates pending; FR-42, SC-16):** add explicitly imported test-only
   tests/support/vector_leases.rs; replace six debug-only calls in hybrid_jobs,
   cache_settings, ann_lifetimes. Preserve every existing assertion. Test helper
   readonly/missing-file behavior and model isolation through real SQLite.
