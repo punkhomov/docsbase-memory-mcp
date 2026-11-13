@@ -66,3 +66,55 @@ mandatory caller-owned OperationGuard and checks through connection/open/exchang
 reviewer scoped re-review ADDRESSED, PASS/APPROVED, no new findings. Evidence:
 /workspace/scratch/agent-b/79/c2/{review.md,fix-rereview.md,fix/}. No deferred minors.
 C3/native/package acceptance and FR-S* still pending; #79 remains open.
+
+2026-11-13 user ruling: real corpus/load/machine пока предоставить не может,
+«можно скипнуть наверно». FR-S4 measurement deferred, not verified and no longer
+blocks shipping/queue. No capacity promises or synthetic replacement. Runtime
+server FR-S1..S3 remains required before #79 implementation completion.
+
+2026-11-13 C3 local resource ruling: source-exact Node50/0, native2/0 + lean
+fixture1/0, packed JS/external TS consumer and full+opt-in Clippy passed. Full
+Rust suite failed during linking, before executing tests: ENOSPC; agent B target
+reached32GiB, filesystem100%. Evidence c3-full-suite.log/c3-verification.log.
+Only own disposable target-agent-b removed (source/evidence/A target preserved).
+Repeat local Rust verification with CARGO_PROFILE_DEV_DEBUG=0,
+CARGO_PROFILE_TEST_DEBUG=0, CARGO_INCREMENTAL=0 to fit disk; debug assertions,
+features, test expectations and CI profiles unchanged. No bypass/skip/rebaseline.
+
+2026-11-13 C3 local verification (fresh review pending): Rust-generated fixture
+RED0/1 + Node fixture RED0/2, canonical generated GREEN; full/lean preserve_order
+ordering discrepancy reproduced then canonicalized without numeric coercion.
+Native root alias/junction fixture exposed path-string assumption RED, corrected
+with realpath; no SDK production change. Final Node50/0 + tsc build/check0, real
+packed ESM/external TS consumer0, native full2/0 + lean fixture1/0, fmt/diff0,
+full all-target and opt-in Clippy0. Local full cli-full (debug symbols off only)
+1341 passed/0 failed/18 ignored across83targets; original374 source/input hashes
+unchanged before/after. ~3GiB target versus32GiB failing debug-symbol target.
+Evidence c3-full-counts.json, c3-source-sha256.json and c3-*.log in scratch79.
+Native CI remains pending until PR exact head; Linux checks do not prove other OS.
+Real20k run user-deferred; serverFR-S1..S3 remain next phases. #79 not closed.
+
+2026-11-13 C3 Important review fix (scoped re-review pending): nightly's full
+release cli-full suite now explicitly builds packages/client in its existing
+preparation step. Audited all workflows and agent/local entrypoints; required
+native CI and AGENTS already prepare the client. Corrected docs/WEB full-test
+sequence and documented generated-export prerequisite in IPC/CI/current specs.
+CLI-only builds, compile-only checks, lean and selected non-Node suites unchanged.
+Actual isolated source-copy RED: public package import fails ERR_MODULE_NOT_FOUND
+for absent dist/index.js (exit1). GREEN: actual pnpm package build exit0, same
+unchanged import succeeds exit0. All-workflow actionlint, static prerequisite/
+preserved-Cargo-command/check-name audit and source diff check exit0. Fix changes
+only YAML/docs; no Cargo rerun or Node suite rerun needed after unchanged runtime
+and tests. Evidence /workspace/scratch/agent-b/79/c3/fix/. Exact-head native CI
+and original reviewer's scoped re-review remain pending; no new acceptance claim.
+
+Task C3: local implementation complete (2026-11-13): source-native integration,
+Rust-owned canonical fixture, packed JS/TS check, CI/docs. Fresh task review found
+one Important: nightly full release tests lacked SDK build. Separate implementer
+reproduced clean missingdist RED1→actualbuild/import GREEN0; fixed nightly + current
+Web instructions, audited other selected-target workflows and actionlint0. Original
+reviewer scoped re-review ADDRESSED/PASS/APPROVED, no new findings. Evidence
+/workspace/scratch/agent-b/79/c3/{review.md,fix-rereview.md,fix/}. No deferred minors.
+PR exact-head native4 and most-capable whole-stage review remain required before
+merge; no other-OS or full #79 completion claim. Next rebase onto A's CF7 main254af73
+and verify combined source; no changes to A-owned storage implementation here.

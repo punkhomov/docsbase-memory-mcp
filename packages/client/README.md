@@ -22,9 +22,17 @@ const client = new DocsbaseClient({
   },
 });
 try {
-  const hits = await client.search('authentication', {
-    query_mode: 'literal', snippet: true, dedupe: 'path', n_per_doc: 1, limit: 10,
-  }, { signal: requestAbortSignal });
+  const hits = await client.search(
+    'authentication',
+    {
+      query_mode: 'literal',
+      snippet: true,
+      dedupe: 'path',
+      n_per_doc: 1,
+      limit: 10,
+    },
+    { signal: requestAbortSignal },
+  );
   const status = await client.status();
 } finally {
   client.close();

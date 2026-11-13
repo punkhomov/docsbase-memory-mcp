@@ -136,3 +136,25 @@ Hello.schema_version до bind. Build string описывает package-version 
 гарантия source-commit identity не заявляется.
 FR-C3 уточнён: chunk_id имеет unsigned integer token syntax, u64 range и canonical
 decimal string output; C1 проверяет обе границы и запрещённые формы записи.
+
+## Delta 2026-11-13 — целевой корпус пока недоступен
+
+MODIFIED FR-S4 / SC-S1: пользователь сообщил, что сейчас не может предоставить
+реальный корпус/нагрузку/целевую среду, и разрешил пропустить этот прогон. FR-S4
+откладывается и не блокирует реализацию/поставку client/server этапов. Сохранять
+пометку «не проверено на реальном ~20k корпусе»; synthetic E2E не заменяют FR-S4,
+capacity/production latency claims запрещены. После FR-S1..S3 допускается закрыть
+implementation scope #79 с явным указанием отложенного измерения. Первый client
+PR всё ещё не закрывает #79: FR-S1..S3 остаются обязательными.
+
+## Delta 2026-11-13 — C3 native test preparation
+
+MODIFIED SC-C1/SC-C3: every entrypoint executing the full Rust suite with `web`
+or `cli-full`, or selecting `node_client` with either feature, must explicitly
+build `packages/client` after workspace dependency installation and before test
+execution. The ignored `dist/index.js` public export is not produced by install.
+This includes the existing nightly release suite as well as required native CI
+and documented agent/local commands. Preserve full-suite execution and release
+profiles; no test skip, cfg weakening, npm publishing or new job/check is needed.
+CLI-only builds, compile-only feature checks, lean suites and selected targets
+that do not execute the Node E2E have no client-build prerequisite.

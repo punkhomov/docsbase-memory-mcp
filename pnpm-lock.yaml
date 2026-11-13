@@ -168,6 +168,9 @@ importers:
 
   packages/client:
     devDependencies:
+      '@biomejs/biome':
+        specifier: 2.6.3
+        version: 2.6.3
       '@types/node':
         specifier: 24.19.2
         version: 24.19.2

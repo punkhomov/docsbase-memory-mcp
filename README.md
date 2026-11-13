@@ -303,3 +303,7 @@ MIT — see [LICENSE](LICENSE).
 Included in official `cli-full` binaries; no Node.js needed at runtime.
 Git source builds prepare embedded assets with the pinned Node.js/pnpm toolchain
 before Cargo. See [Web setup and testing](docs/WEB.md).
+
+Node.js integration: the [official TypeScript IPC client](docs/IPC-CLIENT.md)
+connects to a separately managed local daemon. The dedicated website server
+profile remains tracked in [#79](https://github.com/punkhomov/docsbase-memory-mcp/issues/79).

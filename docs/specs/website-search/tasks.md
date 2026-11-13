@@ -74,3 +74,22 @@ C2 расширен deterministic preprocessing deadline tests до admission. �
 ещё не начата; эти RED cases обязательны при выполнении соответствующих задач.
 C1 также фиксирует chunk_id unsigned integer raw syntax, u64 range и tests на
 0/MAX/MAX+1/negative/fraction/exponent без числового округления.
+
+### Delta 2026-11-13 — C3 concrete files / user ruling
+
+C3 also modifies AGENTS/README links and package-local Biome configuration, reuses
+pinned existing Biome dev dependency and LICENSE, creates check-node-package.py
+and fixture.test.ts/native.mjs. Check fixture under lean and cli-full (canonical
+JSON order, exact numeric tokens), native real-daemon run, packed external TS/JS
+consumer. FR-S4 real corpus is user-deferred, not a blocking acceptance criterion;
+FR-S1..S3 remain follow-ups before #79 closes.
+
+### Delta 2026-11-13 — C3 prerequisite review fix
+
+C3 also audits all workflow and agent/local test entrypoints for the generated
+client export. Build `packages/client` before nightly's full release `cli-full`
+suite and include it in the documented Web/full-test preparation. Required native
+jobs already build it; preserve CLI-only builds, compile checks and selected test
+targets that never execute the Node E2E. Verify an isolated source copy fails its
+public package self-reference without `dist`, then succeeds after the actual
+package build; validate workflow syntax without repeating unrelated Cargo suites.

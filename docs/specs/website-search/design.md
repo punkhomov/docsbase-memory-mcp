@@ -160,3 +160,13 @@ Public config/Hello contract теперь явно требует expectedSchema
 создаются до любых argument preprocessing; C1/C2 acceptance tests покрывают оба
 уточнения. Это исправления плана до реализации, не свидетельство пройденных тестов.
 Chunk ID parsing также получает явные raw-token syntax/range и boundary tests.
+
+## Delta 2026-11-13 — C3 artifact/fixture enforcement
+
+Reuse the existing pinned Biome2.6.3 as client dev-only tooling, with package-local
+configuration (VCS disabled to avoid sibling/worktree ignore-root panic). No new
+runtime dependency/crate. Rust fixture canonicalizes map key order recursively,
+including encoded frame JSON, preserving u64: cli-full's preserve_order changes
+ordering only. Node consumes the same fixture. Native jobs pack/extract locally,
+execute public ESM and typecheck an external consumer; no npm registry publishing.
+Real ~20k measurement deferred by user ruling in requirements delta, not verified.
