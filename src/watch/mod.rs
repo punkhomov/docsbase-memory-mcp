@@ -1050,7 +1050,8 @@ fn run_batch_using(
 ) -> Result<JobStats> {
     // Incremental chunks are only valid for an index built with the current
     // schema; a stale or errored project must be rebuilt by a full index
-    // first (T24). The stamp itself is only written by `registry::mark_indexed`.
+    // first (T24). Full outcome publication (or the legacy mark_indexed helper)
+    // advances the stamp; incremental completion leaves it unchanged.
     let current = registry::project_by_id(db, project.id)?.ok_or_else(|| Error::Project {
         message: format!("project {} disappeared from the registry", project.id),
         instruction: None,
@@ -1072,6 +1073,9 @@ fn run_batch_using(
         let context = current_context();
         context.validate_root(cache)?;
         context.validate_root(db.cache_root())?;
+        // Revoke historical completeness before filtering or a possibly
+        // recreating/failing index open. Keep status for the existing retries.
+        crate::index::outcome::invalidate(db, project.id)?;
         let config = context.config();
         // The producer may have admitted these paths before a reopen. Retry
         // from the original pending paths, with no cached directory verdicts.
@@ -1104,7 +1108,13 @@ fn run_batch_using(
         // outside its raw batch before reporting success.
         if filtered.is_empty() && !index.was_recreated() {
             check_config()?;
-            return Ok(JobStats::default());
+            return crate::index::outcome::run(
+                db,
+                project,
+                config,
+                crate::index::outcome::SurveyScope::Subset,
+                |_| Ok(JobStats::default()),
+            );
         }
         let stats = match &context {
             WatchContext::Configured(_) => {
@@ -1126,7 +1136,6 @@ fn run_batch_using(
                 )?
             }
         };
-        registry::set_status(db, project.id, ProjectStatus::Indexed)?;
         Ok(stats)
     })
 }

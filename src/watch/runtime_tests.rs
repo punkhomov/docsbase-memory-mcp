@@ -441,3 +441,166 @@ fn captured_runtime_retains_vector_owner_until_consumer_finishes() {
     drop(runtime);
     crate::vector_cache::VectorCache::open(fixture.cache.path()).unwrap();
 }
+
+#[test]
+fn outcome_tracks_unchanged_and_filtered_empty_watcher_batches() {
+    use crate::index::outcome::{self, SurveyScope};
+    let mut fixture = Fixture::new();
+    let before = outcome::read(&fixture.db, fixture.project.id)
+        .unwrap()
+        .unwrap();
+    assert!(before.is_complete());
+    let runtime = fixture.runtime(Config::default());
+    let path = fixture.project.canonical_root.join("bbb/b.md");
+    let stats = run_batch_using(
+        &mut fixture.db,
+        fixture.cache.path(),
+        &fixture.project,
+        std::slice::from_ref(&path),
+        || WatchContext::Prepared(runtime.clone()),
+    )
+    .unwrap();
+    assert_eq!(stats.skipped, 1);
+    let subset = outcome::read(&fixture.db, fixture.project.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(subset.scope, SurveyScope::Subset);
+    assert!(!subset.is_complete());
+    assert_eq!(subset.stats, stats);
+    assert_eq!(subset.index_generation, before.index_generation);
+    assert!(subset.attempt_id > before.attempt_id);
+    let runtime = fixture.runtime(Config {
+        ignores: vec!["bbb/**".to_owned()],
+        ..Config::default()
+    });
+    let stats = run_batch_using(
+        &mut fixture.db,
+        fixture.cache.path(),
+        &fixture.project,
+        &[path],
+        || WatchContext::Prepared(runtime.clone()),
+    )
+    .unwrap();
+    assert_eq!(stats, JobStats::default());
+    let empty = outcome::read(&fixture.db, fixture.project.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(empty.stats, stats);
+    assert_eq!(empty.scope, SurveyScope::Subset);
+    assert!(empty.attempt_id > subset.attempt_id);
+    assert_eq!(empty.recipe_id, outcome::recipe_id(&runtime.config));
+}
+
+#[test]
+fn stale_filtered_empty_batch_revokes_proof_and_still_retries() {
+    use crate::index::outcome;
+    let mut fixture = Fixture::new();
+    assert!(
+        outcome::read(&fixture.db, fixture.project.id)
+            .unwrap()
+            .unwrap()
+            .is_complete()
+    );
+    let config = Config {
+        ignores: vec!["bbb/**".to_owned()],
+        ..Config::default()
+    };
+    let old = fixture.runtime(config.clone());
+    let new = fixture.runtime(config);
+    let reads = std::cell::Cell::new(0);
+    let path = fixture.project.canonical_root.join("bbb/b.md");
+    let error = run_batch_using(
+        &mut fixture.db,
+        fixture.cache.path(),
+        &fixture.project,
+        std::slice::from_ref(&path),
+        || {
+            let first = reads.get() == 0;
+            reads.set(reads.get() + 1);
+            WatchContext::Prepared(if first { old.clone() } else { new.clone() })
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("config changed"), "{error}");
+    assert!(
+        outcome::read(&fixture.db, fixture.project.id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        registry::project_by_id(&fixture.db, fixture.project.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        ProjectStatus::Indexed
+    );
+    run_batch_using(
+        &mut fixture.db,
+        fixture.cache.path(),
+        &fixture.project,
+        &[path],
+        || WatchContext::Prepared(new.clone()),
+    )
+    .unwrap();
+    assert!(
+        !outcome::read(&fixture.db, fixture.project.id)
+            .unwrap()
+            .unwrap()
+            .is_complete()
+    );
+}
+
+#[test]
+fn failed_watcher_index_open_revokes_proof_without_poisoning_retry_status() {
+    use crate::index::outcome;
+    let mut fixture = Fixture::new();
+    assert!(
+        outcome::read(&fixture.db, fixture.project.id)
+            .unwrap()
+            .unwrap()
+            .is_complete()
+    );
+    let dir = lifecycle::index_dir(fixture.cache.path(), fixture.project.id);
+    fs::remove_dir_all(&dir).unwrap();
+    fs::write(&dir, "blocks directory open").unwrap();
+    let runtime = fixture.runtime(Config::default());
+    let path = fixture.project.canonical_root.join("bbb/b.md");
+    assert!(
+        run_batch_using(
+            &mut fixture.db,
+            fixture.cache.path(),
+            &fixture.project,
+            std::slice::from_ref(&path),
+            || WatchContext::Prepared(runtime.clone())
+        )
+        .is_err()
+    );
+    assert!(
+        outcome::read(&fixture.db, fixture.project.id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        registry::project_by_id(&fixture.db, fixture.project.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        ProjectStatus::Indexed
+    );
+    fs::remove_file(&dir).unwrap();
+    let stats = run_batch_using(
+        &mut fixture.db,
+        fixture.cache.path(),
+        &fixture.project,
+        &[path],
+        || WatchContext::Prepared(runtime.clone()),
+    )
+    .unwrap();
+    assert_eq!(stats.docs, 1);
+    assert!(
+        outcome::read(&fixture.db, fixture.project.id)
+            .unwrap()
+            .unwrap()
+            .is_complete()
+    );
+}

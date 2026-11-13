@@ -434,3 +434,16 @@ Stage admission может предотвратить watcher startup по су�
 path; resource failures по-прежнему warning. Scope FR-2/3/5/16 и bounded SC-3.
 Старые configured APIs сохраняют lazy batch behavior. Strict startup, file-v2,
 persisted adoption/apply и оставшиеся component owners этим slice не включаются.
+
+## Delta 2026-11-13 — IO1: metadata результата индексации для #79
+
+ADDED: FR-IO1. Все actual full/subset indexing cores отзывают прежний outcome до
+работы и записывают actual scope/JobStats/attempt/root/recipe/index_generation.
+Успешные Indexed и outcome публикуются одной короткой SQL transaction до release
+существующего writer lease. No-op/full, partial/error/interrupted и legacy evidence
+различаются без вывода о полноте из generation/status/sync timestamp.
+Первый slice считает полным только zero-error full survey; subset отзывает proof.
+Read-only bounded projection консервативна при absent/corrupt/mismatched evidence.
+Additive schema migration сохраняет совместимые existing lexical indexes, не
+придумывая историческую полноту. План: [index-outcome-plan.md](index-outcome-plan.md).
+Readiness endpoint, server profile и continuous generation publication не входят.

@@ -24,8 +24,8 @@
   "responses": {
     "bind": "{\"data\":{\"value\":{\"session_id\":1}},\"kind\":\"ToolResult\"}\n",
     "explained": "{\"data\":{\"value\":{\"hits\":[{\"chunk_id\":18446744073709551615,\"heading_path\":\"Guide > Привет\",\"lines\":[1,3],\"path\":\"guides/привет.md\",\"score\":1.25,\"snippet\":\"widgets stay local\",\"snippet_truncated\":false}],\"meta\":{\"index_generation\":3}}},\"kind\":\"ToolResult\"}\n",
-    "hello": "{\"data\":{\"build_id\":\"docsbase 0.1.0-alpha.5\",\"capabilities\":[\"search-context-v1\",\"panel-read-v1\",\"literal-query-v1\"],\"protocol_version\":1,\"schema_version\":2},\"kind\":\"Hello\"}\n",
+    "hello": "{\"data\":{\"build_id\":\"docsbase 0.1.0-alpha.5\",\"capabilities\":[\"search-context-v1\",\"panel-read-v1\",\"literal-query-v1\"],\"protocol_version\":1,\"schema_version\":3},\"kind\":\"Hello\"}\n",
     "hits": "{\"data\":{\"value\":[{\"chunk_id\":18446744073709551615,\"heading_path\":\"Guide > Привет\",\"lines\":[1,3],\"path\":\"guides/привет.md\",\"score\":1.25,\"snippet\":\"widgets stay local\",\"snippet_truncated\":false}]},\"kind\":\"ToolResult\"}\n"
   },
-  "schemaVersion": 2
+  "schemaVersion": 3
 }

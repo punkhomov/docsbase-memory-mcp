@@ -1923,10 +1923,7 @@ fn run_project_index_using(
             run(db, &mut index)
         })();
         match outcome {
-            Ok(stats) => {
-                registry::mark_indexed(db, project.id)?;
-                Ok(stats)
-            }
+            Ok(stats) => Ok(stats),
             Err(err) => {
                 if let Err(status_err) = registry::set_status(db, project.id, ProjectStatus::Error)
                 {

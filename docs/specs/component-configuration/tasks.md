@@ -477,3 +477,9 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   root admission, actual Shared ensure/reload и отсутствие stale creation.
   План [cf7c3-plan.md](cf7c3-plan.md). Configured APIs сохраняют прежний режим;
   strict startup/adoption/apply и оставшиеся CF5/CF7 задачи ещё не завершены.
+
+## Delta 2026-11-13 — IO1: результат каждого index writer
+
+- [x] IO1: additive schema, bounded read-only outcome и all-core begin/end publication
+  для #79 FR-S2. План: [index-outcome-plan.md](index-outcome-plan.md). Scope — A-owned
+  index/store плюс существующие wrapper endings; server/readiness/IPC остаются B.

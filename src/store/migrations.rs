@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version understood by this build.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 const SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS projects (
@@ -56,6 +56,14 @@ const SCHEMA_V2: &str = "
 ALTER TABLE projects ADD COLUMN index_generation INTEGER NOT NULL DEFAULT 0;
 ";
 
+const OUTCOME_ATTEMPT_COLUMN: &str = "
+ALTER TABLE projects ADD COLUMN index_attempt INTEGER NOT NULL DEFAULT 0
+    CHECK (typeof(index_attempt) = 'integer' AND index_attempt >= 0);
+";
+const OUTCOME_RESULT_COLUMN: &str = "
+ALTER TABLE projects ADD COLUMN index_outcome_json TEXT;
+";
+
 /// Migrates the database to [`SCHEMA_VERSION`].
 ///
 /// # Errors
@@ -98,6 +106,18 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     // a column probe does the same for the `ALTER TABLE` steps.
     if version < SCHEMA_VERSION && !has_column(conn, "projects", "index_generation")? {
         script += SCHEMA_V2;
+    }
+    if version < 3 {
+        if !has_column(conn, "projects", "index_attempt")? {
+            script += OUTCOME_ATTEMPT_COLUMN;
+        }
+        if !has_column(conn, "projects", "index_outcome_json")? {
+            script += OUTCOME_RESULT_COLUMN;
+        }
+        // This additive bookkeeping migration does not change the lexical
+        // format. Keep compatible indexes usable, without inventing a result.
+        // Older stale stamps still require their existing rebuild path.
+        script += "UPDATE projects SET schema_version = 3 WHERE schema_version = 2;";
     }
     script.push_str("PRAGMA user_version = ");
     script.push_str(&SCHEMA_VERSION.to_string());

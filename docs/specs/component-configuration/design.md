@@ -743,3 +743,14 @@ source до публикации и всегда заменяет весь watch
 reopen с новым provider instance/credentials; native resource failure
 остаётся warning. start_watchers сначала получает список и освобождает Db guard.
 План: [cf7c3-plan.md](cf7c3-plan.md). Strict startup/adoption остаются CF5/CF7.
+
+## Delta 2026-11-13 — IO1 для серверной готовности
+
+Последний outcome хранится в projects row с отдельным monotonic attempt ID.
+Indexing cores инвалидируют proof до работы и атомарно публикуют outcome/status
+по окончании, не удерживая SQL transaction через walk/provider/Tantivy. Existing
+writer lease остаётся authority. Projection проверяет root/recipe/schema/attempt/
+generation и crash markers; FullSurvey/errors0 — единственное initial completeness
+evidence. Subset не наследует полноту. DB3 additive migration сохраняет project
+stamp2→3 без rebuild; absent legacy outcome остаётся unknown. Детали и проверка:
+[index-outcome-plan.md](index-outcome-plan.md). Это prerequisite #79, а не CF11.

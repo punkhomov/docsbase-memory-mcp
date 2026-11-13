@@ -108,6 +108,22 @@ Project — .docsbase.toml, .docsbaseignore
 
 Indexes are derived data: they can always be rebuilt from the `.md` sources.
 
+Registry schema 3 adds a bounded latest indexing outcome to each project. Its
+attempt token changes even when the search generation stays unchanged; a complete
+lexical result requires a full survey with zero file errors. Subset jobs revoke
+that completeness evidence. The public `index::outcome::read` observer validates
+current metadata in one read-only query; consumers compare the relevant indexing
+recipe and use the existing project read lease to correlate it with Tantivy.
+It records completed scan coverage, while source freshness and final hybrid sync
+success remain separate checks.
+
+The additive v2-to-v3 migration preserves compatible lexical indexes, documents
+and search generations. Older stale project stamps still require their existing
+rebuild. Existing projects start with unknown outcome; a full index/sync, including
+an unchanged-file scan, establishes new evidence. There is no historical backfill
+or forced corpus rebuild. Older binaries refuse schema 3; use a pre-upgrade cache
+backup or rebuild a separate cache for a downgrade, without editing user_version.
+
 ## Platform seam (ADR-9/ADR-10)
 
 All OS-dependent code lives in `src/platform/` behind a small facade:

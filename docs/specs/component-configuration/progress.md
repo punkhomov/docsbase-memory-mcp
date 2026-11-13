@@ -763,3 +763,32 @@ in both cli-full and lean; final full all-target Clippy/fmt/diff GREEN. No produ
 change, assertions/coverage/ignores unchanged. Independent fix/integration review
 converged, no findings; source tree equality across prior integration confirmed.
 First native run is not acceptance; corrected head requires fresh4checks/inventory.
+
+## 2026-11-13 — IO1: attributable indexing outcome для #79
+
+Task IO1: plan/source investigation in progress. На main6826aaf подтверждено:
+Indexed/старый Done/generation не доказывают completeness. Выбран per-project
+bounded latest outcome и begin invalidation в shared job cores; один end transaction
+публикует actual stats+status под существующим lease. Subset первоначально отзывает
+completeness; только zero-error full survey даёт proof. DB3 migration должна
+сохранить lexical stamp2/content и оставить legacy outcome unknown. Endpoint и
+server integration B-owned. Fresh plan review и RED/GREEN implementation pending.
+
+IO1 plan review: принято после исправления двух Important и одного Minor:
+proof-only watcher invalidation до open, SQL byte guards для root/JSON/status
+boolean и token fencing при lifecycle invalidation. Реализация: additive DB3,
+public bounded projection, shared full/subset cores, actual wrapper/watcher paths.
+API RED — отсутствующий module; GREEN13real integration,3fencing и21watcher tests.
+Семь causal mutations дали RED (begin/no-op/subset/errors/watch/fence/migration),
+восстановлены. Focused cli-full и all-target Clippy GREEN. Первое full выполнение
+нашло точную Rust↔Node fixture schema2→3: обновлены только2version values,
+quality baseline/thresholds неизменны. Node checks и final full/lean suites идут;
+fresh source reviews/native delivery pending. #78/#79 целиком не закрываются.
+
+Task IO1: complete (implementation/local verification/fresh task review).
+Ruling: task review PASS/APPROVED;1Minor по старому stamp-writer comment исправлен
+в задаче, deferred minors нет. Final cli-full1422/0/18, lean1228/0/11;88top-level
+summaries на конфигурацию, nested child summaries не суммируются повторно.
+Node58/0, real Node2/0, full/lean all-target Clippy/fmt/diff GREEN. Первый полный
+прогон с outdated protocol fixture не является acceptance; final проход использует
+только2обновлённых schema values. Independent final/native delivery pending.
