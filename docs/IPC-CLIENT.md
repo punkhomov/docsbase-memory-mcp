@@ -128,3 +128,19 @@ API keys/model downloads or performance thresholds are used.
 The user deferred the real ~20k Markdown corpus/load/machine run on 2026-11-13.
 It is **not verified**. Synthetic coverage is not a substitute and establishes no
 production p95/p99, RSS, throughput or update-duration promise.
+
+
+Application worker admission bounds daemon-owned Tokio blocking closures. Search
+and control use separate fair active/pending lanes; search queueing consumes its
+original deadline and cancellation. Bind, registration, metadata and lifecycle
+pruning share control capacity. Fixed-project sync owns its singleton slot; a
+caller disconnect never returns a running closure's permit or physical Activity.
+The checked S+C+sync1+headroom1 <= B sum applies to this application inventory.
+
+On Windows the current interprocess dependency can retain separate std-thread
+linger work after a pipe owner is dropped. This work is outside the application's
+Tokio worker lanes and the sum above. Native adapter redesign is tracked by
+[#155](https://github.com/punkhomov/docsbase-memory-mcp/issues/155), independently
+parked; it is not a prerequisite for the application admission change. No
+process-wide thread/IPC-retirement or unconditional control-availability claim
+is made.

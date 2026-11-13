@@ -324,3 +324,16 @@ Use bounded fixtures/counters, not huge allocations, RSS or timing thresholds.
 S1's inventory/dependency classification records the enforced current I52 slice
 and runtime/diagnostic-only effect; no CF5/v2/source-write/strict-activation scope
 is added. The original reviewer's scoped plan-addendum PASS precedes runtime code.
+## Delta 2026-11-13 — MODIFIED: граница S1c и поставка #79
+
+FR-S1c,d ограничивают **application-owned** blocking work daemon: admission до
+spawn, исходный SearchOperation deadline/token и permit/Activity до фактического
+завершения или unwind closure. Проверенная сумма S+C+sync1+headroom1 относится к
+этой инвентаризации Tokio work; это не process-wide/native IPC retirement proof
+и не обещание доступности control/соединения при любых внешних ограничениях.
+Отдельная platform adapter работа не входит в S1c и не блокирует его поставку.
+
+Оставшаяся поставка #79 состоит из двух функциональных PR: S1 profile/workers с
+bounded-read исправлением #152, затем readiness+HTTP для закрытия #79. Отдельная
+цепочка docs-only PR не требуется. #47/#48/#117/#128 вне scope; #12 закрыта как
+not planned. Real ~20k acceptance по-прежнему отложен пользователем.

@@ -162,3 +162,11 @@ project reopen keeps the existing revision/preparation authority while rejecting
 hybrid before factory/vector/watch work. Status/panel select the admitted project
 set before runtime/coverage callbacks. No new artifact invalidation edge, CF5
 consent executor, v2 activation or readiness DTO is adopted by this slice.
+
+
+### Delta 2026-11-13 — S1c ownership boundary
+
+Admission/cancellation/janitor ownership is runtime-only and restart-immutable.
+The checked executor sum covers application-owned blocking closures through
+finish/unwind. No persisted artifact edge, CF5 publication authority or
+process-wide/native transport resource guarantee follows from this bound.

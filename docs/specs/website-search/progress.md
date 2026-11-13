@@ -456,3 +456,20 @@ retries are removed. I1 production files remain byte-identical to `63df8aa`.
 Targeted cli-full `cli::connection_tests`: 4 passed / 0 failed; fmt/diff checks
 passed. No full repeat or native probe. Evidence:
 `/workspace/scratch/agent-b/79/s1b/fix2/`. Original scoped rereview remains pending.
+
+### 2026-11-13 — S1c in progress; corrected functional scope
+
+Task S1c: in progress from671f2a7. Initial RED in server_workers failed only for
+missing WorkerAdmission and same-token async cancellation APIs. Same-state Notify
+unit GREEN:2 passed/0failed; generated Web/SDK assets were prepared before Cargo.
+Raw evidence is in /workspace/scratch/agent-b/79/s1c/. Server/lifecycle wiring is
+held until the S1b IPC finding is fixed and independently re-reviewed.
+
+Ruling: this functional task corrects the earlier scope wording that grouped
+platform adapter work into S1c. S1c bounds application-owned blocking closures
+through actual finish/unwind, preserving original deadlines and cancellation.
+The checked sum is not a process-wide/native IPC retirement or unconditional
+control availability claim. Independent platform adapter work is parked outside
+this task and is not a blocker. One server profile+workers PR closes #152; one
+readiness+HTTP PR follows to close #79. No docs-only PR chain or #47/#48/#117/#128
+expansion; #12 is closed not planned.

@@ -608,3 +608,18 @@ restart stamp as runtime/diagnostic state only, with no metadata/lexical/vector/
 ANN invalidation or CF5 publication edge. No source writes, CF5/v2 executor or
 strict activation are added. These are future runtime acceptance gates, not
 executed tests or a claim that #152 is fixed already.
+
+
+## Delta 2026-11-13 — MODIFIED: S1c application ownership boundary
+
+The S1c inventory and S+C+sync1+headroom1 <= B contract bound application-owned
+Tokio blocking closures. Each admitted closure retains its permit and Activity
+through actual finish/unwind; queued searches retain the original deadline and
+same cancellation. This supersedes broader native/closed-resource readings of
+I3 above. It establishes no process-wide thread cap, native IPC retirement proof
+or unconditional control/connection availability. Platform adapter redesign is
+independent and outside this functional S1 change.
+
+Keep the current server profile+workers/bounded-read work as one functional PR
+(closes #152), followed by one readiness+HTTP PR (closes #79). No extra docs-only
+PR chain; #47/#48/#117/#128 and closed-not-planned #12 remain out of scope.

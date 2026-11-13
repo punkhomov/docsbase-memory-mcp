@@ -187,3 +187,13 @@ is shared and actually enforced; configurable bootstrap I52 remains deferred.
 Launch capture/restart diagnostics have runtime/diagnostic-only effects, no
 metadata/index/vector/ANN invalidation or CF5 publication dependency. No CF5/v2
 executor, source write or strict activation is in this task.
+
+
+## Delta 2026-11-13 — MODIFIED: functional delivery and proof boundary
+
+S1c remains the minimal approved application worker admission/janitor task: no
+platform adapter redesign, new transport mechanism or transport research gate.
+Its explicit executor inventory/sum bounds application-owned Tokio work, with
+original deadlines and closure-held permits/Activity; no process-wide/native IPC
+retirement/control availability claim. Complete S1a/b/c and #152 in one functional
+server PR, then readiness+HTTP in a second functional PR to close #79.

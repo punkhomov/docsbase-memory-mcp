@@ -278,9 +278,9 @@ implementation invariants, не дополнительные settings и не р
 work. Сам physical reserve и watcher/provider zero-classes требуют S1b/c и
 повторного source scan перед единственным S1 merge. Connection fds, payload bytes
 и ReadPool — независимые budgets; real-corpus capacity/RSS/latency не измерены.
-Windows interprocess flush/dirty-Drop linger требует отдельного transport audit
-перед S1c: формула owner validation в S1a ещё не доказывает полноту helper
-inventory или physical control reserve на этой платформе.
+**MODIFIED 2026-11-13:** прежняя platform audit предпосылка S1c заменена
+уточнённой application ownership границей в delta «S1c application worker scope»
+ниже; platform adapter работа независима и не блокирует эту поставку.
 
 Launch parse и baseline diagnostic digest используют одни captured bytes, без
 повторного startup file read. Missing/Loaded/Unavailable различаются; текущий
@@ -324,5 +324,17 @@ Website composes lexical stages and disabled ANN policy without provider
 construction, vector-store opens, ANN refresh/backfill or watcher producers.
 Existing DenseCache/SearchOperation/generation/singleflight and sync-job dedup/
 ProjectLease mechanisms remain. I46/I48..I51 physical active/pending/control
-admission, coalesced janitor and #155 transport ownership remain S1c; accepted
-unwired settings cannot ship before that task and integrated final review.
+admission and coalesced janitor remain S1c; accepted unwired settings cannot
+ship before that task and integrated final review. **MODIFIED 2026-11-13:**
+platform adapter ownership is independent, outside S1c (see scope delta below).
+
+
+## Delta 2026-11-13 — MODIFIED: S1c application worker scope
+
+The I63/I66 sum and closed inventory describe application-owned Tokio blocking
+work only. They do not bound dependency-owned/native process resources or prove
+IPC retirement/control availability. Prior text making platform adapter work an
+S1c prerequisite is superseded; that independent work is parked outside S1. The
+functional worker change keeps explicit B, validated S/C active/pending counts,
+original search deadlines, same-state cancellation and closure-held ownership.
+No new configurable defaults or artifact invalidation edges are introduced.
