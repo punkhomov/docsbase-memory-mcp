@@ -121,7 +121,7 @@ struct ProjectState {
 
 impl Shared {
     /// Opens the registry database and prepares shared state.
-    /// Compatibility adapter; production passes policies to [`Self::open_with_policies`].
+    /// Compatibility adapter; production passes policies to [`Self::open_with_resource_policies`].
     ///
     /// # Errors
     /// Returns [`Error::Internal`]/[`Error::Admission`] from [`Db::open`].
@@ -142,7 +142,7 @@ impl Shared {
     }
 
     /// Constructs writer and prepared readers using explicit owner policies.
-    /// Compatibility adapters resolve omitted policies; production calls here.
+    /// Compatibility adapter; query policy is resolved at this boundary.
     ///
     /// # Errors
     /// Invalid policies are rejected before filesystem access. Other failures
@@ -152,7 +152,27 @@ impl Shared {
         settings: &Resolved<DbSettings>,
         pool_settings: &Resolved<ReadPoolSettings>,
     ) -> Result<Arc<Self>> {
+        Self::open_with_resource_policies(
+            cache,
+            settings,
+            pool_settings,
+            &crate::hybrid::dense_settings::standalone_query_cache()?,
+        )
+    }
+
+    /// Construct storage/readers/cache with explicit component policies.
+    ///
+    /// # Errors
+    /// Invalid policies fail before filesystem access; other startup errors match
+    /// [`Self::open_with_policies`].
+    pub fn open_with_resource_policies(
+        cache: &Path,
+        settings: &Resolved<DbSettings>,
+        pool_settings: &Resolved<ReadPoolSettings>,
+        query_settings: &crate::hybrid::dense_settings::QueryCacheSettings,
+    ) -> Result<Arc<Self>> {
         use crate::config::schema::{Capabilities, SettingsSpec};
+        query_settings.validate()?;
         crate::store::settings::DbSpec::validate(settings.settings(), &Capabilities::current())?;
         crate::store::settings::ReadPoolSpec::validate(
             pool_settings.settings(),
@@ -194,7 +214,12 @@ impl Shared {
             global_config_error,
             global_config_stamp: stamp,
             project_states: Mutex::new(HashMap::new()),
-            dense: DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, cache, dense_limits),
+            dense: DenseCache::with_policy_limits_and_query_settings(
+                AnnPolicy::BuildOrLoad,
+                cache,
+                dense_limits,
+                query_settings,
+            )?,
         });
         match shared.start_watchers() {
             Ok(started) if started > 0 => eprintln!("watching {started} indexed project(s)"),

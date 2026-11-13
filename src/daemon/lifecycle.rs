@@ -160,7 +160,29 @@ pub fn run_daemon_with_policies(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
 ) -> Result<()> {
+    run_daemon_with_resource_policies(
+        cache,
+        grace,
+        settings,
+        pool_settings,
+        &crate::hybrid::dense_settings::standalone_query_cache()?,
+    )
+}
+
+/// Run with complete storage, reader and query-cache policy from the boundary.
+///
+/// # Errors
+/// Invalid policy fails before admission/state creation; other errors match
+/// [`run_daemon_with_policies`].
+pub fn run_daemon_with_resource_policies(
+    cache: &Path,
+    grace: Duration,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
+    query_settings: &crate::hybrid::dense_settings::QueryCacheSettings,
+) -> Result<()> {
     use crate::config::schema::SettingsSpec;
+    query_settings.validate()?;
     crate::store::settings::DbSpec::validate(
         settings.settings(),
         &crate::config::schema::Capabilities::current(),
@@ -178,7 +200,7 @@ pub fn run_daemon_with_policies(
         .enable_all()
         .build()
         .map_err(|err| Error::internal_with_source("build tokio runtime", err))?;
-    runtime.block_on(serve(cache, grace, settings, pool_settings))
+    runtime.block_on(serve(cache, grace, settings, pool_settings, query_settings))
 }
 
 /// Asks a running daemon to stop and waits for it to exit (FR-6).
@@ -255,6 +277,7 @@ async fn serve(
     grace: Duration,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
+    query_settings: &crate::hybrid::dense_settings::QueryCacheSettings,
 ) -> Result<()> {
     create_state_dir(cache)?;
     if is_running(cache) {
@@ -265,7 +288,12 @@ async fn serve(
     cleanup_stale(cache)?;
 
     // Prepare resources before advertising a listener or daemon state.
-    let shared = crate::daemon::server::Shared::open_with_policies(cache, settings, pool_settings)?;
+    let shared = crate::daemon::server::Shared::open_with_resource_policies(
+        cache,
+        settings,
+        pool_settings,
+        query_settings,
+    )?;
 
     let endpoint = platform::daemon_endpoint(cache);
     if platform::exists(&endpoint) {

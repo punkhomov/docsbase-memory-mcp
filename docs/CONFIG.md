@@ -78,6 +78,20 @@ operation. A running daemon still clamps client time to its startup policy.
 Invalid global configuration prevents MCP startup instead of selecting another
 policy. See [search timing and cancellation](MCP.md#timeouts-and-cancellation).
 
+## Query-vector cache policy
+
+The query cache retains up to 256 vectors and 4 MiB of vector payload by default.
+Both limits apply to the same shared cache; hits refresh recency and insertion
+evicts the least recent entries. Larger vectors can serve a request without
+being retained. This byte count excludes keys, allocator overhead, externally
+held vector references and in-flight requests.
+
+Rust callers can project `DenseSettings::query_cache_settings()` and pass a
+validated `QueryCacheSettings` to the explicit cache or daemon constructors.
+Both capacities must be positive. CLI search and daemon startup receive the
+owner's defaults at their composition boundary. These settings have no TOML
+keys yet; changing a live cache's policy is a later configuration task.
+
 ## Hybrid stages (opt-in, spec `docs/specs/hybrid-providers`)
 
 Hybrid search is opt-in per project. Official `cli-full` binaries include both

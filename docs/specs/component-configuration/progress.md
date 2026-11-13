@@ -401,3 +401,30 @@ Limits: observations are independent reads, not an atomic multi-file snapshot;
 future apply must revalidate all inputs. No raw source export, source writes,
 runtime activation, strict-store adoption or executor is implemented here.
 Issue78 and the remaining CF4/CF5–CF14 contracts stay open.
+
+
+## 2026-11-13 — CF6a query-cache policy adoption
+
+Task CF6a: complete (construction-only implementation + fresh task review).
+DenseSpec owns query defaults and positive validation; QueryCache holds its
+immutable policy with shared entries, eviction order, counters and query flights.
+Explicit daemon/lifecycle/direct CLI constructors consume the projection; old
+signatures remain adapters. No new source keys, live update/shrink, migration
+writes, strict-store activation or broader dense/ANN/backfill adoption.
+Ruling: existing DenseSpec is reused rather than introducing a duplicate query
+settings catalog. This typed construction slice may precede CF5 without enabling
+configurable apply. Accounting remains retained vector payload, excluding external
+Arc holders, keys/allocator overhead and in-flight work. Query identity and default
+256 entries / 4 MiB behavior are preserved.
+Validation: updated origin/main9d12a72, exact stable Rust 1.100.0 and upstream locked
+dependencies; pinned frontend built. API/propagation compile RED before GREEN;
+9 new integration tests + 1 CLI factory test check actual eviction, shared caps,
+counting-embedder reuse/bypass and invalid-before-filesystem admission. Full
+cli-full1321 passed, 0 failed, 18 existing ignored; frozen benchmark and all9
+existing singleflight regressions passed. Lean42 focused tests passed; full/lean
+all-target Clippy, fmt and diff checks passed. Initial Clippy findings corrected
+local import ordering and a test literal lifetime without behavioral changes.
+Fresh task review: Spec compliance PASS; Quality APPROVED; no findings or deferred
+minors. Final whole-branch review and native docs/linux/macos/windows delivery
+gates remain required. No dependency, workflow, baseline or threshold changes;
+no live inference/model downloads. #78 stays open for the remaining tasks.

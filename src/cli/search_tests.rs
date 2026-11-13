@@ -92,3 +92,19 @@ fn missing_endpoint_leaves_original_operation_live_for_direct_search() {
     );
     assert!(!operation.cancellation().is_cancelled());
 }
+
+#[test]
+fn direct_cache_constructor_consumes_supplied_query_policy() {
+    let root = tempfile::tempdir().unwrap();
+    let query = crate::hybrid::dense_settings::QueryCacheSettings {
+        max_entries: 1,
+        max_bytes: 16,
+    };
+    let dense = super::direct_dense_cache(root.path(), 1024, &query).unwrap();
+    dense.store_query_vector("model", "a", &[1., 2.]);
+    dense.store_query_vector("model", "b", &[3., 4.]);
+    assert!(dense.query_vector("model", "a").is_none());
+    assert!(dense.query_vector("model", "b").is_some());
+    assert_eq!(dense.query_cache_stats().entries, 1);
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
