@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::error::Result;
 use crate::store::Db;
 use crate::store::repo;
-use crate::vector_cache::{CacheLimits, Embedder, VectorCache};
+use crate::vector_cache::{CacheLimits, Embedder, VectorCacheSource};
 
 use super::config::Ranking;
 use super::dense::DenseCacheLimits;
@@ -69,10 +69,29 @@ pub fn embed_texts_with_limits(
     texts: &[String],
     limits: CacheLimits,
 ) -> Result<u64> {
+    embed_texts_from(
+        cache_root,
+        embedder,
+        texts,
+        &VectorCacheSource::Legacy(limits),
+    )
+}
+
+/// Embed through an explicit connection owner, without constructing providers.
+///
+/// # Errors
+/// Root admission, cache or provider failures.
+pub fn embed_texts_from(
+    cache_root: &Path,
+    embedder: &dyn Embedder,
+    texts: &[String],
+    source: &VectorCacheSource,
+) -> Result<u64> {
+    source.validate_root(cache_root)?;
     if texts.is_empty() {
         return Ok(0);
     }
-    let mut cache = VectorCache::open_with_limits(cache_root, limits)?;
+    let mut cache = source.connect(cache_root)?;
     let vectors = blocking::enter(|| cache.embed_missing(embedder, texts))?;
     Ok(vectors.len() as u64)
 }
@@ -180,6 +199,29 @@ pub fn embed_project_chunks_with_dense_policy(
     pin_for_ann: bool,
     dense: &DenseCacheLimits,
 ) -> Result<u64> {
+    embed_project_chunks_from(
+        db,
+        embedder,
+        project_id,
+        pin_for_ann,
+        dense,
+        &VectorCacheSource::Legacy(limits),
+    )
+}
+
+/// Backfill using the runtime's connection owner and ANN eligibility policy.
+///
+/// # Errors
+/// Root admission, registry, cache or provider failures.
+pub fn embed_project_chunks_from(
+    db: &Db,
+    embedder: &dyn Embedder,
+    project_id: i64,
+    pin_for_ann: bool,
+    dense: &DenseCacheLimits,
+    source: &VectorCacheSource,
+) -> Result<u64> {
+    source.validate_root(db.cache_root())?;
     let texts = repo::chunk_texts(db.connection(), project_id)?;
     if texts.is_empty() {
         return Ok(0);
@@ -197,7 +239,7 @@ pub fn embed_project_chunks_with_dense_policy(
     // in the exact view and graph. Use the same static policy as the builder.
     let pin_for_ann =
         pin_for_ann && dense.ann_build_eligible_for_model(texts.len(), embedder.model_id());
-    let mut cache = VectorCache::open_with_limits(db.cache_root(), limits)?;
+    let mut cache = source.connect(db.cache_root())?;
     // Lease the project's vectors for the ANN build; without this a
     // concurrent backfill can evict them and coverage never reaches 100%.
     if pin_for_ann {
@@ -285,6 +327,20 @@ pub fn coverage_for_key_with_limits(
     project_id: i64,
     limits: CacheLimits,
 ) -> Result<Coverage> {
+    coverage_for_key_from(db, model_id, project_id, &VectorCacheSource::Legacy(limits))
+}
+
+/// Count distinct cached chunk hashes through the runtime's connection owner.
+///
+/// # Errors
+/// Root admission, registry or cache failures.
+pub fn coverage_for_key_from(
+    db: &Db,
+    model_id: &str,
+    project_id: i64,
+    source: &VectorCacheSource,
+) -> Result<Coverage> {
+    source.validate_root(db.cache_root())?;
     let texts = repo::chunk_texts(db.connection(), project_id)?;
     let hashes: std::collections::HashSet<String> = texts
         .iter()
@@ -298,7 +354,7 @@ pub fn coverage_for_key_with_limits(
         });
     }
     let unique: Vec<String> = hashes.into_iter().collect();
-    let cache = VectorCache::open_with_limits(db.cache_root(), limits)?;
+    let cache = source.connect(db.cache_root())?;
     let cached = cache.count_present(model_id, &unique)?;
     Ok(Coverage { cached, total })
 }

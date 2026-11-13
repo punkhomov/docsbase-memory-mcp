@@ -554,3 +554,56 @@ final7 vector unit +18 integration pass; оба all-target Clippy/fmt/diff GREEN
 Production source совпадает с full1358 suite; native inventory теперь ожидает
 19 Unix/18 Windows новых tests + первоначальный native unit, всего20/19 additions.
 Fresh final review и native delivery следуют отдельно; #78/CF7 остаются открытыми.
+
+CF7a delivery (2026-11-13): PR140 влит как254af73d087bb44e75ed5f71794669689805e716.
+Fresh final review converged без замечаний. Native run43417372537 attempt1:
+docs/Linux/macOS/Windows green; Linux1359+2static/macOS1355/Windows1341 passed,
+18 прежних ignores/platform, все parent tests сохранены,20новых Unix/19Windows
+выполнены. Reviewed source/tested merge/squash имеют tree
+10c8c4da1b6eed442f0eefe194c93a22d4b5deff. CF7/#78 остаются открытыми.
+
+
+## 2026-11-13 — CF7b: source для dense/jobs/search
+
+Task CF7b: complete (implementation и local verification; fresh reviews следуют).
+VectorCacheSource хранит explicit legacy limits либо clone immutable owner. Root
+проверяется без создания другого каталога; strict connections не fallback-ят.
+Dense cold loads/worker unpin и full/scoped/streaming search используют source;
+sharing_query_cache и worker snapshot удерживают owner. Strict aliases разделяют
+canonical cold key и metadata identity, legacy raw-root semantics сохранены.
+Ruling: project budget setter теперь Result; Owned отказывает даже равному budget.
+Оба daemon caller передают отказ; reload делает это до invalidate/publication.
+Experimental library signature меняется явно, stable CLI/MCP/file/IPC прежние.
+Source-taking jobs используют прежний core, TTL/ownership и short SQL phases.
+Production startup/status/sync factories, persisted adoption и consent/recovery
+остаются следующими CF5/CF7 tasks; blockers migration не сняты, #78 открыт.
+
+TDD: absent API compile RED; real search streaming дал mode conflict, wrong root
+успевал вызвать query provider. Causal mutation RED: worker оставлял3leases вместо1;
+late setter менял config до отказа; raw cold key запускал2loaders вместо1.
+Все GREEN. Новые9integration +3unit regressions проверяют настоящие SQLite,
+metadata, search results и native lifetime: content reuse двух projects, shared
+limits/legacy0, cold identity, sharing lifetime, scoped/streaming equality,
+provider BEGIN IMMEDIATE probe при backfill с pins, worker-only owner retention,
+сохранение чужих leases и прежних config/stages/resident rows после отказа reload.
+
+Validation: stable Rust1.100.0, upstream lockfile и pinned Web. Full cli-full1370
+passed/0failed/18прежних ignores,84top-level summaries;2nested filtered subprocess
+summaries исключены. На том же production source final489unit+9integration pass
+(добавлен1alias cold test), затем final alias GREEN после causal RED. Lean61focused
+integration +15vector-filtered unit passes. Full/lean all-target Clippy/fmt/diff
+GREEN. Нет новых crates/workflows/baseline/threshold/file keys или provider calls/
+downloads. Fresh task/final reviews и native inventory audit остаются gates delivery.
+
+Fresh task review: Important — Db-taking get/warm читали generation до root admission.
+Проверено causal RED на настоящей чужой БД без project: Internal вместо Admission.
+Исправление проверяет root до SQL в обоих adapters; новый test сохраняет также
+legacy Internal semantics. GREEN10consumer tests; re-review ADDRESSED, новых
+Critical/Important нет. Новых tests теперь13 (10integration+3unit). Final refreshed
+full/lean/Clippy и fresh final review следуют; deferred minors нет.
+
+Post-review validation: final full cli-full1372passed/0failed/18прежних ignores,
+84top-level summaries,2nested filtered subprocess summaries исключены. Все13новых
+regressions выполнены на final source. Final lean10consumer + прежние52integration/
+15vector-filtered unit и1alias-unit pass (78distinct focused tests); full/lean
+all-target Clippy/fmt/diff GREEN. Fresh final source review и native delivery pending.

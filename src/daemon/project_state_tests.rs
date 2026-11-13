@@ -538,3 +538,58 @@ fn active_preparation_blocks_publication_without_blocking_state_reads() {
         assert_eq!(after.max_docs_per_project, 23);
     });
 }
+
+#[test]
+fn rejected_project_vector_budget_preserves_published_runtime_and_dense_rows() {
+    use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseRows};
+    use crate::vector_cache::VectorStore;
+
+    let mut fixture = Fixture::new();
+    fixture.write_config("hybrid = false\nmax_docs_per_project = 11\n");
+    fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .unwrap();
+    let before = fixture.shared.project_runtime(&fixture.project).unwrap();
+    let owner = VectorStore::acquire(
+        fixture.cache.path(),
+        crate::vector_cache::settings::standalone()
+            .unwrap()
+            .settings(),
+    )
+    .unwrap();
+    Arc::get_mut(&mut fixture.shared).unwrap().dense = DenseCache::with_vector_store(
+        AnnPolicy::Disabled,
+        &owner,
+        crate::hybrid::dense_settings::standalone()
+            .unwrap()
+            .settings(),
+    )
+    .unwrap();
+    let load = || {
+        let db = Db::open(fixture.cache.path()).unwrap();
+        match fixture
+            .shared
+            .dense
+            .get(&db, fixture.project.id, "test/reload@d3@l2")
+            .unwrap()
+        {
+            DenseRows::Ready(rows) => rows,
+            _ => panic!("empty project has exact rows"),
+        }
+    };
+    let rows = load();
+    fixture.write_config("hybrid = false\nmax_docs_per_project = 29\n");
+    let error = fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .unwrap_err();
+    assert!(matches!(error, Error::Admission { .. }));
+    let after = fixture.shared.project_runtime(&fixture.project).unwrap();
+    assert!(Arc::ptr_eq(&before.0, &after.0));
+    assert!(Arc::ptr_eq(&before.1, &after.1));
+    assert!(
+        Arc::ptr_eq(&rows, &load()),
+        "failed reload must not invalidate dense state"
+    );
+}

@@ -466,3 +466,14 @@ change ordinary legacy startup, or implement migration/apply/live policy updates
 Legacy project budgets and zero-cap semantics remain supported. Migration planning
 still reports strict-store-adoption and executor blockers until the complete
 consumer rollout and consent/recovery protocol are implemented.
+
+The experimental Rust consumer APIs can now receive that owner explicitly:
+`DenseCache::with_vector_store` and `VectorCacheSource::Owned` retain its lifetime;
+`hybrid::jobs::{embed_texts_from, embed_project_chunks_from, coverage_for_key_from}`
+use the same connection policy. Dense cold loads, ANN worker lease release and
+full/scoped/streaming retrieval all reuse the owner. A different cache root is
+rejected before provider work. `DenseCache::set_vector_cache_max_bytes` now returns
+`Result<()>`: owner-backed caches reject project budgets, including equal values,
+without changing policy or published config. Legacy adapters still accept them.
+This does not yet select strict ownership in daemon startup, sync/status factories
+or CLI configuration; those await the migration and recovery rollout.

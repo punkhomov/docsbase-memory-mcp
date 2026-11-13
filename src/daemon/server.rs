@@ -388,7 +388,7 @@ impl Shared {
         }
         let config = Arc::new(self.config_for_root(&project.canonical_root)?);
         self.dense
-            .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes);
+            .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
         state.config = Some(Arc::clone(&config));
         Ok(config)
     }
@@ -545,16 +545,16 @@ impl Shared {
             }
         };
         let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+        self.dense
+            .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
         let changed = state.config.as_deref() != Some(config.as_ref());
         if changed {
             self.dense.invalidate_memory(project.id);
         }
-        // Both fallible preparation steps precede publication: a rejected
+        // All fallible preparation steps precede publication: a rejected
         // reload leaves the last valid runtime and its policies intact.
         state.config = Some(Arc::clone(&config));
         state.stages = Some(stages);
-        self.dense
-            .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes);
         if changed
             && !self.watchers.revise(project.id, Arc::clone(&config))
             && let Err(err) = self.watchers.ensure_with_settings(

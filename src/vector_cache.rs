@@ -16,7 +16,9 @@ use crate::error::{Error, Result};
 
 mod owner;
 pub mod settings;
+mod source;
 pub use owner::VectorStore;
+pub use source::VectorCacheSource;
 
 #[cfg(test)]
 #[path = "vector_cache_batch_tests.rs"]
