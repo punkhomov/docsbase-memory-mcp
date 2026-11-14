@@ -188,16 +188,17 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
     }
 
     /// Async members use this same registry. The owned leader outlives any one waiter.
-    pub(crate) async fn run_async<F, Fut>(
+    pub(crate) async fn run_async<P, F, Fut>(
         self: &Arc<Self>,
         key: K,
         operation: &SearchOperation,
         policy: &SearchSettings,
         mut cached: impl FnMut() -> Option<T>,
-        mut publish: impl FnMut(T) -> Result<T>,
+        mut publish: impl FnMut(T) -> P,
         work: F,
     ) -> Result<T>
     where
+        P: std::future::Future<Output = Result<T>>,
         K: Send + Sync + 'static,
         T: Send + Sync + 'static,
         F: FnOnce(RemoteCall) -> Fut + Send + 'static,
@@ -263,13 +264,7 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
             #[cfg(test)]
             self.observe_boundary(Boundary::Selected);
             if leader {
-                let hard =
-                    SearchOperation::new(policy, Instant::now(), flight.cancellation.clone())?;
-                flight
-                    .state
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .hard_deadline = Some(hard.deadline());
+                let hard = flight.shared_operation(policy)?;
                 let owner = OwnedLeader {
                     registry: self.clone(),
                     key: key.clone(),
@@ -296,10 +291,30 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
                 Completion::Finished(result) => {
                     // Keep membership (and terminal discoverability) through the
                     // admitted cache handoff, including cancellation and unwind.
-                    return publish(result.map_err(SharedFailure::into_error)?);
+                    return Self::wait_publication(
+                        operation,
+                        publish(result.map_err(SharedFailure::into_error)?),
+                    )
+                    .await;
                 }
                 Completion::Abandoned => {}
             }
+        }
+    }
+
+    async fn wait_publication(
+        operation: &SearchOperation,
+        publication: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        tokio::select! {
+            biased;
+            () = operation.cancellation().cancelled() => {
+                operation.check().and_then(|()| Err(Error::internal("publication wake without cancellation or expiry")))
+            }
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(operation.deadline())) => {
+                operation.check().and_then(|()| Err(Error::internal("publication wake without cancellation or expiry")))
+            }
+            result = publication => { operation.check()?; result }
         }
     }
 
@@ -406,6 +421,15 @@ struct FlightState<T> {
 }
 
 impl<T> Flight<T> {
+    fn shared_operation(&self, policy: &SearchSettings) -> Result<SearchOperation> {
+        let hard = SearchOperation::new(policy, Instant::now(), self.cancellation.clone())?;
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .hard_deadline = Some(hard.deadline());
+        Ok(hard)
+    }
+
     fn new() -> Self {
         Self {
             state: Mutex::new(FlightState {

@@ -69,7 +69,27 @@ impl SearchSession {
                             operation: &operation,
                             policy: &shared.global_config.search,
                         },
-                        || slot.search_preparation_lease(&captured.config, &captured.stages),
+                        |publication| {
+                            let captured = captured.clone();
+                            let operation = operation.clone();
+                            let slot = slot.clone();
+                            async move {
+                                phase(&captured.shared, &operation, activity, {
+                                    let captured = captured.clone();
+                                    let operation = operation.clone();
+                                    let slot = slot.clone();
+                                    move || {
+                                        publication.complete(&operation, || {
+                                            slot.search_preparation_lease(
+                                                &captured.config,
+                                                &captured.stages,
+                                            )
+                                        })
+                                    }
+                                })
+                                .await
+                            }
+                        },
                         move |call| async move {
                             #[cfg(feature = "hybrid-remote")]
                             if let Some(remote) = embedder.async_remote() {

@@ -89,3 +89,32 @@ A1/A2 reviews, including their fix1 closures, are PASS/APPROVED with no new
 Critical/Important findings. A3 resolves the previously separate real-client Drop
 and retained-key lifetime evidence in one hermetic test. This coverage does not
 promote remaining native/task/final-review gates to completed acceptance.
+
+## MODIFIED 2026-11-14 — final-review I1/I2 execution boundaries
+
+The final whole-branch challenge found two PR1 gaps; its original verdict was
+PARTIAL/CHANGES. The author fix runs an owned QueryPublication through the same
+admitted search CPU phase. Existing Flights retains the successful terminal
+membership through the asynchronous handoff, bounded by the member's original
+operation. Publication checks before work, after revision admission and after
+cache-lock acquisition prevent cancellation/deadline warming after contention.
+The actual ProjectCell publication writer gate on a current-thread runtime proves
+independent control and cancellation/expiry finish before releasing the writer,
+then proves the cancelled physical publication left no cached entry.
+
+RemoteStage now runs all non-2xx error-envelope parsing and tree/body destruction
+through existing RemoteExecution.cpu, with the same original call/physical/
+ingress/source owners. A >1MiB response with an occupied actual CPU lane proves
+admission and cancellation before decoding; retry classification/status helpers,
+backoff/jitter and final-attempt rules remain shared. True backoff cancellation
+and expiry use the real existing timing-entry seam with the same30.049s assertion.
+The integration name `cancelled_backoff_starts_no_new_attempt` is deliberately
+corrected to `cancelled_retry_processing_starts_no_new_attempt`: its first Pending
+now can be the admitted response codec. No assertion/budget/ignore is removed;
+actual backoff-phase proof stays in the gated unit case. The successful handoff
+Arc/call-count regression now holds an asynchronous publication gate.
+
+Focused/current lint/source checks pass; new full CLI/lean/release-perf executions
+on the fixed frozen source and original strongest reviewer's fix-only verdict
+are independent pending receipts at commit time. Earlier c3 native/performance
+results are historical, not acceptance of this changed production input.

@@ -142,8 +142,6 @@ async fn retryable_and_terminal_statuses_keep_the_existing_policy() {
 
 #[tokio::test]
 async fn final_attempt_returns_without_waiting_for_backoff() {
-    use std::future::Future;
-    use std::task::Poll;
     let mut policy = immediate_policy();
     policy.retry_attempts = 1;
     policy.retry_initial_ms = 3_600_000;
@@ -158,17 +156,20 @@ async fn final_attempt_returns_without_waiting_for_backoff() {
     .unwrap();
     let call = call();
     let req = request();
-    let mut work = Box::pin(execution.post(&call, &req));
-    std::future::poll_fn(|cx| {
-        assert!(matches!(work.as_mut().poll(cx), Poll::Ready(Err(_))));
-        Poll::Ready(())
-    })
-    .await;
+    // An admitted error codec may suspend; the final retry must not sleep.
+    let error = tokio::time::timeout(Duration::from_secs(5), execution.post(&call, &req))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(error.inner_message().starts_with("OpenRouter error 503:"));
     assert_eq!(execution.snapshot().attempts, 1);
+    assert_eq!(execution.snapshot().backoff_ms, 0);
 }
 
 #[tokio::test]
-async fn cancelled_backoff_starts_no_new_attempt() {
+async fn cancelled_retry_processing_starts_no_new_attempt() {
+    // This integration cancels pending response processing. Actual backoff entry
+    // (after codec CPU) is gated separately in remote's timing-seam unit test.
     use std::future::Future;
     use std::task::Poll;
     let mut policy = immediate_policy();

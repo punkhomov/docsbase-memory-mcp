@@ -1278,7 +1278,9 @@ async fn reloaded_flight_is_last_real_client_owner_and_destroys_it_in_async_wait
             operation: &operation,
             policy: &fixture.shared.global_config.search,
         },
-        || slot.preparation_lease(&config),
+        |publication| {
+            std::future::ready(publication.complete(&operation, || slot.preparation_lease(&config)))
+        },
         move |_| async move {
             entered.send(()).unwrap();
             gate.acquire().await.unwrap().forget();
@@ -1307,4 +1309,103 @@ async fn reloaded_flight_is_last_real_client_owner_and_destroys_it_in_async_wait
     assert!(retired_client.upgrade().is_none());
     assert!(retired_execution.upgrade().is_none());
     assert_eq!(fixture.shared.dense.query_cache_stats().entries, 0);
+}
+
+#[test]
+fn publication_contention_keeps_single_thread_runtime_and_original_budget_live() {
+    for expiry in [false, true] {
+        publication_contention_case(expiry);
+    }
+}
+
+fn publication_contention_case(expiry: bool) {
+    let (attempted, attempt) = std::sync::mpsc::channel();
+    let (progress, progressed) = std::sync::mpsc::channel();
+    let (returned, result) = std::sync::mpsc::channel();
+    let (configured, configuration) = std::sync::mpsc::channel();
+    let (release, proceed) = std::sync::mpsc::channel();
+    let (go, begin) = tokio::sync::oneshot::channel();
+    let warmed = Arc::new(AtomicUsize::new(usize::MAX));
+    let observed_cache = warmed.clone();
+    let runtime = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let transport = wire_gate();
+            let fixture = search_phase_tests::Fixture::new(HybridStages {
+                embedder: Some(remote_fixture(&transport)),
+                ranking: Ranking::Rrf,
+                reranker: None,
+            });
+            let mut policy = fixture.shared.global_config.search.clone();
+            if expiry {
+                policy.request_timeout_ms = 1_000;
+            }
+            let operation = crate::search::operation::SearchOperation::new(
+                &policy,
+                Instant::now(),
+                crate::hybrid::work::Cancellation::new(),
+            )
+            .unwrap();
+            configured.send(operation.cancellation().clone()).unwrap();
+            let search = start_actual(&fixture, operation);
+            transport.entered.acquire().await.unwrap().forget();
+            let slot = fixture.shared.project_slot(fixture.project.id);
+            *slot.preparation_observer.lock().unwrap() = Some(attempted);
+            let (held, acquired) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                let _publication = slot.preparation.write().unwrap();
+                held.send(()).unwrap();
+                proceed.recv().unwrap();
+            });
+            acquired.recv_timeout(Duration::from_secs(5)).unwrap();
+            transport.release.add_permits(1);
+            begin.await.unwrap();
+            let control = call_tool(&fixture.shared, None, "list_projects", json!({})).await;
+            progress.send(control.is_ok()).unwrap();
+            returned
+                .send(search.await.unwrap().unwrap_err().inner_message().clone())
+                .unwrap();
+            holder.join().unwrap();
+            fixture
+                .shared
+                .activity
+                .drain(Duration::from_millis(1))
+                .await;
+            observed_cache.store(
+                fixture.shared.dense.query_cache_stats().entries,
+                Ordering::SeqCst,
+            );
+        });
+    });
+    let cancellation = configuration.recv_timeout(Duration::from_secs(5)).unwrap();
+    let entered = attempt.recv_timeout(Duration::from_secs(5)).is_ok();
+    go.send(()).unwrap();
+    let control = progressed
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or(false);
+    if !expiry {
+        cancellation.cancel();
+    }
+    let outcome = result.recv_timeout(Duration::from_secs(5));
+    // Release the actual project publication writer before every RED assertion.
+    release.send(()).unwrap();
+    runtime.join().unwrap();
+    assert_eq!(
+        warmed.load(Ordering::SeqCst),
+        0,
+        "cancelled publication warmed cache after writer release"
+    );
+    assert!(entered);
+    assert!(
+        control,
+        "publication lock blocked independent Tokio/control progress"
+    );
+    assert!(
+        outcome
+            .unwrap()
+            .contains(if expiry { "deadline" } else { "cancelled" })
+    );
 }

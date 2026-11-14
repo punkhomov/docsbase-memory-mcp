@@ -48,7 +48,7 @@ async fn join(
             &operation,
             &policy,
             || None,
-            Ok,
+            |value| std::future::ready(Ok(value)),
             move |call| async move {
                 gate.entered.fetch_add(1, Ordering::SeqCst);
                 gate.ready.add_permits(1);
@@ -191,7 +191,7 @@ async fn async_flight_failure_and_unwind_wake_every_member_and_allow_fresh_work(
             &first_op,
             &policy,
             || None,
-            Ok,
+            |value| std::future::ready(Ok(value)),
             move |_| async move {
                 assert!(!unwind, "controlled async leader unwind");
                 Err(Error::internal_with_source(
@@ -200,8 +200,14 @@ async fn async_flight_failure_and_unwind_wake_every_member_and_allow_fresh_work(
                 ))
             },
         ));
-        let mut second =
-            Box::pin(registry.run_async(1, &second_op, &policy, || None, Ok, |_| async { Ok(1) }));
+        let mut second = Box::pin(registry.run_async(
+            1,
+            &second_op,
+            &policy,
+            || None,
+            |value| std::future::ready(Ok(value)),
+            |_| async { Ok(1) },
+        ));
         poll_pending(first.as_mut()).await;
         poll_pending(second.as_mut()).await;
         let error = first.await.unwrap_err();
@@ -213,7 +219,14 @@ async fn async_flight_failure_and_unwind_wake_every_member_and_allow_fresh_work(
         assert_eq!(registry.active(), 0);
         assert_eq!(
             registry
-                .run_async(1, &operation(), &policy, || None, Ok, |_| async { Ok(11) })
+                .run_async(
+                    1,
+                    &operation(),
+                    &policy,
+                    || None,
+                    |value| std::future::ready(Ok(value)),
+                    |_| async { Ok(11) }
+                )
                 .await
                 .unwrap(),
             11
@@ -323,7 +336,7 @@ async fn async_query_keys_own_config_and_stages_through_abandonment_and_unwind()
                 operation: &operation,
                 policy: &policy,
             },
-            || Ok(()),
+            |publication| std::future::ready(publication.complete(&operation, || Ok(()))),
             move |_call| async move {
                 let _finished = done;
                 entered.add_permits(1);
@@ -371,7 +384,7 @@ async fn async_query_different_models_do_not_share_inflight_or_completed_vectors
             operation: &first_op,
             policy: &policy,
         },
-        || Ok(()),
+        |publication| std::future::ready(publication.complete(&first_op, || Ok(()))),
         work(),
     ));
     let mut second = Box::pin(cache.query_embedding_async(
@@ -382,7 +395,7 @@ async fn async_query_different_models_do_not_share_inflight_or_completed_vectors
             operation: &second_op,
             policy: &policy,
         },
-        || Ok(()),
+        |publication| std::future::ready(publication.complete(&second_op, || Ok(()))),
         work(),
     ));
     poll_pending(first.as_mut()).await;
@@ -404,13 +417,13 @@ async fn async_query_completion_remains_discoverable_until_cache_publication() {
     let stages = Arc::new(crate::hybrid::HybridStages::default());
     let revision = RuntimeRevision::Captured { config, stages };
     let (entered, observed) = tokio::sync::oneshot::channel();
-    let (release, proceed) = std::sync::mpsc::channel();
+    let (release, proceed) = tokio::sync::oneshot::channel();
     let owner = cache.clone();
     let count = calls.clone();
     let first_revision = revision.clone();
     let first = tokio::spawn(async move {
         let entered = Mutex::new(Some(entered));
-        let proceed = Mutex::new(proceed);
+        let proceed = Mutex::new(Some(proceed));
         owner
             .query_embedding_async(
                 QueryEmbeddingRequest {
@@ -420,10 +433,14 @@ async fn async_query_completion_remains_discoverable_until_cache_publication() {
                     operation: &operation(),
                     policy: &standalone().unwrap().into_settings(),
                 },
-                || {
-                    entered.lock().unwrap().take().unwrap().send(()).unwrap();
-                    proceed.lock().unwrap().recv().unwrap();
-                    Ok(())
+                |publication| {
+                    let entered = entered.lock().unwrap().take().unwrap();
+                    let proceed = proceed.lock().unwrap().take().unwrap();
+                    async move {
+                        entered.send(()).unwrap();
+                        proceed.await.unwrap();
+                        publication.complete(&operation(), || Ok(()))
+                    }
                 },
                 move |_| async move {
                     count.fetch_add(1, Ordering::SeqCst);
@@ -443,7 +460,7 @@ async fn async_query_completion_remains_discoverable_until_cache_publication() {
                 operation: &operation(),
                 policy: &standalone().unwrap().into_settings(),
             },
-            || Ok(()),
+            |publication| std::future::ready(publication.complete(&operation(), || Ok(()))),
             {
                 let calls = calls.clone();
                 move |_| async move {

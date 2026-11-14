@@ -315,3 +315,43 @@ workflow compiles opt-in perf_budget but does not execute its standalone release
 tests; that execution is recorded as pending, not inferred from native green.
 No local release-LTO/static/performance execution or CI change was made. #81
 stays open; complete background/direct/terminal/diagnostic delivery is PR2.
+
+## MODIFIED 2026-11-14 — original-author final-review fix1 checkpoint
+
+Task A3 scoped review: PASS/APPROVED. Strongest whole-branch review: PR1
+PARTIAL/CHANGES, exactly Important I1/I2, no Critical/Minor. Original-author fix1
+base `c3d9755`, functional commit containing this entry; fix-only verdict pending.
+
+I1 actual RED blocked independent control on a current-thread runtime at real
+ProjectCell publication contention. Owned QueryPublication now uses the existing
+admitted CPU phase and original operation; successful flight terminal handoff
+stays discoverable throughout async publication. Checks after waiting for revision
+and cache locks prohibit cancelled/expired cache publication. GREEN proves both
+control and caller cancel/deadline return before writer release, then cache0.
+
+I2 actual RED parsed a >1MiB non-2xx envelope despite an occupied CPU lane.
+Error parsing and deep/body destruction now run in existing RemoteExecution.cpu
+with unchanged call/ingress/source ownership and status/retry/redaction helpers.
+GREEN proves normal admitted decode and cancellation before admission/no decoder.
+Current focused: async40/0, remote8/0, phase9/0, scoped17/0, query-flight10/0 and
+preservation129/0. Current full CLI/default all-target Clippy, fmt and individual
+remote/local all-target source checks pass; historical driver/lint failures stay
+in private `final-delivery/fix1/` receipts. No suppression or budget change.
+
+Ruling: first Pending no longer identifies backoff after an admitted error codec.
+The original expiry driver now selects actual timing entry while polling the same
+future; it also proves cancellation there with exact30.049s/attempt/deadline
+assertions. Integration old→new name:
+`cancelled_backoff_starts_no_new_attempt` →
+`cancelled_retry_processing_starts_no_new_attempt`. Named-inventory comparison
+must disclose that rename relative to c3 (it was new since accepted main79).
+Final-attempt integration drives the same future under a watchdog against the
+unchanged1h delay and asserts actual503/attempts1/backoff_ms0, permitting the
+required CPU await without permitting final backoff. Handoff test uses an async
+gate with unchanged one-call/Arc assertions. These correct execution-context
+assumptions rather than weakening retry or deadline contracts.
+
+One current frozen full CLI, lean and standalone release perf run follow this
+checkpoint; c3 results are not claimed for changed production source. New public
+PR160 native CI and strongest fix-only re-review remain root gates; no local
+static/artifact duplication, no issue closure, B1–B3 still pending PR1 acceptance.

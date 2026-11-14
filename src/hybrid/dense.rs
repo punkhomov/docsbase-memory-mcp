@@ -550,6 +550,38 @@ struct QueryCache {
 }
 
 impl QueryCache {
+    fn store(
+        &mut self,
+        key: QueryKey,
+        bytes: u64,
+        make: impl FnOnce() -> Arc<[f32]>,
+    ) -> Option<Arc<[f32]>> {
+        if bytes == 0 {
+            return None;
+        }
+        if bytes > self.settings.max_bytes {
+            return None;
+        }
+        if let Some((vector, _)) = self.entries.get(&key) {
+            return Some(Arc::clone(vector));
+        }
+        let arc = make();
+        while (!self.entries.is_empty() && self.entries.len() >= self.settings.max_entries)
+            || self.bytes.saturating_add(bytes) > self.settings.max_bytes
+        {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some((_, evicted_bytes)) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(evicted_bytes);
+            }
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.order.push_back(key.clone());
+        self.entries.insert(key, (Arc::clone(&arc), bytes));
+        Some(arc)
+    }
+
     fn new(settings: QueryCacheSettings) -> Self {
         Self {
             settings,
@@ -560,6 +592,36 @@ impl QueryCache {
             misses: 0,
             flights: Arc::new(Flights::default()),
         }
+    }
+}
+
+/// Owned cache handoff; execute inside the caller's admitted blocking phase.
+pub(crate) struct QueryPublication {
+    cache: Arc<Mutex<QueryCache>>,
+    key: QueryFlightKey,
+    vector: Arc<[f32]>,
+}
+
+impl QueryPublication {
+    pub(crate) fn complete<Guard>(
+        self,
+        operation: &crate::search::operation::SearchOperation,
+        admit: impl FnOnce() -> Result<Guard>,
+    ) -> Result<Arc<[f32]>> {
+        operation.check()?;
+        let admission = admit();
+        operation.check()?;
+        if let Ok(_revision) = admission {
+            let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+            // Cancellation while waiting for either lock cannot warm the cache.
+            operation.check()?;
+            let bytes =
+                u64::try_from(std::mem::size_of_val(self.vector.as_ref())).unwrap_or(u64::MAX);
+            return Ok(cache
+                .store(self.key.recipe.clone(), bytes, || self.vector.clone())
+                .unwrap_or(self.vector));
+        }
+        Ok(self.vector)
     }
 }
 
@@ -925,13 +987,14 @@ impl DenseCache {
     }
 
     /// Join the existing query registry without retaining a CPU permit while following.
-    pub(crate) async fn query_embedding_async<Guard, F, Fut>(
+    pub(crate) async fn query_embedding_async<P, F, Fut>(
         &self,
         request: QueryEmbeddingRequest<'_>,
-        admit_publication: impl Fn() -> Result<Guard>,
+        mut publish: impl FnMut(QueryPublication) -> P,
         work: F,
     ) -> Result<Arc<[f32]>>
     where
+        P: std::future::Future<Output = Result<Arc<[f32]>>>,
         F: FnOnce(crate::hybrid::work::RemoteCall) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<Vec<f32>>> + Send + 'static,
     {
@@ -953,7 +1016,7 @@ impl DenseCache {
             .run_async(
                 QueryFlightKey {
                     recipe: key.clone(),
-                    revision,
+                    revision: revision.clone(),
                 },
                 operation,
                 policy,
@@ -964,17 +1027,14 @@ impl DenseCache {
                         .map(|(vector, _)| vector.clone())
                 },
                 |vector| {
-                    operation.check()?;
-                    // Terminal success stays discoverable in the same registry
-                    // until this revision-admitted cache handoff has finished.
-                    if let Ok(_revision) = admit_publication() {
-                        let bytes = u64::try_from(std::mem::size_of_val(vector.as_ref()))
-                            .unwrap_or(u64::MAX);
-                        return Ok(self
-                            .cache_query(key.clone(), bytes, || vector.clone())
-                            .unwrap_or(vector));
-                    }
-                    Ok(vector)
+                    publish(QueryPublication {
+                        cache: self.query_cache.clone(),
+                        key: QueryFlightKey {
+                            recipe: key.clone(),
+                            revision: revision.clone(),
+                        },
+                        vector,
+                    })
                 },
                 move |call| async move { work(call).await.map(Arc::<[f32]>::from) },
             )
@@ -1000,31 +1060,7 @@ impl DenseCache {
         bytes: u64,
         make: impl FnOnce() -> Arc<[f32]>,
     ) -> Option<Arc<[f32]>> {
-        if bytes == 0 {
-            return None;
-        }
-        let mut cache = self.lock_query_cache();
-        if bytes > cache.settings.max_bytes {
-            return None;
-        }
-        if let Some((vector, _)) = cache.entries.get(&key) {
-            return Some(Arc::clone(vector));
-        }
-        let arc = make();
-        while (!cache.entries.is_empty() && cache.entries.len() >= cache.settings.max_entries)
-            || cache.bytes.saturating_add(bytes) > cache.settings.max_bytes
-        {
-            let Some(oldest) = cache.order.pop_front() else {
-                break;
-            };
-            if let Some((_, evicted_bytes)) = cache.entries.remove(&oldest) {
-                cache.bytes = cache.bytes.saturating_sub(evicted_bytes);
-            }
-        }
-        cache.bytes = cache.bytes.saturating_add(bytes);
-        cache.order.push_back(key.clone());
-        cache.entries.insert(key, (Arc::clone(&arc), bytes));
-        Some(arc)
+        self.lock_query_cache().store(key, bytes, make)
     }
 
     /// A cache with fresh row/ANN state that **shares** this one's query cache

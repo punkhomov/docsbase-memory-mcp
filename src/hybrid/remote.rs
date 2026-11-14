@@ -409,13 +409,21 @@ impl RemoteStage<'_> {
             execution.shutdown.check()?;
             let (error, after) = match result {
                 Ok(response) if (200..300).contains(&response.status) => return Ok(response),
-                Ok(response) if is_retryable(response.status) => {
+                Ok(response) => {
+                    let retryable = is_retryable(response.status);
                     let after = (response.status == 429)
                         .then_some(response.retry_after)
                         .flatten();
-                    (error_for_status(response.status, &response.body), after)
+                    let error = execution
+                        .cpu(call, move || {
+                            Ok(error_for_status(response.status, &response.body))
+                        })
+                        .await?;
+                    if !retryable {
+                        return Err(error);
+                    }
+                    (error, after)
                 }
-                Ok(response) => return Err(error_for_status(response.status, &response.body)),
                 Err(error @ Error::Admission { .. }) => return Err(error),
                 Err(error) => (error, None),
             };
@@ -528,6 +536,92 @@ fn denied(message: &str) -> Error {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn large_error_envelope_obeys_actual_cpu_admission_and_cancellation() {
+        struct LargeError(String);
+        impl AsyncTransport for LargeError {
+            fn post_json<'a>(
+                &'a self,
+                _: &'a WireRequest,
+                _: Duration,
+            ) -> StageFuture<'a, TransportResponse> {
+                Box::pin(async move {
+                    Ok(TransportResponse {
+                        status: 429,
+                        body: self.0.clone(),
+                        retry_after: Some(Duration::ZERO),
+                    })
+                })
+            }
+        }
+        for cancel in [false, true] {
+            let mut daemon = crate::daemon::settings::standalone()
+                .unwrap()
+                .into_settings();
+            daemon.search_active = 1;
+            daemon.search_pending = 1;
+            let mut policy = super::super::remote_settings::standalone()
+                .unwrap()
+                .into_settings();
+            policy.retry_attempts = 1;
+            let workers = Arc::new(WorkerAdmission::with_policies(&daemon, &policy).unwrap());
+            let (activity, _) = ActivitySource::channel(daemon.max_events);
+            let body = serde_json::json!({"padding": vec!["bulk".repeat(64); 4096], "error":{"message":"safe fixture failure"}}).to_string();
+            assert!(body.len() > 1024 * 1024);
+            let mut execution = RemoteExecution::with_owners(
+                &policy,
+                Arc::new(LargeError(body)),
+                workers.clone(),
+                activity.clone(),
+            )
+            .unwrap();
+            let decoded = Arc::new(AtomicUsize::new(0));
+            let observed = decoded.clone();
+            execution.observe_cpu(Arc::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }));
+            let call = call();
+            let permit = workers.search(call.operation()).await.unwrap();
+            let (release, proceed) = std::sync::mpsc::channel();
+            let occupied = request::spawn(Some(permit), Some(activity.track()), move || {
+                proceed.recv().unwrap();
+                Ok(())
+            });
+            let request = wire_request();
+            let mut work = Box::pin(execution.post(&call, &request));
+            let completion =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(work.as_mut().poll(cx))).await;
+            let pending = completion.is_pending();
+            assert_eq!(decoded.load(Ordering::SeqCst), 0);
+            if cancel {
+                call.operation().cancellation().cancel();
+            }
+            // Free the actual occupied CPU closure before every RED assertion.
+            release.send(()).unwrap();
+            occupied.await.unwrap().unwrap();
+            let result = match completion {
+                std::task::Poll::Ready(result) => result,
+                std::task::Poll::Pending => work.await,
+            };
+            assert!(
+                pending,
+                "large non-2xx decoding bypassed occupied CPU admission"
+            );
+            let error = result.unwrap_err();
+            if cancel {
+                assert!(error.inner_message().contains("cancelled"));
+                assert_eq!(decoded.load(Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(
+                    error.inner_message(),
+                    "OpenRouter error 429: safe fixture failure"
+                );
+                assert_eq!(decoded.load(Ordering::SeqCst), 1);
+            }
+            assert_eq!(execution.snapshot().attempts, 1);
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn execution_shutdown_retires_retained_real_resolver_without_other_lanes() {
@@ -768,36 +862,44 @@ mod tests {
 
     #[tokio::test]
     async fn original_deadline_expires_during_backoff_including_jitter() {
-        use std::task::Poll;
-        let policy = super::super::remote_settings::standalone().unwrap();
-        let delays = Arc::new(Mutex::new(Vec::new()));
-        let observed = delays.clone();
-        let mut execution = observed_execution(
-            policy.settings(),
-            vec![(429, Some(Duration::from_secs(90)))],
-            delays.clone(),
-        );
-        execution.timing.as_mut().unwrap().sleep = Arc::new(move |delay| {
-            observed.lock().unwrap().push(delay);
-            Box::pin(std::future::pending())
-        });
-        let expiring = expiring_call();
-        let request = wire_request();
-        let mut work = Box::pin(execution.post(&expiring, &request));
-        std::future::poll_fn(|cx| {
-            assert!(work.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-        assert_eq!(*delays.lock().unwrap(), vec![Duration::from_millis(30_049)]);
-        assert_expired(
-            tokio::time::timeout(Duration::from_secs(5), work)
+        for cancel in [false, true] {
+            let policy = super::super::remote_settings::standalone().unwrap();
+            let delays = Arc::new(Mutex::new(Vec::new()));
+            let observed = delays.clone();
+            let mut execution = observed_execution(
+                policy.settings(),
+                vec![(429, Some(Duration::from_secs(90)))],
+                delays.clone(),
+            );
+            let (entered, backoff) = tokio::sync::oneshot::channel();
+            let entered = Mutex::new(Some(entered));
+            execution.timing.as_mut().unwrap().sleep = Arc::new(move |delay| {
+                observed.lock().unwrap().push(delay);
+                entered.lock().unwrap().take().unwrap().send(()).unwrap();
+                Box::pin(std::future::pending())
+            });
+            let expiring = expiring_call();
+            let request = wire_request();
+            let mut work = Box::pin(execution.post(&expiring, &request));
+            tokio::select! {
+                result = &mut work => panic!("request completed before backoff entry: {result:?}"),
+                result = backoff => result.unwrap(),
+            }
+            assert_eq!(*delays.lock().unwrap(), vec![Duration::from_millis(30_049)]);
+            if cancel {
+                expiring.operation().cancellation().cancel();
+            }
+            let result = tokio::time::timeout(Duration::from_secs(5), work)
                 .await
-                .unwrap(),
-            &expiring,
-        );
-        assert_eq!(execution.snapshot().attempts, 1);
-        assert_eq!(execution.snapshot().active, 0);
+                .unwrap();
+            if cancel {
+                assert!(result.unwrap_err().inner_message().contains("cancelled"));
+            } else {
+                assert_expired(result, &expiring);
+            }
+            assert_eq!(execution.snapshot().attempts, 1);
+            assert_eq!(execution.snapshot().active, 0);
+        }
     }
 
     #[tokio::test]

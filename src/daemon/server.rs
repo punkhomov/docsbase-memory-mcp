@@ -115,6 +115,8 @@ struct ProjectCell {
     state: Mutex<ProjectState>,
     reload: Mutex<()>,
     preparation: RwLock<()>,
+    #[cfg(test)]
+    preparation_observer: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl ProjectCell {
@@ -150,6 +152,10 @@ impl ProjectCell {
     }
 
     fn preparation_lease(&self, expected: &Arc<Config>) -> Result<RwLockReadGuard<'_, ()>> {
+        #[cfg(test)]
+        if let Some(observer) = self.preparation_observer.lock().unwrap().as_ref() {
+            let _ = observer.send(());
+        }
         let preparation = self
             .preparation
             .read()
