@@ -128,3 +128,56 @@ async fn running_janitor_coalesces_and_keeps_physical_ownership_after_waiter_dro
     assert_eq!(count.load(Ordering::SeqCst), 0);
     assert!(shared.workers.control().await.is_ok());
 }
+
+#[tokio::test]
+async fn graceful_stop_preserves_accepted_phase_admission_and_refuses_new_ingress() {
+    let (cache, _config, shared, listener) = fixture();
+    let accepted = shared.activity.track();
+    let operation = crate::search::operation::SearchOperation::with_timeout(
+        std::time::Instant::now(),
+        Duration::from_secs(60),
+        crate::hybrid::work::Cancellation::new(),
+    )
+    .unwrap();
+    // First physical phase finished; its accepted request is between phases.
+    drop(shared.workers.background(&operation).await.unwrap());
+    let owner = shared.clone();
+    let (_signal, signal_rx) = tokio::sync::oneshot::channel::<()>();
+    let serving = tokio::spawn(async move {
+        accept_loop_with(
+            owner,
+            &listener,
+            async {
+                let _ = signal_rx.await;
+            },
+            async || std::future::pending().await,
+        )
+        .await
+    });
+    let mut client = AsyncClient::connect(cache.path()).await.unwrap();
+    client.handshake_registry().await.unwrap();
+    let stopping = tokio::spawn(async move { client.call(Request::StopDaemon).await });
+    loop {
+        let mut late = AsyncClient::connect(cache.path()).await.unwrap();
+        if let Err(error) = late.handshake_registry().await {
+            assert!(
+                error.to_string().contains("daemon is shutting down"),
+                "{error}"
+            );
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !stopping.is_finished(),
+        "accepted physical Activity still owns the drain"
+    );
+    drop(shared.workers.background(&operation).await.unwrap());
+    drop(accepted);
+    stopping.await.unwrap().unwrap();
+    serving.await.unwrap().unwrap();
+    assert!(
+        shared.workers.background(&operation).await.is_err(),
+        "ordinary admission closes after physical drain"
+    );
+}

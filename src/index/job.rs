@@ -107,6 +107,74 @@ struct Pending {
     chunks: Vec<Chunk>,
 }
 
+impl Pending {
+    fn retained_fields(&self) -> Result<u64> {
+        let mut bytes = 0_u64;
+        for text in [
+            Some(&self.rel_path),
+            Some(&self.abs_path),
+            self.title.as_ref(),
+            self.frontmatter_json.as_ref(),
+            Some(&self.content_hash),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            add_capture_bytes(&mut bytes, text.capacity(), 1)?;
+        }
+        add_capture_bytes(
+            &mut bytes,
+            self.chunks.capacity(),
+            std::mem::size_of::<Chunk>(),
+        )?;
+        for chunk in &self.chunks {
+            add_capture_bytes(&mut bytes, chunk.text.capacity(), 1)?;
+            add_capture_bytes(
+                &mut bytes,
+                chunk.heading_path.capacity(),
+                std::mem::size_of::<String>(),
+            )?;
+            for heading in &chunk.heading_path {
+                add_capture_bytes(&mut bytes, heading.capacity(), 1)?;
+            }
+            if let ChunkKind::Code { lang: Some(lang) } = &chunk.kind {
+                add_capture_bytes(&mut bytes, lang.capacity(), 1)?;
+            }
+        }
+        Ok(bytes)
+    }
+    fn retained_charge(&self) -> Result<u64> {
+        let mut bytes = self.retained_fields()?;
+        // Covers old+new Pending Vec storage during its next geometric growth.
+        add_capture_bytes(&mut bytes, 3, std::mem::size_of::<Self>())?;
+        // Keep the later apply workspace admitted too: owned heading joins,
+        // their String vector and the borrowed SQL row vector. Parser/text
+        // workspace is the part released after prepare_doc_inner returns.
+        add_capture_bytes(
+            &mut bytes,
+            self.chunks.len(),
+            std::mem::size_of::<String>() + std::mem::size_of::<NewChunk<'_>>(),
+        )?;
+        for chunk in &self.chunks {
+            for heading in &chunk.heading_path {
+                add_capture_bytes(&mut bytes, heading.capacity(), 1)?;
+            }
+            add_capture_bytes(&mut bytes, chunk.heading_path.len(), 3)?;
+        }
+        Ok(bytes)
+    }
+}
+fn add_capture_bytes(total: &mut u64, count: usize, width: usize) -> Result<()> {
+    *total = count
+        .checked_mul(width)
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .and_then(|bytes| total.checked_add(bytes))
+        .ok_or_else(|| Error::Admission {
+            message: "retained index capture size overflow".into(),
+        })?;
+    Ok(())
+}
+
 /// Indexes `project` fully: every `.md` under its root is hashed and only
 /// new/changed files or files with stale extracted metadata are re-chunked;
 /// documents whose files disappeared are purged. Per-file failures are counted
@@ -429,7 +497,7 @@ impl CaptureBudget<'_> {
         self.reserve(
             bytes
                 .checked_mul(16)
-                .and_then(|n| n.checked_add(8192))
+                .and_then(|n| n.checked_add(512))
                 .ok_or_else(|| Error::Admission {
                     message: "index path preflight overflow".into(),
                 })?,
@@ -527,6 +595,47 @@ impl PreparedPlan {
         }
         self.stats.removed = self.removed.len();
         Ok(())
+    }
+    #[cfg(test)]
+    pub(crate) fn measured_retained_bytes(&self) -> Result<u64> {
+        let mut bytes = 0;
+        add_capture_bytes(
+            &mut bytes,
+            self.plan.capacity(),
+            std::mem::size_of::<Pending>(),
+        )?;
+        for pending in &self.plan {
+            bytes = bytes
+                .checked_add(pending.retained_fields()?)
+                .ok_or_else(|| Error::internal("retained measurement overflow"))?;
+        }
+        add_capture_bytes(
+            &mut bytes,
+            self.removed.capacity(),
+            std::mem::size_of::<DocState>(),
+        )?;
+        for removed in &self.removed {
+            for text in [
+                Some(&removed.rel_path),
+                Some(&removed.content_hash),
+                removed.frontmatter_json.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                add_capture_bytes(&mut bytes, text.capacity(), 1)?;
+            }
+        }
+        add_capture_bytes(
+            &mut bytes,
+            self.stats.warnings.capacity(),
+            std::mem::size_of::<FileWarning>(),
+        )?;
+        for warning in &self.stats.warnings {
+            add_capture_bytes(&mut bytes, warning.path.capacity(), 1)?;
+            add_capture_bytes(&mut bytes, warning.message.capacity(), 1)?;
+        }
+        Ok(bytes)
     }
     pub(crate) fn chunk_count(&self) -> usize {
         self.plan.iter().map(|p| p.chunks.len()).sum()
@@ -693,6 +802,13 @@ pub(crate) fn capture_full_accounted(
                     if new_budget == 0 {
                         stats.errors += 1;
                         doc_limit_warning(&mut stats, rel);
+                        let charge = prepared.retained_charge()?;
+                        drop(prepared);
+                        if let Some(budget) = capture.as_deref_mut() {
+                            budget
+                                .account
+                                .shrink_to(budget.account.bytes().saturating_sub(charge));
+                        }
                         continue;
                     }
                     new_budget -= 1;
@@ -900,6 +1016,44 @@ fn relative_to_root(path: &Path, root: &Path) -> Option<String> {
 /// Reads and hashes one walked file. Returns `Ok(None)` when both the source
 /// hash and extracted metadata match, `Err` for per-file problems (A4).
 fn prepare_doc_accounted(
+    path: &Path,
+    rel_path: &str,
+    existing: Option<&DocState>,
+    config: &Config,
+    capture: Option<&mut CaptureBudget<'_>>,
+) -> Result<Option<Pending>> {
+    let Some(budget) = capture else {
+        return prepare_doc_inner(path, rel_path, existing, config, None);
+    };
+    let baseline = budget.account.bytes();
+    let header = (path.as_os_str().len() as u64)
+        .checked_mul(8)
+        .and_then(|n| n.checked_add((3 * std::mem::size_of::<Pending>() + 256) as u64))
+        .ok_or_else(|| Error::Admission {
+            message: "file capture header size overflow".into(),
+        })?;
+    budget.reserve(header)?;
+    let result = prepare_doc_inner(path, rel_path, existing, config, Some(budget));
+    if let Ok(pending) = &result {
+        let retained = pending.as_ref().map_or(Ok(0), Pending::retained_charge)?;
+        let total = baseline
+            .checked_add(retained)
+            .ok_or_else(|| Error::Admission {
+                message: "retained file capture overflow".into(),
+            })?;
+        if total > budget.account.bytes() {
+            return Err(Error::internal(
+                "file capture preflight underestimated retained capacities",
+            ));
+        }
+        // prepare_doc_inner has returned: original text, frontmatter builder,
+        // sections and parser/range buffers have actually been destroyed.
+        budget.account.shrink_to(total);
+    }
+    result
+}
+
+fn prepare_doc_inner(
     path: &Path,
     rel_path: &str,
     existing: Option<&DocState>,

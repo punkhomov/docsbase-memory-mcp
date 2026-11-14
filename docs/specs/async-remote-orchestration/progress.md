@@ -435,3 +435,24 @@ accepted async project_runtime_for_search factory; same case continues through
 real OpenRouter codecs + fake HTTP and checks J/control capacity while held.
 Exact existing Website bound-session check is preserved in this context helper.
 No new provider table, runtime, public API or external request.
+
+
+B1 no-fail-fast preservation run at9ec8876 found six failures across install,
+lifecycle and registry. Capture charged each file's dead parser/text workspace
+for the entire job; it now measures returned owned capacities and releases only
+after those temporaries are destroyed, retaining later SQL/heading apply
+workspace. The unchanged 3000×40 install corpus fits the unchanged64MiB owner
+cap with measured capacities/charged peak logged. The low-cap event test keeps
+its2MiB cap and last-refusal/no-following-copy assertions, but now uses actual
+retained chunks (256 compact files) rather than pinning erroneous accumulated
+scratch charges. New-Sync creation restores best-effort retention prune; only
+successful completion restores the old watcher hook in admitted CPU with original
+Activity. All six original integration assertions/fixtures pass unchanged.
+
+The now-reachable long index exposed immediate StopDaemon worker shutdown
+between accepted phases. Graceful stop now refuses new wire ingress first and
+uses the existing physical-Activity drain before closing worker/remote admission;
+original job deadlines and signal escalation still apply. A real current-thread
+accept-loop case proves new-ingress refusal, accepted later phase admission,
+physical drain ownership and closed admission after retirement. Exact full
+CLI/lean --no-fail-fast runs and fresh B1 review remain pending; B2/B3 stay open.

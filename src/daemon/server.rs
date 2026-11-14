@@ -1185,6 +1185,16 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
     scope: &scoped::Scope,
     reader: &mut FrameReader<R>,
 ) -> (Response, bool) {
+    // Closing ingress does not cancel work already accepted by another
+    // handler: graceful installation must let its later CPU phases finish.
+    if shared.stopping.load(Ordering::SeqCst) && !matches!(&request, Request::StopDaemon) {
+        return (
+            error_response(&Error::Admission {
+                message: "daemon is shutting down".into(),
+            }),
+            true,
+        );
+    }
     match request {
         Request::Hello {
             protocol_version,
@@ -1347,9 +1357,6 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
             // (FR-5, FR-6). The drain lets every other request finish; the
             // process then lives until background jobs complete.
             if !shared.stopping.swap(true, Ordering::SeqCst) {
-                #[cfg(feature = "hybrid-remote")]
-                shared.shutdown_remote();
-                shared.workers.shutdown();
                 let settings = shared.daemon_settings();
                 wait_for_drain(
                     in_flight,
@@ -1734,6 +1741,42 @@ fn prepare_index_context(
     }))
 }
 
+async fn finish_index_watch(
+    shared: &Arc<Shared>,
+    project_id: i64,
+    operation: &crate::search::operation::SearchOperation,
+    activity: &Arc<Activity>,
+) {
+    if shared.stopping.load(Ordering::SeqCst) || operation.check().is_err() {
+        return;
+    }
+    let permit = tokio::select! {
+        biased;
+        () = operation.cancellation().cancelled() => return,
+        () = tokio::time::sleep_until(tokio::time::Instant::from_std(operation.deadline())) => return,
+        permit = shared.workers.control() => match permit {
+            Ok(permit) => permit,
+            Err(_) => return,
+        },
+    };
+    let owner = shared.clone();
+    let call = operation.clone();
+    let worker = request::spawn(Some(permit), Some(activity.clone()), move || {
+        call.check()?;
+        let fresh = {
+            let db = owner.db();
+            registry::project_by_id(&db, project_id)?
+        };
+        if let Some(project) = fresh
+            && let Err(error) = owner.ensure_watcher(&project)
+        {
+            eprintln!("warning: cannot watch project {project_id}: {error}");
+        }
+        Ok(())
+    });
+    let _ = request::run(worker, Some(operation)).await;
+}
+
 async fn index_async(
     shared: &Arc<Shared>,
     service: &super::job_service::JobService,
@@ -1766,6 +1809,7 @@ async fn index_async(
             return Ok(existing);
         }
     };
+    let project_id = context.project.id;
     let result = if detached {
         let (mut owner, work, receiver) = crate::index::async_job::start(
             service,
@@ -1789,25 +1833,41 @@ async fn index_async(
         let status = (**status).clone();
         let service = service.clone();
         let workers = shared.workers.clone();
+        let shared = shared.clone();
+        let operation = operation.clone();
+        let activity = activity.clone();
         // No await between ownership transfer to the detached task and acknowledgement.
         drop(tokio::spawn(async move {
-            let _ = crate::index::async_job::execute(
-                &service, &workers, activity, operation, owner, work, receiver,
+            let result = crate::index::async_job::execute(
+                &service,
+                &workers,
+                activity.clone(),
+                operation.clone(),
+                owner,
+                work,
+                receiver,
             )
             .await;
+            if result.is_ok() {
+                finish_index_watch(&shared, project_id, &operation, &activity).await;
+            }
         }));
         Ok(status)
     } else {
         crate::index::async_job::run(
             service,
             &shared.workers,
-            activity,
-            operation,
+            activity.clone(),
+            operation.clone(),
             &shared.payload_budget,
             context,
         )
         .await
     };
+    if !detached && result.is_ok() {
+        finish_index_watch(shared, project_id, &operation, &activity).await;
+        operation.check()?;
+    }
     cancellation.0 = None;
     result
 }

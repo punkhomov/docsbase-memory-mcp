@@ -661,11 +661,9 @@ async fn accept_loop_with(
             }
         }
     }
-    #[cfg(feature = "hybrid-remote")]
-    shared.shutdown_remote();
-    shared.workers.shutdown();
-    // Drop pending admission immediately; an already running closure keeps its
-    // own Activity/permit and remains visible to the physical drain below.
+    // Ingress is closed by the stop flag/listener loop. Accepted requests
+    // retain their original budgets and may need another admitted CPU/remote
+    // phase before they can publish and reply.
     drop(janitor);
     // Shutdown was requested: the StopDaemon reply itself is bounded by
     // `DRAIN_TIMEOUT` (T46), but running requests must still deliver their
@@ -687,6 +685,9 @@ async fn accept_loop_with(
             }
         }
     }
+    #[cfg(feature = "hybrid-remote")]
+    shared.shutdown_remote();
+    shared.workers.shutdown();
     Ok(())
 }
 
