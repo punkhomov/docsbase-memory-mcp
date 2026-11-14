@@ -187,7 +187,7 @@ impl LaunchSnapshot {
                 stamp: self.stamp(),
                 error: None,
             }),
-            Err(LaunchFailure::Daemon(error)) => Err(error),
+            Err(LaunchFailure::Daemon(error) | LaunchFailure::Remote(error)) => Err(error),
             Err(LaunchFailure::Legacy(error)) => {
                 // Shared alone retains the source-error compatibility adapter.
                 if matches!(

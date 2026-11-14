@@ -296,6 +296,21 @@ pub trait Provider: Sync {
         providers: &ProvidersCfg,
     ) -> Result<Stages>;
 
+    /// Build on one explicit async execution owner. Local providers retain their adapter.
+    ///
+    /// # Errors
+    /// Existing provider admission/construction failures.
+    #[cfg(feature = "hybrid-remote")]
+    fn build_stages_with_execution(
+        &self,
+        embedding: Option<&EmbeddingCfg>,
+        reranker: Option<&RerankerCfg>,
+        providers: &ProvidersCfg,
+        _execution: Arc<super::remote::RemoteExecution>,
+    ) -> Result<Stages> {
+        self.build_stages(embedding, reranker, providers)
+    }
+
     /// The admission raised when a stage needs this provider but the build
     /// lacks its feature. Provider-owned so the corrective action stays exact.
     fn feature_missing(&self) -> Error {
@@ -739,6 +754,31 @@ impl Provider for OpenrouterProvider {
             let _ = (embedding, reranker, providers);
             Err(self.feature_missing())
         }
+    }
+
+    #[cfg(feature = "hybrid-remote")]
+    fn build_stages_with_execution(
+        &self,
+        embedding: Option<&EmbeddingCfg>,
+        reranker: Option<&RerankerCfg>,
+        _providers: &ProvidersCfg,
+        execution: Arc<super::remote::RemoteExecution>,
+    ) -> Result<Stages> {
+        let client =
+            Arc::new(super::openrouter::OpenRouterClient::from_env_with_execution(execution)?);
+        let embedder = embedding.map(|cfg| {
+            Arc::new(super::openrouter::OpenRouterEmbedder::with_client(
+                cfg.clone(),
+                Arc::clone(&client),
+            )) as Arc<dyn Embedder>
+        });
+        let reranker = reranker.map(|cfg| {
+            Arc::new(super::openrouter::OpenRouterReranker::with_client(
+                cfg.clone(),
+                Arc::clone(&client),
+            )) as Arc<dyn Reranker>
+        });
+        Ok((embedder, reranker))
     }
 
     fn feature_missing(&self) -> Error {

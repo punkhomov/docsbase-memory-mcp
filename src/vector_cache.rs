@@ -47,6 +47,11 @@ impl Default for CacheLimits {
 
 /// Anything that can turn chunk texts into vectors.
 pub trait Embedder: Send + Sync {
+    /// Explicit remote capability; local inference retains its blocking adapter.
+    #[cfg(feature = "hybrid-remote")]
+    fn async_remote(&self) -> Option<&dyn crate::hybrid::remote::AsyncEmbedder> {
+        None
+    }
     /// Stable identity of the model; changing it invalidates lookups.
     fn model_id(&self) -> &str;
     /// Embeds one batch of chunk texts.

@@ -26,6 +26,30 @@ impl OpenRouterCodec {
         Self(OpenAIConfig::with_key(&dialect, key.to_owned()))
     }
 
+    pub(super) fn prepare_embedding(
+        &self,
+        model: &str,
+        dimensions: u32,
+        texts: &[String],
+        input_type: &str,
+    ) -> Result<PreparedEmbedding> {
+        let codec = Embeddings::new(self.0.clone(), model, Some(dimensions as usize));
+        let input = texts.to_vec();
+        let encoded = codec
+            .encode(input.clone(), Mode::Unary)
+            .map_err(|error| Error::internal_with_source("encode Rig embeddings request", error))?;
+        let request = encode_request(encoded, |body| {
+            body["input_type"] = input_type.into();
+            body["dimensions"] = dimensions.into();
+        })?;
+        Ok(PreparedEmbedding {
+            request,
+            codec,
+            input,
+            dimensions,
+        })
+    }
+
     pub(super) fn embed(
         &self,
         transport: &dyn Transport,
@@ -34,38 +58,33 @@ impl OpenRouterCodec {
         texts: &[String],
         input_type: &str,
     ) -> Result<Vec<Vec<f32>>> {
-        let codec = Embeddings::new(self.0.clone(), model, Some(dimensions as usize));
-        let request = codec
-            .encode(texts.to_vec(), Mode::Unary)
-            .map_err(|err| Error::internal_with_source("encode Rig embeddings request", err))?;
-        let response = send(transport, request, |body| {
-            // The generic embedding request has no query/document role. Keep
-            // the existing wire contract, including explicit dimensions.
-            body["input_type"] = input_type.into();
-            body["dimensions"] = dimensions.into();
-        })?;
-        let response = ordered_embeddings(&response, texts.len())?;
-        let decoded = decode_reply(
-            &codec,
-            &texts.to_vec(),
-            Mode::Unary,
-            [WireFrame::Bytes(response)],
-        )
-        .map_err(|err| {
-            Error::internal_with_source("incompatible OpenRouter embeddings schema", err)
-        })?;
-        decoded
-            .embeddings
-            .into_iter()
-            .map(|embedding| {
-                if embedding.vec.is_empty() || embedding.vec.len() != dimensions as usize {
-                    return Err(Error::internal(
-                        "OpenRouter returned an invalid vector width",
-                    ));
-                }
-                embedding.vec.into_iter().map(finite_f32).collect()
-            })
-            .collect()
+        let prepared = self.prepare_embedding(model, dimensions, texts, input_type)?;
+        let body = send(transport, &prepared.request)?;
+        prepared.decode(&body)
+    }
+
+    pub(super) fn prepare_rerank(
+        &self,
+        model: &str,
+        query: &str,
+        docs: &[String],
+        top_n: usize,
+    ) -> Result<PreparedRerank> {
+        let codec = Rerank::new(self.0.clone(), model).with_top_n(top_n);
+        let input = RerankRequest {
+            query: query.to_owned(),
+            documents: docs.to_vec(),
+        };
+        let encoded = codec
+            .encode(input.clone(), Mode::Unary)
+            .map_err(|error| Error::internal_with_source("encode Rig rerank request", error))?;
+        let request = encode_request(encoded, |_| {})?;
+        Ok(PreparedRerank {
+            request,
+            codec,
+            input,
+            top_n,
+        })
     }
 
     pub(super) fn rerank(
@@ -76,16 +95,54 @@ impl OpenRouterCodec {
         docs: &[String],
         top_n: usize,
     ) -> Result<Vec<(usize, f32)>> {
-        let codec = Rerank::new(self.0.clone(), model).with_top_n(top_n);
-        let input = RerankRequest {
-            query: query.to_owned(),
-            documents: docs.to_vec(),
-        };
-        let request = codec
-            .encode(input.clone(), Mode::Unary)
-            .map_err(|err| Error::internal_with_source("encode Rig rerank request", err))?;
-        let response = send(transport, request, |_| {})?;
-        let mut response: Value = serde_json::from_str(&response).map_err(|err| {
+        let prepared = self.prepare_rerank(model, query, docs, top_n)?;
+        let body = send(transport, &prepared.request)?;
+        prepared.decode(&body)
+    }
+}
+
+pub(super) struct PreparedEmbedding {
+    pub(super) request: super::remote::WireRequest,
+    codec: Embeddings,
+    input: Vec<String>,
+    dimensions: u32,
+}
+impl PreparedEmbedding {
+    pub(super) fn decode(self, body: &str) -> Result<Vec<Vec<f32>>> {
+        let response = ordered_embeddings(body, self.input.len())?;
+        let decoded = decode_reply(
+            &self.codec,
+            &self.input,
+            Mode::Unary,
+            [WireFrame::Bytes(response)],
+        )
+        .map_err(|err| {
+            Error::internal_with_source("incompatible OpenRouter embeddings schema", err)
+        })?;
+        decoded
+            .embeddings
+            .into_iter()
+            .map(|embedding| {
+                if embedding.vec.is_empty() || embedding.vec.len() != self.dimensions as usize {
+                    return Err(Error::internal(
+                        "OpenRouter returned an invalid vector width",
+                    ));
+                }
+                embedding.vec.into_iter().map(finite_f32).collect()
+            })
+            .collect()
+    }
+}
+
+pub(super) struct PreparedRerank {
+    pub(super) request: super::remote::WireRequest,
+    codec: Rerank,
+    input: RerankRequest,
+    top_n: usize,
+}
+impl PreparedRerank {
+    pub(super) fn decode(self, body: &str) -> Result<Vec<(usize, f32)>> {
+        let mut response: Value = serde_json::from_str(body).map_err(|err| {
             Error::internal_with_source("incompatible OpenRouter rerank schema", err)
         })?;
         let results = response
@@ -103,8 +160,8 @@ impl OpenRouterCodec {
         }
         let projected = serde_json::json!({"results": results});
         let decoded = decode_reply(
-            &codec,
-            &input,
+            &self.codec,
+            &self.input,
             Mode::Unary,
             [WireFrame::Bytes(projected.to_string().into_bytes())],
         )
@@ -114,14 +171,14 @@ impl OpenRouterCodec {
                 "OpenRouter rerank returned no results for non-empty documents",
             ));
         }
-        let mut seen = vec![false; docs.len()];
+        let mut seen = vec![false; self.input.documents.len()];
         let mut ranked = Vec::with_capacity(decoded.results.len());
         for result in decoded.results {
             let slot = seen.get_mut(result.index).ok_or_else(|| {
                 Error::internal(format!(
                     "OpenRouter rerank returned index {} for {} documents",
                     result.index,
-                    docs.len()
+                    self.input.documents.len()
                 ))
             })?;
             if std::mem::replace(slot, true) {
@@ -132,16 +189,15 @@ impl OpenRouterCodec {
             ranked.push((result.index, finite_f32(result.relevance_score)?));
         }
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
-        ranked.truncate(top_n);
+        ranked.truncate(self.top_n);
         Ok(ranked)
     }
 }
 
-fn send(
-    transport: &dyn Transport,
+fn encode_request(
     encoded: Encoded,
     extend: impl FnOnce(&mut Value),
-) -> Result<String> {
+) -> Result<super::remote::WireRequest> {
     let (parts, body) = encoded.request.into_parts();
     let Body::Bytes(bytes) = body else {
         return Err(Error::internal("Rig retrieval request must be JSON"));
@@ -163,13 +219,16 @@ fn send(
     }
     headers.push(("HTTP-Referer".into(), HTTP_REFERER.into()));
     headers.push(("X-Title".into(), X_TITLE.into()));
-    let response = post_with_retry(
-        transport,
-        &parts.uri.to_string(),
-        &headers,
-        &body.to_string(),
-    )?;
-    Ok(response.body)
+    Ok(super::remote::WireRequest {
+        url: parts.uri.to_string(),
+        headers,
+        body: body.to_string(),
+    })
+}
+
+fn send(transport: &dyn Transport, request: &super::remote::WireRequest) -> Result<String> {
+    post_with_retry(transport, &request.url, &request.headers, &request.body)
+        .map(|response| response.body)
 }
 
 /// Rig's decoder ignores indices, and defaults a missing index to zero.

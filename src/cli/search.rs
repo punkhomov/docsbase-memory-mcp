@@ -115,8 +115,25 @@ pub(crate) fn run_with_policies(
     mode: QueryMode,
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
 ) -> anyhow::Result<()> {
+    run_with_policies_started(
+        query,
+        options,
+        settings,
+        mode,
+        dense_settings,
+        std::time::Instant::now(),
+    )
+}
+
+pub(crate) fn run_with_policies_started(
+    query: &str,
+    options: &Options,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    mode: QueryMode,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+    started: std::time::Instant,
+) -> anyhow::Result<()> {
     dense_settings.query_cache_settings().validate()?;
-    let started = std::time::Instant::now();
     let global = Config::global()?;
     let operation = SearchOperation::new(&global.search, started, Cancellation::new())?;
     let cache = paths::cache_dir()?;
@@ -203,6 +220,11 @@ fn try_daemon_search(
 }
 
 fn block_on_io<T>(work: impl Future<Output = Result<T>>) -> Result<T> {
+    if crate::hybrid::blocking::in_context()
+        && let Some(bridge) = crate::hybrid::blocking::bridge()
+    {
+        return bridge.block_on(work);
+    }
     let run = || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

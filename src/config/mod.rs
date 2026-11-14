@@ -9,6 +9,7 @@ use serde::Deserialize;
 use crate::daemon::settings::{DaemonPatch, DaemonSettings, DaemonSpec};
 use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridCfg, HybridDefaults, HybridPatch, HybridSpec, ProvidersCfg};
+use crate::hybrid::remote_settings::{RemotePatch, RemoteSettings, RemoteSpec};
 use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
 use bootstrap::DefaultsContext;
 use schema::{
@@ -43,6 +44,8 @@ pub struct Config {
     pub search: SearchSettings,
     /// Complete global-only daemon launch and resource policy.
     pub daemon: DaemonSettings,
+    /// Complete global-only remote execution policy.
+    pub remote: RemoteSettings,
     /// Register and index a project automatically on first connection (ADR-6: off).
     pub auto_index: bool,
     /// Hybrid retrieval feature flag (phase 2; off in v1).
@@ -88,6 +91,7 @@ struct GlobalFileConfig {
     auto_index: Option<bool>,
     search: Option<SearchPatch>,
     daemon: Option<DaemonPatch>,
+    remote: Option<RemotePatch>,
     hybrid: Option<HybridPatch>,
     providers: Option<HashMap<String, toml::Table>>,
 }
@@ -115,6 +119,7 @@ impl ProjectFileConfig {
             providers: None,
             search: None,
             daemon: None,
+            remote: None,
         }
     }
 }
@@ -243,6 +248,7 @@ impl Config {
         crate::hybrid::config::validate_settings(&self.hybrid_cfg)?;
         SearchSpec::validate(&self.search, &Capabilities::current())?;
         DaemonSpec::validate(&self.daemon, &Capabilities::current())?;
+        RemoteSpec::validate(&self.remote, &Capabilities::current())?;
         Ok(())
     }
 }
@@ -322,6 +328,7 @@ struct ConfigDefaults {
     hybrid: HybridDefaults,
     search: SearchSettings,
     daemon: DaemonSettings,
+    remote: RemoteSettings,
 }
 struct ConfigSpec;
 impl SettingsSpec for ConfigSpec {
@@ -341,18 +348,21 @@ impl SettingsSpec for ConfigSpec {
         fields.extend_from_slice(HybridSpec::FIELDS);
         fields.extend_from_slice(SearchSpec::FIELDS);
         fields.extend_from_slice(DaemonSpec::FIELDS);
+        fields.extend_from_slice(RemoteSpec::FIELDS);
         fields
     }
     fn defaults(context: &DefaultsContext) -> Self::Defaults {
         let hybrid = HybridSpec::defaults(context);
         let search = SearchSpec::defaults(context);
         let daemon = DaemonSpec::defaults(context);
+        let remote = RemoteSpec::defaults(context);
         let initial = Config {
             ignores: Vec::new(),
             max_file_size: 1_048_576,
             max_docs_per_project: 20_000,
             search: SearchSpec::initial(&search),
             daemon: DaemonSpec::initial(&daemon),
+            remote: RemoteSpec::initial(&remote),
             auto_index: false,
             hybrid: false,
             hybrid_cfg: HybridSpec::initial(&hybrid),
@@ -363,6 +373,7 @@ impl SettingsSpec for ConfigSpec {
             hybrid,
             search,
             daemon,
+            remote,
         }
     }
     fn initial(defaults: &Self::Defaults) -> Config {
@@ -423,6 +434,15 @@ impl SettingsSpec for ConfigSpec {
                 origins,
             )?;
         }
+        if let Some(patch) = patch.remote {
+            RemoteSpec::overlay(
+                &mut settings.remote,
+                patch,
+                &defaults.remote,
+                source,
+                origins,
+            )?;
+        }
         Ok(())
     }
     fn validate(settings: &Config, _: &Capabilities) -> Result<()> {
@@ -449,6 +469,7 @@ impl ConfigSpec {
         }
         crate::hybrid::config::view::fields(&settings.hybrid_cfg, view)?;
         SearchSpec::view_fields(&settings.search, view)?;
-        DaemonSpec::view_fields(&settings.daemon, view)
+        DaemonSpec::view_fields(&settings.daemon, view)?;
+        RemoteSpec::view_fields(&settings.remote, view)
     }
 }

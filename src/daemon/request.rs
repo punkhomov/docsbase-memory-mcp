@@ -18,7 +18,7 @@ mod worker_spawn_tests;
 
 /// Transfer actual execution ownership, including unwind, into the closure.
 /// `None` permits are reserved for the legacy Shared background sync path.
-pub(super) fn spawn<T: Send + 'static>(
+pub(crate) fn spawn<T: Send + 'static>(
     permit: Option<OwnedSemaphorePermit>,
     activity: Option<Arc<Activity>>,
     work: impl FnOnce() -> Result<T> + Send + 'static,
@@ -32,7 +32,56 @@ pub(super) fn spawn<T: Send + 'static>(
 }
 
 /// One charge shared by the async reply and the actual blocking closure.
-pub(super) struct Activity {
+#[derive(Clone)]
+pub(crate) struct ActivitySource {
+    pub(crate) counter: Arc<AtomicUsize>,
+    pub(crate) events: mpsc::Sender<()>,
+    pub(crate) bridge: Option<Arc<super::remote::SyncBridge>>,
+}
+
+impl ActivitySource {
+    pub(crate) fn channel(capacity: usize) -> (Self, mpsc::Receiver<()>) {
+        let (events, receiver) = mpsc::channel(capacity);
+        (
+            Self {
+                counter: Arc::new(AtomicUsize::new(0)),
+                events,
+                bridge: tokio::runtime::Handle::try_current()
+                    .ok()
+                    .map(|handle| Arc::new(super::remote::SyncBridge::new(handle))),
+            },
+            receiver,
+        )
+    }
+
+    pub(crate) fn with_runtime(
+        capacity: usize,
+        handle: tokio::runtime::Handle,
+    ) -> (Self, mpsc::Receiver<()>) {
+        let (mut source, receiver) = Self::channel(capacity);
+        source.bridge = Some(Arc::new(super::remote::SyncBridge::new(handle)));
+        (source, receiver)
+    }
+
+    pub(crate) fn retire_bridge(&self) {
+        if let Some(bridge) = &self.bridge {
+            bridge.retire();
+        }
+    }
+
+    pub(crate) fn track(&self) -> Arc<Activity> {
+        Activity::new(&self.counter, &self.events, None)
+    }
+
+    pub(crate) async fn drain(&self, poll: std::time::Duration) {
+        while self.counter.load(Ordering::SeqCst) != 0 {
+            tokio::time::sleep(poll).await;
+        }
+    }
+}
+
+/// One charge shared by the async reply and the actual blocking closure.
+pub(crate) struct Activity {
     counter: Arc<AtomicUsize>,
     events: mpsc::Sender<()>,
     connection: Option<Arc<OwnedSemaphorePermit>>,
@@ -40,7 +89,7 @@ pub(super) struct Activity {
 
 impl Activity {
     #[must_use]
-    pub(super) fn new(
+    pub(crate) fn new(
         counter: &Arc<AtomicUsize>,
         events: &mpsc::Sender<()>,
         connection: Option<&Arc<OwnedSemaphorePermit>>,
@@ -103,7 +152,7 @@ fn joined(result: std::result::Result<Result<Value>, JoinError>) -> Result<Value
     result.map_err(|err| Error::internal_with_source("tool task join", err))?
 }
 
-pub(super) struct CancelOnDrop(pub(super) Option<Cancellation>);
+pub(crate) struct CancelOnDrop(pub(crate) Option<Cancellation>);
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {

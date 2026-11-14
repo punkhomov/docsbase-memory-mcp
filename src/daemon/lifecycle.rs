@@ -464,7 +464,8 @@ async fn serve(
         .map_err(|err| Error::internal_with_source("chmod 0600 socket", err))?;
     write_state(cache)?;
 
-    let result = accept_loop(shared, &listener).await;
+    let result = accept_loop(Arc::clone(&shared), &listener).await;
+    shared.activity.retire_bridge();
 
     if let Err(err) = platform::remove(&endpoint) {
         eprintln!(
@@ -573,8 +574,9 @@ async fn accept_loop_with(
     tokio::pin!(shutdown_signal);
     let settings = shared.daemon_settings().clone();
     let grace = Duration::from_millis(settings.idle_grace_ms);
-    let in_flight = Arc::new(AtomicUsize::new(0));
-    let (events_tx, mut events_rx) = mpsc::channel::<()>(settings.max_events);
+    let in_flight = Arc::clone(&shared.activity.counter);
+    let events_tx = shared.activity.events.clone();
+    let mut events_rx = shared.take_activity_events()?;
     let connections = Arc::new(tokio::sync::Semaphore::new(settings.max_connections));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let mut grace_deadline: Option<tokio::time::Instant> = None;

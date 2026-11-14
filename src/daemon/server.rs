@@ -65,7 +65,9 @@ pub struct Shared {
     db_settings: Resolved<DbSettings>,
     readers: Arc<ReadPool>,
     payload_budget: crate::search::budget::PayloadBudget,
-    pub(super) workers: crate::daemon::worker_admission::WorkerAdmission,
+    pub(super) workers: Arc<crate::daemon::worker_admission::WorkerAdmission>,
+    pub(super) activity: request::ActivitySource,
+    activity_events: Mutex<Option<mpsc::Receiver<()>>>,
     // Website has exactly one fixed-project background sync closure.
     sync_slot: Arc<tokio::sync::Semaphore>,
     /// Live sessions.
@@ -89,6 +91,12 @@ pub struct Shared {
 }
 
 type ProjectSlot = Arc<ProjectCell>;
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        self.activity.retire_bridge();
+    }
+}
 
 /// Stable per-project authority; model construction uses only the reload lock.
 #[derive(Default)]
@@ -278,6 +286,8 @@ impl Shared {
             eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
         }
         let global_config = launch.config.into_settings();
+        let (activity, activity_events) =
+            request::ActivitySource::channel(global_config.daemon.max_events);
         let mut effective_dense = dense_settings.clone();
         effective_dense.vector_cache_max_bytes = global_config.hybrid_cfg.cache.max_bytes;
         let payload_budget =
@@ -306,9 +316,14 @@ impl Shared {
             db_settings: settings.clone(),
             readers,
             payload_budget,
-            workers: crate::daemon::worker_admission::WorkerAdmission::with_settings(
-                &global_config.daemon,
-            )?,
+            workers: Arc::new(
+                crate::daemon::worker_admission::WorkerAdmission::with_policies(
+                    &global_config.daemon,
+                    &global_config.remote,
+                )?,
+            ),
+            activity,
+            activity_events: Mutex::new(Some(activity_events)),
             sync_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: SessionRegistry::with_settings(&global_config.daemon)?,
             watchers,
@@ -334,6 +349,14 @@ impl Shared {
     #[must_use]
     pub fn read_pool(&self) -> &ReadPool {
         &self.readers
+    }
+
+    pub(super) fn take_activity_events(&self) -> Result<mpsc::Receiver<()>> {
+        self.activity_events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| Error::internal("daemon activity receiver already consumed"))
     }
 
     /// Complete immutable daemon policy captured by the controlling boundary.
@@ -409,7 +432,9 @@ impl Shared {
         project: &crate::store::models::Project,
     ) -> Result<(Arc<Config>, Arc<HybridStages>)> {
         self.project_runtime_with(project, |config| {
-            crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)
+            crate::hybrid::blocking::with_bridge(self.activity.bridge.clone(), || {
+                crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)
+            })
         })
     }
 
@@ -682,7 +707,9 @@ impl Shared {
         project: &crate::store::models::Project,
     ) -> Result<Arc<Config>> {
         self.open_project_config_with(project, |config| {
-            crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)
+            crate::hybrid::blocking::with_bridge(self.activity.bridge.clone(), || {
+                crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)
+            })
         })
     }
 
@@ -1952,6 +1979,45 @@ mod tests {
     use crate::hybrid::dense::DenseRows;
     use crate::hybrid::jobs::embed_project_chunks_with;
     use crate::vector_cache::Embedder;
+
+    #[test]
+    fn invalid_remote_policy_is_fatal_before_legacy_shared_effects() {
+        for policy in [
+            "interactive_active=0",
+            "attempt_timeout_ms=0",
+            "retry_attempts=0",
+            "interactive_active='bad'",
+            "interactive_active=9223372036854775807",
+            "retry_attempts=4294967296",
+            "retry_attempts=1\n[daemon]\nmax_blocking_threads=1",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            fs::write(
+                root.path().join("config.toml"),
+                format!("max_file_size='unrelated legacy error'\n[remote]\n{policy}\n"),
+            )
+            .unwrap();
+            let cache = root.path().join("cache");
+            let result = LaunchSnapshot::capture_from(root.path())
+                .legacy(DaemonPatch::default())
+                .and_then(|launch| {
+                    Shared::open_with_launch_config(
+                        &cache,
+                        &crate::store::settings::standalone().unwrap(),
+                        &crate::store::settings::standalone_read_pool().unwrap(),
+                        crate::hybrid::dense_settings::standalone()
+                            .unwrap()
+                            .settings(),
+                        launch,
+                    )
+                });
+            assert!(result.is_err(), "recognized remote policy must fail closed");
+            assert!(
+                !cache.exists(),
+                "remote failure must precede DB/state effects"
+            );
+        }
+    }
 
     #[test]
     fn invalid_file_daemon_policy_cannot_fall_back_during_legacy_shared_open() {

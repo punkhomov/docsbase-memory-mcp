@@ -383,3 +383,32 @@ are API/implementation invariants, not additional hidden operational defaults.
 only narrow the existing SDK operation. Connection/session/worker/reader/byte caps
 stay independent. No new external runtime dependency is added. Full CF12/CF13,
 remote async #81 and process-wide/native-resource guarantees remain separate.
+
+
+## MODIFIED 2026-11-14 — #81 A1 remote execution owner
+
+RemoteSpec (`hybrid/remote_settings.rs`) owns the global-only `[remote]` typed
+policy: interactive_active4/pending32, attempt_timeout_ms30000, retry_attempts4,
+retry_initial_ms250/max4000/multiplier2, max_retry_after_ms30000/jitter_max_ms50,
+embed_batch_texts128/bytes524288 and max_response_bytes33554432. Count/byte/ms
+units, defaults, provenance, validation, capability projection and runtime-only
+assessment are owned there; ConfigSpec composes without copying its rules.
+
+I38–I40 use those values in the new real async provider/transport/retry/batch/body
+path, including original/hard deadline minimum and independent live-interest
+wait. DaemonSpec adds helper_active1; helper pending is derived interactive_active
+and physically enforced by WorkerAdmission before custom DNS spawn. CPU/DNS
+closures retain the existing Activity and physical permit through finish/unwind.
+Reqwest owns no Runtime. Explicit root-retired Handle bridge preserves sync
+compatibility and never crosses an await. All timeout/retry/budget changes require
+restart and do not alter persisted vector/query/model/ANN identities.
+
+Recognized remote owner errors are fatal before effects in the actual legacy
+Shared launch; unrelated legacy fallback remains. Project remote override is
+structurally rejected. Effective/source/v1 roundtrip and connect read-modify-write
+preserve values/origins. A1 is an internal functional task: new library provider
+consumers run, server phase dispatch lands with A2 in the same first PR; existing
+background/direct sync-over-async remains explicitly legacy until PR2. No settings
+are published in a standalone scaffold/docs PR. Full CF13/provisioning/v2 remains
+deferred. Locked Tokio1.54.1, reqwest0.12.28 and hyper-util0.1.21 were inspected;
+no process-wide native resource or capacity claim follows from the Tokio bound.

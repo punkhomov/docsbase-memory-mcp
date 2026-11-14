@@ -21,6 +21,9 @@ mod flight;
 pub mod jobs;
 pub mod meta;
 pub mod provider;
+#[cfg(feature = "hybrid-remote")]
+pub mod remote;
+pub mod remote_settings;
 pub mod rrf;
 pub mod work;
 
@@ -53,6 +56,11 @@ pub use provider::{ModelAddress, Provider, Task, provider, providers};
 /// Not cached (no `model_id`): rerank scores are per-query and never
 /// persisted, so an identity would have no consumer (YAGNI).
 pub trait Reranker: Send + Sync {
+    /// Explicit remote capability; None keeps bounded local execution.
+    #[cfg(feature = "hybrid-remote")]
+    fn async_remote(&self) -> Option<&dyn remote::AsyncReranker> {
+        None
+    }
     /// Scores `docs` against `query`; returns `(original_index, score)` pairs,
     /// best first. `top_n` caps the number of returned pairs.
     ///
@@ -72,6 +80,33 @@ pub mod blocking {
     use crate::error::Result;
 
     use super::IN_BLOCKING;
+
+    thread_local! {
+        static SYNC_BRIDGE: std::cell::RefCell<Option<std::sync::Arc<crate::daemon::remote::SyncBridge>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(crate) fn bridge() -> Option<std::sync::Arc<crate::daemon::remote::SyncBridge>> {
+        SYNC_BRIDGE.with(|current| current.borrow().clone())
+    }
+
+    // Compatibility construction scope only. It never encloses an await.
+    pub(crate) fn with_bridge<T>(
+        bridge: Option<std::sync::Arc<crate::daemon::remote::SyncBridge>>,
+        work: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        struct Restore(Option<std::sync::Arc<crate::daemon::remote::SyncBridge>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                SYNC_BRIDGE.with(|current| {
+                    current.replace(self.0.take());
+                });
+            }
+        }
+        SYNC_BRIDGE.with(|current| {
+            let _restore = Restore(current.replace(bridge));
+            enter(work)
+        })
+    }
 
     struct ContextReset<'a> {
         flag: &'a Cell<bool>,

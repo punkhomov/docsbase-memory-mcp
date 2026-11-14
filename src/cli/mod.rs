@@ -213,6 +213,7 @@ pub enum DaemonCommand {
 ///
 /// # Errors
 /// Propagates command failures to the `anyhow` CLI boundary.
+#[allow(clippy::too_many_lines)] // Exhaustive CLI dispatcher; runtime owners remain explicit per command.
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let db_settings = crate::store::settings::standalone()?;
@@ -221,7 +222,12 @@ pub fn run() -> anyhow::Result<()> {
     match cli.command {
         #[cfg(feature = "web")]
         Command::Web { open, port } => crate::web::run(port, open),
-        Command::Index { path } => index::run_with_settings(path.as_deref(), &db_settings),
+        Command::Index { path } => {
+            let policy = Config::global()?.daemon;
+            crate::daemon::remote::with_sync_command(&policy, move || {
+                index::run_with_settings(path.as_deref(), &db_settings)
+            })
+        }
         Command::Search {
             query,
             query_mode,
@@ -232,23 +238,35 @@ pub fn run() -> anyhow::Result<()> {
             n_per_doc,
             path_prefix,
             tags,
-        } => search::run_with_policies(
-            &query,
-            &search::Options {
-                limit,
-                explain,
-                snippet,
-                dedupe,
-                n_per_doc,
-                path_prefix,
-                tags,
-            },
-            &db_settings,
-            query_mode,
-            dense_settings.settings(),
-        ),
+        } => {
+            let started = std::time::Instant::now();
+            let policy = Config::global()?.daemon;
+            crate::daemon::remote::with_sync_command(&policy, move || {
+                search::run_with_policies_started(
+                    &query,
+                    &search::Options {
+                        limit,
+                        explain,
+                        snippet,
+                        dedupe,
+                        n_per_doc,
+                        path_prefix,
+                        tags,
+                    },
+                    &db_settings,
+                    query_mode,
+                    dense_settings.settings(),
+                    started,
+                )
+            })
+        }
         Command::List => status::list_with_settings(&db_settings),
-        Command::Sync { path } => sync(path.as_deref(), &db_settings),
+        Command::Sync { path } => {
+            let policy = Config::global()?.daemon;
+            crate::daemon::remote::with_sync_command(&policy, move || {
+                sync(path.as_deref(), &db_settings)
+            })
+        }
         Command::Config { command: None } => show_config(),
         Command::Config {
             command: Some(command),
@@ -276,7 +294,10 @@ pub fn run() -> anyhow::Result<()> {
             DaemonCommand::Stop => daemon_stop(),
         },
         Command::Models { command } => match command {
-            models::ModelsCommand::Use(args) => models::run(&args),
+            models::ModelsCommand::Use(args) => {
+                let policy = Config::global()?.daemon;
+                crate::daemon::remote::with_sync_command(&policy, move || models::run(&args))
+            }
             #[cfg(feature = "hybrid-local")]
             models::ModelsCommand::Fetch(args) => models::fetch_cmd(&args),
             #[cfg(feature = "hybrid-local")]
@@ -288,11 +309,16 @@ pub fn run() -> anyhow::Result<()> {
             provider,
             check,
             force,
-        } => connect::run(&connect::ConnectArgs {
-            provider,
-            check,
-            force,
-        }),
+        } => {
+            let policy = Config::global()?.daemon;
+            crate::daemon::remote::with_sync_command(&policy, move || {
+                connect::run(&connect::ConnectArgs {
+                    provider,
+                    check,
+                    force,
+                })
+            })
+        }
         Command::Install => install::install(),
         Command::Update {
             check,

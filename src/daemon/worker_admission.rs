@@ -16,20 +16,39 @@ use super::settings::{DaemonSettings, DaemonSpec};
 pub struct WorkerAdmission {
     search: Lane,
     control: Lane,
+    #[cfg(feature = "hybrid-remote")]
+    helper: Lane,
     control_timeout: Duration,
     shutdown: Cancellation,
 }
 
 impl WorkerAdmission {
-    /// Constructs only from complete validated settings; no consumer defaults.
+    /// Compatibility composition resolving omitted remote policy through its owner.
     ///
     /// # Errors
     /// Invalid owner policy, including unsupported semaphore sizes.
     pub fn with_settings(settings: &DaemonSettings) -> Result<Self> {
+        Self::with_policies(
+            settings,
+            crate::hybrid::remote_settings::standalone()?.settings(),
+        )
+    }
+
+    /// Compose complete daemon and remote policy before creating any worker lane.
+    ///
+    /// # Errors
+    /// Invalid owner policy or semaphore capacity.
+    pub fn with_policies(
+        settings: &DaemonSettings,
+        remote: &crate::hybrid::remote_settings::RemoteSettings,
+    ) -> Result<Self> {
         DaemonSpec::validate(settings, &Capabilities::current())?;
+        crate::hybrid::remote_settings::RemoteSpec::validate(remote, &Capabilities::current())?;
         Ok(Self {
             search: Lane::new(settings.search_active, settings.search_pending),
             control: Lane::new(settings.control_active, settings.control_pending),
+            #[cfg(feature = "hybrid-remote")]
+            helper: Lane::new(settings.helper_active, remote.interactive_active),
             control_timeout: Duration::from_millis(settings.control_timeout_ms),
             shutdown: Cancellation::new(),
         })
@@ -72,6 +91,13 @@ impl WorkerAdmission {
     /// Retires pending and future admission; running closures keep their permits.
     pub fn shutdown(&self) {
         self.shutdown.cancel();
+    }
+
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) async fn helper(&self, deadline: Instant) -> Result<OwnedSemaphorePermit> {
+        self.helper
+            .acquire(deadline, &self.shutdown, &self.shutdown)
+            .await
     }
 }
 

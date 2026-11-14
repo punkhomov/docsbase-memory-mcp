@@ -480,6 +480,23 @@ fn write_global_provider_locked(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn provider_write_preserves_resolved_remote_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[remote]\nattempt_timeout_ms=73\nretry_attempts=1\ninteractive_pending=0\n",
+        )
+        .unwrap();
+        let before = crate::config::Config::global_from(root.path()).unwrap();
+        let mut record = toml::Table::new();
+        record.insert("enabled".into(), toml::Value::Boolean(true));
+        super::write_global_provider_locked("openrouter", &record, &path).unwrap();
+        let after = crate::config::Config::global_from(root.path()).unwrap();
+        assert_eq!(after.remote, before.remote);
+        assert!(after.providers.iter().any(|(name, _)| name == "openrouter"));
+    }
+    #[test]
     fn every_provisioner_is_a_registered_provider() {
         // The CLI provisioning table is a second table; this keeps it in sync
         // with the provider registry (ADR-18 design §6).

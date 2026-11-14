@@ -1,5 +1,18 @@
 # SPECIFICATION: hybrid-providers (итерация 1 — OpenRouter-only)
 
+## MODIFIED 2026-11-14 — #81 A1 execution boundary
+
+Исторические FR-10/A4 и ADR-7/I3 ниже дополнены
+[async remote design](../async-remote-orchestration/design.md). Новый explicit
+`from_config_with_execution` создаёт async-capable stages того же registry;
+remote HTTP/retry admission не требует blocking worker или thread-local guard.
+Sync compatibility остаётся sanctioned blocking API с явным Handle-only bridge.
+ReqwestTransport больше не владеет Runtime; root command/daemon owner создаёт
+и уничтожает runtime отдельно. A1 — внутренний task первого функционального PR,
+не самостоятельная поставка: interactive search consumer — A2, прочие legacy
+background/direct consumers перечислены в #81 и мигрируют во втором PR.
+Ranking, wire codecs Rig, model/vector identities и provider enablement неизменны.
+
 **Status:** Draft, ревизия 2.2 · **Дата:** 2026-10-14 (черновик — 2026-10-08;
 delta 2026-10-22)
 **Constitution:** `docs/specs/constitution.md` (1.2.0)

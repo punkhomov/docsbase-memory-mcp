@@ -42,18 +42,19 @@ pub trait Transport: Send + Sync {
 }
 
 /// Maximum input texts per embeddings request (FR-6).
-pub const EMBED_BATCH_TEXTS: usize = 128;
+pub const EMBED_BATCH_TEXTS: usize = super::remote_settings::RemoteSpec::DEFAULTS.embed_batch_texts;
 
 /// Byte budget per embeddings request; a single text may exceed it and goes
 /// alone in its own request (FR-6).
-pub const EMBED_BATCH_BYTES: usize = 512 * 1024;
+pub const EMBED_BATCH_BYTES: usize = super::remote_settings::RemoteSpec::DEFAULTS.embed_batch_bytes;
 
 /// Total attempts (first try plus retries) for retryable failures (FR-7).
-pub const RETRY_ATTEMPTS: u32 = 4;
+pub const RETRY_ATTEMPTS: u32 = super::remote_settings::RemoteSpec::DEFAULTS.retry_attempts;
 
 /// Upper bound for a provider-requested `Retry-After` (a rogue value must not
 /// stall an interactive search forever).
-pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
+pub const MAX_RETRY_AFTER: Duration =
+    Duration::from_millis(super::remote_settings::RemoteSpec::DEFAULTS.max_retry_after_ms);
 
 /// Statuses that get an exponential-backoff retry (FR-7, spike table).
 #[must_use]
@@ -132,7 +133,8 @@ fn post_with_retry_with_timing(
     mut sleep: impl FnMut(Duration),
     mut jitter: impl FnMut() -> Duration,
 ) -> Result<TransportResponse> {
-    let mut delay = Duration::from_millis(250);
+    let policy = &super::remote_settings::RemoteSpec::DEFAULTS;
+    let mut delay = Duration::from_millis(policy.retry_initial_ms);
     let mut last: Option<Error> = None;
     for attempt in 1..=RETRY_ATTEMPTS {
         let mut wait = None;
@@ -158,7 +160,9 @@ fn post_with_retry_with_timing(
         }
         let pause = wait.map_or(delay, |after| after.min(MAX_RETRY_AFTER));
         sleep(pause.saturating_add(jitter()));
-        delay = delay.saturating_mul(2).min(Duration::from_secs(4));
+        delay = delay
+            .saturating_mul(policy.retry_multiplier)
+            .min(Duration::from_millis(policy.retry_max_ms));
     }
     Err(last.unwrap_or_else(|| Error::internal("OpenRouter retry loop exhausted")))
 }
@@ -168,20 +172,31 @@ fn jitter() -> Duration {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.subsec_nanos());
-    Duration::from_millis(u64::from(nanos % 50))
+    Duration::from_millis(
+        u64::from(nanos) % super::remote_settings::RemoteSpec::DEFAULTS.jitter_max_ms,
+    )
 }
 
 /// Splits input texts into request batches bounded by count and bytes; one
 /// oversized text forms a batch on its own (FR-6).
 #[must_use]
 pub fn embed_batches(texts: &[String]) -> Vec<Range<usize>> {
+    embed_batches_with_settings(texts, &super::remote_settings::RemoteSpec::DEFAULTS)
+}
+
+/// Ordered batching using complete owner policy; oversized single texts remain alone.
+#[must_use]
+pub fn embed_batches_with_settings(
+    texts: &[String],
+    settings: &super::remote_settings::RemoteSettings,
+) -> Vec<Range<usize>> {
     let mut batches = Vec::new();
     let mut start = 0;
     let mut bytes = 0usize;
     for (index, text) in texts.iter().enumerate() {
         let size = text.len();
-        let count_full = index - start >= EMBED_BATCH_TEXTS;
-        let bytes_full = index > start && bytes.saturating_add(size) > EMBED_BATCH_BYTES;
+        let count_full = index - start >= settings.embed_batch_texts;
+        let bytes_full = index > start && bytes.saturating_add(size) > settings.embed_batch_bytes;
         if count_full || bytes_full {
             batches.push(start..index);
             start = index;

@@ -191,3 +191,19 @@ Ready covers the indexed full-survey corpus/recipe; watcher-off filesystem edits
 remain unknown until explicit Sync. In-place mutation can refuse search, without
 old-generation continuous availability. No CF5/v2 activation or full CF12/CF13
 adoption is claimed by these application consumers.
+
+
+## MODIFIED 2026-11-14 — #81 A1 runtime-only remote dependencies
+
+RemoteSpec HTTP/retry/batch/body/provider-active/pending and DaemonSpec DNS helper
+capacity affect execution admission/client policy only. Captured settings require
+restart; no metadata/lexical/vector/query-recipe/ANN rebuild edge is added.
+Provider/model/normalization/dimensions/roles retain existing identities.
+
+Existing SearchOperation owns ordinary deadline/cancellation; shared work uses
+one fixed attempt/hard clock plus a resettable live-interest wait on the same
+future. Existing WorkerAdmission/Activity own physical CPU/DNS through actual
+finish/unwind. Runtime owners stay outside async transport/stages; compatibility
+bridges retire before runtime destruction. No config/global DB/read transaction
+needs to survive remote await. Server dispatch is A2, full job/direct/watcher
+retirement is PR2; A1 alone does not close #81 or claim a full Shared reserve.
