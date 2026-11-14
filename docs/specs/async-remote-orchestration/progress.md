@@ -280,3 +280,38 @@ codec fixture setup for the existing lint limit; no assertion/timeout weakening.
 One frozen full CLI and full lean execution follows this checkpoint; receipts
 are untracked under `task-a2/fix1/`. A3/PR2 remain pending, no public PR or final
 A2 review/issue-closure claim.
+
+## MODIFIED 2026-11-14 — A2 accepted; A3 local integration checkpoint
+
+Task A2: complete (`6a80d7d..44d4f99`; original fix1 scoped re-review
+PASS/APPROVED, I1/I2 closed, no new Critical/Important). Final actual CLI1614/0/18
+and lean1377/0/11, current lint/fmt and679 frozen hashes were independently
+accepted by root. A3 unlocked; B1–B3 remain locked until PR1 acceptance.
+
+Task A3: local verification complete (base `44d4f99`, integration commit containing
+this entry; native/task/whole-branch review pending). Actual consumer audit and
+FR/SC/resource boundaries are in [coverage.md](coverage.md). CONFIG/ARCHITECTURE
+and component inventory/state dependencies describe global RemoteSpec/helper
+policy, original deadlines and retained revision/ingress ownership, without
+claiming process-wide capacity or async direct/index/watch/backfill completion.
+
+The one missing combined lifetime case now constructs a real reqwest-backed
+client, gates an old flight, performs actual project reload, proves the retained
+stage is its last client/execution owner and destroys it inside the awaited async
+waiter. It passes with zero HTTP/DNS calls and no obsolete LRU publication.
+No production change was needed. New focused test1/0, current full CLI Clippy/fmt,
+remote-only/local-only all-target source checks, artifact/perf compile-only
+Clippy, lean dependency boundary and explicit cli-full CLI/Web capability checks
+all pass; documentation links/hygiene/diff pass. Pinned prepared assets reused.
+
+Ruling: reuse the actual44d4 full CLI1614 and lean1377 receipts, with exact input
+identity, because only a remote-gated test module and docs changed. Do not report
+an inferred new full-suite execution/total. A3 adds an executed focused lifetime
+case; it does not rerun either broad suite. Private receipts: `task-a3/`.
+
+Native docs/linux/macos/windows, browser/static/artifact and strongest final
+review remain coordinator gates on the functional public PR. The existing Linux
+workflow compiles opt-in perf_budget but does not execute its standalone release
+tests; that execution is recorded as pending, not inferred from native green.
+No local release-LTO/static/performance execution or CI change was made. #81
+stays open; complete background/direct/terminal/diagnostic delivery is PR2.

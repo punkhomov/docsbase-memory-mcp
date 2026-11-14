@@ -1238,3 +1238,73 @@ fn codec_stages(
         }
     }
 }
+
+#[tokio::test]
+async fn reloaded_flight_is_last_real_client_owner_and_destroys_it_in_async_waiter() {
+    use crate::hybrid::dense::{QueryEmbeddingRequest, RuntimeRevision};
+    use crate::hybrid::openrouter::{BASE_URL, OpenRouterClient};
+    let fixture = search_phase_tests::Fixture::new(HybridStages::default());
+    let execution = Arc::new(
+        RemoteExecution::real_with_owners(
+            &fixture.shared.global_config.remote,
+            fixture.shared.workers.clone(),
+            fixture.shared.activity.clone(),
+        )
+        .unwrap(),
+    );
+    let retired_execution = Arc::downgrade(&execution);
+    let client =
+        Arc::new(OpenRouterClient::with_execution(BASE_URL, "fixture-secret", execution).unwrap());
+    let retired_client = Arc::downgrade(&client);
+    let stages = Arc::new(codec_stages(client, true));
+    let retired_stages = Arc::downgrade(&stages);
+    let slot = fixture.shared.project_slot(fixture.project.id);
+    let config = slot.state.lock().unwrap().config.clone().unwrap();
+    slot.state.lock().unwrap().search_stages = Some(stages.clone());
+    let operation = search_operation(&fixture.shared, "search_docs")
+        .unwrap()
+        .unwrap();
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let gate = release.clone();
+    let mut work = Box::pin(fixture.shared.dense.query_embedding_async(
+        QueryEmbeddingRequest {
+            model: "openrouter/fixture@d3@l2",
+            text: "reload lifetime",
+            revision: RuntimeRevision::Captured {
+                config: config.clone(),
+                stages,
+            },
+            operation: &operation,
+            policy: &fixture.shared.global_config.search,
+        },
+        || slot.preparation_lease(&config),
+        move |_| async move {
+            entered.send(()).unwrap();
+            gate.acquire().await.unwrap().forget();
+            Ok(vec![1.0, 0.0, 0.0])
+        },
+    ));
+    tokio::select! {
+        result = &mut work => panic!("flight completed before reload: {result:?}"),
+        result = observed => result.unwrap(),
+    }
+    fixture
+        .shared
+        .open_project_config_with(&fixture.project, |_| Ok(HybridStages::default()))
+        .unwrap();
+    // No external client/execution Arc remains; only the old flight's retained
+    // stage revision owns the real reqwest client. No HTTP or DNS is requested.
+    assert_eq!(retired_client.strong_count(), 1);
+    assert_eq!(retired_execution.strong_count(), 1);
+    assert_eq!(retired_execution.upgrade().unwrap().snapshot().attempts, 0);
+    release.add_permits(1);
+    // This current-thread runtime completes the leader's poll before scheduling
+    // this waiter. Its final key/membership Drop therefore destroys the actual
+    // client in this awaited future: a runtime-Drop panic fails this test.
+    assert_eq!(&*work.await.unwrap(), &[1.0, 0.0, 0.0]);
+    assert!(retired_stages.upgrade().is_none());
+    assert!(retired_client.upgrade().is_none());
+    assert!(retired_execution.upgrade().is_none());
+    assert_eq!(fixture.shared.dense.query_cache_stats().entries, 0);
+}

@@ -412,3 +412,25 @@ background/direct sync-over-async remains explicitly legacy until PR2. No settin
 are published in a standalone scaffold/docs PR. Full CF13/provisioning/v2 remains
 deferred. Locked Tokio1.54.1, reqwest0.12.28 and hyper-util0.1.21 were inspected;
 no process-wide native resource or capacity claim follows from the Tokio bound.
+
+## MODIFIED 2026-11-14 — #81 PR1 integrated adoption
+
+I38–I40 now have an interactive daemon consumer: `server::call_tool_in` selects
+`search_async::run`, whose execution-backed stages consume RemoteSpec through
+async HTTP/retry/batch/codec calls. I66's existing search/control lanes and new
+helper_active1 own physical CPU/DNS, with helper pending derived from
+remote.interactive_active. Original request/leader Activity is retained through
+physical codec completion/unwind and abandoned output Drop, beside the source
+Activity. No second executor/admission/cache registry or new setting is added.
+
+This narrow CF13 adoption is global-only/restart-time. Effective view preserves
+units, origins and feature-off capability. Runtime assessment changes no lexical,
+query/vector recipe, model/dimension/normalization or ANN identity. Completed
+pure query vectors survive reload; retained active revision keys prevent obsolete
+publication and keep successful work discoverable through the cache handoff.
+
+Direct snapshot search, index/Sync, watcher and backfill remain legacy until PR2;
+background active/pending policy, resumable jobs/terminal IndexHandle cleanup and
+complete diagnostic projection are not delivered by these interactive owners.
+Provider/native pools and legacy producers remain outside a process-wide reserve
+claim. See [PR1 coverage](../async-remote-orchestration/coverage.md).

@@ -218,3 +218,19 @@ config and file-read leases end before remote waits. Rerank input/encoded copies
 use the existing request/retained payload allowance, and byte reservations follow
 actual CPU output destruction after cancellation. No setting, artifact identity,
 rebuild edge, independent admission tracker or v2 executor is introduced.
+
+## MODIFIED 2026-11-14 — #81 PR1 publication and retirement boundary
+
+A2 fix1 keeps successful async flight state in the existing registry until the
+last member leaves its revision-admitted cache publication callback. Failure,
+abandonment and matching replacement removal retain their prior semantics.
+This closes the completion-to-LRU gap without changing pure completed identity
+or permitting obsolete warming. Original ingress Activity and the independent
+source Activity both outlive physical codec permits; CpuOutput retains input
+charges/ingress through actual returned-data destruction, including abandonment.
+
+A3's combined boundary uses a real reqwest-backed client as the old flight's
+last stage-owned client, actual project reload and final Drop inside an async
+waiter. No HTTP/DNS call or new runtime owner is required. These runtime-only
+edges do not imply async index/Sync/watch/backfill/direct ownership, atomic
+metadata/Tantivy publication or native/process-wide memory guarantees.
