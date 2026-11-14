@@ -191,3 +191,46 @@ Ready covers the indexed full-survey corpus/recipe; watcher-off filesystem edits
 remain unknown until explicit Sync. In-place mutation can refuse search, without
 old-generation continuous availability. No CF5/v2 activation or full CF12/CF13
 adoption is claimed by these application consumers.
+
+
+## MODIFIED 2026-11-14 — #81 A1 runtime-only remote dependencies
+
+RemoteSpec HTTP/retry/batch/body/provider-active/pending and DaemonSpec DNS helper
+capacity affect execution admission/client policy only. Captured settings require
+restart; no metadata/lexical/vector/query-recipe/ANN rebuild edge is added.
+Provider/model/normalization/dimensions/roles retain existing identities.
+
+Existing SearchOperation owns ordinary deadline/cancellation; shared work uses
+one fixed attempt/hard clock plus a resettable live-interest wait on the same
+future. Existing WorkerAdmission/Activity own physical CPU/DNS through actual
+finish/unwind. Runtime owners stay outside async transport/stages; compatibility
+bridges retire before runtime destruction. No config/global DB/read transaction
+needs to survive remote await. Server dispatch is A2, full job/direct/watcher
+retirement is PR2; A1 alone does not close #81 or claim a full Shared reserve.
+
+## MODIFIED 2026-11-14 — #81 A2 interactive ownership
+
+Interactive search consumes the captured RemoteSpec/DaemonSpec/SearchSpec owners
+through Shared execution, existing CPU admission and original request deadlines.
+Active query revision keys retain config plus stages; obsolete results cannot
+newly publish, while existing pure completed recipes survive reload. Metadata,
+config and file-read leases end before remote waits. Rerank input/encoded copies
+use the existing request/retained payload allowance, and byte reservations follow
+actual CPU output destruction after cancellation. No setting, artifact identity,
+rebuild edge, independent admission tracker or v2 executor is introduced.
+
+## MODIFIED 2026-11-14 — #81 PR1 publication and retirement boundary
+
+A2 fix1 keeps successful async flight state in the existing registry until the
+last member leaves its revision-admitted cache publication callback. Failure,
+abandonment and matching replacement removal retain their prior semantics.
+This closes the completion-to-LRU gap without changing pure completed identity
+or permitting obsolete warming. Original ingress Activity and the independent
+source Activity both outlive physical codec permits; CpuOutput retains input
+charges/ingress through actual returned-data destruction, including abandonment.
+
+A3's combined boundary uses a real reqwest-backed client as the old flight's
+last stage-owned client, actual project reload and final Drop inside an async
+waiter. No HTTP/DNS call or new runtime owner is required. These runtime-only
+edges do not imply async index/Sync/watch/backfill/direct ownership, atomic
+metadata/Tantivy publication or native/process-wide memory guarantees.

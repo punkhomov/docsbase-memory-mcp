@@ -768,6 +768,39 @@ pub fn from_config_with(
     cfg: &HybridCfg,
     providers: &ProvidersCfg,
 ) -> Result<HybridStages> {
+    from_config_dispatch(
+        table,
+        cfg,
+        providers,
+        #[cfg(feature = "hybrid-remote")]
+        None,
+    )
+}
+
+/// Build existing provider stages with an explicit async remote owner.
+///
+/// # Errors
+/// Existing provider/model/config admission or construction errors.
+#[cfg(feature = "hybrid-remote")]
+pub fn from_config_with_execution(
+    cfg: &HybridCfg,
+    providers: &ProvidersCfg,
+    execution: &Arc<super::remote::RemoteExecution>,
+) -> Result<HybridStages> {
+    from_config_dispatch(
+        crate::hybrid::provider::providers(),
+        cfg,
+        providers,
+        Some(execution),
+    )
+}
+
+fn from_config_dispatch(
+    table: &[&'static dyn Provider],
+    cfg: &HybridCfg,
+    providers: &ProvidersCfg,
+    #[cfg(feature = "hybrid-remote")] execution: Option<&Arc<super::remote::RemoteExecution>>,
+) -> Result<HybridStages> {
     if !cfg.enabled {
         return Ok(HybridStages::default());
     }
@@ -814,15 +847,26 @@ pub fn from_config_with(
         ..HybridStages::default()
     };
     for provider in needed {
-        let (embedder, reranker) = provider.build_stages(
-            cfg.embedding
-                .as_ref()
-                .filter(|stage| stage.provider == provider.name()),
-            cfg.reranker
-                .as_ref()
-                .filter(|stage| stage.provider == provider.name()),
-            providers,
-        )?;
+        let embedding = cfg
+            .embedding
+            .as_ref()
+            .filter(|stage| stage.provider == provider.name());
+        let reranker = cfg
+            .reranker
+            .as_ref()
+            .filter(|stage| stage.provider == provider.name());
+        #[cfg(feature = "hybrid-remote")]
+        let (embedder, reranker) = match execution {
+            Some(execution) => provider.build_stages_with_execution(
+                embedding,
+                reranker,
+                providers,
+                Arc::clone(execution),
+            )?,
+            None => provider.build_stages(embedding, reranker, providers)?,
+        };
+        #[cfg(not(feature = "hybrid-remote"))]
+        let (embedder, reranker) = provider.build_stages(embedding, reranker, providers)?;
         stages.embedder = stages.embedder.or(embedder);
         stages.reranker = stages.reranker.or(reranker);
     }

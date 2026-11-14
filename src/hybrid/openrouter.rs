@@ -42,7 +42,8 @@ impl std::fmt::Debug for ApiKey {
 pub struct OpenRouterClient {
     base_url: String,
     api_key: ApiKey,
-    transport: Box<dyn Transport>,
+    transport: Option<Box<dyn Transport>>,
+    execution: Option<Arc<super::remote::RemoteExecution>>,
 }
 
 impl std::fmt::Debug for OpenRouterClient {
@@ -76,7 +77,8 @@ impl OpenRouterClient {
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             api_key: ApiKey(api_key.to_owned()),
-            transport,
+            transport: Some(transport),
+            execution: None,
         })
     }
 
@@ -89,6 +91,39 @@ impl OpenRouterClient {
             message: "OPENROUTER_API_KEY is not set; export it or disable hybrid".to_owned(),
         })?;
         Self::new(BASE_URL, &key, Box::new(ReqwestTransport::new()?))
+    }
+
+    /// Build an async-capable client on an explicit execution owner, without a sync fallback.
+    ///
+    /// # Errors
+    /// Invalid allowlisted endpoint or empty credential.
+    pub fn with_execution(
+        base_url: &str,
+        api_key: &str,
+        execution: Arc<super::remote::RemoteExecution>,
+    ) -> Result<Self> {
+        if base_url.trim_end_matches('/') != BASE_URL || api_key.trim().is_empty() {
+            return Err(Error::Admission {
+                message: "invalid OpenRouter endpoint or empty credential".to_owned(),
+            });
+        }
+        Ok(Self {
+            base_url: BASE_URL.to_owned(),
+            api_key: ApiKey(api_key.to_owned()),
+            transport: None,
+            execution: Some(execution),
+        })
+    }
+
+    /// Read the existing credential once while composing explicit execution.
+    ///
+    /// # Errors
+    /// Missing/empty credential or invalid client policy.
+    pub fn from_env_with_execution(execution: Arc<super::remote::RemoteExecution>) -> Result<Self> {
+        let key = std::env::var("OPENROUTER_API_KEY").map_err(|_| Error::Admission {
+            message: "OPENROUTER_API_KEY is not set; export it or disable hybrid".to_owned(),
+        })?;
+        Self::with_execution(BASE_URL, &key, execution)
     }
 
     /// Embeds `texts` in bounded batches, preserving input order.
@@ -125,7 +160,7 @@ impl OpenRouterClient {
         let mut vectors = Vec::with_capacity(texts.len());
         for range in wire::embed_batches(texts) {
             let batch = codec.embed(
-                &*self.transport,
+                self.sync_transport()?,
                 model,
                 dimensions,
                 &texts[range],
@@ -160,12 +195,102 @@ impl OpenRouterClient {
             return Ok(Vec::new());
         }
         super::rig_codec::OpenRouterCodec::new(&self.api_key.0).rerank(
-            &*self.transport,
+            self.sync_transport()?,
             model,
             query,
             docs,
             top_n,
         )
+    }
+
+    fn sync_transport(&self) -> Result<&dyn Transport> {
+        self.transport.as_deref().ok_or_else(|| Error::Admission {
+            message: "this remote stage requires async orchestration".to_owned(),
+        })
+    }
+
+    async fn embed_async(
+        self: &Arc<Self>,
+        model: String,
+        dimensions: u32,
+        normalize: bool,
+        texts: Arc<[String]>,
+        input_type: &'static str,
+        call: &super::remote::RemoteCall,
+    ) -> Result<Vec<Vec<f32>>> {
+        let execution = self.execution.as_ref().ok_or_else(|| Error::Admission {
+            message: "remote execution owner is required".to_owned(),
+        })?;
+        let stage = execution.admit(call).await?;
+        let mut vectors = Vec::new();
+        for range in wire::embed_batches_with_settings(&texts, execution.settings()) {
+            let client = Arc::clone(self);
+            let input = Arc::clone(&texts);
+            let model = model.clone();
+            let prepared = execution
+                .cpu(call, move || {
+                    super::rig_codec::OpenRouterCodec::new(&client.api_key.0).prepare_embedding(
+                        &model,
+                        dimensions,
+                        &input[range],
+                        input_type,
+                    )
+                })
+                .await?;
+            let response = stage.post(call, &prepared.request).await?;
+            let batch = execution
+                .cpu(call, move || {
+                    prepared.decode(&response.body).map(|vectors| {
+                        vectors
+                            .into_iter()
+                            .map(|vector| {
+                                if normalize {
+                                    l2_normalize(vector)
+                                } else {
+                                    vector
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .await?;
+            vectors.extend(batch);
+        }
+        Ok(vectors)
+    }
+
+    async fn rerank_async(
+        self: &Arc<Self>,
+        model: String,
+        query: Arc<str>,
+        documents: Arc<[String]>,
+        top_n: usize,
+        call: &super::remote::RemoteCall,
+    ) -> Result<Vec<(usize, f32)>> {
+        if documents.is_empty() || top_n == 0 {
+            return Ok(Vec::new());
+        }
+        let execution = self.execution.as_ref().ok_or_else(|| Error::Admission {
+            message: "remote execution owner is required".to_owned(),
+        })?;
+        let stage = execution.admit(call).await?;
+        let client = Arc::clone(self);
+        let reservation = call.payload_reservation();
+        let prepared = execution
+            .cpu(call, move || {
+                let prepared = super::rig_codec::OpenRouterCodec::new(&client.api_key.0)
+                    .prepare_rerank(&model, &query, &documents, top_n.min(documents.len()))?;
+                // The encoded value owns its reservation through network waits/drop.
+                Ok((prepared, reservation))
+            })
+            .await?;
+        let response = stage.post(call, &prepared.0.request).await?;
+        execution
+            .cpu(call, move || {
+                let (prepared, _reservation) = prepared;
+                prepared.decode(&response.body)
+            })
+            .await
     }
 }
 
@@ -222,6 +347,12 @@ impl OpenRouterEmbedder {
 }
 
 impl Embedder for OpenRouterEmbedder {
+    fn async_remote(&self) -> Option<&dyn super::remote::AsyncEmbedder> {
+        self.client
+            .execution
+            .as_ref()
+            .map(|_| self as &dyn super::remote::AsyncEmbedder)
+    }
     fn model_id(&self) -> &str {
         &self.model_id
     }
@@ -249,6 +380,46 @@ impl Embedder for OpenRouterEmbedder {
     }
 }
 
+impl super::remote::AsyncEmbedder for OpenRouterEmbedder {
+    fn embed<'a>(
+        &'a self,
+        texts: Arc<[String]>,
+        call: &'a super::remote::RemoteCall,
+    ) -> super::remote::StageFuture<'a, Vec<Vec<f32>>> {
+        Box::pin(self.client.embed_async(
+            self.cfg.model.clone(),
+            self.cfg.dimensions,
+            self.cfg.normalize,
+            texts,
+            INPUT_TYPE_DOCUMENT,
+            call,
+        ))
+    }
+
+    fn embed_query<'a>(
+        &'a self,
+        text: Arc<str>,
+        call: &'a super::remote::RemoteCall,
+    ) -> super::remote::StageFuture<'a, Vec<f32>> {
+        Box::pin(async move {
+            let mut vectors = self
+                .client
+                .embed_async(
+                    self.cfg.model.clone(),
+                    self.cfg.dimensions,
+                    self.cfg.normalize,
+                    Arc::from([text.to_string()]),
+                    INPUT_TYPE_QUERY,
+                    call,
+                )
+                .await?;
+            vectors
+                .pop()
+                .ok_or_else(|| Error::internal("embed returned no vector for one input"))
+        })
+    }
+}
+
 /// `Reranker` adapter over [`OpenRouterClient`] (FR-2, FR-11).
 pub struct OpenRouterReranker {
     client: Arc<OpenRouterClient>,
@@ -273,6 +444,12 @@ impl OpenRouterReranker {
 }
 
 impl Reranker for OpenRouterReranker {
+    fn async_remote(&self) -> Option<&dyn super::remote::AsyncReranker> {
+        self.client
+            .execution
+            .as_ref()
+            .map(|_| self as &dyn super::remote::AsyncReranker)
+    }
     fn rerank(&self, query: &str, docs: &[String], top_n: usize) -> Result<Vec<(usize, f32)>> {
         if docs.is_empty() {
             return Ok(Vec::new());
@@ -282,39 +459,143 @@ impl Reranker for OpenRouterReranker {
     }
 }
 
-/// Real transport: async `reqwest` driven from the sanctioned blocking
-/// context; reuses the ambient runtime when there is one (daemon blocking
-/// threads) and otherwise owns a small current-thread runtime (CLI/tests).
+impl super::remote::AsyncReranker for OpenRouterReranker {
+    fn rerank<'a>(
+        &'a self,
+        query: Arc<str>,
+        documents: Arc<[String]>,
+        top_n: usize,
+        call: &'a super::remote::RemoteCall,
+    ) -> super::remote::StageFuture<'a, Vec<(usize, f32)>> {
+        Box::pin(
+            self.client
+                .rerank_async(self.cfg.model.clone(), query, documents, top_n, call),
+        )
+    }
+}
+
+/// Runtime-free reqwest transport with an explicitly bounded DNS resolver.
 pub struct ReqwestTransport {
     http: reqwest::Client,
-    runtime: tokio::runtime::Runtime,
+    max_response_bytes: u64,
+    attempt_timeout: Duration,
+    sync_bridge: Option<Arc<crate::daemon::remote::SyncBridge>>,
 }
 
 impl ReqwestTransport {
-    /// Builds the HTTP client and a fallback runtime.
+    /// Resolve standalone compatibility policy, then build a runtime-free client.
     ///
     /// # Errors
-    /// [`Error::Internal`] when the HTTP client or runtime cannot be built.
+    /// Invalid owner policy or HTTP client construction failure.
     pub fn new() -> Result<Self> {
-        // 30 s per attempt keeps the worst retry chain (~2 min) bounded for
-        // interactive search (NFR-1; a rerank/embed call takes ~100-500 ms).
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|err| Error::internal_with_source("build OpenRouter http client", err))?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| Error::internal_with_source("build OpenRouter runtime", err))?;
-        Ok(Self { http, runtime })
+        let settings = super::remote_settings::standalone()?;
+        let daemon = crate::daemon::settings::standalone()?;
+        let resolver = Arc::new(crate::daemon::remote::BoundedResolver::with_settings(
+            settings.settings(),
+            daemon.settings(),
+        )?);
+        let mut transport = Self::with_settings(settings.settings(), resolver)?;
+        transport.sync_bridge = blocking::bridge();
+        Ok(transport)
     }
 
-    fn block_on<F: Future>(&self, future: F) -> F::Output {
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => handle.block_on(future),
-            Err(_) => self.runtime.block_on(future),
-        }
+    /// Construct a runtime-free client with explicitly owned policy and resolver.
+    ///
+    /// # Errors
+    /// Invalid policy or HTTP client construction failure.
+    pub fn with_settings<R: reqwest::dns::Resolve + 'static>(
+        settings: &super::remote_settings::RemoteSettings,
+        resolver: Arc<R>,
+    ) -> Result<Self> {
+        use crate::config::schema::{Capabilities, SettingsSpec};
+        super::remote_settings::RemoteSpec::validate(settings, &Capabilities::current())?;
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_millis(settings.attempt_timeout_ms))
+            .pool_max_idle_per_host(settings.interactive_active)
+            .dns_resolver(resolver)
+            .build()
+            .map_err(|err| Error::internal_with_source("build OpenRouter http client", err))?;
+        Ok(Self {
+            http,
+            max_response_bytes: settings.max_response_bytes,
+            attempt_timeout: Duration::from_millis(settings.attempt_timeout_ms),
+            sync_bridge: None,
+        })
     }
+
+    fn block_on<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
+        if !blocking::in_context() {
+            return Err(Error::Admission {
+                message: "synchronous remote transport requires a sanctioned blocking context"
+                    .to_owned(),
+            });
+        }
+        self.sync_bridge
+            .as_ref()
+            .ok_or_else(|| Error::Admission {
+                message: "synchronous remote transport requires an explicit command runtime"
+                    .to_owned(),
+            })?
+            .block_on(future)
+    }
+}
+
+impl super::remote::AsyncTransport for ReqwestTransport {
+    fn post_json<'a>(
+        &'a self,
+        request: &'a super::remote::WireRequest,
+        timeout: Duration,
+    ) -> super::remote::StageFuture<'a, TransportResponse> {
+        Box::pin(async move {
+            let mut send = self
+                .http
+                .post(&request.url)
+                .timeout(timeout.min(self.attempt_timeout))
+                .body(request.body.clone());
+            for (name, value) in &request.headers {
+                send = send.header(name, value);
+            }
+            let response = send.send().await.map_err(|error| {
+                Error::internal_with_source("OpenRouter request failed", error.without_url())
+            })?;
+            read_response(response, self.max_response_bytes).await
+        })
+    }
+}
+
+async fn read_response(mut response: reqwest::Response, maximum: u64) -> Result<TransportResponse> {
+    let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        Error::internal_with_source("read OpenRouter response", error.without_url())
+    })? {
+        let next = bytes
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| Error::internal("remote response byte overflow"))?;
+        if u64::try_from(next).map_or(true, |length| length > maximum) {
+            return Err(Error::Admission {
+                message: "remote response byte limit exceeded".to_owned(),
+            });
+        }
+        bytes
+            .try_reserve_exact(chunk.len())
+            .map_err(|error| Error::internal_with_source("reserve remote response", error))?;
+        bytes.extend_from_slice(&chunk);
+    }
+    let body =
+        String::from_utf8(bytes).map_err(|_| Error::internal("remote response is not UTF-8"))?;
+    Ok(TransportResponse {
+        status,
+        body,
+        retry_after,
+    })
 }
 
 impl Transport for ReqwestTransport {
@@ -324,63 +605,29 @@ impl Transport for ReqwestTransport {
         headers: &[(String, String)],
         body: &str,
     ) -> Result<TransportResponse> {
-        let future = async {
-            let mut request = self.http.post(url).body(body.to_owned());
-            for (name, value) in headers {
-                request = request.header(name, value);
-            }
-            let response = request
-                .send()
-                .await
-                .map_err(|err| Error::internal_with_source("OpenRouter request failed", err))?;
-            let status = response.status().as_u16();
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.trim().parse::<u64>().ok())
-                .map(Duration::from_secs);
-            let body = response
-                .text()
-                .await
-                .map_err(|err| Error::internal_with_source("read OpenRouter response", err))?;
-            Ok(TransportResponse {
-                status,
-                body,
-                retry_after,
-            })
+        let request = super::remote::WireRequest {
+            url: url.to_owned(),
+            headers: headers.to_vec(),
+            body: body.to_owned(),
         };
-        self.block_on(future)
+        self.block_on(super::remote::AsyncTransport::post_json(
+            self,
+            &request,
+            self.attempt_timeout,
+        ))
     }
 
     fn get_json(&self, url: &str, headers: &[(String, String)]) -> Result<TransportResponse> {
-        let future = async {
+        self.block_on(async {
             let mut request = self.http.get(url);
             for (name, value) in headers {
                 request = request.header(name, value);
             }
-            let response = request
-                .send()
-                .await
-                .map_err(|err| Error::internal_with_source("OpenRouter request failed", err))?;
-            let status = response.status().as_u16();
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.trim().parse::<u64>().ok())
-                .map(Duration::from_secs);
-            let body = response
-                .text()
-                .await
-                .map_err(|err| Error::internal_with_source("read OpenRouter response", err))?;
-            Ok(TransportResponse {
-                status,
-                body,
-                retry_after,
-            })
-        };
-        self.block_on(future)
+            let response = request.send().await.map_err(|error| {
+                Error::internal_with_source("OpenRouter request failed", error.without_url())
+            })?;
+            read_response(response, self.max_response_bytes).await
+        })
     }
 }
 

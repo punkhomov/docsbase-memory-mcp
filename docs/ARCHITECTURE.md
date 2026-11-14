@@ -54,6 +54,56 @@ Errors/unwinds wake followers, cancelled callers stop participating and live
 followers can continue. Large vector materialization happens after flight
 admission. Background refresh uses the same prepared metadata pool.
 
+## Asynchronous remote search
+
+Daemon searches, including CLI/MCP forwarding, run these owned phases:
+
+```mermaid
+flowchart LR
+    P[CPU lexical and runtime capture] --> Q[Async shared query embedding]
+    Q --> C[CPU dense, fusion, refill and payload capture]
+    C --> R[Async remote rerank]
+    R --> F[CPU response construction]
+```
+
+The same `SearchOperation` bounds admission, CPU phases, HTTP attempts/retries,
+rerank and reply. SQL/read-pool, config and project preparation leases end before
+remote waits. Revision/generation checks refuse obsolete preparation; a complete
+owned payload can finish a consistent old response after mutation/reload.
+In-place indexing can still refuse new search; continuous old-generation service
+is not promised.
+
+Existing query flights have asynchronous members and one owned leader. Active
+keys retain config and stage revisions alongside model/query identity. Successful
+terminal work remains discoverable until the revision-admitted cache handoff;
+errors, abandonment and the last departing member retire the matching flight.
+One caller's cancellation does not cancel live peers. Compatible completed query
+vectors keep their pure model/query-hash identity across reload, while obsolete
+in-flight results cannot newly warm the completed cache.
+
+Remote stages use a runtime-free reqwest client, the existing Rig wire codecs,
+asynchronous HTTP/backoff and bounded codec CPU work. Personal member deadlines
+reset only an outer interest timer around the same pinned shared attempt;
+attempt/hard limits do not inherit the first member's shorter deadline. Local
+inference remains bounded blocking work; no thread-local blocking guard spans an
+await. The new route never enters the synchronous provider bridge.
+
+One admitted connection drives one request/reply at a time. Owned leaders and
+physical local/codec closures retain the original Activity/connection permit;
+physical CPU permits retire before ingress/source activity on completion/unwind,
+including abandoned results. Source-owned DNS helpers have separate bounded
+admission and stay charged until native lookup finishes after cancellation.
+Provider active/pending limits, search/control/helper lanes, ReadPool and payload
+budgets retain their existing owners. These bounds do not cover all native
+Tantivy/ONNX/tokenizer/ANN threads or promise process-wide memory/capacity.
+
+Direct snapshot fallback, index/Sync, watcher and vector backfill still use the
+legacy synchronous boundary and explicit command/runtime bridge where applicable.
+Their resumable async migration, terminal job cleanup/Sync attribution and full
+diagnostic projection remain #81's second delivery. No on-disk identity, ranking,
+provider fallback or protocol change accompanies this first delivery. See
+[remote policy](CONFIG.md#remote-execution-policy-global-only).
+
 ## Scoped search IPC
 
 Protocol version remains `1`. `Hello` replies add `data.capabilities`, including
@@ -79,7 +129,7 @@ cancellation abandons that caller; another complete frame during work is a
 protocol refusal, while a partial next frame survives if the current work wins.
 The same original deadline bounds reply writes, without a fresh error-delivery
 budget. Clients discard interrupted/partial connections before reuse. Actual
-synchronous jobs retain activity and connection capacity until they complete;
+blocking search work retains activity and connection capacity until it completes;
 graceful shutdown drains that real work, not only waiting client futures.
 
 Legacy `CallTool` remains available to compatibility clients and retains its

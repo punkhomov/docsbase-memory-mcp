@@ -153,6 +153,25 @@ pub(crate) fn launch_resolution(
         let mut document =
             super::parse_global_document(path, text).map_err(LaunchFailure::Legacy)?;
         let source = SourceId::Global(path.to_owned());
+        // New owner policy errors precede unrelated legacy decoding failures.
+        if let Some(remote) = document.remove("remote") {
+            let owner_policy = crate::hybrid::remote_settings::RemoteSpec::decode_patch(remote)
+                .map_err(LaunchFailure::Remote)?;
+            resolution
+                .apply(
+                    &source,
+                    super::GlobalFileConfig {
+                        remote: Some(owner_policy),
+                        ..super::GlobalFileConfig::default()
+                    },
+                )
+                .map_err(LaunchFailure::Remote)?;
+            crate::hybrid::remote_settings::RemoteSpec::validate(
+                &resolution.settings.remote,
+                &resolution.capabilities,
+            )
+            .map_err(LaunchFailure::Remote)?;
+        }
         if let Some(daemon) = document.remove("daemon") {
             let owner_patch = daemon
                 .try_into::<crate::daemon::settings::DaemonPatch>()
@@ -202,6 +221,8 @@ pub(crate) enum LaunchFailure {
     Legacy(Error),
     // New owner errors and every recognized Website failure must fail closed.
     Daemon(Error),
+    // A recognized remote policy is never a legacy Shared source fallback.
+    Remote(Error),
 }
 impl LaunchFailure {
     fn classify(error: Error, website: bool) -> Self {
@@ -213,7 +234,7 @@ impl LaunchFailure {
     }
     pub(crate) fn into_error(self) -> Error {
         match self {
-            Self::Legacy(error) | Self::Daemon(error) => error,
+            Self::Legacy(error) | Self::Daemon(error) | Self::Remote(error) => error,
         }
     }
 }

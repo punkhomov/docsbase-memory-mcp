@@ -157,6 +157,11 @@ impl OwnedPayload {
         })
     }
 
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        self.data.charge.total
+    }
+
     /// Root validated before capture.
     #[must_use]
     pub fn cache_root(&self) -> &Path {

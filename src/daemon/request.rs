@@ -4,7 +4,6 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio::task::{JoinError, JoinHandle};
 
@@ -18,21 +17,81 @@ mod worker_spawn_tests;
 
 /// Transfer actual execution ownership, including unwind, into the closure.
 /// `None` permits are reserved for the legacy Shared background sync path.
-pub(super) fn spawn<T: Send + 'static>(
+pub(crate) fn spawn<T: Send + 'static>(
     permit: Option<OwnedSemaphorePermit>,
     activity: Option<Arc<Activity>>,
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> JoinHandle<Result<T>> {
+    spawn_retained(permit, activity, None, work)
+}
+
+/// Keep the ingress owner alongside the source's physical drain charge.
+pub(crate) fn spawn_retained<T: Send + 'static>(
+    permit: Option<OwnedSemaphorePermit>,
+    activity: Option<Arc<Activity>>,
+    ingress: Option<Arc<Activity>>,
     work: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> JoinHandle<Result<T>> {
     tokio::task::spawn_blocking(move || {
         // Release capacity before Activity publishes physical completion.
         let _activity = activity;
+        let _ingress = ingress;
         let _permit = permit;
         work()
     })
 }
 
 /// One charge shared by the async reply and the actual blocking closure.
-pub(super) struct Activity {
+#[derive(Clone)]
+pub(crate) struct ActivitySource {
+    pub(crate) counter: Arc<AtomicUsize>,
+    pub(crate) events: mpsc::Sender<()>,
+    pub(crate) bridge: Option<Arc<super::remote::SyncBridge>>,
+}
+
+impl ActivitySource {
+    pub(crate) fn channel(capacity: usize) -> (Self, mpsc::Receiver<()>) {
+        let (events, receiver) = mpsc::channel(capacity);
+        (
+            Self {
+                counter: Arc::new(AtomicUsize::new(0)),
+                events,
+                bridge: tokio::runtime::Handle::try_current()
+                    .ok()
+                    .map(|handle| Arc::new(super::remote::SyncBridge::new(handle))),
+            },
+            receiver,
+        )
+    }
+
+    pub(crate) fn with_runtime(
+        capacity: usize,
+        handle: tokio::runtime::Handle,
+    ) -> (Self, mpsc::Receiver<()>) {
+        let (mut source, receiver) = Self::channel(capacity);
+        source.bridge = Some(Arc::new(super::remote::SyncBridge::new(handle)));
+        (source, receiver)
+    }
+
+    pub(crate) fn retire_bridge(&self) {
+        if let Some(bridge) = &self.bridge {
+            bridge.retire();
+        }
+    }
+
+    pub(crate) fn track(&self) -> Arc<Activity> {
+        Activity::new(&self.counter, &self.events, None)
+    }
+
+    pub(crate) async fn drain(&self, poll: std::time::Duration) {
+        while self.counter.load(Ordering::SeqCst) != 0 {
+            tokio::time::sleep(poll).await;
+        }
+    }
+}
+
+/// One charge shared by the async reply and the actual blocking closure.
+pub(crate) struct Activity {
     counter: Arc<AtomicUsize>,
     events: mpsc::Sender<()>,
     connection: Option<Arc<OwnedSemaphorePermit>>,
@@ -40,7 +99,7 @@ pub(super) struct Activity {
 
 impl Activity {
     #[must_use]
-    pub(super) fn new(
+    pub(crate) fn new(
         counter: &Arc<AtomicUsize>,
         events: &mpsc::Sender<()>,
         connection: Option<&Arc<OwnedSemaphorePermit>>,
@@ -63,10 +122,10 @@ impl Drop for Activity {
     }
 }
 
-pub(super) async fn run(
-    worker: JoinHandle<Result<Value>>,
+pub(super) async fn run<T>(
+    worker: JoinHandle<Result<T>>,
     operation: Option<&SearchOperation>,
-) -> Result<Value> {
+) -> Result<T> {
     match operation {
         Some(operation) => {
             let deadline = tokio::time::Instant::from_std(operation.deadline());
@@ -77,11 +136,11 @@ pub(super) async fn run(
 }
 
 /// A private expiry signal permits gate-driven tests without virtual std time.
-async fn with_expiry(
-    worker: JoinHandle<Result<Value>>,
+async fn with_expiry<T>(
+    worker: JoinHandle<Result<T>>,
     operation: &SearchOperation,
     expiry: impl Future<Output = ()>,
-) -> Result<Value> {
+) -> Result<T> {
     let mut cancellation = CancelOnDrop(Some(operation.cancellation().clone()));
     tokio::select! {
         biased;
@@ -89,6 +148,9 @@ async fn with_expiry(
             cancellation.0 = None;
             operation.check()?;
             joined(result)
+        }
+        () = operation.cancellation().cancelled() => {
+            Err(Error::Admission { message: "search request cancelled".to_owned() })
         }
         () = expiry => {
             operation.cancellation().cancel();
@@ -99,11 +161,11 @@ async fn with_expiry(
     }
 }
 
-fn joined(result: std::result::Result<Result<Value>, JoinError>) -> Result<Value> {
+fn joined<T>(result: std::result::Result<Result<T>, JoinError>) -> Result<T> {
     result.map_err(|err| Error::internal_with_source("tool task join", err))?
 }
 
-pub(super) struct CancelOnDrop(pub(super) Option<Cancellation>);
+pub(crate) struct CancelOnDrop(pub(crate) Option<Cancellation>);
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {

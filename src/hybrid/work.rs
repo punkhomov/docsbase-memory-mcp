@@ -3,7 +3,13 @@
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
+use super::remote_settings::RemoteSettings;
 use crate::error::{Error, Result};
+use crate::search::operation::SearchOperation;
+#[cfg(any(feature = "hybrid-remote", test))]
+use std::future::Future;
+use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 /// One operation's cancellation state, independent of configuration/time budgets.
 #[derive(Clone, Default)]
@@ -175,6 +181,150 @@ impl Drop for Subscription {
             .unwrap_or_else(PoisonError::into_inner)
             .listeners
             .retain(|wake| !Weak::ptr_eq(wake, &self.wake));
+    }
+}
+
+/// Live shared-work interest supplied by the existing flight registry.
+pub trait SharedInterest: Send + Sync {
+    /// Current maximum live-member deadline; None is terminal abandonment.
+    fn deadline(&self) -> Option<Instant>;
+    /// Changes notify a permanent-state checking loop, not a one-shot event.
+    fn notify(&self) -> &Notify;
+}
+
+/// One explicit operation or a hard-capped shared operation with independent members.
+#[derive(Clone)]
+pub struct RemoteCall {
+    operation: SearchOperation,
+    interest: Option<Arc<dyn SharedInterest>>,
+    #[cfg(feature = "hybrid-remote")]
+    retained_payload: Option<Arc<crate::search::budget::PayloadPermit>>,
+    #[cfg(feature = "hybrid-remote")]
+    activity: Option<Arc<crate::daemon::request::Activity>>,
+}
+
+impl RemoteCall {
+    /// Preserve an ordinary caller's original deadline and token.
+    #[must_use]
+    pub fn new(operation: SearchOperation) -> Self {
+        Self {
+            operation,
+            interest: None,
+            #[cfg(feature = "hybrid-remote")]
+            retained_payload: None,
+            #[cfg(feature = "hybrid-remote")]
+            activity: None,
+        }
+    }
+
+    /// The operation deadline is the shared hard cap, never the initiating member's budget.
+    #[must_use]
+    pub fn shared(operation: SearchOperation, interest: Arc<dyn SharedInterest>) -> Self {
+        Self {
+            operation,
+            interest: Some(interest),
+            #[cfg(feature = "hybrid-remote")]
+            retained_payload: None,
+            #[cfg(feature = "hybrid-remote")]
+            activity: None,
+        }
+    }
+
+    /// Retain the original ingress owner through physical codec work and output Drop.
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn with_activity(mut self, activity: Arc<crate::daemon::request::Activity>) -> Self {
+        self.activity = Some(activity);
+        self
+    }
+
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn activity(&self) -> Option<Arc<crate::daemon::request::Activity>> {
+        self.activity.clone()
+    }
+
+    /// CPU adapters clone this owner with encoded input even after waiter Drop.
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn with_payload_reservation(
+        mut self,
+        reservation: Arc<crate::search::budget::PayloadPermit>,
+    ) -> Self {
+        self.retained_payload = Some(reservation);
+        self
+    }
+
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn payload_reservation(&self) -> Option<Arc<crate::search::budget::PayloadPermit>> {
+        self.retained_payload.clone()
+    }
+
+    /// Original operation, or shared hard operation when coalesced.
+    #[must_use]
+    pub fn operation(&self) -> &SearchOperation {
+        &self.operation
+    }
+
+    pub(crate) fn check(&self) -> Result<()> {
+        self.operation.check()?;
+        if let Some(interest) = &self.interest
+            && interest
+                .deadline()
+                .is_none_or(|deadline| deadline <= Instant::now())
+        {
+            return Err(remote_denied("shared remote work has no live interest"));
+        }
+        Ok(())
+    }
+
+    /// Fixed attempt timeout excludes personal-member limits for shared work.
+    ///
+    /// # Errors
+    /// Expired/cancelled operation or no live shared interest.
+    pub fn attempt_timeout(&self, policy: &RemoteSettings) -> Result<Duration> {
+        self.check()?;
+        Ok(Duration::from_millis(policy.attempt_timeout_ms).min(self.operation.remaining()?))
+    }
+
+    /// Poll the same pinned work while resetting only the outer live-interest timer.
+    #[cfg(any(feature = "hybrid-remote", test))]
+    pub(crate) async fn wait<T>(
+        &self,
+        shutdown: &Cancellation,
+        work: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        tokio::pin!(work);
+        loop {
+            // Enable the concrete Notify waiter before reading permanent state.
+            let changed = self
+                .interest
+                .as_ref()
+                .map(|interest| interest.notify().notified());
+            tokio::pin!(changed);
+            if let Some(notified) = changed.as_mut().as_pin_mut() {
+                notified.enable();
+            }
+            self.check()?;
+            shutdown.check()?;
+            let deadline = self
+                .interest
+                .as_ref()
+                .and_then(|interest| interest.deadline())
+                .unwrap_or(self.operation.deadline())
+                .min(self.operation.deadline());
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return Err(remote_denied("remote execution is shutting down")),
+                () = self.operation.cancellation().cancelled() => return Err(remote_denied("remote operation cancelled")),
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => { self.check()?; }
+                () = async { match changed.as_mut().as_pin_mut() { Some(waiter) => waiter.await, None => std::future::pending().await } } => {}
+                result = &mut work => { self.check()?; return result; }
+            }
+        }
+    }
+}
+
+fn remote_denied(message: &str) -> Error {
+    Error::Admission {
+        message: message.to_owned(),
     }
 }
 

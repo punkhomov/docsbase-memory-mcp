@@ -78,6 +78,71 @@ operation. A running daemon still clamps client time to its startup policy.
 Invalid global configuration prevents MCP startup instead of selecting another
 policy. See [search timing and cancellation](MCP.md#timeouts-and-cancellation).
 
+## Remote execution policy (global only)
+
+The optional global `[remote]` table controls asynchronous remote query embedding
+and rerank in daemon searches, including searches forwarded by CLI/MCP clients.
+`RemoteSpec` resolves defaults, validates values and records provenance before
+runtime construction. Project overrides are rejected. Enabled remote stages
+still require an available provider and credentials; this policy does not enable
+hybrid search or select another provider on failure.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `interactive_active` | `4` | Concurrent remote stages, including their codec, batch and retry waits |
+| `interactive_pending` | `32` | Queued stages; zero refuses a busy stage immediately |
+| `attempt_timeout_ms` | `30000` | Maximum time per HTTP attempt, narrowed by the remaining original budget |
+| `retry_attempts` | `4` | Total attempts, including the first |
+| `retry_initial_ms` | `250` | Initial retry delay |
+| `retry_max_ms` | `4000` | Maximum exponentially multiplied retry delay |
+| `retry_multiplier` | `2` | Retry delay multiplier |
+| `max_retry_after_ms` | `30000` | Cap on a retryable 429 response's Retry-After seconds |
+| `jitter_max_ms` | `50` | Exclusive upper bound for added jitter; zero disables it |
+| `embed_batch_texts` | `128` | Maximum embedding inputs per batch |
+| `embed_batch_bytes` | `524288` (512 KiB) | Target input bytes per embedding batch; one oversized text remains a single batch |
+| `max_response_bytes` | `33554432` (32 MiB) | Maximum actual streamed response bytes, independent of Content-Length |
+
+```toml
+[remote]
+interactive_active = 4
+interactive_pending = 32
+attempt_timeout_ms = 30000
+retry_attempts = 4
+
+[daemon]
+helper_active = 1
+```
+
+`[daemon].helper_active` defaults to `1` physically running DNS lookup. Its
+pending allowance is derived from `remote.interactive_active`. It uses the
+existing daemon worker admission and activity owners. The daemon's
+`max_blocking_threads` must accommodate `search_active + control_active + 1`
+fixed sync worker `+ helper_active`; its default remains `512`. This is a Tokio
+blocking ceiling, not a preallocated pool or a bound on native library threads.
+
+Active counts, attempts, batch counts/bytes and response bytes must be positive;
+pending may be zero, and the attempt timeout must be positive. Retry delays and
+jitter may be zero, initial delay cannot
+exceed its maximum, and all counts/durations must fit their runtime domain.
+Retry/backoff and provider queue waits consume the original search deadline.
+Shared query flights use an independent hard budget: a later live peer can keep
+the same HTTP attempt alive after an earlier caller expires, within the attempt
+and hard limits. Membership changes do not resend requests. Cancelling a caller
+does not imply the provider cancelled or refunded its work.
+
+Change these global policies by restarting the daemon. Effective configuration
+exposes values, units, source and provider capability; recognized invalid remote
+policy is fatal before listener/state/provider effects. Policy changes request a
+runtime restart and do not rebuild lexical/vector/ANN data or change model,
+dimensions, normalization, ranking or completed query-cache identity.
+
+This first async delivery migrates interactive daemon search. Direct snapshot
+fallback, full/incremental indexing, Sync, watcher and open-time vector backfill
+still use the legacy synchronous provider boundary. They do not gain the new
+interactive admission/deadline guarantees; their async migration and complete
+background diagnostics are the second delivery of #81. No process RSS,
+process-wide thread reserve, provider throughput or increased capacity is claimed.
+
 ## Query-vector cache policy
 
 The query cache retains up to 256 vectors and 4 MiB of vector payload by default.

@@ -69,6 +69,8 @@ pub struct DaemonSettings {
     pub control_active: usize,
     /// Owner policy: `control_pending`.
     pub control_pending: usize,
+    /// Maximum physically running DNS helpers; their pending cap derives from remote slots.
+    pub helper_active: usize,
     /// Owner policy: `max_blocking_threads`.
     pub max_blocking_threads: usize,
     /// Owner policy: `idle_grace_ms`.
@@ -98,6 +100,7 @@ struct EffectiveDaemonPolicy<'a> {
     search_pending: usize,
     control_active: usize,
     control_pending: usize,
+    helper_active: usize,
     max_blocking_threads: usize,
     idle_grace_ms: u64,
     control_timeout_ms: u64,
@@ -117,6 +120,7 @@ impl DaemonSettings {
             search_pending: self.search_pending,
             control_active: self.control_active,
             control_pending: self.control_pending,
+            helper_active: self.helper_active,
             max_blocking_threads: self.max_blocking_threads,
             idle_grace_ms: self.idle_grace_ms,
             control_timeout_ms: self.control_timeout_ms,
@@ -148,6 +152,8 @@ pub struct DaemonPatch {
     pub control_active: Option<usize>,
     /// Explicit `control_pending` override.
     pub control_pending: Option<usize>,
+    /// Explicit DNS helper capacity.
+    pub helper_active: Option<usize>,
     /// Explicit `max_blocking_threads` override.
     pub max_blocking_threads: Option<usize>,
     /// Explicit `idle_grace_ms` override.
@@ -176,6 +182,7 @@ impl DaemonSpec {
         search_pending: 32,
         control_active: 2,
         control_pending: 16,
+        helper_active: 1,
         max_blocking_threads: 512,
         idle_grace_ms: 5000,
         control_timeout_ms: 2000,
@@ -218,6 +225,11 @@ impl DaemonSpec {
         settings: &DaemonSettings,
         view: &mut crate::config::view::ViewBuilder<'_>,
     ) -> Result<()> {
+        view.push(
+            "daemon.helper_active",
+            serde_json::json!(settings.helper_active),
+            None,
+        )?;
         view.push(
             "daemon.profile",
             serde_json::to_value(&settings.profile)
@@ -311,6 +323,7 @@ impl SettingsSpec for DaemonSpec {
         FieldSpec::new("daemon.search_pending", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.control_active", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.control_pending", Scope::Daemon, Unit::Count),
+        FieldSpec::new("daemon.helper_active", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.max_blocking_threads", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.idle_grace_ms", Scope::Daemon, Unit::Milliseconds),
         FieldSpec::new(
@@ -340,6 +353,10 @@ impl SettingsSpec for DaemonSpec {
         source: &SourceId,
         origins: &mut Provenance,
     ) -> Result<()> {
+        if let Some(value) = patch.helper_active {
+            settings.helper_active = value;
+            origins.set("daemon.helper_active", source)?;
+        }
         if let Some(profile) = patch.profile {
             profile.validate()?;
             settings.profile = profile;
@@ -418,6 +435,7 @@ impl SettingsSpec for DaemonSpec {
             ("daemon.search_pending", settings.search_pending, true),
             ("daemon.control_active", settings.control_active, false),
             ("daemon.control_pending", settings.control_pending, true),
+            ("daemon.helper_active", settings.helper_active, false),
             (
                 "daemon.max_blocking_threads",
                 settings.max_blocking_threads,
@@ -474,13 +492,11 @@ impl SettingsSpec for DaemonSpec {
             .search_active
             .checked_add(settings.control_active)
             .and_then(|n| n.checked_add(1))
-            .and_then(|n| n.checked_add(1))
+            .and_then(|n| n.checked_add(settings.helper_active))
             .ok_or_else(|| invalid("daemon lexical worker capacity overflow"))?;
-        if matches!(settings.profile, DaemonProfile::Website { .. })
-            && required > settings.max_blocking_threads
-        {
+        if required > settings.max_blocking_threads {
             return Err(invalid(
-                "daemon.max_blocking_threads must fit search_active + control_active + fixed sync1 + helper1",
+                "daemon.max_blocking_threads must fit search_active + control_active + fixed sync1 + helper_active",
             ));
         }
         Ok(())
