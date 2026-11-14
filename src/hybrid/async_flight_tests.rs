@@ -48,6 +48,7 @@ async fn join(
             &operation,
             &policy,
             || None,
+            Ok,
             move |call| async move {
                 gate.entered.fetch_add(1, Ordering::SeqCst);
                 gate.ready.add_permits(1);
@@ -190,6 +191,7 @@ async fn async_flight_failure_and_unwind_wake_every_member_and_allow_fresh_work(
             &first_op,
             &policy,
             || None,
+            Ok,
             move |_| async move {
                 assert!(!unwind, "controlled async leader unwind");
                 Err(Error::internal_with_source(
@@ -199,7 +201,7 @@ async fn async_flight_failure_and_unwind_wake_every_member_and_allow_fresh_work(
             },
         ));
         let mut second =
-            Box::pin(registry.run_async(1, &second_op, &policy, || None, |_| async { Ok(1) }));
+            Box::pin(registry.run_async(1, &second_op, &policy, || None, Ok, |_| async { Ok(1) }));
         poll_pending(first.as_mut()).await;
         poll_pending(second.as_mut()).await;
         let error = first.await.unwrap_err();
@@ -211,7 +213,7 @@ async fn async_flight_failure_and_unwind_wake_every_member_and_allow_fresh_work(
         assert_eq!(registry.active(), 0);
         assert_eq!(
             registry
-                .run_async(1, &operation(), &policy, || None, |_| async { Ok(11) })
+                .run_async(1, &operation(), &policy, || None, Ok, |_| async { Ok(11) })
                 .await
                 .unwrap(),
             11
@@ -391,4 +393,74 @@ async fn async_query_different_models_do_not_share_inflight_or_completed_vectors
     assert_eq!(entered.load(Ordering::SeqCst), 2);
     assert!(!Arc::ptr_eq(&a, &b));
     assert_eq!(cache.query_cache_stats().entries, 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_query_completion_remains_discoverable_until_cache_publication() {
+    use crate::hybrid::dense::{DenseCache, QueryEmbeddingRequest, RuntimeRevision};
+    let cache = Arc::new(DenseCache::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let config = Arc::new(crate::config::Config::default());
+    let stages = Arc::new(crate::hybrid::HybridStages::default());
+    let revision = RuntimeRevision::Captured { config, stages };
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let (release, proceed) = std::sync::mpsc::channel();
+    let owner = cache.clone();
+    let count = calls.clone();
+    let first_revision = revision.clone();
+    let first = tokio::spawn(async move {
+        let entered = Mutex::new(Some(entered));
+        let proceed = Mutex::new(proceed);
+        owner
+            .query_embedding_async(
+                QueryEmbeddingRequest {
+                    model: "test/handoff@d3",
+                    text: "same",
+                    revision: first_revision,
+                    operation: &operation(),
+                    policy: &standalone().unwrap().into_settings(),
+                },
+                || {
+                    entered.lock().unwrap().take().unwrap().send(()).unwrap();
+                    proceed.lock().unwrap().recv().unwrap();
+                    Ok(())
+                },
+                move |_| async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![1.0, 0.0, 0.0])
+                },
+            )
+            .await
+    });
+    observed.await.unwrap();
+    assert_eq!(cache.query_cache_stats().entries, 0);
+    let late = cache
+        .query_embedding_async(
+            QueryEmbeddingRequest {
+                model: "test/handoff@d3",
+                text: "same",
+                revision,
+                operation: &operation(),
+                policy: &standalone().unwrap().into_settings(),
+            },
+            || Ok(()),
+            {
+                let calls = calls.clone();
+                move |_| async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![0.0, 1.0, 0.0])
+                }
+            },
+        )
+        .await;
+    // Always release the original publication gate, including the RED path.
+    release.send(()).unwrap();
+    let first = first.await.unwrap().unwrap();
+    let late = late.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(Arc::ptr_eq(&first, &late));
+    assert!(Arc::ptr_eq(
+        &first,
+        &cache.query_vector("test/handoff@d3", "same").unwrap()
+    ));
 }

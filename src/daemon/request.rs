@@ -22,9 +22,20 @@ pub(crate) fn spawn<T: Send + 'static>(
     activity: Option<Arc<Activity>>,
     work: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> JoinHandle<Result<T>> {
+    spawn_retained(permit, activity, None, work)
+}
+
+/// Keep the ingress owner alongside the source's physical drain charge.
+pub(crate) fn spawn_retained<T: Send + 'static>(
+    permit: Option<OwnedSemaphorePermit>,
+    activity: Option<Arc<Activity>>,
+    ingress: Option<Arc<Activity>>,
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> JoinHandle<Result<T>> {
     tokio::task::spawn_blocking(move || {
         // Release capacity before Activity publishes physical completion.
         let _activity = activity;
+        let _ingress = ingress;
         let _permit = permit;
         work()
     })

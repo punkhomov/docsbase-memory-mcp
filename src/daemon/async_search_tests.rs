@@ -1103,3 +1103,138 @@ async fn empty_document_scope_never_starts_query_embedding() {
         "empty scoped corpus must preserve the existing no-provider early exit"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scoped_remote_codec_retains_original_connection_until_physical_completion() {
+    use crate::hybrid::openrouter::{BASE_URL, OpenRouterClient};
+    for embedding in [false, true] {
+        for unwind in [false, true] {
+            let fixture = search_phase_tests::Fixture::new(HybridStages::default());
+            let transport = wire_gate();
+            let mut execution = RemoteExecution::with_owners(
+                &fixture.shared.global_config.remote,
+                transport.clone(),
+                fixture.shared.workers.clone(),
+                fixture.shared.activity.clone(),
+            )
+            .unwrap();
+            let (entered, observed) = tokio::sync::oneshot::channel();
+            let entered = Mutex::new(Some(entered));
+            let (release, proceed) = std::sync::mpsc::channel();
+            let proceed = Mutex::new(proceed);
+            execution.observe_cpu(Arc::new(move || {
+                entered.lock().unwrap().take().unwrap().send(()).unwrap();
+                proceed.lock().unwrap().recv().unwrap();
+                assert!(!unwind, "controlled actual codec CPU unwind");
+            }));
+            let execution = Arc::new(execution);
+            let client = Arc::new(
+                OpenRouterClient::with_execution(BASE_URL, "fixture-secret", execution.clone())
+                    .unwrap(),
+            );
+            let stages = codec_stages(client, embedding);
+            fixture
+                .shared
+                .project_slot(fixture.project.id)
+                .state
+                .lock()
+                .unwrap()
+                .stages = Some(Arc::new(stages));
+            let slots = Arc::new(tokio::sync::Semaphore::new(1));
+            let permit = Arc::new(slots.clone().try_acquire_owned().unwrap());
+            let scope = scoped::Scope {
+                activity: Activity::new(
+                    &fixture.shared.activity.counter,
+                    &fixture.shared.activity.events,
+                    Some(&permit),
+                ),
+                operation: search_operation(&fixture.shared, "search_docs").unwrap(),
+            };
+            drop(permit);
+            let mut peer = Peer {
+                hello_done: true,
+                session_id: Some(fixture.session),
+                cancel_rx: None,
+            };
+            let (mut client, server) = tokio::io::duplex(1024);
+            let mut reader = FrameReader::new(BufReader::new(server));
+            let mut request = Box::pin(scoped::call(
+                &fixture.shared,
+                &mut peer,
+                json!({"query":"widgets", "rerank":!embedding}),
+                &scope,
+                &mut reader,
+            ));
+            tokio::select! {
+                result = &mut request => panic!("search completed before codec CPU gate: {result:?}"),
+                result = observed => result.unwrap(),
+            }
+            client.shutdown().await.unwrap();
+            let (response, close) = request.as_mut().await;
+            assert!(matches!(response, Response::Error { .. }));
+            assert!(close);
+            assert!(
+                scope
+                    .operation
+                    .as_ref()
+                    .unwrap()
+                    .cancellation()
+                    .is_cancelled()
+            );
+            drop(request);
+            drop(scope);
+            // A shared embedding leader must also have observed last departure.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while execution.snapshot().active != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let retained = slots.clone().try_acquire_owned().is_err();
+            let no_http = transport.calls.load(Ordering::SeqCst) == 0;
+            // Cleanup precedes the RED assertion, including controlled unwind.
+            release.send(()).unwrap();
+            let retired = tokio::time::timeout(Duration::from_secs(5), slots.acquire())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                retained,
+                "original connection freed during physical codec work"
+            );
+            assert!(no_http);
+            drop(retired);
+        }
+    }
+}
+
+fn codec_stages(
+    client: Arc<crate::hybrid::openrouter::OpenRouterClient>,
+    embedding: bool,
+) -> HybridStages {
+    use crate::hybrid::openrouter::{OpenRouterEmbedder, OpenRouterReranker};
+    if embedding {
+        HybridStages {
+            embedder: Some(Arc::new(OpenRouterEmbedder::with_client(
+                crate::hybrid::EmbeddingCfg {
+                    model: "fixture".into(),
+                    dimensions: 3,
+                    normalize: true,
+                    ..crate::hybrid::EmbeddingCfg::default()
+                },
+                client,
+            ))),
+            ranking: Ranking::Rrf,
+            reranker: None,
+        }
+    } else {
+        HybridStages {
+            reranker: Some(Arc::new(OpenRouterReranker::with_client(
+                crate::hybrid::RerankerCfg::default(),
+                client,
+            ))),
+            ..HybridStages::default()
+        }
+    }
+}

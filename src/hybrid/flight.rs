@@ -194,6 +194,7 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
         operation: &SearchOperation,
         policy: &SearchSettings,
         mut cached: impl FnMut() -> Option<T>,
+        mut publish: impl FnMut(T) -> Result<T>,
         work: F,
     ) -> Result<T>
     where
@@ -220,7 +221,12 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
                 };
                 let id = {
                     let mut state = flight.state.lock().unwrap_or_else(PoisonError::into_inner);
-                    if state.retiring || state.result.is_some() {
+                    if state.retiring
+                        || matches!(
+                            state.result,
+                            Some(Completion::Abandoned | Completion::Finished(Err(_)))
+                        )
+                    {
                         if active
                             .get(&key)
                             .is_some_and(|current| Arc::ptr_eq(current, &flight))
@@ -287,7 +293,11 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
                 });
             }
             match self.wait_async(&flight, operation).await? {
-                Completion::Finished(result) => return result.map_err(SharedFailure::into_error),
+                Completion::Finished(result) => {
+                    // Keep membership (and terminal discoverability) through the
+                    // admitted cache handoff, including cancellation and unwind.
+                    return publish(result.map_err(SharedFailure::into_error)?);
+                }
                 Completion::Abandoned => {}
             }
         }
@@ -344,9 +354,13 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
                 state.result = Some(result);
             }
             let listeners = std::mem::take(&mut state.listeners);
-            if active
-                .get(key)
-                .is_some_and(|current| Arc::ptr_eq(current, flight))
+            let handoff = !state.retiring
+                && !state.members.is_empty()
+                && matches!(state.result, Some(Completion::Finished(Ok(_))));
+            if !handoff
+                && active
+                    .get(key)
+                    .is_some_and(|current| Arc::ptr_eq(current, flight))
             {
                 active.remove(key);
             }
@@ -493,6 +507,11 @@ struct AsyncMembership<K: Clone + Eq + Hash, T: Clone> {
 impl<K: Clone + Eq + Hash, T: Clone> Drop for AsyncMembership<K, T> {
     fn drop(&mut self) {
         let retire = {
+            let mut active = self
+                .registry
+                .active
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             let mut state = self
                 .flight
                 .state
@@ -502,6 +521,13 @@ impl<K: Clone + Eq + Hash, T: Clone> Drop for AsyncMembership<K, T> {
             let retire = state.result.is_none() && !state.has_active();
             if retire {
                 state.retiring = true;
+            }
+            if (retire || (state.result.is_some() && state.members.is_empty()))
+                && active
+                    .get(&self.key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &self.flight))
+            {
+                active.remove(&self.key);
             }
             retire
         };

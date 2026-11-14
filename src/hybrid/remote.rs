@@ -112,6 +112,8 @@ pub struct RemoteExecution {
     activity: ActivitySource,
     #[cfg(test)]
     timing: Option<TestTiming>,
+    #[cfg(test)]
+    cpu_observer: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 // Results can outlive an abandoned JoinHandle. Drop returned data before its charge.
@@ -223,7 +225,14 @@ impl RemoteExecution {
             activity,
             #[cfg(test)]
             timing: None,
+            #[cfg(test)]
+            cpu_observer: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_cpu(&mut self, observer: Arc<dyn Fn() + Send + Sync>) {
+        self.cpu_observer = Some(observer);
     }
 
     /// Complete immutable owner policy.
@@ -322,17 +331,28 @@ impl RemoteExecution {
         let counters = Arc::clone(&self.counters);
         let worker_call = call.clone();
         let shutdown = self.shutdown.clone();
-        let worker = request::spawn(Some(permit), Some(self.activity.track()), move || {
-            // Declare retention before work so input captures drop first on every exit.
-            let (retention, body) = (worker_call, work);
-            retention.check()?;
-            shutdown.check()?;
-            let _time = DurationCharge(&counters.cpu_ms, Instant::now());
-            Ok(CpuOutput {
-                value: body(),
-                _retention: retention,
-            })
-        });
+        #[cfg(test)]
+        let cpu_observer = self.cpu_observer.clone();
+        let worker = request::spawn_retained(
+            Some(permit),
+            Some(self.activity.track()),
+            call.activity(),
+            move || {
+                // Declare retention before work so input captures drop first on every exit.
+                let (retention, body) = (worker_call, work);
+                retention.check()?;
+                shutdown.check()?;
+                let _time = DurationCharge(&counters.cpu_ms, Instant::now());
+                #[cfg(test)]
+                if let Some(observer) = cpu_observer {
+                    observer();
+                }
+                Ok(CpuOutput {
+                    value: body(),
+                    _retention: retention,
+                })
+            },
+        );
         let result = call
             .wait(&self.shutdown, async {
                 let output = worker.await.map_err(|error| {

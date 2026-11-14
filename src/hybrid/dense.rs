@@ -949,7 +949,7 @@ impl DenseCache {
         }
         let key = (model.to_owned(), crate::vector_cache::chunk_hash(text));
         let flights = self.lock_query_cache().flights.clone();
-        let vector = flights
+        flights
             .run_async(
                 QueryFlightKey {
                     recipe: key.clone(),
@@ -963,19 +963,22 @@ impl DenseCache {
                         .get(&key)
                         .map(|(vector, _)| vector.clone())
                 },
+                |vector| {
+                    operation.check()?;
+                    // Terminal success stays discoverable in the same registry
+                    // until this revision-admitted cache handoff has finished.
+                    if let Ok(_revision) = admit_publication() {
+                        let bytes = u64::try_from(std::mem::size_of_val(vector.as_ref()))
+                            .unwrap_or(u64::MAX);
+                        return Ok(self
+                            .cache_query(key.clone(), bytes, || vector.clone())
+                            .unwrap_or(vector));
+                    }
+                    Ok(vector)
+                },
                 move |call| async move { work(call).await.map(Arc::<[f32]>::from) },
             )
-            .await?;
-        operation.check()?;
-        // A stale captured runtime may finish for its members, but cannot publish
-        // into the current pure cache. The caller's next capture reports retry.
-        if let Ok(_revision) = admit_publication() {
-            let bytes = u64::try_from(std::mem::size_of_val(vector.as_ref())).unwrap_or(u64::MAX);
-            return Ok(self
-                .cache_query(key, bytes, || vector.clone())
-                .unwrap_or(vector));
-        }
-        Ok(vector)
+            .await
     }
 
     #[cfg(all(test, feature = "hybrid-remote"))]

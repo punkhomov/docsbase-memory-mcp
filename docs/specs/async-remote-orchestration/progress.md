@@ -253,3 +253,30 @@ Current cli-full/default all-target Clippy (`-D warnings`) and fmt pass; histori
 lint/compiler failures remain in raw receipts. One frozen full CLI and full lean
 run follow this checkpoint. No runtime convergence/native/release acceptance or
 task-complete claim for A2; A3 and PR2 are still pending.
+
+## MODIFIED 2026-11-14 — A2 author fix-round1 checkpoint
+
+Task A2: fix-round1 addresses original Important I1/I2 (base `5371867`,
+functional commit containing this entry; original reviewer re-review pending).
+I1 causal RED observed two provider calls while the first successful waiter was
+gated before cache publication. Existing Flights now retains terminal success
+through the revision-admitted publication callback and removes the matching
+entry when its last membership exits, including cancellation/unwind. Late same
+revision admission receives the same Arc with one call; stale revision rejection,
+pure completed cache identity and failure/abandon/replacement semantics remain.
+
+I2 causal RED freed an admitted connection during a real Rig codec CPU gate
+after scoped EOF. RemoteCall now carries the original Activity into embedding
+leader/rerank CPU work and abandoned output retention. The existing spawn helper
+also keeps ingress and source Activity guards until after physical permit drop,
+including unwind; source-owned DNS is unchanged. Actual embedding and rerank
+codec gates pass both normal completion and controlled unwind after EOF.
+
+Focused GREEN on current inputs: async38/0, query-flight10/0, phase9/0, scoped17/0
+and preservation129/0 across eight existing integration targets. Current full
+CLI/default all-target Clippy and fmt pass. Earlier fixture rerank-argument and
+test-length lint failures remain in raw receipts. Ruling: extract only the new
+codec fixture setup for the existing lint limit; no assertion/timeout weakening.
+One frozen full CLI and full lean execution follows this checkpoint; receipts
+are untracked under `task-a2/fix1/`. A3/PR2 remain pending, no public PR or final
+A2 review/issue-closure claim.

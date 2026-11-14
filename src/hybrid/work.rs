@@ -199,6 +199,8 @@ pub struct RemoteCall {
     interest: Option<Arc<dyn SharedInterest>>,
     #[cfg(feature = "hybrid-remote")]
     retained_payload: Option<Arc<crate::search::budget::PayloadPermit>>,
+    #[cfg(feature = "hybrid-remote")]
+    activity: Option<Arc<crate::daemon::request::Activity>>,
 }
 
 impl RemoteCall {
@@ -210,6 +212,8 @@ impl RemoteCall {
             interest: None,
             #[cfg(feature = "hybrid-remote")]
             retained_payload: None,
+            #[cfg(feature = "hybrid-remote")]
+            activity: None,
         }
     }
 
@@ -221,7 +225,21 @@ impl RemoteCall {
             interest: Some(interest),
             #[cfg(feature = "hybrid-remote")]
             retained_payload: None,
+            #[cfg(feature = "hybrid-remote")]
+            activity: None,
         }
+    }
+
+    /// Retain the original ingress owner through physical codec work and output Drop.
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn with_activity(mut self, activity: Arc<crate::daemon::request::Activity>) -> Self {
+        self.activity = Some(activity);
+        self
+    }
+
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn activity(&self) -> Option<Arc<crate::daemon::request::Activity>> {
+        self.activity.clone()
     }
 
     /// CPU adapters clone this owner with encoded input even after waiter Drop.

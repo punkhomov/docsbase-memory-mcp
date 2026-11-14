@@ -73,6 +73,7 @@ impl SearchSession {
                         move |call| async move {
                             #[cfg(feature = "hybrid-remote")]
                             if let Some(remote) = embedder.async_remote() {
+                                let call = call.with_activity(leader_activity);
                                 return remote.embed_query(text, &call).await;
                             }
                             let operation = call.operation().clone();
@@ -120,6 +121,7 @@ impl SearchSession {
             let started = Instant::now();
             let ranked = if let Some(input) = input {
                 let call = crate::hybrid::work::RemoteCall::new(operation.clone())
+                    .with_activity(activity.clone())
                     .with_payload_reservation(input.reservation);
                 let top_n = input.documents.len();
                 remote
