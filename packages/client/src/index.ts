@@ -4,6 +4,7 @@ import { Pool } from './pool.ts';
 import { resolveClientOptions } from './settings.ts';
 import {
   LITERAL_QUERY,
+  SERVER_STATUS,
   MAX_FRAME_BYTES,
   encodeRequest,
   object,
@@ -11,6 +12,7 @@ import {
   toolValue,
   searchResult,
   daemonStatus,
+  serverStatus,
   type WireRequest,
 } from './protocol.ts';
 import {
@@ -21,6 +23,7 @@ import {
   type SearchOptions,
   type SearchResult,
   type DaemonStatus,
+  type ServerStatus,
   type HelloMetadata,
 } from './types.ts';
 export { DocsbaseError } from './types.ts';
@@ -33,6 +36,11 @@ export type {
   SearchResult,
   ProjectStatus,
   DaemonStatus,
+  ServerStatus,
+  ServerSync,
+  IndexOutcome,
+  IndexStats,
+  ReadinessReason,
   HelloMetadata,
   ErrorKind,
 } from './types.ts';
@@ -48,9 +56,9 @@ class Operation {
   private readonly upstream: AbortSignal | undefined;
   private readonly onAbort = () =>
     this.controller.abort(new DocsbaseError('cancelled', 'docsbase request cancelled'));
-  constructor(startedAt: number, timeoutMs: number, upstream: AbortSignal | undefined) {
+  constructor(startedAt: number, deadline: number, upstream: AbortSignal | undefined) {
     this.startedAt = startedAt;
-    this.deadline = startedAt + timeoutMs;
+    this.deadline = deadline;
     this.upstream = upstream;
     if (upstream) {
       upstream.addEventListener('abort', this.onAbort, { once: true });
@@ -220,6 +228,26 @@ export class DocsbaseClient {
       this.end(operation);
     }
   }
+  /** Current fixed Website readiness. Requires server-status-v1 support. */
+  async serverStatus(call: CallOptions = {}): Promise<ServerStatus> {
+    const startedAt = performance.now();
+    const operation = this.begin(startedAt, call);
+    try {
+      operation.check();
+      return await this.invoke(
+        this.controls,
+        operation,
+        (connection) => {
+          if (!connection.metadata.capabilities.includes(SERVER_STATUS))
+            throw new DocsbaseError('protocol', 'daemon does not support server-status-v1');
+          return { method: 'CallTool', params: { name: 'server_status', args: {} } };
+        },
+        (value) => serverStatus(value, this.options.projectId),
+      );
+    } finally {
+      this.end(operation);
+    }
+  }
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -229,14 +257,38 @@ export class DocsbaseClient {
   }
   private begin(startedAt: number, call: CallOptions): Operation {
     if (this.closed) throw new DocsbaseError('closed', 'docsbase client closed');
-    if (!object(call) || Object.keys(call).some((key) => key !== 'signal')) {
+    if (!object(call) || Object.keys(call).some((key) => key !== 'signal' && key !== 'budget')) {
       throw new DocsbaseError('validation', 'invalid docsbase call options');
     }
     const signal = call.signal;
     if (signal !== undefined && !(signal instanceof AbortSignal)) {
       throw new DocsbaseError('validation', 'invalid docsbase AbortSignal');
     }
-    const operation = new Operation(startedAt, this.options.settings.requestTimeoutMs, signal);
+    let originalStart = startedAt;
+    let deadline = startedAt + this.options.settings.requestTimeoutMs;
+    const budget = call.budget;
+    if (budget !== undefined) {
+      if (
+        !object(budget) ||
+        Object.keys(budget).some((key) => key !== 'startedAtMs' && key !== 'deadlineAtMs')
+      )
+        throw new DocsbaseError('validation', 'invalid docsbase caller budget');
+      const callerStart = budget.startedAtMs;
+      const callerDeadline = budget.deadlineAtMs;
+      if (
+        typeof callerStart !== 'number' ||
+        !Number.isFinite(callerStart) ||
+        callerStart < 0 ||
+        callerStart > startedAt ||
+        typeof callerDeadline !== 'number' ||
+        !Number.isFinite(callerDeadline) ||
+        callerDeadline < callerStart
+      )
+        throw new DocsbaseError('validation', 'invalid docsbase caller budget');
+      originalStart = callerStart;
+      deadline = Math.min(callerDeadline, callerStart + this.options.settings.requestTimeoutMs);
+    }
+    const operation = new Operation(originalStart, deadline, signal);
     try {
       operation.check();
     } catch (error) {

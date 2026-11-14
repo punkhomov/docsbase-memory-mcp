@@ -74,13 +74,14 @@ pnpm --dir web check
 pnpm --dir web test:unit
 pnpm --dir web build
 pnpm --dir packages/client build
+pnpm --dir examples/website-search build
 cargo build --locked --features cli-full
 cargo test --locked --features cli-full
 pnpm --dir web exec playwright install chromium
 pnpm --dir web test
 ```
 
-Rust 1.88 and the exact Node.js version in `.node-version` are build tools;
+Rust 1.100.0 and the exact Node.js version in `.node-version` are build tools;
 installed users need neither. The root `package.json` pins pnpm, including its
 package checksum. Run all installation commands from the repository root. Cargo's
 build script only embeds already-built `web/dist` files and fails with an

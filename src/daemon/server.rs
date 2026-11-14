@@ -1084,6 +1084,7 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                         ];
                         if shared.website.is_some() {
                             capabilities.push(protocol::ACTIVE_WEBSITE_CAPABILITY.to_owned());
+                            capabilities.push(protocol::SERVER_STATUS_CAPABILITY.to_owned());
                         }
                         capabilities
                     },
@@ -1564,6 +1565,27 @@ fn route_metadata_tool_in(
     args: &Value,
     activity: Option<Arc<Activity>>,
 ) -> Result<Value> {
+    if name == "server_status" {
+        let fixed = shared.website.as_ref().ok_or_else(Shared::profile_denial)?;
+        let bound = session_id
+            .and_then(|id| shared.sessions.get(id))
+            .and_then(|session| session.project_id);
+        shared.admit_binding(bound)?;
+        if !args.as_object().is_some_and(serde_json::Map::is_empty) {
+            return Err(Error::Protocol {
+                message: "server_status accepts no arguments".to_owned(),
+            });
+        }
+        let config = shared.project_config(&fixed.project)?;
+        let status = super::readiness::observe(
+            &shared.readers,
+            &fixed.project,
+            &config,
+            shared.restart_notice(),
+        )?;
+        return serde_json::to_value(status)
+            .map_err(|err| Error::internal_with_source("serialize server readiness", err));
+    }
     if name == "index_project" && shared.website.is_some() {
         return Err(Shared::profile_denial());
     }
@@ -1604,11 +1626,17 @@ fn route_metadata_tool_in(
             )
         }
         "panel_info" => Ok(json!(crate::ipc::panel::PanelInfo {
-            capabilities: vec![
-                protocol::PANEL_READ_CAPABILITY.into(),
-                protocol::SEARCH_CONTEXT_CAPABILITY.into(),
-                protocol::LITERAL_QUERY_CAPABILITY.into()
-            ],
+            capabilities: {
+                let mut capabilities = vec![
+                    protocol::PANEL_READ_CAPABILITY.into(),
+                    protocol::SEARCH_CONTEXT_CAPABILITY.into(),
+                    protocol::LITERAL_QUERY_CAPABILITY.into(),
+                ];
+                if shared.website.is_some() {
+                    capabilities.push(protocol::SERVER_STATUS_CAPABILITY.into());
+                }
+                capabilities
+            },
             request_timeout_ms: shared.global_config.search.request_timeout_ms,
             max_request_payload_bytes: shared.global_config.search.max_request_payload_bytes,
             max_retained_payload_bytes: shared.global_config.search.max_retained_payload_bytes,

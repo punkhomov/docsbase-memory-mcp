@@ -574,3 +574,133 @@ fn cli_shared_cannot_mask_recognized_website_source_policy_errors() {
         assert!(!env.cache.path().join("state").exists());
     }
 }
+
+#[test]
+fn explicit_project_status_uses_fixed_readonly_binding_from_unrelated_cwd() {
+    let env = ProfileEnv::indexed();
+    let mut daemon = env.start(&[]);
+    let output = cli(env.cache.path(), env.config.path())
+        .current_dir(env.config.path())
+        .args(["status", "--project"])
+        .arg(env.root.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let view: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(view["profile"], "website");
+    assert_eq!(view["project"]["id"], env.project().id);
+    assert_eq!(view["ready"], true);
+    let mut client = env.connect();
+    assert!(
+        client
+            .call_tool("server_status", serde_json::json!({}))
+            .is_err(),
+        "unbound readiness must be refused"
+    );
+    client
+        .call(Request::BindReadOnly {
+            pid: std::process::id(),
+            project_id: Some(env.project().id),
+        })
+        .unwrap();
+    for args in [
+        serde_json::json!({"project_id": env.project().id + 1}),
+        serde_json::json!({"repair":true}),
+    ] {
+        assert!(client.call_tool("server_status", args).is_err());
+    }
+    assert_eq!(
+        client.call_tool("status", serde_json::json!({})).unwrap()["watchers"],
+        0
+    );
+    drop(client);
+    env.stop(&mut daemon);
+    let output = cli(env.cache.path(), env.config.path())
+        .args(["status", "--project"])
+        .arg(env.root.path())
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "explicit project status needs the daemon"
+    );
+    assert!(Client::connect(env.cache.path()).is_none());
+}
+
+#[test]
+fn explicit_status_is_unavailable_in_shared_and_does_not_register_unknown_roots() {
+    let env = ProfileEnv::indexed();
+    let mut shared = env.start(&["--profile", "shared", "--grace-ms", "60000"]);
+    let output = cli(env.cache.path(), env.config.path())
+        .args(["status", "--project"])
+        .arg(env.root.path())
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "fixed Website readiness requires Website profile"
+    );
+    env.stop(&mut shared);
+    let unknown = tempfile::tempdir().unwrap();
+    let mut website = env.start(&[]);
+    let output = cli(env.cache.path(), env.config.path())
+        .args(["status", "--project"])
+        .arg(unknown.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let db = docsbase_memory::store::Db::open_readonly(env.cache.path()).unwrap();
+    assert_eq!(
+        docsbase_memory::daemon::registry::list_projects(&db)
+            .unwrap()
+            .len(),
+        1
+    );
+    env.stop(&mut website);
+}
+
+#[test]
+fn website_explicit_sync_adds_and_removes_files_and_publishes_readiness() {
+    let env = ProfileEnv::indexed();
+    let mut daemon = env.start(&[]);
+    std::fs::remove_file(env.root.path().join("guide.md")).unwrap();
+    std::fs::write(env.root.path().join("added.md"), "addedreadinesswidget").unwrap();
+    let sync = cli(env.cache.path(), env.config.path())
+        .current_dir(env.config.path())
+        .arg("sync")
+        .arg(env.root.path())
+        .output()
+        .unwrap();
+    assert!(sync.status.success(), "{sync:?}");
+    let output = cli(env.cache.path(), env.config.path())
+        .current_dir(env.config.path())
+        .args(["status", "--project"])
+        .arg(env.root.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let view: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(view["ready"], true);
+    assert_eq!(view["latest_sync"]["stats"]["docs"], 1);
+    assert_eq!(view["latest_sync"]["stats"]["removed"], 1);
+    assert_eq!(
+        view["latest_sync"]["attempt_id"],
+        view["outcome"]["attempt_id"]
+    );
+    let status = env
+        .connect()
+        .call_tool("status", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(status["watchers"], 0);
+    let dir = env
+        .cache
+        .path()
+        .join("projects")
+        .join(env.project().id.to_string())
+        .join("tantivy");
+    let index = docsbase_memory::index::tantivy_index::ReadIndex::open(&dir).unwrap();
+    assert_eq!(index.search("addedreadinesswidget", 10).unwrap().len(), 1);
+    assert_eq!(index.search("originalwidget", 10).unwrap().len(), 0);
+    drop(index);
+    env.stop(&mut daemon);
+}

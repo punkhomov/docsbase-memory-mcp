@@ -7,6 +7,8 @@ import {
   SEARCH_CONTEXT,
   PANEL_READ,
   LITERAL_QUERY,
+  SERVER_STATUS,
+  serverStatus,
   decodeResponse,
   encodeRequest,
   searchResult,
@@ -42,4 +44,15 @@ test('Rust-generated Hello/citation/error frames decode without integer loss', (
     if (response.kind !== 'Error') throw new Error('not error');
     assert.throws(() => toolValue(response), { kind: 'daemon', code: response.data.code });
   }
+});
+
+test('Rust-generated Website capability and readiness DTO match the SDK projection', () => {
+  assert.deepEqual(fixture.serverCapabilities, ['active-website-profile-v1', SERVER_STATUS]);
+  const status = serverStatus(
+    toolValue(decodeResponse(Buffer.from(fixture.responses.serverStatus))),
+    7,
+  );
+  assert.equal(status.schema_version, 1);
+  assert.equal(status.ready, true);
+  assert.equal(status.outcome?.stats.skipped, 2);
 });

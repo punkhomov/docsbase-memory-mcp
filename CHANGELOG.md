@@ -12,8 +12,12 @@ Git tag `v<version>` must equal `version` in `Cargo.toml` (checked in CI).
 
 - Official `@docsbase/client` Node/TypeScript local IPC connector: fixed-project
   read-only binding, bounded search/control pools, original deadlines/cancellation,
-  lossless citation IDs and native integration/package checks. Server lifecycle
-  profile and publication readiness remain follow-ups in #79.
+  lossless citation IDs and native integration/package checks.
+- Fixed lexical Website service (`serve --project ABS`), watcher-off explicit sync,
+  versioned checked readiness (`status --project ABS` / SDK `serverStatus()`), and
+  a bounded Node HTTP example with original caller deadlines. Readiness observes
+  indexed full-survey proof; it does not promise filesystem freshness or continuous
+  availability during updates. Real ~20k workload measurement remains deferred.
 - A local, read-only Web panel (`docsbase web [--open] [--port N]`) in official
   binaries: registered projects, cancellable Syntax/Literal search and safe
   effective configuration. Embedded assets need no Node.js at runtime.

@@ -5,6 +5,10 @@ import {
   type SearchResult,
   type DaemonStatus,
   type ProjectStatus,
+  type ServerStatus,
+  type IndexStats,
+  type IndexOutcome,
+  type ServerSync,
 } from './types.ts';
 
 // Wire identities/limit owned by Rust ipc::protocol, checked by the Rust fixture gate.
@@ -13,6 +17,7 @@ export const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 export const SEARCH_CONTEXT = 'search-context-v1';
 export const PANEL_READ = 'panel-read-v1';
 export const LITERAL_QUERY = 'literal-query-v1';
+export const SERVER_STATUS = 'server-status-v1';
 export type WireRequest = {
   method: 'Hello' | 'BindReadOnly' | 'Search' | 'CallTool';
   params: unknown;
@@ -165,4 +170,82 @@ export function daemonStatus(value: unknown, projectId: number): DaemonStatus {
     restart_required: value.restart_required,
     notice: value.notice,
   };
+}
+
+function indexStats(value: unknown): value is IndexStats {
+  return (
+    object(value) &&
+    ['docs', 'chunks', 'skipped', 'removed', 'errors'].every((key) => safeUnsigned(value[key])) &&
+    Array.isArray(value.warnings) &&
+    value.warnings.length <= 100 &&
+    value.warnings.every(
+      (warning) =>
+        object(warning) && typeof warning.path === 'string' && typeof warning.message === 'string',
+    )
+  );
+}
+function indexOutcome(value: unknown): value is IndexOutcome {
+  return (
+    object(value) &&
+    value.schema_version === 1 &&
+    safeUnsigned(value.attempt_id) &&
+    value.attempt_id > 0 &&
+    safeUnsigned(value.index_generation) &&
+    typeof value.canonical_root === 'string' &&
+    typeof value.recipe_id === 'string' &&
+    /^index-recipe-v1:[a-fA-F0-9]{64}$/.test(value.recipe_id) &&
+    (value.scope === 'full_survey' || value.scope === 'subset') &&
+    indexStats(value.stats)
+  );
+}
+function serverSync(value: unknown): value is ServerSync {
+  return (
+    object(value) &&
+    safeUnsigned(value.job_id) &&
+    value.job_id > 0 &&
+    ['queued', 'running', 'done', 'error'].includes(value.state as string) &&
+    (value.attempt_id === null || (safeUnsigned(value.attempt_id) && value.attempt_id > 0)) &&
+    (value.stats === null || indexStats(value.stats))
+  );
+}
+const readinessReasons = new Set([
+  'state_changed',
+  'indexing',
+  'interrupted',
+  'failed',
+  'partial',
+  'sync_failed',
+  'index_unavailable',
+  'rebuild_required',
+  'unknown_outcome',
+  'incomplete_scope',
+  'recipe_changed',
+]);
+export function serverStatus(value: unknown, projectId: number): ServerStatus {
+  if (
+    !object(value) ||
+    value.schema_version !== 1 ||
+    value.profile !== 'website' ||
+    !object(value.project) ||
+    value.project.id !== projectId ||
+    typeof value.project.name !== 'string' ||
+    typeof value.project.root !== 'string' ||
+    typeof value.project.status !== 'string' ||
+    !safeUnsigned(value.index_generation) ||
+    !safeUnsigned(value.index_attempt) ||
+    !['healthy', 'index_unavailable', 'rebuild_required'].includes(value.index_health as string) ||
+    !(value.outcome === null || indexOutcome(value.outcome)) ||
+    !(
+      value.active_sync === null ||
+      (serverSync(value.active_sync) && ['queued', 'running'].includes(value.active_sync.state))
+    ) ||
+    !(value.latest_sync === null || serverSync(value.latest_sync)) ||
+    typeof value.ready !== 'boolean' ||
+    !(value.reason === null || readinessReasons.has(value.reason as string)) ||
+    value.ready !== (value.reason === null) ||
+    typeof value.restart_required !== 'boolean' ||
+    !(value.notice === null || typeof value.notice === 'string')
+  )
+    throw protocolError();
+  return value as unknown as ServerStatus;
 }

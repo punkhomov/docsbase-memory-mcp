@@ -3,6 +3,7 @@
 pub mod admission;
 pub mod launch;
 pub mod lifecycle;
+pub mod readiness;
 pub mod registry;
 mod request;
 pub mod server;

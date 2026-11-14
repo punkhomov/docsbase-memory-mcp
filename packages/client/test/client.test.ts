@@ -585,3 +585,92 @@ test('plain owned tags cannot invoke user toJSON or retain a changed queued payl
   assert.equal(serializations, 0);
   assert.deepEqual(captured, { query: 'query', tags: ['safe'] });
 });
+
+const noBudgetIoEndpoint =
+  process.platform === 'win32' ? String.raw`\\.\pipe\no-budget-io` : '/no-budget-io';
+
+for (const method of ['search', 'status', 'serverStatus'] as const) {
+  test(`${method} rejects a spent caller budget before admission or preprocessing`, async (t) => {
+    t.mock.method(performance, 'now', () => 500);
+    const client = new DocsbaseClient(options(noBudgetIoEndpoint));
+    t.after(() => client.close());
+    const call = { budget: { startedAtMs: 0, deadlineAtMs: 400 } };
+    let prepared = false;
+    const request =
+      method === 'search'
+        ? client.search(
+            'x',
+            {
+              get limit() {
+                prepared = true;
+                return 1;
+              },
+            },
+            call,
+          )
+        : client[method](call);
+    await assert.rejects(request, { kind: 'deadline' });
+    assert.equal(prepared, false);
+  });
+}
+
+test('caller start charges upstream time and can only narrow the SDK deadline', async (t) => {
+  let now = 500;
+  t.mock.method(performance, 'now', () => now);
+  const client = await clientPeer(t, (request, socket) => {
+    assert.equal(request.params.context.elapsed_ms, 800);
+    assert.equal(request.params.context.remaining_ms, 9200);
+    socket.write(line(result));
+  });
+  const budget = { startedAtMs: 0, deadlineAtMs: 50000 };
+  await client.search(
+    'x',
+    {
+      get limit() {
+        now = 800;
+        budget.startedAtMs = 800;
+        budget.deadlineAtMs = 60000;
+        return 1;
+      },
+    },
+    { budget },
+  );
+});
+
+test('synchronous preparation cannot refresh a caller deadline', async (t) => {
+  let now = 100;
+  t.mock.method(performance, 'now', () => now);
+  const client = new DocsbaseClient(options(noBudgetIoEndpoint));
+  t.after(() => client.close());
+  await assert.rejects(
+    client.search(
+      'x',
+      {
+        get limit() {
+          now = 201;
+          return 1;
+        },
+      },
+      { budget: { startedAtMs: 0, deadlineAtMs: 200 } },
+    ),
+    { kind: 'deadline' },
+  );
+});
+
+test('caller budget shape and finite monotonic clock values are validated before I/O', async (t) => {
+  t.mock.method(performance, 'now', () => 500);
+  const client = new DocsbaseClient(options(noBudgetIoEndpoint));
+  t.after(() => client.close());
+  for (const budget of [
+    null,
+    {},
+    { startedAtMs: -1, deadlineAtMs: 500 },
+    { startedAtMs: 501, deadlineAtMs: 600 },
+    { startedAtMs: 1, deadlineAtMs: 0 },
+    { startedAtMs: NaN, deadlineAtMs: 500 },
+    { startedAtMs: 0, deadlineAtMs: Infinity },
+    { startedAtMs: 0, deadlineAtMs: 500, extra: 1 },
+  ]) {
+    await assert.rejects(client.status({ budget } as any), { kind: 'validation' });
+  }
+});

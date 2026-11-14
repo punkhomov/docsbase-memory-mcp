@@ -38,13 +38,13 @@ const make = (overrides) => {
 let daemon;
 let daemonExit;
 let daemonLog = '';
-async function start() {
+async function start(args = ['--grace-ms', '60000']) {
   mkdirSync(join(cache, 'state'), { recursive: true });
   // Subscribe before spawn, then probe before waiting: no missed readiness edge.
   const events = watch(join(cache, 'state'));
   const stopped = new AbortController();
   const signal = AbortSignal.any([stopped.signal, AbortSignal.timeout(60000)]);
-  daemon = spawn(binary, ['serve', '--grace-ms', '60000'], {
+  daemon = spawn(binary, ['serve', ...args], {
     cwd: root,
     env: process.env,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -184,9 +184,22 @@ try {
   assert.equal(existsSync(join(cache, 'vectors.db')), false);
   assert.equal(existsSync(join(cache, 'models')), false);
   await stop();
+  config.endpoint = daemonEndpoint(await start(['--project', alpha]));
+  const website = make();
+  assert.equal((await website.serverStatus()).ready, true);
+  await run(['sync', alpha]);
+  const readiness = await website.serverStatus();
+  assert.equal(readiness.ready, true);
+  assert.equal(readiness.profile, 'website');
+  assert.equal(readiness.latest_sync.attempt_id, readiness.outcome.attempt_id);
+  assert.equal(readiness.latest_sync.stats.skipped, 2);
+  assert.equal((await website.status()).project.watched, false);
+  website.close();
+  await stop();
   process.stdout.write(
     JSON.stringify({
       nativeIpc: true,
+      serverReadiness: true,
       searchesAccepted: accepted.length,
       overloaded: rejected.length,
       reconnected: true,

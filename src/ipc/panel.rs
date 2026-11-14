@@ -110,3 +110,67 @@ pub struct SearchHit {
     #[cfg_attr(feature = "web", ts(optional))]
     pub snippet_truncated: Option<bool>,
 }
+
+/// Fixed Website project identity observed from authoritative metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerProject {
+    pub id: i64,
+    pub name: String,
+    pub root: String,
+    pub status: String,
+}
+
+/// Result of one read-only index compatibility/health check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexHealth {
+    Healthy,
+    IndexUnavailable,
+    RebuildRequired,
+}
+
+/// Stable recovery category; status never performs the recovery itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessReason {
+    StateChanged,
+    Indexing,
+    Interrupted,
+    Failed,
+    Partial,
+    SyncFailed,
+    IndexUnavailable,
+    RebuildRequired,
+    UnknownOutcome,
+    IncompleteScope,
+    RecipeChanged,
+}
+
+/// Latest/active durable Sync identity and strict actual lexical counters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerSync {
+    pub job_id: i64,
+    pub state: String,
+    pub attempt_id: Option<i64>,
+    pub stats: Option<crate::index::job::JobStats>,
+}
+
+/// Versioned bounded observation of the active fixed Website corpus.
+/// Ready describes the indexed corpus/recipe, not filesystem freshness or
+/// availability during later in-place mutation. It does not pin a generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerStatus {
+    pub schema_version: u32,
+    pub profile: String,
+    pub project: ServerProject,
+    pub index_generation: i64,
+    pub index_attempt: i64,
+    pub index_health: IndexHealth,
+    pub outcome: Option<crate::index::outcome::IndexOutcome>,
+    pub active_sync: Option<ServerSync>,
+    pub latest_sync: Option<ServerSync>,
+    pub ready: bool,
+    pub reason: Option<ReadinessReason>,
+    pub restart_required: bool,
+    pub notice: Option<String>,
+}

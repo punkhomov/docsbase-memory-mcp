@@ -1,0 +1,5 @@
+{
+  "extends": "../../packages/client/tsconfig.json",
+  "compilerOptions": { "rootDir": ".", "outDir": "dist" },
+  "include": ["config.ts", "server.ts"]
+}

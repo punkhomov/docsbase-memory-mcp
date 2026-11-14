@@ -41,6 +41,9 @@ pub(crate) fn ensure_search_query_mode(
 /// Absent for Shared. Additive Hello marker; wire shape and required SDK caps stay unchanged.
 pub const ACTIVE_WEBSITE_CAPABILITY: &str = "active-website-profile-v1";
 
+/// Versioned fixed-project readiness; advertised only by active Website daemons.
+pub const SERVER_STATUS_CAPABILITY: &str = "server-status-v1";
+
 /// Durations from one caller's original operation, never fresh stage budgets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,6 +90,7 @@ pub const TOOL_ALLOWLIST: &[&str] = &[
     "index_project",
     "sync_start",
     "sync_status",
+    "server_status",
     "status",
     "panel_info",
     "panel_config",

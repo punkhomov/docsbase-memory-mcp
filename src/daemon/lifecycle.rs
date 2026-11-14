@@ -950,6 +950,27 @@ pub fn with_project_read_lease<T>(
         .truncate(false)
         .open(&path)
         .map_err(|err| Error::internal_with_source(format!("open {}", path.display()), err))?;
+    with_read_lock(file, &path, work)
+}
+
+/// Observe using the existing project coordination file, without creating any
+/// directories/files when proof or project state is missing.
+pub(crate) fn with_existing_project_read_lease<T>(
+    cache_root: &Path,
+    project_id: i64,
+    work: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let path = lease_path(cache_root, project_id);
+    let file = File::open(&path).map_err(|err| {
+        Error::internal_with_source(
+            format!("open existing project lease {}", path.display()),
+            err,
+        )
+    })?;
+    with_read_lock(file, &path, work)
+}
+
+fn with_read_lock<T>(file: File, path: &Path, work: impl FnOnce() -> Result<T>) -> Result<T> {
     let lock = RwLock::new(file);
     let _guard = lock.try_read().map_err(|err| {
         if err.kind() == std::io::ErrorKind::WouldBlock {

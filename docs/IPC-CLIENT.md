@@ -3,10 +3,10 @@
 The `@docsbase/client` workspace package is the official local Node connector.
 It ships compiled ESM JavaScript and declarations, has no runtime npm dependencies,
 and requires Node >=24.22.3. Package API and usage: [client README](../packages/client/README.md).
-This first delivery is the connector stage of [#79](https://github.com/punkhomov/docsbase-memory-mcp/issues/79).
-The dedicated fixed-project server profile, disabling watchers, service-manager
-lifecycle and explicit publication readiness follow separately. It does not yet
-constitute full website-mode acceptance.
+The fixed lexical Website daemon, explicit sync/readiness and bounded Node HTTP
+example implement [#79](https://github.com/punkhomov/docsbase-memory-mcp/issues/79).
+See the runnable [website example](../examples/website-search/README.md) for complete
+operator configuration, Unix/Windows endpoints and foreground/service-manager use.
 
 ## Obtain the package
 
@@ -83,8 +83,26 @@ and remain within its original HTTP request budget.
 is diagnostic; it is not a publication token proving a complete sync. During index
 mutation the backend can reject work rather than expose mixed generations. This
 client does not promise serving an old generation uninterrupted. A failed or
-partial sync must not be interpreted as a successful website deployment; the
-explicit sync/readiness contract is the next server milestone.
+partial sync must not be interpreted as a successful website deployment.
+
+`serverStatus()` requires the additive Website-only `server-status-v1` capability
+and returns schema1 fixed-project readiness: current generation/attempt, actual
+index outcome, health, active/latest Sync association and stable not-ready reason.
+It makes two fresh bounded metadata snapshots around one read-only health check,
+without repair or retry. A full zero-error survey can qualify, including skipped-
+only/no-op work. Legacy/missing/corrupt proof, partial/subset/failed/interrupted work
+or changing metadata cannot. A failed/partial latest Sync survives a later direct
+success until an attributable successful full Sync replaces it. Use
+`docsbase status --project ABS` and `docsbase sync ABS` as explicit operator routes.
+Ready covers the indexed corpus/recipe, not watcher-off filesystem freshness.
+
+Embedding HTTP applications may pass `CallOptions.budget` with finite
+`{startedAtMs, deadlineAtMs}` in Node's `performance.now()` domain. Capture the start
+before body/queue/JSON preparation. The SDK copies these values at ingress and
+uses min(caller deadline, original caller start + configured request timeout).
+A spent budget fails before I/O; omission retains the existing per-call behavior.
+See the example's independent bounded HTTP search/control admission and response
+cleanup; it exposes no project/tool/provider controls and never replays requests.
 
 Search follows project configuration. To guarantee no inference costs, provision
 an explicitly lexical project; `rerank:false` alone does not disable embedding.
@@ -104,7 +122,8 @@ No numeric IDs are coerced while canonicalizing.
 
 Before a full Rust suite with `web`/`cli-full`, or a selected `--test node_client`
 run with either feature, run `pnpm --dir packages/client build` after the root
-workspace install. The native script imports the public package export from
+workspace install. Full suites and `--test website_http` additionally need
+`pnpm --dir examples/website-search build`. The native script imports the public package export from
 ignored `dist/index.js`; dependency installation alone does not create it.
 Required native CI jobs and the nightly release suite prepare it explicitly.
 See [Web build/test preparation](WEB.md#building-and-testing) for the full sequence.
@@ -121,7 +140,10 @@ its tests with the Rust contract. Normal CI compares the checked-in fixture.
 
 Native E2E uses a small hermetic lexical corpus and checks snippets, scoped
 filtering/page cap, project isolation, bounded admission, errors, no autostart,
-stop/restart/reconnect and no model/vector artifacts. Fake-peer tests independently
+stop/restart/reconnect and no model/vector artifacts. `tests/website_http.rs`
+additionally executes actual HTTP→SDK→IPC→Website search/readiness, explicit add/
+edit/remove Sync, partial recovery, body-held admission/queued disconnects and
+restart without replay. Fake-peer tests independently
 cover cancellation, malformed frames and deterministic clock boundaries. No live
 API keys/model downloads or performance thresholds are used.
 

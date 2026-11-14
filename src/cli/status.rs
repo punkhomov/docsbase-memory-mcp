@@ -76,6 +76,52 @@ pub(crate) fn status_with_settings(
     Ok(())
 }
 
+/// Explicit Website readiness never registers, autostarts or falls back to direct indexing.
+pub(crate) fn project_status_with_settings(
+    root: &std::path::Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> anyhow::Result<()> {
+    if !root.is_absolute() {
+        return Err(Error::Admission {
+            message: "status --project requires an absolute root".into(),
+        }
+        .into());
+    }
+    let cache = paths::cache_dir()?;
+    let mut client = crate::ipc::client::Client::try_connect(&cache)?
+        .ok_or_else(crate::daemon::launch::website_unavailable)?;
+    client.handshake_registry()?;
+    if !client.active_website() {
+        return Err(Error::Admission {
+            message: "status --project requires the fixed Website daemon".into(),
+        }
+        .into());
+    }
+    let project = crate::cli::existing_website_project(&cache, root, settings)?;
+    match client.call(crate::ipc::protocol::Request::BindReadOnly {
+        pid: std::process::id(),
+        project_id: Some(project.id),
+    })? {
+        crate::ipc::protocol::Response::ToolResult { .. } => {}
+        crate::ipc::protocol::Response::Error {
+            code,
+            message,
+            instruction,
+        } => {
+            return Err(Error::from_mcp_code(code, message, instruction).into());
+        }
+        other @ crate::ipc::protocol::Response::Hello { .. } => {
+            return Err(Error::Protocol {
+                message: format!("unexpected readiness binding reply: {other:?}"),
+            }
+            .into());
+        }
+    }
+    let value = client.call_tool("server_status", serde_json::json!({}))?;
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
 /// Runs `docsbase list`, printing documents of the current project (FR-25).
 ///
 /// # Errors

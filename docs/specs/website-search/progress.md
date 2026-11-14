@@ -516,3 +516,36 @@ Current all-target Clippy, fmt and diff checks pass. Full current cli-full/lean
 verification and original final scoped rereview remain pending. Evidence:
 `/workspace/scratch/agent-b/79/server-delivery/fix1/`. No dependency, budget,
 ignore, native adapter or S2 scope change.
+
+### 2026-11-13 — S2 functional checkpoint; final verification/review pending
+
+Task S2: implemented fixed-project read-only readiness/CLI/SDK after actual API,
+CLI and causal association REDs. Targeted Rust: readiness units10 + integration41
+passed; SDK63 passed; current cli-full all-target Clippy/fmt/diff checks passed.
+The durable Sync association records A's exact attempt/actual counters before the
+existing writer lease ends; bounded O1/health/O2 observation never repairs/retries.
+Full cli-full, lean, inventory/source freeze and fresh task review remain pending.
+Ready covers the indexed corpus/recipe, not watcher-off filesystem freshness or
+continuous availability. S3 HTTP, native final delivery and deferred FR-S4 remain separate.
+
+### 2026-11-13 — S2 accepted; S3/S4 functional checkpoint
+
+Task S2: complete (bc845df; fresh review PASS/APPROVED, no findings; exact native
+checks docs/linux/macos/windows green). Readiness scope and FR-S4 deferral stand.
+Task S3/S4: functional HTTP/original-budget/native-preparation/docs bundle
+implemented after SDK and HTTP missing-contract REDs. SDK69 and HTTP8 pass;
+real native website_http1 + node_client2 pass; current cli-full all-target Clippy,
+fmt/diff and actionlint pass. Full/lean inventories, final Node/artifact checks,
+fresh task review and combined native/final delivery gates remain pending.
+Ruling: known-closed idle SDK connections may be retired before dispatch; native
+restart assertions now fail both pools while absent, then verify later fresh
+calls. This corrected a test assumption; production no-replay behavior is intact.
+
+### 2026-11-14 — S3/final review fix1 checkpoint
+
+Task S3 fix1: addressed Important I1/I2 and companion M1 in one HTTP lifecycle
+pass. Actual causal RED7/old controls8; GREEN HTTP15, SDK69 and native1+2, with
+current check/build/format/fmt/diff passing. Shared finish/close/error/abort
+settlement retains success/failure ownership; HTTP's original abort reason governs
+504. Already-expired error writes get one immediate attempt, without flush grace.
+Full cli-full/freeze proof and both original scoped reviews remain pending.

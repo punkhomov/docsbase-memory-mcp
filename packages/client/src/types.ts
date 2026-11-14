@@ -31,6 +31,8 @@ export interface SearchOptions {
 }
 export interface CallOptions {
   readonly signal?: AbortSignal;
+  /** Original caller times in Node performance.now()'s monotonic clock domain. */
+  readonly budget?: { readonly startedAtMs: number; readonly deadlineAtMs: number };
 }
 export interface SearchHit {
   /** Exact Rust u64 rendered in canonical decimal notation; never a JS number. */
@@ -87,4 +89,62 @@ export function abortError(signal: AbortSignal): DocsbaseError {
   return signal.reason instanceof DocsbaseError
     ? signal.reason
     : new DocsbaseError('cancelled', 'docsbase request cancelled');
+}
+
+/** Strict uncapped counters from the completed lexical pass. */
+export interface IndexStats {
+  readonly docs: number;
+  readonly chunks: number;
+  readonly skipped: number;
+  readonly removed: number;
+  readonly errors: number;
+  readonly warnings: readonly { readonly path: string; readonly message: string }[];
+}
+export interface IndexOutcome {
+  readonly schema_version: 1;
+  readonly attempt_id: number;
+  readonly index_generation: number;
+  readonly canonical_root: string;
+  readonly recipe_id: string;
+  readonly scope: 'full_survey' | 'subset';
+  readonly stats: IndexStats;
+}
+export interface ServerSync {
+  readonly job_id: number;
+  readonly state: 'queued' | 'running' | 'done' | 'error';
+  readonly attempt_id: number | null;
+  readonly stats: IndexStats | null;
+}
+export type ReadinessReason =
+  | 'state_changed'
+  | 'indexing'
+  | 'interrupted'
+  | 'failed'
+  | 'partial'
+  | 'sync_failed'
+  | 'index_unavailable'
+  | 'rebuild_required'
+  | 'unknown_outcome'
+  | 'incomplete_scope'
+  | 'recipe_changed';
+/** A bounded current observation; it does not pin a future search generation. */
+export interface ServerStatus {
+  readonly schema_version: 1;
+  readonly profile: 'website';
+  readonly project: {
+    readonly id: number;
+    readonly name: string;
+    readonly root: string;
+    readonly status: string;
+  };
+  readonly index_generation: number;
+  readonly index_attempt: number;
+  readonly index_health: 'healthy' | 'index_unavailable' | 'rebuild_required';
+  readonly outcome: IndexOutcome | null;
+  readonly active_sync: ServerSync | null;
+  readonly latest_sync: ServerSync | null;
+  readonly ready: boolean;
+  readonly reason: ReadinessReason | null;
+  readonly restart_required: boolean;
+  readonly notice: string | null;
 }

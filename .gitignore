@@ -22,3 +22,5 @@ __pycache__/
 /node_modules/
 /packages/client/node_modules/
 /packages/client/dist/
+/examples/website-search/node_modules/
+/examples/website-search/dist/
