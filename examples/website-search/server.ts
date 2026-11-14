@@ -28,7 +28,7 @@ class RequestOperation {
   private readonly disconnect = () =>
     this.controller.abort(new DocsbaseError('cancelled', 'HTTP caller disconnected'));
   private readonly responseClose = () => {
-    if (!this.res.writableEnded) this.disconnect();
+    if (!this.res.writableFinished) this.disconnect();
   };
   private readonly requestClose = () => {
     // IncomingMessage.close also follows a successfully consumed body.
@@ -223,32 +223,61 @@ function send(
   status: number,
   json: string,
   operation: RequestOperation,
+  mode: 'result' | 'failure',
 ): Promise<void> {
-  operation.check();
+  if (mode === 'result') operation.check();
   return new Promise((resolve, reject) => {
-    const abort = () => {
-      cleanup();
-      res.destroy();
-      reject(operation.signal.reason);
-    };
-    const error = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
+    let settled = false;
     const cleanup = () => {
       operation.signal.removeEventListener('abort', abort);
+      res.off('finish', finish);
+      res.off('close', close);
       res.off('error', error);
+      // Node attaches the supplied end callback to finish. A queued response
+      // may close without invoking it; do not retain that callback afterwards.
+      res.off('finish', ended);
     };
-    operation.signal.addEventListener('abort', abort, { once: true });
-    res.once('error', error);
-    res.writeHead(status, {
-      'content-type': 'application/json; charset=utf-8',
-      'content-length': Buffer.byteLength(json),
-    });
-    res.end(json, () => {
+    const settle = (failure?: unknown) => {
+      if (settled) return;
+      settled = true;
       cleanup();
-      resolve();
-    });
+      if (failure !== undefined) {
+        res.destroy();
+        reject(failure);
+      } else resolve();
+    };
+    const finish = () => settle();
+    const close = () => {
+      if (res.writableFinished) settle();
+      else settle(new DocsbaseError('cancelled', 'HTTP response closed before finish'));
+    };
+    const error = (failure: Error) => settle(failure);
+    const abort = () => settle(operation.signal.reason);
+    const ended = (failure?: Error | null) => {
+      if (failure) settle(failure);
+    };
+    res.once('finish', finish);
+    res.once('close', close);
+    res.once('error', error);
+    operation.signal.addEventListener('abort', abort, { once: true });
+    try {
+      if (res.destroyed) {
+        close();
+        return;
+      }
+      res.writeHead(status, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(json),
+        ...(mode === 'failure' ? { connection: 'close' } : {}),
+      });
+      res.end(json, ended);
+      // An already-expired failure gets one synchronous best-effort write,
+      // never a new flush budget. If delivery still needs IO, retire it now.
+      // writableFinished means no pending output; finish is already scheduled.
+      if (operation.signal.aborted && !res.writableFinished) abort();
+    } catch (failure) {
+      settle(failure);
+    }
   });
 }
 export function createWebsiteServer(config: WebsiteConfig, api: SearchClient = config.client) {
@@ -351,19 +380,32 @@ export function createWebsiteServer(config: WebsiteConfig, api: SearchClient = c
       operation.check();
       if (Buffer.byteLength(json) > policy.maxResultBytes)
         throw new HttpError(502, 'result_too_large');
-      await send(res, status, json, operation);
+      await send(res, status, json, operation, 'result');
     } catch (error) {
       if (!res.destroyed && !res.writableEnded) {
         if (res.headersSent) res.destroy();
         else {
-          const failure = publicError(error);
+          // The SDK intentionally translates an upstream abort to cancelled.
+          // HTTP owns its original deadline/disconnect reason and keeps it.
+          try {
+            operation.check();
+          } catch {
+            /* authoritative reason below */
+          }
+          const failure = publicError(operation.signal.aborted ? operation.signal.reason : error);
           const json = JSON.stringify({ error: failure.code });
           res.shouldKeepAlive = false;
-          res.writeHead(failure.status, {
-            'content-type': 'application/json; charset=utf-8',
-            connection: 'close',
-          });
-          res.end(Buffer.byteLength(json) <= policy.maxResultBytes ? json : undefined);
+          try {
+            await send(
+              res,
+              failure.status,
+              Buffer.byteLength(json) <= policy.maxResultBytes ? json : '',
+              operation,
+              'failure',
+            );
+          } catch {
+            res.destroy();
+          }
         }
       }
     } finally {

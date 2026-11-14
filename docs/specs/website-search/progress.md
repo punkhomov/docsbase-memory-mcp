@@ -540,3 +540,12 @@ fresh task review and combined native/final delivery gates remain pending.
 Ruling: known-closed idle SDK connections may be retired before dispatch; native
 restart assertions now fail both pools while absent, then verify later fresh
 calls. This corrected a test assumption; production no-replay behavior is intact.
+
+### 2026-11-14 — S3/final review fix1 checkpoint
+
+Task S3 fix1: addressed Important I1/I2 and companion M1 in one HTTP lifecycle
+pass. Actual causal RED7/old controls8; GREEN HTTP15, SDK69 and native1+2, with
+current check/build/format/fmt/diff passing. Shared finish/close/error/abort
+settlement retains success/failure ownership; HTTP's original abort reason governs
+504. Already-expired error writes get one immediate attempt, without flush grace.
+Full cli-full/freeze proof and both original scoped reviews remain pending.

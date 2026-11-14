@@ -130,6 +130,10 @@ active/pending caps apply before retaining unbounded work. Header accounting kee
 one extra pair solely to detect/reject overflow; the Node keep-alive timeout buffer
 is0 so no independent grace is added. Body high-water marks use the body byte
 policy. These are implementation invariants, not hidden operator defaults.
+Success and failure responses keep admission until finish or a terminal close,
+write error or cancellation. A response merely queued by end() is still active.
+An already-expired HTTP request gets at most one immediate best-effort error write;
+blocked/queued delivery is closed without a new flush grace or deadline.
 
 Public failures contain a bounded stable error name, not daemon messages,
 instructions, queries or document content. Invalid input is400, unknown routes404,
