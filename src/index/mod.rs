@@ -1,5 +1,6 @@
 //! Markdown indexing pipeline.
 
+pub(crate) mod async_job;
 pub mod chunk;
 pub mod frontmatter;
 pub mod job;

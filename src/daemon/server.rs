@@ -45,6 +45,9 @@ use crate::watch::Watchers;
 mod search_phase_tests;
 
 #[cfg(all(test, feature = "hybrid-remote"))]
+#[path = "async_index_tests.rs"]
+mod async_index_tests;
+#[cfg(all(test, feature = "hybrid-remote"))]
 #[path = "async_search_tests.rs"]
 mod async_search_tests;
 
@@ -75,6 +78,7 @@ pub struct Shared {
     pub(super) workers: Arc<crate::daemon::worker_admission::WorkerAdmission>,
     pub(super) activity: request::ActivitySource,
     activity_events: Mutex<Option<mpsc::Receiver<()>>>,
+    jobs: std::sync::OnceLock<super::job_service::JobService>,
     // Website has exactly one fixed-project background sync closure.
     sync_slot: Arc<tokio::sync::Semaphore>,
     #[cfg(feature = "hybrid-remote")]
@@ -111,7 +115,7 @@ impl Drop for Shared {
 
 /// Stable per-project authority; model construction uses only the reload lock.
 #[derive(Default)]
-struct ProjectCell {
+pub(crate) struct ProjectCell {
     state: Mutex<ProjectState>,
     reload: Mutex<()>,
     preparation: RwLock<()>,
@@ -151,7 +155,10 @@ impl ProjectCell {
         work()
     }
 
-    fn preparation_lease(&self, expected: &Arc<Config>) -> Result<RwLockReadGuard<'_, ()>> {
+    pub(crate) fn preparation_lease(
+        &self,
+        expected: &Arc<Config>,
+    ) -> Result<RwLockReadGuard<'_, ()>> {
         #[cfg(test)]
         if let Some(observer) = self.preparation_observer.lock().unwrap().as_ref() {
             let _ = observer.send(());
@@ -374,6 +381,7 @@ impl Shared {
             remote,
             activity,
             activity_events: Mutex::new(Some(activity_events)),
+            jobs: std::sync::OnceLock::new(),
             sync_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: SessionRegistry::with_settings(&global_config.daemon)?,
             watchers,
@@ -392,6 +400,12 @@ impl Shared {
             Err(err) => eprintln!("warning: cannot start watchers: {err}"),
         }
         Ok(shared)
+    }
+
+    pub(crate) fn activate_jobs(&self, service: super::job_service::JobService) -> Result<()> {
+        self.jobs
+            .set(service)
+            .map_err(|_| Error::internal("job root already activated"))
     }
 
     /// Prepared metadata readers shared by search phases and ANN refresh,
@@ -1607,6 +1621,19 @@ async fn call_tool_in(
         cancellation.0 = None;
         return result;
     }
+    if matches!(name, "index_project" | "sync_start")
+        && let Some(service) = shared.jobs.get()
+    {
+        return index_async(
+            shared,
+            service,
+            session_id,
+            args,
+            activity,
+            name == "sync_start",
+        )
+        .await;
+    }
     let permit = match &operation {
         Some(operation) => shared.workers.search(operation).await?,
         None => shared.workers.control().await?,
@@ -1633,6 +1660,150 @@ async fn call_tool_in(
         )
     });
     let result = request::run(worker, operation.as_ref()).await;
+    cancellation.0 = None;
+    result
+}
+
+fn prepare_index_context(
+    shared: &Arc<Shared>,
+    session: Option<u64>,
+    args: &Value,
+    detached: bool,
+) -> Result<std::result::Result<crate::index::async_job::JobContext, Value>> {
+    let mut db = Db::open_with_settings(&shared.cache, &shared.db_settings)?;
+    let project = if detached {
+        let requested = match opt_i64(args, "project_id")? {
+            Some(id) => id,
+            None => bound_project(shared, &db, session)?.id,
+        };
+        shared.admit_binding(Some(requested))?;
+        registry::project_by_id(&db, requested)?.ok_or_else(|| Error::Project {
+            message: format!("unknown project id {requested}"),
+            instruction: Some("call list_projects".into()),
+        })?
+    } else {
+        let path = match opt_str(args, "path")? {
+            Some(raw) => {
+                let raw = PathBuf::from(raw);
+                if raw.is_absolute() {
+                    raw
+                } else {
+                    session_cwd(shared, session)?.join(raw)
+                }
+            }
+            None => session_cwd(shared, session)?,
+        };
+        let root = registry::project_root_for(&path, &shared.cache)?;
+        registry::ensure_project(&mut db, &root)?
+    };
+    shared.admit_project(&project)?;
+    registry::ensure_root_present(&project)?;
+    if let Some(job) = crate::store::repo::active_sync_job(db.connection(), project.id)? {
+        return Ok(Err(tools::sync_status(&db, &json!({"job_id":job.id}))?));
+    }
+    let singleton = if shared.website.is_some() {
+        Some(
+            shared
+                .sync_slot
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| Error::Admission {
+                    message: "fixed-project sync is still finishing".into(),
+                })?,
+        )
+    } else {
+        None
+    };
+    let (config, stages) = shared.project_runtime(&project)?;
+    let source = shared.vector_source_for(project.id, &config);
+    Ok(Ok(crate::index::async_job::JobContext {
+        input: crate::index::async_job::JobInput::Sync,
+        singleton,
+        cache: shared.cache.clone(),
+        db_settings: shared.db_settings.clone(),
+        revision: Some(shared.project_slot(project.id)),
+        dense: Some(Arc::new(shared.dense.snapshot())),
+        project,
+        config,
+        stages,
+        source,
+    }))
+}
+
+async fn index_async(
+    shared: &Arc<Shared>,
+    service: &super::job_service::JobService,
+    session: Option<u64>,
+    args: Value,
+    activity: Option<Arc<Activity>>,
+    detached: bool,
+) -> Result<Value> {
+    if shared.website.is_some() && !detached {
+        return Err(Shared::profile_denial());
+    }
+    let operation = crate::search::operation::SearchOperation::with_timeout(
+        Instant::now(),
+        Duration::from_millis(shared.global_config.remote.background_timeout_ms),
+        crate::hybrid::work::Cancellation::new(),
+    )?;
+    let mut cancellation = request::CancelOnDrop(Some(operation.cancellation().clone()));
+    let activity = activity.unwrap_or_else(|| shared.activity.track());
+    let permit = shared.workers.control().await?;
+    let context_owner = shared.clone();
+    let captured_operation = operation.clone();
+    let worker = request::spawn(Some(permit), Some(activity.clone()), move || {
+        captured_operation.check()?;
+        prepare_index_context(&context_owner, session, &args, detached)
+    });
+    let context = match request::run(worker, Some(&operation)).await? {
+        Ok(context) => context,
+        Err(existing) => {
+            cancellation.0 = None;
+            return Ok(existing);
+        }
+    };
+    let result = if detached {
+        let (mut owner, work, receiver) = crate::index::async_job::start(
+            service,
+            &shared.workers,
+            activity.clone(),
+            &operation,
+            &shared.payload_budget,
+            context,
+        )
+        .await?;
+        let (next, status) = service
+            .phase(
+                &shared.workers,
+                activity.clone(),
+                &operation,
+                owner,
+                |state| state.acknowledgement(),
+            )
+            .await?;
+        owner = next;
+        let status = (**status).clone();
+        let service = service.clone();
+        let workers = shared.workers.clone();
+        // No await between ownership transfer to the detached task and acknowledgement.
+        drop(tokio::spawn(async move {
+            let _ = crate::index::async_job::execute(
+                &service, &workers, activity, operation, owner, work, receiver,
+            )
+            .await;
+        }));
+        Ok(status)
+    } else {
+        crate::index::async_job::run(
+            service,
+            &shared.workers,
+            activity,
+            operation,
+            &shared.payload_budget,
+            context,
+        )
+        .await
+    };
     cancellation.0 = None;
     result
 }

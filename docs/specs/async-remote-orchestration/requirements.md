@@ -150,8 +150,16 @@ direct CLI, lifecycle и metrics и закрывает #81. Документы/t
 
 ## Модель данных и интерфейсы
 
-Новые on-disk tables/formats не нужны. Сохраняются `VectorCacheSource` и
-`VectorStore` owner, `IndexOutcome` attempt и generation, Sync record association.
+MODIFIED 2026-11-14, B1 scoped challenge C1/I3: новых tables/schema migration
+и vector identities нет. Принят **additive persistent format** в существующем
+`vectors.db`: application_id `0x44424A31` и одна reserved coordination row в
+`vector_cache_leases` для monotonic negative job-pin ids. Это не format-neutral:
+missing/corrupt/unknown initialized state и exhaustion дают explicit refusal,
+никогда reset/reuse. Public legacy pin/unpin отвергают все negative ids; existing
+production positive project-id callers сохраняются. Older arbitrary-negative
+library callers/raw SQL writers вне этого протокола. Сохраняются
+`VectorCacheSource`/`VectorStore` owner, `IndexOutcome` attempt/generation и
+captured Sync record association.
 In-memory добавляются complete `RemoteSettings`, retained query flight revision,
 owned resumable search/index state и bounded counters. Имена будущих Rust APIs
 в [design.md](design.md) отмечены как proposed; это не claim об уже имеющемся API.

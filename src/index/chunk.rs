@@ -45,6 +45,48 @@ pub struct Chunk {
     pub text: String,
 }
 
+/// Conservative logical peak before frontmatter/chunk/JSON/apply allocations.
+/// Parser internals and range arrays are bounded by source bytes; retained heading
+/// breadcrumbs are additionally bounded per section (including all chunk clones).
+pub(crate) fn capture_charge(body: &str, cap: usize) -> crate::error::Result<u64> {
+    use crate::error::Error;
+    let denied = || Error::Admission {
+        message: "chunk capture preflight overflow".into(),
+    };
+    let mut total = (body.len() as u64).checked_mul(96).ok_or_else(denied)?;
+    let mut headings = [0_u64; 6];
+    let mut start = 0;
+    let mut previous_heading = 0_u64;
+    let mut section = |start: usize, end: usize, heading: u64| -> crate::error::Result<()> {
+        let text = &body[start..end];
+        let pieces = text
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            .saturating_add(text.len() / cap.saturating_sub(CHUNK_OVERLAP).max(1))
+            .saturating_add(2) as u64;
+        let records = heading
+            .checked_mul(8)
+            .and_then(|n| n.checked_add(2048))
+            .and_then(|n| n.checked_mul(pieces))
+            .ok_or_else(denied)?;
+        total = total.checked_add(records).ok_or_else(denied)?;
+        Ok(())
+    };
+    for (event, range) in Parser::new_ext(body, Options::all()).into_offset_iter() {
+        if let Event::Start(Tag::Heading { level, .. }) = event {
+            section(start, range.start, previous_heading)?;
+            let level = level as usize;
+            headings[level - 1] = (range.end - range.start) as u64;
+            headings[level..].fill(0);
+            previous_heading = headings.iter().sum();
+            start = range.start;
+        }
+    }
+    section(start, body.len(), previous_heading)?;
+    Ok(total)
+}
+
 /// Splits `body` into chunks no larger than `max_chunk_chars` where possible.
 #[must_use]
 pub fn chunk_markdown(body: &str, max_chunk_chars: usize) -> Vec<Chunk> {

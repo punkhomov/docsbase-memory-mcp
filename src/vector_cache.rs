@@ -14,11 +14,17 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Error, Result};
 
+mod job_pin;
 mod owner;
+pub(crate) use job_pin::JobPinAuthority;
 pub mod settings;
 mod source;
 pub use owner::VectorStore;
 pub use source::VectorCacheSource;
+
+#[cfg(test)]
+#[path = "vector_cache_job_pin_tests.rs"]
+mod job_pin_tests;
 
 #[cfg(test)]
 #[path = "vector_cache_batch_tests.rs"]
@@ -275,6 +281,11 @@ impl VectorCache {
         hashes: &[String],
         ttl: Duration,
     ) -> Result<()> {
+        if lease_id < 0 {
+            return Err(Error::Admission {
+                message: "negative vector lease ids require private job authority".into(),
+            });
+        }
         if hashes.is_empty() {
             return Ok(());
         }
@@ -285,7 +296,7 @@ impl VectorCache {
             .transaction()
             .map_err(|err| Error::internal_with_source("begin pin transaction", err))?;
         tx.execute(
-            "DELETE FROM vector_cache_leases WHERE expires_at <= ?1",
+            "DELETE FROM vector_cache_leases WHERE expires_at <= ?1 AND lease_id <> -9223372036854775808",
             params![now],
         )
         .map_err(|err| Error::internal_with_source("purge expired leases", err))?;
@@ -309,6 +320,11 @@ impl VectorCache {
     /// # Errors
     /// Returns [`Error::Internal`] on `SQLite` failures.
     pub fn unpin(&mut self, lease_id: i64, model_id: &str, hashes: &[String]) -> Result<()> {
+        if lease_id < 0 {
+            return Err(Error::Admission {
+                message: "negative vector lease ids require private job authority".into(),
+            });
+        }
         let strict = self.access.is_owned();
         let behavior = if strict {
             rusqlite::TransactionBehavior::Immediate
@@ -529,7 +545,7 @@ fn evict(conn: &Connection, limits: CacheLimits, warned_over_budget: &mut bool) 
         let now = now_secs();
         let purged = conn
             .execute(
-                "DELETE FROM vector_cache_leases WHERE expires_at <= ?1",
+                "DELETE FROM vector_cache_leases WHERE expires_at <= ?1 AND lease_id <> -9223372036854775808",
                 params![now],
             )
             .map_err(|err| Error::internal_with_source("purge expired vector leases", err))?;

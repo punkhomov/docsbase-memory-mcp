@@ -96,6 +96,59 @@ pub struct PayloadPermit {
     bytes: u64,
 }
 
+impl PayloadPermit {
+    /// Current logical charge retained by this account.
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Reserve the checked delta BEFORE allocating or copying retained data.
+    /// A refusal changes neither account nor shared aggregate.
+    ///
+    /// # Errors
+    /// Per-account/aggregate limit exceeded or arithmetic overflow.
+    pub fn grow_to(&mut self, total: u64) -> Result<()> {
+        if total <= self.bytes {
+            return Ok(());
+        }
+        if total > self.retained.policy.max_request_payload_bytes {
+            return Err(Error::Admission {
+                message: "job capture exceeds max_request_payload_bytes".into(),
+            });
+        }
+        let delta = total - self.bytes;
+        let mut retained = self
+            .retained
+            .bytes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let next = retained
+            .checked_add(delta)
+            .filter(|n| *n <= self.retained.policy.max_retained_payload_bytes)
+            .ok_or_else(|| Error::Admission {
+                message: "job capture exceeds max_retained_payload_bytes".into(),
+            })?;
+        *retained = next;
+        self.bytes = total;
+        Ok(())
+    }
+
+    /// Release only storage which the caller has already destroyed.
+    pub(crate) fn shrink_to(&mut self, total: u64) {
+        if total >= self.bytes {
+            return;
+        }
+        let mut retained = self
+            .retained
+            .bytes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *retained -= self.bytes - total;
+        self.bytes = total;
+    }
+}
+
 impl Drop for PayloadPermit {
     fn drop(&mut self) {
         let mut retained = self

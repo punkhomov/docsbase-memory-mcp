@@ -350,13 +350,19 @@ fn run_with_launch(
         .enable_all()
         .build()
         .map_err(|err| Error::internal_with_source("build tokio runtime", err))?;
-    runtime.block_on(serve(
-        cache,
-        settings,
-        pool_settings,
-        dense_settings,
-        launch,
-    ))
+    let mut jobs = super::job_service::JobRoot::new(&launch.launch.config.settings().daemon);
+    let service = jobs.service();
+    jobs.run(
+        &runtime,
+        serve(
+            cache,
+            settings,
+            pool_settings,
+            dense_settings,
+            launch,
+            service,
+        ),
+    )
 }
 
 /// Asks a running daemon to stop and waits for it to exit (FR-6).
@@ -434,6 +440,7 @@ async fn serve(
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
     launch: AdmittedLaunch,
+    jobs: super::job_service::JobService,
 ) -> Result<()> {
     create_state_dir(cache)?;
     if is_running(cache) {
@@ -451,6 +458,7 @@ async fn serve(
         dense_settings,
         launch,
     )?;
+    shared.activate_jobs(jobs)?;
 
     let endpoint = platform::daemon_endpoint(cache);
     if platform::exists(&endpoint) {

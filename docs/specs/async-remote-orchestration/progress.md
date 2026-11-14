@@ -355,3 +355,48 @@ One current frozen full CLI, lean and standalone release perf run follow this
 checkpoint; c3 results are not claimed for changed production source. New public
 PR160 native CI and strongest fix-only re-review remain root gates; no local
 static/artifact duplication, no issue closure, B1–B3 still pending PR1 acceptance.
+
+
+## MODIFIED 2026-11-14 — PR1 merged; B1 functional checkpoint
+
+PR160 ordinary squash `28c9d5f66cdd36d1b4cccc9601f0a4ef5f4d47c4` accepted;
+merged tree exactly matches reviewed/tested cabdfdc. Strongest fix-only review,
+native artifact/browser gates and actual CLI1617/0/18, lean1377/0/11, release
+perf6/0/0 complete for PR1. #81 remains open. New PR2 branch
+feat/async-background-orchestration-81 starts from that squash, not old commits.
+
+Original B1 source challenge fix2 PASS unlocked production. Functional B1 now
+migrates actual daemon index_project/sync_start into bounded prepare → embedding
+batches → commit/captured attribution → ordered backfill (Sync only) → mandatory
+terminal retirement. Global-only daemon.background_active1/pending8 and remote
+background_active1/pending8/timeout600000 have actual consumers; helper pending
+uses checked interactive+background slots and executor sum includes S+C+J+H+T.
+No paid call, dependency, fixture/golden/ignore/budget or CI change.
+
+Actual first RED held document provider and independent control failed admission;
+GREEN proves control/J free, native writer refusal and no sync bridge. Pin API RED
+proved negative forgery; own negative allocator/corruption/parallel/cleanup tests
+GREEN. Additional actual RED caught intermediate lexical Full doing unwanted
+whole-corpus backfill; fixed to preserve separate explicit Sync boundary. Historical
+compile/lint failures retained. Current actual route matrix11/0, registration2/0,
+capture event2/0, pin4/0 and shared-index preservation51/0. TTL/ANN case moves -1
+into existing native worker, holds later -2, joins old cleanup and proves -2
+survives; captured TTL123s verified from SQL. Outer root unwind drains real held
+native work before Runtime Drop. Allocation refusal is the last observed capture
+event and preserves metadata/index; charge releases on retirement.
+
+Rulings: D7a application-only Drop guarantee with Tokio wake exception; sealed
+unreachable ownership violation fail-stop; additive vectors.db application_id/
+counter format and whole negative public API boundary explicitly recorded in
+requirements/design. Cow planner classification reuses legacy/async kernels
+without cloning legacy path lists or dead-code suppression. Existing positive
+library pin paths unchanged. Concurrent cold WAL bootstrap Busy is inherited,
+explicit/retry-safe before project effects; parked independently as #161.
+
+This functional checkpoint records focused proof/current lint work. One frozen
+full CLI and lean execution, exact source/name/ignore inventory, fresh B1 task
+review remain completion gates; results go in private task-b1 receipts. No release
+perf/static/LTO/native execution is repeated per internal task. Watcher, automatic
+open-time scheduling and direct CLI/MCP/metrics consumers remain explicit B2/B3
+work in the SAME second substantial PR; no public foundation PR, no issue closure
+or claim that all operational consumers have migrated.

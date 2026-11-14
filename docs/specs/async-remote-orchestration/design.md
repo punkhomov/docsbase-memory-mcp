@@ -537,126 +537,89 @@ command Runtime local **вне** block_on, затем complete drain, затем
 в том же sync/block_in_place scope. Provider waits async, CPU phases admitted.
 Current-thread nesting отклоняется до construction; MCP proxy не создаёт runtime.
 
-### D7a. MODIFIED 2026-11-14 — unique job/finalizer ownership (fix1/C1)
+### D7a. MODIFIED 2026-11-14 — implemented unique job/root ownership (B1)
 
-Проверено: `IndexHandle::drop` (`index/tantivy_index.rs:157`) вызывает
-`wait_merging_threads`; pinned Tantivy IndexWriter Drop joins workers. Поэтому
-native IndexState никогда не является обычным полем async coordinator с native
-Drop. Единственный переход ownership — transfer-only wrapper; native destruction
-допустим только внутри физически charged blocking closure.
+B1 original scoped planning challenge fix2 PASS принят root до production.
+`JobRoot` создан в `run_daemon` **вне** runtime.block_on; strict serve получает
+его JobService. Compatibility Shared без activated root сохраняет legacy route;
+watcher/open-time/direct consumers мигрируют B2/B3. Root.run catches work-driver
+unwind, closes new admission, cancels registered original operations, pumps every
+issued terminal and joins T before receiver/Runtime destruction, включая signal
+escalation. Это обязательная B1 lifetime, не future B2 promise.
 
-```rust,ignore
-struct IndexState { /* private, !Clone; only blocking phase/finalizer can access */
-    index: Option<IndexHandle>, db: Option<Db>,
-    attribution: CapturedSyncRecord, effects: MutationState,
-    capture: JobCapture, // owns all plan/workspace data, then PayloadPermit
-    lease: Option<OwnedWriterLease>,
-}
-enum MutationState { Untouched, Started, LexicalCommitted }
-// CapturedSyncRecord is a proposed bounded Option of exact existing stats/
-// SyncAttribution, not a new generation or a later DB observation.
-struct JobOwner { // !Clone; async-safe Drop transfers, never drops IndexState
-    state: Option<Box<IndexState>>,
-    accepted: Option<AcceptedJob>, // logical slot, Activity, pre-reserved ticket
-    terminal: TerminalReason,
-}
-struct AcceptedJob {
-    logical: OwnedSemaphorePermit, // L, distinct from physical J
-    ticket: mpsc::OwnedPermit<FinalizationEnvelope>, // obtained before native state
-    activity: Arc<Activity>,
-}
-struct FinalizationEnvelope {
-    state: Option<Box<IndexState>>, reason: TerminalReason,
-    logical: OwnedSemaphorePermit, activity: Arc<Activity>,
-} // send consumes the ticket; envelope contains no second ticket
-struct JobPhaseResult<T> { owner: JobOwner, result: Result<T> }
-impl JobService {
-    async fn admit(&self, operation: &SearchOperation) -> Result<JobOwner>;
-    async fn phase<T>(&self, owner: JobOwner,
-        work: impl FnOnce(&mut IndexState) -> Result<T> + Send + 'static)
-        -> Result<JobPhaseResult<T>>; // Result/JoinError also retains transfer ownership
-    fn close_new(&self); // no new logical jobs/ordinary phases; tickets stay valid
-    async fn drain(&self) -> Result<()>;
-}
-```
+Конкретные types: private !Clone JobOwner содержит Option<Box<IndexState>>,
+oneshot::Sender<Box<IndexState>> и Arc<PhysicalTail>. IndexState единственный
+в phase либо terminal; Db Send, не Sync, поэтому shared Arc<IndexState> нет.
+OwnedWriterLease использует existing fd_lock и ouroboros на том же .writer.lock.
+Root Registration держит L permit, original operation, **tail-free** Activity,
+terminal/done receivers и ack. Bounded registration mpsc несёт только admission
+headers; root slots capacity=L preallocated. До native capture/effects allocate
+empty box/cells и transfer registration; root installs slot до ack. Abandoned ack
+не возвращает L: empty terminal retires через T. После ack/cancel check только
+existing admitted J phase открывает native state. J permit не держится на network.
 
-`phase` signature выше обозначает owned result, но transport/join failure **не
-может** вернуть Err, который drops naked IndexState. Реальный envelope всегда
-содержит JobOwner либо уже передал его в finalizer; handle observer владеет только
-operation token/completion receiver. `JobService::phase` получает **physical**
-J permit независимо от accepted L; передаёт owner в `request::spawn`. Рабочий
-closure — единственный owner во время prepare/resume. Нормальный результат
-возвращается как JobPhaseResult; receiver dropped/unwind/JoinHandle output drop
-вызывает только JobOwner transfer. Ни один Async Drop не читает SQL, не ждёт
-merge, не берёт J permit и не запускает новый blocking task.
+JobOwner Drop синхронно передаёт уже выделенный box ровно один раз. Root хранит
+полученный box в своем slot, ждёт physical_done **без J/T**, затем передаёт его
+и L/Activity в existing request spawn с fixed terminal T=1. Receiver может уйти
+после consumption/transfer (native sender уже consumed); unconsumed receiver
+root не закрывает до complete retirement. Terminal действует после ordinary
+WorkerAdmission.shutdown. L=J, T=1 имеют отдельные ownership scopes: queued,
+remote и retiring native states bounded by L; физические closures — J/T.
 
-До capture/native construction `admit` получает logical slot L=J из **отдельного**
-semaphore и terminal ticket. Для pending jobs действует daemon.background_pending;
-logical slot остаётся до finalization, physical J возвращается после каждой
-closure. Даже при L=J=1 следующий phase не ждёт удерживаемый им physical permit.
-Terminal queue — `mpsc::channel(L)`; каждый AcceptedJob до mutation резервирует
-slot (`try_reserve_owned`, отсутствие slot — отказ до effects). Пока ticket жив,
-slot не может быть отдан другому job. Количество queued+reserved+finalizing jobs
-<=L благодаря logical slot, а не только размеру mpsc. FinalizationEnvelope storage
-и Box header preallocated/charged до IndexState capture; `JobOwner::drop` делает
-только `take` и synchronous `OwnedPermit::send`, не allocation/await/lock/native
-destruction. `owner.finish(reason)` использует тот же exactly-once transfer.
+PhysicalTail **не содержит native state**. Root/Activity/SearchOperation не имеют
+ни прямой, ни косвенной strong tail reference. RemoteCall и delivered JobValue/
+CpuOutput удерживают tail до destruction данных. Existing spawn_with_tail держит
+отдельный closure-local guard: work/data/undelivered output → physical permit →
+tail → source/ingress Activity при normal/unwind. Следовательно root не запускает
+T и не освобождает payload/lease, пока physical job data ещё живы. Нового registry,
+executor, CPU tracker или application lock в transfer Drop нет.
 
-Один async terminal dispatcher создан при JobService construction до accepted
-jobs. Он ждёт mpsc без blocking worker, затем получает **reserved terminal
-physical T=1** и вызывает `request::spawn` с permit и cloned job Activity.
-T — fixed single-dispatcher implementation invariant, отдельная lane в том же
-WorkerAdmission, отображённая derived formula; не private workload default.
-У terminal нет новой ordinary admission/pending queue: доказательство допуска —
-ранее выданный ticket, очередь уже зарезервирована. WorkerAdmission.shutdown
-закрывает S/C/J/helper new admission, но terminal lane допускает только valid
-AcceptedJob ticket до конца drain. Нет unpermitted spawn или `spawn(None,...)`.
+**Narrow D7a ruling:** no NEW APPLICATION envelope/channel-storage allocation,
+native destruction, await, ordinary admission или application lock в transfer
+Drop. Transitive allocator/lock freedom не обещается: pinned Tokio1.54.1 oneshot
+send wakes runtime; current-thread VecDeque может расти, inject может брать
+runtime mutex. mpsc reservation alone storage не preallocates, поэтому terminal
+использует preallocated oneshot cells. Sealed unreachable native-closed-send или
+root-live-ticket invariant violation fail-stops без unwinding/destruction native
+payload на Tokio. Это **никогда** не normal error/cancel/shutdown policy.
 
-Shared/command root владеет JobService и dispatcher lifetime. Close-new отменяет
-pending/new admission и producing tasks, **не** закрывает terminal receiver.
-Receiver нельзя уничтожить/abort-ить до возврата всех issued tickets и JobOwner;
-dispatcher не хранит Arc<JobService> с циклом sender/JoinHandle. После завершения
-Activity drain owner закрывает base sender и joins dispatcher. Поломка receiver
-не трактуется как «можно drop native state на Tokio»; его lifetime конструктивно
-зафиксирован private owner, tests не получают raw receiver/abort handle.
+T сначала публикует terminal own record/non-success, затем IndexHandle joins →
+idle Db/plan/data/account → writer lease → L → physical T → Activity. Mutation
+explicit Untouched/Started/LexicalCommitted: capture refusal не меняет project
+status/attempt/outcome/markers/index. Только own newly-created Sync id attached
+в том же коротком J transaction до delivery; dedup result не владеет чужой row.
+Queued refusal/cancel может завершить own Sync Error без lexical attribution.
+Committed detached Sync живёт под root deadline/cancel, независимо от caller EOF.
+Captured own lexical association сохраняется под writer lease; later generation
+не resamples. Sync alone делает full backfill; lexical Full/Incremental сохраняют
+existing changed-document-only embedding. Shared planner input использует borrowed
+Cow для legacy paths и owned Cow для resumable consumers, без второй recipe.
 
-В finalizer IndexState перемещается в `RetiringJob`, который существует только
-внутри T closure. Порядок normal/error/unwind retirement:
+B1 pin authority: signed negative ids allocated BEGIN IMMEDIATE по одной row:
+lease_id=MIN, model_id="\0docsbase:job-pin-sequence:v1", chunk_hash=canonical
+last-issued decimal, expires_at=MAX. application_id DBJ1 отдельно отмечает init:
+only marker0 + absent counter + no negative rows bootstrap atomically; expected
+marker с absent/multiple/corrupt counter, foreign marker, checked_sub exhaustion
+отказывают без reset/reuse. Public pin/unpin reject ALL negative ids; private
+move-only JobPinAuthority routes only its issued id. Expiry skips MIN; ordinary
+positive unpin/model-file cleanup не трогает coordination. No table/identity
+migration, но explicit additive persistent format/API boundary.
 
-1. Завершить/rollback краткую текущую SQL transaction; сохранить terminal
-   outcome/non-success и Sync Error либо законный success, используя **captured
-   lexical attempt/attribution**, не sampling later generation. Success только
-   после commit/apply; cancelled/failed uncommitted work не становится Ready.
-   Publication failure сохраняет durable nonterminal/markers и явный error;
-   никакого синтетического Done. Finalizer не требует новой admission для SQL.
-   `MutationState::Untouched` (например budget refusal до effects) запрещает
-   менять project status/attempt/outcome/markers. Уже queued Sync можно завершить
-   Error без lexical attribution, но нельзя приписать ему прежний чужой outcome.
-   Started устанавливается непосредственно перед первым project effect;
-   LexicalCommitted получает только captured own attempt record после apply.
-2. Destroy IndexHandle и дождаться merges/worker retirement **под writer lease**.
-3. Drop idle Db, затем plan/workspace данные, затем их PayloadPermit.
-4. Drop writer lease; только теперь другой writer может пройти. Drop logical L.
-5. Вернуться из closure: existing request::spawn освобождает physical T permit,
-   затем последнюю Activity reference/physical-completion event. Drain не видит
-   completion раньше terminal publication attempt и native destruction.
+Hash tracking capacity charged до allocation. Captured DenseSpec TTL renews на
+successful batches/handoff. Failure/cancel снимает только own authority. Успех
+передаёт **точную** authority + retained account через existing cold flight в
+BuildJob/native ANN worker; existing ready/build/follower/deferred paths снимают
+unused own pins внутри admitted CPU. Native worker retires own id на success/
+error/unwind; old positive project-id cleanup не может стереть later negative
+job. Config/generation admitted в CPU, no read lease/transaction over await.
 
-Native fields RetiringJob объявлены в том же resource-before-guard порядке;
-unwind guard выполняет retirement в T closure. Phase/publication unwind переводит
-reason в Error; catch_unwind на blocking boundary сохраняет single ownership и
-error context. Если сам native destructor unwinds, оставшиеся поля/lease drops
-тоже выполняются на T worker, Activity живёт до конца closure unwind. Нельзя
-передавать второй aliased IndexState, unlock lease в coordinator или переносить
-IndexHandle в отдельный untracked task. Early constructor failure держит local
-resources внутри charged blocking phase, где допустим их blocking Drop.
-
-Обязательные races: remote cancel/abort; cancel while prepare/resume running;
-panic/unwind; delivery receiver dropped before/after phase completion; shutdown
-закрыл ordinary admission до terminal transfer. Fake/native destructor и terminal
-SQL gates доказывают: Tokio control task продолжает работать, writer admission
-отказана, retained bytes/logical/physical/Activity сохраняются; release позволяет
-exactly one finalizer завершить captured Sync/outcome до drain. Проверить J=L=T=1
-и >1 jobs, чтобы отсутствие self-deadlock и queue bound были причинно наблюдаемы.
+Actual B1 source gates включают real current-thread index dispatch, codec physical
+abandon/normal/unwind, registered ack loss/L1+L3/T1 after shutdown, outer driver
+unwind before Runtime Drop, capture-before-copy low budget, subset/no-op/rebuild,
+whole-invalid batch/retry reuse и old ANN cleanup при later job -2/TTL123 capture.
+Builds/tests/review/native acceptance фиксируются в progress/receipts, не выводятся
+из этого design текста. Native ANN/DNS owners остаются existing separate bounds;
+никакого process-wide thread/RSS/capacity или paid-quality claim нет.
 
 ### D7b. MODIFIED 2026-11-14 — reserve before capture/copy (fix1/I4)
 

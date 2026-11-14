@@ -48,6 +48,30 @@ impl SearchOperation {
         })
     }
 
+    /// Explicit composition-owner budget, without the interactive search clamp.
+    ///
+    /// # Errors
+    /// Zero/unrepresentable duration or cancelled/expired original budget.
+    pub(crate) fn with_timeout(
+        started_at: Instant,
+        timeout: Duration,
+        cancellation: Cancellation,
+    ) -> Result<Self> {
+        if timeout.is_zero() {
+            return Err(Error::Admission {
+                message: "job timeout must be positive".into(),
+            });
+        }
+        let operation = Self {
+            started_at,
+            deadline: checked_deadline(started_at, timeout)?,
+            cancellation,
+            queue_ms: Arc::new(AtomicU64::new(0)),
+        };
+        operation.check()?;
+        Ok(operation)
+    }
+
     /// Clamps an explicit caller deadline to this owner's original budget.
     ///
     /// # Errors

@@ -106,6 +106,8 @@ pub struct RemoteExecution {
     transport: Arc<dyn AsyncTransport>,
     active: Arc<Semaphore>,
     pending: Arc<Semaphore>,
+    background_active: Arc<Semaphore>,
+    background_pending: Arc<Semaphore>,
     counters: Arc<Counters>,
     shutdown: Cancellation,
     workers: Arc<WorkerAdmission>,
@@ -219,6 +221,8 @@ impl RemoteExecution {
             transport,
             active: Arc::new(Semaphore::new(settings.interactive_active)),
             pending: Arc::new(Semaphore::new(settings.interactive_pending)),
+            background_active: Arc::new(Semaphore::new(settings.background_active)),
+            background_pending: Arc::new(Semaphore::new(settings.background_pending)),
             counters: Arc::new(Counters::default()),
             shutdown,
             workers,
@@ -274,17 +278,22 @@ impl RemoteExecution {
         call.check()?;
         self.shutdown.check()?;
         let started = Instant::now();
-        let permit = if let Ok(permit) = Arc::clone(&self.active).try_acquire_owned() {
+        let (active, pending_lane) = if call.is_background() {
+            (&self.background_active, &self.background_pending)
+        } else {
+            (&self.active, &self.pending)
+        };
+        let permit = if let Ok(permit) = Arc::clone(active).try_acquire_owned() {
             permit
         } else {
-            let pending = Arc::clone(&self.pending)
+            let pending = Arc::clone(pending_lane)
                 .try_acquire_owned()
                 .map_err(|_| denied("remote pending limit reached"))?;
             let _charge = CounterCharge::new(&self.counters.pending);
             let _queue = QueueCharge(&self.counters.queue_ms, call.operation(), started);
             let result = call
                 .wait(&self.shutdown, async {
-                    Arc::clone(&self.active)
+                    Arc::clone(active)
                         .acquire_owned()
                         .await
                         .map_err(|_| denied("remote lane closed"))
@@ -326,17 +335,24 @@ impl RemoteExecution {
     ) -> Result<T> {
         let mut cancelled = request::CancelOnDrop(Some(call.operation().cancellation().clone()));
         let permit = call
-            .wait(&self.shutdown, self.workers.search(call.operation()))
+            .wait(&self.shutdown, async {
+                if call.is_background() {
+                    self.workers.background(call.operation()).await
+                } else {
+                    self.workers.search(call.operation()).await
+                }
+            })
             .await?;
         let counters = Arc::clone(&self.counters);
         let worker_call = call.clone();
         let shutdown = self.shutdown.clone();
         #[cfg(test)]
         let cpu_observer = self.cpu_observer.clone();
-        let worker = request::spawn_retained(
+        let worker = request::spawn_with_tail(
             Some(permit),
             Some(self.activity.track()),
             call.activity(),
+            call.physical_tail(),
             move || {
                 // Declare retention before work so input captures drop first on every exit.
                 let (retention, body) = (worker_call, work);

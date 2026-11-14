@@ -1,6 +1,7 @@
 //! Daemon-side modules: registry, lifecycle, admission, sessions, server.
 
 pub mod admission;
+pub(crate) mod job_service;
 pub mod launch;
 pub mod lifecycle;
 pub mod readiness;

@@ -16,6 +16,8 @@ use super::settings::{DaemonSettings, DaemonSpec};
 pub struct WorkerAdmission {
     search: Lane,
     control: Lane,
+    background: Lane,
+    terminal: Arc<Semaphore>,
     #[cfg(feature = "hybrid-remote")]
     helper: Lane,
     control_timeout: Duration,
@@ -47,8 +49,16 @@ impl WorkerAdmission {
         Ok(Self {
             search: Lane::new(settings.search_active, settings.search_pending),
             control: Lane::new(settings.control_active, settings.control_pending),
+            background: Lane::new(settings.background_active, settings.background_pending),
+            terminal: Arc::new(Semaphore::new(1)),
             #[cfg(feature = "hybrid-remote")]
-            helper: Lane::new(settings.helper_active, remote.interactive_active),
+            helper: Lane::new(
+                settings.helper_active,
+                remote
+                    .interactive_active
+                    .checked_add(remote.background_active)
+                    .ok_or_else(|| denied("remote helper pending capacity overflow"))?,
+            ),
             control_timeout: Duration::from_millis(settings.control_timeout_ms),
             shutdown: Cancellation::new(),
         })
@@ -73,6 +83,33 @@ impl WorkerAdmission {
         operation.record_queue(queued_at.elapsed());
         operation.check()?;
         result
+    }
+
+    /// Admit a background CPU phase within its original whole-job budget.
+    pub(crate) async fn background(
+        &self,
+        operation: &SearchOperation,
+    ) -> Result<OwnedSemaphorePermit> {
+        operation.check()?;
+        let queued = Instant::now();
+        let result = self
+            .background
+            .acquire(
+                operation.deadline(),
+                operation.cancellation(),
+                &self.shutdown,
+            )
+            .await;
+        operation.record_queue(queued.elapsed());
+        operation.check()?;
+        result
+    }
+
+    // Only JobRoot's already registered terminal authority can call this lane.
+    pub(crate) fn terminal(&self) -> Result<OwnedSemaphorePermit> {
+        Arc::clone(&self.terminal)
+            .try_acquire_owned()
+            .map_err(|_| denied("terminal worker already occupied"))
     }
 
     /// Uses the owner's finite control timeout and daemon shutdown state.
@@ -105,20 +142,26 @@ impl WorkerAdmission {
     }
 }
 
-struct Lane {
+pub(crate) struct Lane {
+    active_capacity: usize,
     active: Arc<Semaphore>,
     pending: Arc<Semaphore>,
 }
 
 impl Lane {
-    fn new(active: usize, pending: usize) -> Self {
+    pub(crate) fn new(active: usize, pending: usize) -> Self {
         Self {
+            active_capacity: active,
             active: Arc::new(Semaphore::new(active)),
             pending: Arc::new(Semaphore::new(pending)),
         }
     }
 
-    async fn acquire(
+    pub(crate) fn is_idle(&self) -> bool {
+        self.active.available_permits() == self.active_capacity
+    }
+
+    pub(crate) async fn acquire(
         &self,
         deadline: Instant,
         cancellation: &Cancellation,

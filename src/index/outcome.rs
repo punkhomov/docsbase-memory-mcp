@@ -175,6 +175,13 @@ pub(crate) fn run(
     scope: SurveyScope,
     work: impl FnOnce(&mut Db) -> Result<JobStats>,
 ) -> Result<JobStats> {
+    let attempt = begin(db, project)?;
+    let stats = work(db)?;
+    publish(db, project, config, scope, attempt, &stats)?;
+    Ok(stats)
+}
+
+pub(crate) fn begin(db: &Db, project: &Project) -> Result<i64> {
     let root = project.canonical_root.to_string_lossy();
     let attempt: i64 = db
         .connection()
@@ -186,7 +193,18 @@ pub(crate) fn run(
             |row| row.get(0),
         )
         .map_err(db_error)?;
-    let stats = work(db)?;
+    Ok(attempt)
+}
+
+pub(crate) fn publish(
+    db: &mut Db,
+    project: &Project,
+    config: &Config,
+    scope: SurveyScope,
+    attempt: i64,
+    stats: &JobStats,
+) -> Result<()> {
+    let root = project.canonical_root.to_string_lossy();
     let tx = db.begin_write()?;
     let generation = repo::index_generation(&tx, project.id)?;
     let outcome = IndexOutcome {
@@ -226,7 +244,7 @@ pub(crate) fn run(
         ));
     }
     tx.commit().map_err(db_error)?;
-    Ok(stats)
+    Ok(())
 }
 
 #[cfg(test)]

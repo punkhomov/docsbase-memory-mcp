@@ -32,12 +32,25 @@ pub(crate) fn spawn_retained<T: Send + 'static>(
     ingress: Option<Arc<Activity>>,
     work: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> JoinHandle<Result<T>> {
+    spawn_with_tail(permit, activity, ingress, None, work)
+}
+
+/// Physical fence is local to the closure; shared Activities MUST stay tail-free.
+pub(crate) fn spawn_with_tail<T: Send + 'static>(
+    permit: Option<OwnedSemaphorePermit>,
+    activity: Option<Arc<Activity>>,
+    ingress: Option<Arc<Activity>>,
+    tail: Option<Arc<dyn Send + Sync>>,
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> JoinHandle<Result<T>> {
     tokio::task::spawn_blocking(move || {
-        // Release capacity before Activity publishes physical completion.
+        // Reverse local drop order: work/data, permit, opaque tail, Activities.
         let _activity = activity;
         let _ingress = ingress;
+        let _tail = tail;
         let _permit = permit;
-        work()
+        let body = work;
+        body()
     })
 }
 

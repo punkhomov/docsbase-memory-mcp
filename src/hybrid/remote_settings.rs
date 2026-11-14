@@ -16,6 +16,12 @@ pub struct RemoteSettings {
     pub interactive_active: usize,
     /// Maximum interactive admission waiters.
     pub interactive_pending: usize,
+    /// Maximum background stages, including retry waits.
+    pub background_active: usize,
+    /// Maximum background stage admission waiters.
+    pub background_pending: usize,
+    /// Original whole background job budget.
+    pub background_timeout_ms: u64,
     /// HTTP attempt and complete response-body timeout.
     pub attempt_timeout_ms: u64,
     /// Total attempts, including the first send.
@@ -46,6 +52,12 @@ pub struct RemotePatch {
     pub interactive_active: Option<usize>,
     /// Override `interactive_pending`.
     pub interactive_pending: Option<usize>,
+    /// Override background stage capacity.
+    pub background_active: Option<usize>,
+    /// Override background stage waiter capacity.
+    pub background_pending: Option<usize>,
+    /// Override whole job timeout.
+    pub background_timeout_ms: Option<u64>,
     /// Override `attempt_timeout_ms`.
     pub attempt_timeout_ms: Option<u64>,
     /// Override `retry_attempts`.
@@ -76,6 +88,9 @@ impl RemoteSpec {
     pub const DEFAULTS: RemoteSettings = RemoteSettings {
         interactive_active: 4,
         interactive_pending: 32,
+        background_active: 1,
+        background_pending: 8,
+        background_timeout_ms: 600_000,
         attempt_timeout_ms: 30_000,
         retry_attempts: 4,
         retry_initial_ms: 250,
@@ -145,6 +160,13 @@ impl SettingsSpec for RemoteSpec {
     const FIELDS: &'static [FieldSpec] = &[
         FieldSpec::new("remote.interactive_active", Scope::Daemon, Unit::Count),
         FieldSpec::new("remote.interactive_pending", Scope::Daemon, Unit::Count),
+        FieldSpec::new("remote.background_active", Scope::Daemon, Unit::Count),
+        FieldSpec::new("remote.background_pending", Scope::Daemon, Unit::Count),
+        FieldSpec::new(
+            "remote.background_timeout_ms",
+            Scope::Daemon,
+            Unit::Milliseconds,
+        ),
         FieldSpec::new(
             "remote.attempt_timeout_ms",
             Scope::Daemon,
@@ -192,6 +214,9 @@ impl SettingsSpec for RemoteSpec {
         apply!(
             interactive_active,
             interactive_pending,
+            background_active,
+            background_pending,
+            background_timeout_ms,
             attempt_timeout_ms,
             retry_attempts,
             retry_initial_ms,
@@ -210,6 +235,13 @@ impl SettingsSpec for RemoteSpec {
         if settings.interactive_active == 0
             || settings.interactive_active > max
             || settings.interactive_pending > max
+            || settings.background_active == 0
+            || settings.background_active > max
+            || settings.background_pending > max
+            || settings
+                .interactive_active
+                .checked_add(settings.background_active)
+                .is_none_or(|n| n > max)
             || settings.retry_attempts == 0
             || settings.retry_multiplier == 0
             || settings.embed_batch_texts == 0
@@ -226,6 +258,7 @@ impl SettingsSpec for RemoteSpec {
         }
         for (milliseconds, positive) in [
             (settings.attempt_timeout_ms, true),
+            (settings.background_timeout_ms, true),
             (settings.retry_initial_ms, false),
             (settings.retry_max_ms, false),
             (settings.max_retry_after_ms, false),
