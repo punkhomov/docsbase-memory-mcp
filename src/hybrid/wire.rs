@@ -20,7 +20,8 @@ pub struct TransportResponse {
     pub retry_after: Option<Duration>,
 }
 
-/// Minimal synchronous HTTP seam; the real implementation owns the runtime.
+/// Minimal synchronous HTTP seam; the real implementation uses a root-owned runtime's
+/// retirable Handle bridge and never owns a Runtime.
 pub trait Transport: Send + Sync {
     /// Sends one JSON POST request.
     ///

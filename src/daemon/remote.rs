@@ -113,20 +113,32 @@ pub struct BoundedResolver {
     activity: ActivitySource,
     queue_timeout: Duration,
     lookup: Arc<Lookup>,
+    shutdown: crate::hybrid::work::Cancellation,
 }
 
 #[cfg(feature = "hybrid-remote")]
 impl BoundedResolver {
+    #[cfg(test)]
+    pub(crate) fn with_lookup(
+        mut self,
+        lookup: impl Fn(String) -> std::io::Result<Vec<std::net::SocketAddr>> + Send + Sync + 'static,
+    ) -> Self {
+        self.lookup = Arc::new(lookup);
+        self
+    }
+
     pub(crate) fn with_owners(
         settings: &crate::hybrid::remote_settings::RemoteSettings,
         workers: Arc<WorkerAdmission>,
         activity: ActivitySource,
+        shutdown: crate::hybrid::work::Cancellation,
     ) -> Result<Self> {
         crate::hybrid::remote_settings::RemoteSpec::validate(settings, &Capabilities::current())?;
         Ok(Self {
             workers,
             activity,
             queue_timeout: Duration::from_millis(settings.attempt_timeout_ms),
+            shutdown,
             lookup: Arc::new(|name| {
                 use std::net::ToSocketAddrs;
                 (name.as_str(), 0).to_socket_addrs().map(Iterator::collect)
@@ -144,7 +156,12 @@ impl BoundedResolver {
     ) -> Result<Self> {
         let workers = Arc::new(WorkerAdmission::with_policies(daemon, settings)?);
         let (activity, _events) = ActivitySource::channel(daemon.max_events);
-        Self::with_owners(settings, workers, activity)
+        Self::with_owners(
+            settings,
+            workers,
+            activity,
+            crate::hybrid::work::Cancellation::new(),
+        )
     }
 }
 
@@ -155,6 +172,7 @@ impl reqwest::dns::Resolve for BoundedResolver {
         let activity = self.activity.clone();
         let timeout = self.queue_timeout;
         let lookup = Arc::clone(&self.lookup);
+        let shutdown = self.shutdown.clone();
         let name = name.as_str().to_owned();
         Box::pin(async move {
             let failed = |message: &'static str| -> Box<dyn std::error::Error + Send + Sync> {
@@ -164,10 +182,11 @@ impl reqwest::dns::Resolve for BoundedResolver {
                 .checked_add(timeout)
                 .ok_or_else(|| failed("DNS helper deadline overflow"))?;
             let permit = workers
-                .helper(deadline)
+                .helper(deadline, &shutdown)
                 .await
                 .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
             let worker = request::spawn(Some(permit), Some(activity.track()), move || {
+                shutdown.check()?;
                 lookup(name)
                     .map_err(|error| Error::internal_with_source("provider DNS lookup", error))
             });
@@ -257,8 +276,13 @@ mod tests {
         policy.interactive_active = 1;
         let workers = Arc::new(WorkerAdmission::with_policies(daemon.settings(), &policy).unwrap());
         let (activity, mut events) = ActivitySource::channel(daemon.settings().max_events);
-        let mut resolver =
-            BoundedResolver::with_owners(&policy, workers, activity.clone()).unwrap();
+        let mut resolver = BoundedResolver::with_owners(
+            &policy,
+            workers,
+            activity.clone(),
+            crate::hybrid::work::Cancellation::new(),
+        )
+        .unwrap();
         let (release, gate) = std::sync::mpsc::channel();
         let gate = Arc::new(Mutex::new(gate));
         let (started, ready) = tokio::sync::oneshot::channel();

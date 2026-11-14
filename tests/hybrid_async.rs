@@ -500,6 +500,15 @@ async fn shared_member_changes_keep_the_same_attempt_and_hard_timeout() {
 
 #[test]
 fn dropping_a_cpu_waiter_before_executor_start_skips_its_work() {
+    queued_cpu_work_is_skipped(false);
+}
+
+#[test]
+fn shutdown_before_cpu_executor_start_skips_its_work() {
+    queued_cpu_work_is_skipped(true);
+}
+
+fn queued_cpu_work_is_skipped(shutdown: bool) {
     use std::future::Future;
     use std::task::Poll;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -536,7 +545,12 @@ fn dropping_a_cpu_waiter_before_executor_start_skips_its_work() {
             Poll::Ready(())
         })
         .await;
-        drop(work);
+        if shutdown {
+            execution.shutdown();
+            assert!(work.await.is_err());
+        } else {
+            drop(work);
+        }
         release.send(()).unwrap();
         occupied.await.unwrap();
         tokio::time::timeout(
@@ -548,7 +562,7 @@ fn dropping_a_cpu_waiter_before_executor_start_skips_its_work() {
         assert_eq!(
             entered.load(Ordering::SeqCst),
             0,
-            "dropped queued CPU work must not execute"
+            "retired queued CPU work must not execute"
         );
     });
 }

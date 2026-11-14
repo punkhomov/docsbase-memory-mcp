@@ -168,3 +168,38 @@ reference does not describe the causal RED runtime. No dependency files changed.
 Prepared frozen Web/SDK/HTTP assets were reused. Fresh normal rlib depinfo contains
 the new remote module and is newer than source (`depinfo-source-check.json`);
 no mtime touch, source workaround or clean was required.
+
+## MODIFIED 2026-11-14 — A1 review fix1 (I1/I2/I3/M1)
+
+Fresh A1 task review returned FAIL/CHANGES at `af08ca0`; author owns this scoped
+fix. Actual gated REDs (`task-a1/fix1/red-queued-cpu-shutdown.log` and
+`red-resolver-shutdown.log`, each exit101) reproduced queued CPU work running
+after execution shutdown and retained real-factory DNS admission remaining live.
+
+I1: error exits keep CancelOnDrop armed; actual CPU closure checks the execution
+shutdown token before work. I2: real reqwest factory gives its resolver the same
+execution token; helper admission observes both execution and root shutdown,
+and a queued helper closure checks retirement before native lookup. Retiring one
+execution leaves shared search/control lanes available. No global worker kill.
+
+I3: causal gates cover original deadline expiry during provider queue/network/
+backoff+jitter; actual transport observes the min of policy and partially consumed
+ordinary budget. The tests await the semantic deadline (one second), with held
+work and a five-second hang watchdog, without elapsed-time performance claims.
+Actual Shared table adds unknown owner key and a valid-TOML numeric value beyond
+the u64 timeout domain; the latter fails owner decoding, preserving the existing
+whole-document syntax/fallback boundary. Direct assessment and real Shared
+restart notice prove runtime-only remote policy change, with no artifact effect.
+M1 runtime-ownership comments now describe the retirable Handle bridge.
+
+Focused GREEN: remote unit14/0 plus CLI integration44/0; affected lean config51/0,
+owner unit1/0, final settings4/0. Current cli-full/default all-target Clippy and
+fmt pass. One earlier Clippy exit101 for new test assertion style is retained in
+raw receipts and fixed. Full frozen CLI check follows this checkpoint; fix1
+report/commands/source hashes live untracked under `task-a1/fix1/`. Fresh scoped
+re-review remains pending; A2 still locked. No task-complete/PR/closure claim.
+
+Ruling: use a construction-only resolver factory seam to retain the exact
+resolver injected into real reqwest for the shutdown test. The normal factory
+and test share the complete owner/token/client composition. Existing local
+CPU/Activity/WorkerAdmission owners and same-pinned-future policy are retained.

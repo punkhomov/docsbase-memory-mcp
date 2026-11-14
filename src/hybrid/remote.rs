@@ -248,15 +248,41 @@ impl RemoteExecution {
         workers: Arc<WorkerAdmission>,
         activity: ActivitySource,
     ) -> Result<Self> {
-        let resolver = Arc::new(crate::daemon::remote::BoundedResolver::with_owners(
+        Self::real_with_resolver(
+            settings,
+            workers,
+            activity,
+            |settings, workers, activity, shutdown| {
+                crate::daemon::remote::BoundedResolver::with_owners(
+                    settings, workers, activity, shutdown,
+                )
+                .map(Arc::new)
+            },
+        )
+    }
+
+    fn real_with_resolver(
+        settings: &RemoteSettings,
+        workers: Arc<WorkerAdmission>,
+        activity: ActivitySource,
+        resolver: impl FnOnce(
+            &RemoteSettings,
+            Arc<WorkerAdmission>,
+            ActivitySource,
+            Cancellation,
+        ) -> Result<Arc<crate::daemon::remote::BoundedResolver>>,
+    ) -> Result<Self> {
+        let shutdown = Cancellation::new();
+        let resolver = resolver(
             settings,
             Arc::clone(&workers),
             activity.clone(),
-        )?);
+            shutdown.clone(),
+        )?;
         let transport = Arc::new(super::openrouter::ReqwestTransport::with_settings(
             settings, resolver,
         )?);
-        Self::with_owners(settings, transport, workers, activity)
+        Self::with_shutdown(settings, transport, workers, activity, shutdown)
     }
 
     pub(crate) fn with_owners(
@@ -265,6 +291,16 @@ impl RemoteExecution {
         workers: Arc<WorkerAdmission>,
         activity: ActivitySource,
     ) -> Result<Self> {
+        Self::with_shutdown(settings, transport, workers, activity, Cancellation::new())
+    }
+
+    fn with_shutdown(
+        settings: &RemoteSettings,
+        transport: Arc<dyn AsyncTransport>,
+        workers: Arc<WorkerAdmission>,
+        activity: ActivitySource,
+        shutdown: Cancellation,
+    ) -> Result<Self> {
         RemoteSpec::validate(settings, &Capabilities::current())?;
         Ok(Self {
             settings: settings.clone(),
@@ -272,7 +308,7 @@ impl RemoteExecution {
             active: Arc::new(Semaphore::new(settings.interactive_active)),
             pending: Arc::new(Semaphore::new(settings.interactive_pending)),
             counters: Arc::new(Counters::default()),
-            shutdown: Cancellation::new(),
+            shutdown,
             workers,
             activity,
             #[cfg(test)]
@@ -375,8 +411,10 @@ impl RemoteExecution {
             .await?;
         let counters = Arc::clone(&self.counters);
         let worker_call = call.clone();
+        let shutdown = self.shutdown.clone();
         let worker = request::spawn(Some(permit), Some(self.activity.track()), move || {
             worker_call.check()?;
+            shutdown.check()?;
             let _time = DurationCharge(&counters.cpu_ms, Instant::now());
             work()
         });
@@ -387,7 +425,9 @@ impl RemoteExecution {
                     .map_err(|error| Error::internal_with_source("remote CPU task join", error))?
             })
             .await;
-        cancelled.0 = None;
+        if result.is_ok() {
+            cancelled.0 = None;
+        }
         result
     }
 }
@@ -553,6 +593,85 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn execution_shutdown_retires_retained_real_resolver_without_other_lanes() {
+        use reqwest::dns::Resolve;
+        use std::task::Poll;
+        let daemon = crate::daemon::settings::standalone().unwrap();
+        let mut policy = super::super::remote_settings::standalone()
+            .unwrap()
+            .into_settings();
+        policy.interactive_active = 1;
+        let workers = Arc::new(WorkerAdmission::with_policies(daemon.settings(), &policy).unwrap());
+        let (activity, _events) = ActivitySource::channel(daemon.settings().max_events);
+        let (release, gate) = std::sync::mpsc::channel();
+        let gate = Mutex::new(gate);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let started = Mutex::new(Some(started));
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let lookup_count = lookups.clone();
+        let mut captured = None;
+        let execution = RemoteExecution::real_with_resolver(
+            &policy,
+            workers,
+            activity.clone(),
+            |settings, workers, activity, shutdown| {
+                let resolver = Arc::new(
+                    crate::daemon::remote::BoundedResolver::with_owners(
+                        settings, workers, activity, shutdown,
+                    )
+                    .unwrap()
+                    .with_lookup(move |_| {
+                        if lookup_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                            let _ = started.lock().unwrap().take().unwrap().send(());
+                            gate.lock().unwrap().recv().unwrap();
+                        }
+                        Ok(vec!["127.0.0.1:0".parse().unwrap()])
+                    }),
+                );
+                captured = Some(resolver.clone());
+                Ok(resolver)
+            },
+        )
+        .unwrap();
+        let resolver = captured.unwrap();
+        let first = tokio::spawn(resolver.resolve("openrouter.ai".parse().unwrap()));
+        ready.await.unwrap();
+        first.abort();
+        assert!(first.await.is_err());
+        let mut second = resolver.resolve("openrouter.ai".parse().unwrap());
+        std::future::poll_fn(|cx| {
+            assert!(second.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        execution.shutdown();
+        let pending_rejected = std::future::poll_fn(|cx| {
+            Poll::Ready(matches!(second.as_mut().poll(cx), Poll::Ready(Err(_))))
+        })
+        .await;
+        // Always release the native gate before assertions, including the RED path.
+        release.send(()).unwrap();
+        execution.drain(Duration::from_millis(1)).await;
+        drop(second);
+        let new_rejected = resolver
+            .resolve("openrouter.ai".parse().unwrap())
+            .await
+            .is_err();
+        assert!(execution.workers.control().await.is_ok());
+        assert!(execution.workers.search(call().operation()).await.is_ok());
+        assert!(
+            pending_rejected,
+            "execution shutdown must reject a retained DNS admission waiter"
+        );
+        assert!(
+            new_rejected,
+            "retired execution must reject new DNS work after drain"
+        );
+        assert_eq!(lookups.load(Ordering::SeqCst), 1);
+        assert_eq!(activity.counter.load(Ordering::SeqCst), 0);
+    }
+
     struct Responses(Mutex<std::collections::VecDeque<(u16, Option<Duration>)>>);
     impl AsyncTransport for Responses {
         fn post_json<'a>(
@@ -601,6 +720,191 @@ mod tests {
             }),
         });
         execution
+    }
+
+    fn expiring_call() -> RemoteCall {
+        let mut policy = crate::search::settings::standalone()
+            .unwrap()
+            .into_settings();
+        policy.request_timeout_ms = 1_000;
+        RemoteCall::new(SearchOperation::new(&policy, Instant::now(), Cancellation::new()).unwrap())
+    }
+
+    fn wire_request() -> WireRequest {
+        WireRequest {
+            url: "https://openrouter.ai/api/v1/embeddings".into(),
+            headers: vec![],
+            body: "{}".into(),
+        }
+    }
+
+    fn assert_expired(result: Result<TransportResponse>, call: &RemoteCall) {
+        assert!(
+            result
+                .unwrap_err()
+                .inner_message()
+                .contains("deadline expired")
+        );
+        assert!(call.operation().cancellation().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn original_deadline_expires_while_provider_admission_is_queued() {
+        use std::task::Poll;
+        let mut policy = super::super::remote_settings::standalone()
+            .unwrap()
+            .into_settings();
+        policy.interactive_active = 1;
+        let execution = RemoteExecution::with_transport(
+            &policy,
+            crate::daemon::settings::standalone().unwrap().settings(),
+            Arc::new(Responses(Mutex::new(vec![(200, None)].into()))),
+        )
+        .unwrap();
+        let held = execution.admit(&call()).await.unwrap();
+        let expiring = expiring_call();
+        let request = wire_request();
+        let mut work = Box::pin(execution.post(&expiring, &request));
+        std::future::poll_fn(|cx| {
+            assert!(work.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(execution.snapshot().pending, 1);
+        assert_expired(
+            tokio::time::timeout(Duration::from_secs(5), work)
+                .await
+                .unwrap(),
+            &expiring,
+        );
+        assert_eq!(execution.snapshot().pending, 0);
+        assert_eq!(execution.snapshot().attempts, 0);
+        drop(held);
+        assert!(execution.post(&call(), &request).await.is_ok());
+        assert_eq!(execution.snapshot().attempts, 1);
+    }
+
+    #[derive(Default)]
+    struct HeldRequest(Mutex<Vec<Duration>>);
+    impl AsyncTransport for HeldRequest {
+        fn post_json<'a>(
+            &'a self,
+            _: &'a WireRequest,
+            timeout: Duration,
+        ) -> StageFuture<'a, TransportResponse> {
+            Box::pin(async move {
+                self.0.lock().unwrap().push(timeout);
+                std::future::pending().await
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn original_deadline_expires_during_a_held_network_attempt() {
+        use std::task::Poll;
+        let transport = Arc::new(HeldRequest::default());
+        let execution = RemoteExecution::with_transport(
+            super::super::remote_settings::standalone()
+                .unwrap()
+                .settings(),
+            crate::daemon::settings::standalone().unwrap().settings(),
+            transport.clone(),
+        )
+        .unwrap();
+        let expiring = expiring_call();
+        let request = wire_request();
+        let mut work = Box::pin(execution.post(&expiring, &request));
+        std::future::poll_fn(|cx| {
+            assert!(work.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(transport.0.lock().unwrap().len(), 1);
+        assert_expired(
+            tokio::time::timeout(Duration::from_secs(5), work)
+                .await
+                .unwrap(),
+            &expiring,
+        );
+        assert_eq!(transport.0.lock().unwrap().len(), 1);
+        assert_eq!(execution.snapshot().active, 0);
+    }
+
+    #[tokio::test]
+    async fn original_deadline_expires_during_backoff_including_jitter() {
+        use std::task::Poll;
+        let policy = super::super::remote_settings::standalone().unwrap();
+        let delays = Arc::new(Mutex::new(Vec::new()));
+        let observed = delays.clone();
+        let mut execution = observed_execution(
+            policy.settings(),
+            vec![(429, Some(Duration::from_secs(90)))],
+            delays.clone(),
+        );
+        execution.timing.as_mut().unwrap().sleep = Arc::new(move |delay| {
+            observed.lock().unwrap().push(delay);
+            Box::pin(std::future::pending())
+        });
+        let expiring = expiring_call();
+        let request = wire_request();
+        let mut work = Box::pin(execution.post(&expiring, &request));
+        std::future::poll_fn(|cx| {
+            assert!(work.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(*delays.lock().unwrap(), vec![Duration::from_millis(30_049)]);
+        assert_expired(
+            tokio::time::timeout(Duration::from_secs(5), work)
+                .await
+                .unwrap(),
+            &expiring,
+        );
+        assert_eq!(execution.snapshot().attempts, 1);
+        assert_eq!(execution.snapshot().active, 0);
+    }
+
+    #[tokio::test]
+    async fn ordinary_partially_consumed_budget_caps_the_actual_attempt_timeout() {
+        use std::task::Poll;
+        for attempt_timeout_ms in [30_000, 73] {
+            let mut policy = super::super::remote_settings::standalone()
+                .unwrap()
+                .into_settings();
+            policy.attempt_timeout_ms = attempt_timeout_ms;
+            let transport = Arc::new(HeldRequest::default());
+            let execution = RemoteExecution::with_transport(
+                &policy,
+                crate::daemon::settings::standalone().unwrap().settings(),
+                transport.clone(),
+            )
+            .unwrap();
+            let search = crate::search::settings::standalone().unwrap();
+            let started = Instant::now()
+                .checked_sub(Duration::from_millis(
+                    search.settings().request_timeout_ms / 3,
+                ))
+                .unwrap();
+            let call = RemoteCall::new(
+                SearchOperation::new(search.settings(), started, Cancellation::new()).unwrap(),
+            );
+            let before = call.operation().remaining().unwrap();
+            let request = wire_request();
+            let mut work = Box::pin(execution.post(&call, &request));
+            std::future::poll_fn(|cx| {
+                assert!(work.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            let after = call.operation().remaining().unwrap();
+            let observed = transport.0.lock().unwrap()[0];
+            let policy_cap = Duration::from_millis(attempt_timeout_ms);
+            assert!(observed <= before.min(policy_cap));
+            assert!(observed >= after.min(policy_cap));
+            call.operation().cancellation().cancel();
+            assert!(work.await.is_err());
+            assert_eq!(transport.0.lock().unwrap().len(), 1);
+        }
     }
 
     #[tokio::test]

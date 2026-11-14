@@ -731,8 +731,8 @@ impl Provider for OpenrouterProvider {
         #[cfg(feature = "hybrid-remote")]
         {
             let _ = providers;
-            // One client for both stages (it owns an http client and a
-            // runtime); built only when a stage actually needs it, so a
+            // One HTTP client for both stages, with a retirable root-runtime
+            // Handle bridge; built only when a stage actually needs it, so a
             // fastembed-only config never demands `OPENROUTER_API_KEY`.
             let client = Arc::new(super::openrouter::OpenRouterClient::from_env()?);
             let embedder = embedding.map(|cfg| {

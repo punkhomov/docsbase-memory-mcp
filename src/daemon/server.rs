@@ -1985,6 +1985,10 @@ mod tests {
         for policy in [
             "interactive_active=0",
             "attempt_timeout_ms=0",
+            "unknown_remote_policy=1",
+            // Valid TOML number, outside the complete policy's u64 domain;
+            // owner decoding must fail rather than legacy fallback.
+            "attempt_timeout_ms=18446744073709551616.0",
             "retry_attempts=0",
             "interactive_active='bad'",
             "interactive_active=9223372036854775807",

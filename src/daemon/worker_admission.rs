@@ -94,9 +94,13 @@ impl WorkerAdmission {
     }
 
     #[cfg(feature = "hybrid-remote")]
-    pub(crate) async fn helper(&self, deadline: Instant) -> Result<OwnedSemaphorePermit> {
+    pub(crate) async fn helper(
+        &self,
+        deadline: Instant,
+        cancellation: &Cancellation,
+    ) -> Result<OwnedSemaphorePermit> {
         self.helper
-            .acquire(deadline, &self.shutdown, &self.shutdown)
+            .acquire(deadline, cancellation, &self.shutdown)
             .await
     }
 }
