@@ -81,6 +81,11 @@ fn apply_rerank(
     // candidates it received (FR-11); every ranked score is a
     // `relevance_score`, so the tail can never mix score scales.
     let ranked = blocking::enter(|| reranker.rerank(query, documents, documents.len()))?;
+    reorder_rerank(ordered, ranked);
+    Ok(())
+}
+
+fn reorder_rerank(ordered: &mut Vec<(u64, f32)>, ranked: Vec<(usize, f32)>) {
     let mut reordered: Vec<(u64, f32)> = Vec::with_capacity(ordered.len());
     let mut ranked_flags = vec![false; ordered.len()];
     for (index, score) in ranked {
@@ -100,7 +105,6 @@ fn apply_rerank(
         }
     }
     *ordered = reordered;
-    Ok(())
 }
 
 /// Dense candidate list for the RRF stage (FR-15): the query embedding plus
@@ -111,6 +115,7 @@ struct DenseQuery<'a> {
     text: &'a str,
     generation: i64,
     fetch: usize,
+    vector: Option<&'a [f32]>,
 }
 
 fn dense_candidates<Guard>(
@@ -136,7 +141,13 @@ fn dense_candidates<Guard>(
     // is a pure function of both, so this cannot change the answer
     // (`search-cost` FR-1/FR-3).
     let model_id = embedder.model_id();
-    let vector = dense.query_embedding(embedder, query.text, operation.cancellation())?;
+    let fresh;
+    let vector = if let Some(vector) = query.vector {
+        vector
+    } else {
+        fresh = dense.query_embedding(embedder, query.text, operation.cancellation())?;
+        &fresh
+    };
     operation.check()?;
     let rows = dense.get_with_metadata_admitted(
         DenseRequest {
@@ -154,9 +165,9 @@ fn dense_candidates<Guard>(
     match rows {
         DenseRows::Ready(index) => {
             dense.record_outcome(project.id, AnnState::Ready, None);
-            dense::top_k(&vector, index.rows(), fetch)
+            dense::top_k(vector, index.rows(), fetch)
         }
-        DenseRows::Ann(ann) => match ann.search(&vector, fetch) {
+        DenseRows::Ann(ann) => match ann.search(vector, fetch) {
             Ok(hits) if hits.len() >= fetch => {
                 #[cfg(debug_assertions)]
                 ANN_SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -175,14 +186,14 @@ fn dense_candidates<Guard>(
                     Some("ann returned fewer candidates than the window"),
                 );
                 operation.check()?;
-                stream_exact(context, source, query.generation, model_id, &vector, fetch)
+                stream_exact(context, source, query.generation, model_id, vector, fetch)
             }
             Err(err) => {
                 eprintln!("warning: ann search failed: {err}; falling back to exact");
                 degrade(degraded, Degraded::AnnError);
                 dense.record_outcome(project.id, AnnState::Fallback, Some("ann search failed"));
                 operation.check()?;
-                stream_exact(context, source, query.generation, model_id, &vector, fetch)
+                stream_exact(context, source, query.generation, model_id, vector, fetch)
             }
         },
         DenseRows::TooLarge(hashes) => {
@@ -194,7 +205,7 @@ fn dense_candidates<Guard>(
                 AnnState::TooLarge,
                 Some("above the resident cap"),
             );
-            stream_hashes(context, model_id, &hashes, &vector, fetch)
+            stream_hashes(context, model_id, &hashes, vector, fetch)
         }
         DenseRows::Building(building) => {
             degrade(degraded, Degraded::AnnBuilding);
@@ -203,7 +214,7 @@ fn dense_candidates<Guard>(
                 AnnState::Building,
                 Some("background build in flight"),
             );
-            stream_hashes(context, model_id, &building.hashes, &vector, fetch)
+            stream_hashes(context, model_id, &building.hashes, vector, fetch)
         }
         DenseRows::Failed(failed) => {
             degrade(degraded, Degraded::AnnError);
@@ -212,7 +223,7 @@ fn dense_candidates<Guard>(
                 AnnState::Fallback,
                 Some("the last build failed"),
             );
-            stream_hashes(context, model_id, &failed.hashes, &vector, fetch)
+            stream_hashes(context, model_id, &failed.hashes, vector, fetch)
         }
     }
 }
@@ -248,16 +259,23 @@ fn scoped_dense<Guard>(
     let Some(embedder) = context.stages.embedder.as_deref() else {
         return Ok(Vec::new());
     };
-    let vector =
-        context
-            .dense
-            .query_embedding(embedder, query.text, context.operation.cancellation())?;
+    let fresh;
+    let vector = if let Some(vector) = query.vector {
+        vector
+    } else {
+        fresh = context.dense.query_embedding(
+            embedder,
+            query.text,
+            context.operation.cancellation(),
+        )?;
+        &fresh
+    };
     context.operation.check()?;
     let mut cache = context
         .dense
         .vector_source(context.project.id)
         .connect(context.cache)?;
-    let mut top = dense::TopK::new(&vector, query.fetch)?;
+    let mut top = dense::TopK::new(vector, query.fetch)?;
     for documents in scope.documents().chunks(repo::BATCH_KEYS) {
         let mut after = (0_i64, 0_u32);
         loop {
@@ -409,6 +427,47 @@ pub fn search_docs_from<Guard>(
     args: &Value,
     admit: impl Fn() -> Result<Guard>,
 ) -> Result<Value> {
+    match start_search(context, source, args, &admit)? {
+        SearchStart::Complete(value) => Ok(value),
+        SearchStart::Prepared(start) => {
+            prepare_with_query_vector(context, source, &admit, start, None)?.finish(context.stages)
+        }
+    }
+}
+
+pub(super) enum SearchStart {
+    Complete(Value),
+    Prepared(StartedSearch),
+}
+pub(super) struct StartedSearch {
+    arguments: SearchArgs,
+    active: ActiveStages,
+    fetch: usize,
+    lexical: LexicalSnapshot,
+    dense_started: std::time::Instant,
+}
+impl StartedSearch {
+    pub(super) fn query(&self) -> Option<&str> {
+        self.active
+            .rrf_active
+            .then_some(())
+            .filter(|()| {
+                !self
+                    .lexical
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.documents().is_empty())
+            })
+            .map(|()| self.arguments.query.as_str())
+    }
+}
+
+pub(super) fn start_search<Guard>(
+    context: &SearchContext<'_>,
+    source: MetadataSource<'_>,
+    args: &Value,
+    admit: impl Fn() -> Result<Guard>,
+) -> Result<SearchStart> {
     context.operation.check()?;
     if source.cache_root() != context.cache {
         return Err(Error::Admission {
@@ -423,7 +482,7 @@ pub fn search_docs_from<Guard>(
     let arguments = parse_search_args(args)?;
     if arguments.limit == 0 {
         if !arguments.explain {
-            return Ok(Value::Array(Vec::new()));
+            return Ok(SearchStart::Complete(Value::Array(Vec::new())));
         }
         return in_read_phase(context, source, &admit, |reader| {
             snapshot_info(&reader, context.project, None)?;
@@ -438,13 +497,22 @@ pub fn search_docs_from<Guard>(
                 ),
                 &context.operation,
             )
-        });
+        })
+        .map(SearchStart::Complete);
     }
-    prepare_search(context, source, &admit, arguments)?.finish(context.stages)
+    let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
+    let lexical = lexical_snapshot(context, source, &admit, &arguments, fetch)?;
+    Ok(SearchStart::Prepared(StartedSearch {
+        arguments,
+        active,
+        fetch,
+        lexical,
+        dense_started: std::time::Instant::now(),
+    }))
 }
 
 /// No Db, SQL transaction, index handle or filesystem lease can escape capture.
-struct PreparedSearch {
+pub(super) struct PreparedSearch {
     payload: OwnedPayload,
     arguments: SearchArgs,
     ordered: Vec<(u64, f32)>,
@@ -456,8 +524,81 @@ struct PreparedSearch {
     refill: Option<Refill>,
 }
 
+#[cfg(feature = "hybrid-remote")]
+pub(super) struct RerankInput {
+    pub(super) query: std::sync::Arc<str>,
+    pub(super) documents: std::sync::Arc<[String]>,
+    pub(super) reservation: std::sync::Arc<crate::search::budget::PayloadPermit>,
+}
+
 impl PreparedSearch {
-    fn finish(mut self, stages: &HybridStages) -> Result<Value> {
+    #[cfg(feature = "hybrid-remote")]
+    pub(super) fn remote_rerank_input(
+        &self,
+        budget: &PayloadBudget,
+        model_bytes: usize,
+    ) -> Result<Option<RerankInput>> {
+        self.operation.check()?;
+        if !self.active.rerank_active || self.ordered.is_empty() {
+            return Ok(None);
+        }
+        let documents = self.payload.rerank_documents()?;
+        let overflow = || Error::Admission {
+            message: "remote rerank input byte charge overflow".to_owned(),
+        };
+        let text_bytes = documents.iter().try_fold(
+            self.arguments
+                .query
+                .len()
+                .checked_add(model_bytes)
+                .ok_or_else(overflow)?,
+            |bytes, document| bytes.checked_add(document.len()).ok_or_else(overflow),
+        )?;
+        // Rig projection can overlap three raw owners with two encoded bodies
+        // (six bytes per source byte); later reqwest body copying is smaller.
+        // Include the caller/Rig clone and serde Value array metadata too.
+        let metadata = std::mem::size_of::<String>() * 3
+            + std::mem::size_of::<Value>()
+            + std::mem::size_of::<(usize, f32)>() * 2
+            + 6;
+        let envelope =
+            br#"{"model":"","query":"","documents":[],"top_n":18446744073709551615}"#.len() * 2;
+        let extra = text_bytes
+            .checked_mul(15)
+            .and_then(|bytes| {
+                documents
+                    .len()
+                    .checked_mul(metadata)
+                    .and_then(|records| bytes.checked_add(records))
+            })
+            .and_then(|bytes| bytes.checked_add(envelope + std::mem::size_of::<RerankInput>()))
+            .ok_or_else(overflow)?;
+        let extra = u64::try_from(extra).map_err(|_| overflow())?;
+        let reservation =
+            std::sync::Arc::new(budget.reserve_additional(self.payload.retained_bytes(), extra)?);
+        // Every retained copy is made only after both request and aggregate admission.
+        Ok(Some(RerankInput {
+            query: std::sync::Arc::from(self.arguments.query.as_str()),
+            documents: std::sync::Arc::from(documents.to_vec()),
+            reservation,
+        }))
+    }
+
+    #[cfg(feature = "hybrid-remote")]
+    pub(super) fn finish_with_rerank(
+        mut self,
+        ranked: Vec<(usize, f32)>,
+        elapsed: u64,
+    ) -> Result<Value> {
+        self.operation.check()?;
+        if self.active.rerank_active {
+            reorder_rerank(&mut self.ordered, ranked);
+            self.stage_ms.push((Stage::Rerank, elapsed));
+        }
+        self.finalize()
+    }
+
+    pub(super) fn finish(mut self, stages: &HybridStages) -> Result<Value> {
         self.operation.check()?;
         if self.active.rerank_active {
             let started = std::time::Instant::now();
@@ -469,6 +610,10 @@ impl PreparedSearch {
             )?;
             self.stage_ms.push((Stage::Rerank, elapsed_ms(started)));
         }
+        self.finalize()
+    }
+
+    fn finalize(mut self) -> Result<Value> {
         self.operation.check()?;
         let post = apply_post_filter(
             &self.payload,
@@ -703,15 +848,45 @@ fn dense_for_scope<Guard>(
     }
 }
 
+#[cfg(test)]
 fn prepare_search<Guard>(
     context: &SearchContext<'_>,
     source: MetadataSource<'_>,
     admit: &impl Fn() -> Result<Guard>,
     arguments: SearchArgs,
 ) -> Result<PreparedSearch> {
+    let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
+    let lexical = lexical_snapshot(context, source, admit, &arguments, fetch)?;
+    prepare_with_query_vector(
+        context,
+        source,
+        admit,
+        StartedSearch {
+            arguments,
+            active,
+            fetch,
+            lexical,
+            dense_started: std::time::Instant::now(),
+        },
+        None,
+    )
+}
+
+pub(super) fn prepare_with_query_vector<Guard>(
+    context: &SearchContext<'_>,
+    source: MetadataSource<'_>,
+    admit: &impl Fn() -> Result<Guard>,
+    start: StartedSearch,
+    vector: Option<&[f32]>,
+) -> Result<PreparedSearch> {
     context.operation.check()?;
-    let (active, mut fetch) = search_plan(context.stages, &arguments, context.window)?;
-    let mut lexical = lexical_snapshot(context, source, admit, &arguments, fetch)?;
+    let StartedSearch {
+        arguments,
+        active,
+        mut fetch,
+        mut lexical,
+        dense_started,
+    } = start;
     let mut refill = Refill::new(
         &arguments,
         fetch,
@@ -726,9 +901,9 @@ fn prepare_search<Guard>(
     }
     context.operation.check()?;
     let dense_hits = if active.rrf_active {
-        let dense_started = std::time::Instant::now();
         let query = DenseQuery {
             text: &arguments.query,
+            vector,
             generation: lexical.generation,
             // One frozen source: no repeated full-vector scans or changing ANN
             // membership as lexical/fusion prefixes grow.
@@ -780,24 +955,15 @@ fn prepare_search<Guard>(
     }
     // Preparation and final payload allowances never overlap per request.
     drop(lexical.scope);
-    let ids: Vec<_> = ordered.iter().map(|(id, _)| *id).collect();
-    let payload = in_read_phase(context, source, admit, |reader| {
-        snapshot_info(&reader, context.project, Some(lexical.generation))?;
-        OwnedPayload::capture(
-            &reader,
-            PayloadRequest {
-                cache_root: context.cache,
-                project_id: context.project.id,
-                generation: lexical.generation,
-                chunk_ids: &ids,
-                include_text: active.rerank_active || arguments.snippet,
-                include_filter_metadata: arguments.path_prefix.is_some()
-                    || !arguments.tags.is_empty(),
-            },
-            context.payload_budget,
-            context.operation.cancellation(),
-        )
-    })?;
+    let payload = capture_search_payload(
+        context,
+        source,
+        admit,
+        lexical.generation,
+        &ordered,
+        active,
+        &arguments,
+    )?;
     context.operation.check()?;
     Ok(PreparedSearch {
         payload,
@@ -809,6 +975,35 @@ fn prepare_search<Guard>(
         operation: context.operation.clone(),
         fetch,
         refill,
+    })
+}
+
+fn capture_search_payload<Guard>(
+    context: &SearchContext<'_>,
+    source: MetadataSource<'_>,
+    admit: &impl Fn() -> Result<Guard>,
+    generation: i64,
+    ordered: &[(u64, f32)],
+    active: ActiveStages,
+    arguments: &SearchArgs,
+) -> Result<OwnedPayload> {
+    let ids: Vec<_> = ordered.iter().map(|(id, _)| *id).collect();
+    in_read_phase(context, source, admit, |reader| {
+        snapshot_info(&reader, context.project, Some(generation))?;
+        OwnedPayload::capture(
+            &reader,
+            PayloadRequest {
+                cache_root: context.cache,
+                project_id: context.project.id,
+                generation,
+                chunk_ids: &ids,
+                include_text: active.rerank_active || arguments.snippet,
+                include_filter_metadata: arguments.path_prefix.is_some()
+                    || !arguments.tags.is_empty(),
+            },
+            context.payload_budget,
+            context.operation.cancellation(),
+        )
     })
 }
 
@@ -2209,6 +2404,7 @@ mod tests {
             &|| Ok(()),
             DenseQuery {
                 text: "widgets",
+                vector: None,
                 generation: repo::index_generation(db.connection(), project.id)
                     .expect("generation"),
                 fetch: 10,

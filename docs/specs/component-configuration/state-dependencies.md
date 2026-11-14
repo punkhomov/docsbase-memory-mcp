@@ -207,3 +207,14 @@ finish/unwind. Runtime owners stay outside async transport/stages; compatibility
 bridges retire before runtime destruction. No config/global DB/read transaction
 needs to survive remote await. Server dispatch is A2, full job/direct/watcher
 retirement is PR2; A1 alone does not close #81 or claim a full Shared reserve.
+
+## MODIFIED 2026-11-14 — #81 A2 interactive ownership
+
+Interactive search consumes the captured RemoteSpec/DaemonSpec/SearchSpec owners
+through Shared execution, existing CPU admission and original request deadlines.
+Active query revision keys retain config plus stages; obsolete results cannot
+newly publish, while existing pure completed recipes survive reload. Metadata,
+config and file-read leases end before remote waits. Rerank input/encoded copies
+use the existing request/retained payload allowance, and byte reservations follow
+actual CPU output destruction after cancellation. No setting, artifact identity,
+rebuild edge, independent admission tracker or v2 executor is introduced.

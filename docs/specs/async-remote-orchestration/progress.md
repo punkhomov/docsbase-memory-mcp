@@ -203,3 +203,53 @@ Ruling: use a construction-only resolver factory seam to retain the exact
 resolver injected into real reqwest for the shutdown test. The normal factory
 and test share the complete owner/token/client composition. Existing local
 CPU/Activity/WorkerAdmission owners and same-pinned-future policy are retained.
+
+## MODIFIED 2026-11-14 — A1 accepted; A2 functional checkpoint
+
+Task A1: complete (`61effaf3..6a80d7d`; original fix1 scoped re-review
+PASS/APPROVED, I1/I2/I3/M1 addressed, no new Critical/Important findings).
+Root unlocked A2. A1 final CLI1586/0/18 and source-hash receipts were accepted.
+
+Task A2: functional implementation checkpoint (base `6a80d7d`, commit containing
+this entry; fresh task review pending). Actual native search now runs admitted
+lexical preparation, async shared embedding, admitted dense/fusion/refill/payload
+capture, async remote rerank and admitted finalization. Only local inference,
+codec and metadata/CPU phases hold search permits. The interactive factory uses
+Shared RemoteExecution; execution-only real Rig stages pass the native route
+without a synchronous bridge. Direct/index/backfill/watch remain legacy PR2 work.
+
+Existing Flights owns async memberships and one independent leader; keys retain
+both config and stage Arcs, including abandonment/unwind. Personal deadlines and
+last-departure cancellation do not alias the initiator's token. Later peers keep
+the same fixed HTTP attempt; hard cap, reverse shortening, late join and Notify
+publication boundaries pass controlled tests. Config/stage/generation admission
+ends before await; completed OwnedPayload finishes after later writer/reload.
+The leader and its actual CPU closure retain the original Activity/connection
+permit; DNS retains its existing separate physical helper owner.
+
+Actual causal RED receipts in untracked `task-a2/`: held HTTP starved lexical
+dispatch (`red-dispatch-worker.log`); rerank selected sync entry
+(`red-rerank-dispatch.log`); abandoned CPU output outlived its payload charge
+(`red-cpu-output-retention-2.log`); empty document scope made an extra provider
+call (`red-empty-scope.log`). Each was observed and fixed. Reservations now follow
+actual returned CPU data and encoded rerank input through failed delivery/drop;
+retained/encoded copies are admitted before allocation under existing limits.
+
+Ruling: approved D5 intentionally removes obsolete in-flight LRU publication.
+The existing reload test initially failed8/1 expecting that warming; its name
+and exact retry error remain, with a pre-existing completed vector proven to
+survive by Arc identity and the obsolete query explicitly absent. No blanket
+cache clear, test removal, fixture/baseline/ignore or budget-value change.
+
+Ruling: existing scoped fixtures stopped polling the phased request after one
+poll, then blocked on provider entry. The exact stalled test was stopped with
+SIGTERM (receipt retained); fixtures now select provider entry while driving
+that same future. All EOF/half-close/partial-frame/physical permit assertions
+and timeouts are unchanged. Scoped16/0 verifies the corrected driver/ownership.
+
+Focused GREEN includes async/refactor36/0, scoped16/0, phase9/0, query-flight10/0,
+worker-unit4/0 and129/0 preservation tests across eight integration targets.
+Current cli-full/default all-target Clippy (`-D warnings`) and fmt pass; historical
+lint/compiler failures remain in raw receipts. One frozen full CLI and full lean
+run follow this checkpoint. No runtime convergence/native/release acceptance or
+task-complete claim for A2; A3 and PR2 are still pending.

@@ -350,9 +350,23 @@ mod tests {
         eof_case(true);
     }
 
+    // A phased request needs continued polling between CPU phases. Await the
+    // provider event while driving that exact future, rather than blocking the
+    // driver after one poll and assuming the entire request is one worker.
+    async fn await_provider_entry<F: Future>(
+        request: std::pin::Pin<&mut F>,
+        receiver: std_mpsc::Receiver<()>,
+    ) -> bool {
+        let entered = tokio::task::spawn_blocking(move || receiver.recv_timeout(WATCHDOG).is_ok());
+        tokio::select! {
+            result = entered => result.expect("provider entry receiver"),
+            _ = request => panic!("request completed before its controlled provider entry"),
+        }
+    }
+
     struct Gated {
         fixture: Fixture,
-        entered: std_mpsc::Receiver<()>,
+        entered: Option<std_mpsc::Receiver<()>>,
         release: Option<std_mpsc::Sender<()>>,
         reranks: Arc<AtomicUsize>,
     }
@@ -373,7 +387,7 @@ mod tests {
             });
             Self {
                 fixture,
-                entered: observed,
+                entered: Some(observed),
                 release: Some(release),
                 reranks,
             }
@@ -442,7 +456,12 @@ mod tests {
                 &mut peers.reader,
             ));
             let first = poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await;
-            let entered = first && gated.entered.recv_timeout(WATCHDOG).is_ok();
+            let entered = first
+                && await_provider_entry(
+                    pending.as_mut(),
+                    gated.entered.take().expect("entry receiver"),
+                )
+                .await;
             if session {
                 cancel.send(()).expect("session signal");
             } else {
@@ -532,7 +551,12 @@ mod tests {
                 }
             });
             let first = poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await;
-            let entered = first && gated.entered.recv_timeout(WATCHDOG).is_ok();
+            let entered = first
+                && await_provider_entry(
+                    pending.as_mut(),
+                    gated.entered.take().expect("entry receiver"),
+                )
+                .await;
             let waiting = poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await;
             gated.proceed();
             let result = tokio::time::timeout(WATCHDOG, &mut pending).await;
@@ -603,7 +627,7 @@ mod tests {
             ));
             let first_pending =
                 poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await;
-            let entered = first_pending && observed.recv_timeout(WATCHDOG).is_ok();
+            let entered = first_pending && await_provider_entry(pending.as_mut(), observed).await;
             drop(peers.client);
             let returned = if entered {
                 if native {

@@ -5,11 +5,10 @@
 //! default offline build (FR-14). Only the wire/client implementation sits
 //! behind the `hybrid-remote` feature (SC-4).
 //!
-//! Every embed/rerank call must run inside [`blocking::enter`]: the daemon
-//! routes tool calls through `spawn_blocking` (`daemon::server`), the watcher
-//! consumer owns its thread and the direct CLI mode runs on the main thread,
-//! so a sanctioned blocking context is always available without blocking an
-//! async worker (ADR-7, I3).
+//! Interactive remote stages use explicit async capabilities between admitted CPU
+//! phases. Local inference and codec work use bounded blocking closures; no
+//! [`blocking::enter`] guard crosses await. Legacy direct/index/watch consumers
+//! still enter the synchronous compatibility context until their #81 migration.
 
 pub mod ann;
 pub mod ann_store;

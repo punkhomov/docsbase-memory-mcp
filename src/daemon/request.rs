@@ -4,7 +4,6 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio::task::{JoinError, JoinHandle};
 
@@ -112,10 +111,10 @@ impl Drop for Activity {
     }
 }
 
-pub(super) async fn run(
-    worker: JoinHandle<Result<Value>>,
+pub(super) async fn run<T>(
+    worker: JoinHandle<Result<T>>,
     operation: Option<&SearchOperation>,
-) -> Result<Value> {
+) -> Result<T> {
     match operation {
         Some(operation) => {
             let deadline = tokio::time::Instant::from_std(operation.deadline());
@@ -126,11 +125,11 @@ pub(super) async fn run(
 }
 
 /// A private expiry signal permits gate-driven tests without virtual std time.
-async fn with_expiry(
-    worker: JoinHandle<Result<Value>>,
+async fn with_expiry<T>(
+    worker: JoinHandle<Result<T>>,
     operation: &SearchOperation,
     expiry: impl Future<Output = ()>,
-) -> Result<Value> {
+) -> Result<T> {
     let mut cancellation = CancelOnDrop(Some(operation.cancellation().clone()));
     tokio::select! {
         biased;
@@ -138,6 +137,9 @@ async fn with_expiry(
             cancellation.0 = None;
             operation.check()?;
             joined(result)
+        }
+        () = operation.cancellation().cancelled() => {
+            Err(Error::Admission { message: "search request cancelled".to_owned() })
         }
         () = expiry => {
             operation.cancellation().cancel();
@@ -148,7 +150,7 @@ async fn with_expiry(
     }
 }
 
-fn joined(result: std::result::Result<Result<Value>, JoinError>) -> Result<Value> {
+fn joined<T>(result: std::result::Result<Result<T>, JoinError>) -> Result<T> {
     result.map_err(|err| Error::internal_with_source("tool task join", err))?
 }
 

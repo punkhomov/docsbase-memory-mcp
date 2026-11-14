@@ -3,7 +3,8 @@
 //! Rig owns provider request/response shapes. This boundary preserves the
 //! retrieval contract Rig does not express: input roles, indexed embeddings,
 //! finite f32 values and unique rerank indices. It starts no runtime and owns
-//! no retry policy. The caller must enter the sanctioned blocking context.
+//! no retry policy. Preparation/decoding run in bounded CPU work; only the legacy
+//! synchronous send entry requires the thread-local blocking context.
 
 use rig_core::operation::RerankRequest;
 use rig_core::providers::openai::OpenAIConfig;

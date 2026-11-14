@@ -39,6 +39,20 @@ impl PayloadBudget {
         })
     }
 
+    /// Additional retained/encoded input is part of the same request allowance.
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn reserve_additional(&self, existing: u64, bytes: u64) -> Result<PayloadPermit> {
+        if existing
+            .checked_add(bytes)
+            .is_none_or(|total| total > self.retained.policy.max_request_payload_bytes)
+        {
+            return Err(Error::Admission {
+                message: "remote rerank input exceeds max_request_payload_bytes".to_owned(),
+            });
+        }
+        self.reserve(bytes)
+    }
+
     /// Reserves the preflight charge before copying candidate payload. Does
     /// not wait for another request to release its allowance or allocate data.
     ///

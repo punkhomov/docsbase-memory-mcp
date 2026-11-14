@@ -484,6 +484,61 @@ struct DenseInput {
 /// `(model_id, blake3(query))` — the cache key.
 type QueryKey = (String, String);
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct QueryFlightKey {
+    recipe: QueryKey,
+    revision: RuntimeRevision,
+}
+
+/// Retained process-local identity; never changes persisted vector recipes.
+#[derive(Clone)]
+pub(crate) enum RuntimeRevision {
+    Compatibility,
+    Captured {
+        config: Arc<crate::config::Config>,
+        stages: Arc<crate::hybrid::HybridStages>,
+    },
+}
+pub(crate) struct QueryEmbeddingRequest<'a> {
+    pub(crate) model: &'a str,
+    pub(crate) text: &'a str,
+    pub(crate) revision: RuntimeRevision,
+    pub(crate) operation: &'a crate::search::operation::SearchOperation,
+    pub(crate) policy: &'a crate::search::settings::SearchSettings,
+}
+
+impl PartialEq for RuntimeRevision {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Compatibility, Self::Compatibility) => true,
+            (
+                Self::Captured {
+                    config: a,
+                    stages: b,
+                },
+                Self::Captured {
+                    config: c,
+                    stages: d,
+                },
+            ) => Arc::ptr_eq(a, c) && Arc::ptr_eq(b, d),
+            _ => false,
+        }
+    }
+}
+impl Eq for RuntimeRevision {}
+impl std::hash::Hash for RuntimeRevision {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Compatibility => 0_u8.hash(state),
+            Self::Captured { config, stages } => {
+                1_u8.hash(state);
+                Arc::as_ptr(config).hash(state);
+                Arc::as_ptr(stages).hash(state);
+            }
+        }
+    }
+}
+
 struct QueryCache {
     settings: QueryCacheSettings,
     entries: HashMap<QueryKey, (std::sync::Arc<[f32]>, u64)>,
@@ -491,7 +546,7 @@ struct QueryCache {
     bytes: u64,
     hits: u64,
     misses: u64,
-    flights: Arc<Flights<QueryKey, Arc<[f32]>>>,
+    flights: Arc<Flights<QueryFlightKey, Arc<[f32]>>>,
 }
 
 impl QueryCache {
@@ -845,7 +900,10 @@ impl DenseCache {
         let key = (model_id.to_owned(), crate::vector_cache::chunk_hash(text));
         let flights = Arc::clone(&self.lock_query_cache().flights);
         flights.run(
-            &key,
+            &QueryFlightKey {
+                recipe: key.clone(),
+                revision: RuntimeRevision::Compatibility,
+            },
             cancellation,
             || {
                 self.lock_query_cache()
@@ -864,6 +922,65 @@ impl DenseCache {
                     .unwrap_or(vector))
             },
         )
+    }
+
+    /// Join the existing query registry without retaining a CPU permit while following.
+    pub(crate) async fn query_embedding_async<Guard, F, Fut>(
+        &self,
+        request: QueryEmbeddingRequest<'_>,
+        admit_publication: impl Fn() -> Result<Guard>,
+        work: F,
+    ) -> Result<Arc<[f32]>>
+    where
+        F: FnOnce(crate::hybrid::work::RemoteCall) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<Vec<f32>>> + Send + 'static,
+    {
+        let QueryEmbeddingRequest {
+            model,
+            text,
+            revision,
+            operation,
+            policy,
+        } = request;
+        operation.check()?;
+        if let Some(vector) = self.query_vector(model, text) {
+            operation.check()?;
+            return Ok(vector);
+        }
+        let key = (model.to_owned(), crate::vector_cache::chunk_hash(text));
+        let flights = self.lock_query_cache().flights.clone();
+        let vector = flights
+            .run_async(
+                QueryFlightKey {
+                    recipe: key.clone(),
+                    revision,
+                },
+                operation,
+                policy,
+                || {
+                    self.lock_query_cache()
+                        .entries
+                        .get(&key)
+                        .map(|(vector, _)| vector.clone())
+                },
+                move |call| async move { work(call).await.map(Arc::<[f32]>::from) },
+            )
+            .await?;
+        operation.check()?;
+        // A stale captured runtime may finish for its members, but cannot publish
+        // into the current pure cache. The caller's next capture reports retry.
+        if let Ok(_revision) = admit_publication() {
+            let bytes = u64::try_from(std::mem::size_of_val(vector.as_ref())).unwrap_or(u64::MAX);
+            return Ok(self
+                .cache_query(key, bytes, || vector.clone())
+                .unwrap_or(vector));
+        }
+        Ok(vector)
+    }
+
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn observe_query_joins(&self, observer: std::sync::mpsc::Sender<()>) {
+        self.lock_query_cache().flights.observe_joins(observer);
     }
 
     /// Stores a query vector, evicting least-recently-used entries until both

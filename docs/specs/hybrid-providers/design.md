@@ -403,3 +403,22 @@ The local Web specification supersedes the earlier 40 MiB executable ceiling.
 Static linking and artifact routing checks remain; executable, embedded bundle
 and compressed distribution sizes are measured without a replacement ceiling.
 The official `cli-full` profile includes `web`; lean Cargo defaults remain lean.
+
+## MODIFIED 2026-11-14 — #81 A2 interactive async consumer
+
+Interactive native search now captures lexical state, awaits shared query embedding,
+captures dense/fusion/refill/OwnedPayload, awaits remote rerank, then finalizes the
+owned response in separate admitted CPU phases. Its operational provider factory
+uses the Shared RemoteExecution and never enters the synchronous Handle bridge.
+Local query followers wait asynchronously in the existing Flights registry; only
+its owned leader enters bounded inference. Direct/index/backfill/watch stay on
+the explicit legacy path pending PR2; no complete process-wide reserve claim.
+
+Active query keys retain both config and stage Arcs. Completed LRU identity stays
+(model_id, query hash), but an obsolete active revision cannot newly publish a
+vector. The previous reload test's in-flight cache-warming expectation is replaced
+by an explicit fence, while a separately completed pure vector survives the same
+reload with identical Arc identity. This is the approved ADR-81 D5 delta, not a
+retrieval/normalization/model identity change. Rerank input peak admission includes
+original captured bytes plus retained input/Rig/JSON copies, with a reservation
+that follows actual CPU output and encoded input destruction on waiter Drop.

@@ -6,7 +6,11 @@ use std::hash::Hash;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use crate::error::{Error, Result};
-use crate::hybrid::work::{Cancellation, Wake};
+use crate::hybrid::work::{Cancellation, RemoteCall, SharedInterest, Wake};
+use crate::search::operation::SearchOperation;
+use crate::search::settings::SearchSettings;
+use std::time::Instant;
+use tokio::sync::Notify;
 
 type SharedResult<T> = std::result::Result<T, SharedFailure>;
 
@@ -53,6 +57,8 @@ enum Boundary {
     Selected,
     BeforeStart,
     Inactive,
+    Registered,
+    BeforeWait,
 }
 
 #[cfg(test)]
@@ -111,12 +117,7 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
                         cancellation.check()?;
                         return Ok(value);
                     }
-                    let flight = Arc::new(Flight {
-                        state: Mutex::new(FlightState {
-                            result: None,
-                            listeners: Vec::new(),
-                        }),
-                    });
+                    let flight = Arc::new(Flight::new());
                     active.insert(key.clone(), Arc::clone(&flight));
                     (flight, true)
                 }
@@ -186,6 +187,143 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
         }
     }
 
+    /// Async members use this same registry. The owned leader outlives any one waiter.
+    pub(crate) async fn run_async<F, Fut>(
+        self: &Arc<Self>,
+        key: K,
+        operation: &SearchOperation,
+        policy: &SearchSettings,
+        mut cached: impl FnMut() -> Option<T>,
+        work: F,
+    ) -> Result<T>
+    where
+        K: Send + Sync + 'static,
+        T: Send + Sync + 'static,
+        F: FnOnce(RemoteCall) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T>> + Send + 'static,
+    {
+        let mut work = Some(work);
+        loop {
+            operation.check()?;
+            let (flight, leader, id) = {
+                let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+                let (flight, leader) = if let Some(flight) = active.get(&key) {
+                    (flight.clone(), false)
+                } else {
+                    if let Some(value) = cached() {
+                        operation.check()?;
+                        return Ok(value);
+                    }
+                    let flight = Arc::new(Flight::new());
+                    active.insert(key.clone(), flight.clone());
+                    (flight, true)
+                };
+                let id = {
+                    let mut state = flight.state.lock().unwrap_or_else(PoisonError::into_inner);
+                    if state.retiring || state.result.is_some() {
+                        if active
+                            .get(&key)
+                            .is_some_and(|current| Arc::ptr_eq(current, &flight))
+                        {
+                            active.remove(&key);
+                        }
+                        continue;
+                    }
+                    let id = state.next_member;
+                    state.next_member = id
+                        .checked_add(1)
+                        .ok_or_else(|| Error::internal("flight membership exhausted"))?;
+                    state.members.insert(id, operation.clone());
+                    id
+                };
+                (flight, leader, id)
+            };
+            let _member = AsyncMembership {
+                registry: self.clone(),
+                key: key.clone(),
+                flight: flight.clone(),
+                id,
+            };
+            flight.notify.notify_waiters();
+            #[cfg(test)]
+            if let Some(observer) = self
+                .observer
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                let _ = observer.send(());
+            }
+            #[cfg(test)]
+            self.observe_boundary(Boundary::Selected);
+            if leader {
+                let hard =
+                    SearchOperation::new(policy, Instant::now(), flight.cancellation.clone())?;
+                flight
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .hard_deadline = Some(hard.deadline());
+                let owner = OwnedLeader {
+                    registry: self.clone(),
+                    key: key.clone(),
+                    flight: flight.clone(),
+                    complete: false,
+                };
+                let interest: Arc<dyn SharedInterest> = flight.clone();
+                let call = RemoteCall::shared(hard, interest);
+                let work = work
+                    .take()
+                    .ok_or_else(|| Error::internal("flight leader work already consumed"))?;
+                tokio::spawn(async move {
+                    #[cfg(test)]
+                    owner.registry.observe_boundary(Boundary::BeforeStart);
+                    let result = match call.check() {
+                        Ok(()) => work(call).await,
+                        Err(error) => Err(error),
+                    }
+                    .map_err(SharedFailure::new);
+                    owner.finish(Completion::Finished(result));
+                });
+            }
+            match self.wait_async(&flight, operation).await? {
+                Completion::Finished(result) => return result.map_err(SharedFailure::into_error),
+                Completion::Abandoned => {}
+            }
+        }
+    }
+
+    async fn wait_async(
+        &self,
+        flight: &Flight<T>,
+        operation: &SearchOperation,
+    ) -> Result<Completion<T>> {
+        loop {
+            let changed = flight.notify.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            #[cfg(test)]
+            self.observe_boundary(Boundary::Registered);
+            operation.check()?;
+            match flight.result() {
+                Some(Completion::Finished(result)) => {
+                    operation.check()?;
+                    return Ok(Completion::Finished(result));
+                }
+                Some(Completion::Abandoned) => return Ok(Completion::Abandoned),
+                None => {}
+            }
+            #[cfg(test)]
+            self.observe_boundary(Boundary::BeforeWait);
+            tokio::select! {
+                biased;
+                () = operation.cancellation().cancelled() => { operation.check()?; }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(operation.deadline())) => { operation.check()?; }
+                () = &mut changed => {}
+            }
+        }
+    }
+
     #[cfg(test)]
     fn observe_boundary(&self, boundary: Boundary) {
         let observer = self
@@ -214,6 +352,7 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
             }
             listeners
         };
+        flight.notify.notify_waiters();
         for wake in listeners.into_iter().filter_map(|wake| wake.upgrade()) {
             wake.notify();
         }
@@ -240,10 +379,33 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
 
 struct Flight<T> {
     state: Mutex<FlightState<T>>,
+    notify: Notify,
+    cancellation: Cancellation,
 }
 struct FlightState<T> {
     result: Option<Completion<T>>,
     listeners: Vec<Weak<Wake>>,
+    members: HashMap<u64, SearchOperation>,
+    next_member: u64,
+    hard_deadline: Option<Instant>,
+    retiring: bool,
+}
+
+impl<T> Flight<T> {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(FlightState {
+                result: None,
+                listeners: Vec::new(),
+                members: HashMap::new(),
+                next_member: 0,
+                hard_deadline: None,
+                retiring: false,
+            }),
+            notify: Notify::new(),
+            cancellation: Cancellation::new(),
+        }
+    }
 }
 
 impl<T: Clone> Flight<T> {
@@ -264,10 +426,7 @@ impl<T: Clone> Flight<T> {
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .listeners
-            .iter()
-            .filter_map(Weak::upgrade)
-            .any(|wake| wake.active())
+            .has_active()
     }
 
     fn result(&self) -> Option<Completion<T>> {
@@ -276,6 +435,109 @@ impl<T: Clone> Flight<T> {
             .unwrap_or_else(PoisonError::into_inner)
             .result
             .clone()
+    }
+}
+
+impl<T> FlightState<T> {
+    fn has_active(&self) -> bool {
+        self.listeners
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|wake| wake.active())
+            || self.members.values().any(|member| {
+                member.deadline() > Instant::now() && !member.cancellation().is_cancelled()
+            })
+    }
+}
+impl<T: Send + Sync> SharedInterest for Flight<T> {
+    fn deadline(&self) -> Option<Instant> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.retiring || state.result.is_some() {
+            return None;
+        }
+        let mut deadline = state
+            .members
+            .values()
+            .filter(|member| {
+                !member.cancellation().is_cancelled() && member.deadline() > Instant::now()
+            })
+            .map(SearchOperation::deadline)
+            .max();
+        if state
+            .listeners
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|wake| wake.active())
+        {
+            deadline = deadline.max(state.hard_deadline);
+        }
+        if deadline.is_none() {
+            state.retiring = true;
+        }
+        drop(state);
+        if deadline.is_none() {
+            self.cancellation.cancel();
+        }
+        deadline
+    }
+    fn notify(&self) -> &Notify {
+        &self.notify
+    }
+}
+struct AsyncMembership<K: Clone + Eq + Hash, T: Clone> {
+    registry: Arc<Flights<K, T>>,
+    key: K,
+    flight: Arc<Flight<T>>,
+    id: u64,
+}
+impl<K: Clone + Eq + Hash, T: Clone> Drop for AsyncMembership<K, T> {
+    fn drop(&mut self) {
+        let retire = {
+            let mut state = self
+                .flight
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.members.remove(&self.id);
+            let retire = state.result.is_none() && !state.has_active();
+            if retire {
+                state.retiring = true;
+            }
+            retire
+        };
+        if retire {
+            #[cfg(test)]
+            self.registry.observe_boundary(Boundary::Inactive);
+            self.flight.cancellation.cancel();
+            self.registry
+                .complete(&self.key, &self.flight, Completion::Abandoned);
+        }
+        self.flight.notify.notify_waiters();
+    }
+}
+struct OwnedLeader<K: Clone + Eq + Hash, T: Clone> {
+    registry: Arc<Flights<K, T>>,
+    key: K,
+    flight: Arc<Flight<T>>,
+    complete: bool,
+}
+impl<K: Clone + Eq + Hash, T: Clone> OwnedLeader<K, T> {
+    fn finish(mut self, result: Completion<T>) {
+        self.registry.complete(&self.key, &self.flight, result);
+        self.complete = true;
+    }
+}
+impl<K: Clone + Eq + Hash, T: Clone> Drop for OwnedLeader<K, T> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.registry.complete(
+                &self.key,
+                &self.flight,
+                Completion::Finished(Err(SharedFailure::new(Error::internal(
+                    "shared async work leader unwound before completion",
+                )))),
+            );
+        }
     }
 }
 
@@ -429,6 +691,8 @@ mod tests {
                 }
             }
             Boundary::Inactive => inactive(),
+            // These notification boundaries belong only to async waiters.
+            Boundary::Registered | Boundary::BeforeWait => {}
         })
     }
 
@@ -627,3 +891,7 @@ mod tests {
         assert_eq!(cancellation.subscriber_count(), 0);
     }
 }
+
+#[cfg(test)]
+#[path = "async_flight_tests.rs"]
+mod async_flight_tests;

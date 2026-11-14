@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::schema::{Capabilities, SettingsSpec};
 use crate::daemon::request::{self, ActivitySource};
@@ -68,103 +68,7 @@ pub trait AsyncReranker: Send + Sync {
     ) -> StageFuture<'a, Vec<(usize, f32)>>;
 }
 
-/// Live shared-work interest supplied by the existing flight registry.
-pub trait SharedInterest: Send + Sync {
-    /// Current maximum live-member deadline; None is terminal abandonment.
-    fn deadline(&self) -> Option<Instant>;
-    /// Changes notify a permanent-state checking loop, not a one-shot event.
-    fn notify(&self) -> &Notify;
-}
-
-/// One explicit operation or a hard-capped shared operation with independent members.
-#[derive(Clone)]
-pub struct RemoteCall {
-    operation: SearchOperation,
-    interest: Option<Arc<dyn SharedInterest>>,
-}
-
-impl RemoteCall {
-    /// Preserve an ordinary caller's original deadline and token.
-    #[must_use]
-    pub fn new(operation: SearchOperation) -> Self {
-        Self {
-            operation,
-            interest: None,
-        }
-    }
-
-    /// The operation deadline is the shared hard cap, never the initiating member's budget.
-    #[must_use]
-    pub fn shared(operation: SearchOperation, interest: Arc<dyn SharedInterest>) -> Self {
-        Self {
-            operation,
-            interest: Some(interest),
-        }
-    }
-
-    /// Original operation, or shared hard operation when coalesced.
-    #[must_use]
-    pub fn operation(&self) -> &SearchOperation {
-        &self.operation
-    }
-
-    fn check(&self) -> Result<()> {
-        self.operation.check()?;
-        if let Some(interest) = &self.interest
-            && interest
-                .deadline()
-                .is_none_or(|deadline| deadline <= Instant::now())
-        {
-            return Err(denied("shared remote work has no live interest"));
-        }
-        Ok(())
-    }
-
-    /// Fixed attempt timeout excludes personal-member limits for shared work.
-    ///
-    /// # Errors
-    /// Expired/cancelled operation or no live shared interest.
-    pub fn attempt_timeout(&self, policy: &RemoteSettings) -> Result<Duration> {
-        self.check()?;
-        Ok(Duration::from_millis(policy.attempt_timeout_ms).min(self.operation.remaining()?))
-    }
-
-    /// Poll the same pinned work while resetting only the outer live-interest timer.
-    pub(crate) async fn wait<T>(
-        &self,
-        shutdown: &Cancellation,
-        work: impl Future<Output = Result<T>>,
-    ) -> Result<T> {
-        tokio::pin!(work);
-        loop {
-            // Enable the concrete Notify waiter before reading permanent state.
-            let changed = self
-                .interest
-                .as_ref()
-                .map(|interest| interest.notify().notified());
-            tokio::pin!(changed);
-            if let Some(notified) = changed.as_mut().as_pin_mut() {
-                notified.enable();
-            }
-            self.check()?;
-            shutdown.check()?;
-            let deadline = self
-                .interest
-                .as_ref()
-                .and_then(|interest| interest.deadline())
-                .unwrap_or(self.operation.deadline())
-                .min(self.operation.deadline());
-            tokio::select! {
-                biased;
-                () = shutdown.cancelled() => return Err(denied("remote execution is shutting down")),
-                () = self.operation.cancellation().cancelled() => return Err(denied("remote operation cancelled")),
-                () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => { self.check()?; }
-                () = async { match changed.as_mut().as_pin_mut() { Some(waiter) => waiter.await, None => std::future::pending().await } } => {}
-                result = &mut work => { self.check()?; return result; }
-            }
-        }
-    }
-}
+pub use super::work::{RemoteCall, SharedInterest};
 
 #[derive(Default)]
 struct Counters {
@@ -208,6 +112,12 @@ pub struct RemoteExecution {
     activity: ActivitySource,
     #[cfg(test)]
     timing: Option<TestTiming>,
+}
+
+// Results can outlive an abandoned JoinHandle. Drop returned data before its charge.
+struct CpuOutput<T> {
+    value: Result<T>,
+    _retention: RemoteCall,
 }
 
 #[cfg(test)]
@@ -362,7 +272,7 @@ impl RemoteExecution {
                 .try_acquire_owned()
                 .map_err(|_| denied("remote pending limit reached"))?;
             let _charge = CounterCharge::new(&self.counters.pending);
-            let _queue = QueueCharge(&self.counters.queue_ms, &call.operation, started);
+            let _queue = QueueCharge(&self.counters.queue_ms, call.operation(), started);
             let result = call
                 .wait(&self.shutdown, async {
                     Arc::clone(&self.active)
@@ -405,7 +315,7 @@ impl RemoteExecution {
         call: &RemoteCall,
         work: impl FnOnce() -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let mut cancelled = request::CancelOnDrop(Some(call.operation.cancellation().clone()));
+        let mut cancelled = request::CancelOnDrop(Some(call.operation().cancellation().clone()));
         let permit = call
             .wait(&self.shutdown, self.workers.search(call.operation()))
             .await?;
@@ -413,16 +323,22 @@ impl RemoteExecution {
         let worker_call = call.clone();
         let shutdown = self.shutdown.clone();
         let worker = request::spawn(Some(permit), Some(self.activity.track()), move || {
-            worker_call.check()?;
+            // Declare retention before work so input captures drop first on every exit.
+            let (retention, body) = (worker_call, work);
+            retention.check()?;
             shutdown.check()?;
             let _time = DurationCharge(&counters.cpu_ms, Instant::now());
-            work()
+            Ok(CpuOutput {
+                value: body(),
+                _retention: retention,
+            })
         });
         let result = call
             .wait(&self.shutdown, async {
-                worker
-                    .await
-                    .map_err(|error| Error::internal_with_source("remote CPU task join", error))?
+                let output = worker.await.map_err(|error| {
+                    Error::internal_with_source("remote CPU task join", error)
+                })??;
+                output.value
             })
             .await;
         if result.is_ok() {

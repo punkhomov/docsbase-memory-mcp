@@ -275,19 +275,21 @@ impl OpenRouterClient {
         })?;
         let stage = execution.admit(call).await?;
         let client = Arc::clone(self);
+        let reservation = call.payload_reservation();
         let prepared = execution
             .cpu(call, move || {
-                super::rig_codec::OpenRouterCodec::new(&client.api_key.0).prepare_rerank(
-                    &model,
-                    &query,
-                    &documents,
-                    top_n.min(documents.len()),
-                )
+                let prepared = super::rig_codec::OpenRouterCodec::new(&client.api_key.0)
+                    .prepare_rerank(&model, &query, &documents, top_n.min(documents.len()))?;
+                // The encoded value owns its reservation through network waits/drop.
+                Ok((prepared, reservation))
             })
             .await?;
-        let response = stage.post(call, &prepared.request).await?;
+        let response = stage.post(call, &prepared.0.request).await?;
         execution
-            .cpu(call, move || prepared.decode(&response.body))
+            .cpu(call, move || {
+                let (prepared, _reservation) = prepared;
+                prepared.decode(&response.body)
+            })
             .await
     }
 }

@@ -14,7 +14,7 @@ const WATCHDOG: Duration = Duration::from_mins(5);
 
 pub(super) struct Fixture {
     pub(super) shared: Arc<Shared>,
-    project: Project,
+    pub(super) project: Project,
     pub(super) session: u64,
     _cache: tempfile::TempDir,
     _root: tempfile::TempDir,
@@ -368,6 +368,18 @@ async fn sync_during_embedding_refuses_original_generation_before_payload() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reload_during_embedding_rejects_old_revision_and_preserves_query_cache() {
     let (fixture, observed, release) = embedding_fixture();
+    // #81/D5 (2026-11-14): preserve completed pure recipes, while an obsolete
+    // in-flight runtime must no longer warm the current query cache.
+    let model = "test/phases@d3@l2";
+    fixture
+        .shared
+        .dense
+        .store_query_vector(model, "completed before reload", &[1.0, 0.0, 0.0]);
+    let completed = fixture
+        .shared
+        .dense
+        .query_vector(model, "completed before reload")
+        .expect("completed entry");
     let blocked = start_search(&fixture);
     observed.recv_timeout(WATCHDOG).expect("embedding started");
     std::fs::write(
@@ -384,6 +396,21 @@ async fn reload_during_embedding_rejects_old_revision_and_preserves_query_cache(
     assert!(matches!(result, Err(Error::Project { ref message, .. })
         if message == "project configuration changed before search preparation"));
     assert_eq!(fixture.shared.dense.query_cache_stats().entries, 1);
+    assert!(
+        fixture
+            .shared
+            .dense
+            .query_vector(model, "widgets")
+            .is_none()
+    );
+    assert!(Arc::ptr_eq(
+        &completed,
+        &fixture
+            .shared
+            .dense
+            .query_vector(model, "completed before reload")
+            .expect("completed recipe survives reload")
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

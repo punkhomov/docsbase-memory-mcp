@@ -44,6 +44,10 @@ use crate::watch::Watchers;
 #[path = "search_phase_tests.rs"]
 mod search_phase_tests;
 
+#[cfg(all(test, feature = "hybrid-remote"))]
+#[path = "async_search_tests.rs"]
+mod async_search_tests;
+
 #[cfg(test)]
 #[path = "profile_tests.rs"]
 mod profile_tests;
@@ -54,6 +58,9 @@ mod server_worker_tests;
 
 #[path = "scoped.rs"]
 mod scoped;
+
+#[path = "search_async.rs"]
+mod search_async;
 
 /// Daemon state shared by all connections.
 pub struct Shared {
@@ -70,6 +77,8 @@ pub struct Shared {
     activity_events: Mutex<Option<mpsc::Receiver<()>>>,
     // Website has exactly one fixed-project background sync closure.
     sync_slot: Arc<tokio::sync::Semaphore>,
+    #[cfg(feature = "hybrid-remote")]
+    remote: Arc<crate::hybrid::remote::RemoteExecution>,
     /// Live sessions.
     pub sessions: SessionRegistry,
     /// Per-project filesystem watchers (FR-15).
@@ -94,6 +103,8 @@ type ProjectSlot = Arc<ProjectCell>;
 
 impl Drop for Shared {
     fn drop(&mut self) {
+        #[cfg(feature = "hybrid-remote")]
+        self.shutdown_remote();
         self.activity.retire_bridge();
     }
 }
@@ -107,6 +118,28 @@ struct ProjectCell {
 }
 
 impl ProjectCell {
+    fn search_preparation_lease<'a>(
+        &'a self,
+        expected: &Arc<Config>,
+        stages: &Arc<HybridStages>,
+    ) -> Result<RwLockReadGuard<'a, ()>> {
+        let lease = self.preparation_lease(expected)?;
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state
+            .search_stages
+            .as_ref()
+            .or(state.stages.as_ref())
+            .is_some_and(|current| Arc::ptr_eq(current, stages))
+        {
+            return Err(Error::Project {
+                message: "project runtime changed before search preparation".to_owned(),
+                instruction: Some("retry search".to_owned()),
+            });
+        }
+        drop(state);
+        Ok(lease)
+    }
+
     fn with_preparation<T>(
         &self,
         expected: &Arc<Config>,
@@ -143,6 +176,7 @@ impl ProjectCell {
 struct ProjectState {
     config: Option<Arc<Config>>,
     stages: Option<Arc<HybridStages>>,
+    search_stages: Option<Arc<HybridStages>>,
 }
 
 impl Shared {
@@ -288,6 +322,18 @@ impl Shared {
         let global_config = launch.config.into_settings();
         let (activity, activity_events) =
             request::ActivitySource::channel(global_config.daemon.max_events);
+        let workers = Arc::new(
+            crate::daemon::worker_admission::WorkerAdmission::with_policies(
+                &global_config.daemon,
+                &global_config.remote,
+            )?,
+        );
+        #[cfg(feature = "hybrid-remote")]
+        let remote = Arc::new(crate::hybrid::remote::RemoteExecution::real_with_owners(
+            &global_config.remote,
+            workers.clone(),
+            activity.clone(),
+        )?);
         let mut effective_dense = dense_settings.clone();
         effective_dense.vector_cache_max_bytes = global_config.hybrid_cfg.cache.max_bytes;
         let payload_budget =
@@ -299,6 +345,7 @@ impl Shared {
                     state: Mutex::new(ProjectState {
                         config: Some(Arc::clone(&fixed.config)),
                         stages: Some(Arc::new(HybridStages::default())),
+                        search_stages: None,
                     }),
                     ..ProjectCell::default()
                 }),
@@ -316,12 +363,9 @@ impl Shared {
             db_settings: settings.clone(),
             readers,
             payload_budget,
-            workers: Arc::new(
-                crate::daemon::worker_admission::WorkerAdmission::with_policies(
-                    &global_config.daemon,
-                    &global_config.remote,
-                )?,
-            ),
+            workers,
+            #[cfg(feature = "hybrid-remote")]
+            remote,
             activity,
             activity_events: Mutex::new(Some(activity_events)),
             sync_slot: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -427,6 +471,31 @@ impl Shared {
         Ok(self.project_runtime(project)?.1)
     }
 
+    #[cfg(feature = "hybrid-remote")]
+    pub(super) fn shutdown_remote(&self) {
+        self.remote.shutdown();
+    }
+
+    fn project_runtime_for_search(
+        &self,
+        project: &crate::store::models::Project,
+    ) -> Result<(Arc<Config>, Arc<HybridStages>)> {
+        self.project_runtime_kind(project, true, |config| {
+            #[cfg(feature = "hybrid-remote")]
+            {
+                crate::hybrid::config::from_config_with_execution(
+                    &config.hybrid_cfg,
+                    &config.providers,
+                    &self.remote,
+                )
+            }
+            #[cfg(not(feature = "hybrid-remote"))]
+            {
+                crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)
+            }
+        })
+    }
+
     fn project_runtime(
         &self,
         project: &crate::store::models::Project,
@@ -443,6 +512,18 @@ impl Shared {
     fn project_runtime_with<F>(
         &self,
         project: &crate::store::models::Project,
+        build: F,
+    ) -> Result<(Arc<Config>, Arc<HybridStages>)>
+    where
+        F: FnMut(&Config) -> Result<HybridStages>,
+    {
+        self.project_runtime_kind(project, false, build)
+    }
+
+    fn project_runtime_kind<F>(
+        &self,
+        project: &crate::store::models::Project,
+        search: bool,
         mut build: F,
     ) -> Result<(Arc<Config>, Arc<HybridStages>)>
     where
@@ -454,7 +535,26 @@ impl Shared {
             let config = {
                 let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
                 let config = self.config_in(&mut state, project)?;
-                if let Some(stages) = &state.stages {
+                let remote = config.hybrid_cfg.embedding.as_ref().is_some_and(|stage| {
+                    stage.provider == crate::hybrid::config::PROVIDER_OPENROUTER
+                }) || config.hybrid_cfg.reranker.as_ref().is_some_and(|stage| {
+                    stage.provider == crate::hybrid::config::PROVIDER_OPENROUTER
+                });
+                let cached = if search {
+                    state
+                        .search_stages
+                        .as_ref()
+                        .or_else(|| if remote { None } else { state.stages.as_ref() })
+                } else {
+                    state.stages.as_ref().or_else(|| {
+                        if remote {
+                            None
+                        } else {
+                            state.search_stages.as_ref()
+                        }
+                    })
+                };
+                if let Some(stages) = cached {
                     return Ok((config, Arc::clone(stages)));
                 }
                 config
@@ -474,11 +574,16 @@ impl Shared {
                 // Neither an obsolete result nor its error may escape.
                 continue;
             }
-            if let Some(stages) = &state.stages {
+            let cached = if search {
+                &mut state.search_stages
+            } else {
+                &mut state.stages
+            };
+            if let Some(stages) = cached.as_ref() {
                 return Ok((config, Arc::clone(stages)));
             }
             let stages = Arc::new(outcome?);
-            state.stages = Some(Arc::clone(&stages));
+            *cached = Some(Arc::clone(&stages));
             return Ok((config, stages));
         }
     }
@@ -780,6 +885,7 @@ impl Shared {
         // reload leaves the last valid runtime and its policies intact.
         state.config = Some(Arc::clone(&config));
         state.stages = Some(stages);
+        state.search_stages = None;
         // Provider construction may refresh credentials even when Config values
         // are equal. Every published runtime must reach the watcher as one pair.
         if let Some(watch_runtime) = watch_runtime {
@@ -1221,6 +1327,8 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
             // (FR-5, FR-6). The drain lets every other request finish; the
             // process then lives until background jobs complete.
             if !shared.stopping.swap(true, Ordering::SeqCst) {
+                #[cfg(feature = "hybrid-remote")]
+                shared.shutdown_remote();
                 shared.workers.shutdown();
                 let settings = shared.daemon_settings();
                 wait_for_drain(
@@ -1486,6 +1594,13 @@ async fn call_tool_in(
             .as_ref()
             .map(|operation| operation.cancellation().clone()),
     );
+    if name == "search_docs"
+        && let Some(operation) = operation.as_ref()
+    {
+        let result = search_async::run(shared, session_id, args, operation.clone(), activity).await;
+        cancellation.0 = None;
+        return result;
+    }
     let permit = match &operation {
         Some(operation) => shared.workers.search(operation).await?,
         None => shared.workers.control().await?,

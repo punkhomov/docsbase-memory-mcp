@@ -653,6 +653,8 @@ async fn accept_loop_with(
             }
         }
     }
+    #[cfg(feature = "hybrid-remote")]
+    shared.shutdown_remote();
     shared.workers.shutdown();
     // Drop pending admission immediately; an already running closure keeps its
     // own Activity/permit and remains visible to the physical drain below.
