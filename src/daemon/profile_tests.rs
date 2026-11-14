@@ -325,3 +325,25 @@ fn malformed_project_policy_is_rejected_before_startup_resources() {
     assert!(f.open().is_err());
     f.no_activation_effects();
 }
+
+#[test]
+fn async_website_sync_context_requires_bound_session_for_explicit_fixed_project() {
+    let fixture = Fixture::new();
+    let shared = fixture.open().unwrap();
+    let result = prepare_index_context(
+        &shared,
+        None,
+        &json!({"project_id":fixture.project.id}),
+        true,
+    );
+    assert!(
+        result.is_err(),
+        "explicit fixed id does not replace the existing bound-session requirement"
+    );
+    let jobs: i64 = shared
+        .db()
+        .connection()
+        .query_row("SELECT COUNT(*) FROM sync_jobs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(jobs, 0);
+}

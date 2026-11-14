@@ -579,36 +579,45 @@ impl IndexState {
                     .as_ref()
                     .ok_or_else(|| Error::internal("ANN embedder absent"))?
                     .model_id();
-                let _revision = context
-                    .revision
-                    .as_ref()
-                    .map(|slot| slot.preparation_lease(&context.config))
-                    .transpose()?;
-                lifecycle::with_project_read_lease(&context.cache, context.project.id, || {
-                    let db = Db::open_with_settings(&context.cache, &context.db_settings)?;
-                    if repo::index_generation(db.connection(), context.project.id)? != generation {
-                        return Err(Error::Admission {
-                            message: "project generation changed before ANN handoff".into(),
-                        });
-                    }
-                    dense.warm_with_job_pin(
-                        crate::hybrid::dense::DenseRequest {
-                            cache_root: &context.cache,
-                            project_id: context.project.id,
-                            generation,
-                            model_id: model,
-                        },
-                        &crate::hybrid::work::Cancellation::new(),
-                        || {
-                            crate::hybrid::dense_metadata::DenseMetadata::capture(
-                                &db,
-                                context.project.id,
-                            )
-                        },
-                        || Ok(()),
-                        pin,
-                    )
-                })
+                dense.warm_with_job_pin(
+                    crate::hybrid::dense::DenseRequest {
+                        cache_root: &context.cache,
+                        project_id: context.project.id,
+                        generation,
+                        model_id: model,
+                    },
+                    &crate::hybrid::work::Cancellation::new(),
+                    || {
+                        lifecycle::with_project_read_lease(
+                            &context.cache,
+                            context.project.id,
+                            || {
+                                let db =
+                                    Db::open_with_settings(&context.cache, &context.db_settings)?;
+                                if repo::index_generation(db.connection(), context.project.id)?
+                                    != generation
+                                {
+                                    return Err(Error::Admission {
+                                        message: "project generation changed before ANN handoff"
+                                            .into(),
+                                    });
+                                }
+                                crate::hybrid::dense_metadata::DenseMetadata::capture(
+                                    &db,
+                                    context.project.id,
+                                )
+                            },
+                        )
+                    },
+                    || {
+                        context
+                            .revision
+                            .as_ref()
+                            .map(|slot| slot.preparation_lease(&context.config))
+                            .transpose()
+                    },
+                    pin,
+                )
             })();
             if let Err(error) = warm {
                 eprintln!("warning: deferred ANN warm after sync: {error}");

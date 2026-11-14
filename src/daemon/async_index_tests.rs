@@ -950,3 +950,200 @@ fn lexical_full_embeds_changed_documents_without_backfilling_unchanged_offline_c
         Ok(())
     }).unwrap();
 }
+
+#[test]
+#[allow(clippy::too_many_lines)] // One real cold-flight follower/revision/read-lease boundary.
+fn terminal_ann_follower_releases_revision_and_project_read_leases_before_waiting() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut root = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = root.service();
+    root.run(&runtime,async move {
+        let provider=document_gate();
+        let mut fixture=search_phase_tests::Fixture::new(HybridStages{embedder:Some(provider.clone()),ranking:Ranking::Rrf,reranker:None});fixture.shared.activate_jobs(service).unwrap();
+        let shared=Arc::get_mut(&mut fixture.shared).unwrap();
+        let mut policy=crate::hybrid::dense_settings::standalone().unwrap().into_settings();policy.min_vectors=1;
+        shared.dense=crate::hybrid::dense::DenseCache::with_settings(crate::hybrid::dense::AnnPolicy::BuildOrLoad,&shared.cache,&policy).unwrap();
+        let (selected,started)=tokio::sync::oneshot::channel();let selected=Mutex::new(Some(selected));
+        let (release,proceed)=std::sync::mpsc::channel();let proceed=Mutex::new(proceed);
+        fixture.shared.dense.observe_cold_start(Arc::new(move || {selected.lock().unwrap().take().unwrap().send(()).unwrap();proceed.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();}));
+        let (joined,joins)=std::sync::mpsc::channel();fixture.shared.dense.observe_cold_joins(joined);
+        let (config,_)=fixture.shared.project_runtime(&fixture.project).unwrap();
+        let slot=fixture.shared.project_slot(fixture.project.id);
+        let dense=fixture.shared.dense.snapshot();let cache=fixture.shared.cache.clone();let settings=fixture.shared.db_settings.clone();let id=fixture.project.id;
+        let generation=crate::store::repo::index_generation(fixture.shared.db().connection(),id).unwrap();
+        let model=provider.model_id().to_owned();let leader_slot=slot.clone();let leader_config=config.clone();
+        let leader=std::thread::spawn(move ||dense.warm_with_metadata_admitted(crate::hybrid::dense::DenseRequest{cache_root:&cache,project_id:id,generation,model_id:&model},&crate::hybrid::work::Cancellation::new(),||lifecycle::with_project_read_lease(&cache,id,||{let db=Db::open_with_settings(&cache,&settings)?;crate::hybrid::dense_metadata::DenseMetadata::capture(&db,id)}),||leader_slot.preparation_lease(&leader_config)));
+        let release=ReleaseOnDrop(Some(release));started.await.unwrap();
+        let shared=fixture.shared.clone();let session=fixture.session;
+        let index=tokio::spawn(async move {call_tool(&shared,Some(session),"index_project",json!({})).await});
+        tokio::time::timeout(Duration::from_secs(5),provider.entered.acquire()).await.unwrap().unwrap().forget();provider.release.add_permits(1);
+        tokio::task::spawn_blocking(move || {joins.recv_timeout(Duration::from_secs(5)).unwrap();joins.recv_timeout(Duration::from_secs(5)).unwrap();}).await.unwrap();
+        let revision_free=slot.preparation.try_write().is_ok();
+        let native_writer_free=lifecycle::with_writer_lease(&fixture.shared.cache,id,||Ok(())).is_ok();
+        // Always let the elected leader and actual terminal follower retire before assertions.
+        drop(release);
+        tokio::task::spawn_blocking(move ||leader.join().unwrap()).await.unwrap().unwrap();
+        let result=index.await.unwrap();
+        let dense=fixture.shared.dense.snapshot();tokio::task::spawn_blocking(move ||dense.join_job_builds_for_test()).await.unwrap().unwrap();
+        assert!(revision_free,"terminal cold-flight follower must not retain preparation READ while waiting for the elected leader");
+        assert!(native_writer_free,"terminal cold-flight follower must not retain project read lease while waiting");
+        assert_eq!(result.unwrap()["state"],"done");
+        Ok(())
+    }).unwrap();
+}
+
+struct FactoryWire {
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+    calls: AtomicUsize,
+}
+impl crate::hybrid::remote::AsyncTransport for FactoryWire {
+    fn post_json<'a>(
+        &'a self,
+        request: &'a crate::hybrid::remote::WireRequest,
+        _: Duration,
+    ) -> StageFuture<'a, crate::hybrid::wire::TransportResponse> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+            let request: Value = serde_json::from_str(&request.body).unwrap();
+            let count = request["input"].as_array().unwrap().len();
+            let dimension = crate::hybrid::config::DEFAULT_DIMENSIONS as usize;
+            let data: Vec<_> = (0..count)
+                .map(|index| {
+                    let mut vector = vec![0.0_f32; dimension];
+                    vector[0] = 1.0;
+                    json!({"index":index,"embedding":vector})
+                })
+                .collect();
+            Ok(crate::hybrid::wire::TransportResponse{status:200,body:json!({"object":"list","data":data,"model":crate::hybrid::config::DEFAULT_EMBEDDING_MODEL,"usage":{"prompt_tokens":1,"total_tokens":1}}).to_string(),retry_after:None})
+        })
+    }
+}
+#[test]
+#[allow(clippy::too_many_lines)] // One isolated real factory/codec/HTTP ownership proof.
+fn actual_background_remote_factory_is_async_and_held_http_releases_cpu() {
+    const CHILD: &str = "DOCSBASE_B1_ACTUAL_FACTORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","daemon::server::async_index_tests::actual_background_remote_factory_is_async_and_held_http_releases_cpu","--nocapture"]).env(CHILD,"1").env("OPENROUTER_API_KEY","fixture-secret").output().unwrap();
+        assert!(
+            output.status.success(),
+            "isolated actual factory boundary failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut root = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = root.service();
+    root.run(&runtime, async move {
+        let mut fixture = search_phase_tests::Fixture::new(HybridStages::default());
+        fixture.shared.activate_jobs(service).unwrap();
+        let wire = Arc::new(FactoryWire {
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+            calls: AtomicUsize::new(0),
+        });
+        let shared = Arc::get_mut(&mut fixture.shared).unwrap();
+        let mut daemon = shared.global_config.daemon.clone();
+        daemon.control_active = 1;
+        shared.workers = Arc::new(
+            crate::daemon::worker_admission::WorkerAdmission::with_policies(
+                &daemon,
+                &shared.global_config.remote,
+            )
+            .unwrap(),
+        );
+        shared.remote = Arc::new(
+            crate::hybrid::remote::RemoteExecution::with_owners(
+                &shared.global_config.remote,
+                wire.clone(),
+                shared.workers.clone(),
+                shared.activity.clone(),
+            )
+            .unwrap(),
+        );
+        let slot = shared.project_slot(fixture.project.id);
+        let mut config = Config {
+            hybrid_cfg: crate::hybrid::HybridCfg::enabled_with_defaults(),
+            ..Config::default()
+        };
+        config.hybrid_cfg.reranker = None;
+        {
+            let mut state = slot.state.lock().unwrap();
+            state.config = Some(Arc::new(config));
+            state.stages = None;
+            state.search_stages = None;
+        }
+        // Exercise the REAL configured provider registry/client constructor on a
+        // cold stage cache. Stop before any provider call if legacy was selected.
+        let owner = fixture.shared.clone();
+        let session = fixture.session;
+        let permit = owner.workers.control().await.unwrap();
+        let context = request::spawn(Some(permit), Some(owner.activity.track()), move || {
+            prepare_index_context(&owner, Some(session), &json!({}), false)
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert!(
+            context
+                .stages
+                .embedder
+                .as_ref()
+                .unwrap()
+                .async_remote()
+                .is_some(),
+            "actual configured background factory selected legacy sync transport/bridge"
+        );
+        drop(context);
+        assert_eq!(wire.calls.load(Ordering::SeqCst), 0);
+        std::fs::write(
+            fixture.project.canonical_root.join("guide.md"),
+            "# Actual factory\n\nnew document role input\n",
+        )
+        .unwrap();
+        let owner = fixture.shared.clone();
+        let index = tokio::spawn(async move {
+            call_tool(&owner, Some(session), "index_project", json!({})).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), wire.entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        let call = crate::search::operation::SearchOperation::with_timeout(
+            Instant::now(),
+            Duration::from_secs(5),
+            crate::hybrid::work::Cancellation::new(),
+        )
+        .unwrap();
+        let physical = tokio::time::timeout(
+            Duration::from_secs(5),
+            fixture.shared.workers.background(&call),
+        )
+        .await;
+        let control = call_tool(&fixture.shared, Some(session), "list_projects", json!({})).await;
+        let cpu_free = physical.as_ref().is_ok_and(std::result::Result::is_ok);
+        drop(physical);
+        wire.release.add_permits(20);
+        let result = index.await.unwrap();
+        assert!(cpu_free);
+        assert!(control.is_ok());
+        assert_eq!(result.unwrap()["state"], "done");
+        assert_eq!(wire.calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    })
+    .unwrap();
+}

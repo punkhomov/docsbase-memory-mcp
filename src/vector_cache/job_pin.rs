@@ -128,6 +128,11 @@ impl JobPinAuthority {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(db_error)?;
+        tx.execute(
+            "DELETE FROM vector_cache_leases WHERE expires_at<=?1 AND lease_id<>?2",
+            params![now_secs(), COORD_LEASE],
+        )
+        .map_err(db_error)?;
         for hash in &self.hashes {
             tx.execute("INSERT INTO vector_cache_leases(lease_id,model_id,chunk_hash,expires_at) VALUES(?1,?2,?3,?4) ON CONFLICT(lease_id,model_id,chunk_hash) DO UPDATE SET expires_at=excluded.expires_at", params![self.id,self.model,hash,expiry]).map_err(db_error)?;
         }
@@ -135,6 +140,7 @@ impl JobPinAuthority {
     }
     fn release(&self) -> Result<()> {
         let mut cache = self.source.connect(&self.root)?;
+        let strict = cache.access.is_owned();
         let tx = cache
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -144,7 +150,18 @@ impl JobPinAuthority {
             params![self.id, self.model],
         )
         .map_err(db_error)?;
-        tx.commit().map_err(db_error)
+        // Preserve the public unpin contract: Owned release+eviction commit
+        // atomically, Legacy eviction follows the committed release.
+        let mut warned = cache.warned_over_budget;
+        if strict {
+            super::evict(&tx, cache.limits, &mut warned)?;
+        }
+        tx.commit().map_err(db_error)?;
+        if !strict {
+            super::evict(&cache.conn, cache.limits, &mut warned)?;
+        }
+        cache.warned_over_budget = warned;
+        Ok(())
     }
 }
 impl Drop for JobPinAuthority {

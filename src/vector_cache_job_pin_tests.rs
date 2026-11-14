@@ -113,3 +113,91 @@ fn parallel_connections_issue_distinct_persistent_pin_authorities() {
     assert_eq!(leases(&cache), vec![-2, -1]);
     drop((first, second));
 }
+
+#[test]
+fn negative_authority_release_restores_cache_budget_and_renew_prunes_expired_leases() {
+    for owned in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut policy = settings::VectorStoreSettings::owner_defaults();
+        policy.max_entries = 1;
+        policy.max_bytes = 1024;
+        let source = if owned {
+            VectorCacheSource::Owned(VectorStore::acquire(dir.path(), &policy).unwrap())
+        } else {
+            VectorCacheSource::Legacy(policy.limits())
+        };
+        let model = "model@d1@l2";
+        let hashes = vec![chunk_hash("first"), chunk_hash("second")];
+        let mut pin = JobPinAuthority::allocate(
+            dir.path(),
+            source.clone(),
+            model.into(),
+            Duration::from_secs(60),
+            2,
+        )
+        .unwrap();
+        for hash in &hashes {
+            pin.track(hash).unwrap();
+        }
+        pin.renew().unwrap();
+        let mut cache = source.connect(dir.path()).unwrap();
+        for hash in &hashes {
+            cache.put(model, hash, &[1.0]).unwrap();
+        }
+        assert_eq!(
+            cache.count_present(model, &hashes).unwrap(),
+            2,
+            "both live own pins suspend eviction"
+        );
+        drop(pin);
+        assert_eq!(
+            cache.count_present(model, &hashes).unwrap(),
+            1,
+            "releasing negative authority must restore the same vector budget as public unpin"
+        );
+        cache
+            .pin(7, model, &hashes, Duration::from_secs(60))
+            .unwrap();
+        cache
+            .conn
+            .execute(
+                "UPDATE vector_cache_leases SET expires_at=0 WHERE lease_id=7",
+                [],
+            )
+            .unwrap();
+        let mut next = JobPinAuthority::allocate(
+            dir.path(),
+            source.clone(),
+            model.into(),
+            Duration::from_secs(60),
+            2,
+        )
+        .unwrap();
+        next.track(&hashes[0]).unwrap();
+        next.renew().unwrap();
+        let expired: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM vector_cache_leases WHERE lease_id=7",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            expired, 0,
+            "private renewal preserves existing expiry pruning"
+        );
+        let counter: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM vector_cache_leases WHERE lease_id=?1",
+                [i64::MIN],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            counter, 1,
+            "expiry pruning cannot remove persistent allocator state"
+        );
+    }
+}

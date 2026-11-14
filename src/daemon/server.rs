@@ -1671,6 +1671,10 @@ fn prepare_index_context(
     detached: bool,
 ) -> Result<std::result::Result<crate::index::async_job::JobContext, Value>> {
     let mut db = Db::open_with_settings(&shared.cache, &shared.db_settings)?;
+    if detached && shared.website.is_some() {
+        let bound = bound_project(shared, &db, session)?;
+        shared.admit_binding(opt_i64(args, "project_id")?.or(Some(bound.id)))?;
+    }
     let project = if detached {
         let requested = match opt_i64(args, "project_id")? {
             Some(id) => id,
@@ -1714,7 +1718,7 @@ fn prepare_index_context(
     } else {
         None
     };
-    let (config, stages) = shared.project_runtime(&project)?;
+    let (config, stages) = shared.project_runtime_for_search(&project)?;
     let source = shared.vector_source_for(project.id, &config);
     Ok(Ok(crate::index::async_job::JobContext {
         input: crate::index::async_job::JobInput::Sync,

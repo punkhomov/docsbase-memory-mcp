@@ -400,3 +400,38 @@ perf/static/LTO/native execution is repeated per internal task. Watcher, automat
 open-time scheduling and direct CLI/MCP/metrics consumers remain explicit B2/B3
 work in the SAME second substantial PR; no public foundation PR, no issue closure
 or claim that all operational consumers have migrated.
+
+
+B1 first frozen full CLI (`5b3f05a`) failed exit101 at the existing daemon policy
+fixture: old fixed-sync inventory considered8 sufficient. Runtime correctly
+requires S4+C2+J1+H1+T1=9. Original negative7 retained, negative8 added, exact
+positive boundary9; no runtime/default/benchmark budget weakened. Historical
+observer184.300s/failure is preserved; next frozen CLI/lean use --no-fail-fast.
+
+
+B1 final source audit caught a real intermediate ANN follower lease inversion:
+outer preparation/project READ around cold-flight wait could block reload/leader
+admission. Actual join-gate RED (cleanup before assertion) proves both unavailable;
+fix delegates revision to existing cold admission and project read/Db/generation
+check to the actual loader, preserving lease-free followers. The same bounded
+fix also aligns existing server_workers S=C1 inventory4→5 including J/H/T,
+retaining all original search/control/sync occupancy assertions. Focused and
+current lint evidence precede re-freeze; no new registry/runtime/policy mechanism.
+
+
+B1 pin-release preservation RED showed2 cached vectors remaining after last
+negative pin release under an entry cap1. Private release now reuses existing
+Owned atomic release+eviction / Legacy post-commit eviction, and renewal preserves
+expired-lease purge while excluding the permanent MIN counter. Regression covers
+both existing sources, without changing defaults or benchmark budgets. This closes
+the final known bounded-cache gap before refreeze/full --no-fail-fast gates.
+
+
+B1 actual factory selection acceptance: injected async stages were insufficient
+proof. Isolated credential-scoped child clears both caches and invokes the real
+provider registry/client constructor through prepare_index_context; actual RED
+selected legacy bridged stages before any HTTP. New consumer now reuses the
+accepted async project_runtime_for_search factory; same case continues through
+real OpenRouter codecs + fake HTTP and checks J/control capacity while held.
+Exact existing Website bound-session check is preserved in this context helper.
+No new provider table, runtime, public API or external request.

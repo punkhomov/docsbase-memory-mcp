@@ -611,7 +611,10 @@ successful batches/handoff. Failure/cancel снимает только own autho
 BuildJob/native ANN worker; existing ready/build/follower/deferred paths снимают
 unused own pins внутри admitted CPU. Native worker retires own id на success/
 error/unwind; old positive project-id cleanup не может стереть later negative
-job. Config/generation admitted в CPU, no read lease/transaction over await.
+job. Config/generation admitted в CPU. MODIFIED B1 preservation fix: warm passes
+revision admission to existing cold flight and opens project read lease/Db only
+inside its actual metadata loader; followers retain neither lease while waiting.
+No read lease/transaction over provider await or cold-flight follower wait.
 
 Actual B1 source gates включают real current-thread index dispatch, codec physical
 abandon/normal/unwind, registered ack loss/L1+L3/T1 after shutdown, outer driver

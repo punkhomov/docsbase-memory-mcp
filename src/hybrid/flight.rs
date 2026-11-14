@@ -387,6 +387,15 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
         }
     }
 
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn observe_starts(&self, observer: Arc<dyn Fn() + Send + Sync>) {
+        *self.boundary_observer.lock().unwrap() = Some(Arc::new(move |boundary| {
+            if matches!(boundary, Boundary::BeforeStart) {
+                observer();
+            }
+        }));
+    }
+
     #[cfg(test)]
     pub(crate) fn registry_available(&self) -> bool {
         self.active.try_lock().is_ok()

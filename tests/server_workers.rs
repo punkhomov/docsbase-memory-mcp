@@ -23,7 +23,7 @@ fn settings(pending: usize) -> DaemonSettings {
                 search_pending: Some(pending),
                 control_active: Some(1),
                 control_pending: Some(pending),
-                max_blocking_threads: Some(4),
+                max_blocking_threads: Some(5),
                 ..DaemonPatch::default()
             },
         )],
@@ -202,11 +202,15 @@ fn application_control_enters_with_search_and_sync_occupied() {
     use std::time::Duration;
     use tokio::sync::oneshot;
 
-    // The daemon owner's checked inventory for S=C=1 is B=1+1+1+1.
+    // S1 + C1 + background J1 + DNS H1 + reserved terminal T1 = B5.
     let settings = settings(0);
     assert_eq!(
         settings.max_blocking_threads,
-        settings.search_active + settings.control_active + 1 + 1
+        settings.search_active
+            + settings.control_active
+            + settings.background_active
+            + settings.helper_active
+            + 1
     );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .max_blocking_threads(settings.max_blocking_threads)

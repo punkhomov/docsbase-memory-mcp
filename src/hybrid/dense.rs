@@ -1043,6 +1043,15 @@ impl DenseCache {
     }
 
     #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn observe_cold_start(&self, observer: Arc<dyn Fn() + Send + Sync>) {
+        self.cold_flights.observe_starts(observer);
+    }
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn observe_cold_joins(&self, observer: std::sync::mpsc::Sender<()>) {
+        self.cold_flights.observe_joins(observer);
+    }
+
+    #[cfg(all(test, feature = "hybrid-remote"))]
     pub(crate) fn observe_query_joins(&self, observer: std::sync::mpsc::Sender<()>) {
         self.lock_query_cache().flights.observe_joins(observer);
     }
