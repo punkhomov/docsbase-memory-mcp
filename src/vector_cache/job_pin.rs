@@ -20,6 +20,7 @@ pub(crate) struct JobPinAuthority {
     hashes: HashSet<String>,
     max_hashes: usize,
     retained: Option<std::sync::Arc<crate::search::budget::PayloadPermit>>,
+    activity: Option<std::sync::Arc<crate::daemon::request::Activity>>,
 }
 impl JobPinAuthority {
     pub(crate) fn allocate(
@@ -100,6 +101,7 @@ impl JobPinAuthority {
             hashes,
             max_hashes,
             retained: None,
+            activity: None,
         })
     }
     pub(crate) fn retain_account(
@@ -107,6 +109,17 @@ impl JobPinAuthority {
         account: std::sync::Arc<crate::search::budget::PayloadPermit>,
     ) {
         self.retained = Some(account);
+    }
+    pub(crate) fn retain_activity(
+        &mut self,
+        activity: std::sync::Arc<crate::daemon::request::Activity>,
+    ) {
+        self.activity = Some(activity);
+    }
+    pub(crate) fn take_activity(
+        &mut self,
+    ) -> Option<std::sync::Arc<crate::daemon::request::Activity>> {
+        self.activity.take()
     }
     pub(crate) fn track(&mut self, hash: &str) -> Result<()> {
         if !self.hashes.contains(hash) {

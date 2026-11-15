@@ -125,6 +125,10 @@ impl WorkerAdmission {
             .await
     }
 
+    pub(crate) async fn cancelled(&self) {
+        self.shutdown.cancelled().await;
+    }
+
     /// Retires pending and future admission; running closures keep their permits.
     pub fn shutdown(&self) {
         self.shutdown.cancel();
@@ -155,6 +159,31 @@ impl Lane {
             active: Arc::new(Semaphore::new(active)),
             pending: Arc::new(Semaphore::new(pending)),
         }
+    }
+
+    pub(crate) fn reserve(&self) -> Result<LaneReservation> {
+        if let Ok(ready) = self.active.clone().try_acquire_owned() {
+            return Ok(LaneReservation {
+                active: self.active.clone(),
+                ready: Some(ready),
+                pending: None,
+            });
+        }
+        let pending = self
+            .pending
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| denied("blocking worker pending limit reached"))?;
+        Ok(LaneReservation {
+            active: self.active.clone(),
+            ready: None,
+            pending: Some(pending),
+        })
+    }
+
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn pending_available(&self) -> usize {
+        self.pending.available_permits()
     }
 
     pub(crate) fn is_idle(&self) -> bool {
@@ -189,6 +218,34 @@ impl Lane {
             }
         };
         drop(pending);
+        check(deadline, cancellation, shutdown)?;
+        Ok(permit)
+    }
+}
+
+pub(crate) struct LaneReservation {
+    active: Arc<Semaphore>,
+    ready: Option<OwnedSemaphorePermit>,
+    pending: Option<OwnedSemaphorePermit>,
+}
+impl LaneReservation {
+    pub(crate) async fn acquire(
+        mut self,
+        deadline: Instant,
+        cancellation: &Cancellation,
+        shutdown: &Cancellation,
+    ) -> Result<OwnedSemaphorePermit> {
+        check(deadline, cancellation, shutdown)?;
+        if let Some(ready) = self.ready.take() {
+            return Ok(ready);
+        }
+        let permit = tokio::select! { biased;
+            () = shutdown.cancelled() => return Err(denied("daemon is shutting down")),
+            () = cancellation.cancelled() => return Err(denied("shared work request cancelled")),
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => return Err(denied("blocking worker admission deadline expired")),
+            permit = self.active.clone().acquire_owned() => permit.map_err(|_| denied("blocking worker lane closed"))?,
+        };
+        drop(self.pending.take());
         check(deadline, cancellation, shutdown)?;
         Ok(permit)
     }

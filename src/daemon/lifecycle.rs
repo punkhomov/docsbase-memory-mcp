@@ -442,23 +442,50 @@ async fn serve(
     launch: AdmittedLaunch,
     jobs: super::job_service::JobService,
 ) -> Result<()> {
-    create_state_dir(cache)?;
-    if is_running(cache) {
-        return Err(Error::Admission {
-            message: format!("daemon already running for {}", cache.display()),
-        });
-    }
-    cleanup_stale(cache)?;
-
-    // Prepare resources before advertising a listener or daemon state.
-    let shared = crate::daemon::server::Shared::open_with_admitted_launch(
-        cache,
-        settings,
-        pool_settings,
-        dense_settings,
-        launch,
-    )?;
-    shared.activate_jobs(jobs)?;
+    // Bootstrap uses the same component-owned lanes/source as every later
+    // handler. Root owns watcher retirement before any native startup effects.
+    let policy = launch.launch.config.settings();
+    let workers = Arc::new(super::worker_admission::WorkerAdmission::with_policies(
+        &policy.daemon,
+        &policy.remote,
+    )?);
+    let (activity, events) = super::request::ActivitySource::channel(policy.daemon.max_events);
+    let watchers = Arc::new(crate::watch::Watchers::with_enabled(
+        launch.website.is_none(),
+    ));
+    jobs.retain_watchers(watchers.clone(), activity.clone())?;
+    let permit = workers.control().await?;
+    let charge = activity.track();
+    let owners = crate::daemon::server::AsyncDaemonOwners {
+        jobs,
+        workers,
+        watchers,
+        activity,
+        events,
+    };
+    let prepared_cache = cache.to_path_buf();
+    let prepared_settings = settings.clone();
+    let prepared_pool = pool_settings.clone();
+    let prepared_dense = dense_settings.clone();
+    let shared = super::request::spawn(Some(permit), Some(charge), move || {
+        create_state_dir(&prepared_cache)?;
+        if is_running(&prepared_cache) {
+            return Err(Error::Admission {
+                message: format!("daemon already running for {}", prepared_cache.display()),
+            });
+        }
+        cleanup_stale(&prepared_cache)?;
+        crate::daemon::server::Shared::open_with_runtime_owners(
+            &prepared_cache,
+            &prepared_settings,
+            &prepared_pool,
+            &prepared_dense,
+            launch,
+            Some(owners),
+        )
+    })
+    .await
+    .map_err(|error| Error::internal_with_source("daemon startup worker", error))??;
 
     let endpoint = platform::daemon_endpoint(cache);
     if platform::exists(&endpoint) {
@@ -661,6 +688,7 @@ async fn accept_loop_with(
             }
         }
     }
+    shared.close_watchers();
     // Ingress is closed by the stop flag/listener loop. Accepted requests
     // retain their original budgets and may need another admitted CPU/remote
     // phase before they can publish and reply.

@@ -2026,7 +2026,10 @@ impl DenseCache {
 #[cfg(any(test, debug_assertions))]
 #[doc(hidden)]
 #[derive(Clone, Default)]
-pub struct TestBuildGate(std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+pub struct TestBuildGate(
+    std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    #[cfg(test)] std::sync::Arc<std::sync::atomic::AtomicBool>,
+);
 
 #[cfg(any(test, debug_assertions))]
 impl TestBuildGate {
@@ -2045,11 +2048,22 @@ impl TestBuildGate {
         ready.notify_all();
     }
 
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn open_with_unwind(&self) {
+        self.1.store(true, AtomicOrdering::SeqCst);
+        self.open();
+    }
+
     fn wait(&self) {
         let (lock, ready) = &*self.0;
         if let Ok(open) = lock.lock() {
             let _ = ready.wait_timeout_while(open, Duration::from_mins(2), |open| !*open);
         }
+        #[cfg(test)]
+        assert!(
+            !self.1.load(AtomicOrdering::SeqCst),
+            "controlled ANN worker unwind"
+        );
     }
 }
 
@@ -2085,10 +2099,16 @@ fn test_build_delay() {}
 #[allow(clippy::needless_pass_by_value)]
 fn build_in_background(
     cache: Arc<DenseCache>,
-    job: BuildJob,
+    mut job: BuildJob,
     building: Arc<BuildingAnn>,
     reservation: BuildReservation,
 ) {
+    // Same originating Activity retires last, after data, publication and the
+    // existing physical byte reservation, including stale completion/unwind.
+    let _activity = job
+        .job_pin
+        .as_mut()
+        .and_then(crate::vector_cache::JobPinAuthority::take_activity);
     // Declare the guard before the working-set locals: on unwind or stale
     // completion, rows/loaded graphs must drop before their charge is freed.
     let mut reservation = reservation;

@@ -108,6 +108,7 @@ pub(crate) struct Activity {
     counter: Arc<AtomicUsize>,
     events: mpsc::Sender<()>,
     connection: Option<Arc<OwnedSemaphorePermit>>,
+    active: std::sync::atomic::AtomicBool,
 }
 
 impl Activity {
@@ -122,7 +123,25 @@ impl Activity {
             counter: Arc::clone(counter),
             events: events.clone(),
             connection: connection.cloned(),
+            active: std::sync::atomic::AtomicBool::new(true),
         })
+    }
+}
+
+impl Activity {
+    /// Preallocate producer retirement ownership without keeping an idle daemon alive.
+    pub(crate) fn dormant(source: &ActivitySource) -> Arc<Self> {
+        Arc::new(Self {
+            counter: source.counter.clone(),
+            events: source.events.clone(),
+            connection: None,
+            active: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+    pub(crate) fn activate(&self) {
+        if !self.active.swap(true, Ordering::SeqCst) {
+            self.counter.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -130,8 +149,10 @@ impl Drop for Activity {
     fn drop(&mut self) {
         // Announce completion after releasing this owner's capacity reference.
         drop(self.connection.take());
-        self.counter.fetch_sub(1, Ordering::SeqCst);
-        let _ = self.events.try_send(());
+        if self.active.load(Ordering::SeqCst) {
+            self.counter.fetch_sub(1, Ordering::SeqCst);
+            let _ = self.events.try_send(());
+        }
     }
 }
 

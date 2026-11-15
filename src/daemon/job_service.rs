@@ -28,8 +28,21 @@ struct Service {
     logical: Lane,
     registrations: mpsc::Sender<Registration>,
     close: Cancellation,
+    watcher_owner:
+        std::sync::OnceLock<(Arc<crate::watch::Watchers>, super::request::ActivitySource)>,
     #[cfg(test)]
     retirement_observer: std::sync::Mutex<Option<RetirementObserver>>,
+}
+pub(crate) struct JobReservation {
+    owner: Arc<Service>,
+    lane: super::worker_admission::LaneReservation,
+    queued_at: std::time::Instant,
+    operation: SearchOperation,
+}
+impl JobReservation {
+    pub(crate) fn operation(&self) -> SearchOperation {
+        self.operation.clone()
+    }
 }
 struct Registration {
     logical: OwnedSemaphorePermit,
@@ -119,16 +132,84 @@ impl Drop for JobOwner {
 }
 
 impl JobService {
+    pub(crate) fn retain_watchers(
+        &self,
+        watchers: Arc<crate::watch::Watchers>,
+        source: super::request::ActivitySource,
+    ) -> Result<()> {
+        self.inner.close.check()?;
+        if let Some((current, activity)) = self.inner.watcher_owner.get() {
+            if Arc::ptr_eq(current, &watchers) && Arc::ptr_eq(&activity.counter, &source.counter) {
+                return Ok(());
+            }
+            return Err(Error::internal("root watcher owner already installed"));
+        }
+        self.inner
+            .watcher_owner
+            .set((watchers, source))
+            .map_err(|_| Error::internal("root watcher owner already installed"))
+    }
     #[cfg(test)]
     pub(crate) fn observe_retirement(&self, observer: RetirementObserver) {
         *self.inner.retirement_observer.lock().unwrap() = Some(observer);
     }
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn pending_available(&self) -> usize {
+        self.inner.logical.pending_available()
+    }
+
+    pub(crate) fn reserve(&self, operation: SearchOperation) -> Result<JobReservation> {
+        operation.check()?;
+        self.inner.close.check()?;
+        Ok(JobReservation {
+            owner: self.inner.clone(),
+            lane: self.inner.logical.reserve()?,
+            queued_at: std::time::Instant::now(),
+            operation,
+        })
+    }
+    pub(crate) async fn admit_reserved(
+        &self,
+        workers: Arc<WorkerAdmission>,
+        activity: Arc<Activity>,
+        budget: &PayloadBudget,
+        reservation: JobReservation,
+    ) -> Result<JobOwner> {
+        if !Arc::ptr_eq(&self.inner, &reservation.owner) {
+            return Err(Error::internal("foreign job reservation"));
+        }
+        let operation = reservation.operation;
+        let logical = reservation
+            .lane
+            .acquire(
+                operation.deadline(),
+                operation.cancellation(),
+                &self.inner.close,
+            )
+            .await?;
+        operation.record_queue(reservation.queued_at.elapsed());
+        self.register(logical, workers, activity, &operation, budget, None)
+            .await
+    }
+    #[cfg(test)]
     pub(crate) async fn admit(
         &self,
         workers: Arc<WorkerAdmission>,
         activity: Arc<Activity>,
         operation: &SearchOperation,
         budget: &PayloadBudget,
+    ) -> Result<JobOwner> {
+        self.admit_with_account(workers, activity, operation, budget, None)
+            .await
+    }
+
+    pub(crate) async fn admit_with_account(
+        &self,
+        workers: Arc<WorkerAdmission>,
+        activity: Arc<Activity>,
+        operation: &SearchOperation,
+        budget: &PayloadBudget,
+        account: Option<Arc<crate::search::budget::PayloadPermit>>,
     ) -> Result<JobOwner> {
         let queued = std::time::Instant::now();
         let logical = self
@@ -141,12 +222,37 @@ impl JobService {
             )
             .await?;
         operation.record_queue(queued.elapsed());
+        self.register(logical, workers, activity, operation, budget, account)
+            .await
+    }
+
+    async fn register(
+        &self,
+        logical: OwnedSemaphorePermit,
+        workers: Arc<WorkerAdmission>,
+        activity: Arc<Activity>,
+        operation: &SearchOperation,
+        budget: &PayloadBudget,
+        account: Option<Arc<crate::search::budget::PayloadPermit>>,
+    ) -> Result<JobOwner> {
         operation.check()?;
         self.inner.close.check()?;
-        let account = budget.reserve(
-            u64::try_from(std::mem::size_of::<IndexState>() + 4096)
-                .map_err(|_| Error::internal("job registration size overflow"))?,
-        )?;
+        let registration_bytes = u64::try_from(std::mem::size_of::<IndexState>() + 4096)
+            .map_err(|_| Error::internal("job registration size overflow"))?;
+        let account = match account {
+            Some(account) => {
+                account.grow_shared(
+                    account
+                        .bytes()
+                        .checked_add(registration_bytes)
+                        .ok_or_else(|| Error::Admission {
+                            message: "job registration capture overflow".into(),
+                        })?,
+                )?;
+                account
+            }
+            None => Arc::new(budget.reserve(registration_bytes)?),
+        };
         let state = Box::new(IndexState::empty(account));
         #[cfg(test)]
         let state = {
@@ -243,6 +349,7 @@ impl JobRoot {
                     logical: Lane::new(settings.background_active, settings.background_pending),
                     registrations: send,
                     close: Cancellation::new(),
+                    watcher_owner: std::sync::OnceLock::new(),
                     #[cfg(test)]
                     retirement_observer: std::sync::Mutex::new(None),
                 }),
@@ -257,6 +364,9 @@ impl JobRoot {
         self.service.clone()
     }
     fn close(&mut self) {
+        if let Some((watchers, _)) = self.service.inner.watcher_owner.get() {
+            watchers.close();
+        }
         self.service.inner.close.cancel();
         for slot in self.slots.iter().flatten() {
             slot.operation.cancellation().cancel();
@@ -286,6 +396,17 @@ impl JobRoot {
             && let Poll::Ready(result) = Pin::new(join).poll(cx)
         {
             self.terminal = None;
+            #[cfg(test)]
+            if let Some(observer) = self
+                .service
+                .inner
+                .retirement_observer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                observer("terminal_finished");
+            }
             if let Err(error) = result {
                 eprintln!("warning: terminal job worker failed: {error}");
             } else if let Ok(Err(error)) = result {
@@ -325,12 +446,13 @@ impl JobRoot {
                 let Some(state) = registration.envelope.take() else {
                     std::process::abort()
                 };
+                let activity = registration.activity.clone();
                 self.terminal = Some(request::spawn(
                     Some(permit),
                     Some(registration.activity),
                     move || {
                         let _logical = registration.logical;
-                        state.retire();
+                        state.retire(activity);
                         Ok(())
                     },
                 ));
@@ -362,6 +484,12 @@ impl JobRoot {
         }));
         self.close();
         let drained = runtime.block_on(self.drive());
+        if let Some((watchers, source)) = self.service.inner.watcher_owner.get() {
+            runtime.block_on(source.drain(self.poll_interval));
+            // Existing debounce threads own/drop native watchers. Join their
+            // already-retired handles on this outer synchronous root thread.
+            watchers.join_retired();
+        }
         match result {
             Ok(result) => {
                 drained?;

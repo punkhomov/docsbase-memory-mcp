@@ -88,7 +88,7 @@ fn held_document_embedding_releases_actual_control_dispatch() {
             "# Guide\n\nchanged widget document\n",
         )
         .unwrap();
-        fixture.shared.activate_jobs(service).unwrap();
+
         let shared = Arc::get_mut(&mut fixture.shared).unwrap();
         let mut policy = shared.global_config.daemon.clone();
         policy.control_active = 1;
@@ -100,6 +100,7 @@ fn held_document_embedding_releases_actual_control_dispatch() {
             )
             .unwrap(),
         );
+        fixture.shared.activate_jobs(service).unwrap();
         let shared = fixture.shared.clone();
         let session = fixture.session;
         let indexing = tokio::spawn(async move {
@@ -163,12 +164,13 @@ fn low_capture_budget_refuses_before_project_effects_and_terminalizes_only_own_s
     let service = root.service();
     root.run(&runtime, async move {
         let mut fixture = search_phase_tests::Fixture::new(HybridStages::default());
-        fixture.shared.activate_jobs(service).unwrap();
+
         let shared = Arc::get_mut(&mut fixture.shared).unwrap();
         let mut budget = shared.global_config.search.clone();
         budget.max_request_payload_bytes = 16 * 1024;
         budget.max_retained_payload_bytes = 32 * 1024;
         shared.payload_budget = crate::search::budget::PayloadBudget::new(budget).unwrap();
+        fixture.shared.activate_jobs(service).unwrap();
         let snapshot = |db: &Db| -> (String, i64, Option<String>, i64, Vec<crate::store::repo::DocState>) {
             let row: (String, i64, Option<String>, i64) = db.connection().query_row(
                 "SELECT status,index_attempt,index_outcome_json,index_generation FROM projects WHERE id=?1", [fixture.project.id],
@@ -892,14 +894,20 @@ fn captured_ttl_and_exact_ann_handoff_isolate_later_job_from_old_worker_cleanup(
     let mut root = crate::daemon::job_service::JobRoot::new(policy.settings());
     let service = root.service();
     root.run(&runtime,async move {
+        let (retired, terminal_finished) = tokio::sync::oneshot::channel();
+        let retired = Mutex::new(Some(retired));
+        service.observe_retirement(Arc::new(move |event| {
+            if event == "terminal_finished" && let Some(retired) = retired.lock().unwrap().take() { let _ = retired.send(()); }
+        }));
         let provider=document_gate();
         let mut fixture=search_phase_tests::Fixture::new(HybridStages{embedder:Some(provider.clone()),ranking:Ranking::Rrf,reranker:None});
-        fixture.shared.activate_jobs(service).unwrap();
+
         let shared=Arc::get_mut(&mut fixture.shared).unwrap();
         let mut dense=crate::hybrid::dense_settings::standalone().unwrap().into_settings();dense.min_vectors=1;
         dense.ann_lifetimes=crate::hybrid::dense_settings::AnnLifetimes::new(Duration::from_secs(123),Duration::from_secs(456)).unwrap();
         shared.dense=crate::hybrid::dense::DenseCache::with_settings(crate::hybrid::dense::AnnPolicy::BuildOrLoad,&shared.cache,&dense).unwrap();
         let build=shared.dense.pause_job_builds_for_test();let _open_on_drop=OpenBuildOnDrop(build.clone());
+        fixture.shared.activate_jobs(service).unwrap();
         std::fs::write(fixture.project.canonical_root.join("guide.md"),"# First owner\n\nfirst job chunk\n").unwrap();
         let before=i64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()).unwrap();
         let shared=fixture.shared.clone();let session=fixture.session;
@@ -910,6 +918,9 @@ fn captured_ttl_and_exact_ann_handoff_isolate_later_job_from_old_worker_cleanup(
         let initial=pins();assert_eq!(initial.len(),1);assert_eq!(initial[0].0,-1);assert!((before+123..=after+123).contains(&initial[0].1),"TTL must come from captured DenseSpec");
         provider.release.add_permits(1);assert_eq!(first.await.unwrap().unwrap()["state"],"done");
         assert_eq!(pins().iter().map(|row|row.0).collect::<Vec<_>>(),vec![-1],"completed job moved authority into physically retained ANN worker");
+        tokio::time::timeout(Duration::from_secs(5), terminal_finished).await.unwrap().unwrap();
+        let ann_retained_activity = fixture.shared.activity.counter.load(Ordering::SeqCst);
+
         std::fs::write(fixture.project.canonical_root.join("guide.md"),"# Second owner\n\nsecond job new chunk\n").unwrap();
         let shared=fixture.shared.clone();let session=fixture.session;
         let second=tokio::spawn(async move {call_tool(&shared,Some(session),"index_project",json!({})).await});
@@ -924,6 +935,7 @@ fn captured_ttl_and_exact_ann_handoff_isolate_later_job_from_old_worker_cleanup(
         request::spawn(Some(permit),Some(fixture.shared.activity.track()),move ||join.join_job_builds_for_test()).await.unwrap().unwrap();
         assert_eq!(pins(),Vec::<(i64,i64)>::new());
         assert_eq!(provider.synchronous.load(Ordering::SeqCst),0);
+        assert_eq!(ann_retained_activity, 1, "the original Activity must outlive terminal CPU retirement while the actual ANN worker owns its rows/pin");
         Ok(())
     }).unwrap();
 }
@@ -963,10 +975,11 @@ fn terminal_ann_follower_releases_revision_and_project_read_leases_before_waitin
     let service = root.service();
     root.run(&runtime,async move {
         let provider=document_gate();
-        let mut fixture=search_phase_tests::Fixture::new(HybridStages{embedder:Some(provider.clone()),ranking:Ranking::Rrf,reranker:None});fixture.shared.activate_jobs(service).unwrap();
+        let mut fixture=search_phase_tests::Fixture::new(HybridStages{embedder:Some(provider.clone()),ranking:Ranking::Rrf,reranker:None});
         let shared=Arc::get_mut(&mut fixture.shared).unwrap();
         let mut policy=crate::hybrid::dense_settings::standalone().unwrap().into_settings();policy.min_vectors=1;
         shared.dense=crate::hybrid::dense::DenseCache::with_settings(crate::hybrid::dense::AnnPolicy::BuildOrLoad,&shared.cache,&policy).unwrap();
+        fixture.shared.activate_jobs(service).unwrap();
         let (selected,started)=tokio::sync::oneshot::channel();let selected=Mutex::new(Some(selected));
         let (release,proceed)=std::sync::mpsc::channel();let proceed=Mutex::new(proceed);
         fixture.shared.dense.observe_cold_start(Arc::new(move || {selected.lock().unwrap().take().unwrap().send(()).unwrap();proceed.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();}));
@@ -1013,7 +1026,7 @@ impl crate::hybrid::remote::AsyncTransport for FactoryWire {
             self.release.acquire().await.unwrap().forget();
             let request: Value = serde_json::from_str(&request.body).unwrap();
             let count = request["input"].as_array().unwrap().len();
-            let dimension = crate::hybrid::config::DEFAULT_DIMENSIONS as usize;
+            let dimension = usize::try_from(request["dimensions"].as_u64().unwrap()).unwrap();
             let data: Vec<_> = (0..count)
                 .map(|index| {
                     let mut vector = vec![0.0_f32; dimension];
@@ -1048,7 +1061,7 @@ fn actual_background_remote_factory_is_async_and_held_http_releases_cpu() {
     let service = root.service();
     root.run(&runtime, async move {
         let mut fixture = search_phase_tests::Fixture::new(HybridStages::default());
-        fixture.shared.activate_jobs(service).unwrap();
+
         let wire = Arc::new(FactoryWire {
             entered: tokio::sync::Semaphore::new(0),
             release: tokio::sync::Semaphore::new(0),
@@ -1085,6 +1098,7 @@ fn actual_background_remote_factory_is_async_and_held_http_releases_cpu() {
             state.stages = None;
             state.search_stages = None;
         }
+        fixture.shared.activate_jobs(service).unwrap();
         // Exercise the REAL configured provider registry/client constructor on a
         // cold stage cache. Stop before any provider call if legacy was selected.
         let owner = fixture.shared.clone();
@@ -1108,6 +1122,26 @@ fn actual_background_remote_factory_is_async_and_held_http_releases_cpu() {
             "actual configured background factory selected legacy sync transport/bridge"
         );
         drop(context);
+        // B2: the real watcher constructor must use the async cache even when
+        // the separate legacy cache is cold. Inspect before any provider send.
+        let owner = fixture.shared.clone();
+        let project = fixture.project.clone();
+        let permit = owner.workers.control().await.unwrap();
+        request::spawn(Some(permit), Some(owner.activity.track()), move || {
+            owner.ensure_watcher(&project)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let (_, stages, _) = fixture
+            .shared
+            .watchers
+            .runtime_for_test(fixture.project.id)
+            .unwrap();
+        assert!(
+            stages.embedder.as_ref().unwrap().async_remote().is_some(),
+            "actual watcher factory selected legacy synchronous stages"
+        );
         assert_eq!(wire.calls.load(Ordering::SeqCst), 0);
         std::fs::write(
             fixture.project.canonical_root.join("guide.md"),
@@ -1150,3 +1184,114 @@ fn actual_background_remote_factory_is_async_and_held_http_releases_cpu() {
 
 #[path = "async_index_budget_tests.rs"]
 mod budget_regressions;
+
+#[test]
+fn actual_watcher_held_remote_uses_async_consumer_and_coalesces_repeated_changes() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut root = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = root.service();
+    root.run(&runtime,async move {
+        let provider=document_gate();
+        let fixture=search_phase_tests::Fixture::new(HybridStages{embedder:Some(provider.clone()),..HybridStages::default()});
+        fixture.shared.activate_jobs(service).unwrap();
+        // Prepared dependency gate through the actual production watcher. The
+        // separate cold-factory acceptance must exercise configured construction.
+        let slot=fixture.shared.project_slot(fixture.project.id);
+        {let mut state=slot.state.lock().unwrap();state.search_stages=state.stages.clone();}
+        assert!(fixture.shared.ensure_watcher(&fixture.project).unwrap());
+        let path=fixture.project.canonical_root.join("guide.md");
+        std::fs::write(&path,"# Watch\n\nwatcherfirst\n").unwrap();
+        tokio::time::timeout(Duration::from_secs(10),provider.entered.acquire()).await.unwrap().unwrap().forget();
+        let synchronous_while_held=provider.synchronous.load(Ordering::SeqCst);
+        let control=fixture.shared.workers.control().await.unwrap();drop(control);
+        for index in 0..16 {std::fs::write(&path,format!("# Watch\n\nwatcherlatest {index}\n")).unwrap();}
+        provider.release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(10),provider.entered.acquire()).await.unwrap().unwrap().forget();
+        provider.release.add_permits(32);
+        let source_hash=blake3::hash(b"# Watch\n\nwatcherlatest 15\n").to_hex().to_string();
+        tokio::time::timeout(Duration::from_secs(10),async {
+            loop {
+                let current:Option<String>=fixture.shared.db().connection().query_row("SELECT content_hash FROM docs WHERE project_id=?1 AND rel_path='guide.md'",[fixture.project.id],|row|row.get(0)).ok();
+                if current.as_deref()==Some(source_hash.as_str()) && lifecycle::with_writer_lease(&fixture.shared.cache,fixture.project.id,||Ok(())).is_ok() {break;}
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let batches=provider.batches.lock().unwrap().clone();
+        assert_eq!(synchronous_while_held,0,"actual watcher parked its consumer thread in the synchronous provider path while remote work was held");
+        assert_eq!(batches.len(),2,"repeated same-path producer changes coalesce and unchanged followups do not embed again");
+        assert!(batches[1].iter().any(|text|text.contains("watcherlatest 15")));
+        let rows:i64=fixture.shared.db().connection().query_row("SELECT COUNT(*) FROM sync_jobs WHERE project_id=?1",[fixture.project.id],|row|row.get(0)).unwrap();
+        assert_eq!(rows,0,"successful lexical watcher work does not fabricate a Sync row");
+        Ok(())
+    }).unwrap();
+}
+
+#[path = "async_shutdown_tests.rs"]
+mod async_shutdown_tests;
+
+#[test]
+#[allow(clippy::too_many_lines)] // One isolated real configured registration/backfill boundary.
+fn automatic_registration_and_backfill_use_configured_async_factory() {
+    const CHILD: &str = "DOCSBASE_B2_AUTO_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","daemon::server::async_index_tests::automatic_registration_and_backfill_use_configured_async_factory","--nocapture"]).env(CHILD,"1").env("OPENROUTER_API_KEY","fixture-secret").output().unwrap();
+        assert!(
+            output.status.success(),
+            "isolated automatic route failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    for registered in [true, false] {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let policy = crate::daemon::settings::standalone().unwrap();
+        let mut root = crate::daemon::job_service::JobRoot::new(policy.settings());
+        let service = root.service();
+        root.run(&runtime,async move {
+            let mut fixture=search_phase_tests::Fixture::new(HybridStages::default());
+            let new_root=tempfile::tempdir().unwrap();
+            let project_root=if registered {fixture.project.canonical_root.clone()} else {new_root.path().to_path_buf()};
+            std::fs::create_dir_all(project_root.join(".git")).unwrap();
+            std::fs::write(project_root.join("guide.md"),"# Automatic\n\nautomaticwidget\n").unwrap();
+            std::fs::write(project_root.join(".docsbase.toml"),"auto_index=true\n[hybrid]\nenabled=true\nranking='lexical'\n[hybrid.embedding]\nprovider='openrouter'\nmodel='fixture'\ndimensions=3\nnormalize=true\n").unwrap();
+            let wire=Arc::new(FactoryWire{entered:tokio::sync::Semaphore::new(0),release:tokio::sync::Semaphore::new(0),calls:AtomicUsize::new(0)});
+            let owner=Arc::get_mut(&mut fixture.shared).unwrap();
+            let mut daemon=owner.global_config.daemon.clone();daemon.control_active=1;daemon.control_pending=1;
+            owner.workers=Arc::new(crate::daemon::worker_admission::WorkerAdmission::with_policies(&daemon,&owner.global_config.remote).unwrap());
+            owner.remote=Arc::new(crate::hybrid::remote::RemoteExecution::with_owners(&owner.global_config.remote,wire.clone(),owner.workers.clone(),owner.activity.clone()).unwrap());
+            fixture.shared.activate_jobs(service).unwrap();
+            let shared=fixture.shared.clone();let cwd=project_root.clone();
+            let mut registration=tokio::spawn(async move { register_session(&shared,std::process::id(),&cwd,false).await });
+            let mut completed=None;
+            let reached=tokio::select! {
+                result=wire.entered.acquire() => {result.unwrap().forget();true},
+                result=&mut registration => {
+                    let result=result.unwrap();let success=result.is_ok();completed=Some(result);
+                    if success {tokio::time::timeout(Duration::from_secs(10),wire.entered.acquire()).await.unwrap().unwrap().forget();true} else {false}
+                }
+            };
+            let control=if reached {Some(tokio::time::timeout(Duration::from_secs(10),fixture.shared.workers.control()).await)} else {None};
+            let independent=control.as_ref().is_some_and(|result|result.as_ref().is_ok_and(std::result::Result::is_ok));drop(control);
+            wire.release.add_permits(32);
+            let outcome=match completed {Some(result)=>result,None=>registration.await.unwrap()};
+            eprintln!("automatic registered={registered}, reached_remote={reached}, calls={}",wire.calls.load(Ordering::SeqCst));
+            assert!(reached,"valid configured automatic route did not reach its async remote gate (registered={registered}): {outcome:?}");
+            let (_,value,_)=outcome.unwrap();assert_eq!(value["status"],"indexed");
+            assert!(independent,"automatic remote wait must release the only control worker");
+            fixture.shared.activity.drain(Duration::from_millis(policy.settings().drain_poll_ms)).await;
+            assert!(wire.calls.load(Ordering::SeqCst)>0);
+            Ok(())
+        }).unwrap();
+    }
+}
+
+#[path = "../watch/async_runtime_tests.rs"]
+mod async_runtime_tests;

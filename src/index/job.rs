@@ -421,7 +421,7 @@ pub(crate) enum CaptureEvent {
 }
 
 pub(crate) struct CaptureBudget<'a> {
-    pub(crate) account: &'a mut crate::search::budget::PayloadPermit,
+    pub(crate) account: &'a crate::search::budget::PayloadPermit,
     pub(crate) operation: &'a crate::search::operation::SearchOperation,
     #[cfg(test)]
     pub(crate) observed: Option<&'a dyn Fn(CaptureEvent)>,
@@ -437,7 +437,7 @@ impl CaptureBudget<'_> {
                     .ok_or_else(|| Error::Admission {
                         message: "index capture size overflow".into(),
                     })?;
-            self.account.grow_to(total)
+            self.account.grow_shared(total)
         })();
         #[cfg(test)]
         if let Some(observer) = self.observed {
@@ -491,7 +491,7 @@ impl CaptureBudget<'_> {
         }
         Ok(())
     }
-    fn path(&mut self, path: &Path) -> Result<()> {
+    pub(crate) fn path(&mut self, path: &Path) -> Result<()> {
         let bytes = u64::try_from(path.as_os_str().len())
             .map_err(|_| Error::internal("path size overflow"))?;
         self.reserve(
@@ -539,7 +539,7 @@ impl CaptureBudget<'_> {
                     Error::internal_with_source("allocate accounted file capture", e)
                 })?;
                 self.account
-                    .shrink_to(self.account.bytes().saturating_sub(previous as u64));
+                    .shrink_shared(self.account.bytes().saturating_sub(previous as u64));
             }
             #[cfg(test)]
             if let Some(observer) = self.observed {
@@ -710,6 +710,16 @@ pub(crate) enum JobInput<'a> {
     Full,
     Sync,
     Incremental(std::borrow::Cow<'a, [PathBuf]>),
+    Watch(std::sync::Arc<crate::watch::WatchPayload>),
+}
+
+impl JobInput<'_> {
+    pub(crate) fn account(&self) -> Option<std::sync::Arc<crate::search::budget::PayloadPermit>> {
+        match self {
+            Self::Watch(payload) => Some(payload.account.clone()),
+            _ => None,
+        }
+    }
 }
 
 pub(crate) fn capture_input(
@@ -718,9 +728,22 @@ pub(crate) fn capture_input(
     config: &Config,
     recreated: bool,
     input: &JobInput<'_>,
-    capture: Option<&mut CaptureBudget<'_>>,
+    mut capture: Option<&mut CaptureBudget<'_>>,
 ) -> Result<(PreparedPlan, super::outcome::SurveyScope)> {
     match input {
+        JobInput::Watch(changed) if !recreated => {
+            let filtered = crate::watch::refilter_accounted(
+                project,
+                db.cache_root(),
+                &changed.paths,
+                config,
+                capture.as_deref_mut(),
+            )?;
+            Ok((
+                capture_incremental_accounted(db, project, &filtered, config, capture)?,
+                super::outcome::SurveyScope::Subset,
+            ))
+        }
         JobInput::Incremental(changed) if !recreated => Ok((
             capture_incremental_accounted(db, project, changed, config, capture)?,
             super::outcome::SurveyScope::Subset,
@@ -832,7 +855,7 @@ pub(crate) fn capture_full_accounted(
                         if let Some(budget) = capture.as_deref_mut() {
                             budget
                                 .account
-                                .shrink_to(budget.account.bytes().saturating_sub(charge));
+                                .shrink_shared(budget.account.bytes().saturating_sub(charge));
                         }
                         continue;
                     }
@@ -1039,7 +1062,7 @@ fn capture_file_warning(
                 "file warning preflight underestimated retained storage",
             ));
         }
-        budget.account.shrink_to(total);
+        budget.account.shrink_shared(total);
     }
     Ok(())
 }
@@ -1123,7 +1146,7 @@ fn prepare_doc_accounted(
         }
         // prepare_doc_inner has returned: original text, frontmatter builder,
         // sections and parser/range buffers have actually been destroyed.
-        budget.account.shrink_to(total);
+        budget.account.shrink_shared(total);
     }
     result
 }

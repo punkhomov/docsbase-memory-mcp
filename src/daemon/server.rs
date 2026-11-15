@@ -192,6 +192,53 @@ struct ProjectState {
     search_stages: Option<Arc<HybridStages>>,
 }
 
+/// Explicit bootstrap ownership supplied before the daemon's first CPU/native work.
+pub(crate) struct AsyncDaemonOwners {
+    pub(crate) jobs: super::job_service::JobService,
+    pub(crate) workers: Arc<crate::daemon::worker_admission::WorkerAdmission>,
+    pub(crate) watchers: Arc<Watchers>,
+    pub(crate) activity: request::ActivitySource,
+    pub(crate) events: mpsc::Receiver<()>,
+}
+
+type RuntimeOwners = (
+    request::ActivitySource,
+    mpsc::Receiver<()>,
+    Arc<crate::daemon::worker_admission::WorkerAdmission>,
+    Arc<Watchers>,
+    Option<super::job_service::JobService>,
+);
+
+fn prepare_runtime_owners(
+    owners: Option<AsyncDaemonOwners>,
+    global_config: &Config,
+    watch_enabled: bool,
+) -> Result<RuntimeOwners> {
+    Ok(if let Some(owners) = owners {
+        (
+            owners.activity,
+            owners.events,
+            owners.workers,
+            owners.watchers,
+            Some(owners.jobs),
+        )
+    } else {
+        let (activity, events) = request::ActivitySource::channel(global_config.daemon.max_events);
+        let workers = Arc::new(
+            crate::daemon::worker_admission::WorkerAdmission::with_policies(
+                &global_config.daemon,
+                &global_config.remote,
+            )?,
+        );
+        (
+            activity,
+            events,
+            workers,
+            Arc::new(Watchers::with_enabled(watch_enabled)),
+            None,
+        )
+    })
+}
 impl Shared {
     /// Opens the registry database and prepares shared state.
     /// Compatibility adapter: one captured global source, warned defaults on a
@@ -314,6 +361,24 @@ impl Shared {
         dense_settings: &crate::hybrid::dense_settings::DenseSettings,
         admitted: AdmittedLaunch,
     ) -> Result<Arc<Self>> {
+        Self::open_with_runtime_owners(
+            cache,
+            settings,
+            pool_settings,
+            dense_settings,
+            admitted,
+            None,
+        )
+    }
+
+    pub(crate) fn open_with_runtime_owners(
+        cache: &Path,
+        settings: &Resolved<DbSettings>,
+        pool_settings: &Resolved<ReadPoolSettings>,
+        dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+        admitted: AdmittedLaunch,
+        owners: Option<AsyncDaemonOwners>,
+    ) -> Result<Arc<Self>> {
         use crate::config::schema::{Capabilities, SettingsSpec};
         let AdmittedLaunch { launch, website } = admitted;
         launch.config.settings().validate()?;
@@ -333,14 +398,8 @@ impl Shared {
             eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
         }
         let global_config = launch.config.into_settings();
-        let (activity, activity_events) =
-            request::ActivitySource::channel(global_config.daemon.max_events);
-        let workers = Arc::new(
-            crate::daemon::worker_admission::WorkerAdmission::with_policies(
-                &global_config.daemon,
-                &global_config.remote,
-            )?,
-        );
+        let (activity, activity_events, workers, watchers, jobs) =
+            prepare_runtime_owners(owners, &global_config, website.is_none())?;
         #[cfg(feature = "hybrid-remote")]
         let remote = Arc::new(crate::hybrid::remote::RemoteExecution::real_with_owners(
             &global_config.remote,
@@ -364,7 +423,6 @@ impl Shared {
                 }),
             )])
         });
-        let watchers = Arc::new(Watchers::with_enabled(website.is_none()));
         let ann_policy = if website.is_some() {
             AnnPolicy::Disabled
         } else {
@@ -394,6 +452,9 @@ impl Shared {
             project_states: Mutex::new(project_states),
             dense: DenseCache::with_settings(ann_policy, cache, &effective_dense)?,
         });
+        if let Some(jobs) = jobs {
+            shared.activate_jobs(jobs)?;
+        }
         match shared.start_watchers() {
             Ok(started) if started > 0 => eprintln!("watching {started} indexed project(s)"),
             Ok(_) => {}
@@ -402,10 +463,170 @@ impl Shared {
         Ok(shared)
     }
 
-    pub(crate) fn activate_jobs(&self, service: super::job_service::JobService) -> Result<()> {
+    pub(crate) fn activate_jobs(
+        self: &Arc<Self>,
+        service: super::job_service::JobService,
+    ) -> Result<()> {
+        service.retain_watchers(self.watchers.clone(), self.activity.clone())?;
         self.jobs
             .set(service)
-            .map_err(|_| Error::internal("job root already activated"))
+            .map_err(|_| Error::internal("job root already activated"))?;
+        self.watchers.activate_async(Arc::downgrade(self))
+    }
+
+    pub(crate) async fn run_watch_batch(
+        self: &Arc<Self>,
+        project: crate::store::models::Project,
+        runtime: Arc<crate::watch::WatchRuntime>,
+        paths: Arc<crate::watch::WatchPayload>,
+        operation: crate::search::operation::SearchOperation,
+        activity: Arc<Activity>,
+    ) -> Result<crate::index::job::JobStats> {
+        let service = self
+            .jobs
+            .get()
+            .ok_or_else(|| Error::internal("watcher job owner absent"))?;
+        let permit = self.workers.background(&operation).await?;
+        let cache = self.cache.clone();
+        let root = project.canonical_root.clone();
+        let call = operation.clone();
+        let injected = request::spawn(Some(permit), Some(activity.clone()), move || {
+            call.check()?;
+            if let Some(error) = crate::watch::injected_watch_fault(&root, &cache) {
+                return Err(error);
+            }
+            Ok(())
+        });
+        request::run(injected, Some(&operation)).await?;
+        let context = crate::index::async_job::JobContext {
+            input: crate::index::async_job::JobInput::Watch(paths),
+            singleton: None,
+            cache: self.cache.clone(),
+            db_settings: self.db_settings.clone(),
+            revision: Some(self.project_slot(project.id)),
+            dense: Some(Arc::new(self.dense.snapshot())),
+            project,
+            config: runtime.config.clone(),
+            stages: runtime.stages.clone(),
+            source: runtime.source.clone(),
+        };
+        let account = match &context.input {
+            crate::index::async_job::JobInput::Watch(input) => input.clone(),
+            _ => return Err(Error::internal("watcher input absent")),
+        };
+        let result = crate::index::async_job::run(
+            service,
+            &self.workers,
+            activity,
+            operation.clone(),
+            &self.payload_budget,
+            context,
+        )
+        .await;
+        if result.is_err() {
+            // The same quota guard is retained by native/codec physical owners.
+            // Settle those existing owners before the coalescer reuses its bytes.
+            while Arc::strong_count(&account.account) > 1 {
+                crate::hybrid::work::RemoteCall::new(operation.clone())
+                    .wait(&crate::hybrid::work::Cancellation::new(), async {
+                        tokio::time::sleep(Duration::from_millis(
+                            self.global_config.daemon.drain_poll_ms,
+                        ))
+                        .await;
+                        Ok(())
+                    })
+                    .await?;
+            }
+        }
+        serde_json::from_value(result?)
+            .map_err(|error| Error::internal_with_source("watcher job counters", error))
+    }
+
+    pub(crate) async fn report_watch_event(
+        self: &Arc<Self>,
+        project: &crate::store::models::Project,
+        event: crate::watch::BatchEvent,
+        pending: Option<Arc<crate::watch::WatchPayload>>,
+        operation: &crate::search::operation::SearchOperation,
+        activity: &Arc<Activity>,
+    ) -> Result<()> {
+        let permit = self.workers.background(operation).await?;
+        let shared = self.clone();
+        let project = project.clone();
+        let call = operation.clone();
+        let worker = request::spawn(Some(permit), Some(activity.clone()), move || {
+            call.check()?;
+            crate::watch::report_async_event(
+                &shared.cache,
+                &project,
+                event.clone(),
+                pending.as_deref(),
+                &shared.db_settings,
+            )?;
+            #[cfg(test)]
+            shared.watchers.emit_batch(event);
+            Ok(())
+        });
+        request::run(worker, Some(operation)).await
+    }
+
+    pub(crate) async fn prepare_watch_pending(
+        &self,
+        project: &crate::store::models::Project,
+        previous: Option<Arc<crate::watch::WatchPayload>>,
+        first: Option<Vec<PathBuf>>,
+        mut rx: mpsc::Receiver<Vec<PathBuf>>,
+        operation: &crate::search::operation::SearchOperation,
+        activity: &Arc<Activity>,
+    ) -> Result<crate::watch::WatchPrepared> {
+        let permit = match self.workers.background(operation).await {
+            Ok(permit) => permit,
+            Err(error) => {
+                return Ok(crate::watch::WatchPrepared {
+                    payload: Err(error),
+                    rx,
+                    _retention: activity.clone(),
+                });
+            }
+        };
+        let project = project.clone();
+        let budget = self.payload_budget.clone();
+        let watchers = self.watchers.clone();
+        let call = operation.clone();
+        let retention = activity.clone();
+        let worker = request::spawn(Some(permit), Some(activity.clone()), move || {
+            let payload =
+                if registry::root_state(&project.canonical_root) == registry::RootState::Missing {
+                    Ok(None)
+                } else {
+                    crate::watch::merge_pending(&budget, previous, first, &mut rx, &call, &watchers)
+                        .map(Some)
+                };
+            Ok(crate::watch::WatchPrepared {
+                payload,
+                rx,
+                _retention: retention,
+            })
+        });
+        request::run(worker, Some(operation)).await
+    }
+
+    pub(super) fn close_watchers(&self) {
+        self.watchers.close();
+    }
+
+    pub(crate) fn watch_activity(&self) -> Arc<Activity> {
+        self.activity.track()
+    }
+    pub(crate) fn watch_activity_source(&self) -> request::ActivitySource {
+        self.activity.clone()
+    }
+    pub(crate) fn watch_operation(&self) -> Result<crate::search::operation::SearchOperation> {
+        crate::search::operation::SearchOperation::with_timeout(
+            Instant::now(),
+            Duration::from_millis(self.global_config.remote.background_timeout_ms),
+            crate::hybrid::work::Cancellation::new(),
+        )
     }
 
     /// Prepared metadata readers shared by search phases and ANN refresh,
@@ -496,30 +717,42 @@ impl Shared {
         self.remote.shutdown();
     }
 
+    #[cfg_attr(
+        not(feature = "hybrid-remote"),
+        expect(
+            clippy::unused_self,
+            reason = "The common stage factory consumes the Shared remote owner only when that capability is compiled"
+        )
+    )]
+    fn async_stages(&self, config: &Config) -> Result<HybridStages> {
+        #[cfg(feature = "hybrid-remote")]
+        {
+            crate::hybrid::config::from_config_with_execution(
+                &config.hybrid_cfg,
+                &config.providers,
+                &self.remote,
+            )
+        }
+        #[cfg(not(feature = "hybrid-remote"))]
+        {
+            crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)
+        }
+    }
+
     fn project_runtime_for_search(
         &self,
         project: &crate::store::models::Project,
     ) -> Result<(Arc<Config>, Arc<HybridStages>)> {
-        self.project_runtime_kind(project, true, |config| {
-            #[cfg(feature = "hybrid-remote")]
-            {
-                crate::hybrid::config::from_config_with_execution(
-                    &config.hybrid_cfg,
-                    &config.providers,
-                    &self.remote,
-                )
-            }
-            #[cfg(not(feature = "hybrid-remote"))]
-            {
-                crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)
-            }
-        })
+        self.project_runtime_kind(project, true, |config| self.async_stages(config))
     }
 
     fn project_runtime(
         &self,
         project: &crate::store::models::Project,
     ) -> Result<(Arc<Config>, Arc<HybridStages>)> {
+        if self.jobs.get().is_some() {
+            return self.project_runtime_for_search(project);
+        }
         self.project_runtime_with(project, |config| {
             crate::hybrid::blocking::with_bridge(self.activity.bridge.clone(), || {
                 crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)
@@ -631,6 +864,18 @@ impl Shared {
     /// # Errors
     /// Stage admission errors (propagated to the open) and registry failures.
     fn schedule_backfill(self: &Arc<Self>, project: &crate::store::models::Project) -> Result<()> {
+        self.schedule_backfill_in(project, None)
+    }
+
+    fn schedule_backfill_in(
+        self: &Arc<Self>,
+        project: &crate::store::models::Project,
+        operation: Option<crate::search::operation::SearchOperation>,
+    ) -> Result<()> {
+        let operation = match operation {
+            Some(operation) => operation,
+            None => self.watch_operation()?,
+        };
         self.admit_project(project)?;
         if self.website.is_some() {
             return Ok(());
@@ -652,6 +897,57 @@ impl Shared {
             return Ok(());
         }
         if crate::store::repo::active_sync_job(db.connection(), project.id)?.is_some() {
+            return Ok(());
+        }
+        if let Some(service) = self.jobs.get() {
+            // Reserve existing L/queue authority before allocating a detached
+            // coordinator; opens cannot accumulate unadmitted Tokio tasks.
+            drop(db);
+            // Accepted automatic work owns cancellation independently of the
+            // frontend, but retains the exact original absolute deadline.
+            let detached = crate::search::operation::SearchOperation::with_timeout(
+                operation.started_at(),
+                operation.deadline().duration_since(operation.started_at()),
+                crate::hybrid::work::Cancellation::new(),
+            )?;
+            let reservation = service.reserve(detached)?;
+            let context = crate::index::async_job::JobContext {
+                input: crate::index::async_job::JobInput::Sync,
+                singleton: None,
+                cache: self.cache.clone(),
+                db_settings: self.db_settings.clone(),
+                revision: Some(self.project_slot(project.id)),
+                dense: Some(Arc::new(self.dense.snapshot())),
+                project: project.clone(),
+                config,
+                stages,
+                source,
+            };
+            let shared = self.clone();
+            let activity = self.activity.track();
+            drop(
+                tokio::runtime::Handle::try_current()
+                    .map_err(|error| {
+                        Error::internal_with_source("background runtime owner absent", error)
+                    })?
+                    .spawn(async move {
+                        let Some(service) = shared.jobs.get() else {
+                            return;
+                        };
+                        if let Err(error) = crate::index::async_job::run_reserved(
+                            service,
+                            &shared.workers,
+                            activity,
+                            &shared.payload_budget,
+                            context,
+                            reservation,
+                        )
+                        .await
+                        {
+                            eprintln!("warning: automatic backfill: {error}");
+                        }
+                    }),
+            );
             return Ok(());
         }
         let (job_id, created) = crate::daemon::tools::enqueue_sync(&db, project)?;
@@ -831,6 +1127,9 @@ impl Shared {
         &self,
         project: &crate::store::models::Project,
     ) -> Result<Arc<Config>> {
+        if self.jobs.get().is_some() {
+            return self.open_project_config_with(project, |config| self.async_stages(config));
+        }
         self.open_project_config_with(project, |config| {
             crate::hybrid::blocking::with_bridge(self.activity.bridge.clone(), || {
                 crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)
@@ -904,8 +1203,13 @@ impl Shared {
         // All fallible preparation steps precede publication: a rejected
         // reload leaves the last valid runtime and its policies intact.
         state.config = Some(Arc::clone(&config));
-        state.stages = Some(stages);
-        state.search_stages = None;
+        if self.jobs.get().is_some() {
+            state.stages = None;
+            state.search_stages = Some(stages);
+        } else {
+            state.stages = Some(stages);
+            state.search_stages = None;
+        }
         // Provider construction may refresh credentials even when Config values
         // are equal. Every published runtime must reach the watcher as one pair.
         if let Some(watch_runtime) = watch_runtime {
@@ -1072,6 +1376,20 @@ pub(super) async fn handle_admitted_connection(
     .await;
 }
 
+async fn write_frame_error(writer: &mut (impl tokio::io::AsyncWrite + Unpin), frame: Frame) {
+    let message = match frame {
+        Frame::TooLarge => {
+            format!("frame exceeds {} bytes", protocol::MAX_FRAME_BYTES)
+        }
+        _ => "incomplete frame without delimiter".to_owned(),
+    };
+    let err = Error::Protocol { message };
+    let response = error_response(&err);
+    if let Ok(bytes) = protocol::encode(&response) {
+        let _ = writer.write_all(&bytes).await;
+    }
+}
+
 async fn handle_connection_in(
     shared: Arc<Shared>,
     stream: Stream,
@@ -1084,87 +1402,93 @@ async fn handle_connection_in(
     let mut reader = FrameReader::new(BufReader::new(read_half));
     let mut peer = Peer::default();
 
-    loop {
-        let next_frame = match peer.cancel_rx.as_mut() {
-            Some(cancel) => tokio::select! {
-                frame = reader.read_frame() => frame,
-                // The janitor reaped this session: stop holding the socket.
-                _ = cancel => break,
-            },
-            None => reader.read_frame().await,
-        };
-        let line = match next_frame {
-            Ok(Frame::Line(line)) => {
-                ipc_debug(&format!(
-                    "frame {} bytes on session {:?}",
-                    line.len(),
-                    peer.session_id
-                ));
-                line
-            }
-            Ok(Frame::Eof) => {
-                ipc_debug("connection EOF");
-                break;
-            }
-            Err(err) => {
-                ipc_debug(&format!("connection read error: {err}"));
-                break;
-            }
-            Ok(frame @ (Frame::Incomplete | Frame::TooLarge)) => {
-                let message = match frame {
-                    Frame::TooLarge => {
-                        format!("frame exceeds {} bytes", protocol::MAX_FRAME_BYTES)
-                    }
-                    _ => "incomplete frame without delimiter".to_owned(),
+    {
+        let work = async {
+            loop {
+                let next_frame = match peer.cancel_rx.as_mut() {
+                    Some(cancel) => tokio::select! {
+                        frame = reader.read_frame() => frame,
+                        // The janitor reaped this session: stop holding the socket.
+                        _ = cancel => break,
+                    },
+                    None => reader.read_frame().await,
                 };
-                let err = Error::Protocol { message };
-                let response = error_response(&err);
-                if let Ok(bytes) = protocol::encode(&response) {
-                    let _ = writer.write_all(&bytes).await;
+                let line = match next_frame {
+                    Ok(Frame::Line(line)) => {
+                        ipc_debug(&format!(
+                            "frame {} bytes on session {:?}",
+                            line.len(),
+                            peer.session_id
+                        ));
+                        line
+                    }
+                    Ok(Frame::Eof) => {
+                        ipc_debug("connection EOF");
+                        break;
+                    }
+                    Err(err) => {
+                        ipc_debug(&format!("connection read error: {err}"));
+                        break;
+                    }
+                    Ok(frame @ (Frame::Incomplete | Frame::TooLarge)) => {
+                        write_frame_error(&mut writer, frame).await;
+                        break;
+                    }
+                };
+                let guard = Activity::new(&in_flight, &events, connection.as_ref());
+                let decoded = protocol::decode_request(&line);
+                let scope = match &decoded {
+                    Ok(request) => scoped::Scope::new(&shared, request, Arc::clone(&guard)),
+                    Err(_) => Ok(scoped::Scope {
+                        activity: Arc::clone(&guard),
+                        operation: None,
+                    }),
+                };
+                let immediate = scope.is_err()
+                    || decoded
+                        .as_ref()
+                        .is_err_and(|error| matches!(error, Error::Admission { .. }));
+                let (response, close) = match (decoded, &scope) {
+                    (Ok(request), Ok(scope)) => {
+                        handle_request(
+                            &shared,
+                            &shutdown,
+                            &in_flight,
+                            &mut peer,
+                            request,
+                            scope,
+                            &mut reader,
+                        )
+                        .await
+                    }
+                    (Err(error), _) => (error_response(&error), immediate),
+                    (_, Err(error)) => (error_response(error), true),
+                };
+                let operation = scope
+                    .as_ref()
+                    .ok()
+                    .and_then(|scope| scope.operation.as_ref());
+                let delivered = scoped::reply(&mut writer, response, operation, immediate).await;
+                drop(guard);
+                if !delivered {
+                    break;
                 }
-                break;
+                if close {
+                    break;
+                }
             }
         };
-        let guard = Activity::new(&in_flight, &events, connection.as_ref());
-        let decoded = protocol::decode_request(&line);
-        let scope = match &decoded {
-            Ok(request) => scoped::Scope::new(&shared, request, Arc::clone(&guard)),
-            Err(_) => Ok(scoped::Scope {
-                activity: Arc::clone(&guard),
-                operation: None,
-            }),
-        };
-        let immediate = scope.is_err()
-            || decoded
-                .as_ref()
-                .is_err_and(|error| matches!(error, Error::Admission { .. }));
-        let (response, close) = match (decoded, &scope) {
-            (Ok(request), Ok(scope)) => {
-                handle_request(
-                    &shared,
-                    &shutdown,
-                    &in_flight,
-                    &mut peer,
-                    request,
-                    scope,
-                    &mut reader,
-                )
-                .await
+        if connection.is_some() {
+            // Graceful stop closes this token only after drain; signal
+            // escalation closes it immediately. Drop a wedged reply/task while
+            // physical closures keep their original Activities and permits.
+            tokio::select! {
+                biased;
+                () = shared.workers.cancelled() => {},
+                () = work => {},
             }
-            (Err(error), _) => (error_response(&error), immediate),
-            (_, Err(error)) => (error_response(error), true),
-        };
-        let operation = scope
-            .as_ref()
-            .ok()
-            .and_then(|scope| scope.operation.as_ref());
-        let delivered = scoped::reply(&mut writer, response, operation, immediate).await;
-        drop(guard);
-        if !delivered {
-            break;
-        }
-        if close {
-            break;
+        } else {
+            work.await;
         }
     }
 
@@ -1357,6 +1681,7 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
             // (FR-5, FR-6). The drain lets every other request finish; the
             // process then lives until background jobs complete.
             if !shared.stopping.swap(true, Ordering::SeqCst) {
+                shared.close_watchers();
                 let settings = shared.daemon_settings();
                 wait_for_drain(
                     in_flight,
@@ -1475,6 +1800,9 @@ async fn register_session_in(
     if shared.website.is_some() {
         return Err(Shared::profile_denial());
     }
+    if shared.jobs.get().is_some() {
+        return registration_async::run(shared, pid, cwd, allow_unbound, activity).await;
+    }
     let permit = shared.workers.control().await?;
     let shared_for_task = Arc::clone(shared);
     let cwd = cwd.to_path_buf();
@@ -1541,9 +1869,24 @@ async fn register_session_in(
     .await
     .map_err(|err| Error::internal_with_source("session task join", err))?;
 
+    finish_registration(shared, pid, &cwd, allow_unbound, outcome)
+}
+
+#[path = "registration_async.rs"]
+mod registration_async;
+
+fn finish_registration(
+    shared: &Shared,
+    pid: u32,
+    cwd: &Path,
+    allow_unbound: bool,
+    outcome: Result<crate::store::models::Project>,
+) -> Result<(u64, Value, oneshot::Receiver<()>)> {
     match outcome {
         Ok(project) => {
-            let (id, cancel) = shared.sessions.join(pid, cwd, Some(project.id))?;
+            let (id, cancel) = shared
+                .sessions
+                .join(pid, cwd.to_path_buf(), Some(project.id))?;
             ipc_debug(&format!("bound session {id} (pid {pid})"));
             Ok((
                 id,
@@ -1557,7 +1900,7 @@ async fn register_session_in(
             ))
         }
         Err(err) if allow_unbound => {
-            let (id, cancel) = shared.sessions.join(pid, cwd, None)?;
+            let (id, cancel) = shared.sessions.join(pid, cwd.to_path_buf(), None)?;
             Ok((
                 id,
                 json!({
@@ -1794,6 +2137,25 @@ async fn index_async(
         crate::hybrid::work::Cancellation::new(),
     )?;
     let mut cancellation = request::CancelOnDrop(Some(operation.cancellation().clone()));
+    let result = index_async_with_operation(
+        shared, service, session, args, activity, detached, operation,
+    )
+    .await;
+    cancellation.0 = None;
+    result
+}
+
+async fn index_async_with_operation(
+    shared: &Arc<Shared>,
+    service: &super::job_service::JobService,
+    session: Option<u64>,
+    args: Value,
+    activity: Option<Arc<Activity>>,
+    detached: bool,
+    operation: crate::search::operation::SearchOperation,
+) -> Result<Value> {
+    // The outer request owns cancellation; this phase borrows its original
+    // operation so an ordinary preparation error cannot cancel a later recovery.
     let activity = activity.unwrap_or_else(|| shared.activity.track());
     let permit = crate::hybrid::work::RemoteCall::new(operation.clone())
         .wait(
@@ -1810,7 +2172,6 @@ async fn index_async(
     let context = match request::run(worker, Some(&operation)).await? {
         Ok(context) => context,
         Err(existing) => {
-            cancellation.0 = None;
             return Ok(existing);
         }
     };
@@ -1873,7 +2234,6 @@ async fn index_async(
         finish_index_watch(shared, project_id, &operation, &activity).await;
         operation.check()?;
     }
-    cancellation.0 = None;
     result
 }
 

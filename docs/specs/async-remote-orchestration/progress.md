@@ -473,3 +473,29 @@ Ruling: 40× text workspace covers worst-case6-byte escaping and overlapping
 Rig bytes/Value/final String growth plus live input clones; actual captured text
 batch peak is scanned without allocation. Configured caps/defaults, vector/ranking
 identities and existing test assertions remain unchanged.
+
+2026-11-15: B1 fix1 accepted (7f1586d, original scoped review PASS/APPROVED;
+I1–I4 closed; actual full CLI1645/0/18 and lean1390/0/11). B2 implementation
+migrates daemon watchers and reachable automatic registration/open-time backfill
+to existing JobService, async runtime stages and original whole-job clocks.
+Direct standalone CLI/MCP/metrics remain B3; no #81 completion claim.
+
+B2 ruling: RecommendedWatcher native Drop/join stays on the existing debounce
+producer thread. Tokio guard retirement only activates the preallocated dormant
+existing Activity, transfers its ticket, cancels and wakes. Root retains watcher
+receivers before startup, closes and physically drains outside the cancellable
+work driver, then joins retired producers outside block_on. During normal
+operation a retiring producer keeps its same-project slot until physical finish;
+replacement defers, rather than accumulating retired producers. Idle watcher
+Activities are dormant and do not pin idle grace.
+
+B2 ruling: pending raw paths and native/codec inputs share the SAME existing
+PayloadPermit. Mutations serialize on its existing budget mutex; no lock crosses
+await. Reserve precedes path/map copy; reset follows prior physical retirement.
+The original Activity transfers with exact private ANN pin authority and outlives
+ANN data/reservation/publication, including invalidation and actual unwind.
+Existing fault/retry/drop-status effects remain admitted CPU work. Signal
+escalation cancels admitted wire loops through the existing worker shutdown token
+so a wedged reply cannot keep the new root drain alive; actual physical closures
+retain ownership. Focused evidence and final frozen project gates are recorded
+with the functional B2 checkpoint; fresh B2 review remains pending.

@@ -84,7 +84,7 @@ impl PayloadBudget {
         *retained = next;
         Ok(PayloadPermit {
             retained: Arc::clone(&self.retained),
-            bytes,
+            bytes: std::sync::atomic::AtomicU64::new(bytes),
         })
     }
 }
@@ -93,14 +93,14 @@ impl PayloadBudget {
 #[must_use = "retain the permit while the charged search payload is live"]
 pub struct PayloadPermit {
     retained: Arc<Retained>,
-    bytes: u64,
+    bytes: std::sync::atomic::AtomicU64,
 }
 
 impl PayloadPermit {
     /// Current logical charge retained by this account.
     #[must_use]
     pub fn bytes(&self) -> u64 {
-        self.bytes
+        self.bytes.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Reserve the checked delta BEFORE allocating or copying retained data.
@@ -109,7 +109,19 @@ impl PayloadPermit {
     /// # Errors
     /// Per-account/aggregate limit exceeded or arithmetic overflow.
     pub fn grow_to(&mut self, total: u64) -> Result<()> {
-        if total <= self.bytes {
+        self.grow_shared(total)
+    }
+
+    /// One serialized job/coalescer owns mutations; clones retain the same
+    /// existing allowance through CPU, transport and terminal retirement.
+    pub(crate) fn grow_shared(&self, total: u64) -> Result<()> {
+        let mut retained = self
+            .retained
+            .bytes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = self.bytes();
+        if total <= current {
             return Ok(());
         }
         if total > self.retained.policy.max_request_payload_bytes {
@@ -117,35 +129,30 @@ impl PayloadPermit {
                 message: "job capture exceeds max_request_payload_bytes".into(),
             });
         }
-        let delta = total - self.bytes;
-        let mut retained = self
-            .retained
-            .bytes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
         let next = retained
-            .checked_add(delta)
-            .filter(|n| *n <= self.retained.policy.max_retained_payload_bytes)
+            .checked_add(total - current)
+            .filter(|next| *next <= self.retained.policy.max_retained_payload_bytes)
             .ok_or_else(|| Error::Admission {
                 message: "job capture exceeds max_retained_payload_bytes".into(),
             })?;
         *retained = next;
-        self.bytes = total;
+        self.bytes.store(total, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
-    /// Release only storage which the caller has already destroyed.
-    pub(crate) fn shrink_to(&mut self, total: u64) {
-        if total >= self.bytes {
-            return;
-        }
+    /// Release only storage already destroyed by this serialized owner.
+    pub(crate) fn shrink_shared(&self, total: u64) {
         let mut retained = self
             .retained
             .bytes
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        *retained -= self.bytes - total;
-        self.bytes = total;
+        let current = self.bytes();
+        if total >= current {
+            return;
+        }
+        *retained -= current - total;
+        self.bytes.store(total, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -156,6 +163,6 @@ impl Drop for PayloadPermit {
             .bytes
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        *retained = retained.saturating_sub(self.bytes);
+        *retained = retained.saturating_sub(self.bytes());
     }
 }

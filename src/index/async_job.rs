@@ -107,13 +107,13 @@ pub(crate) struct IndexState {
     backfill_cursor: (i64, i64),
     generation: Option<i64>,
     dimension: usize,
-    account: Option<PayloadPermit>,
+    account: Option<Arc<PayloadPermit>>,
     retained: Option<Arc<PayloadPermit>>,
     lease: Option<OwnedWriterLease>,
     singleton: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl IndexState {
-    pub(crate) fn empty(account: PayloadPermit) -> Self {
+    pub(crate) fn empty(account: Arc<PayloadPermit>) -> Self {
         Self {
             index: None,
             #[cfg(test)]
@@ -256,7 +256,7 @@ impl IndexState {
         let mut capture = job::CaptureBudget {
             account: self
                 .account
-                .as_mut()
+                .as_deref()
                 .ok_or_else(|| Error::internal("job capture account absent"))?,
             operation,
             #[cfg(test)]
@@ -328,7 +328,7 @@ impl IndexState {
                 )?);
             }
         }
-        self.retained = self.account.take().map(Arc::new);
+        self.retained = self.account.take();
         Ok(())
     }
     fn commit(&mut self, operation: &SearchOperation) -> Result<bool> {
@@ -537,13 +537,14 @@ impl IndexState {
             .map_err(|e| Error::internal_with_source("encode lexical job counters", e))
         }
     }
-    pub(crate) fn retire(mut self: Box<Self>) {
+    pub(crate) fn retire(mut self: Box<Self>, activity: Arc<Activity>) {
         let reply = self.reply.take();
         let result = self.terminal();
         let handoff = if result.is_ok() {
             self.pin.take().and_then(|mut pin| {
                 let account = self.retained.clone()?;
                 pin.retain_account(account);
+                pin.retain_activity(activity);
                 Some((pin, self.context.take()?, self.generation?))
             })
         } else {
@@ -659,8 +660,25 @@ pub(crate) async fn start(
     context: JobContext,
 ) -> Result<(JobOwner, bool, oneshot::Receiver<Result<serde_json::Value>>)> {
     let owner = service
-        .admit(workers.clone(), activity.clone(), operation, budget)
+        .admit_with_account(
+            workers.clone(),
+            activity.clone(),
+            operation,
+            budget,
+            context.input.account(),
+        )
         .await?;
+    start_admitted(service, workers, activity, operation, owner, context).await
+}
+
+async fn start_admitted(
+    service: &JobService,
+    workers: &Arc<WorkerAdmission>,
+    activity: Arc<Activity>,
+    operation: &SearchOperation,
+    owner: JobOwner,
+    context: JobContext,
+) -> Result<(JobOwner, bool, oneshot::Receiver<Result<serde_json::Value>>)> {
     let (reply, receiver) = oneshot::channel();
     let call = operation.clone();
     let (owner, prepared) = service
@@ -894,6 +912,30 @@ pub(crate) async fn run(
         activity.clone(),
         &operation,
         budget,
+        context,
+    )
+    .await?;
+    execute(service, workers, activity, operation, owner, work, receiver).await
+}
+
+pub(crate) async fn run_reserved(
+    service: &JobService,
+    workers: &Arc<WorkerAdmission>,
+    activity: Arc<Activity>,
+    budget: &PayloadBudget,
+    context: JobContext,
+    reservation: crate::daemon::job_service::JobReservation,
+) -> Result<serde_json::Value> {
+    let operation = reservation.operation();
+    let owner = service
+        .admit_reserved(workers.clone(), activity.clone(), budget, reservation)
+        .await?;
+    let (owner, work, receiver) = start_admitted(
+        service,
+        workers,
+        activity.clone(),
+        &operation,
+        owner,
         context,
     )
     .await?;
