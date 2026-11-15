@@ -453,3 +453,24 @@ owners supply versioned explain execution and additive numeric status diagnostic
 there is no observability backend/label setting or persisted metric identity.
 Probes/rootless compatibility adapters remain named exceptions, not binary
 operational paths. Full CF13/v2/provisioning remains outside this adoption.
+
+
+## MODIFIED 2026-11-15 — #161 vector cold WAL contention
+
+I20/VectorStoreSpec busy_timeout (default5s, zero immediate, signed SQLite-ms
+validation/provenance unchanged) also bounds BUSY retries by one shared absolute
+monotonic contention window, without preempting an in-flight SQLite call or
+discarding its success after expiry. Immediate DatabaseBusy retries cap subsequent SQLite waits to
+remaining budget and yield the existing constructor thread; no local delay/attempt
+default or new field. Normal schema/operation timeout is restored after success.
+Legacy and owned acquire/connect share the same implementation after ModeLease.
+No metadata-store policy, schema/vector identity, DBJ1 negative pin coordination
+format, v2 activation or configuration invalidation edge changes.
+
+MODIFIED 2026-11-15 — #161 native portability correction: the SAME owner window
+also covers a persistent nofollow `vectors.init.lock` native lease, acquired after
+ModeLease and before SQLite, retained through WAL/schema/sequence initialization.
+Only this root's constructors serialize; there is no process registry, worker,
+new policy field or default. Failed queued admission opens no SQLite connection;
+SQLite closes before initialization unlock on constructor errors. PROTOCOL and
+other nonBusy errors remain explicit failures, never classified as BUSY.

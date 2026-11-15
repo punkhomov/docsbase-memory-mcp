@@ -547,6 +547,19 @@ connections cannot override them. Defaults remain 1,000,000 vectors, 1 GiB of
 vector payload and a five-second busy timeout. Strict capacities must be positive;
 timeout zero means immediate failure on writer contention.
 
+Constructors also use that busy timeout as one shared contention/retry window.
+After mode ownership and before SQLite opens, a persistent `vectors.init.lock`
+native lease serializes WAL, schema and constructor sequence initialization for
+the same root. Independent roots remain independent. Waiting for this lease uses
+the same window as SQLite journal-mode negotiation; expiry refuses admission
+before SQLite opens. An immediate SQLite BUSY may retry until its original deadline;
+time already spent inside SQLite counts, and each remaining wait is capped.
+Zero makes one immediate attempt, while other SQLite errors propagate directly.
+A BUSY returned after expiry starts no further attempt. A running synchronous
+SQLite call is not preempted; its success is retained even if it finishes later.
+Successful initialization restores the configured timeout for normal operations.
+No extra retry setting, schema migration or lease-format change is introduced.
+
 An owner and its connections retain an exclusive native `vectors.lock` lease.
 Current legacy `VectorCache::open/open_with_limits` connections retain shared
 leases, so either mode rejects the other before SQLite opens. Clones and live
