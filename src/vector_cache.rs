@@ -114,13 +114,13 @@ impl VectorCache {
     pub fn open_with_limits(cache_root: &Path, limits: CacheLimits) -> Result<Self> {
         let root = owner::prepare_root(cache_root)?;
         let lease = owner::ModeLease::legacy(&root)?;
-        let conn = open_connection(
+        let opened = open_connection(
             &root,
             settings::VectorStoreSettings::owner_defaults().busy_timeout,
         )?;
-        let sequence = read_sequence(&conn)?;
+        let sequence = read_sequence(&opened.conn)?;
         Ok(Self::from_connection(
-            conn,
+            opened.conn,
             limits,
             owner::Access::Legacy {
                 sequence,
@@ -130,10 +130,10 @@ impl VectorCache {
     }
 
     fn open_owned(owner: VectorStore) -> Result<Self> {
-        let conn = open_connection(owner.root(), owner.settings().busy_timeout)?;
+        let opened = open_connection(owner.root(), owner.settings().busy_timeout)?;
         let limits = owner.settings().limits();
         Ok(Self::from_connection(
-            conn,
+            opened.conn,
             limits,
             owner::Access::Owned { owner },
         ))
@@ -588,12 +588,20 @@ fn evict(conn: &Connection, limits: CacheLimits, warned_over_budget: &mut bool) 
 }
 
 /// Open SQLite only after the caller has acquired its mode lease.
-fn open_connection(root: &Path, busy_timeout: Duration) -> Result<Connection> {
+fn open_connection(root: &Path, busy_timeout: Duration) -> Result<OpenedConnection> {
+    let deadline = journal_now()
+        .checked_add(busy_timeout)
+        .ok_or_else(|| Error::internal("vector cache journal deadline exceeds clock range"))?;
+    let initialization = owner::ModeLease::initialization(root, deadline)?;
+    #[cfg(test)]
+    cold_wal_tests::observe_phase(cold_wal_tests::Phase::BeforeSqlite);
     let conn = Connection::open(root.join(VECTOR_DB_FILE))
         .map_err(|err| Error::internal_with_source("open vector cache", err))?;
-    conn.busy_timeout(busy_timeout)
+    conn.busy_timeout(deadline.saturating_duration_since(journal_now()))
         .map_err(|err| Error::internal_with_source("set vector cache timeout", err))?;
-    enable_wal(&conn, busy_timeout)?;
+    enable_wal(&conn, busy_timeout, deadline)?;
+    #[cfg(test)]
+    cold_wal_tests::observe_phase(cold_wal_tests::Phase::AfterWal);
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS vector_cache (
              model_id TEXT NOT NULL,
@@ -612,17 +620,24 @@ fn open_connection(root: &Path, busy_timeout: Duration) -> Result<Connection> {
          );",
     )
     .map_err(|err| Error::internal_with_source("create vector cache schema", err))?;
-    Ok(conn)
+    Ok(OpenedConnection {
+        conn,
+        _initialization: initialization,
+    })
+}
+
+// Native close precedes initialization unlock on errors, including a failed
+// constructor sequence read. Successful callers move only the connection out.
+struct OpenedConnection {
+    conn: Connection,
+    _initialization: owner::ModeLease,
 }
 
 // SQLite may return immediate BUSY for a journal-mode lock upgrade without
 // invoking its busy handler. BUSY retries share the SAME owner contention window.
 // A running SQLite call is not preempted or its success discarded after expiry;
 // normal reads/writes retain their configured timeout after initialization.
-fn enable_wal(conn: &Connection, busy_timeout: Duration) -> Result<()> {
-    let deadline = journal_now()
-        .checked_add(busy_timeout)
-        .ok_or_else(|| Error::internal("vector cache journal deadline exceeds clock range"))?;
+fn enable_wal(conn: &Connection, busy_timeout: Duration, deadline: Instant) -> Result<()> {
     loop {
         let journal = conn.pragma_update(None, "journal_mode", "WAL");
         #[cfg(test)]

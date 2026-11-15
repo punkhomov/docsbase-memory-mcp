@@ -5,12 +5,14 @@ use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Instant;
 
 use super::settings::VectorStoreSettings;
 use super::{VectorCache, open_connection, read_sequence};
 use crate::error::{Error, Result};
 
 const LOCK_FILE: &str = "vectors.lock";
+const INITIALIZATION_LOCK_FILE: &str = "vectors.init.lock";
 
 /// One immutable policy owner per canonical cache root, retained by connections.
 ///
@@ -40,9 +42,9 @@ impl VectorStore {
         let lease = ModeLease::acquire(&root, true)?;
         // Initialize under the exclusive lease. No SQLite transaction survives
         // acquisition; connections have independent short SQL phases.
-        let conn = open_connection(&root, settings.busy_timeout)?;
-        let sequence = read_sequence(&conn)?;
-        drop(conn);
+        let opened = open_connection(&root, settings.busy_timeout)?;
+        let sequence = read_sequence(&opened.conn)?;
+        drop(opened);
         Ok(Self(Arc::new(StoreInner {
             root,
             settings: settings.clone(),
@@ -110,6 +112,43 @@ impl ModeLease {
         Self::acquire(root, false)
     }
 
+    /// Serialize cooperating constructors through WAL, schema and sequence
+    /// initialization. The caller already owns its distinct mode lease.
+    pub(super) fn initialization(root: &Path, deadline: Instant) -> Result<Self> {
+        let file = crate::platform::fs::open_private_lock(&root.join(INITIALIZATION_LOCK_FILE))
+            .map_err(|err| Error::internal_with_source("open vector initialization lock", err))?;
+        let metadata = file.metadata().map_err(|err| {
+            Error::internal_with_source("inspect vector initialization lock", err)
+        })?;
+        if !crate::platform::fs::is_regular_nofollow(&metadata) {
+            return Err(Error::Admission {
+                message: "vector initialization lock must be a regular file".into(),
+            });
+        }
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { file }),
+                Err(TryLockError::WouldBlock) => {
+                    #[cfg(test)]
+                    super::cold_wal_tests::observe_phase(super::cold_wal_tests::Phase::Contended);
+                    if super::journal_now() >= deadline {
+                        return Err(initialization_expired());
+                    }
+                    std::thread::yield_now();
+                    if super::journal_now() >= deadline {
+                        return Err(initialization_expired());
+                    }
+                }
+                Err(TryLockError::Error(err)) => {
+                    return Err(Error::internal_with_source(
+                        "acquire vector initialization lock",
+                        err,
+                    ));
+                }
+            }
+        }
+    }
+
     fn acquire(root: &Path, exclusive: bool) -> Result<Self> {
         let file = crate::platform::fs::open_private_lock(&root.join(LOCK_FILE))
             .map_err(|err| Error::internal_with_source("open vector mode lock", err))?;
@@ -134,6 +173,12 @@ impl ModeLease {
                 Err(Error::internal_with_source("acquire vector mode lock", err))
             }
         }
+    }
+}
+
+fn initialization_expired() -> Error {
+    Error::Admission {
+        message: "vector cache initialization contention window expired".into(),
     }
 }
 

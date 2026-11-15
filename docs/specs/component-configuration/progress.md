@@ -994,3 +994,26 @@ Ruling #161: the configured interval is a shared contention/retry window, not a
 hard native-I/O completion bound. In-flight SQLite success is retained after
 elapsed time; BUSY after expiry admits no subsequent retry. This preserves
 SQLite's approximate/non-preemptible timeout contract without a new policy.
+
+MODIFIED 2026-11-15 — Task #161 native fix checkpoint: actual Windows run
+43732590132 failed with SQLITE_PROTOCOL at concurrent WAL/schema initialization,
+after both real BUSYs. Prior local/release/native successes are intermediate.
+Actual held-WAL/second-constructor RED showed native entry before the first
+schema phase finished. GREEN now uses a per-root secure persistent native
+initialization lease after ModeLease/before SQLite, held through schema/sequence
+read. One original owner window includes queue wait and WAL retries;0/expiry
+refuse queued admission before SQLite, without retrying PROTOCOL/nonBusy.
+
+Controlled matrix9/0 includes actual held-phase serialization, two real cold
+constructors (one external SQLite BUSY plus one queued initializer), independent
+roots,0/expiry/no native entry,72ms queue→1ms WAL→73ms normal restoration, lock
+error/mode release, existing raw BUSY expiry/data/positive/private leases and DBJ1
+persistence. Minor M1 now pins actual NotADatabase26 plus journal error context.
+Affected/current full/lint/native/fresh scoped review remain delivery gates.
+
+Ruling #161 native correction: persistent vectors.init.lock is coordination,
+not another policy/default/registry or a SQLite/lease-format migration. Existing
+native RAII unlocks it; error ownership closes Connection before releasing this
+lease, including failed sequence reads. A live successful connection retains its
+existing mode owner. The shared window still bounds contention/retry admission,
+not non-preemptible native completion. No fixture/budget/ignore/dependency change.

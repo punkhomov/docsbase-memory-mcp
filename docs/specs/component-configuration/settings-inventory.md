@@ -466,3 +466,11 @@ default or new field. Normal schema/operation timeout is restored after success.
 Legacy and owned acquire/connect share the same implementation after ModeLease.
 No metadata-store policy, schema/vector identity, DBJ1 negative pin coordination
 format, v2 activation or configuration invalidation edge changes.
+
+MODIFIED 2026-11-15 — #161 native portability correction: the SAME owner window
+also covers a persistent nofollow `vectors.init.lock` native lease, acquired after
+ModeLease and before SQLite, retained through WAL/schema/sequence initialization.
+Only this root's constructors serialize; there is no process registry, worker,
+new policy field or default. Failed queued admission opens no SQLite connection;
+SQLite closes before initialization unlock on constructor errors. PROTOCOL and
+other nonBusy errors remain explicit failures, never classified as BUSY.

@@ -547,9 +547,12 @@ connections cannot override them. Defaults remain 1,000,000 vectors, 1 GiB of
 vector payload and a five-second busy timeout. Strict capacities must be positive;
 timeout zero means immediate failure on writer contention.
 
-Cold WAL initialization also uses that busy timeout as a shared contention/retry
-window. An immediate
-SQLite BUSY during journal-mode negotiation may retry until its original deadline;
+Constructors also use that busy timeout as one shared contention/retry window.
+After mode ownership and before SQLite opens, a persistent `vectors.init.lock`
+native lease serializes WAL, schema and constructor sequence initialization for
+the same root. Independent roots remain independent. Waiting for this lease uses
+the same window as SQLite journal-mode negotiation; expiry refuses admission
+before SQLite opens. An immediate SQLite BUSY may retry until its original deadline;
 time already spent inside SQLite counts, and each remaining wait is capped.
 Zero makes one immediate attempt, while other SQLite errors propagate directly.
 A BUSY returned after expiry starts no further attempt. A running synchronous

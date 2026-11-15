@@ -1,12 +1,41 @@
 //! Controlled real cold journal-mode contention, separate from initialized allocators.
 use super::*;
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::mpsc;
+
+type InitializationObserver = Box<dyn Fn(Phase)>;
 
 thread_local! {
     static BUSY:RefCell<Option<Box<dyn Fn()>>>=RefCell::new(None);
     static NOW:RefCell<Option<Instant>>=const{RefCell::new(None)};
     static TIMEOUTS:RefCell<Vec<i64>>=const{RefCell::new(Vec::new())};
+    static INITIALIZATION:RefCell<Option<InitializationObserver>>=RefCell::new(None);
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Phase {
+    BeforeSqlite,
+    AfterWal,
+    Contended,
+}
+pub(super) fn observe_phase(phase: Phase) {
+    INITIALIZATION.with(|slot| {
+        if let Some(observer) = slot.borrow().as_ref() {
+            observer(phase);
+        }
+    });
+}
+struct InitializationHook;
+impl InitializationHook {
+    fn new(observer: impl Fn(Phase) + 'static) -> Self {
+        INITIALIZATION.with(|slot| *slot.borrow_mut() = Some(Box::new(observer)));
+        Self
+    }
+}
+impl Drop for InitializationHook {
+    fn drop(&mut self) {
+        INITIALIZATION.with(|slot| *slot.borrow_mut() = None);
+    }
 }
 pub(super) fn clock_now() -> Option<Instant> {
     NOW.with(|clock| *clock.borrow())
@@ -59,6 +88,178 @@ fn initializer(root: &Path) -> Connection {
 }
 
 #[test]
+fn cold_constructor_serializes_sqlite_until_schema_initialization_finishes() {
+    let root = tempfile::tempdir().unwrap();
+    let (entered, observed) = mpsc::channel();
+    let (release, proceed) = mpsc::channel();
+    let path = root.path().to_path_buf();
+    let first = std::thread::spawn(move || {
+        let _hook = InitializationHook::new(move |phase| {
+            if phase == Phase::AfterWal {
+                entered.send(()).unwrap();
+                proceed.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
+        });
+        VectorCache::open(&path)
+    });
+    let first_entered = observed.recv_timeout(Duration::from_secs(10));
+    let (decision, observed) = mpsc::channel();
+    let path = root.path().to_path_buf();
+    let second = std::thread::spawn(move || {
+        let first = std::cell::Cell::new(true);
+        let _hook = InitializationHook::new(move |phase| {
+            if phase != Phase::AfterWal && first.replace(false) {
+                decision.send(phase).unwrap();
+            }
+        });
+        VectorCache::open(&path)
+    });
+    let second_phase = observed.recv_timeout(Duration::from_secs(10));
+    let _ = release.send(());
+    let first = first.join().unwrap();
+    let second = second.join().unwrap();
+    assert!(
+        first_entered.is_ok(),
+        "actual first WAL phase must be reached"
+    );
+    assert_eq!(
+        second_phase.unwrap(),
+        Phase::Contended,
+        "second constructor must wait before SQLite while first owns WAL/schema initialization"
+    );
+    first.unwrap();
+    second.unwrap();
+}
+
+fn held_owned_initialization(
+    owner: VectorStore,
+) -> (
+    mpsc::Sender<()>,
+    std::thread::JoinHandle<Result<VectorCache>>,
+) {
+    let (entered, observed) = mpsc::channel();
+    let (release, proceed) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _hook = InitializationHook::new(move |phase| {
+            if phase == Phase::AfterWal {
+                entered.send(()).unwrap();
+                proceed.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
+        });
+        owner.connect()
+    });
+    observed.recv_timeout(Duration::from_secs(10)).unwrap();
+    (release, worker)
+}
+
+#[test]
+fn queued_initialization_zero_and_expiry_refuse_before_sqlite_without_blocking_other_roots() {
+    for milliseconds in [0, 73] {
+        let root = tempfile::tempdir().unwrap();
+        let policy = settings::VectorStoreSettings {
+            busy_timeout: Duration::from_millis(milliseconds),
+            ..settings::VectorStoreSettings::owner_defaults()
+        };
+        let owner = VectorStore::acquire(root.path(), &policy).unwrap();
+        let (release, worker) = held_owned_initialization(owner.clone());
+        let independent = tempfile::tempdir().unwrap();
+        let other = VectorCache::open(independent.path());
+        let start = Instant::now();
+        let _clock = Hook::new(Some(start), || {
+            panic!("queued refusal must not reach SQLite")
+        });
+        let waiting = Rc::new(std::cell::Cell::new(0));
+        let native = Rc::new(std::cell::Cell::new(0));
+        let waits = waiting.clone();
+        let entries = native.clone();
+        let initialization = InitializationHook::new(move |phase| match phase {
+            Phase::Contended => {
+                let count = waits.get() + 1;
+                waits.set(count);
+                let elapsed = if count == 1 {
+                    milliseconds.saturating_sub(1)
+                } else {
+                    milliseconds
+                };
+                NOW.with(|now| *now.borrow_mut() = Some(start + Duration::from_millis(elapsed)));
+            }
+            Phase::BeforeSqlite => entries.set(entries.get() + 1),
+            Phase::AfterWal => {}
+        });
+        let refused = owner.connect();
+        drop(initialization);
+        let timeouts = Hook::timeouts();
+        let _ = release.send(());
+        let first = worker.join().unwrap();
+        assert!(
+            other.is_ok(),
+            "another root completes while this root is held"
+        );
+        assert!(
+            matches!(refused, Err(Error::Admission { message }) if message == "vector cache initialization contention window expired")
+        );
+        assert_eq!(waiting.get(), if milliseconds == 0 { 1 } else { 2 });
+        assert_eq!(native.get(), 0);
+        assert_eq!(timeouts, [] as [i64; 0]);
+        first.unwrap();
+        owner.connect().unwrap();
+    }
+}
+
+#[test]
+fn queued_initialization_and_wal_share_the_original_timeout() {
+    let root = tempfile::tempdir().unwrap();
+    let policy = settings::VectorStoreSettings {
+        busy_timeout: Duration::from_millis(73),
+        ..settings::VectorStoreSettings::owner_defaults()
+    };
+    let owner = VectorStore::acquire(root.path(), &policy).unwrap();
+    let (release, worker) = held_owned_initialization(owner.clone());
+    let worker = RefCell::new(Some(worker));
+    let start = Instant::now();
+    let clock = Hook::new(Some(start), || {
+        panic!("already-WAL database must not need a BUSY retry")
+    });
+    let initialization = InitializationHook::new(move |phase| {
+        if phase == Phase::Contended {
+            NOW.with(|now| *now.borrow_mut() = Some(start + Duration::from_millis(72)));
+            release.send(()).unwrap();
+            worker.borrow_mut().take().unwrap().join().unwrap().unwrap();
+        }
+    });
+    let cache = owner.connect().unwrap();
+    assert_eq!(
+        Hook::timeouts(),
+        [1],
+        "queue time must not reset the WAL window"
+    );
+    assert_eq!(
+        cache
+            .conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        73
+    );
+    drop(initialization);
+    drop(clock);
+}
+
+#[test]
+fn initialization_lock_error_precedes_sqlite_and_releases_mode_ownership() {
+    let root = tempfile::tempdir().unwrap();
+    let lock = root.path().join("vectors.init.lock");
+    std::fs::create_dir(&lock).unwrap();
+    assert!(VectorCache::open(root.path()).is_err());
+    assert!(!root.path().join(VECTOR_DB_FILE).exists());
+    std::fs::remove_dir(lock).unwrap();
+    VectorStore::acquire(
+        root.path(),
+        &settings::VectorStoreSettings::owner_defaults(),
+    )
+    .unwrap();
+}
+
+#[test]
 fn cold_constructor_retries_real_wal_busy_after_initializer_releases() {
     let root = tempfile::tempdir().unwrap();
     let initializer = initializer(root.path());
@@ -73,10 +274,17 @@ fn cold_constructor_retries_real_wal_busy_after_initializer_releases() {
         constructors.push(std::thread::spawn(move || {
             let started = Instant::now();
             let first = std::cell::Cell::new(true);
-            let _hook = Hook::new(None, move || {
+            let observation = Rc::new(move |kind| {
                 if first.replace(false) {
-                    busy.send((index, started.elapsed())).unwrap();
+                    busy.send((index, kind, started.elapsed())).unwrap();
                     proceed.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+            });
+            let on_busy = observation.clone();
+            let _hook = Hook::new(None, move || on_busy("sqlite-busy"));
+            let _initialization = InitializationHook::new(move |phase| {
+                if phase == Phase::Contended {
+                    observation("initialization-lock");
                 }
             });
             let result = VectorCache::open(&path);
@@ -127,6 +335,12 @@ fn cold_constructor_retries_real_wal_busy_after_initializer_releases() {
         .collect();
     eprintln!("real first WAL busy: {observed:?}; results={results:?}");
     assert!(observed.iter().all(std::result::Result::is_ok));
+    let mut kinds: Vec<_> = observed
+        .iter()
+        .map(|event| event.as_ref().unwrap().1)
+        .collect();
+    kinds.sort_unstable();
+    assert_eq!(kinds, ["initialization-lock", "sqlite-busy"]);
     let expected_timeout = i64::try_from(
         settings::VectorStoreSettings::owner_defaults()
             .busy_timeout
@@ -226,9 +440,16 @@ fn non_busy_journal_failure_is_not_retried_or_rewritten() {
     let root = tempfile::tempdir().unwrap();
     let bytes = vec![b'x'; 1024];
     std::fs::write(root.path().join(VECTOR_DB_FILE), &bytes).unwrap();
-    let hook = Hook::new(None, || panic!("non-BUSY must not enter retry observation"));
+    let hook = Hook::new(Some(Instant::now()), || {
+        panic!("non-BUSY must not enter retry observation")
+    });
     let error = VectorCache::open(root.path()).err().unwrap();
-    assert!(!busy(&error));
+    assert!(
+        matches!(&error, Error::Internal { message, .. } if message == "set vector cache journal")
+    );
+    assert!(
+        matches!(std::error::Error::source(&error).and_then(|source| source.downcast_ref::<rusqlite::Error>()), Some(rusqlite::Error::SqliteFailure(code, _)) if code.code == rusqlite::ErrorCode::NotADatabase && code.extended_code == 26)
+    );
     assert_eq!(
         Hook::timeouts(),
         vec![
