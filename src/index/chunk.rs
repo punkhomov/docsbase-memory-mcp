@@ -45,6 +45,115 @@ pub struct Chunk {
     pub text: String,
 }
 
+#[cfg(test)]
+thread_local! {
+    static CAPTURE_PARSER_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(crate) fn capture_parser_entries() -> usize {
+    CAPTURE_PARSER_ENTRIES.get()
+}
+
+/// Allocation-free allowance for eager parser trees/ranges before construction.
+pub(crate) fn capture_parser_charge(body: &str) -> crate::error::Result<u64> {
+    let denied = || crate::error::Error::Admission {
+        message: "parser capture preflight overflow".into(),
+    };
+    let bytes = body.len() as u64;
+    if let Some(lines) = simple_ascii_lines(body) {
+        // pulldown-cmark 0.13.5 firstpass preallocates max(128, len/32)
+        // nodes even for one borrowed plain-text run. Account that capacity
+        // separately from line-proportional growth, not 96 bytes per source byte.
+        // Only unindented ASCII words/spaces, blank lines and ATX headings
+        // qualify: no inline delimiters, attributes, HTML, links or code buffers.
+        // 96 bytes/node covers Node<Item>; 512/line covers growth/spine/ranges.
+        (bytes / 32)
+            .max(128)
+            .checked_mul(96)
+            .and_then(|n| {
+                lines
+                    .checked_mul(512)
+                    .and_then(|lines| n.checked_add(lines))
+            })
+            .and_then(|n| n.checked_add(8192))
+            .ok_or_else(denied)
+    } else {
+        bytes.checked_mul(96).ok_or_else(denied)
+    }
+}
+
+fn simple_ascii_lines(body: &str) -> Option<u64> {
+    let mut count = 0_u64;
+    for line in body.split('\n') {
+        count = count.checked_add(1)?;
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let text = if line.starts_with('#') {
+            let text = line.trim_start_matches('#');
+            if line.len() - text.len() > 6 || !text.starts_with(' ') {
+                return None;
+            }
+            text
+        } else {
+            // Indented code can allocate an owned whole-block buffer.
+            if line.starts_with(' ') && !line.bytes().all(|byte| byte == b' ') {
+                return None;
+            }
+            line
+        };
+        if !text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b' ')
+        {
+            return None;
+        }
+    }
+    Some(count)
+}
+
+/// Conservative logical peak before frontmatter/chunk/JSON/apply allocations.
+/// Parser internals and range arrays are bounded by source bytes; retained heading
+/// breadcrumbs are additionally bounded per section (including all chunk clones).
+pub(crate) fn capture_charge(body: &str, cap: usize) -> crate::error::Result<u64> {
+    use crate::error::Error;
+    let denied = || Error::Admission {
+        message: "chunk capture preflight overflow".into(),
+    };
+    let mut total = capture_parser_charge(body)?;
+    let mut headings = [0_u64; 6];
+    let mut start = 0;
+    let mut previous_heading = 0_u64;
+    let mut section = |start: usize, end: usize, heading: u64| -> crate::error::Result<()> {
+        let text = &body[start..end];
+        let pieces = text
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            .saturating_add(text.len() / cap.saturating_sub(CHUNK_OVERLAP).max(1))
+            .saturating_add(2) as u64;
+        let records = heading
+            .checked_mul(8)
+            .and_then(|n| n.checked_add(2048))
+            .and_then(|n| n.checked_mul(pieces))
+            .ok_or_else(denied)?;
+        total = total.checked_add(records).ok_or_else(denied)?;
+        Ok(())
+    };
+    #[cfg(test)]
+    CAPTURE_PARSER_ENTRIES.set(CAPTURE_PARSER_ENTRIES.get() + 1);
+    for (event, range) in Parser::new_ext(body, Options::all()).into_offset_iter() {
+        if let Event::Start(Tag::Heading { level, .. }) = event {
+            section(start, range.start, previous_heading)?;
+            let level = level as usize;
+            headings[level - 1] = (range.end - range.start) as u64;
+            headings[level..].fill(0);
+            previous_heading = headings.iter().sum();
+            start = range.start;
+        }
+    }
+    section(start, body.len(), previous_heading)?;
+    Ok(total)
+}
+
 /// Splits `body` into chunks no larger than `max_chunk_chars` where possible.
 #[must_use]
 pub fn chunk_markdown(body: &str, max_chunk_chars: usize) -> Vec<Chunk> {
@@ -511,4 +620,44 @@ fn line_of(starts: &[usize], offset: usize) -> u32 {
         Err(index) => index.max(1),
     };
     u32::try_from(line).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod parser_allowance_tests {
+    use super::*;
+
+    #[test]
+    fn simple_ascii_allowance_accounts_initial_tree_and_keeps_complex_markdown_fallback() {
+        let text = "# Heading\r\n\nwords 123\n";
+        let lines = simple_ascii_lines(text).unwrap();
+        assert_eq!(lines, 4);
+        let allowance = capture_parser_charge(text).unwrap();
+        assert!(allowance >= 128 * 96 + lines * 512);
+        let events = Parser::new_ext(text, Options::all()).count();
+        assert!(
+            events as u64 <= lines * 8,
+            "simple blocks have bounded line structure"
+        );
+        for text in [
+            "    indented code",
+            "\tcode",
+            "words # later",
+            "#unspaced",
+            "####### heading",
+            "[link](url)",
+            "# Heading {id}",
+            "a|b\n---|---",
+            "```code\nbody\n```",
+            "<html>",
+            "Unicode é",
+            "words\rwords",
+        ] {
+            assert_eq!(
+                simple_ascii_lines(text),
+                None,
+                "complex input keeps byte-based bound: {text:?}"
+            );
+            assert_eq!(capture_parser_charge(text).unwrap(), text.len() as u64 * 96);
+        }
+    }
 }

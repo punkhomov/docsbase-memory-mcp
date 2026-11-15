@@ -299,6 +299,14 @@ fn owner_rejects_actual_consumer_overflow_and_closed_inventory_shortfall() {
             max_blocking_threads: Some(7),
             ..DaemonPatch::default()
         },
+        DaemonPatch {
+            profile: Some(DaemonProfile::Website {
+                project_root: root.path().to_owned(),
+            }),
+            // S4 + C2 + J1 + H1 needs the separate pre-reserved terminal T1.
+            max_blocking_threads: Some(8),
+            ..DaemonPatch::default()
+        },
     ] {
         assert!(
             resolve_component::<DaemonSpec>(
@@ -312,10 +320,10 @@ fn owner_rejects_actual_consumer_overflow_and_closed_inventory_shortfall() {
         profile: Some(DaemonProfile::Website {
             project_root: root.path().to_owned(),
         }),
-        max_blocking_threads: Some(8),
+        max_blocking_threads: Some(9),
         ..DaemonPatch::default()
     });
-    assert_eq!(enough.settings().max_blocking_threads, 8);
+    assert_eq!(enough.settings().max_blocking_threads, 9);
 }
 
 #[test]

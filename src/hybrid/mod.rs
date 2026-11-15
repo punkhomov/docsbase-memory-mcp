@@ -7,8 +7,8 @@
 //!
 //! Interactive remote stages use explicit async capabilities between admitted CPU
 //! phases. Local inference and codec work use bounded blocking closures; no
-//! [`blocking::enter`] guard crosses await. Legacy direct/index/watch consumers
-//! still enter the synchronous compatibility context until their #81 migration.
+//! [`blocking::enter`] guard crosses await. Daemon/direct index, Sync, watch and
+//! backfill use owned async jobs; synchronous adapters remain for probes/compatibility.
 
 pub mod ann;
 pub mod ann_store;
@@ -84,6 +84,7 @@ pub mod blocking {
         static SYNC_BRIDGE: std::cell::RefCell<Option<std::sync::Arc<crate::daemon::remote::SyncBridge>>> = const { std::cell::RefCell::new(None) };
     }
 
+    #[cfg(feature = "hybrid-remote")]
     pub(crate) fn bridge() -> Option<std::sync::Arc<crate::daemon::remote::SyncBridge>> {
         SYNC_BRIDGE.with(|current| current.borrow().clone())
     }
@@ -185,3 +186,5 @@ mod blocking_tests {
         assert!(!blocking::in_context());
     }
 }
+
+pub(crate) mod async_jobs;

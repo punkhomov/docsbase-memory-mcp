@@ -56,7 +56,8 @@ admission. Background refresh uses the same prepared metadata pool.
 
 ## Asynchronous remote search
 
-Daemon searches, including CLI/MCP forwarding, run these owned phases:
+Daemon searches (including CLI/MCP forwarding) and read-only direct searches
+run these owned phases:
 
 ```mermaid
 flowchart LR
@@ -97,12 +98,34 @@ Provider active/pending limits, search/control/helper lanes, ReadPool and payloa
 budgets retain their existing owners. These bounds do not cover all native
 Tantivy/ONNX/tokenizer/ANN threads or promise process-wide memory/capacity.
 
-Direct snapshot fallback, index/Sync, watcher and vector backfill still use the
-legacy synchronous boundary and explicit command/runtime bridge where applicable.
-Their resumable async migration, terminal job cleanup/Sync attribution and full
-diagnostic projection remain #81's second delivery. No on-disk identity, ranking,
-provider fallback or protocol change accompanies this first delivery. See
-[remote policy](CONFIG.md#remote-execution-policy-global-only).
+Full/incremental Index, Sync, automatic registration, watcher updates and vector
+backfill use the same owned JobService: bounded CPU capture/apply phases alternate
+with asynchronous embedding batches. A unique native IndexState owns the writer
+lease across waits; no physical job CPU permit, SQL transaction, shared DB/config
+lock or reader lease spans the network wait. Capture and actual encoded workspace
+are byte-admitted before markers/effects. Validated cache batches survive failure;
+Sync retains its captured lexical attribution and exact terminal outcome.
+
+JobRoot lives outside the cancellable daemon/command work future. Registration
+retains logical job/Activity ownership before native acceptance; a preallocated
+terminal ticket transfers the unique native state on cancellation/unwind. The
+reserved terminal CPU lane retires IndexHandle, DB/data, writer lease/logical job,
+physical tail and Activity in order, even after ordinary admission closes. Drop
+transfer performs no new application envelope/channel allocation or native
+teardown; Tokio wake bookkeeping retains Tokio's normal contract. Native watcher
+Drop/join stays on its existing producer thread; restart defers until retirement.
+Private move-only negative vector pin authorities use a persistent coordination
+counter in the existing lease table; public pin APIs reserve negative ids. This
+is additive persistent coordination data, with unchanged vector recipes/schema.
+
+Direct Search/Index/Sync own one explicit runtime/execution/JobRoot outside the
+work future, including error/unwind drain. Direct search opens only read-only
+metadata/prepared readers and retains ANN LoadOnly policy; native read/model owners
+retire outside block_on. MCP remains a transport proxy, without a second provider
+implementation. Operational binary routes use async remote capabilities; explicit
+models/connect probes and rootless compatibility APIs retain synchronous adapters.
+No vector/ranking identity, silent provider fallback or protocol version changes.
+See [remote policy](CONFIG.md#remote-execution-policy-global-only).
 
 ## Scoped search IPC
 
@@ -122,7 +145,11 @@ them from one configuration-owned original operation, never a new per-exchange
 budget; remaining time must be positive and queue time cannot exceed elapsed.
 The server checks clock range and clamps to its own original policy deadline.
 Responses retain the existing `kind`/`data` envelope and default search array.
-Explain adds `queue_ms` and retains original `stage_ms.total`.
+Explain adds `queue_ms` and versioned `meta.execution`, retaining original
+`stage_ms.total`. Per-request CPU/network/backoff/attempt fields come from that
+operation; shared embedding waits are marked and do not copy global attempt
+counts. Status projects numeric lane/retained-byte/attempt/refusal/cancellation
+owners. Durations overlap; these are not latency partition or capacity claims.
 
 There is one outstanding scoped request per connection. EOF or session/request
 cancellation abandons that caller; another complete frame during work is a
@@ -134,7 +161,7 @@ graceful shutdown drains that real work, not only waiting client futures.
 
 Legacy `CallTool` remains available to compatibility clients and retains its
 half-close/reply semantics. It does not provide the new EOF cancellation or
-upstream timing contract. CLI search creates an async runtime bridge on a plain
+upstream timing contract. CLI commands own one runtime on a plain
 thread (or a multithread runtime's blocking context); synchronous invocation from
 an existing current-thread runtime returns explicit Admission. Async consumers
 can use the internal `AsyncClient` API, whose stability remains unpublished.

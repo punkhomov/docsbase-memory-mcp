@@ -212,8 +212,15 @@ or serial docs-only PR. Root creates/reviews/pushes/merges the one functional PR
 delta discovered while A shipped. **Design:** D2,D3,D6,D7,D8.
 **FR:** 02,04,05,07,08,09,10,11,13. **New crates:** none.
 
-**Create:** `src/index/async_job.rs`, `src/hybrid/async_jobs.rs`,
-`src/daemon/job_service.rs`, `tests/async_index.rs`, `tests/async_backfill.rs`.
+**MODIFIED 2026-11-14, actual B1 verification seams:** create
+`src/index/async_job.rs`, `src/hybrid/async_jobs.rs`, `src/daemon/job_service.rs`;
+actual private-route gates live in `src/daemon/async_index_tests.rs`, root gates in
+`src/daemon/job_service_tests.rs`, capture gates in
+`src/index/capture_budget_tests.rs`, negative pin tests in
+`src/vector_cache_job_pin_tests.rs`. These source-unit targets drive actual daemon/
+codec/ANN consumers hermetically, instead of exposing test-only public APIs for
+integration fixtures. Cold invocation: --lib async_index_tests / job_service /
+capture_budget / job_pin. Existing integration preservation targets below remain.
 **Modify:** `src/index/{mod,job,outcome,chunk,frontmatter}.rs`, `src/store/repo.rs`,
 `src/daemon/{mod,lifecycle,tools,
 server,worker_admission,settings}.rs`, `src/hybrid/{remote_settings,jobs}.rs`,
@@ -267,7 +274,10 @@ whole job operation and background limits with real consumers; terminal cleanup.
 **Verify (focused):**
 
 ```sh
-cargo test --locked --features cli-full --test async_index --test async_backfill
+cargo test --locked --features cli-full --lib async_index_tests
+cargo test --locked --features cli-full --lib job_service
+cargo test --locked --features cli-full --lib capture_budget
+cargo test --locked --features cli-full --lib job_pin
 cargo test --locked --features cli-full --test index_job --test index_recovery --test index_outcome
 cargo test --locked --features cli-full --test index_vector_source --test vector_sync_context --test hybrid_jobs
 cargo test --locked --features cli-full --lib vector_cache_batch

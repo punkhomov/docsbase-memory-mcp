@@ -547,9 +547,13 @@ impl super::remote::AsyncTransport for ReqwestTransport {
         timeout: Duration,
     ) -> super::remote::StageFuture<'a, TransportResponse> {
         Box::pin(async move {
+            #[cfg(not(test))]
+            let url = &request.url;
+            #[cfg(test)]
+            let url = test_http::request_url(&request.url);
             let mut send = self
                 .http
-                .post(&request.url)
+                .post(url)
                 .timeout(timeout.min(self.attempt_timeout))
                 .body(request.body.clone());
             for (name, value) in &request.headers {
@@ -605,6 +609,8 @@ impl Transport for ReqwestTransport {
         headers: &[(String, String)],
         body: &str,
     ) -> Result<TransportResponse> {
+        #[cfg(test)]
+        test_http::record_sync_entry();
         let request = super::remote::WireRequest {
             url: url.to_owned(),
             headers: headers.to_vec(),
@@ -740,4 +746,48 @@ pub(crate) fn bearer_headers() -> crate::error::Result<Vec<(String, String)>> {
         ("Authorization".to_owned(), format!("Bearer {key}")),
         ("X-Title".to_owned(), X_TITLE.to_owned()),
     ])
+}
+
+// Isolated unit-child seam: keeps the configured provider/client/codecs and
+// actual reqwest HTTP, while production retains its strict origin allowlist.
+#[cfg(test)]
+pub(crate) mod test_http {
+    use std::sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    };
+    pub(crate) struct Redirect {
+        origin: String,
+        pub(crate) synchronous: AtomicUsize,
+    }
+    static REDIRECT: OnceLock<Arc<Redirect>> = OnceLock::new();
+    pub(crate) fn install(origin: String) -> Arc<Redirect> {
+        let value = Arc::new(Redirect {
+            origin,
+            synchronous: AtomicUsize::new(0),
+        });
+        assert!(
+            REDIRECT.set(value.clone()).is_ok(),
+            "one isolated HTTP fixture per child"
+        );
+        value
+    }
+    pub(super) fn request_url(url: &str) -> String {
+        REDIRECT.get().map_or_else(
+            || url.to_owned(),
+            |fixture| {
+                format!(
+                    "{}{}",
+                    fixture.origin,
+                    url.strip_prefix(super::BASE_URL)
+                        .expect("configured allowlisted provider request")
+                )
+            },
+        )
+    }
+    pub(super) fn record_sync_entry() {
+        if let Some(fixture) = REDIRECT.get() {
+            fixture.synchronous.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }

@@ -251,6 +251,7 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
                 flight: flight.clone(),
                 id,
             };
+            operation.mark_shared_work();
             flight.notify.notify_waiters();
             #[cfg(test)]
             if let Some(observer) = self
@@ -311,7 +312,7 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
             () = operation.cancellation().cancelled() => {
                 operation.check().and_then(|()| Err(Error::internal("publication wake without cancellation or expiry")))
             }
-            () = tokio::time::sleep_until(tokio::time::Instant::from_std(operation.deadline())) => {
+            () = operation.deadline_elapsed() => {
                 operation.check().and_then(|()| Err(Error::internal("publication wake without cancellation or expiry")))
             }
             result = publication => { operation.check()?; result }
@@ -343,7 +344,7 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
             tokio::select! {
                 biased;
                 () = operation.cancellation().cancelled() => { operation.check()?; }
-                () = tokio::time::sleep_until(tokio::time::Instant::from_std(operation.deadline())) => { operation.check()?; }
+                () = operation.deadline_elapsed() => { operation.check()?; }
                 () = &mut changed => {}
             }
         }
@@ -385,6 +386,15 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
         for wake in listeners.into_iter().filter_map(|wake| wake.upgrade()) {
             wake.notify();
         }
+    }
+
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn observe_starts(&self, observer: Arc<dyn Fn() + Send + Sync>) {
+        *self.boundary_observer.lock().unwrap() = Some(Arc::new(move |boundary| {
+            if matches!(boundary, Boundary::BeforeStart) {
+                observer();
+            }
+        }));
     }
 
     #[cfg(test)]

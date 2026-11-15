@@ -1,5 +1,6 @@
 //! Shared byte admission for search preparation and owned payloads; no payload allocation or IO.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::config::schema::{Capabilities, SettingsSpec};
@@ -10,6 +11,17 @@ use super::settings::{SearchSettings, SearchSpec};
 struct Retained {
     policy: SearchSettings,
     bytes: Mutex<u64>,
+    refusals: AtomicU64,
+}
+
+impl Retained {
+    fn refused(&self) {
+        let _ = self
+            .refusals
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_add(1))
+            });
+    }
 }
 
 /// One daemon's search byte allowance. Clones share the same retained charge.
@@ -19,6 +31,9 @@ pub struct PayloadBudget {
 }
 
 impl PayloadBudget {
+    pub(crate) fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({"retained_payload_bytes": *self.retained.bytes.lock().unwrap_or_else(PoisonError::into_inner), "max_retained_payload_bytes":self.retained.policy.max_retained_payload_bytes,"max_request_payload_bytes":self.retained.policy.max_request_payload_bytes,"payload_refusals":self.retained.refusals.load(Ordering::Relaxed)})
+    }
     /// Complete policy supplied by the composition root; no values are filled.
     #[must_use]
     pub fn settings(&self) -> &SearchSettings {
@@ -35,6 +50,7 @@ impl PayloadBudget {
             retained: Arc::new(Retained {
                 policy,
                 bytes: Mutex::new(0),
+                refusals: AtomicU64::new(0),
             }),
         })
     }
@@ -46,6 +62,7 @@ impl PayloadBudget {
             .checked_add(bytes)
             .is_none_or(|total| total > self.retained.policy.max_request_payload_bytes)
         {
+            self.retained.refused();
             return Err(Error::Admission {
                 message: "remote rerank input exceeds max_request_payload_bytes".to_owned(),
             });
@@ -60,6 +77,13 @@ impl PayloadBudget {
     /// Admission if a request/aggregate limit would be exceeded, including
     /// arithmetic overflow. A refusal leaves the retained charge unchanged.
     pub fn reserve(&self, bytes: u64) -> Result<PayloadPermit> {
+        let result = self.reserve_inner(bytes);
+        if result.is_err() {
+            self.retained.refused();
+        }
+        result
+    }
+    fn reserve_inner(&self, bytes: u64) -> Result<PayloadPermit> {
         if bytes > self.retained.policy.max_request_payload_bytes {
             return Err(Error::Admission {
                 message: format!(
@@ -84,7 +108,7 @@ impl PayloadBudget {
         *retained = next;
         Ok(PayloadPermit {
             retained: Arc::clone(&self.retained),
-            bytes,
+            bytes: std::sync::atomic::AtomicU64::new(bytes),
         })
     }
 }
@@ -93,7 +117,74 @@ impl PayloadBudget {
 #[must_use = "retain the permit while the charged search payload is live"]
 pub struct PayloadPermit {
     retained: Arc<Retained>,
-    bytes: u64,
+    bytes: std::sync::atomic::AtomicU64,
+}
+
+impl PayloadPermit {
+    /// Current logical charge retained by this account.
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Reserve the checked delta BEFORE allocating or copying retained data.
+    /// A refusal changes neither account nor shared aggregate.
+    ///
+    /// # Errors
+    /// Per-account/aggregate limit exceeded or arithmetic overflow.
+    pub fn grow_to(&mut self, total: u64) -> Result<()> {
+        self.grow_shared(total)
+    }
+
+    /// One serialized job/coalescer owns mutations; clones retain the same
+    /// existing allowance through CPU, transport and terminal retirement.
+    pub(crate) fn grow_shared(&self, total: u64) -> Result<()> {
+        let result = self.grow_inner(total);
+        if result.is_err() {
+            self.retained.refused();
+        }
+        result
+    }
+    fn grow_inner(&self, total: u64) -> Result<()> {
+        let mut retained = self
+            .retained
+            .bytes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = self.bytes();
+        if total <= current {
+            return Ok(());
+        }
+        if total > self.retained.policy.max_request_payload_bytes {
+            return Err(Error::Admission {
+                message: "job capture exceeds max_request_payload_bytes".into(),
+            });
+        }
+        let next = retained
+            .checked_add(total - current)
+            .filter(|next| *next <= self.retained.policy.max_retained_payload_bytes)
+            .ok_or_else(|| Error::Admission {
+                message: "job capture exceeds max_retained_payload_bytes".into(),
+            })?;
+        *retained = next;
+        self.bytes.store(total, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Release only storage already destroyed by this serialized owner.
+    pub(crate) fn shrink_shared(&self, total: u64) {
+        let mut retained = self
+            .retained
+            .bytes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = self.bytes();
+        if total >= current {
+            return;
+        }
+        *retained -= current - total;
+        self.bytes.store(total, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl Drop for PayloadPermit {
@@ -103,6 +194,6 @@ impl Drop for PayloadPermit {
             .bytes
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        *retained = retained.saturating_sub(self.bytes);
+        *retained = retained.saturating_sub(self.bytes());
     }
 }

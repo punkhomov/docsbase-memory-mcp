@@ -3,7 +3,7 @@
 //! [`spawn_watcher`] watches a project root, coalesces bursts with a 1.5 s
 //! quiet window (flushing at most 2 s after the first event) and forwards
 //! batches of changed markdown paths over a channel; [`Watchers`] owns one
-//! watcher plus a consumer thread per project inside the daemon. Events below
+//! watcher plus an async consumer per project inside the daemon. Events below
 //! the cache root (tantivy index state) are ignored so indexing cannot feed
 //! itself (R4).
 //!
@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -66,8 +66,69 @@ const LEASE_RETRY: Duration = Duration::from_millis(250);
 
 /// Stops the underlying watcher when dropped.
 pub struct WatcherGuard {
-    _watcher: RecommendedWatcher,
-    _forwarder: std::thread::JoinHandle<()>,
+    _watcher: Option<RecommendedWatcher>,
+    forwarder: Option<std::thread::JoinHandle<()>>,
+    retirement: Option<ProducerRetirement>,
+}
+struct ProducerRetirement {
+    cancel: crate::hybrid::work::Cancellation,
+    wake: std::sync::mpsc::SyncSender<Option<PathBuf>>,
+    activity: Option<Arc<crate::daemon::request::Activity>>,
+    ticket: Option<tokio::sync::oneshot::Sender<Arc<crate::daemon::request::Activity>>>,
+}
+impl ProducerRetirement {
+    fn begin(&mut self) {
+        if let (Some(ticket), Some(activity)) = (self.ticket.take(), self.activity.take()) {
+            activity.activate();
+            let _ = ticket.send(activity);
+        }
+        self.cancel.cancel();
+        let _ = self.wake.try_send(None);
+    }
+}
+impl WatcherGuard {
+    fn retiring(&self) -> bool {
+        self.retirement
+            .as_ref()
+            .is_some_and(|value| value.ticket.is_none())
+    }
+    fn finished(&self) -> bool {
+        self.forwarder
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+    }
+    fn begin_retirement(&mut self) {
+        if let Some(value) = &mut self.retirement {
+            value.begin();
+        }
+    }
+}
+impl Drop for WatcherGuard {
+    fn drop(&mut self) {
+        if let Some(retirement) = &mut self.retirement {
+            retirement.begin();
+        }
+    }
+}
+struct ProducerOwner {
+    cancel: crate::hybrid::work::Cancellation,
+    source: crate::daemon::request::ActivitySource,
+    #[cfg(test)]
+    before_native_drop: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+struct ProducerNative {
+    watcher: Option<RecommendedWatcher>,
+    #[cfg(test)]
+    before_drop: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+impl Drop for ProducerNative {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(observer) = &self.before_drop {
+            observer();
+        }
+        drop(self.watcher.take());
+    }
 }
 
 /// Watches `project.canonical_root` and sends deduplicated batches of
@@ -103,16 +164,27 @@ fn spawn_watcher_using(
     current_config: impl Fn() -> Arc<Config> + Send + 'static,
     tx: std::sync::mpsc::SyncSender<Vec<PathBuf>>,
 ) -> Result<WatcherGuard> {
-    let root = project.canonical_root.clone();
-    // Canonicalize once: notify reports verbatim paths on Windows, while the
-    // configured cache dir may use the short/drive spelling. The dir itself
-    // may not exist yet (tests watch an in-root cache), so tolerate that.
-    let cache = canonicalize_allow_missing(cache);
-    // Bounded with blocking send: the notify callback applies backpressure
-    // instead of growing without bound; no path is dropped (T46).
-    let (event_tx, event_rx) = std::sync::mpsc::sync_channel(MAX_WATCH_EVENTS);
-    let watch_cache = cache.clone();
-    let watch_root = root.clone();
+    spawn_watcher_sink(project, cache, current_config, move |batch| {
+        tx.send(batch).map_err(|error| error.0)
+    })
+}
+
+fn spawn_watcher_sink(
+    project: &Project,
+    cache: &Path,
+    current_config: impl Fn() -> Arc<Config> + Send + 'static,
+    send: impl Fn(Vec<PathBuf>) -> std::result::Result<(), Vec<PathBuf>> + Send + 'static,
+) -> Result<WatcherGuard> {
+    spawn_watcher_sink_owned(project, cache, current_config, send, None)
+}
+
+fn native_watcher(
+    root: &Path,
+    cache: &Path,
+    event_tx: std::sync::mpsc::SyncSender<Option<PathBuf>>,
+) -> Result<RecommendedWatcher> {
+    let watch_cache = cache.to_path_buf();
+    let watch_root = root.to_path_buf();
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<Event>| {
         let Ok(event) = result else {
             eprintln!("warning: watcher event: {result:?}");
@@ -135,27 +207,73 @@ fn spawn_watcher_using(
                 Ok(meta) if meta.file_type().is_symlink() => {}
                 Ok(meta) => {
                     if meta.is_dir() || walk::is_markdown(&path) {
-                        let _ = event_tx.send(path);
+                        let _ = event_tx.send(Some(path));
                     }
                 }
                 // Deleted: `.md` files purge, other paths may be directories
                 // whose subtree must be purged (FR-16).
                 Err(_) => {
-                    let _ = event_tx.send(path);
+                    let _ = event_tx.send(Some(path));
                 }
             }
         }
     })
     .map_err(|err| Error::internal_with_source("create watcher", err))?;
     watcher
-        .watch(&project.canonical_root, RecursiveMode::Recursive)
+        .watch(root, RecursiveMode::Recursive)
         .map_err(|err| {
-            Error::internal_with_source(
-                format!("watch {}: {err}", project.canonical_root.display()),
-                err,
-            )
+            Error::internal_with_source(format!("watch {}: {err}", root.display()), err)
         })?;
 
+    Ok(watcher)
+}
+
+fn spawn_watcher_sink_owned(
+    project: &Project,
+    cache: &Path,
+    current_config: impl Fn() -> Arc<Config> + Send + 'static,
+    send: impl Fn(Vec<PathBuf>) -> std::result::Result<(), Vec<PathBuf>> + Send + 'static,
+    owner: Option<ProducerOwner>,
+) -> Result<WatcherGuard> {
+    let root = project.canonical_root.clone();
+    // Canonicalize once: notify reports verbatim paths on Windows, while the
+    // configured cache dir may use the short/drive spelling. The dir itself
+    // may not exist yet (tests watch an in-root cache), so tolerate that.
+    let cache = canonicalize_allow_missing(cache);
+    // Bounded with blocking send: the notify callback applies backpressure
+    // instead of growing without bound; no path is dropped (T46).
+    let (event_tx, event_rx) = std::sync::mpsc::sync_channel(MAX_WATCH_EVENTS);
+    let wake = event_tx.clone();
+    let watcher = native_watcher(&root, &cache, event_tx)?;
+
+    // Cells exist before native ownership is transferred to the producer.
+    #[cfg(test)]
+    let before_native_drop = owner
+        .as_ref()
+        .and_then(|owner| owner.before_native_drop.clone());
+    let (retirement, retired) = if let Some(owner) = owner {
+        let (ticket, receiver) = tokio::sync::oneshot::channel();
+        (
+            Some(ProducerRetirement {
+                cancel: owner.cancel,
+                wake,
+                activity: Some(crate::daemon::request::Activity::dormant(&owner.source)),
+                ticket: Some(ticket),
+            }),
+            Some(receiver),
+        )
+    } else {
+        (None, None)
+    };
+    let cancel = retirement
+        .as_ref()
+        .map(|retirement| retirement.cancel.clone());
+    let mut watcher = Some(watcher);
+    let native = if retirement.is_some() {
+        watcher.take()
+    } else {
+        None
+    };
     let project_id = project.id;
     let filter_root = root;
     let filter_cache = cache;
@@ -163,9 +281,25 @@ fn spawn_watcher_using(
     let forwarder = std::thread::Builder::new()
         .name(format!("docsbase-debounce-{project_id}"))
         .spawn(move || {
+            // Reverse drop order on normal return AND unwind: event receiver
+            // unblocks notify callbacks; native watcher joins them; terminal
+            // cell releases the original physical Activity last.
+            let _retired = retired;
+            let _native = ProducerNative {
+                watcher: native,
+                #[cfg(test)]
+                before_drop: before_native_drop,
+            };
+            let event_rx = event_rx;
             let mut filter = IndexFilter::new(filter_root, filter_cache, &initial);
             drop(initial);
-            while let Ok(first) = event_rx.recv() {
+            while let Ok(Some(first)) = event_rx.recv() {
+                if cancel
+                    .as_ref()
+                    .is_some_and(crate::hybrid::work::Cancellation::is_cancelled)
+                {
+                    return;
+                }
                 let deadline = Instant::now() + MAX_DEBOUNCE;
                 let mut raw = Batch::new();
                 raw.push(first);
@@ -175,10 +309,11 @@ fn spawn_watcher_using(
                         break;
                     }
                     match event_rx.recv_timeout(DEBOUNCE.min(remaining)) {
-                        Ok(path) => raw.push(path),
+                        Ok(Some(path)) => raw.push(path),
+                        Ok(None) => return,
                         Err(RecvTimeoutError::Timeout) => break,
                         Err(RecvTimeoutError::Disconnected) => {
-                            let _ = tx.send(finalize(&mut filter, raw));
+                            let _ = send(finalize(&mut filter, raw));
                             return;
                         }
                     }
@@ -190,7 +325,7 @@ fn spawn_watcher_using(
                 let batch_config = current_config();
                 filter.set_config(&batch_config);
                 let batch = finalize(&mut filter, raw);
-                if !batch.is_empty() && tx.send(batch).is_err() {
+                if !batch.is_empty() && send(batch).is_err() {
                     return;
                 }
             }
@@ -198,7 +333,8 @@ fn spawn_watcher_using(
         .map_err(|err| Error::internal_with_source("spawn debounce thread", err))?;
     Ok(WatcherGuard {
         _watcher: watcher,
-        _forwarder: forwarder,
+        forwarder: Some(forwarder),
+        retirement,
     })
 }
 
@@ -383,7 +519,7 @@ static INJECTED_COMMIT_ARMED: Mutex<Option<String>> = Mutex::new(None);
 /// dies mid-way - the recovery path (`tests/mcp_registry.rs::
 /// watcher_recovers_from_a_commit_failure`) needs the index marked for a
 /// rebuild and rebuilt by the retried batch.
-fn injected_watch_fault(root: &Path, cache: &Path) -> Option<Error> {
+pub(crate) fn injected_watch_fault(root: &Path, cache: &Path) -> Option<Error> {
     let spec = std::env::var("DOCSBASE_WATCH_FAULT").ok()?;
     let prefix = std::env::var("DOCSBASE_WATCH_FAULT_ROOT").ok()?;
     if !root.starts_with(&prefix) {
@@ -506,8 +642,17 @@ fn report_batch_event(
 /// Records a dropped batch as a terminal `error` job row so `status` surfaces
 /// the lost edits next to per-file warnings (FR-19 pattern).
 fn record_dropped_batch(db: &mut Db, project_id: i64, pending: &Batch, attempts: u32, error: &str) {
-    let warnings: Vec<serde_json::Value> = pending
-        .paths()
+    record_dropped_paths(db, project_id, pending.paths(), attempts, error);
+}
+
+fn record_dropped_paths(
+    db: &mut Db,
+    project_id: i64,
+    paths: &[PathBuf],
+    attempts: u32,
+    error: &str,
+) {
+    let warnings: Vec<serde_json::Value> = paths
         .iter()
         .map(|path| {
             json!({
@@ -526,6 +671,49 @@ fn record_dropped_batch(db: &mut Db, project_id: i64, pending: &Batch, attempts:
             "warning: cannot record dropped watcher batch for project {project_id}: {record}"
         );
     }
+}
+
+/// Existing failure diagnostics/status effects, called only on admitted CPU.
+pub(crate) fn report_async_event(
+    cache: &Path,
+    project: &Project,
+    event: BatchEvent,
+    pending: Option<&WatchPayload>,
+    db_settings: &Resolved<DbSettings>,
+) -> Result<()> {
+    let dropped = match &event {
+        BatchEvent::DroppedTransient { attempts, error } => Some((*attempts, error.as_str())),
+        BatchEvent::DroppedPermanent { error } => Some((0, error.as_str())),
+        _ => None,
+    };
+    if let (Some((attempts, error)), Some(pending)) = (dropped, pending) {
+        // Warnings, paths, Value nodes and concurrent encoded JSON are live
+        // together. Reserve their conservative escaped peak before copying.
+        let bytes = pending
+            .paths
+            .iter()
+            .try_fold(0_u64, |bytes, path| {
+                (path.as_os_str().len() as u64)
+                    .checked_add(error.len() as u64)
+                    .and_then(|n| n.checked_mul(48))
+                    .and_then(|n| n.checked_add(2048))
+                    .and_then(|n| bytes.checked_add(n))
+            })
+            .and_then(|n| n.checked_add(pending.account.bytes()))
+            .ok_or_else(|| Error::Admission {
+                message: "watcher warning capture overflow".into(),
+            })?;
+        pending.account.grow_shared(bytes)?;
+        let mut db = Db::open_with_settings(cache, db_settings)?;
+        record_dropped_paths(&mut db, project.id, &pending.paths, attempts, error);
+    }
+    report_batch_event(
+        project.id,
+        &BatchRetryPolicy::default(),
+        &lifecycle::index_dir(cache, project.id),
+        event,
+    );
+    Ok(())
 }
 
 /// Filters candidate paths through the same ignore stack as [`walk`],
@@ -617,6 +805,103 @@ fn finalize(filter: &mut IndexFilter, raw: Batch) -> Vec<PathBuf> {
     finished
 }
 
+/// Recheck raw pending paths under the current revision on admitted job CPU.
+/// Stream the existing walker and charge retained selections before their copies;
+/// unlike the producer cache, this does not retain uncharged sibling listings.
+pub(crate) fn refilter_accounted(
+    project: &Project,
+    cache: &Path,
+    paths: &[PathBuf],
+    config: &Config,
+    mut capture: Option<&mut crate::index::job::CaptureBudget<'_>>,
+) -> Result<Vec<PathBuf>> {
+    if let Some(budget) = capture.as_deref_mut() {
+        budget.reserve((paths.len() as u64).checked_mul(128).ok_or_else(|| {
+            Error::Admission {
+                message: "watch filter references overflow".into(),
+            }
+        })?)?;
+    }
+    let wanted: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    // The walker determines current ignore membership only; it must not
+    // determine the order consumed by incremental document-limit admission.
+    let mut allowed = HashSet::new();
+    for entry in walk::walk(&project.canonical_root, config)? {
+        if let Some(budget) = capture.as_deref_mut() {
+            budget.operation.check()?;
+        }
+        let path = match entry {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("warning: watcher filter: {error}");
+                continue;
+            }
+        };
+        if !crate::platform::paths::is_under(&path, cache)
+            && let Some(original) = wanted.get(path.as_path())
+        {
+            allowed.insert(*original);
+        }
+    }
+    let mut filtered = Vec::new();
+    let mut seen = HashSet::new();
+    for path in paths {
+        if let Some(budget) = capture.as_deref_mut() {
+            budget.operation.check()?;
+        }
+        if path.is_dir() {
+            // Keep each directory's expansion at its original event position.
+            // The same walker supplies ignore/depth checks without retaining
+            // uncharged sibling listings; the existing global expansion cap
+            // applies after previously admitted paths, as in finalize.
+            for entry in walk::walk(&project.canonical_root, config)? {
+                if let Some(budget) = capture.as_deref_mut() {
+                    budget.operation.check()?;
+                }
+                if filtered.len() >= EXPAND_MAX_FILES {
+                    break;
+                }
+                let expanded = match entry {
+                    Ok(path) => path,
+                    Err(error) => {
+                        eprintln!("warning: watcher filter: {error}");
+                        continue;
+                    }
+                };
+                if !crate::platform::paths::is_under(&expanded, cache)
+                    && expanded
+                        .strip_prefix(path)
+                        .is_ok_and(|relative| relative.components().count() <= EXPAND_MAX_DEPTH + 1)
+                {
+                    push_filtered(&expanded, &mut filtered, &mut seen, capture.as_deref_mut())?;
+                }
+            }
+        } else if !path.exists() || allowed.contains(path.as_path()) {
+            // Missing files/directories keep their admitted position too;
+            // the incremental planner resolves exact/subtree purge markers.
+            push_filtered(path, &mut filtered, &mut seen, capture.as_deref_mut())?;
+        }
+    }
+    Ok(filtered)
+}
+
+fn push_filtered(
+    path: &Path,
+    filtered: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    capture: Option<&mut crate::index::job::CaptureBudget<'_>>,
+) -> Result<()> {
+    if seen.contains(path) {
+        return Ok(());
+    }
+    if let Some(budget) = capture {
+        budget.path(path)?;
+    }
+    seen.insert(path.to_path_buf());
+    filtered.push(path.to_path_buf());
+    Ok(())
+}
+
 /// Maximum files and depth for one directory expansion, bounding the work a
 /// single directory-create event can trigger (R4).
 const EXPAND_MAX_FILES: usize = 10_000;
@@ -664,9 +949,9 @@ fn expand_dir_inner(filter: &mut IndexFilter, batch: &mut Batch, dir: &Path, dep
 /// Immutable provider and vector-source snapshot supplied by the composition root.
 /// Config selects indexing limits; the prepared stages select embedding.
 pub struct WatchRuntime {
-    config: Arc<Config>,
-    stages: Arc<crate::hybrid::HybridStages>,
-    source: crate::vector_cache::VectorCacheSource,
+    pub(crate) config: Arc<Config>,
+    pub(crate) stages: Arc<crate::hybrid::HybridStages>,
+    pub(crate) source: crate::vector_cache::VectorCacheSource,
 }
 
 impl WatchRuntime {
@@ -717,22 +1002,132 @@ impl WatchContext {
 
 /// One running watcher plus its incremental consumer.
 struct WatcherEntry {
-    _guard: WatcherGuard,
-    _consumer: std::thread::JoinHandle<()>,
+    guard: WatcherGuard,
+    _consumer: ConsumerHandle,
     /// Open-time config, swappable on reopen so batch filtering follows
     /// `.docsbase.toml` edits without restarting notify/threads (OQ-6).
     context: Arc<Mutex<WatchContext>>,
     cache: PathBuf,
 }
 
+enum ConsumerHandle {
+    Blocking { _join: std::thread::JoinHandle<()> },
+    Async { _join: tokio::task::JoinHandle<()> },
+}
+
+#[path = "async_runtime.rs"]
+mod async_runtime;
+pub(crate) use async_runtime::{WatchPayload, WatchPrepared, merge_pending};
+struct AsyncOwner {
+    shared: Weak<crate::daemon::server::Shared>,
+    runtime: tokio::runtime::Handle,
+}
+
+#[cfg(test)]
+type BatchObserver = Arc<dyn Fn(BatchEvent) + Send + Sync>;
+#[cfg(test)]
+type CopyObserver = Arc<dyn Fn(&Arc<crate::search::budget::PayloadPermit>) + Send + Sync>;
+
 /// Per-project watchers owned by the daemon (design §5).
-#[derive(Default)]
 pub struct Watchers {
     inner: Mutex<HashMap<i64, WatcherEntry>>,
     disabled: bool,
+    async_owner: OnceLock<AsyncOwner>,
+    close: crate::hybrid::work::Cancellation,
+    #[cfg(test)]
+    producer_retirement: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    batch_observer: Mutex<Option<BatchObserver>>,
+    #[cfg(test)]
+    pending_copy: Mutex<Option<CopyObserver>>,
+}
+
+impl Default for Watchers {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            disabled: false,
+            async_owner: OnceLock::new(),
+            close: crate::hybrid::work::Cancellation::new(),
+            #[cfg(test)]
+            producer_retirement: Mutex::new(None),
+            #[cfg(test)]
+            batch_observer: Mutex::new(None),
+            #[cfg(test)]
+            pending_copy: Mutex::new(None),
+        }
+    }
 }
 
 impl Watchers {
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn observe_pending_copy(&self, observer: CopyObserver) {
+        *self.pending_copy.lock().unwrap() = Some(observer);
+    }
+    #[cfg(test)]
+    fn pending_copy_entered(&self, account: &Arc<crate::search::budget::PayloadPermit>) {
+        let observer = self.pending_copy.lock().unwrap().clone();
+        if let Some(observer) = observer {
+            observer(account);
+        }
+    }
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn consumer_finished(&self, project: i64) -> bool {
+        self.map().get(&project).is_none_or(
+            |WatcherEntry {
+                 _consumer: consumer,
+                 ..
+             }| match consumer {
+                ConsumerHandle::Blocking { _join: handle } => handle.is_finished(),
+                ConsumerHandle::Async { _join: handle } => handle.is_finished(),
+            },
+        )
+    }
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn observe_batches(&self, observer: Arc<dyn Fn(BatchEvent) + Send + Sync>) {
+        *self.batch_observer.lock().unwrap() = Some(observer);
+    }
+    #[cfg(test)]
+    pub(crate) fn emit_batch(&self, event: BatchEvent) {
+        let observer = self.batch_observer.lock().unwrap().clone();
+        if let Some(observer) = observer {
+            observer(event);
+        }
+    }
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn observe_producer_retirement(&self, observer: Arc<dyn Fn() + Send + Sync>) {
+        *self.producer_retirement.lock().unwrap() = Some(observer);
+    }
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn stop_project(&self, project: i64) {
+        if let Some(entry) = self.map().get_mut(&project) {
+            entry.guard.begin_retirement();
+        }
+    }
+    pub(crate) fn close(&self) {
+        self.close.cancel();
+        for entry in self.map().values_mut() {
+            entry.guard.begin_retirement();
+        }
+    }
+    /// Called by the synchronous outer root only, after async/physical drain.
+    pub(crate) fn join_retired(&self) {
+        let entries = std::mem::take(&mut *self.map());
+        for (_, mut entry) in entries {
+            entry.guard.begin_retirement();
+            if let Some(join) = entry.guard.forwarder.take() {
+                let _ = join.join();
+            }
+        }
+    }
+    fn retire_matching(&self, project: i64, context: &Arc<Mutex<WatchContext>>) {
+        if let Some(entry) = self.map().get_mut(&project)
+            && Arc::ptr_eq(&entry.context, context)
+        {
+            entry.guard.begin_retirement();
+        }
+    }
+
     /// Empty set.
     #[must_use]
     pub fn new() -> Self {
@@ -748,17 +1143,33 @@ impl Watchers {
         }
     }
 
+    pub(crate) fn activate_async(&self, shared: Weak<crate::daemon::server::Shared>) -> Result<()> {
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|error| Error::internal_with_source("watcher runtime owner absent", error))?;
+        self.async_owner
+            .set(AsyncOwner { shared, runtime })
+            .map_err(|_| Error::internal("watcher async owner already installed"))
+    }
+
     /// Number of watched projects (`status`).
     #[must_use]
     pub fn count(&self) -> u64 {
-        u64::try_from(self.map().len()).unwrap_or(u64::MAX)
+        u64::try_from(
+            self.map()
+                .values()
+                .filter(|entry| !entry.guard.finished())
+                .count(),
+        )
+        .unwrap_or(u64::MAX)
     }
 
     /// True while a watcher thread is alive for `project_id`; a dead watcher
     /// is visible in `status` instead of silently dropping edits.
     #[must_use]
     pub fn watching(&self, project_id: i64) -> bool {
-        self.map().contains_key(&project_id)
+        self.map()
+            .get(&project_id)
+            .is_some_and(|entry| !entry.guard.finished())
     }
 
     /// Starts a watcher for `project` when it is indexed and not yet watched;
@@ -842,37 +1253,82 @@ impl Watchers {
         {
             return Ok(false);
         }
-        let mut map = self.map();
-        if map.contains_key(&project.id) {
-            return Ok(false);
+        if self.close.is_cancelled() {
+            return Err(Error::Admission {
+                message: "watcher owner is shutting down".into(),
+            });
         }
-        let (tx, rx) = std::sync::mpsc::sync_channel(MAX_WATCH_EVENTS);
+        {
+            let mut map = self.map();
+            if map
+                .get(&project.id)
+                .is_some_and(|entry| !entry.guard.finished())
+            {
+                return Ok(false);
+            }
+            map.remove(&project.id);
+        }
+        // Native setup runs outside the registry lock; same-project publication
+        // is still serialized by the daemon's existing project reload authority.
         let slot = Arc::new(Mutex::new(context));
         let producer_slot = Arc::clone(&slot);
-        let guard = spawn_watcher_using(
-            project,
-            cache,
-            move || {
-                producer_slot
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .config()
-                    .clone()
-            },
-            tx,
-        )?;
-        let consumer = spawn_consumer(
-            cache.to_path_buf(),
-            project.clone(),
-            Arc::clone(&slot),
-            db_settings.clone(),
-            rx,
-            Arc::downgrade(self),
-        )?;
+        let current = move || {
+            producer_slot
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .config()
+                .clone()
+        };
+        let (guard, consumer) = if let Some(owner) = self.async_owner.get() {
+            let (tx, rx) = tokio::sync::mpsc::channel(MAX_WATCH_EVENTS);
+            let shared = owner
+                .shared
+                .upgrade()
+                .ok_or_else(|| Error::internal("watcher owner retired"))?;
+            let cancel = crate::hybrid::work::Cancellation::new();
+            let guard = spawn_watcher_sink_owned(
+                project,
+                cache,
+                current,
+                move |batch| tx.blocking_send(batch).map_err(|error| error.0),
+                Some(ProducerOwner {
+                    cancel: cancel.clone(),
+                    source: shared.watch_activity_source(),
+                    #[cfg(test)]
+                    before_native_drop: self.producer_retirement.lock().unwrap().clone(),
+                }),
+            )?;
+            let consumer = owner.runtime.spawn(async_runtime::consume(
+                owner.shared.clone(),
+                project.clone(),
+                slot.clone(),
+                rx,
+                Arc::downgrade(self),
+                self.close.clone(),
+                cancel,
+            ));
+            (guard, ConsumerHandle::Async { _join: consumer })
+        } else {
+            let (tx, rx) = std::sync::mpsc::sync_channel(MAX_WATCH_EVENTS);
+            let guard = spawn_watcher_using(project, cache, current, tx)?;
+            let consumer = spawn_consumer(
+                cache.to_path_buf(),
+                project.clone(),
+                slot.clone(),
+                db_settings.clone(),
+                rx,
+                Arc::downgrade(self),
+            )?;
+            (guard, ConsumerHandle::Blocking { _join: consumer })
+        };
+        let mut map = self.map();
+        if self.close.is_cancelled() || map.contains_key(&project.id) {
+            return Ok(false);
+        }
         map.insert(
             project.id,
             WatcherEntry {
-                _guard: guard,
+                guard,
                 _consumer: consumer,
                 context: slot,
                 cache: canonicalize_allow_missing(cache),
@@ -920,6 +1376,7 @@ impl Watchers {
         let existing = self
             .map()
             .get(&project_id)
+            .filter(|entry| !entry.guard.retiring() && !entry.guard.finished())
             .map(|entry| (entry.context.clone(), entry.cache.clone()));
         let Some((slot, root)) = existing else {
             return Ok(false);
@@ -1063,13 +1520,7 @@ fn run_batch(
     })
 }
 
-fn run_batch_using(
-    db: &mut Db,
-    cache: &Path,
-    project: &Project,
-    batch: &[PathBuf],
-    mut current_context: impl FnMut() -> WatchContext,
-) -> Result<JobStats> {
+pub(crate) fn admit_incremental(db: &Db, project: &Project) -> Result<()> {
     // Incremental chunks are only valid for an index built with the current
     // schema; a stale or errored project must be rebuilt by a full index
     // first (T24). Full outcome publication (or the legacy mark_indexed helper)
@@ -1089,6 +1540,17 @@ fn run_batch_using(
             instruction: Some("run `docsbase index` to rebuild".to_owned()),
         });
     }
+    Ok(())
+}
+
+fn run_batch_using(
+    db: &mut Db,
+    cache: &Path,
+    project: &Project,
+    batch: &[PathBuf],
+    mut current_context: impl FnMut() -> WatchContext,
+) -> Result<JobStats> {
+    admit_incremental(db, project)?;
     // The writer handle is opened per batch: holding it between batches would
     // block full index jobs on the tantivy lock.
     lifecycle::with_writer_lease(cache, project.id, || {

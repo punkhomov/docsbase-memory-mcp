@@ -350,13 +350,19 @@ fn run_with_launch(
         .enable_all()
         .build()
         .map_err(|err| Error::internal_with_source("build tokio runtime", err))?;
-    runtime.block_on(serve(
-        cache,
-        settings,
-        pool_settings,
-        dense_settings,
-        launch,
-    ))
+    let mut jobs = super::job_service::JobRoot::new(&launch.launch.config.settings().daemon);
+    let service = jobs.service();
+    jobs.run(
+        &runtime,
+        serve(
+            cache,
+            settings,
+            pool_settings,
+            dense_settings,
+            launch,
+            service,
+        ),
+    )
 }
 
 /// Asks a running daemon to stop and waits for it to exit (FR-6).
@@ -434,23 +440,52 @@ async fn serve(
     pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
     launch: AdmittedLaunch,
+    jobs: super::job_service::JobService,
 ) -> Result<()> {
-    create_state_dir(cache)?;
-    if is_running(cache) {
-        return Err(Error::Admission {
-            message: format!("daemon already running for {}", cache.display()),
-        });
-    }
-    cleanup_stale(cache)?;
-
-    // Prepare resources before advertising a listener or daemon state.
-    let shared = crate::daemon::server::Shared::open_with_admitted_launch(
-        cache,
-        settings,
-        pool_settings,
-        dense_settings,
-        launch,
-    )?;
+    // Bootstrap uses the same component-owned lanes/source as every later
+    // handler. Root owns watcher retirement before any native startup effects.
+    let policy = launch.launch.config.settings();
+    let workers = Arc::new(super::worker_admission::WorkerAdmission::with_policies(
+        &policy.daemon,
+        &policy.remote,
+    )?);
+    let (activity, events) = super::request::ActivitySource::channel(policy.daemon.max_events);
+    let watchers = Arc::new(crate::watch::Watchers::with_enabled(
+        launch.website.is_none(),
+    ));
+    jobs.retain_watchers(watchers.clone(), activity.clone())?;
+    let permit = workers.control().await?;
+    let charge = activity.track();
+    let owners = crate::daemon::server::AsyncDaemonOwners {
+        jobs,
+        workers,
+        watchers,
+        activity,
+        events,
+    };
+    let prepared_cache = cache.to_path_buf();
+    let prepared_settings = settings.clone();
+    let prepared_pool = pool_settings.clone();
+    let prepared_dense = dense_settings.clone();
+    let shared = super::request::spawn(Some(permit), Some(charge), move || {
+        create_state_dir(&prepared_cache)?;
+        if is_running(&prepared_cache) {
+            return Err(Error::Admission {
+                message: format!("daemon already running for {}", prepared_cache.display()),
+            });
+        }
+        cleanup_stale(&prepared_cache)?;
+        crate::daemon::server::Shared::open_with_runtime_owners(
+            &prepared_cache,
+            &prepared_settings,
+            &prepared_pool,
+            &prepared_dense,
+            launch,
+            Some(owners),
+        )
+    })
+    .await
+    .map_err(|error| Error::internal_with_source("daemon startup worker", error))??;
 
     let endpoint = platform::daemon_endpoint(cache);
     if platform::exists(&endpoint) {
@@ -653,11 +688,10 @@ async fn accept_loop_with(
             }
         }
     }
-    #[cfg(feature = "hybrid-remote")]
-    shared.shutdown_remote();
-    shared.workers.shutdown();
-    // Drop pending admission immediately; an already running closure keeps its
-    // own Activity/permit and remains visible to the physical drain below.
+    shared.close_watchers();
+    // Ingress is closed by the stop flag/listener loop. Accepted requests
+    // retain their original budgets and may need another admitted CPU/remote
+    // phase before they can publish and reply.
     drop(janitor);
     // Shutdown was requested: the StopDaemon reply itself is bounded by
     // `DRAIN_TIMEOUT` (T46), but running requests must still deliver their
@@ -679,6 +713,9 @@ async fn accept_loop_with(
             }
         }
     }
+    #[cfg(feature = "hybrid-remote")]
+    shared.shutdown_remote();
+    shared.workers.shutdown();
     Ok(())
 }
 

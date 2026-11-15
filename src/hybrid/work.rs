@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use super::remote_settings::RemoteSettings;
 use crate::error::{Error, Result};
 use crate::search::operation::SearchOperation;
-#[cfg(any(feature = "hybrid-remote", test))]
 use std::future::Future;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
@@ -196,6 +195,10 @@ pub trait SharedInterest: Send + Sync {
 #[derive(Clone)]
 pub struct RemoteCall {
     operation: SearchOperation,
+    #[cfg(feature = "hybrid-remote")]
+    background: bool,
+    #[cfg(feature = "hybrid-remote")]
+    physical: Option<Arc<dyn Send + Sync>>,
     interest: Option<Arc<dyn SharedInterest>>,
     #[cfg(feature = "hybrid-remote")]
     retained_payload: Option<Arc<crate::search::budget::PayloadPermit>>,
@@ -209,6 +212,10 @@ impl RemoteCall {
     pub fn new(operation: SearchOperation) -> Self {
         Self {
             operation,
+            #[cfg(feature = "hybrid-remote")]
+            background: false,
+            #[cfg(feature = "hybrid-remote")]
+            physical: None,
             interest: None,
             #[cfg(feature = "hybrid-remote")]
             retained_payload: None,
@@ -222,12 +229,31 @@ impl RemoteCall {
     pub fn shared(operation: SearchOperation, interest: Arc<dyn SharedInterest>) -> Self {
         Self {
             operation,
+            #[cfg(feature = "hybrid-remote")]
+            background: false,
+            #[cfg(feature = "hybrid-remote")]
+            physical: None,
             interest: Some(interest),
             #[cfg(feature = "hybrid-remote")]
             retained_payload: None,
             #[cfg(feature = "hybrid-remote")]
             activity: None,
         }
+    }
+
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn for_background(mut self, physical: Arc<dyn Send + Sync>) -> Self {
+        self.background = true;
+        self.physical = Some(physical);
+        self
+    }
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn is_background(&self) -> bool {
+        self.background
+    }
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn physical_tail(&self) -> Option<Arc<dyn Send + Sync>> {
+        self.physical.clone()
     }
 
     /// Retain the original ingress owner through physical codec work and output Drop.
@@ -255,6 +281,11 @@ impl RemoteCall {
     #[cfg(feature = "hybrid-remote")]
     pub(crate) fn payload_reservation(&self) -> Option<Arc<crate::search::budget::PayloadPermit>> {
         self.retained_payload.clone()
+    }
+
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn is_shared(&self) -> bool {
+        self.interest.is_some()
     }
 
     /// Original operation, or shared hard operation when coalesced.
@@ -285,7 +316,6 @@ impl RemoteCall {
     }
 
     /// Poll the same pinned work while resetting only the outer live-interest timer.
-    #[cfg(any(feature = "hybrid-remote", test))]
     pub(crate) async fn wait<T>(
         &self,
         shutdown: &Cancellation,
@@ -314,7 +344,10 @@ impl RemoteCall {
                 biased;
                 () = shutdown.cancelled() => return Err(remote_denied("remote execution is shutting down")),
                 () = self.operation.cancellation().cancelled() => return Err(remote_denied("remote operation cancelled")),
-                () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => { self.check()?; }
+                () = async {
+                    if self.interest.is_none() {self.operation.deadline_elapsed().await;}
+                    else {tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;}
+                } => { self.check()?; }
                 () = async { match changed.as_mut().as_pin_mut() { Some(waiter) => waiter.await, None => std::future::pending().await } } => {}
                 result = &mut work => { self.check()?; return result; }
             }

@@ -19,25 +19,60 @@ fn operation(started: Instant) -> SearchOperation {
 
 #[test]
 fn plain_thread_bridge_returns_work_result() {
+    let _env = crate::cli::test_env::env_guard();
     assert_eq!(
-        super::block_on_io(async { Ok(7) }).expect("plain bridge"),
+        crate::cli::command::run(crate::config::Config::default(), |_| async { Ok(7) }).unwrap(),
         7
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multithread_runtime_bridge_does_not_nest_an_async_executor() {
+    let env_guard = crate::cli::test_env::env_guard();
+    for failure in [0, 1, 2] {
+        let result = crate::cli::command::run(crate::config::Config::default(), |_| {
+            assert_eq!(
+                tokio::runtime::Handle::current().runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread,
+                "work construction stays outside command block_on"
+            );
+            async move {
+                assert_eq!(
+                    tokio::runtime::Handle::current().runtime_flavor(),
+                    tokio::runtime::RuntimeFlavor::CurrentThread,
+                    "actual command work owns one explicit runtime"
+                );
+                match failure {
+                    0 => Ok(7),
+                    1 => Err(Error::internal("actual command error")),
+                    _ => panic!("actual command unwind"),
+                }
+            }
+        });
+        if failure == 0 {
+            assert_eq!(result.unwrap(), 7);
+        } else {
+            assert!(result.is_err());
+        }
+        assert_eq!(
+            tokio::runtime::Handle::current().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        );
+    }
+    drop(env_guard);
     assert_eq!(
-        super::block_on_io(async { Ok(7) }).expect("blocking bridge"),
-        7
+        tokio::spawn(async { 9 }).await.unwrap(),
+        9,
+        "ambient executor remains live after actual command runtime destruction"
     );
 }
 
 #[tokio::test]
 async fn current_thread_runtime_refuses_sync_bridge_before_polling_work() {
+    let _env = crate::cli::test_env::env_guard();
     let polled = Arc::new(AtomicBool::new(false));
-    let work = Arc::clone(&polled);
-    let result = super::block_on_io(async move {
+    let work = polled.clone();
+    let result = crate::cli::command::run(crate::config::Config::default(), move |_| async move {
         work.store(true, Ordering::SeqCst);
         Ok(7)
     });
@@ -47,52 +82,68 @@ async fn current_thread_runtime_refuses_sync_bridge_before_polling_work() {
 
 #[test]
 fn expired_cli_operation_cannot_turn_missing_endpoint_into_direct_fallback() {
-    let cache = tempfile::tempdir().expect("missing endpoint cache");
-    let settings = crate::search::settings::standalone().expect("owner policy");
+    let _env = crate::cli::test_env::env_guard();
+    let cache = tempfile::tempdir().unwrap();
+    let settings = crate::search::settings::standalone().unwrap();
     let started = Instant::now()
         .checked_sub(Duration::from_millis(
             settings.settings().request_timeout_ms,
         ))
-        .expect("expired start");
+        .unwrap();
     let operation = operation(started);
-    let result = super::try_daemon_search(
-        cache.path(),
-        std::path::Path::new("."),
-        json!({"query":"widgets"}),
-        &operation,
-        &crate::store::settings::standalone().unwrap(),
+    let observed = operation.clone();
+    let result = crate::cli::command::run(
+        crate::config::Config::default(),
+        move |mut context| async move {
+            context.cache = cache.path().to_path_buf();
+            let activity = context.activity.track();
+            super::daemon_in(
+                &context,
+                std::path::Path::new("."),
+                json!({"query":"widgets"}),
+                &operation,
+                &crate::store::settings::standalone().unwrap(),
+                &activity,
+            )
+            .await
+        },
     );
     assert!(matches!(result, Err(Error::Admission { .. })));
-    assert!(operation.cancellation().is_cancelled());
+    assert!(observed.cancellation().is_cancelled());
 }
 
 #[test]
 fn missing_endpoint_leaves_original_operation_live_for_direct_search() {
-    let cache = tempfile::tempdir().expect("missing endpoint cache");
-    let mut settings = crate::search::settings::standalone()
-        .expect("owner policy")
-        .into_settings();
-    settings.request_timeout_ms = 300_000; // safety policy, not a latency assertion
+    let _env = crate::cli::test_env::env_guard();
+    let cache = tempfile::tempdir().unwrap();
+    let mut global = crate::config::Config::default();
+    global.search.request_timeout_ms = 300_000;
     let started = Instant::now()
         .checked_sub(Duration::from_millis(12))
-        .expect("original ingress");
-    let operation =
-        SearchOperation::new(&settings, started, Cancellation::new()).expect("operation");
-    let result = super::try_daemon_search(
-        cache.path(),
-        std::path::Path::new("."),
-        json!({"query":"widgets"}),
-        &operation,
-        &crate::store::settings::standalone().unwrap(),
-    )
-    .expect("direct fallback");
+        .unwrap();
+    let operation = SearchOperation::new(&global.search, started, Cancellation::new()).unwrap();
+    let observed = operation.clone();
+    let result = crate::cli::command::run(global, move |mut context| async move {
+        context.cache = cache.path().to_path_buf();
+        let activity = context.activity.track();
+        super::daemon_in(
+            &context,
+            std::path::Path::new("."),
+            json!({"query":"widgets"}),
+            &operation,
+            &crate::store::settings::standalone().unwrap(),
+            &activity,
+        )
+        .await
+    })
+    .unwrap();
     assert!(result.is_none());
-    assert_eq!(operation.started_at(), started);
+    assert_eq!(observed.started_at(), started);
     assert_eq!(
-        operation.deadline().duration_since(started),
-        Duration::from_millis(settings.request_timeout_ms)
+        observed.deadline().duration_since(started),
+        Duration::from_millis(300_000)
     );
-    assert!(!operation.cancellation().is_cancelled());
+    assert!(!observed.cancellation().is_cancelled());
 }
 
 #[test]

@@ -86,7 +86,7 @@ pub fn ann_build_admitted_for_model(count: usize, model_id: &str, max_bytes: u64
 }
 
 /// Embedding width encoded in a cache model id (`...@d2048@l2`), when present.
-fn model_dim(model_id: &str) -> Option<usize> {
+pub(crate) fn model_dim(model_id: &str) -> Option<usize> {
     let (_, after) = model_id.rsplit_once("@d")?;
     let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok().filter(|dim| *dim > 0)
@@ -466,6 +466,8 @@ struct BuildJob {
     building_bytes: u64,
     dim: usize,
     store_root: Option<PathBuf>,
+    job_pin: Option<crate::vector_cache::JobPinAuthority>,
+    activity: Option<Arc<crate::daemon::request::Activity>>,
 }
 
 /// Rows/hashes loaded for one lookup, before the ANN exact/build decision.
@@ -674,6 +676,7 @@ pub struct DenseCache {
     outcomes: Arc<Mutex<HashMap<i64, AnnOutcome>>>,
     query_cache: Arc<Mutex<QueryCache>>,
     clock: Arc<AtomicU64>,
+    origin_activity: Option<Arc<crate::daemon::request::Activity>>,
     #[cfg(test)]
     test_build_gate: Option<TestBuildGate>,
     #[cfg(test)]
@@ -863,6 +866,7 @@ impl DenseCache {
             outcomes: Arc::new(Mutex::new(HashMap::new())),
             query_cache: Arc::new(Mutex::new(QueryCache::new(query))),
             clock: Arc::new(AtomicU64::new(0)),
+            origin_activity: None,
             #[cfg(test)]
             test_build_gate: None,
             #[cfg(test)]
@@ -1042,6 +1046,15 @@ impl DenseCache {
     }
 
     #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn observe_cold_start(&self, observer: Arc<dyn Fn() + Send + Sync>) {
+        self.cold_flights.observe_starts(observer);
+    }
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn observe_cold_joins(&self, observer: std::sync::mpsc::Sender<()>) {
+        self.cold_flights.observe_joins(observer);
+    }
+
+    #[cfg(all(test, feature = "hybrid-remote"))]
     pub(crate) fn observe_query_joins(&self, observer: std::sync::mpsc::Sender<()>) {
         self.lock_query_cache().flights.observe_joins(observer);
     }
@@ -1088,6 +1101,7 @@ impl DenseCache {
             outcomes: Arc::new(Mutex::new(HashMap::new())),
             query_cache: Arc::clone(&self.query_cache),
             clock: Arc::new(AtomicU64::new(0)),
+            origin_activity: None,
             #[cfg(test)]
             test_build_gate: None,
             #[cfg(test)]
@@ -1212,7 +1226,7 @@ impl DenseCache {
         load: impl FnOnce() -> Result<DenseMetadata>,
         admit: impl Fn() -> Result<Guard>,
     ) -> Result<DenseRows> {
-        self.access(request, cancellation, Lookup::Get, load, admit)
+        self.access(request, cancellation, Lookup::Get, load, admit, None)
     }
 
     fn bind_root(&self, root: &Path) -> Result<PathBuf> {
@@ -1257,6 +1271,7 @@ impl DenseCache {
         lookup: Lookup,
         load: impl FnOnce() -> Result<DenseMetadata>,
         admit: impl Fn() -> Result<Guard>,
+        job_pin: Option<crate::vector_cache::JobPinAuthority>,
     ) -> Result<DenseRows> {
         cancellation.check()?;
         let root = self.bind_root(request.cache_root)?;
@@ -1293,7 +1308,12 @@ impl DenseCache {
                     }
                     .into());
                 }
-                self.resolve(request, metadata.into_chunks(), &|| interest.check())
+                self.resolve(
+                    request,
+                    metadata.into_chunks(),
+                    &|| interest.check(),
+                    job_pin,
+                )
             },
         )?;
         // The registry's cached callback must never block on configuration:
@@ -1309,6 +1329,7 @@ impl DenseCache {
         request: DenseRequest<'_>,
         chunks: Vec<(u64, String)>,
         check: &impl Fn() -> WorkResult<()>,
+        job_pin: Option<crate::vector_cache::JobPinAuthority>,
     ) -> WorkResult<DenseRows> {
         check()?;
         let DenseRequest {
@@ -1399,7 +1420,7 @@ impl DenseCache {
         check()?;
         let input = self.load_rows(request, chunks, digest)?;
         check()?;
-        self.resolve_rows_checked(project_id, generation, model_id, input, check)
+        self.resolve_rows_checked(project_id, generation, model_id, input, check, job_pin)
     }
 
     fn load_rows(
@@ -1446,6 +1467,7 @@ impl DenseCache {
         model_id: &str,
         input: DenseInput,
         check: &impl Fn() -> WorkResult<()>,
+        job_pin: Option<crate::vector_cache::JobPinAuthority>,
     ) -> WorkResult<DenseRows> {
         let DenseInput {
             chunks,
@@ -1534,6 +1556,8 @@ impl DenseCache {
                 building_bytes,
                 dim,
                 store_root,
+                job_pin,
+                activity: self.origin_activity.clone(),
             }))
         } else {
             Ok(self.stash_ready(project_id, generation, model_id, rows, Arc::new(chunks)))
@@ -1548,7 +1572,7 @@ impl DenseCache {
         model_id: &str,
         input: DenseInput,
     ) -> DenseRows {
-        self.resolve_rows_checked(project_id, generation, model_id, input, &|| Ok(()))
+        self.resolve_rows_checked(project_id, generation, model_id, input, &|| Ok(()), None)
             .expect("unchecked test lookup cannot be abandoned")
     }
 
@@ -1727,7 +1751,43 @@ impl DenseCache {
         load: impl FnOnce() -> Result<DenseMetadata>,
         admit: impl Fn() -> Result<Guard>,
     ) -> Result<()> {
-        self.access(request, cancellation, Lookup::Warm, load, admit)
+        self.access(request, cancellation, Lookup::Warm, load, admit, None)
+            .map(|_| ())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_job_builds_for_test(&mut self) -> TestBuildGate {
+        let gate = TestBuildGate::new();
+        self.test_build_gate = Some(gate.clone());
+        gate
+    }
+    #[cfg(test)]
+    pub(crate) fn join_job_builds_for_test(&self) -> Result<()> {
+        let workers = std::mem::take(&mut *self.test_workers.lock().unwrap());
+        let mut failed = false;
+        for worker in workers {
+            failed |= worker.join().is_err();
+        }
+        if failed {
+            Err(Error::internal("controlled ANN test worker unwind"))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Move exact negative authority into the existing cold capture/build owner.
+    pub(crate) fn warm_with_job_pin<Guard>(
+        &self,
+        request: DenseRequest<'_>,
+        cancellation: &Cancellation,
+        load: impl FnOnce() -> Result<DenseMetadata>,
+        admit: impl Fn() -> Result<Guard>,
+        pin: crate::vector_cache::JobPinAuthority,
+    ) -> Result<()> {
+        pin.renew()?;
+        // Existing ready/build/follower/pressure paths drop this authority here
+        // on the admitted caller. A newly started build moves it into BuildJob.
+        self.access(request, cancellation, Lookup::Warm, load, admit, Some(pin))
             .map(|_| ())
     }
 
@@ -1937,6 +1997,15 @@ impl DenseCache {
 
     /// Snapshot of the cache sharing its entries, digests and clock; used by
     /// background builds to publish results (design §8).
+    pub(crate) fn snapshot_with_activity(
+        &self,
+        activity: Arc<crate::daemon::request::Activity>,
+    ) -> Self {
+        let mut snapshot = self.snapshot();
+        snapshot.origin_activity = Some(activity);
+        snapshot
+    }
+
     pub(crate) fn snapshot(&self) -> Self {
         Self {
             limits: self.limits,
@@ -1952,6 +2021,7 @@ impl DenseCache {
             outcomes: Arc::clone(&self.outcomes),
             query_cache: Arc::clone(&self.query_cache),
             clock: Arc::clone(&self.clock),
+            origin_activity: self.origin_activity.clone(),
             #[cfg(test)]
             test_build_gate: self.test_build_gate.clone(),
             #[cfg(test)]
@@ -1971,7 +2041,10 @@ impl DenseCache {
 #[cfg(any(test, debug_assertions))]
 #[doc(hidden)]
 #[derive(Clone, Default)]
-pub struct TestBuildGate(std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+pub struct TestBuildGate(
+    std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    #[cfg(test)] std::sync::Arc<std::sync::atomic::AtomicBool>,
+);
 
 #[cfg(any(test, debug_assertions))]
 impl TestBuildGate {
@@ -1990,11 +2063,22 @@ impl TestBuildGate {
         ready.notify_all();
     }
 
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn open_with_unwind(&self) {
+        self.1.store(true, AtomicOrdering::SeqCst);
+        self.open();
+    }
+
     fn wait(&self) {
         let (lock, ready) = &*self.0;
         if let Ok(open) = lock.lock() {
             let _ = ready.wait_timeout_while(open, Duration::from_mins(2), |open| !*open);
         }
+        #[cfg(test)]
+        assert!(
+            !self.1.load(AtomicOrdering::SeqCst),
+            "controlled ANN worker unwind"
+        );
     }
 }
 
@@ -2029,14 +2113,26 @@ fn test_build_delay() {}
 /// underlying index is caught and treated like a build failure (FR-5).
 #[allow(clippy::needless_pass_by_value)]
 fn build_in_background(
-    cache: Arc<DenseCache>,
-    job: BuildJob,
-    building: Arc<BuildingAnn>,
+    cache_input: Arc<DenseCache>,
+    mut job_input: BuildJob,
+    building_input: Arc<BuildingAnn>,
     reservation: BuildReservation,
 ) {
+    // Same originating Activity retires last, after data, publication and the
+    // existing physical byte reservation, including stale completion/unwind.
+    let _origin_activity = job_input.activity.take();
+    let _activity = job_input
+        .job_pin
+        .as_mut()
+        .and_then(crate::vector_cache::JobPinAuthority::take_activity);
+    // Move arguments into later locals too: argument destruction otherwise
+    // follows local destruction and could outlive the originating Activity.
+    let cache = cache_input;
     // Declare the guard before the working-set locals: on unwind or stale
     // completion, rows/loaded graphs must drop before their charge is freed.
     let mut reservation = reservation;
+    let building = building_input;
+    let job = job_input;
     let BuildJob {
         project_id,
         key,
@@ -2044,6 +2140,7 @@ fn build_in_background(
         hashes,
         dim,
         store_root,
+        mut job_pin,
         ..
     } = job;
     let Some(store_root) = store_root else {
@@ -2076,7 +2173,10 @@ fn build_in_background(
         Ok((Arc::new(loaded), published_bytes))
     }))
     .unwrap_or_else(|payload| Err(Error::internal(format!("ann build panic: {payload:?}"))));
-    if result.is_ok() {
+    if job_pin.is_some() {
+        // Exact moved authority retires on success/error/unwind, never project-id alias.
+        drop(job_pin.take());
+    } else if result.is_ok() {
         // The dump is READY: release the backfill lease. On failure the pins
         // stay until their TTL so the retry still sees full coverage. Do this
         // without holding the entries lock (the vector DB may be busy).
@@ -2172,24 +2272,15 @@ mod tests {
 
         fn from_limits(root: &std::path::Path, limits: DenseCacheLimits) -> Self {
             let mut cache = DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, root, limits);
-            cache.test_build_gate = Some(TestBuildGate::new());
+            cache.pause_job_builds_for_test();
             Self { cache }
         }
 
         fn finish(&self) {
             self.cache.test_build_gate.as_ref().expect("gate").open();
-            let workers = std::mem::take(
-                &mut *self
-                    .cache
-                    .test_workers
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner),
-            );
-            for worker in workers {
-                let joined = worker.join();
-                if !std::thread::panicking() {
-                    joined.expect("worker must not panic");
-                }
+            let joined = self.cache.join_job_builds_for_test();
+            if !std::thread::panicking() {
+                joined.expect("worker must not panic");
             }
             if !std::thread::panicking() {
                 assert_eq!(
@@ -2521,6 +2612,7 @@ mod tests {
                     .expect("metadata")
                     .into_chunks(),
                 &|| Ok(()),
+                None,
             )
             .expect("resolve");
         assert!(
@@ -2619,6 +2711,8 @@ mod tests {
             hashes: Arc::new(chunks),
             dim,
             store_root: Some(root.path().to_path_buf()),
+            job_pin: None,
+            activity: None,
         };
         let state = dense.start_build(job);
         assert!(matches!(state, DenseRows::Ann(current) if Arc::ptr_eq(&current, &published)));

@@ -9,7 +9,7 @@ use crate::platform;
 // A bound listener is sufficient: setup callbacks run only after native connect.
 // No accepted-stream IO is needed to classify the constructor's result.
 struct Peer {
-    _listener: platform::BlockingListener,
+    listener: platform::BlockingListener,
     cache: tempfile::TempDir,
 }
 impl Peer {
@@ -17,10 +17,7 @@ impl Peer {
         let cache = tempfile::tempdir().unwrap();
         platform::fs::secure_dir(&cache.path().join("state")).unwrap();
         let listener = platform::bind_blocking(&platform::daemon_endpoint(cache.path())).unwrap();
-        Self {
-            _listener: listener,
-            cache,
-        }
+        Self { listener, cache }
     }
 }
 
@@ -63,43 +60,55 @@ fn setup_errors_after_native_connect_remain_transport_errors() {
 
 #[test]
 fn connected_setup_error_cannot_replay_cli_sync_or_create_index_state() {
+    use std::io::{BufRead, Write};
+    let _env = crate::cli::test_env::env_guard();
     for fail_read in [true, false] {
         let peer = Peer::new();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("guide.md"), "replacementwidget").unwrap();
-        let connection = injected_setup(peer.cache.path(), fail_read);
-        let result = super::sync_with_connection(
-            peer.cache.path(),
-            root.path(),
-            &crate::store::settings::standalone().unwrap(),
-            connection,
-            || {
-                std::fs::write(
-                    peer.cache.path().join("registry.db"),
-                    b"unexpected direct indexing",
-                )?;
-                std::fs::create_dir(peer.cache.path().join("projects"))?;
-                Ok(())
+        let cache = peer.cache.path().to_path_buf();
+        let listener = peer.listener;
+        let server = std::thread::spawn(move || {
+            let stream = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream);
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            assert!(request.contains("Hello"));
+            if !fail_read {
+                reader
+                    .get_mut()
+                    .write_all(b"invalid handshake response\n")
+                    .unwrap();
+            }
+        });
+        let cache_for_command = cache.clone();
+        let target = root.path().to_path_buf();
+        let result = super::command::run(
+            crate::config::Config::default(),
+            move |mut context| async move {
+                context.cache = cache_for_command;
+                super::sync_command::run_in(
+                    context,
+                    Some(target),
+                    crate::store::settings::standalone().unwrap(),
+                    std::time::Instant::now(),
+                )
+                .await
             },
         );
-        let registry_created = peer.cache.path().join("registry.db").exists();
-        let Err(error) = result else {
-            panic!(
-                "connected setup failure replayed CLI sync; registry_created={registry_created}"
-            );
-        };
-        assert!(
-            matches!(error.downcast_ref::<Error>(), Some(Error::Transport { .. })),
-            "{error}"
-        );
+        server.join().unwrap();
+        let error = result
+            .err()
+            .expect("actual connected Sync setup must not replay direct");
+        assert!(matches!(error, Error::Transport { .. }), "{error}");
         assert!(error.to_string().contains(if fail_read {
-            "injected read"
+            "connection closed"
         } else {
-            "injected write"
+            "bad response"
         }));
         for name in ["registry.db", "projects", "logs", "vectors.db"] {
             assert!(
-                !peer.cache.path().join(name).exists(),
+                !cache.join(name).exists(),
                 "connected failure created {name}"
             );
         }

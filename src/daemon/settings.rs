@@ -71,6 +71,10 @@ pub struct DaemonSettings {
     pub control_pending: usize,
     /// Maximum physically running DNS helpers; their pending cap derives from remote slots.
     pub helper_active: usize,
+    /// Maximum physical background phases and accepted native jobs.
+    pub background_active: usize,
+    /// Maximum waiters for background admission.
+    pub background_pending: usize,
     /// Owner policy: `max_blocking_threads`.
     pub max_blocking_threads: usize,
     /// Owner policy: `idle_grace_ms`.
@@ -101,6 +105,8 @@ struct EffectiveDaemonPolicy<'a> {
     control_active: usize,
     control_pending: usize,
     helper_active: usize,
+    background_active: usize,
+    background_pending: usize,
     max_blocking_threads: usize,
     idle_grace_ms: u64,
     control_timeout_ms: u64,
@@ -121,6 +127,8 @@ impl DaemonSettings {
             control_active: self.control_active,
             control_pending: self.control_pending,
             helper_active: self.helper_active,
+            background_active: self.background_active,
+            background_pending: self.background_pending,
             max_blocking_threads: self.max_blocking_threads,
             idle_grace_ms: self.idle_grace_ms,
             control_timeout_ms: self.control_timeout_ms,
@@ -154,6 +162,10 @@ pub struct DaemonPatch {
     pub control_pending: Option<usize>,
     /// Explicit DNS helper capacity.
     pub helper_active: Option<usize>,
+    /// Explicit background phase/native-job limit.
+    pub background_active: Option<usize>,
+    /// Explicit background waiter limit.
+    pub background_pending: Option<usize>,
     /// Explicit `max_blocking_threads` override.
     pub max_blocking_threads: Option<usize>,
     /// Explicit `idle_grace_ms` override.
@@ -183,6 +195,8 @@ impl DaemonSpec {
         control_active: 2,
         control_pending: 16,
         helper_active: 1,
+        background_active: 1,
+        background_pending: 8,
         max_blocking_threads: 512,
         idle_grace_ms: 5000,
         control_timeout_ms: 2000,
@@ -225,6 +239,16 @@ impl DaemonSpec {
         settings: &DaemonSettings,
         view: &mut crate::config::view::ViewBuilder<'_>,
     ) -> Result<()> {
+        view.push(
+            "daemon.background_active",
+            serde_json::json!(settings.background_active),
+            None,
+        )?;
+        view.push(
+            "daemon.background_pending",
+            serde_json::json!(settings.background_pending),
+            None,
+        )?;
         view.push(
             "daemon.helper_active",
             serde_json::json!(settings.helper_active),
@@ -324,6 +348,8 @@ impl SettingsSpec for DaemonSpec {
         FieldSpec::new("daemon.control_active", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.control_pending", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.helper_active", Scope::Daemon, Unit::Count),
+        FieldSpec::new("daemon.background_active", Scope::Daemon, Unit::Count),
+        FieldSpec::new("daemon.background_pending", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.max_blocking_threads", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.idle_grace_ms", Scope::Daemon, Unit::Milliseconds),
         FieldSpec::new(
@@ -353,6 +379,14 @@ impl SettingsSpec for DaemonSpec {
         source: &SourceId,
         origins: &mut Provenance,
     ) -> Result<()> {
+        if let Some(value) = patch.background_active {
+            settings.background_active = value;
+            origins.set("daemon.background_active", source)?;
+        }
+        if let Some(value) = patch.background_pending {
+            settings.background_pending = value;
+            origins.set("daemon.background_pending", source)?;
+        }
         if let Some(value) = patch.helper_active {
             settings.helper_active = value;
             origins.set("daemon.helper_active", source)?;
@@ -437,6 +471,16 @@ impl SettingsSpec for DaemonSpec {
             ("daemon.control_pending", settings.control_pending, true),
             ("daemon.helper_active", settings.helper_active, false),
             (
+                "daemon.background_active",
+                settings.background_active,
+                false,
+            ),
+            (
+                "daemon.background_pending",
+                settings.background_pending,
+                true,
+            ),
+            (
                 "daemon.max_blocking_threads",
                 settings.max_blocking_threads,
                 false,
@@ -491,12 +535,13 @@ impl SettingsSpec for DaemonSpec {
         let required = settings
             .search_active
             .checked_add(settings.control_active)
-            .and_then(|n| n.checked_add(1))
+            .and_then(|n| n.checked_add(settings.background_active))
             .and_then(|n| n.checked_add(settings.helper_active))
+            .and_then(|n| n.checked_add(1))
             .ok_or_else(|| invalid("daemon lexical worker capacity overflow"))?;
         if required > settings.max_blocking_threads {
             return Err(invalid(
-                "daemon.max_blocking_threads must fit search_active + control_active + fixed sync1 + helper_active",
+                "daemon.max_blocking_threads must fit search_active + control_active + background_active + helper_active + terminal1",
             ));
         }
         Ok(())

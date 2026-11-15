@@ -434,3 +434,22 @@ background active/pending policy, resumable jobs/terminal IndexHandle cleanup an
 complete diagnostic projection are not delivered by these interactive owners.
 Provider/native pools and legacy producers remain outside a process-wide reserve
 claim. See [PR1 coverage](../async-remote-orchestration/coverage.md).
+
+
+## MODIFIED 2026-11-15 — #81 complete operational adoption
+
+RemoteSpec background_active1/pending8/background_timeout_ms600000 now feed
+resumable Index/Sync/watch/automatic-registration/backfill jobs and direct command
+owners. DaemonSpec background_active1/pending8 bounds native jobs/CPU phases;
+terminal1 is reserved within WorkerAdmission, and helper pending is the checked
+sum of interactive+background remote active capacities. Validated executor room
+is S+C+J+H+T1. SearchSpec request/retained allowances also admit captured plans,
+pending paths and actual codec workspace before copies/effects. No consumer fills
+defaults, new executor or process-wide/native reserve is introduced.
+
+Direct Search/Index/Sync capture the same global owner policy once, then compose
+one runtime/execution/JobRoot outside work futures. Existing operation/counter
+owners supply versioned explain execution and additive numeric status diagnostics;
+there is no observability backend/label setting or persisted metric identity.
+Probes/rootless compatibility adapters remain named exceptions, not binary
+operational paths. Full CF13/v2/provisioning remains outside this adoption.

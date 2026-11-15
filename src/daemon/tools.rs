@@ -2080,7 +2080,7 @@ fn run_sync_job_using(
 }
 
 // The association envelope is bounded by the existing state-record boundary.
-fn retained_sync_record(db: &Db, job_id: i64) -> Result<Value> {
+pub(crate) fn retained_sync_record(db: &Db, job_id: i64) -> Result<Value> {
     let bound = i64::try_from(crate::limits::MAX_STATE_BYTES)
         .map_err(|_| Error::internal("sync record bound overflow"))?;
     let raw: Option<Vec<u8>> = db
@@ -2098,7 +2098,12 @@ fn retained_sync_record(db: &Db, job_id: i64) -> Result<Value> {
         .unwrap_or_else(|| json!({})))
 }
 
-fn associate_sync_index(db: &Db, job_id: i64, project_id: i64, stats: &JobStats) -> Result<()> {
+pub(crate) fn associate_sync_index(
+    db: &Db,
+    job_id: i64,
+    project_id: i64,
+    stats: &JobStats,
+) -> Result<()> {
     let outcome = crate::index::outcome::read(db, project_id)?
         .ok_or_else(|| Error::internal("completed sync has no current lexical outcome"))?;
     if outcome.stats != *stats {

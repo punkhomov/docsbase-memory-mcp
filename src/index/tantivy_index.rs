@@ -170,6 +170,15 @@ impl Drop for IndexHandle {
 }
 
 impl IndexHandle {
+    /// Read-only recreation decision, before any writer or marker effects.
+    pub(crate) fn needs_rebuild(dir: &Path) -> bool {
+        !dir.join("meta.json").exists()
+            || dir.join(REBUILD_MARKER).exists()
+            || healing_marker_present(dir)
+            || !tokenizer_version_matches(dir)
+            || open_index(dir).map_or(true, |index| fields_from(&index.schema()).is_err())
+    }
+
     /// Opens the index in `dir`, creating it when absent.
     ///
     /// # Errors

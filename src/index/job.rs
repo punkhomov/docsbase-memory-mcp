@@ -1,6 +1,7 @@
 //! Full index job: walk → hash → diff → tantivy + `SQLite` (FR-16, FR-18; A4; R2).
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -68,6 +69,14 @@ fn push_warning(stats: &mut JobStats, path: impl Into<String>, message: impl Int
     }
 }
 
+fn doc_limit_warning(stats: &mut JobStats, path: &str) {
+    push_warning(
+        stats,
+        path.to_owned(),
+        "max_docs_per_project reached; file skipped",
+    );
+}
+
 /// Outcome of one indexing run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct JobStats {
@@ -96,6 +105,74 @@ struct Pending {
     mtime: i64,
     content_hash: String,
     chunks: Vec<Chunk>,
+}
+
+impl Pending {
+    fn retained_fields(&self) -> Result<u64> {
+        let mut bytes = 0_u64;
+        for text in [
+            Some(&self.rel_path),
+            Some(&self.abs_path),
+            self.title.as_ref(),
+            self.frontmatter_json.as_ref(),
+            Some(&self.content_hash),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            add_capture_bytes(&mut bytes, text.capacity(), 1)?;
+        }
+        add_capture_bytes(
+            &mut bytes,
+            self.chunks.capacity(),
+            std::mem::size_of::<Chunk>(),
+        )?;
+        for chunk in &self.chunks {
+            add_capture_bytes(&mut bytes, chunk.text.capacity(), 1)?;
+            add_capture_bytes(
+                &mut bytes,
+                chunk.heading_path.capacity(),
+                std::mem::size_of::<String>(),
+            )?;
+            for heading in &chunk.heading_path {
+                add_capture_bytes(&mut bytes, heading.capacity(), 1)?;
+            }
+            if let ChunkKind::Code { lang: Some(lang) } = &chunk.kind {
+                add_capture_bytes(&mut bytes, lang.capacity(), 1)?;
+            }
+        }
+        Ok(bytes)
+    }
+    fn retained_charge(&self) -> Result<u64> {
+        let mut bytes = self.retained_fields()?;
+        // Covers old+new Pending Vec storage during its next geometric growth.
+        add_capture_bytes(&mut bytes, 3, std::mem::size_of::<Self>())?;
+        // Keep the later apply workspace admitted too: owned heading joins,
+        // their String vector and the borrowed SQL row vector. Parser/text
+        // workspace is the part released after prepare_doc_inner returns.
+        add_capture_bytes(
+            &mut bytes,
+            self.chunks.len(),
+            std::mem::size_of::<String>() + std::mem::size_of::<NewChunk<'_>>(),
+        )?;
+        for chunk in &self.chunks {
+            for heading in &chunk.heading_path {
+                add_capture_bytes(&mut bytes, heading.capacity(), 1)?;
+            }
+            add_capture_bytes(&mut bytes, chunk.heading_path.len(), 3)?;
+        }
+        Ok(bytes)
+    }
+}
+fn add_capture_bytes(total: &mut u64, count: usize, width: usize) -> Result<()> {
+    *total = count
+        .checked_mul(width)
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .and_then(|bytes| total.checked_add(bytes))
+        .ok_or_else(|| Error::Admission {
+            message: "retained index capture size overflow".into(),
+        })?;
+    Ok(())
 }
 
 /// Indexes `project` fully: every `.md` under its root is hashed and only
@@ -181,108 +258,13 @@ fn run_full_core(
     before_apply: impl FnOnce() -> Result<()>,
     embed: impl FnOnce(&Path, &[String]) -> Result<u64>,
 ) -> Result<JobStats> {
-    // A recreated index needs every document re-added (T27). Delay the SQL
-    // wipe until the prepared payload has passed the caller's config check.
-    let existing = if index.was_recreated() {
-        Vec::new()
-    } else {
-        repo::doc_states(db.connection(), project.id)?
-    };
-    let by_path: HashMap<&str, &DocState> = existing
-        .iter()
-        .map(|state| (state.rel_path.as_str(), state))
-        .collect();
-
-    let mut stats = JobStats::default();
-    let mut plan: Vec<Pending> = Vec::new();
-    let mut walked: HashSet<String> = HashSet::new();
-
-    let mut paths: Vec<PathBuf> = Vec::new();
-    let mut walk_errors = 0_usize;
-    for entry in walk::walk(&project.canonical_root, config)? {
-        match entry {
-            Ok(path) => paths.push(path),
-            Err(err) => {
-                walk_errors += 1;
-                push_warning(&mut stats, "", err.to_string());
-            }
-        }
-    }
-    stats.errors += walk_errors;
-    paths.sort();
-
-    let mut files: Vec<(PathBuf, String)> = Vec::new();
-    for path in paths {
-        if let Some(rel) = relative_to_root(&path, &project.canonical_root) {
-            walked.insert(rel.clone());
-            files.push((path, rel));
-        } else {
-            stats.errors += 1;
-            push_warning(
-                &mut stats,
-                path.display().to_string(),
-                "path is not inside the project root",
-            );
-        }
-    }
-
-    // An incomplete walk cannot prove absence: skip purging when any entry
-    // failed, otherwise one unreadable directory would drop its whole subtree.
-    let removed: Vec<&DocState> = if walk_errors == 0 {
-        existing
-            .iter()
-            .filter(|state| !walked.contains(&state.rel_path))
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    let mut new_budget = config
-        .max_docs_per_project
-        .saturating_sub(existing.len().saturating_sub(removed.len()));
-
-    for (path, rel) in &files {
-        let previous = by_path.get(rel.as_str()).copied();
-        match prepare_doc(path, rel, previous, config) {
-            Ok(Some(mut prepared)) => {
-                if previous.is_none() {
-                    if new_budget == 0 {
-                        stats.errors += 1;
-                        push_warning(
-                            &mut stats,
-                            rel.clone(),
-                            "max_docs_per_project reached; file skipped",
-                        );
-                        continue;
-                    }
-                    new_budget -= 1;
-                }
-                prepared.id = previous.map(|state| state.id);
-                plan.push(prepared);
-            }
-            Ok(None) => stats.skipped += 1,
-            Err(err) => {
-                stats.errors += 1;
-                push_warning(&mut stats, rel.clone(), err.to_string());
-            }
-        }
-    }
-
+    let mut prepared = capture_full(db, project, config, index.was_recreated())?;
     before_apply()?;
-    if index.was_recreated() {
-        let dropped = repo::delete_project_docs(db.connection(), project.id)?;
-        eprintln!(
-            "index schema upgraded for project {}; reindexing {dropped} document(s)",
-            project.id
-        );
-    }
-    finish_plan(
-        db, index, project.id, &mut plan, &removed, &mut stats, embed,
-    )?;
-    if index.was_recreated() {
-        index.mark_rebuilt()?;
-    }
-    Ok(stats)
+    prepared.begin(db, index, project.id)?;
+    let texts = prepared.texts();
+    embed(db.cache_root(), &texts)?;
+    prepared.commit(db, index, project.id)?;
+    Ok(prepared.stats)
 }
 
 /// Incrementally reindexes only `changed` paths (FR-16): created/modified files
@@ -421,6 +403,508 @@ fn run_incremental_core(
     before_apply: impl FnOnce() -> Result<()>,
     embed: impl FnOnce(&Path, &[String]) -> Result<u64>,
 ) -> Result<JobStats> {
+    let mut prepared = capture_incremental(db, project, changed, config)?;
+    before_apply()?;
+    prepared.begin(db, index, project.id)?;
+    let texts = prepared.texts();
+    embed(db.cache_root(), &texts)?;
+    prepared.commit(db, index, project.id)?;
+    Ok(prepared.stats)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CaptureEvent {
+    Reserved(u64),
+    Refused(u64),
+    Copy(&'static str),
+}
+
+pub(crate) struct CaptureBudget<'a> {
+    pub(crate) account: &'a crate::search::budget::PayloadPermit,
+    pub(crate) operation: &'a crate::search::operation::SearchOperation,
+    #[cfg(test)]
+    pub(crate) observed: Option<&'a dyn Fn(CaptureEvent)>,
+}
+impl CaptureBudget<'_> {
+    pub(crate) fn reserve(&mut self, bytes: u64) -> Result<()> {
+        let result = (|| {
+            self.operation.check()?;
+            let total =
+                self.account
+                    .bytes()
+                    .checked_add(bytes)
+                    .ok_or_else(|| Error::Admission {
+                        message: "index capture size overflow".into(),
+                    })?;
+            self.account.grow_shared(total)
+        })();
+        #[cfg(test)]
+        if let Some(observer) = self.observed {
+            observer(if result.is_ok() {
+                CaptureEvent::Reserved(self.account.bytes())
+            } else {
+                CaptureEvent::Refused(self.account.bytes())
+            });
+        }
+        result
+    }
+    fn warning(&mut self, message: &impl std::fmt::Display) -> Result<()> {
+        // Walk errors can include long native paths; count without materializing
+        // the message before reserving its formatted/transient retained copies.
+        struct Count(u64);
+        impl std::fmt::Write for Count {
+            fn write_str(&mut self, value: &str) -> std::fmt::Result {
+                self.0 = self
+                    .0
+                    .checked_add(value.len() as u64)
+                    .ok_or(std::fmt::Error)?;
+                Ok(())
+            }
+        }
+        let mut count = Count(0);
+        std::fmt::write(&mut count, format_args!("{message}")).map_err(|_| Error::Admission {
+            message: "warning capture size overflow".into(),
+        })?;
+        self.reserve(count.0.checked_mul(2).ok_or_else(|| Error::Admission {
+            message: "warning capture size overflow".into(),
+        })?)
+    }
+    fn metadata(&mut self, db: &Db, project: i64) -> Result<()> {
+        let (rows, bytes): (i64, i64) = db.connection().query_row(
+            "SELECT COUNT(*), COALESCE(SUM(length(CAST(rel_path AS BLOB))+length(CAST(content_hash AS BLOB))+COALESCE(length(CAST(frontmatter_json AS BLOB)),0)),0) FROM docs WHERE project_id=?1", [project], |row| Ok((row.get(0)?, row.get(1)?))
+        ).map_err(repo::db_error)?;
+        let rows = u64::try_from(rows).map_err(|_| Error::internal("negative metadata count"))?;
+        let bytes =
+            u64::try_from(bytes).map_err(|_| Error::internal("negative metadata byte count"))?;
+        let charge = rows
+            .checked_mul(1024)
+            .and_then(|n| bytes.checked_mul(8).and_then(|b| n.checked_add(b)))
+            .and_then(|n| n.checked_add(4096 * MAX_WARNINGS as u64))
+            .ok_or_else(|| Error::Admission {
+                message: "index metadata preflight overflow".into(),
+            })?;
+        self.reserve(charge)?;
+        #[cfg(test)]
+        if let Some(observer) = self.observed {
+            observer(CaptureEvent::Copy("doc-state/map/removal capture"));
+        }
+        Ok(())
+    }
+    pub(crate) fn path(&mut self, path: &Path) -> Result<()> {
+        let bytes = u64::try_from(path.as_os_str().len())
+            .map_err(|_| Error::internal("path size overflow"))?;
+        self.reserve(
+            bytes
+                .checked_mul(16)
+                .and_then(|n| n.checked_add(512))
+                .ok_or_else(|| Error::Admission {
+                    message: "index path preflight overflow".into(),
+                })?,
+        )?;
+        #[cfg(test)]
+        if let Some(observer) = self.observed {
+            observer(CaptureEvent::Copy("path/set capture"));
+        }
+        Ok(())
+    }
+    fn read(&mut self, path: &Path, max: u64) -> Result<String> {
+        let limit = max.checked_add(1).ok_or_else(|| Error::Admission {
+            message: "file capture limit overflow".into(),
+        })?;
+        let mut file = std::fs::File::open(path)
+            .map_err(|e| file_error(path, &e))?
+            .take(limit);
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = file.read(&mut buffer).map_err(|e| file_error(path, &e))?;
+            if read == 0 {
+                break;
+            }
+            let needed = bytes
+                .len()
+                .checked_add(read)
+                .ok_or_else(|| Error::Admission {
+                    message: "file capture size overflow".into(),
+                })?;
+            if needed > bytes.capacity() {
+                let next = needed.max(bytes.capacity().saturating_mul(2));
+                let previous = bytes.capacity();
+                self.reserve(
+                    u64::try_from(next)
+                        .map_err(|_| Error::internal("file capture capacity overflow"))?,
+                )?;
+                bytes.try_reserve_exact(next - bytes.len()).map_err(|e| {
+                    Error::internal_with_source("allocate accounted file capture", e)
+                })?;
+                self.account
+                    .shrink_shared(self.account.bytes().saturating_sub(previous as u64));
+            }
+            #[cfg(test)]
+            if let Some(observer) = self.observed {
+                observer(CaptureEvent::Copy("actual bounded file read"));
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+            if bytes.len() as u64 > max {
+                return Err(Error::Index {
+                    path: Some(path.to_path_buf()),
+                    message: format!("file is over max_file_size {max}"),
+                });
+            }
+        }
+        String::from_utf8(bytes).map_err(|_| Error::Index {
+            path: Some(path.to_path_buf()),
+            message: "stream did not contain valid UTF-8".into(),
+        })
+    }
+}
+
+/// Captured lexical plan, without native writer state or an open transaction.
+pub(crate) struct PreparedPlan {
+    plan: Vec<Pending>,
+    removed: Vec<DocState>,
+    pub(crate) stats: JobStats,
+}
+impl PreparedPlan {
+    pub(crate) fn begin(
+        &mut self,
+        db: &mut Db,
+        index: &mut IndexHandle,
+        project_id: i64,
+    ) -> Result<()> {
+        if index.was_recreated() {
+            repo::delete_project_docs(db.connection(), project_id)?;
+        }
+        let removed: Vec<_> = self.removed.iter().collect();
+        mark_pending(db, project_id, &mut self.plan, &removed)?;
+        for pending in &mut self.plan {
+            let id = pending
+                .id
+                .ok_or_else(|| Error::internal("pending document without id"))?;
+            index.delete_doc(id);
+            for chunk in &mut pending.chunks {
+                chunk.doc_id = id;
+            }
+            index.add_chunks(&pending.chunks)?;
+            self.stats.docs += 1;
+            self.stats.chunks += pending.chunks.len();
+        }
+        for state in &self.removed {
+            index.delete_doc(state.id);
+        }
+        self.stats.removed = self.removed.len();
+        Ok(())
+    }
+    #[cfg(test)]
+    pub(crate) fn measured_retained_bytes(&self) -> Result<u64> {
+        let mut bytes = 0;
+        add_capture_bytes(
+            &mut bytes,
+            self.plan.capacity(),
+            std::mem::size_of::<Pending>(),
+        )?;
+        for pending in &self.plan {
+            bytes = bytes
+                .checked_add(pending.retained_fields()?)
+                .ok_or_else(|| Error::internal("retained measurement overflow"))?;
+        }
+        add_capture_bytes(
+            &mut bytes,
+            self.removed.capacity(),
+            std::mem::size_of::<DocState>(),
+        )?;
+        for removed in &self.removed {
+            for text in [
+                Some(&removed.rel_path),
+                Some(&removed.content_hash),
+                removed.frontmatter_json.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                add_capture_bytes(&mut bytes, text.capacity(), 1)?;
+            }
+        }
+        add_capture_bytes(
+            &mut bytes,
+            self.stats.warnings.capacity(),
+            std::mem::size_of::<FileWarning>(),
+        )?;
+        for warning in &self.stats.warnings {
+            add_capture_bytes(&mut bytes, warning.path.capacity(), 1)?;
+            add_capture_bytes(&mut bytes, warning.message.capacity(), 1)?;
+        }
+        Ok(bytes)
+    }
+    pub(crate) fn embedding_batch_peak(&self, max_count: usize, max_bytes: usize) -> Result<usize> {
+        let mut peak = 0_usize;
+        let mut count = 0_usize;
+        let mut bytes = 0_usize;
+        for chunk in self.plan.iter().flat_map(|pending| &pending.chunks) {
+            let next = bytes
+                .checked_add(chunk.text.len())
+                .ok_or_else(|| Error::Admission {
+                    message: "embedding batch capture overflow".into(),
+                })?;
+            if count > 0 && (count >= max_count || next > max_bytes) {
+                peak = peak.max(bytes);
+                count = 0;
+                bytes = 0;
+            }
+            bytes = bytes
+                .checked_add(chunk.text.len())
+                .ok_or_else(|| Error::Admission {
+                    message: "embedding batch capture overflow".into(),
+                })?;
+            count += 1;
+        }
+        Ok(peak.max(bytes))
+    }
+    pub(crate) fn chunk_count(&self) -> usize {
+        self.plan.iter().map(|p| p.chunks.len()).sum()
+    }
+    pub(crate) fn next_texts(
+        &self,
+        cursor: &mut usize,
+        max_count: usize,
+        max_bytes: usize,
+    ) -> Vec<String> {
+        let mut batch = Vec::new();
+        let mut bytes = 0_usize;
+        for chunk in self.plan.iter().flat_map(|p| &p.chunks).skip(*cursor) {
+            if !batch.is_empty()
+                && (batch.len() >= max_count || bytes.saturating_add(chunk.text.len()) > max_bytes)
+            {
+                break;
+            }
+            bytes = bytes.saturating_add(chunk.text.len());
+            batch.push(chunk.text.clone());
+            *cursor += 1;
+        }
+        batch
+    }
+    pub(crate) fn texts(&self) -> Vec<String> {
+        self.plan
+            .iter()
+            .flat_map(|p| p.chunks.iter().map(|c| c.text.clone()))
+            .collect()
+    }
+    pub(crate) fn commit(
+        &self,
+        db: &mut Db,
+        index: &mut IndexHandle,
+        project_id: i64,
+    ) -> Result<()> {
+        index.commit()?;
+        let removed: Vec<_> = self.removed.iter().collect();
+        apply_plan(db, project_id, &self.plan, &removed)?;
+        if index.was_recreated() {
+            index.mark_rebuilt()?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) enum JobInput<'a> {
+    Full,
+    Sync,
+    Incremental(std::borrow::Cow<'a, [PathBuf]>),
+    Watch(std::sync::Arc<crate::watch::WatchPayload>),
+}
+
+impl JobInput<'_> {
+    pub(crate) fn account(&self) -> Option<std::sync::Arc<crate::search::budget::PayloadPermit>> {
+        match self {
+            Self::Watch(payload) => Some(payload.account.clone()),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn capture_input(
+    db: &Db,
+    project: &Project,
+    config: &Config,
+    recreated: bool,
+    input: &JobInput<'_>,
+    mut capture: Option<&mut CaptureBudget<'_>>,
+) -> Result<(PreparedPlan, super::outcome::SurveyScope)> {
+    match input {
+        JobInput::Watch(changed) if !recreated => {
+            let filtered = crate::watch::refilter_accounted(
+                project,
+                db.cache_root(),
+                &changed.paths,
+                config,
+                capture.as_deref_mut(),
+            )?;
+            Ok((
+                capture_incremental_accounted(db, project, &filtered, config, capture)?,
+                super::outcome::SurveyScope::Subset,
+            ))
+        }
+        JobInput::Incremental(changed) if !recreated => Ok((
+            capture_incremental_accounted(db, project, changed, config, capture)?,
+            super::outcome::SurveyScope::Subset,
+        )),
+        _ => Ok((
+            capture_full_accounted(db, project, config, recreated, capture)?,
+            super::outcome::SurveyScope::FullSurvey,
+        )),
+    }
+}
+
+pub(crate) fn capture_full(
+    db: &Db,
+    project: &Project,
+    config: &Config,
+    recreated: bool,
+) -> Result<PreparedPlan> {
+    capture_input(db, project, config, recreated, &JobInput::Full, None).map(|(plan, _)| plan)
+}
+pub(crate) fn capture_full_accounted(
+    db: &Db,
+    project: &Project,
+    config: &Config,
+    recreated: bool,
+    mut capture: Option<&mut CaptureBudget<'_>>,
+) -> Result<PreparedPlan> {
+    if let Some(budget) = capture.as_deref_mut() {
+        budget.metadata(db, project.id)?;
+    }
+    // A recreated index needs every document re-added (T27). Delay the SQL
+    // wipe until the prepared payload has passed the caller's config check.
+    let existing = if recreated {
+        Vec::new()
+    } else {
+        repo::doc_states(db.connection(), project.id)?
+    };
+    let by_path: HashMap<&str, &DocState> = existing
+        .iter()
+        .map(|state| (state.rel_path.as_str(), state))
+        .collect();
+
+    let mut stats = JobStats::default();
+    let mut plan: Vec<Pending> = Vec::new();
+    let mut walked: HashSet<String> = HashSet::new();
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut walk_errors = 0_usize;
+    for entry in walk::walk(&project.canonical_root, config)? {
+        match entry {
+            Ok(path) => {
+                if let Some(budget) = capture.as_deref_mut() {
+                    budget.path(&path)?;
+                }
+                paths.push(path);
+            }
+            Err(err) => {
+                walk_errors += 1;
+                if let Some(budget) = capture.as_deref_mut() {
+                    budget.warning(&err)?;
+                }
+                push_warning(&mut stats, "", err.to_string());
+            }
+        }
+    }
+    stats.errors += walk_errors;
+    paths.sort();
+
+    let mut files: Vec<(PathBuf, String)> = Vec::new();
+    for path in paths {
+        if let Some(rel) = relative_to_root(&path, &project.canonical_root) {
+            walked.insert(rel.clone());
+            files.push((path, rel));
+        } else {
+            stats.errors += 1;
+            push_warning(
+                &mut stats,
+                path.display().to_string(),
+                "path is not inside the project root",
+            );
+        }
+    }
+
+    // An incomplete walk cannot prove absence: skip purging when any entry
+    // failed, otherwise one unreadable directory would drop its whole subtree.
+    let removed: Vec<&DocState> = if walk_errors == 0 {
+        existing
+            .iter()
+            .filter(|state| !walked.contains(&state.rel_path))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let mut new_budget = config
+        .max_docs_per_project
+        .saturating_sub(existing.len().saturating_sub(removed.len()));
+
+    for (path, rel) in &files {
+        let previous = by_path.get(rel.as_str()).copied();
+        let before_file = capture.as_deref().map(|budget| budget.account.bytes());
+        match prepare_doc_accounted(path, rel, previous, config, capture.as_deref_mut()) {
+            Ok(Some(mut prepared)) => {
+                if previous.is_none() {
+                    if new_budget == 0 {
+                        stats.errors += 1;
+                        doc_limit_warning(&mut stats, rel);
+                        let charge = prepared.retained_charge()?;
+                        drop(prepared);
+                        if let Some(budget) = capture.as_deref_mut() {
+                            budget
+                                .account
+                                .shrink_shared(budget.account.bytes().saturating_sub(charge));
+                        }
+                        continue;
+                    }
+                    new_budget -= 1;
+                }
+                prepared.id = previous.map(|state| state.id);
+                plan.push(prepared);
+            }
+            Ok(None) => stats.skipped += 1,
+            Err(err @ Error::Admission { .. }) => return Err(err),
+            Err(err) => {
+                capture_file_warning(&mut stats, rel, err, before_file, capture.as_deref_mut())?;
+            }
+        }
+    }
+
+    Ok(PreparedPlan {
+        removed: removed.into_iter().cloned().collect(),
+        plan,
+        stats,
+    })
+}
+
+pub(crate) fn capture_incremental(
+    db: &Db,
+    project: &Project,
+    changed: &[PathBuf],
+    config: &Config,
+) -> Result<PreparedPlan> {
+    capture_input(
+        db,
+        project,
+        config,
+        false,
+        &JobInput::Incremental(std::borrow::Cow::Borrowed(changed)),
+        None,
+    )
+    .map(|(plan, _)| plan)
+}
+pub(crate) fn capture_incremental_accounted(
+    db: &Db,
+    project: &Project,
+    changed: &[PathBuf],
+    config: &Config,
+    mut capture: Option<&mut CaptureBudget<'_>>,
+) -> Result<PreparedPlan> {
+    if let Some(budget) = capture.as_deref_mut() {
+        budget.metadata(db, project.id)?;
+    }
     let existing = repo::doc_states(db.connection(), project.id)?;
     let by_path: HashMap<&str, &DocState> = existing
         .iter()
@@ -437,6 +921,9 @@ fn run_incremental_core(
     // Pass 1: deduplicate inputs and collect removals (files and whole
     // subtrees), so pass 2 sees the final document count.
     for path in changed {
+        if let Some(budget) = capture.as_deref_mut() {
+            budget.path(path)?;
+        }
         let Some(rel) = relative_to_root(path, &project.canonical_root) else {
             stats.errors += 1;
             push_warning(
@@ -498,24 +985,21 @@ fn run_incremental_core(
         } else {
             if new_budget == 0 {
                 stats.errors += 1;
-                push_warning(
-                    &mut stats,
-                    rel.clone(),
-                    "max_docs_per_project reached; file skipped",
-                );
+                doc_limit_warning(&mut stats, &rel);
                 continue;
             }
             new_budget -= 1;
         }
-        match prepare_doc(path, &rel, previous, config) {
+        let before_file = capture.as_deref().map(|budget| budget.account.bytes());
+        match prepare_doc_accounted(path, &rel, previous, config, capture.as_deref_mut()) {
             Ok(Some(mut prepared)) => {
                 prepared.id = previous.map(|state| state.id);
                 plan.push(prepared);
             }
             Ok(None) => stats.skipped += 1,
+            Err(err @ Error::Admission { .. }) => return Err(err),
             Err(err) => {
-                stats.errors += 1;
-                push_warning(&mut stats, rel.clone(), err.to_string());
+                capture_file_warning(&mut stats, &rel, err, before_file, capture.as_deref_mut())?;
             }
         }
     }
@@ -525,57 +1009,61 @@ fn run_incremental_core(
     let planned_ids: HashSet<i64> = plan.iter().filter_map(|pending| pending.id).collect();
     removed.retain(|state| !planned_ids.contains(&state.id) && !still_present.contains(&state.id));
 
-    before_apply()?;
-    finish_plan(
-        db, index, project.id, &mut plan, &removed, &mut stats, embed,
-    )?;
-    Ok(stats)
+    Ok(PreparedPlan {
+        removed: removed.into_iter().cloned().collect(),
+        plan,
+        stats,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn finish_plan(
-    db: &mut Db,
-    index: &mut IndexHandle,
-    project_id: i64,
-    plan: &mut [Pending],
-    removed: &[&DocState],
+fn capture_file_warning(
     stats: &mut JobStats,
-    embed: impl FnOnce(&Path, &[String]) -> Result<u64>,
+    path: &str,
+    error: Error,
+    before_file: Option<u64>,
+    mut capture: Option<&mut CaptureBudget<'_>>,
 ) -> Result<()> {
-    mark_pending(db, project_id, plan, removed)?;
-
-    for pending in plan.iter_mut() {
-        let id = pending
-            .id
-            .ok_or_else(|| Error::internal("pending document without id"))?;
-        index.delete_doc(id);
-        for chunk in &mut pending.chunks {
-            chunk.doc_id = id;
+    stats.errors += 1;
+    let mut retained = 0_u64;
+    if stats.warnings.len() < MAX_WARNINGS {
+        if let Some(budget) = capture.as_deref_mut() {
+            budget.warning(&error)?;
+            budget.reserve(
+                (path.len() as u64)
+                    .checked_mul(2)
+                    .and_then(|bytes| {
+                        bytes.checked_add((3 * std::mem::size_of::<FileWarning>()) as u64)
+                    })
+                    .ok_or_else(|| Error::Admission {
+                        message: "file warning capture overflow".into(),
+                    })?,
+            )?;
         }
-        index.add_chunks(&pending.chunks)?;
-        stats.docs += 1;
-        stats.chunks += pending.chunks.len();
+        let warning = FileWarning {
+            path: path.to_owned(),
+            message: error.to_string(),
+        };
+        add_capture_bytes(&mut retained, warning.path.capacity(), 1)?;
+        add_capture_bytes(&mut retained, warning.message.capacity(), 1)?;
+        add_capture_bytes(&mut retained, 3, std::mem::size_of::<FileWarning>())?;
+        stats.warnings.push(warning);
     }
-    for state in removed {
-        index.delete_doc(state.id);
+    // Inner read/parser buffers have returned; the last transient error/source
+    // dies here too. Only the newly retained warning remains charged.
+    drop(error);
+    if let (Some(budget), Some(before)) = (capture, before_file) {
+        let total = before
+            .checked_add(retained)
+            .ok_or_else(|| Error::Admission {
+                message: "retained file warning overflow".into(),
+            })?;
+        if total > budget.account.bytes() {
+            return Err(Error::internal(
+                "file warning preflight underestimated retained storage",
+            ));
+        }
+        budget.account.shrink_shared(total);
     }
-    stats.removed = removed.len();
-
-    // Embed before the tantivy commit and the plan apply: a provider failure
-    // (explicit error, NFR-2) then leaves the documents unindexed, and the
-    // marker rows written by `mark_pending` force the next (retry) run to
-    // re-plan the same files instead of skipping them as unchanged - vectors
-    // are never silently lost. Unchanged chunks are untouched (the full pass
-    // lives in the sync job and the open-time backfill).
-    let texts: Vec<String> = plan
-        .iter()
-        .flat_map(|pending| pending.chunks.iter().map(|chunk| chunk.text.clone()))
-        .collect();
-    embed(db.cache_root(), &texts)?;
-    // Tantivy first, then a short SQLite write transaction (R2): the marker
-    // rows make a crash in between reprocess on the next run.
-    index.commit()?;
-    apply_plan(db, project_id, plan, removed)?;
     Ok(())
 }
 
@@ -625,11 +1113,50 @@ fn relative_to_root(path: &Path, root: &Path) -> Option<String> {
 
 /// Reads and hashes one walked file. Returns `Ok(None)` when both the source
 /// hash and extracted metadata match, `Err` for per-file problems (A4).
-fn prepare_doc(
+fn prepare_doc_accounted(
     path: &Path,
     rel_path: &str,
     existing: Option<&DocState>,
     config: &Config,
+    capture: Option<&mut CaptureBudget<'_>>,
+) -> Result<Option<Pending>> {
+    let Some(budget) = capture else {
+        return prepare_doc_inner(path, rel_path, existing, config, None);
+    };
+    let baseline = budget.account.bytes();
+    let header = (path.as_os_str().len() as u64)
+        .checked_mul(8)
+        .and_then(|n| n.checked_add((3 * std::mem::size_of::<Pending>() + 256) as u64))
+        .ok_or_else(|| Error::Admission {
+            message: "file capture header size overflow".into(),
+        })?;
+    budget.reserve(header)?;
+    let result = prepare_doc_inner(path, rel_path, existing, config, Some(budget));
+    if let Ok(pending) = &result {
+        let retained = pending.as_ref().map_or(Ok(0), Pending::retained_charge)?;
+        let total = baseline
+            .checked_add(retained)
+            .ok_or_else(|| Error::Admission {
+                message: "retained file capture overflow".into(),
+            })?;
+        if total > budget.account.bytes() {
+            return Err(Error::internal(
+                "file capture preflight underestimated retained capacities",
+            ));
+        }
+        // prepare_doc_inner has returned: original text, frontmatter builder,
+        // sections and parser/range buffers have actually been destroyed.
+        budget.account.shrink_shared(total);
+    }
+    result
+}
+
+fn prepare_doc_inner(
+    path: &Path,
+    rel_path: &str,
+    existing: Option<&DocState>,
+    config: &Config,
+    mut capture: Option<&mut CaptureBudget<'_>>,
 ) -> Result<Option<Pending>> {
     let metadata = std::fs::metadata(path).map_err(|err| file_error(path, &err))?;
     if metadata.len() > config.max_file_size {
@@ -642,7 +1169,24 @@ fn prepare_doc(
             ),
         });
     }
-    let text = std::fs::read_to_string(path).map_err(|err| file_error(path, &err))?;
+    let text = match capture.as_deref_mut() {
+        Some(budget) => budget.read(path, config.max_file_size)?,
+        None => std::fs::read_to_string(path).map_err(|err| file_error(path, &err))?,
+    };
+    if let Some(budget) = capture {
+        // pulldown-cmark builds its first-pass tree eagerly in Parser::new_ext.
+        // Reserve that allowance before the estimator enters the constructor.
+        let parser = crate::index::chunk::capture_parser_charge(&text)?;
+        budget.reserve(parser)?;
+        let total = crate::index::chunk::capture_charge(&text, MAX_CHUNK_CHARS)?;
+        budget.reserve(total.saturating_sub(parser))?;
+        #[cfg(test)]
+        if let Some(observer) = budget.observed {
+            observer(CaptureEvent::Copy(
+                "hash/frontmatter/chunks/headings/JSON/apply workspace",
+            ));
+        }
+    }
     let content_hash = blake3::hash(text.as_bytes()).to_hex().to_string();
     let (meta, body) = frontmatter::parse(&text);
     let frontmatter_json = serialize_metadata(&meta)?;
@@ -1044,3 +1588,7 @@ mod tests {
         assert!(assigned > 1, "SQLite allocated the id: {assigned}");
     }
 }
+
+#[cfg(test)]
+#[path = "capture_budget_tests.rs"]
+mod capture_budget_tests;

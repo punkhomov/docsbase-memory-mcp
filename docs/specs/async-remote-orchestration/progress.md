@@ -113,7 +113,7 @@ Fix1 report/diff/manifest: `/workspace/scratch/agent-b/81/plan/fix1/`.
 Author fixes are **proposed addressed**, authoritative scoped re-review pending;
 no production unlock, runtime acceptance or task-complete claim.
 
-## Gate status
+## Historical architecture gate status (2026-11-14)
 
 | Gate | Status | Evidence / remaining work |
 |---|---|---|
@@ -355,3 +355,252 @@ One current frozen full CLI, lean and standalone release perf run follow this
 checkpoint; c3 results are not claimed for changed production source. New public
 PR160 native CI and strongest fix-only re-review remain root gates; no local
 static/artifact duplication, no issue closure, B1–B3 still pending PR1 acceptance.
+
+
+## MODIFIED 2026-11-14 — PR1 merged; B1 functional checkpoint
+
+PR160 ordinary squash `28c9d5f66cdd36d1b4cccc9601f0a4ef5f4d47c4` accepted;
+merged tree exactly matches reviewed/tested cabdfdc. Strongest fix-only review,
+native artifact/browser gates and actual CLI1617/0/18, lean1377/0/11, release
+perf6/0/0 complete for PR1. #81 remains open. New PR2 branch
+feat/async-background-orchestration-81 starts from that squash, not old commits.
+
+Original B1 source challenge fix2 PASS unlocked production. Functional B1 now
+migrates actual daemon index_project/sync_start into bounded prepare → embedding
+batches → commit/captured attribution → ordered backfill (Sync only) → mandatory
+terminal retirement. Global-only daemon.background_active1/pending8 and remote
+background_active1/pending8/timeout600000 have actual consumers; helper pending
+uses checked interactive+background slots and executor sum includes S+C+J+H+T.
+No paid call, dependency, fixture/golden/ignore/budget or CI change.
+
+Actual first RED held document provider and independent control failed admission;
+GREEN proves control/J free, native writer refusal and no sync bridge. Pin API RED
+proved negative forgery; own negative allocator/corruption/parallel/cleanup tests
+GREEN. Additional actual RED caught intermediate lexical Full doing unwanted
+whole-corpus backfill; fixed to preserve separate explicit Sync boundary. Historical
+compile/lint failures retained. Current actual route matrix11/0, registration2/0,
+capture event2/0, pin4/0 and shared-index preservation51/0. TTL/ANN case moves -1
+into existing native worker, holds later -2, joins old cleanup and proves -2
+survives; captured TTL123s verified from SQL. Outer root unwind drains real held
+native work before Runtime Drop. Allocation refusal is the last observed capture
+event and preserves metadata/index; charge releases on retirement.
+
+Rulings: D7a application-only Drop guarantee with Tokio wake exception; sealed
+unreachable ownership violation fail-stop; additive vectors.db application_id/
+counter format and whole negative public API boundary explicitly recorded in
+requirements/design. Cow planner classification reuses legacy/async kernels
+without cloning legacy path lists or dead-code suppression. Existing positive
+library pin paths unchanged. Concurrent cold WAL bootstrap Busy is inherited,
+explicit/retry-safe before project effects; parked independently as #161.
+
+This functional checkpoint records focused proof/current lint work. One frozen
+full CLI and lean execution, exact source/name/ignore inventory, fresh B1 task
+review remain completion gates; results go in private task-b1 receipts. No release
+perf/static/LTO/native execution is repeated per internal task. Watcher, automatic
+open-time scheduling and direct CLI/MCP/metrics consumers remain explicit B2/B3
+work in the SAME second substantial PR; no public foundation PR, no issue closure
+or claim that all operational consumers have migrated.
+
+
+B1 first frozen full CLI (`5b3f05a`) failed exit101 at the existing daemon policy
+fixture: old fixed-sync inventory considered8 sufficient. Runtime correctly
+requires S4+C2+J1+H1+T1=9. Original negative7 retained, negative8 added, exact
+positive boundary9; no runtime/default/benchmark budget weakened. Historical
+observer184.300s/failure is preserved; next frozen CLI/lean use --no-fail-fast.
+
+
+B1 final source audit caught a real intermediate ANN follower lease inversion:
+outer preparation/project READ around cold-flight wait could block reload/leader
+admission. Actual join-gate RED (cleanup before assertion) proves both unavailable;
+fix delegates revision to existing cold admission and project read/Db/generation
+check to the actual loader, preserving lease-free followers. The same bounded
+fix also aligns existing server_workers S=C1 inventory4→5 including J/H/T,
+retaining all original search/control/sync occupancy assertions. Focused and
+current lint evidence precede re-freeze; no new registry/runtime/policy mechanism.
+
+
+B1 pin-release preservation RED showed2 cached vectors remaining after last
+negative pin release under an entry cap1. Private release now reuses existing
+Owned atomic release+eviction / Legacy post-commit eviction, and renewal preserves
+expired-lease purge while excluding the permanent MIN counter. Regression covers
+both existing sources, without changing defaults or benchmark budgets. This closes
+the final known bounded-cache gap before refreeze/full --no-fail-fast gates.
+
+
+B1 actual factory selection acceptance: injected async stages were insufficient
+proof. Isolated credential-scoped child clears both caches and invokes the real
+provider registry/client constructor through prepare_index_context; actual RED
+selected legacy bridged stages before any HTTP. New consumer now reuses the
+accepted async project_runtime_for_search factory; same case continues through
+real OpenRouter codecs + fake HTTP and checks J/control capacity while held.
+Exact existing Website bound-session check is preserved in this context helper.
+No new provider table, runtime, public API or external request.
+
+
+B1 no-fail-fast preservation run at9ec8876 found six failures across install,
+lifecycle and registry. Capture charged each file's dead parser/text workspace
+for the entire job; it now measures returned owned capacities and releases only
+after those temporaries are destroyed, retaining later SQL/heading apply
+workspace. The unchanged 3000×40 install corpus fits the unchanged64MiB owner
+cap with measured capacities/charged peak logged. The low-cap event test keeps
+its2MiB cap and last-refusal/no-following-copy assertions, but now uses actual
+retained chunks (256 compact files) rather than pinning erroneous accumulated
+scratch charges. New-Sync creation restores best-effort retention prune; only
+successful completion restores the old watcher hook in admitted CPU with original
+Activity. All six original integration assertions/fixtures pass unchanged.
+
+The now-reachable long index exposed immediate StopDaemon worker shutdown
+between accepted phases. Graceful stop now refuses new wire ingress first and
+uses the existing physical-Activity drain before closing worker/remote admission;
+original job deadlines and signal escalation still apply. A real current-thread
+accept-loop case proves new-ingress refusal, accepted later phase admission,
+physical drain ownership and closed admission after retirement. Exact full
+CLI/lean --no-fail-fast runs and fresh B1 review remain pending; B2/B3 stay open.
+
+
+2026-11-15 B1 fix round1, original review I1–I4: causal REDs demonstrate
+unreserved eager-parser entry, dead invalid-UTF8 scratch exhausting capture,
+new atomic/escaped codec input undercharge and initial control waiting beyond
+the original job deadline. Fix reserves eager parser storage before constructor,
+computes actual captured batch peaks (including oversized first chunks) and
+reserves JSON/Rig/input growth before markers. Failed files retain warning data
+only after read/parser/error-source destruction; initial control uses the same
+RemoteCall/operation deadline and cancellation. Focused capture4/background15,
+shared indexing51/root2/graceful4 pass; current cli-full/default Clippy+fmt pass.
+The functional fix is frozen for one full CLI/lean --no-fail-fast pair and original
+scoped re-review; B2/B3 remain locked. Historical failures remain in fix1 receipts.
+Ruling: 40× text workspace covers worst-case6-byte escaping and overlapping
+Rig bytes/Value/final String growth plus live input clones; actual captured text
+batch peak is scanned without allocation. Configured caps/defaults, vector/ranking
+identities and existing test assertions remain unchanged.
+
+2026-11-15: B1 fix1 accepted (7f1586d, original scoped review PASS/APPROVED;
+I1–I4 closed; actual full CLI1645/0/18 and lean1390/0/11). B2 implementation
+migrates daemon watchers and reachable automatic registration/open-time backfill
+to existing JobService, async runtime stages and original whole-job clocks.
+Direct standalone CLI/MCP/metrics remain B3; no #81 completion claim.
+
+B2 ruling: RecommendedWatcher native Drop/join stays on the existing debounce
+producer thread. Tokio guard retirement only activates the preallocated dormant
+existing Activity, transfers its ticket, cancels and wakes. Root retains watcher
+receivers before startup, closes and physically drains outside the cancellable
+work driver, then joins retired producers outside block_on. During normal
+operation a retiring producer keeps its same-project slot until physical finish;
+replacement defers, rather than accumulating retired producers. Idle watcher
+Activities are dormant and do not pin idle grace.
+
+B2 ruling: pending raw paths and native/codec inputs share the SAME existing
+PayloadPermit. Mutations serialize on its existing budget mutex; no lock crosses
+await. Reserve precedes path/map copy; reset follows prior physical retirement.
+The original Activity transfers with exact private ANN pin authority and outlives
+ANN data/reservation/publication, including invalidation and actual unwind.
+Existing fault/retry/drop-status effects remain admitted CPU work. Signal
+escalation cancels admitted wire loops through the existing worker shutdown token
+so a wedged reply cannot keep the new root drain alive; actual physical closures
+retain ownership. Focused evidence and final frozen project gates are recorded
+with the functional B2 checkpoint; fresh B2 review remains pending.
+
+B2 frozen no-fail-fast preservation found exactly two failures at b33e988:
+stale-schema watch changed document markers, and pagination saw Indexing during
+watch activity. Watch now reuses the existing current status/schema admission
+under its writer lease before capture/native/marker effects and preserves the
+legacy incremental Indexed status through begin, terminal error and cancellation.
+Explicit Index/Sync status/owned-terminal behavior is unchanged. Existing
+admission/document/commit-retry tests remain unchanged; the actual cancelled
+codec finish/unwind case also asserts the legacy terminal watch status.
+Historical failed full run remains in task-b2/verification1; re-freeze/full gates
+and fresh task review still precede B2 acceptance.
+
+B2 actual held-remote reload RED proved the old captured revision was fenced
+correctly but its raw batch was dropped permanently. The existing WatchContext
+identity now maps an actually replaced context to the existing bounded transient
+retry policy, retaining the SAME original operation/deadline and raw paths.
+No Project-error string matching or new revision tracker; unchanged-context
+permanent errors and per-attempt root/schema refusal remain intact. This closes
+the known legacy reload-retry preservation gap before final re-freeze.
+
+2026-11-15 B2 fix1 (original task review I1): the actual ordered Watch batch
+RED retained/emitted traversal order and chose the wrong new document with one
+free configured slot. Current ignore membership now uses borrowed input paths;
+retained emission follows original Batch admission order, including directory
+expansion positions and missing purge markers. Existing reserve-before-copy,
+expansion/depth limits, quota/operation/physical owners and retry policy remain.
+The same deterministic reverse-traversal case is GREEN for retained/provider
+order and the first admitted winning document; no OS-arrival assumption or new
+product sort/default/budget policy. Affected gates, frozen full pair and original
+scoped I1 re-review precede acceptance; B3 remains locked.
+
+2026-11-15: B2 fix1 accepted atb1d9ca2 (original scoped I1 review
+PASS/APPROVED, no new Critical/Important; full CLI1656/0/18 and lean1390/0/11).
+B3 now migrates actual direct Search/Index/Sync to a single explicit command
+runtime/execution/JobRoot outside work futures. Real configured provider/Rig/
+reqwest loopback REDs observed synchronous Index/Search transport; GREEN selects
+async stages. Direct read-only preparation reuses existing search owners/Flights,
+ReadPool and ANN LoadOnly without Shared bootstrap. A real native retirement gate
+proves both command error and unwind drain before returning; current-thread nesting
+is refused before polling/effects. MCP stays the existing async daemon proxy.
+
+B3 ruling: connected errors are never replayed. Initial-connect-only fallback
+and existing unindexed registration bootstrap remain; Website Sync uses the old
+raw BindReadOnly protocol, without introducing a panel-read capability requirement.
+The initial new helper incorrectly imposed that capability; two unchanged routing
+tests exposed it and the same18-test suite is GREEN after exact protocol restoration.
+Sync polling uses captured DaemonSpec poll_interval_ms and the SAME original
+RemoteSpec background operation, replacing local250ms/610s literals.
+
+B3 metrics REDs observed absent actual status/explain projections. Existing
+SearchOperation now owns saturating per-operation CPU/network/backoff/attempts
+and shared-work attribution; existing provider/worker/payload owners project
+numeric status occupancy/calls/attempts/cancellations/refusals/retained bytes.
+No global counter delta is copied into a request. Shared query callers report
+actual own wait as network time and shared_work=true, while shared attempts and
+backoff remain on their physical logical-call owner. Ordinary rerank attempts
+belong to that request. Durations overlap, not a wall-clock partition; no input/
+model/credential/body labels. Cancellation totals deduplicate one remote operation
+across codec/admission/stage retirement, and physical CPU counts outlive awaiters.
+Actual queue/codec/shared-cache/retry-entry tests are GREEN. Existing stage/queue/
+total schema remains; only operational explain adds version1 execution metadata.
+
+Current source checkpoint is for frozen full checks and fresh B3/task/whole-feature
+review. Final native/performance gates and #81 closure remain pending; intermediate
+B1/B2 CI does not stand in for final-source acceptance. No new defaults, external
+dependencies, retrieval fixtures/baselines/budgets/ignores or paid calls.
+
+B3 frozen full CLI no-fail-fast at a1e501a found one unchanged lifecycle fixture
+failure: migrated direct Index rejected a7MB plain ASCII file because the eager
+parser allowance charged96×every byte (~672MB), independent of syntax. Pinned
+pulldown-cmark0.13.5 firstpass preallocates max(128,len/32) Node<Item> cells.
+The allocation-free estimator now recognizes only unindented ASCII words/spaces,
+blank lines and ATX headings: it charges that initial capacity plus conservative
+line growth/spine/ranges before either eager constructor. Indentation, Unicode,
+inline delimiters, attributes, HTML, links/code and other syntax keep the96×byte
+fallback. This is an accounting correction, with unchanged caps/defaults/fixtures.
+The actual same-size capture retains8,835,921 bytes, peaks40,687,752 under the
+unchanged67,108,864 allowance, and releases source/parser scratch only after
+physical destruction. Existing parser-before-constructor refusal, UTF8 warning
+and multi-file retained-cap tests remain. Current affected gates and a new frozen
+full pair are required; the original failed full receipt is retained.
+
+MODIFIED 2026-11-15 — combined final-fix1, original whole/task findings.
+WHOLE-I1 actual cached-search/no-JobPin RED observed Activity0 after the response.
+Operational per-search DenseCache snapshots now carry the SAME originating
+Activity independently of optional pin authority into the existing native build;
+rows/publication/reservation retire before both guards, including invalidation
+and unwind. WHOLE-I2 actual direct Err/unwind RED persisted Indexing after native
+retirement. Failed Started non-Watch lexical jobs now terminalize Error regardless
+of Sync-row ownership; Untouched/Watch/post-commit backfill semantics stay.
+The same actual command test checks recovery markers, retry and no invented Sync.
+
+TASK-I1 removes retired cfg(test) bridge/fallback/Sync copies and retargets all
+existing named tests to actual command/async IPC seams. Real multithread command
+construction/work/destruction covers success/error/unwind. TASK-I2 observes real
+search queue5/CPU7/network47/backoff23 with an independent simultaneous pure-cache
+peer at zero; removing only actual network/backoff hooks yields11/0 respectively,
+then exact restoration is GREEN. The private test clock wakes existing production
+deadline selections automatically; no caller check/cancel substitutes for expiry.
+Original1s budgets and5s protocol watchdogs remain; slow publication fixture setup
+moves outside its initial protocol watchdog. Both original named Windows deadline
+regressions pass locally through actual phase/lock gates. No dependency, configured
+cap/default, golden/baseline/ignore or provider identity change. Current full gates
+and both original scoped re-reviews follow this functional fix; D3 native results
+and release6/0 remain intermediate evidence, not acceptance of this new source.

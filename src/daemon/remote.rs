@@ -15,13 +15,17 @@ use super::worker_admission::WorkerAdmission;
 
 /// Handle-only compatibility dependency. The runtime's root explicitly retires it.
 pub(crate) struct SyncBridge {
+    #[cfg(feature = "hybrid-remote")]
     handle: tokio::runtime::Handle,
     retired: crate::hybrid::work::Cancellation,
 }
 
 impl SyncBridge {
     pub(crate) fn new(handle: tokio::runtime::Handle) -> Self {
+        #[cfg(not(feature = "hybrid-remote"))]
+        drop(handle);
         Self {
+            #[cfg(feature = "hybrid-remote")]
             handle,
             retired: crate::hybrid::work::Cancellation::new(),
         }
@@ -29,6 +33,7 @@ impl SyncBridge {
     pub(crate) fn retire(&self) {
         self.retired.cancel();
     }
+    #[cfg(feature = "hybrid-remote")]
     pub(crate) fn block_on<T>(
         &self,
         work: impl std::future::Future<Output = crate::error::Result<T>>,
