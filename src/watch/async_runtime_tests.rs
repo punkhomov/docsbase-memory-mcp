@@ -426,3 +426,193 @@ fn actual_watch_reload_while_remote_is_held_retries_the_original_raw_batch() {
         Ok(())
     }).unwrap();
 }
+
+struct OrderedWatchResult {
+    free_slots: usize,
+    admitted: Vec<String>,
+    retained: Vec<String>,
+    provider: Vec<String>,
+    indexed: Vec<String>,
+}
+
+#[test]
+fn actual_ordered_watch_batch_preserves_provider_order_and_last_document_slot() {
+    let mut observed = Vec::new();
+    for free_slots in [2, 1] {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let policy = crate::daemon::settings::standalone().unwrap();
+        let mut root = crate::daemon::job_service::JobRoot::new(policy.settings());
+        let service = root.service();
+        observed.push(
+            root.run(&runtime, ordered_watch_case(service, free_slots))
+                .unwrap(),
+        );
+    }
+    for result in &observed {
+        eprintln!(
+            "order slots={} admitted={:?} retained={:?} provider={:?} indexed={:?}",
+            result.free_slots, result.admitted, result.retained, result.provider, result.indexed
+        );
+    }
+    for result in observed {
+        assert_eq!(
+            result.retained, result.admitted,
+            "refilter must preserve the admitted Batch order rather than root traversal"
+        );
+        assert_eq!(
+            result.provider,
+            result.admitted[..result.free_slots],
+            "actual retained chunks must reach the provider in admitted order"
+        );
+        let mut expected = result.admitted[..result.free_slots].to_vec();
+        expected.sort();
+        assert_eq!(
+            result.indexed, expected,
+            "the same first admitted document must win the existing last free slot"
+        );
+    }
+}
+
+async fn ordered_watch_case(
+    service: crate::daemon::job_service::JobService,
+    free_slots: usize,
+) -> Result<OrderedWatchResult> {
+    let provider = document_gate();
+    provider.release.add_permits(16);
+    let fixture = search_phase_tests::Fixture::new(HybridStages {
+        embedder: Some(provider.clone()),
+        ..HybridStages::default()
+    });
+    let config = Arc::new(Config {
+        max_docs_per_project: 1 + free_slots,
+        ..Config::default()
+    });
+    let stages = Arc::new(HybridStages {
+        embedder: Some(provider.clone()),
+        ..HybridStages::default()
+    });
+    {
+        let slot = fixture.shared.project_slot(fixture.project.id);
+        let mut state = slot.state.lock().unwrap();
+        state.config = Some(config.clone());
+        state.stages = Some(stages.clone());
+        state.search_stages = Some(stages.clone());
+    }
+    fixture.shared.activate_jobs(service).unwrap();
+    for name in ["arrival-a", "arrival-b"] {
+        std::fs::write(
+            fixture.project.canonical_root.join(format!("{name}.md")),
+            format!("# Arrival\n\n{name}\n"),
+        )
+        .unwrap();
+    }
+    // Static fixture: explicitly reverse the actual walker, with no OS-event
+    // arrival, delay or new traversal-sort assumption in the test or product.
+    let mut paths: Vec<_> = crate::index::walk::walk(&fixture.project.canonical_root, &config)
+        .unwrap()
+        .map(std::result::Result::unwrap)
+        .filter(|path| path.file_name().unwrap() != "guide.md")
+        .collect();
+    assert_eq!(paths.len(), 2);
+    paths.reverse();
+    let names = |paths: &[PathBuf]| -> Vec<String> {
+        paths
+            .iter()
+            .map(|path| path.file_stem().unwrap().to_str().unwrap().to_owned())
+            .collect()
+    };
+    let admitted = names(&paths);
+    let operation = fixture.shared.watch_operation().unwrap();
+    let charge = fixture.shared.activity.track();
+    let permit = fixture.shared.workers.background(&operation).await.unwrap();
+    let owner = fixture.shared.clone();
+    let project = fixture.project.clone();
+    let config_copy = config.clone();
+    let call = operation.clone();
+    let (pending, retained) = request::spawn(Some(permit), Some(charge.clone()), move || {
+        let (_, mut receiver) = tokio::sync::mpsc::channel(1);
+        let pending = crate::watch::merge_pending(
+            &owner.payload_budget,
+            None,
+            Some(paths),
+            &mut receiver,
+            &call,
+            &owner.watchers,
+        )?;
+        let retained = crate::watch::refilter_accounted(
+            &project,
+            &owner.cache,
+            &pending.paths,
+            &config_copy,
+            None,
+        )?;
+        Ok((pending, retained))
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let retained = names(&retained);
+    let runtime = Arc::new(crate::watch::WatchRuntime::new(
+        config.clone(),
+        stages,
+        fixture
+            .shared
+            .vector_source_for(fixture.project.id, &config),
+    ));
+    let stats = fixture
+        .shared
+        .run_watch_batch(fixture.project.clone(), runtime, pending, operation, charge)
+        .await
+        .unwrap();
+    assert_eq!(stats.docs, free_slots);
+    fixture
+        .shared
+        .activity
+        .drain(Duration::from_millis(1))
+        .await;
+    Ok(ordered_observation(
+        &fixture, &provider, free_slots, admitted, retained,
+    ))
+}
+
+fn ordered_observation(
+    fixture: &search_phase_tests::Fixture,
+    provider: &DocumentGate,
+    free_slots: usize,
+    admitted: Vec<String>,
+    retained: Vec<String>,
+) -> OrderedWatchResult {
+    let batches = provider.batches.lock().unwrap();
+    let provider_order = batches
+        .iter()
+        .flatten()
+        .map(|text| {
+            if text.contains("arrival-a") {
+                "arrival-a".to_owned()
+            } else if text.contains("arrival-b") {
+                "arrival-b".to_owned()
+            } else {
+                panic!("unexpected retained provider text")
+            }
+        })
+        .collect();
+    let mut indexed: Vec<_> =
+        crate::store::repo::doc_states(fixture.shared.db().connection(), fixture.project.id)
+            .unwrap()
+            .into_iter()
+            .filter(|doc| doc.rel_path != "guide.md")
+            .map(|doc| doc.rel_path.trim_end_matches(".md").to_owned())
+            .collect();
+    indexed.sort();
+    assert_eq!(provider.synchronous.load(Ordering::SeqCst), 0);
+    OrderedWatchResult {
+        free_slots,
+        admitted,
+        retained,
+        provider: provider_order,
+        indexed,
+    }
+}

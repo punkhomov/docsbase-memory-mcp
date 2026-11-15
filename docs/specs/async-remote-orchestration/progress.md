@@ -518,3 +518,14 @@ retry policy, retaining the SAME original operation/deadline and raw paths.
 No Project-error string matching or new revision tracker; unchanged-context
 permanent errors and per-attempt root/schema refusal remain intact. This closes
 the known legacy reload-retry preservation gap before final re-freeze.
+
+2026-11-15 B2 fix1 (original task review I1): the actual ordered Watch batch
+RED retained/emitted traversal order and chose the wrong new document with one
+free configured slot. Current ignore membership now uses borrowed input paths;
+retained emission follows original Batch admission order, including directory
+expansion positions and missing purge markers. Existing reserve-before-copy,
+expansion/depth limits, quota/operation/physical owners and retry policy remain.
+The same deterministic reverse-traversal case is GREEN for retained/provider
+order and the first admitted winning document; no OS-arrival assumption or new
+product sort/default/budget policy. Affected gates, frozen full pair and original
+scoped I1 re-review precede acceptance; B3 remains locked.

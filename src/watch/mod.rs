@@ -823,13 +823,9 @@ pub(crate) fn refilter_accounted(
         })?)?;
     }
     let wanted: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
-    let directories: Vec<&Path> = paths
-        .iter()
-        .filter(|path| path.is_dir())
-        .map(PathBuf::as_path)
-        .collect();
-    let mut filtered = Vec::new();
-    let mut seen = HashSet::new();
+    // The walker determines current ignore membership only; it must not
+    // determine the order consumed by incremental document-limit admission.
+    let mut allowed = HashSet::new();
     for entry in walk::walk(&project.canonical_root, config)? {
         if let Some(budget) = capture.as_deref_mut() {
             budget.operation.check()?;
@@ -841,36 +837,69 @@ pub(crate) fn refilter_accounted(
                 continue;
             }
         };
-        if crate::platform::paths::is_under(&path, cache) {
-            continue;
-        }
-        let direct = wanted.contains(path.as_path());
-        let expanded = filtered.len() < EXPAND_MAX_FILES
-            && directories.iter().any(|directory| {
-                path.strip_prefix(directory)
-                    .is_ok_and(|relative| relative.components().count() <= EXPAND_MAX_DEPTH + 1)
-            });
-        if !direct && !expanded {
-            continue;
-        }
-        if let Some(budget) = capture.as_deref_mut() {
-            budget.path(&path)?;
-        }
-        if seen.insert(path.clone()) {
-            filtered.push(path);
+        if !crate::platform::paths::is_under(&path, cache)
+            && let Some(original) = wanted.get(path.as_path())
+        {
+            allowed.insert(*original);
         }
     }
-    // Missing files/directories remain purge markers, as in the producer and
-    // legacy retry filter; the incremental planner resolves exact/subtree rows.
-    for path in paths.iter().filter(|path| !path.exists()) {
+    let mut filtered = Vec::new();
+    let mut seen = HashSet::new();
+    for path in paths {
         if let Some(budget) = capture.as_deref_mut() {
-            budget.path(path)?;
+            budget.operation.check()?;
         }
-        if seen.insert(path.clone()) {
-            filtered.push(path.clone());
+        if path.is_dir() {
+            // Keep each directory's expansion at its original event position.
+            // The same walker supplies ignore/depth checks without retaining
+            // uncharged sibling listings; the existing global expansion cap
+            // applies after previously admitted paths, as in finalize.
+            for entry in walk::walk(&project.canonical_root, config)? {
+                if let Some(budget) = capture.as_deref_mut() {
+                    budget.operation.check()?;
+                }
+                if filtered.len() >= EXPAND_MAX_FILES {
+                    break;
+                }
+                let expanded = match entry {
+                    Ok(path) => path,
+                    Err(error) => {
+                        eprintln!("warning: watcher filter: {error}");
+                        continue;
+                    }
+                };
+                if !crate::platform::paths::is_under(&expanded, cache)
+                    && expanded
+                        .strip_prefix(path)
+                        .is_ok_and(|relative| relative.components().count() <= EXPAND_MAX_DEPTH + 1)
+                {
+                    push_filtered(&expanded, &mut filtered, &mut seen, capture.as_deref_mut())?;
+                }
+            }
+        } else if !path.exists() || allowed.contains(path.as_path()) {
+            // Missing files/directories keep their admitted position too;
+            // the incremental planner resolves exact/subtree purge markers.
+            push_filtered(path, &mut filtered, &mut seen, capture.as_deref_mut())?;
         }
     }
     Ok(filtered)
+}
+
+fn push_filtered(
+    path: &Path,
+    filtered: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    capture: Option<&mut crate::index::job::CaptureBudget<'_>>,
+) -> Result<()> {
+    if seen.contains(path) {
+        return Ok(());
+    }
+    if let Some(budget) = capture {
+        budget.path(path)?;
+    }
+    seen.insert(path.to_path_buf());
+    filtered.push(path.to_path_buf());
+    Ok(())
 }
 
 /// Maximum files and depth for one directory expansion, bounding the work a
