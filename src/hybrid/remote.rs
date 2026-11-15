@@ -259,6 +259,14 @@ impl RemoteExecution {
         self.cpu_observer = Some(observer);
     }
 
+    #[cfg(test)]
+    pub(crate) fn observe_retry_timing(&mut self, sleep: TestSleep) {
+        self.timing = Some(TestTiming {
+            sleep,
+            jitter: Arc::new(|_| Duration::ZERO),
+        });
+    }
+
     /// Complete immutable owner policy.
     #[must_use]
     pub fn settings(&self) -> &RemoteSettings {

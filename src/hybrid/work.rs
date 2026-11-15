@@ -344,7 +344,10 @@ impl RemoteCall {
                 biased;
                 () = shutdown.cancelled() => return Err(remote_denied("remote execution is shutting down")),
                 () = self.operation.cancellation().cancelled() => return Err(remote_denied("remote operation cancelled")),
-                () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => { self.check()?; }
+                () = async {
+                    if self.interest.is_none() {self.operation.deadline_elapsed().await;}
+                    else {tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;}
+                } => { self.check()?; }
                 () = async { match changed.as_mut().as_pin_mut() { Some(waiter) => waiter.await, None => std::future::pending().await } } => {}
                 result = &mut work => { self.check()?; return result; }
             }

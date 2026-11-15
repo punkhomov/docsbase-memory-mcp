@@ -1,7 +1,5 @@
 //! `docsbase search` — read-only snapshot search (FR-20, FR-30).
 
-#[cfg(test)]
-use std::future::Future;
 use std::path::Path;
 
 use serde_json::Value;
@@ -268,60 +266,6 @@ async fn daemon_in(
         client.search(args, operation).await.map(Some)
     })
     .await
-}
-
-/// Only an initial failed connect permits direct mode; connected failures propagate.
-#[cfg(test)]
-fn try_daemon_search(
-    cache: &Path,
-    cwd: &Path,
-    args: Value,
-    operation: &SearchOperation,
-    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
-) -> Result<Option<Value>> {
-    block_on_io(within_operation(operation, async {
-        let Ok(mut client) = AsyncClient::connect(cache).await else {
-            operation.check()?;
-            return Ok(None);
-        };
-        client.handshake_registry().await?;
-        if client
-            .capabilities()
-            .iter()
-            .any(|capability| capability == crate::ipc::protocol::ACTIVE_WEBSITE_CAPABILITY)
-        {
-            let project = crate::cli::existing_website_project(cache, cwd, settings)?;
-            operation.check()?;
-            client.bind_read_only(Some(project.id)).await?;
-        } else {
-            client.register_session(cwd).await?;
-        }
-        client.search(args, operation).await.map(Some)
-    }))
-}
-
-#[cfg(test)]
-fn block_on_io<T>(work: impl Future<Output = Result<T>>) -> Result<T> {
-    if crate::hybrid::blocking::in_context()
-        && let Some(bridge) = crate::hybrid::blocking::bridge()
-    {
-        return bridge.block_on(work);
-    }
-    let run = || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| Error::internal_with_source("create CLI IPC runtime", error))?;
-        runtime.block_on(work)
-    };
-    match tokio::runtime::Handle::try_current() {
-        Err(_) => run(),
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
-            tokio::task::block_in_place(run),
-        Ok(_) => Err(Error::Admission {
-            message: "synchronous CLI search cannot run inside a current-thread Tokio runtime; use AsyncClient".to_owned(),
-        }),
-    }
 }
 
 fn direct_dense_cache(

@@ -82,7 +82,7 @@ impl WorkerAdmission {
     /// Queue full, original deadline expired, cancellation or daemon shutdown.
     pub async fn search(&self, operation: &SearchOperation) -> Result<OwnedSemaphorePermit> {
         operation.check()?;
-        let queued_at = Instant::now();
+        let queued_at = SearchOperation::clock_now(operation);
         let result = self
             .search
             .acquire(
@@ -91,7 +91,7 @@ impl WorkerAdmission {
                 &self.shutdown,
             )
             .await;
-        operation.record_queue(queued_at.elapsed());
+        operation.record_queue(operation.since(queued_at));
         operation.check()?;
         result
     }
@@ -102,7 +102,7 @@ impl WorkerAdmission {
         operation: &SearchOperation,
     ) -> Result<OwnedSemaphorePermit> {
         operation.check()?;
-        let queued = Instant::now();
+        let queued = SearchOperation::clock_now(operation);
         let result = self
             .background
             .acquire(
@@ -111,7 +111,7 @@ impl WorkerAdmission {
                 &self.shutdown,
             )
             .await;
-        operation.record_queue(queued.elapsed());
+        operation.record_queue(operation.since(queued));
         operation.check()?;
         result
     }

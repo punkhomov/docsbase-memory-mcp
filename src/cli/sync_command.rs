@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-enum Outcome {
+pub(super) enum Outcome {
     Daemon(Value),
     Direct(Value),
 }
@@ -34,7 +34,7 @@ pub(super) fn run(
     }
     Ok(())
 }
-async fn run_in(
+pub(super) async fn run_in(
     context: super::command::Context,
     path: Option<PathBuf>,
     settings: crate::config::schema::Resolved<crate::store::settings::DbSettings>,

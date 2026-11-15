@@ -580,3 +580,27 @@ unchanged67,108,864 allowance, and releases source/parser scratch only after
 physical destruction. Existing parser-before-constructor refusal, UTF8 warning
 and multi-file retained-cap tests remain. Current affected gates and a new frozen
 full pair are required; the original failed full receipt is retained.
+
+MODIFIED 2026-11-15 — combined final-fix1, original whole/task findings.
+WHOLE-I1 actual cached-search/no-JobPin RED observed Activity0 after the response.
+Operational per-search DenseCache snapshots now carry the SAME originating
+Activity independently of optional pin authority into the existing native build;
+rows/publication/reservation retire before both guards, including invalidation
+and unwind. WHOLE-I2 actual direct Err/unwind RED persisted Indexing after native
+retirement. Failed Started non-Watch lexical jobs now terminalize Error regardless
+of Sync-row ownership; Untouched/Watch/post-commit backfill semantics stay.
+The same actual command test checks recovery markers, retry and no invented Sync.
+
+TASK-I1 removes retired cfg(test) bridge/fallback/Sync copies and retargets all
+existing named tests to actual command/async IPC seams. Real multithread command
+construction/work/destruction covers success/error/unwind. TASK-I2 observes real
+search queue5/CPU7/network47/backoff23 with an independent simultaneous pure-cache
+peer at zero; removing only actual network/backoff hooks yields11/0 respectively,
+then exact restoration is GREEN. The private test clock wakes existing production
+deadline selections automatically; no caller check/cancel substitutes for expiry.
+Original1s budgets and5s protocol watchdogs remain; slow publication fixture setup
+moves outside its initial protocol watchdog. Both original named Windows deadline
+regressions pass locally through actual phase/lock gates. No dependency, configured
+cap/default, golden/baseline/ignore or provider identity change. Current full gates
+and both original scoped re-reviews follow this functional fix; D3 native results
+and release6/0 remain intermediate evidence, not acceptance of this new source.

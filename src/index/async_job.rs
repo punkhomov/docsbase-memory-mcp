@@ -496,11 +496,14 @@ impl IndexState {
             );
         }
         let success = self.complete && self.error.is_none();
+        if !success
+            && self.mutation == Mutation::Started
+            && !matches!(context.input, JobInput::Watch(_))
+        {
+            registry::set_status(db, context.project.id, ProjectStatus::Error)?;
+        }
         if self.owns_sync {
             if !success {
-                if self.mutation == Mutation::Started {
-                    registry::set_status(db, context.project.id, ProjectStatus::Error)?;
-                }
                 self.record["error"] = serde_json::json!(
                     self.error
                         .as_deref()

@@ -312,7 +312,7 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
             () = operation.cancellation().cancelled() => {
                 operation.check().and_then(|()| Err(Error::internal("publication wake without cancellation or expiry")))
             }
-            () = tokio::time::sleep_until(tokio::time::Instant::from_std(operation.deadline())) => {
+            () = operation.deadline_elapsed() => {
                 operation.check().and_then(|()| Err(Error::internal("publication wake without cancellation or expiry")))
             }
             result = publication => { operation.check()?; result }
@@ -344,7 +344,7 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
             tokio::select! {
                 biased;
                 () = operation.cancellation().cancelled() => { operation.check()?; }
-                () = tokio::time::sleep_until(tokio::time::Instant::from_std(operation.deadline())) => { operation.check()?; }
+                () = operation.deadline_elapsed() => { operation.check()?; }
                 () = &mut changed => {}
             }
         }

@@ -24,7 +24,15 @@ pub struct SearchOperation {
     cancellation: Cancellation,
     queue_ms: Arc<AtomicU64>,
     execution: Arc<Execution>,
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    clock: Option<TestClock>,
 }
+
+#[cfg(all(test, feature = "hybrid-remote"))]
+pub(crate) type TestClock = (
+    Arc<dyn Fn() -> Instant + Send + Sync>,
+    Arc<tokio::sync::Notify>,
+);
 
 #[derive(Default)]
 struct Execution {
@@ -80,7 +88,7 @@ impl Drop for ExecutionTimer {
         };
         add(
             counter,
-            u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            u64::try_from(self.operation.since(self.started).as_millis()).unwrap_or(u64::MAX),
         );
     }
 }
@@ -91,6 +99,41 @@ fn add(counter: &AtomicU64, value: u64) {
 }
 
 impl SearchOperation {
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn with_test_clock(mut self, clock: TestClock) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn clock_now(operation: &Self) -> Instant {
+        operation
+            .clock
+            .as_ref()
+            .map_or_else(Instant::now, |(clock, _)| clock())
+    }
+    #[cfg(not(all(test, feature = "hybrid-remote")))]
+    pub(crate) fn clock_now(_: &Self) -> Instant {
+        Instant::now()
+    }
+    pub(crate) async fn deadline_elapsed(&self) {
+        #[cfg(all(test, feature = "hybrid-remote"))]
+        if let Some((_, changed)) = &self.clock {
+            loop {
+                let notified = changed.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if Self::clock_now(self) >= self.deadline {
+                    return;
+                }
+                notified.await;
+            }
+        }
+        tokio::time::sleep_until(tokio::time::Instant::from_std(self.deadline)).await;
+    }
+    pub(crate) fn since(&self, started: Instant) -> Duration {
+        Self::clock_now(self).saturating_duration_since(started)
+    }
+
     pub(crate) fn execution(&self) -> ExecutionSnapshot {
         let state = &self.execution;
         ExecutionSnapshot {
@@ -120,7 +163,7 @@ impl SearchOperation {
         ExecutionTimer {
             operation: self.clone(),
             kind,
-            started: Instant::now(),
+            started: Self::clock_now(self),
         }
     }
     pub(crate) fn cpu_timer(&self) -> ExecutionTimer {
@@ -159,6 +202,8 @@ impl SearchOperation {
             cancellation,
             queue_ms: Arc::new(AtomicU64::new(0)),
             execution: Arc::new(Execution::default()),
+            #[cfg(all(test, feature = "hybrid-remote"))]
+            clock: None,
         })
     }
 
@@ -182,6 +227,8 @@ impl SearchOperation {
             cancellation,
             queue_ms: Arc::new(AtomicU64::new(0)),
             execution: Arc::new(Execution::default()),
+            #[cfg(all(test, feature = "hybrid-remote"))]
+            clock: None,
         };
         operation.check()?;
         Ok(operation)
@@ -257,7 +304,7 @@ impl SearchOperation {
     /// # Errors
     /// Admission when cancelled or at/after the original request deadline.
     pub fn check(&self) -> Result<()> {
-        self.check_at(Instant::now())
+        self.check_at(Self::clock_now(self))
     }
 
     /// Remaining portion of the original budget, never a successful zero.
@@ -265,13 +312,13 @@ impl SearchOperation {
     /// # Errors
     /// Admission when cancelled or at/after the original request deadline.
     pub fn remaining(&self) -> Result<Duration> {
-        self.remaining_at(Instant::now())
+        self.remaining_at(Self::clock_now(self))
     }
 
     /// End-to-end elapsed time, including time before a worker starts.
     #[must_use]
     pub fn elapsed(&self) -> Duration {
-        self.elapsed_at(Instant::now())
+        self.elapsed_at(Self::clock_now(self))
     }
 
     fn check_at(&self, now: Instant) -> Result<()> {

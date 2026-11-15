@@ -881,15 +881,17 @@ async fn original_request_deadline_spans_embedding_preparation_and_remote_rerank
         ranking: Ranking::Rrf,
         reranker: Some(reranker.clone()),
     });
-    let now = Instant::now();
+    let clock = Arc::new(ExecutionClock::future());
+    let now = clock.now();
     let op = crate::search::operation::SearchOperation::constrained(
         &fixture.shared.global_config.search,
         now,
         now + Duration::from_secs(1),
         crate::hybrid::work::Cancellation::new(),
     )
-    .unwrap();
-    let work = start_actual(&fixture, op);
+    .unwrap()
+    .with_test_clock(clock.reader());
+    let work = start_actual(&fixture, op.clone());
     embedding.entered.acquire().await.unwrap().forget();
     embedding.release.add_permits(1);
     tokio::time::timeout(Duration::from_secs(5), rerank.entered.acquire())
@@ -897,6 +899,7 @@ async fn original_request_deadline_spans_embedding_preparation_and_remote_rerank
         .unwrap()
         .unwrap()
         .forget();
+    clock.advance(Duration::from_secs(1));
     let error = tokio::time::timeout(Duration::from_secs(5), work)
         .await
         .unwrap()
@@ -1327,29 +1330,35 @@ fn publication_contention_case(expiry: bool) {
     let (go, begin) = tokio::sync::oneshot::channel();
     let warmed = Arc::new(AtomicUsize::new(usize::MAX));
     let observed_cache = warmed.clone();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (transport, fixture) = runtime.block_on(async {
+        let transport = wire_gate();
+        let fixture = search_phase_tests::Fixture::new(HybridStages {
+            embedder: Some(remote_fixture(&transport)),
+            ranking: Ranking::Rrf,
+            reranker: None,
+        });
+        (transport, fixture)
+    });
+    let clock = Arc::new(ExecutionClock::future());
+    let worker_clock = clock.clone();
     let runtime = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
         runtime.block_on(async move {
-            let transport = wire_gate();
-            let fixture = search_phase_tests::Fixture::new(HybridStages {
-                embedder: Some(remote_fixture(&transport)),
-                ranking: Ranking::Rrf,
-                reranker: None,
-            });
             let mut policy = fixture.shared.global_config.search.clone();
             if expiry {
                 policy.request_timeout_ms = 1_000;
             }
             let operation = crate::search::operation::SearchOperation::new(
                 &policy,
-                Instant::now(),
+                worker_clock.now(),
                 crate::hybrid::work::Cancellation::new(),
             )
-            .unwrap();
-            configured.send(operation.cancellation().clone()).unwrap();
+            .unwrap()
+            .with_test_clock(worker_clock.reader());
+            configured.send(operation.clone()).unwrap();
             let search = start_actual(&fixture, operation);
             transport.entered.acquire().await.unwrap().forget();
             let slot = fixture.shared.project_slot(fixture.project.id);
@@ -1386,8 +1395,10 @@ fn publication_contention_case(expiry: bool) {
     let control = progressed
         .recv_timeout(Duration::from_secs(5))
         .unwrap_or(false);
-    if !expiry {
-        cancellation.cancel();
+    if expiry {
+        clock.advance(Duration::from_secs(1));
+    } else {
+        cancellation.cancellation().cancel();
     }
     let outcome = result.recv_timeout(Duration::from_secs(5));
     // Release the actual project publication writer before every RED assertion.
@@ -1673,4 +1684,236 @@ async fn status_tracks_actual_codec_cpu_after_caller_cancellation_until_physical
         retired["remote_execution"]["attempts"], 0,
         "cancelled encoding starts no HTTP"
     );
+}
+
+// A private test clock controls observations; native/Tokio work is still driven
+// through the real queues/futures. Advancing to expiry checks the SAME operation
+// and wakes the same production deadline selection; no caller cancellation/reset.
+struct ExecutionClock {
+    epoch: Instant,
+    millis: std::sync::atomic::AtomicU64,
+    changed: Arc<tokio::sync::Notify>,
+}
+impl ExecutionClock {
+    fn future() -> Self {
+        Self {
+            epoch: Instant::now() + Duration::from_hours(24),
+            millis: std::sync::atomic::AtomicU64::new(0),
+            changed: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+    fn now(&self) -> Instant {
+        self.epoch + Duration::from_millis(self.millis.load(Ordering::SeqCst))
+    }
+    fn advance(&self, time: Duration) {
+        self.millis
+            .fetch_add(u64::try_from(time.as_millis()).unwrap(), Ordering::SeqCst);
+        self.changed.notify_waiters();
+    }
+    fn reader(self: &Arc<Self>) -> crate::search::operation::TestClock {
+        let clock = self.clone();
+        (Arc::new(move || clock.now()), self.changed.clone())
+    }
+}
+
+struct TimedSearchWire {
+    clock: Arc<ExecutionClock>,
+    reranks: AtomicUsize,
+}
+impl AsyncTransport for TimedSearchWire {
+    fn post_json<'a>(
+        &'a self,
+        request: &'a WireRequest,
+        _: Duration,
+    ) -> StageFuture<'a, TransportResponse> {
+        Box::pin(async move {
+            let status = if request.url.ends_with("/rerank") {
+                let attempt = self.reranks.fetch_add(1, Ordering::SeqCst);
+                self.clock
+                    .advance(Duration::from_millis(if attempt == 0 { 17 } else { 19 }));
+                if attempt == 0 { 503 } else { 200 }
+            } else {
+                self.clock.advance(Duration::from_millis(11));
+                200
+            };
+            Ok(TransportResponse {
+                status,
+                body: "{}".into(),
+                retry_after: None,
+            })
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_multistage_execution_durations_separate_queue_cpu_http_backoff_and_peer() {
+    let TimedSearch {
+        fixture,
+        clock,
+        embedding,
+        reranker,
+        entered,
+        release,
+    } = timed_search();
+    let operation = crate::search::operation::SearchOperation::new(
+        &fixture.shared.global_config.search,
+        clock.now(),
+        crate::hybrid::work::Cancellation::new(),
+    )
+    .unwrap()
+    .with_test_clock(clock.reader());
+    let occupied = fixture.shared.workers.search(&operation).await.unwrap();
+    let shared = fixture.shared.clone();
+    let session = fixture.session;
+    let first = operation.clone();
+    let search = tokio::spawn(async move {
+        call_tool_in(
+            &shared,
+            Some(session),
+            "search_docs",
+            json!({"query":"widgets","explain":true}),
+            Some(first),
+            None,
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.shared.workers.snapshot()["cpu_search_pending"] != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    clock.advance(Duration::from_millis(5));
+    drop(occupied);
+    entered.acquire().await.unwrap().forget();
+    let peer = crate::search::operation::SearchOperation::new(
+        &fixture.shared.global_config.search,
+        clock.now(),
+        crate::hybrid::work::Cancellation::new(),
+    )
+    .unwrap()
+    .with_test_clock(clock.reader());
+    let other = call_tool_in(
+        &fixture.shared,
+        Some(fixture.session),
+        "search_docs",
+        json!({"query":"widgets","explain":true,"rerank":false}),
+        Some(peer),
+        None,
+    )
+    .await
+    .unwrap();
+    release.add_permits(1);
+    let value = search.await.unwrap().unwrap();
+    let execution = &value["meta"]["execution"];
+    assert_eq!(value["meta"]["queue_ms"], 5);
+    assert_eq!(execution["cpu_ms"], 7);
+    assert_eq!(
+        execution["network_ms"], 47,
+        "11 shared-query wait +17/19 actual rerank attempts"
+    );
+    assert_eq!(execution["backoff_ms"], 23, "only the actual retry wait");
+    assert_eq!(execution["provider_attempts"], 2);
+    assert_eq!(execution["shared_work"], true);
+    let independent = &other["meta"]["execution"];
+    for field in ["cpu_ms", "network_ms", "backoff_ms", "provider_attempts"] {
+        assert_eq!(
+            independent[field], 0,
+            "peer does not inherit {field} from simultaneous shared owners"
+        );
+    }
+    assert_eq!(independent["shared_work"], false);
+    assert_eq!(embedding.execution.snapshot().attempts, 1);
+    assert_eq!(reranker.execution.snapshot().attempts, 2);
+}
+
+struct TimedSearch {
+    fixture: search_phase_tests::Fixture,
+    clock: Arc<ExecutionClock>,
+    embedding: Arc<RemoteFixture>,
+    reranker: Arc<RemoteReranker>,
+    entered: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+fn timed_search() -> TimedSearch {
+    let clock = Arc::new(ExecutionClock::future());
+    let wire = Arc::new(TimedSearchWire {
+        clock: clock.clone(),
+        reranks: AtomicUsize::new(0),
+    });
+    let mut fixture = search_phase_tests::Fixture::new(HybridStages::default());
+    let shared = Arc::get_mut(&mut fixture.shared).unwrap();
+    let mut daemon = shared.global_config.daemon.clone();
+    daemon.search_active = 1;
+    shared.workers = Arc::new(
+        crate::daemon::worker_admission::WorkerAdmission::with_policies(
+            &daemon,
+            &shared.global_config.remote,
+        )
+        .unwrap(),
+    );
+    let embedding = Arc::new(RemoteFixture {
+        execution: RemoteExecution::with_owners(
+            &shared.global_config.remote,
+            wire.clone(),
+            shared.workers.clone(),
+            shared.activity.clone(),
+        )
+        .unwrap(),
+        legacy: tokio::runtime::Handle::current(),
+        sync_calls: AtomicUsize::new(0),
+    });
+    let mut policy = shared.global_config.remote.clone();
+    policy.retry_initial_ms = 23;
+    policy.jitter_max_ms = 0;
+    let mut rerank = RemoteExecution::with_owners(
+        &policy,
+        wire,
+        shared.workers.clone(),
+        shared.activity.clone(),
+    )
+    .unwrap();
+    let cpu_clock = clock.clone();
+    rerank.observe_cpu(Arc::new(move || {
+        cpu_clock.advance(Duration::from_millis(7));
+    }));
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let backoff = entered.clone();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let proceed = release.clone();
+    let retry_clock = clock.clone();
+    rerank.observe_retry_timing(Arc::new(move |delay| {
+        assert_eq!(delay, Duration::from_millis(23));
+        backoff.add_permits(1);
+        let proceed = proceed.clone();
+        let clock = retry_clock.clone();
+        Box::pin(async move {
+            proceed.acquire().await.unwrap().forget();
+            clock.advance(delay);
+            Ok(())
+        })
+    }));
+    let reranker = Arc::new(RemoteReranker {
+        execution: rerank,
+        sync_calls: AtomicUsize::new(0),
+    });
+    shared
+        .project_slot(fixture.project.id)
+        .state
+        .lock()
+        .unwrap()
+        .stages = Some(Arc::new(HybridStages {
+        embedder: Some(embedding.clone()),
+        ranking: Ranking::Rrf,
+        reranker: Some(reranker.clone()),
+    }));
+    TimedSearch {
+        fixture,
+        clock,
+        embedding,
+        reranker,
+        entered,
+        release,
+    }
 }

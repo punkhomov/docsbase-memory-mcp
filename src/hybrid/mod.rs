@@ -84,7 +84,7 @@ pub mod blocking {
         static SYNC_BRIDGE: std::cell::RefCell<Option<std::sync::Arc<crate::daemon::remote::SyncBridge>>> = const { std::cell::RefCell::new(None) };
     }
 
-    #[cfg(any(feature = "hybrid-remote", test))]
+    #[cfg(feature = "hybrid-remote")]
     pub(crate) fn bridge() -> Option<std::sync::Arc<crate::daemon::remote::SyncBridge>> {
         SYNC_BRIDGE.with(|current| current.borrow().clone())
     }

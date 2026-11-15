@@ -7,6 +7,7 @@ use crate::search::metadata::MetadataSource;
 use crate::search::operation::SearchOperation;
 use serde_json::Value;
 use std::sync::Arc;
+#[cfg(feature = "hybrid-remote")]
 use std::time::Instant;
 
 /// Existing prepared owners shared by daemon and read-only direct search.
@@ -252,10 +253,10 @@ async fn phase<T: Send + 'static>(
 ) -> Result<T> {
     let permit = workers.search(operation).await?;
     operation.check()?;
-    let started = Instant::now();
+    let started = SearchOperation::clock_now(operation);
     let worker_operation = operation.clone();
     let worker = request::spawn(Some(permit), Some(activity.clone()), move || {
-        worker_operation.record_queue(started.elapsed());
+        worker_operation.record_queue(worker_operation.since(started));
         worker_operation.check()?;
         let _cpu = worker_operation.cpu_timer();
         work()
@@ -273,6 +274,7 @@ pub(super) async fn run(
     let activity = activity.unwrap_or_else(|| shared.activity.track());
     let owner = shared.clone();
     let call = operation.clone();
+    let dense_activity = activity.clone();
     let (captured, start) = phase(&shared.workers, &operation, &activity, move || {
         let project = {
             let reader = MetadataSource::Prepared(&owner.readers).acquire(&call)?;
@@ -282,7 +284,7 @@ pub(super) async fn run(
         let owners = Arc::new(SearchOwners {
             cache: owner.cache.clone(),
             readers: owner.readers.clone(),
-            dense: Arc::new(owner.dense.snapshot()),
+            dense: Arc::new(owner.dense.snapshot_with_activity(dense_activity)),
             workers: owner.workers.clone(),
             payload_budget: owner.payload_budget.clone(),
             policy: owner.global_config.search.clone(),

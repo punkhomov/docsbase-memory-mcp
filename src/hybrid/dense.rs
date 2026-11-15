@@ -467,6 +467,7 @@ struct BuildJob {
     dim: usize,
     store_root: Option<PathBuf>,
     job_pin: Option<crate::vector_cache::JobPinAuthority>,
+    activity: Option<Arc<crate::daemon::request::Activity>>,
 }
 
 /// Rows/hashes loaded for one lookup, before the ANN exact/build decision.
@@ -675,6 +676,7 @@ pub struct DenseCache {
     outcomes: Arc<Mutex<HashMap<i64, AnnOutcome>>>,
     query_cache: Arc<Mutex<QueryCache>>,
     clock: Arc<AtomicU64>,
+    origin_activity: Option<Arc<crate::daemon::request::Activity>>,
     #[cfg(test)]
     test_build_gate: Option<TestBuildGate>,
     #[cfg(test)]
@@ -864,6 +866,7 @@ impl DenseCache {
             outcomes: Arc::new(Mutex::new(HashMap::new())),
             query_cache: Arc::new(Mutex::new(QueryCache::new(query))),
             clock: Arc::new(AtomicU64::new(0)),
+            origin_activity: None,
             #[cfg(test)]
             test_build_gate: None,
             #[cfg(test)]
@@ -1098,6 +1101,7 @@ impl DenseCache {
             outcomes: Arc::new(Mutex::new(HashMap::new())),
             query_cache: Arc::clone(&self.query_cache),
             clock: Arc::new(AtomicU64::new(0)),
+            origin_activity: None,
             #[cfg(test)]
             test_build_gate: None,
             #[cfg(test)]
@@ -1553,6 +1557,7 @@ impl DenseCache {
                 dim,
                 store_root,
                 job_pin,
+                activity: self.origin_activity.clone(),
             }))
         } else {
             Ok(self.stash_ready(project_id, generation, model_id, rows, Arc::new(chunks)))
@@ -1992,6 +1997,15 @@ impl DenseCache {
 
     /// Snapshot of the cache sharing its entries, digests and clock; used by
     /// background builds to publish results (design §8).
+    pub(crate) fn snapshot_with_activity(
+        &self,
+        activity: Arc<crate::daemon::request::Activity>,
+    ) -> Self {
+        let mut snapshot = self.snapshot();
+        snapshot.origin_activity = Some(activity);
+        snapshot
+    }
+
     pub(crate) fn snapshot(&self) -> Self {
         Self {
             limits: self.limits,
@@ -2007,6 +2021,7 @@ impl DenseCache {
             outcomes: Arc::clone(&self.outcomes),
             query_cache: Arc::clone(&self.query_cache),
             clock: Arc::clone(&self.clock),
+            origin_activity: self.origin_activity.clone(),
             #[cfg(test)]
             test_build_gate: self.test_build_gate.clone(),
             #[cfg(test)]
@@ -2105,6 +2120,7 @@ fn build_in_background(
 ) {
     // Same originating Activity retires last, after data, publication and the
     // existing physical byte reservation, including stale completion/unwind.
+    let _origin_activity = job_input.activity.take();
     let _activity = job_input
         .job_pin
         .as_mut()
@@ -2696,6 +2712,7 @@ mod tests {
             dim,
             store_root: Some(root.path().to_path_buf()),
             job_pin: None,
+            activity: None,
         };
         let state = dense.start_build(job);
         assert!(matches!(state, DenseRows::Ann(current) if Arc::ptr_eq(&current, &published)));

@@ -45,8 +45,6 @@ mod sync_command;
 pub mod update;
 
 use std::path::PathBuf;
-#[cfg(test)]
-use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -374,48 +372,6 @@ fn sync(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
     sync_command::run(path, settings)
-}
-
-// One captured connection result controls the existing sync route and fallback.
-#[cfg(test)]
-fn sync_with_connection(
-    cache: &std::path::Path,
-    target: &std::path::Path,
-    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
-    connection: crate::error::Result<Option<Client>>,
-    direct: impl FnOnce() -> anyhow::Result<()>,
-) -> anyhow::Result<()> {
-    if let Some(mut client) = connection? {
-        client.handshake_registry()?;
-        let binding = bind_cli_project(&mut client, cache, target, settings);
-        match binding {
-            Ok(()) => {
-                let job = client.call_tool("sync_start", serde_json::json!({}))?;
-                let id = job["job_id"].as_i64().context("sync_start: job_id")?;
-                let deadline = Instant::now() + Duration::from_secs(610);
-                let mut job = job;
-                while matches!(job["state"].as_str(), Some("queued" | "running")) {
-                    if Instant::now() >= deadline {
-                        anyhow::bail!("sync job {id} did not finish within the budget");
-                    }
-                    std::thread::sleep(Duration::from_millis(250));
-                    job = client.call_tool("sync_status", serde_json::json!({ "job_id": id }))?;
-                }
-                println!("{}", serde_json::to_string_pretty(&job)?);
-                if job["state"] == "error" {
-                    anyhow::bail!("sync job {id} failed: {}", job["stats"]);
-                }
-                return Ok(());
-            }
-            // Not indexed yet: the direct path registers the project first.
-            Err(Error::Project { .. }) if !client.active_website() => {
-                return direct();
-            }
-            Err(err) => return Err(err.into()),
-        }
-    }
-    crate::daemon::launch::require_shared_without_daemon()?;
-    direct()
 }
 
 /// Runs `docsbase config`: effective values for the current directory

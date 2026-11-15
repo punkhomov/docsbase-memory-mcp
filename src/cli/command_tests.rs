@@ -243,6 +243,7 @@ fn direct_command_error_and_unwind_wait_for_actual_native_terminal_retirement() 
         assert!(request.is_some(), "configured actual HTTP reached");
         let message = result.unwrap().unwrap_err();
         assert!(message.contains(if unwind { "work unwound" } else { "work error" }));
+        assert_direct_failure_state();
         let events = events.lock().unwrap();
         assert!(
             events
@@ -255,6 +256,7 @@ fn direct_command_error_and_unwind_wait_for_actual_native_terminal_retirement() 
                     .unwrap()
         );
     }
+    assert_direct_retry(&listener);
     assert_eq!(calls.synchronous.load(Ordering::SeqCst), 0);
 }
 #[test]
@@ -289,4 +291,58 @@ fn current_thread_command_refuses_before_polling_or_effects() {
             .join(crate::store::DB_FILE)
             .exists()
     );
+}
+
+fn assert_direct_failure_state() {
+    let cache = crate::config::paths::cache_dir().unwrap();
+    let db = rusqlite::Connection::open_with_flags(
+        cache.join(crate::store::DB_FILE),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let status: String = db
+        .query_row("SELECT status FROM projects", [], |row| row.get(0))
+        .unwrap();
+    let pending: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM docs WHERE content_hash=''",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        status, "error",
+        "failed direct Full must terminalize after physical retirement"
+    );
+    assert!(
+        pending > 0,
+        "failed started direct job retains recovery markers"
+    );
+}
+
+fn assert_direct_retry(listener: &std::net::TcpListener) {
+    let retry_listener = listener.try_clone().unwrap();
+    let retry = std::thread::spawn(move || {
+        let (mut socket, _) = retry_listener.accept().unwrap();
+        assert!(read_request(&socket).is_some());
+        response(&mut socket);
+    });
+    let target = std::env::current_dir().unwrap();
+    super::index::run_with_settings(
+        Some(&target),
+        &crate::store::settings::standalone().unwrap(),
+    )
+    .unwrap();
+    retry.join().unwrap();
+    let db = rusqlite::Connection::open_with_flags(
+        crate::config::paths::cache_dir()
+            .unwrap()
+            .join(crate::store::DB_FILE),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let (status,pending,sync):(String,i64,i64)=db.query_row("SELECT status,(SELECT COUNT(*) FROM docs WHERE content_hash=''),(SELECT COUNT(*) FROM sync_jobs) FROM projects",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+    assert_eq!(status, "indexed");
+    assert_eq!(pending, 0);
+    assert_eq!(sync, 0, "direct Full never invents a Sync row");
 }

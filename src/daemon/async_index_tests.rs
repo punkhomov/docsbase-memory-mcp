@@ -1295,3 +1295,81 @@ fn automatic_registration_and_backfill_use_configured_async_factory() {
 
 #[path = "../watch/async_runtime_tests.rs"]
 mod async_runtime_tests;
+
+#[test]
+fn cached_search_without_job_pin_keeps_ann_in_root_drain_through_finish_or_unwind() {
+    use std::future::Future;
+    use std::task::Poll;
+    for unwind in [false, true] {
+        let (prepared, ready) = std::sync::mpsc::channel();
+        let (returned, done) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let policy = crate::daemon::settings::standalone().unwrap();
+            let mut root = crate::daemon::job_service::JobRoot::new(policy.settings());
+            let (fixture,gate)=runtime.block_on(async {
+                let provider=document_gate();let mut fixture=search_phase_tests::Fixture::new(HybridStages{embedder:Some(provider.clone()),ranking:Ranking::Rrf,reranker:None});
+                let shared=Arc::get_mut(&mut fixture.shared).unwrap();let mut settings=crate::hybrid::dense_settings::standalone().unwrap().into_settings();settings.min_vectors=1;
+                shared.dense=crate::hybrid::dense::DenseCache::with_settings(crate::hybrid::dense::AnnPolicy::BuildOrLoad,&shared.cache,&settings).unwrap();
+                let gate=shared.dense.pause_job_builds_for_test();let mut vectors=crate::vector_cache::VectorCache::open(&shared.cache).unwrap();
+                let db=shared.db();let mut query=db.connection().prepare("SELECT c.text FROM chunks c JOIN docs d ON d.id=c.doc_id WHERE d.project_id=?1").unwrap();
+                let texts=query.query_map([fixture.project.id],|row|row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();assert_ne!(texts,Vec::<String>::new());
+                for text in &texts{vectors.put(provider.model_id(),&crate::vector_cache::chunk_hash(text),&[1.,0.,0.]).unwrap();}
+                drop(query);drop(db);drop(vectors);fixture.shared.activate_jobs(root.service()).unwrap();(fixture,gate)
+            });
+            let result = root.run(&runtime, async {
+                let response = call_tool(
+                    &fixture.shared,
+                    Some(fixture.session),
+                    "search_docs",
+                    json!({"query":"widgets"}),
+                )
+                .await?;
+                assert_eq!(response.as_array().unwrap().len(), 1);
+                let count = fixture.shared.activity.counter.load(Ordering::SeqCst);
+                let mut drain = Box::pin(fixture.shared.activity.drain(Duration::from_millis(1)));
+                let pending =
+                    std::future::poll_fn(|cx| Poll::Ready(drain.as_mut().poll(cx).is_pending()))
+                        .await;
+                drop(drain);
+                if unwind {
+                    fixture.shared.dense.invalidate(fixture.project.id).unwrap();
+                }
+                prepared.send((gate.clone(), count, pending)).unwrap();
+                Ok(())
+            });
+            returned.send(result.is_ok()).unwrap();
+            let joined = fixture.shared.dense.join_job_builds_for_test();
+            assert_eq!(joined.is_err(), unwind);
+            assert_eq!(fixture.shared.activity.counter.load(Ordering::SeqCst), 0);
+        });
+        let (gate, count, pending) = ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        let early = done.try_recv();
+        let root_waiting = matches!(early, Err(std::sync::mpsc::TryRecvError::Empty));
+        if unwind {
+            gate.open_with_unwind();
+        } else {
+            gate.open();
+        }
+        let completed = match early {
+            Ok(value) => value,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                done.recv_timeout(Duration::from_secs(10)).unwrap()
+            }
+            Err(error) => panic!("root delivery: {error}"),
+        };
+        assert!(completed);
+        worker.join().unwrap();
+        assert_eq!(
+            count, 1,
+            "actual search-origin ANN owns the SAME Activity without a JobPin"
+        );
+        assert!(
+            pending && root_waiting,
+            "root source drain must remain pending after the real response"
+        );
+    }
+}
