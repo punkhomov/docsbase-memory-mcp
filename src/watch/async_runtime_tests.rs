@@ -137,6 +137,7 @@ fn cancelled_actual_watch_codec_keeps_shared_charge_until_finish_or_unwind() {
             let writer_refused=lifecycle::with_writer_lease(&fixture.shared.cache,fixture.project.id,||Ok(())).is_err();
             release.send(()).unwrap();
             fixture.shared.activity.drain(Duration::from_millis(policy.settings().drain_poll_ms)).await;
+            assert_eq!(registry::project_by_id(&fixture.shared.db(), fixture.project.id).unwrap().unwrap().status, crate::store::models::ProjectStatus::Indexed, "watch cancellation/unwind preserves the legacy incremental status after terminal retirement");
             assert!(retained && guard_alive,"consumer cancellation must retain the same charged pending/native inputs while actual codec work owns them");
             assert!(writer_refused,"native teardown waits actual codec physical retirement");
             assert!(input.lock().unwrap().as_ref().unwrap().upgrade().is_none(),"the last physical/native input owner releases the shared allowance");
@@ -386,4 +387,42 @@ fn assert_no_watch_sync_rows(fixture: &search_phase_tests::Fixture, id: i64) {
         )
         .unwrap();
     assert_eq!(watch_rows, 0);
+}
+
+#[test]
+fn actual_watch_reload_while_remote_is_held_retries_the_original_raw_batch() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut root = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = root.service();
+    root.run(&runtime,async move {
+        let provider=document_gate();
+        let fixture=search_phase_tests::Fixture::new(HybridStages{embedder:Some(provider.clone()),..HybridStages::default()});
+        fixture.shared.activate_jobs(service).unwrap();
+        {let slot=fixture.shared.project_slot(fixture.project.id);let mut state=slot.state.lock().unwrap();state.search_stages=state.stages.clone();}
+        assert!(fixture.shared.ensure_watcher(&fixture.project).unwrap());
+        let body="# Reload\n\nheld remote reload must retry this document\n";
+        std::fs::write(fixture.project.canonical_root.join("guide.md"),body).unwrap();
+        tokio::time::timeout(Duration::from_secs(10),provider.entered.acquire()).await.unwrap().unwrap().forget();
+        std::fs::write(fixture.project.canonical_root.join(".docsbase.toml"),"ignores=['unrelated/**']\n").unwrap();
+        fixture.shared.open_project_config_with(&fixture.project,|_|Ok(HybridStages{embedder:Some(provider.clone()),..HybridStages::default()})).unwrap();
+        provider.release.add_permits(1);
+        let retried=tokio::time::timeout(Duration::from_secs(5),provider.entered.acquire()).await.is_ok_and(|entered| {entered.unwrap().forget();true});
+        provider.release.add_permits(16);
+        if retried {
+            let expected=blake3::hash(body.as_bytes()).to_hex().to_string();
+            tokio::time::timeout(Duration::from_secs(10),async {loop {
+                let current:Option<String>=fixture.shared.db().connection().query_row("SELECT content_hash FROM docs WHERE project_id=?1 AND rel_path='guide.md'",[fixture.project.id],|row|row.get(0)).ok();
+                if current.as_deref()==Some(expected.as_str()) && lifecycle::with_writer_lease(&fixture.shared.cache,fixture.project.id,||Ok(())).is_ok(){break;}
+                tokio::task::yield_now().await;
+            }}).await.unwrap();
+        }
+        fixture.shared.close_watchers();fixture.shared.activity.drain(Duration::from_millis(policy.settings().drain_poll_ms)).await;
+        assert!(retried,"an obsolete in-flight watch revision must consume the existing transient retry policy rather than permanently drop its raw paths");
+        assert_eq!(provider.synchronous.load(Ordering::SeqCst),0);
+        Ok(())
+    }).unwrap();
 }

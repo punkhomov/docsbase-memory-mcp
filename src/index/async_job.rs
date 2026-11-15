@@ -220,7 +220,11 @@ impl IndexState {
             repo::mark_sync_running(db.connection(), id)?;
         }
         self.mutation = Mutation::Started;
-        registry::set_status(db, context.project.id, ProjectStatus::Indexing)?;
+        // Watch preserves legacy incremental status during begin/error/cancel;
+        // Other jobs keep their existing explicit index status transitions.
+        if !matches!(context.input, JobInput::Watch(_)) {
+            registry::set_status(db, context.project.id, ProjectStatus::Indexing)?;
+        }
         self.attempt = Some(outcome::begin(db, &context.project)?);
         self.index = Some(IndexHandle::open_or_create(&lifecycle::index_dir(
             &context.cache,
@@ -251,6 +255,10 @@ impl IndexState {
             &context.cache,
             context.project.id,
         )?);
+        // Re-read after writer admission, before capture/index/marker effects.
+        if matches!(context.input, JobInput::Watch(_)) {
+            crate::watch::admit_incremental(db, &context.project)?;
+        }
         let recreated =
             IndexHandle::needs_rebuild(&lifecycle::index_dir(&context.cache, context.project.id));
         let mut capture = job::CaptureBudget {

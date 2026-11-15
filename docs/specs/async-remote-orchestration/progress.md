@@ -499,3 +499,22 @@ escalation cancels admitted wire loops through the existing worker shutdown toke
 so a wedged reply cannot keep the new root drain alive; actual physical closures
 retain ownership. Focused evidence and final frozen project gates are recorded
 with the functional B2 checkpoint; fresh B2 review remains pending.
+
+B2 frozen no-fail-fast preservation found exactly two failures at b33e988:
+stale-schema watch changed document markers, and pagination saw Indexing during
+watch activity. Watch now reuses the existing current status/schema admission
+under its writer lease before capture/native/marker effects and preserves the
+legacy incremental Indexed status through begin, terminal error and cancellation.
+Explicit Index/Sync status/owned-terminal behavior is unchanged. Existing
+admission/document/commit-retry tests remain unchanged; the actual cancelled
+codec finish/unwind case also asserts the legacy terminal watch status.
+Historical failed full run remains in task-b2/verification1; re-freeze/full gates
+and fresh task review still precede B2 acceptance.
+
+B2 actual held-remote reload RED proved the old captured revision was fenced
+correctly but its raw batch was dropped permanently. The existing WatchContext
+identity now maps an actually replaced context to the existing bounded transient
+retry policy, retaining the SAME original operation/deadline and raw paths.
+No Project-error string matching or new revision tracker; unchanged-context
+permanent errors and per-attempt root/schema refusal remain intact. This closes
+the known legacy reload-retry preservation gap before final re-freeze.

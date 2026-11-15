@@ -2098,20 +2098,25 @@ fn test_build_delay() {}
 /// underlying index is caught and treated like a build failure (FR-5).
 #[allow(clippy::needless_pass_by_value)]
 fn build_in_background(
-    cache: Arc<DenseCache>,
-    mut job: BuildJob,
-    building: Arc<BuildingAnn>,
+    cache_input: Arc<DenseCache>,
+    mut job_input: BuildJob,
+    building_input: Arc<BuildingAnn>,
     reservation: BuildReservation,
 ) {
     // Same originating Activity retires last, after data, publication and the
     // existing physical byte reservation, including stale completion/unwind.
-    let _activity = job
+    let _activity = job_input
         .job_pin
         .as_mut()
         .and_then(crate::vector_cache::JobPinAuthority::take_activity);
+    // Move arguments into later locals too: argument destruction otherwise
+    // follows local destruction and could outlive the originating Activity.
+    let cache = cache_input;
     // Declare the guard before the working-set locals: on unwind or stale
     // completion, rows/loaded graphs must drop before their charge is freed.
     let mut reservation = reservation;
+    let building = building_input;
+    let job = job_input;
     let BuildJob {
         project_id,
         key,

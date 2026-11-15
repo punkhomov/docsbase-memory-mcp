@@ -167,7 +167,7 @@ pub(super) async fn consume(
             let result = tokio::select! { biased;
                 () = close.cancelled() => { cancellation.cancel(); return; },
                 () = cancel.cancelled() => { cancellation.cancel(); return; },
-                result = shared.run_watch_batch(project.clone(), runtime, input.clone(), operation.clone(), activity.clone()) => result,
+                result = shared.run_watch_batch(project.clone(), runtime.clone(), input.clone(), operation.clone(), activity.clone()) => result,
             };
             match result {
                 Ok(stats) => {
@@ -178,6 +178,7 @@ pub(super) async fn consume(
                     break;
                 }
                 Err(error) => {
+                    let error = revision_error(error, runtime, &context);
                     let (event, pause) = retry.failure(&error);
                     let _ = shared
                         .report_watch_event(&project, event, pending.clone(), &operation, &activity)
@@ -246,5 +247,24 @@ impl RetryState {
             },
             None,
         )
+    }
+}
+
+fn revision_error(
+    error: Error,
+    captured: Arc<super::WatchRuntime>,
+    context: &Mutex<WatchContext>,
+) -> Error {
+    // Retry only an actually changed captured context. Every
+    // attempt still performs the permanent root/schema guard
+    // before effects; the same original retry clock applies.
+    let current = context
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    if WatchContext::Prepared(captured).same_revision(&current) {
+        error
+    } else {
+        Error::internal("watcher config changed while preparing batch")
     }
 }

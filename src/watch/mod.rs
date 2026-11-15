@@ -1491,13 +1491,7 @@ fn run_batch(
     })
 }
 
-fn run_batch_using(
-    db: &mut Db,
-    cache: &Path,
-    project: &Project,
-    batch: &[PathBuf],
-    mut current_context: impl FnMut() -> WatchContext,
-) -> Result<JobStats> {
+pub(crate) fn admit_incremental(db: &Db, project: &Project) -> Result<()> {
     // Incremental chunks are only valid for an index built with the current
     // schema; a stale or errored project must be rebuilt by a full index
     // first (T24). Full outcome publication (or the legacy mark_indexed helper)
@@ -1517,6 +1511,17 @@ fn run_batch_using(
             instruction: Some("run `docsbase index` to rebuild".to_owned()),
         });
     }
+    Ok(())
+}
+
+fn run_batch_using(
+    db: &mut Db,
+    cache: &Path,
+    project: &Project,
+    batch: &[PathBuf],
+    mut current_context: impl FnMut() -> WatchContext,
+) -> Result<JobStats> {
+    admit_incremental(db, project)?;
     // The writer handle is opened per batch: holding it between batches would
     // block full index jobs on the tantivy lock.
     lifecycle::with_writer_lease(cache, project.id, || {
