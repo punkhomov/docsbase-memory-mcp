@@ -968,3 +968,29 @@ filters и bounded byte projection также для malformed UTF-8;14outcome t
 lean GREEN, final full/lean all-target Clippy GREEN. Новая regression —20йnew test.
 Final integration с actual main150 и required native остаются gates;1422/1228 выше
 относятся к source до этого узкого observer fix, не к новому integrated head.
+
+
+MODIFIED 2026-11-15 — Task #161 bounded functional correction (implementation
+checkpoint; fresh whole-task review/native/full acceptance pending). Actual cold
+WAL RED: real SQLite initializer lock caused DatabaseBusy in437.594us despite
+existing5s timeout; releasing the real lock before old error propagation did not
+recover. The same-owner contention window now bounds BUSY journal-mode retries,
+counts SQLite wait time, caps each retry to remaining time and restores normal
+timeout on success. Only DatabaseBusy retries; zero immediate and nonBusy source
+errors stay. OS yield is algorithm scheduling under the existing admitted CPU/
+time budget, not a new timeout/delay setting or helper.
+
+Focused controlled matrix5/0: two real cold VectorCache constructors before any
+vector schema, held mode leases, native initializer release, original5000ms
+restoration derived from owner policy; deterministic73→1ms/no-third-attempt expiry; zero/nonBusy one attempt;
+owned connect failure/retry preserves exact values/recency/positive leases/private
+leases/DBJ1 marker and persistent nonreused signed ids. No schema/bootstrap
+allocator case substitutes for cold initialization. Relevant storage/ANN/job/DB
+checks, current lint/fmt, frozen full CLI/lean, native and fresh strongest review
+are separate delivery gates. No dependency/default/cap/fixture/baseline/ignore
+changes, paid calls, new settings/executor/transaction or v2 activation.
+
+Ruling #161: the configured interval is a shared contention/retry window, not a
+hard native-I/O completion bound. In-flight SQLite success is retained after
+elapsed time; BUSY after expiry admits no subsequent retry. This preserves
+SQLite's approximate/non-preemptible timeout contract without a new policy.

@@ -19,7 +19,7 @@ pub struct VectorStoreSettings {
     pub max_entries: u64,
     /// Maximum retained vector payload bytes; active leases can exceed this cap.
     pub max_bytes: u64,
-    /// SQLite writer wait; zero means immediate failure on contention.
+    /// SQLite writer wait and shared WAL-retry window; zero is immediate.
     pub busy_timeout: Duration,
 }
 
@@ -62,7 +62,7 @@ pub struct VectorStorePatch {
     pub max_entries: Option<u64>,
     /// Maximum vector payload bytes.
     pub max_bytes: Option<u64>,
-    /// Writer wait on every owned connection.
+    /// Writer wait and WAL-retry window on every owned connection.
     pub busy_timeout: Option<Duration>,
 }
 

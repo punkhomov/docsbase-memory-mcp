@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -593,8 +593,7 @@ fn open_connection(root: &Path, busy_timeout: Duration) -> Result<Connection> {
         .map_err(|err| Error::internal_with_source("open vector cache", err))?;
     conn.busy_timeout(busy_timeout)
         .map_err(|err| Error::internal_with_source("set vector cache timeout", err))?;
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(|err| Error::internal_with_source("set vector cache journal", err))?;
+    enable_wal(&conn, busy_timeout)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS vector_cache (
              model_id TEXT NOT NULL,
@@ -614,6 +613,57 @@ fn open_connection(root: &Path, busy_timeout: Duration) -> Result<Connection> {
     )
     .map_err(|err| Error::internal_with_source("create vector cache schema", err))?;
     Ok(conn)
+}
+
+// SQLite may return immediate BUSY for a journal-mode lock upgrade without
+// invoking its busy handler. BUSY retries share the SAME owner contention window.
+// A running SQLite call is not preempted or its success discarded after expiry;
+// normal reads/writes retain their configured timeout after initialization.
+fn enable_wal(conn: &Connection, busy_timeout: Duration) -> Result<()> {
+    let deadline = journal_now()
+        .checked_add(busy_timeout)
+        .ok_or_else(|| Error::internal("vector cache journal deadline exceeds clock range"))?;
+    loop {
+        let journal = conn.pragma_update(None, "journal_mode", "WAL");
+        #[cfg(test)]
+        cold_wal_tests::observe_busy(&journal, conn);
+        match journal {
+            Ok(()) => {
+                return conn.busy_timeout(busy_timeout).map_err(|error| {
+                    Error::internal_with_source("restore vector cache timeout", error)
+                });
+            }
+            Err(error) => {
+                let busy = matches!(&error,rusqlite::Error::SqliteFailure(code,_) if code.code==rusqlite::ErrorCode::DatabaseBusy);
+                if !busy || busy_timeout.is_zero() || journal_now() >= deadline {
+                    return Err(Error::internal_with_source(
+                        "set vector cache journal",
+                        error,
+                    ));
+                }
+                // Yield the current admitted constructor thread to the winning
+                // initializer. No additional delay/attempt default or helper.
+                std::thread::yield_now();
+                let remaining = deadline.saturating_duration_since(journal_now());
+                if remaining.is_zero() {
+                    return Err(Error::internal_with_source(
+                        "set vector cache journal",
+                        error,
+                    ));
+                }
+                conn.busy_timeout(remaining).map_err(|error| {
+                    Error::internal_with_source("set vector cache timeout", error)
+                })?;
+            }
+        }
+    }
+}
+fn journal_now() -> Instant {
+    #[cfg(test)]
+    if let Some(now) = cold_wal_tests::clock_now() {
+        return now;
+    }
+    Instant::now()
 }
 
 fn read_sequence(conn: &Connection) -> Result<i64> {
@@ -693,3 +743,7 @@ mod tests {
         assert_ne!(chunk_hash("same text"), chunk_hash("same text "));
     }
 }
+
+#[cfg(test)]
+#[path = "vector_cache_cold_wal_tests.rs"]
+mod cold_wal_tests;
