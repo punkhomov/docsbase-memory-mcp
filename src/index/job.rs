@@ -1176,7 +1176,7 @@ fn prepare_doc_inner(
     if let Some(budget) = capture {
         // pulldown-cmark builds its first-pass tree eagerly in Parser::new_ext.
         // Reserve that allowance before the estimator enters the constructor.
-        let parser = crate::index::chunk::capture_parser_charge(text.len())?;
+        let parser = crate::index::chunk::capture_parser_charge(&text)?;
         budget.reserve(parser)?;
         let total = crate::index::chunk::capture_charge(&text, MAX_CHUNK_CHARS)?;
         budget.reserve(total.saturating_sub(parser))?;

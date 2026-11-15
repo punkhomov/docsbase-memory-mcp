@@ -565,3 +565,18 @@ Current source checkpoint is for frozen full checks and fresh B3/task/whole-feat
 review. Final native/performance gates and #81 closure remain pending; intermediate
 B1/B2 CI does not stand in for final-source acceptance. No new defaults, external
 dependencies, retrieval fixtures/baselines/budgets/ignores or paid calls.
+
+B3 frozen full CLI no-fail-fast at a1e501a found one unchanged lifecycle fixture
+failure: migrated direct Index rejected a7MB plain ASCII file because the eager
+parser allowance charged96×every byte (~672MB), independent of syntax. Pinned
+pulldown-cmark0.13.5 firstpass preallocates max(128,len/32) Node<Item> cells.
+The allocation-free estimator now recognizes only unindented ASCII words/spaces,
+blank lines and ATX headings: it charges that initial capacity plus conservative
+line growth/spine/ranges before either eager constructor. Indentation, Unicode,
+inline delimiters, attributes, HTML, links/code and other syntax keep the96×byte
+fallback. This is an accounting correction, with unchanged caps/defaults/fixtures.
+The actual same-size capture retains8,835,921 bytes, peaks40,687,752 under the
+unchanged67,108,864 allowance, and releases source/parser scratch only after
+physical destruction. Existing parser-before-constructor refusal, UTF8 warning
+and multi-file retained-cap tests remain. Current affected gates and a new frozen
+full pair are required; the original failed full receipt is retained.

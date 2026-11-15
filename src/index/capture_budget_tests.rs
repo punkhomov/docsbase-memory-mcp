@@ -269,3 +269,58 @@ fn invalid_utf8_files_release_dead_scratch_and_preserve_the_valid_document() {
     drop(account);
     assert!(budget.reserve(2 * 1024 * 1024).is_ok());
 }
+
+#[test]
+fn large_plain_document_reserves_eager_capacity_and_retained_chunks_within_unchanged_cap() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let body = format!("# Big\n\n{}\n", "a".repeat(6_999_000));
+    std::fs::write(root.path().join("big.md"), &body).unwrap();
+    let mut db = Db::open(cache.path()).unwrap();
+    let project = crate::daemon::registry::ensure_project(&mut db, root.path()).unwrap();
+    let policy = crate::search::settings::standalone()
+        .unwrap()
+        .into_settings();
+    let cap = policy.max_request_payload_bytes;
+    let budget = crate::search::budget::PayloadBudget::new(policy).unwrap();
+    let account = budget.reserve(0).unwrap();
+    let operation = crate::search::operation::SearchOperation::with_timeout(
+        std::time::Instant::now(),
+        std::time::Duration::from_secs(60),
+        crate::hybrid::work::Cancellation::new(),
+    )
+    .unwrap();
+    let config = Config {
+        max_file_size: 7_000_000,
+        ..Config::default()
+    };
+    let peak = AtomicU64::new(0);
+    let observe = |event| {
+        if let CaptureEvent::Reserved(bytes) = event {
+            peak.fetch_max(bytes, Ordering::Relaxed);
+        }
+    };
+    let mut capture = CaptureBudget {
+        account: &account,
+        operation: &operation,
+        observed: Some(&observe),
+    };
+    let before = crate::index::chunk::capture_parser_entries();
+    let plan = capture_full_accounted(&db, &project, &config, false, Some(&mut capture)).unwrap();
+    assert!(crate::index::chunk::capture_parser_entries() > before);
+    assert_eq!(plan.stats.errors, 0);
+    assert_eq!(plan.plan.len(), 1);
+    assert!(account.bytes() >= plan.measured_retained_bytes().unwrap());
+    assert!(peak.load(Ordering::Relaxed) <= cap);
+    assert!(
+        peak.load(Ordering::Relaxed) > account.bytes(),
+        "eager source/parser scratch is released after destruction"
+    );
+    eprintln!(
+        "plain capture: source={} retained={} peak={} cap={cap}",
+        body.len(),
+        account.bytes(),
+        peak.load(Ordering::Relaxed)
+    );
+}
