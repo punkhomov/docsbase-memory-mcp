@@ -63,7 +63,7 @@ mod server_worker_tests;
 mod scoped;
 
 #[path = "search_async.rs"]
-mod search_async;
+pub(crate) mod search_async;
 
 /// Daemon state shared by all connections.
 pub struct Shared {
@@ -2340,13 +2340,13 @@ fn route_metadata_tool_in(
     let db = shared.db();
     match name {
         "status" => {
-            let stats = shared.sessions.stats();
+            let sessions = shared.sessions.stats();
             let notice = shared.restart_notice();
             let projects = shared.visible_projects(&db)?;
-            tools::status_for_projects(
+            let mut status = tools::status_for_projects(
                 &db,
                 &projects,
-                &stats,
+                &sessions,
                 shared.watchers.count(),
                 notice.as_deref(),
                 &|id| shared.watchers.watching(id),
@@ -2371,7 +2371,25 @@ fn route_metadata_tool_in(
                 } else {
                     None
                 },
-            )
+            )?;
+            let mut execution = shared.workers.snapshot();
+            if let (Some(target), Some(payload)) = (
+                execution.as_object_mut(),
+                shared.payload_budget.snapshot().as_object(),
+            ) {
+                target.extend(payload.clone());
+            }
+            #[cfg(feature = "hybrid-remote")]
+            if let Some(target) = execution.as_object_mut() {
+                let remote = serde_json::to_value(shared.remote.snapshot()).map_err(|error| {
+                    Error::internal_with_source("serialize remote execution", error)
+                })?;
+                if let Some(remote) = remote.as_object() {
+                    target.extend(remote.clone());
+                }
+            }
+            status["remote_execution"] = execution;
+            Ok(status)
         }
         "panel_info" => Ok(json!(crate::ipc::panel::PanelInfo {
             capabilities: {

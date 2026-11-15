@@ -113,7 +113,7 @@ Fix1 report/diff/manifest: `/workspace/scratch/agent-b/81/plan/fix1/`.
 Author fixes are **proposed addressed**, authoritative scoped re-review pending;
 no production unlock, runtime acceptance or task-complete claim.
 
-## Gate status
+## Historical architecture gate status (2026-11-14)
 
 | Gate | Status | Evidence / remaining work |
 |---|---|---|
@@ -529,3 +529,39 @@ The same deterministic reverse-traversal case is GREEN for retained/provider
 order and the first admitted winning document; no OS-arrival assumption or new
 product sort/default/budget policy. Affected gates, frozen full pair and original
 scoped I1 re-review precede acceptance; B3 remains locked.
+
+2026-11-15: B2 fix1 accepted atb1d9ca2 (original scoped I1 review
+PASS/APPROVED, no new Critical/Important; full CLI1656/0/18 and lean1390/0/11).
+B3 now migrates actual direct Search/Index/Sync to a single explicit command
+runtime/execution/JobRoot outside work futures. Real configured provider/Rig/
+reqwest loopback REDs observed synchronous Index/Search transport; GREEN selects
+async stages. Direct read-only preparation reuses existing search owners/Flights,
+ReadPool and ANN LoadOnly without Shared bootstrap. A real native retirement gate
+proves both command error and unwind drain before returning; current-thread nesting
+is refused before polling/effects. MCP stays the existing async daemon proxy.
+
+B3 ruling: connected errors are never replayed. Initial-connect-only fallback
+and existing unindexed registration bootstrap remain; Website Sync uses the old
+raw BindReadOnly protocol, without introducing a panel-read capability requirement.
+The initial new helper incorrectly imposed that capability; two unchanged routing
+tests exposed it and the same18-test suite is GREEN after exact protocol restoration.
+Sync polling uses captured DaemonSpec poll_interval_ms and the SAME original
+RemoteSpec background operation, replacing local250ms/610s literals.
+
+B3 metrics REDs observed absent actual status/explain projections. Existing
+SearchOperation now owns saturating per-operation CPU/network/backoff/attempts
+and shared-work attribution; existing provider/worker/payload owners project
+numeric status occupancy/calls/attempts/cancellations/refusals/retained bytes.
+No global counter delta is copied into a request. Shared query callers report
+actual own wait as network time and shared_work=true, while shared attempts and
+backoff remain on their physical logical-call owner. Ordinary rerank attempts
+belong to that request. Durations overlap, not a wall-clock partition; no input/
+model/credential/body labels. Cancellation totals deduplicate one remote operation
+across codec/admission/stage retirement, and physical CPU counts outlive awaiters.
+Actual queue/codec/shared-cache/retry-entry tests are GREEN. Existing stage/queue/
+total schema remains; only operational explain adds version1 execution metadata.
+
+Current source checkpoint is for frozen full checks and fresh B3/task/whole-feature
+review. Final native/performance gates and #81 closure remain pending; intermediate
+B1/B2 CI does not stand in for final-source acceptance. No new defaults, external
+dependencies, retrieval fixtures/baselines/budgets/ignores or paid calls.

@@ -29,6 +29,11 @@ pub(crate) mod test_env {
 #[path = "connection_tests.rs"]
 mod connection_tests;
 
+#[cfg(all(test, feature = "hybrid-remote"))]
+#[path = "command_tests.rs"]
+mod command_tests;
+
+mod command;
 pub mod config;
 pub mod connect;
 pub mod index;
@@ -36,9 +41,11 @@ pub mod install;
 pub mod models;
 pub mod search;
 pub mod status;
+mod sync_command;
 pub mod update;
 
 use std::path::PathBuf;
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -222,12 +229,7 @@ pub fn run() -> anyhow::Result<()> {
     match cli.command {
         #[cfg(feature = "web")]
         Command::Web { open, port } => crate::web::run(port, open),
-        Command::Index { path } => {
-            let policy = Config::global()?.daemon;
-            crate::daemon::remote::with_sync_command(&policy, move || {
-                index::run_with_settings(path.as_deref(), &db_settings)
-            })
-        }
+        Command::Index { path } => index::run_with_settings(path.as_deref(), &db_settings),
         Command::Search {
             query,
             query_mode,
@@ -240,33 +242,25 @@ pub fn run() -> anyhow::Result<()> {
             tags,
         } => {
             let started = std::time::Instant::now();
-            let policy = Config::global()?.daemon;
-            crate::daemon::remote::with_sync_command(&policy, move || {
-                search::run_with_policies_started(
-                    &query,
-                    &search::Options {
-                        limit,
-                        explain,
-                        snippet,
-                        dedupe,
-                        n_per_doc,
-                        path_prefix,
-                        tags,
-                    },
-                    &db_settings,
-                    query_mode,
-                    dense_settings.settings(),
-                    started,
-                )
-            })
+            search::run_with_policies_started(
+                &query,
+                &search::Options {
+                    limit,
+                    explain,
+                    snippet,
+                    dedupe,
+                    n_per_doc,
+                    path_prefix,
+                    tags,
+                },
+                &db_settings,
+                query_mode,
+                dense_settings.settings(),
+                started,
+            )
         }
         Command::List => status::list_with_settings(&db_settings),
-        Command::Sync { path } => {
-            let policy = Config::global()?.daemon;
-            crate::daemon::remote::with_sync_command(&policy, move || {
-                sync(path.as_deref(), &db_settings)
-            })
-        }
+        Command::Sync { path } => sync(path.as_deref(), &db_settings),
         Command::Config { command: None } => show_config(),
         Command::Config {
             command: Some(command),
@@ -379,22 +373,11 @@ fn sync(
     path: Option<&std::path::Path>,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
-    let cwd = std::env::current_dir().context("resolve current directory")?;
-    let target = cwd.join(path.unwrap_or(std::path::Path::new(".")));
-    let target = target
-        .canonicalize()
-        .with_context(|| format!("resolve sync target {}", target.display()))?;
-    let cache = paths::cache_dir()?;
-    sync_with_connection(
-        &cache,
-        &target,
-        settings,
-        Client::try_connect(&cache),
-        || index::run_with_settings(Some(&target), settings),
-    )
+    sync_command::run(path, settings)
 }
 
 // One captured connection result controls the existing sync route and fallback.
+#[cfg(test)]
 fn sync_with_connection(
     cache: &std::path::Path,
     target: &std::path::Path,

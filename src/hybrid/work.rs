@@ -283,6 +283,11 @@ impl RemoteCall {
         self.retained_payload.clone()
     }
 
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn is_shared(&self) -> bool {
+        self.interest.is_some()
+    }
+
     /// Original operation, or shared hard operation when coalesced.
     #[must_use]
     pub fn operation(&self) -> &SearchOperation {

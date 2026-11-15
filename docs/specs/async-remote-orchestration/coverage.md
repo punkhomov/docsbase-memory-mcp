@@ -118,3 +118,47 @@ Focused/current lint/source checks pass; new full CLI/lean/release-perf executio
 on the fixed frozen source and original strongest reviewer's fix-only verdict
 are independent pending receipts at commit time. Earlier c3 native/performance
 results are historical, not acceptance of this changed production input.
+
+## MODIFIED 2026-11-15 — PR2 operational coverage (current)
+
+The PR1 tables above are historical. B1 is accepted at7f1586d; B2 is accepted
+atb1d9ca2, including original I1 scoped re-review. B3 completes the operational
+consumer selection and additive metrics below. B3 local full gates, fresh task/
+whole-feature review and final native/performance acceptance remain separate
+pending gates; intermediate B1/B2 native CI is not final-source acceptance.
+
+| Requirement / SC | Current source and actual tests |
+|---|---|
+| FR-02/03/05/07/08/09/11; SC-02/04/05/06 | `async_job`, `JobService`/`JobRoot`, WorkerAdmission background/helper/terminal lanes and RemoteSpec background policy: actual full/incremental/Sync/backfill/capture/escaped codec/negative pin/terminal shutdown and unwind matrices accepted in B1 + fix1 |
+| FR-04/05/07/09/11/13; SC-01/05/06 | `watch::{async_runtime::consume,refilter_accounted}`, `server::{run_watch_batch,prepare_watch_pending}`, registration_async and async backfill: actual held-provider coalescing, quota/codec cancellation finish+unwind, retry/refilter/reload, native stop/restart, ANN Activity, multiproject and root-drain tests accepted in B2 + ordered-batch fix1 |
+| FR-01/02/09/10/11/13; SC-02/05/06 | `cli::{command,index,search,sync_command}` reuses existing async search/jobs; `configured_direct_index_uses_async_http_without_synchronous_transport`, `configured_direct_search_uses_async_http_without_synchronous_transport`, `direct_command_error_and_unwind_wait_for_actual_native_terminal_retirement`, `current_thread_command_refuses_before_polling_or_effects`; unchanged CLI routing/read-only/MCP/no-replay/Website contracts |
+| FR-06/12; SC-03/07 | Existing Flights/pure cache + operation-local execution; `shared_request_execution_attribution_never_copies_aggregate_attempts` proves cancelled peer does not inflate calls/attempts, shared request projection and zero-network pure cache hit |
+| FR-05/07/11/12; SC-05/07 | Existing remote/worker/payload owners project status: `status_projects_actual_remote_queue_cpu_and_retained_owners` holds actual HTTP and provider queue while independent control observes saturation, refusal and cancellation; `status_tracks_actual_codec_cpu_after_caller_cancellation_until_physical_retirement` uses actual codec CPU admission |
+| FR-02/03/12/13; SC-02/07 | `retry_metrics_keep_concurrent_operations_separate_at_actual_backoff_entry` drives the real existing timing-entry seam, exact299ms delay, cancelled/no-new-attempt and concurrent owner-local counts; `actual_search_explain_projects_versioned_execution_without_payload_labels` preserves queue/total and fixed six-field schema |
+| FR-13; NFR-01..04; SC-07 | No dependency/fixture/golden/ignore/budget/default changes. Full current CLI/lean, remote/local feature checks, lint, offline/golden/benchmark/capability/docs evidence and strongest fresh review are delivery gates, not inferred from focused tests. |
+
+Current binary consumers: daemon interactive → `search_async`; explicit Index/
+Sync, open-time backfill and automatic registration → existing async JobService;
+watch producer → existing bounded coalescer + async consumer/JobService; direct
+Search/Index/Sync → one command root and same async phases; MCP → daemon proxy.
+No operational path selects synchronous remote Transport or holds a CPU permit
+across HTTP/backoff. Local FastEmbed CPU still uses sanctioned `blocking::enter`
+inside admitted physical closures. Metadata/read/config guards end before waits;
+unique job writer ownership remains intentionally held for in-place recovery.
+
+Named exceptions: models/connect provisioning probes use the explicit sync command
+bridge; rootless Shared/tools/index/watch public compatibility APIs retain their
+sync contracts. Production daemon startup activates JobRoot before automatic
+consumers; CLI direct paths do not use rootless Shared. Test-only old IPC bridges
+are cfg(test). These exceptions do not claim a new public library facade (#80).
+
+Resource delta from PR1: logical/native jobs L=daemon.background_active(default1)
+plus pending8; CPU J uses the same existing background lane; T1 is pre-reserved
+terminal capacity; remote background active1/pending8 is independent of interactive
+active4/pending32. Helper pending is their active sum. S+C+J+H+T1 must fit the
+existing blocking executor ceiling. No DB/read lease or physical J spans network.
+Physical-tail fences stay native-free and root-held Activity stays tail-free.
+Captured plans/pending paths/codec clones use the same payload allowance; teardown
+order, unique pin/ANN authority and producer/native retirement remain B1/B2 proofs.
+Durations overlap and no process-wide/native memory, throughput or speed claim is
+made. Final task/native/whole-feature acceptance remains pending at this checkpoint.

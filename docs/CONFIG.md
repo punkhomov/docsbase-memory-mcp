@@ -80,8 +80,10 @@ policy. See [search timing and cancellation](MCP.md#timeouts-and-cancellation).
 
 ## Remote execution policy (global only)
 
-The optional global `[remote]` table controls asynchronous remote query embedding
-and rerank in daemon searches, including searches forwarded by CLI/MCP clients.
+The optional global `[remote]` table controls asynchronous remote embedding and
+rerank for daemon/direct searches, indexing, Sync, watchers and vector backfill.
+CLI/MCP forwarding uses the daemon policy; direct commands capture global policy
+once for the whole command.
 `RemoteSpec` resolves defaults, validates values and records provenance before
 runtime construction. Project overrides are rejected. Enabled remote stages
 still require an available provider and credentials; this policy does not enable
@@ -90,7 +92,10 @@ hybrid search or select another provider on failure.
 | Key | Default | Meaning |
 |---|---|---|
 | `interactive_active` | `4` | Concurrent remote stages, including their codec, batch and retry waits |
-| `interactive_pending` | `32` | Queued stages; zero refuses a busy stage immediately |
+| `interactive_pending` | `32` | Queued interactive stages; zero refuses a busy stage immediately |
+| `background_active` | `1` | Concurrent background embedding stages |
+| `background_pending` | `8` | Queued background stages |
+| `background_timeout_ms` | `600000` | Whole background job budget, including admission, capture, batches, retries and terminal response |
 | `attempt_timeout_ms` | `30000` | Maximum time per HTTP attempt, narrowed by the remaining original budget |
 | `retry_attempts` | `4` | Total attempts, including the first |
 | `retry_initial_ms` | `250` | Initial retry delay |
@@ -106,18 +111,29 @@ hybrid search or select another provider on failure.
 [remote]
 interactive_active = 4
 interactive_pending = 32
+background_active = 1
+background_pending = 8
+background_timeout_ms = 600000
 attempt_timeout_ms = 30000
 retry_attempts = 4
 
 [daemon]
 helper_active = 1
+background_active = 1
+background_pending = 8
 ```
 
 `[daemon].helper_active` defaults to `1` physically running DNS lookup. Its
-pending allowance is derived from `remote.interactive_active`. It uses the
-existing daemon worker admission and activity owners. The daemon's
-`max_blocking_threads` must accommodate `search_active + control_active + 1`
-fixed sync worker `+ helper_active`; its default remains `512`. This is a Tokio
+pending allowance is derived from `remote.interactive_active + remote.background_active`.
+The existing daemon worker admission and activity owners retain the helper's
+physical charge after a cancelled lookup. `[daemon].background_active` (default
+`1`) bounds admitted background CPU phases and owned native jobs;
+`background_pending` (default `8`) bounds waiting jobs. These are separate from
+remote provider stages, so a network wait releases background CPU capacity.
+The daemon's `max_blocking_threads` must fit
+`search_active + control_active + background_active + helper_active + 1`
+reserved terminal worker; its default remains `512`. The terminal lane retires
+already accepted jobs even after ordinary admission closes. This is a Tokio
 blocking ceiling, not a preallocated pool or a bound on native library threads.
 
 Active counts, attempts, batch counts/bytes and response bytes must be positive;
@@ -136,12 +152,31 @@ policy is fatal before listener/state/provider effects. Policy changes request a
 runtime restart and do not rebuild lexical/vector/ANN data or change model,
 dimensions, normalization, ranking or completed query-cache identity.
 
-This first async delivery migrates interactive daemon search. Direct snapshot
-fallback, full/incremental indexing, Sync, watcher and open-time vector backfill
-still use the legacy synchronous provider boundary. They do not gain the new
-interactive admission/deadline guarantees; their async migration and complete
-background diagnostics are the second delivery of #81. No process RSS,
+Index/Sync, automatic registration, watcher updates and open-time backfill use
+bounded captured plans and asynchronous embedding batches. Search and job payloads
+share the configured `[search]` byte allowance; capture refuses before project
+markers/index changes if the plan or codec workspace cannot fit. In-place jobs
+retain the project writer lease and may refuse same-project searches while
+remote work is pending. They do not promise old-generation availability.
+
+Direct Search/Index/Sync own one command runtime outside the work future; errors
+and unwind close and drain native/physical work before runtime destruction.
+Only an initial failed daemon connection permits direct fallback. A connected
+failure is not replayed, and Website restrictions remain enforced. Models/connect
+probes retain their explicit synchronous compatibility scope. No process RSS,
 process-wide thread reserve, provider throughput or increased capacity is claimed.
+
+Explained search responses add `meta.execution` version `1`: `cpu_ms`,
+`network_ms`, `backoff_ms`, `provider_attempts`, and `shared_work`. Existing
+`meta.queue_ms` and `meta.stage_ms.total` retain their meanings. CPU time is
+elapsed time inside admitted closures, not OS thread CPU accounting. A shared
+query reports that waiter's actual embedding wait as network time and marks
+`shared_work`; its shared provider attempts/backoff are counted on the shared
+owner, not copied into each request. An ordinary rerank records its own attempts.
+The status tool adds numeric `remote_execution` lane occupancy, attempt/call/
+cancellation/refusal totals and retained payload bytes. Timings can overlap and
+are not a wall-clock partition. Metrics contain no query, document, body, model
+or credential labels. Physical CPU/helper occupancy lasts through finish/unwind.
 
 ## Query-vector cache policy
 

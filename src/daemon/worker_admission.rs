@@ -25,6 +25,17 @@ pub struct WorkerAdmission {
 }
 
 impl WorkerAdmission {
+    pub(crate) fn snapshot(&self) -> serde_json::Value {
+        let (search_active, search_pending) = self.search.occupancy();
+        let (control_active, control_pending) = self.control.occupancy();
+        let (background_active, background_pending) = self.background.occupancy();
+        #[cfg(feature = "hybrid-remote")]
+        let (helper_active, helper_pending) = self.helper.occupancy();
+        #[cfg(not(feature = "hybrid-remote"))]
+        let (helper_active, helper_pending) = (0, 0);
+        serde_json::json!({"cpu_search_active": search_active,"cpu_search_pending":search_pending,"cpu_control_active":control_active,"cpu_control_pending":control_pending,"cpu_background_active":background_active,"cpu_background_pending":background_pending,"cpu_terminal_active":1usize.saturating_sub(self.terminal.available_permits()),"helper_active":helper_active,"helper_pending":helper_pending})
+    }
+
     /// Compatibility composition resolving omitted remote policy through its owner.
     ///
     /// # Errors
@@ -148,6 +159,7 @@ impl WorkerAdmission {
 
 pub(crate) struct Lane {
     active_capacity: usize,
+    pending_capacity: usize,
     active: Arc<Semaphore>,
     pending: Arc<Semaphore>,
 }
@@ -156,9 +168,19 @@ impl Lane {
     pub(crate) fn new(active: usize, pending: usize) -> Self {
         Self {
             active_capacity: active,
+            pending_capacity: pending,
             active: Arc::new(Semaphore::new(active)),
             pending: Arc::new(Semaphore::new(pending)),
         }
+    }
+
+    fn occupancy(&self) -> (usize, usize) {
+        (
+            self.active_capacity
+                .saturating_sub(self.active.available_permits()),
+            self.pending_capacity
+                .saturating_sub(self.pending.available_permits()),
+        )
     }
 
     pub(crate) fn reserve(&self) -> Result<LaneReservation> {

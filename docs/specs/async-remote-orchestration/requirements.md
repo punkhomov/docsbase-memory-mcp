@@ -1,8 +1,8 @@
 # Асинхронная оркестрация remote stages — #81
 
 Дата: 2026-11-14. Путь project-design: **Architectural**. Статус: локальный
-blueprint, одобренный после fresh challenge; A1 implementation checkpoint,
-полное выполнение требований и fresh task review ещё впереди.
+blueprint, одобренный после fresh challenge; PR1 и B1/B2 accepted, B3 functional
+checkpoint. Final source verification/task/whole-feature/native acceptance pending.
 Источник: [issue #81](https://github.com/punkhomov/docsbase-memory-mcp/issues/81),
 текущий main `61effaf34dc570b0a3ea9c5c5afec4748587bf6f`, после #158/#159.
 Дизайн: [design.md](design.md), исполнение: [tasks.md](tasks.md),

@@ -251,6 +251,7 @@ impl<K: Clone + Eq + Hash, T: Clone> Flights<K, T> {
                 flight: flight.clone(),
                 id,
             };
+            operation.mark_shared_work();
             flight.notify.notify_waiters();
             #[cfg(test)]
             if let Some(observer) = self

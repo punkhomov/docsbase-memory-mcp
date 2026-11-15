@@ -75,6 +75,10 @@ struct Counters {
     active: AtomicUsize,
     pending: AtomicUsize,
     attempts: AtomicU64,
+    calls: AtomicU64,
+    shared_calls: AtomicU64,
+    cancellations: AtomicU64,
+    admission_refusals: AtomicU64,
     queue_ms: AtomicU64,
     network_ms: AtomicU64,
     backoff_ms: AtomicU64,
@@ -88,6 +92,22 @@ pub struct RemoteSnapshot {
     pub active: usize,
     /// Waiting logical stages.
     pub pending: usize,
+    /// Actual lane occupancies, including stages in retry backoff.
+    pub interactive_active: usize,
+    /// Interactive waiting stages.
+    pub interactive_pending: usize,
+    /// Background active stages.
+    pub background_active: usize,
+    /// Background waiting stages.
+    pub background_pending: usize,
+    /// Admitted logical calls, once per stage.
+    pub calls: u64,
+    /// Admitted calls owned by the existing shared-flight leader.
+    pub shared_calls: u64,
+    /// Cancelled/expired/shutdown remote operations, once across codecs/stages.
+    pub cancellations: u64,
+    /// Refused provider queue admissions.
+    pub admission_refusals: u64,
     /// Actual HTTP sends, once per attempt.
     pub attempts: u64,
     /// Cumulative queue wait.
@@ -252,6 +272,26 @@ impl RemoteExecution {
         RemoteSnapshot {
             active: c.active.load(Ordering::Relaxed),
             pending: c.pending.load(Ordering::Relaxed),
+            interactive_active: self
+                .settings
+                .interactive_active
+                .saturating_sub(self.active.available_permits()),
+            interactive_pending: self
+                .settings
+                .interactive_pending
+                .saturating_sub(self.pending.available_permits()),
+            background_active: self
+                .settings
+                .background_active
+                .saturating_sub(self.background_active.available_permits()),
+            background_pending: self
+                .settings
+                .background_pending
+                .saturating_sub(self.background_pending.available_permits()),
+            calls: c.calls.load(Ordering::Relaxed),
+            shared_calls: c.shared_calls.load(Ordering::Relaxed),
+            cancellations: c.cancellations.load(Ordering::Relaxed),
+            admission_refusals: c.admission_refusals.load(Ordering::Relaxed),
             attempts: c.attempts.load(Ordering::Relaxed),
             queue_ms: c.queue_ms.load(Ordering::Relaxed),
             network_ms: c.network_ms.load(Ordering::Relaxed),
@@ -275,6 +315,11 @@ impl RemoteExecution {
     /// # Errors
     /// Full queue, cancellation, shutdown or expired original budget.
     pub async fn admit(&self, call: &RemoteCall) -> Result<RemoteStage<'_>> {
+        let mut cancellation = CancellationCharge {
+            execution: self,
+            call: call.clone(),
+            armed: true,
+        };
         call.check()?;
         self.shutdown.check()?;
         let started = Instant::now();
@@ -286,9 +331,10 @@ impl RemoteExecution {
         let permit = if let Ok(permit) = Arc::clone(active).try_acquire_owned() {
             permit
         } else {
-            let pending = Arc::clone(pending_lane)
-                .try_acquire_owned()
-                .map_err(|_| denied("remote pending limit reached"))?;
+            let pending = Arc::clone(pending_lane).try_acquire_owned().map_err(|_| {
+                increment(&self.counters.admission_refusals);
+                denied("remote pending limit reached")
+            })?;
             let _charge = CounterCharge::new(&self.counters.pending);
             let _queue = QueueCharge(&self.counters.queue_ms, call.operation(), started);
             let result = call
@@ -305,10 +351,20 @@ impl RemoteExecution {
         call.check()?;
         self.shutdown.check()?;
         self.counters.active.fetch_add(1, Ordering::Relaxed);
+        increment(&self.counters.calls);
+        if call.is_shared() {
+            increment(&self.counters.shared_calls);
+        }
+        cancellation.armed = false;
         Ok(RemoteStage {
             execution: self,
             _permit: permit,
             _activity: self.activity.track(),
+            _cancellation: CancellationCharge {
+                execution: self,
+                call: call.clone(),
+                armed: true,
+            },
         })
     }
 
@@ -333,6 +389,11 @@ impl RemoteExecution {
         call: &RemoteCall,
         work: impl FnOnce() -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        let _cancellation = CancellationCharge {
+            execution: self,
+            call: call.clone(),
+            armed: true,
+        };
         let mut cancelled = request::CancelOnDrop(Some(call.operation().cancellation().clone()));
         let permit = call
             .wait(&self.shutdown, async {
@@ -359,6 +420,7 @@ impl RemoteExecution {
                 retention.check()?;
                 shutdown.check()?;
                 let _time = DurationCharge(&counters.cpu_ms, Instant::now());
+                let _operation_time = retention.operation().cpu_timer();
                 #[cfg(test)]
                 if let Some(observer) = cpu_observer {
                     observer();
@@ -389,6 +451,7 @@ pub struct RemoteStage<'a> {
     execution: &'a RemoteExecution,
     _permit: OwnedSemaphorePermit,
     _activity: Arc<crate::daemon::request::Activity>,
+    _cancellation: CancellationCharge<'a>,
 }
 
 impl RemoteStage<'_> {
@@ -408,10 +471,14 @@ impl RemoteStage<'_> {
             call.check()?;
             execution.shutdown.check()?;
             let timeout = call.attempt_timeout(policy)?;
-            execution.counters.attempts.fetch_add(1, Ordering::Relaxed);
             let result = {
-                let _time = DurationCharge(&execution.counters.network_ms, Instant::now());
                 call.wait(&execution.shutdown, async {
+                    // Count only when the selected attempt future starts, not
+                    // when cancellation wins before it is ever polled.
+                    increment(&execution.counters.attempts);
+                    call.operation().record_attempt();
+                    let _time = DurationCharge(&execution.counters.network_ms, Instant::now());
+                    let _operation_time = call.operation().network_timer();
                     tokio::time::timeout(timeout, execution.transport.post_json(request, timeout))
                         .await
                         .map_err(|error| {
@@ -466,6 +533,7 @@ impl RemoteStage<'_> {
                 .ok_or_else(|| denied("remote retry clock range exceeded"))?;
             {
                 let _time = DurationCharge(&execution.counters.backoff_ms, Instant::now());
+                let _operation_time = call.operation().backoff_timer();
                 #[cfg(test)]
                 let sleep = execution
                     .timing
@@ -496,6 +564,27 @@ impl Drop for RemoteStage<'_> {
             .active
             .fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+struct CancellationCharge<'a> {
+    execution: &'a RemoteExecution,
+    call: RemoteCall,
+    armed: bool,
+}
+impl Drop for CancellationCharge<'_> {
+    fn drop(&mut self) {
+        if self.armed
+            && (self.execution.shutdown.is_cancelled() || self.call.check().is_err())
+            && self.call.operation().claim_remote_cancellation()
+        {
+            increment(&self.execution.counters.cancellations);
+        }
+    }
+}
+fn increment(counter: &AtomicU64) {
+    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_add(1))
+    });
 }
 
 struct CounterCharge<'a>(&'a AtomicUsize);
@@ -990,6 +1079,61 @@ mod tests {
             ]
         );
         assert_eq!(execution.snapshot().attempts, 4);
+    }
+
+    #[tokio::test]
+    async fn retry_metrics_keep_concurrent_operations_separate_at_actual_backoff_entry() {
+        for cancel in [false, true] {
+            let policy = super::super::remote_settings::standalone().unwrap();
+            let delays = Arc::new(Mutex::new(Vec::new()));
+            let mut execution = observed_execution(
+                policy.settings(),
+                vec![(503, None), (200, None), (200, None)],
+                delays.clone(),
+            );
+            let entered = Arc::new(tokio::sync::Semaphore::new(0));
+            let observed = entered.clone();
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            let proceed = release.clone();
+            let recorded = delays.clone();
+            execution.timing.as_mut().unwrap().sleep = Arc::new(move |delay| {
+                recorded.lock().unwrap().push(delay);
+                observed.add_permits(1);
+                let proceed = proceed.clone();
+                Box::pin(async move {
+                    proceed.acquire().await.unwrap().forget();
+                    Ok(())
+                })
+            });
+            let first = call();
+            let request = wire_request();
+            let mut work = Box::pin(execution.post(&first, &request));
+            tokio::select! { result=&mut work=>panic!("completed before actual backoff: {result:?}"),permit=entered.acquire()=>permit.unwrap().forget(), }
+            let other = call();
+            execution.post(&other, &request).await.unwrap();
+            let snapshot =
+                |call: &RemoteCall| serde_json::to_value(call.operation().execution()).unwrap();
+            assert_eq!(snapshot(&first)["provider_attempts"], 1);
+            assert_eq!(snapshot(&other)["provider_attempts"], 1);
+            assert_eq!(execution.snapshot().attempts, 2);
+            assert_eq!(execution.snapshot().active, 1);
+            assert_eq!(*delays.lock().unwrap(), vec![Duration::from_millis(299)]);
+            if cancel {
+                first.operation().cancellation().cancel();
+            } else {
+                release.add_permits(1);
+            }
+            let result = work.await;
+            assert_eq!(result.is_err(), cancel);
+            assert_eq!(
+                snapshot(&first)["provider_attempts"],
+                if cancel { 1 } else { 2 }
+            );
+            assert_eq!(snapshot(&other)["provider_attempts"], 1);
+            assert_eq!(execution.snapshot().attempts, if cancel { 2 } else { 3 });
+            assert_eq!(execution.snapshot().cancellations, u64::from(cancel));
+            assert_eq!(execution.snapshot().active, 0);
+        }
     }
 
     #[tokio::test]

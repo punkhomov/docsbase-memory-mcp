@@ -1,7 +1,7 @@
 //! One caller's original search deadline and cooperative cancellation.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::config::schema::{Capabilities, SettingsSpec};
@@ -23,9 +23,122 @@ pub struct SearchOperation {
     deadline: Instant,
     cancellation: Cancellation,
     queue_ms: Arc<AtomicU64>,
+    execution: Arc<Execution>,
+}
+
+#[derive(Default)]
+struct Execution {
+    cpu_ms: AtomicU64,
+    network_ms: AtomicU64,
+    backoff_ms: AtomicU64,
+    provider_attempts: AtomicU64,
+    shared_work: AtomicBool,
+    #[cfg(feature = "hybrid-remote")]
+    remote_cancellation_recorded: AtomicBool,
+}
+
+/// Per-operation timings overlap for shared work; they are not a wall-clock partition.
+#[derive(serde::Serialize)]
+pub(crate) struct ExecutionSnapshot {
+    execution_version: u8,
+    cpu_ms: u64,
+    network_ms: u64,
+    backoff_ms: u64,
+    provider_attempts: u64,
+    shared_work: bool,
+}
+
+pub(crate) struct ExecutionTimer {
+    operation: SearchOperation,
+    kind: TimeKind,
+    started: Instant,
+}
+enum TimeKind {
+    Cpu,
+    #[cfg(feature = "hybrid-remote")]
+    Network,
+    #[cfg(feature = "hybrid-remote")]
+    Backoff,
+    #[cfg(feature = "hybrid-remote")]
+    SharedNetwork,
+}
+impl Drop for ExecutionTimer {
+    fn drop(&mut self) {
+        let execution = &self.operation.execution;
+        let counter = match self.kind {
+            TimeKind::Cpu => &execution.cpu_ms,
+            #[cfg(feature = "hybrid-remote")]
+            TimeKind::Network => &execution.network_ms,
+            #[cfg(feature = "hybrid-remote")]
+            TimeKind::Backoff => &execution.backoff_ms,
+            #[cfg(feature = "hybrid-remote")]
+            TimeKind::SharedNetwork if execution.shared_work.load(Ordering::Relaxed) => {
+                &execution.network_ms
+            }
+            #[cfg(feature = "hybrid-remote")]
+            TimeKind::SharedNetwork => return,
+        };
+        add(
+            counter,
+            u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
+    }
+}
+fn add(counter: &AtomicU64, value: u64) {
+    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(value))
+    });
 }
 
 impl SearchOperation {
+    pub(crate) fn execution(&self) -> ExecutionSnapshot {
+        let state = &self.execution;
+        ExecutionSnapshot {
+            execution_version: 1,
+            cpu_ms: state.cpu_ms.load(Ordering::Relaxed),
+            network_ms: state.network_ms.load(Ordering::Relaxed),
+            backoff_ms: state.backoff_ms.load(Ordering::Relaxed),
+            provider_attempts: state.provider_attempts.load(Ordering::Relaxed),
+            shared_work: state.shared_work.load(Ordering::Relaxed),
+        }
+    }
+    pub(crate) fn mark_shared_work(&self) {
+        self.execution.shared_work.store(true, Ordering::Relaxed);
+    }
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn claim_remote_cancellation(&self) -> bool {
+        !self
+            .execution
+            .remote_cancellation_recorded
+            .swap(true, Ordering::Relaxed)
+    }
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn record_attempt(&self) {
+        add(&self.execution.provider_attempts, 1);
+    }
+    fn timer(&self, kind: TimeKind) -> ExecutionTimer {
+        ExecutionTimer {
+            operation: self.clone(),
+            kind,
+            started: Instant::now(),
+        }
+    }
+    pub(crate) fn cpu_timer(&self) -> ExecutionTimer {
+        self.timer(TimeKind::Cpu)
+    }
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn network_timer(&self) -> ExecutionTimer {
+        self.timer(TimeKind::Network)
+    }
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn backoff_timer(&self) -> ExecutionTimer {
+        self.timer(TimeKind::Backoff)
+    }
+    #[cfg(feature = "hybrid-remote")]
+    pub(crate) fn shared_network_timer(&self) -> ExecutionTimer {
+        self.timer(TimeKind::SharedNetwork)
+    }
+
     /// Captures a deadline from complete policy and the caller's original start.
     /// Does not resolve defaults, reset elapsed time or start a timer.
     ///
@@ -45,6 +158,7 @@ impl SearchOperation {
             )?,
             cancellation,
             queue_ms: Arc::new(AtomicU64::new(0)),
+            execution: Arc::new(Execution::default()),
         })
     }
 
@@ -67,6 +181,7 @@ impl SearchOperation {
             deadline: checked_deadline(started_at, timeout)?,
             cancellation,
             queue_ms: Arc::new(AtomicU64::new(0)),
+            execution: Arc::new(Execution::default()),
         };
         operation.check()?;
         Ok(operation)

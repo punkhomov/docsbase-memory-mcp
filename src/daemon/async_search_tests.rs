@@ -1409,3 +1409,268 @@ fn publication_contention_case(expiry: bool) {
             .contains(if expiry { "deadline" } else { "cancelled" })
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_projects_actual_remote_queue_cpu_and_retained_owners() {
+    let wire = wire_gate();
+    let mut fixture = search_phase_tests::Fixture::new(HybridStages::default());
+    let shared = Arc::get_mut(&mut fixture.shared).unwrap();
+    let mut policy = shared.global_config.remote.clone();
+    policy.interactive_active = 1;
+    policy.interactive_pending = 1;
+    shared.remote = Arc::new(
+        RemoteExecution::with_owners(
+            &policy,
+            wire.clone(),
+            shared.workers.clone(),
+            shared.activity.clone(),
+        )
+        .unwrap(),
+    );
+    let operation = || {
+        crate::search::operation::SearchOperation::new(
+            &fixture.shared.global_config.search,
+            Instant::now(),
+            crate::hybrid::work::Cancellation::new(),
+        )
+        .unwrap()
+    };
+    let launch = |op: crate::search::operation::SearchOperation| {
+        let remote = fixture.shared.remote.clone();
+        tokio::spawn(async move {
+            remote
+                .post(
+                    &RemoteCall::new(op),
+                    &WireRequest {
+                        url: "https://openrouter.ai/api/v1/embeddings".into(),
+                        headers: Vec::new(),
+                        body: "{}".into(),
+                    },
+                )
+                .await
+        })
+    };
+    let first = launch(operation());
+    tokio::time::timeout(Duration::from_secs(5), wire.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let queued = operation();
+    let second = launch(queued.clone());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.shared.remote.snapshot().pending != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let refusal = launch(operation()).await.unwrap();
+    let cap = fixture
+        .shared
+        .payload_budget
+        .settings()
+        .max_request_payload_bytes;
+    let retained = fixture.shared.payload_budget.reserve(cap).unwrap();
+    let overflow = fixture.shared.payload_budget.reserve(cap + 1);
+    let held = call_tool(&fixture.shared, None, "status", json!({}))
+        .await
+        .unwrap();
+    queued.cancellation().cancel();
+    assert!(second.await.unwrap().is_err());
+    wire.release.add_permits(1);
+    first.await.unwrap().unwrap();
+    drop(retained);
+    let retired = call_tool(&fixture.shared, None, "status", json!({}))
+        .await
+        .unwrap();
+    assert!(refusal.is_err() && overflow.is_err());
+    assert_eq!(wire.calls.load(Ordering::SeqCst), 1);
+    let state = &held["remote_execution"];
+    assert_eq!(
+        state["interactive_active"].as_u64(),
+        Some(1),
+        "status must project the actual admitted provider owner"
+    );
+    assert_eq!(state["interactive_pending"].as_u64(), Some(1));
+    assert_eq!(state["background_active"].as_u64(), Some(0));
+    assert_eq!(state["helper_active"].as_u64(), Some(0));
+    assert_eq!(state["cpu_control_active"].as_u64(), Some(1));
+    assert_eq!(state["attempts"].as_u64(), Some(1));
+    assert_eq!(state["admission_refusals"].as_u64(), Some(1));
+    assert_eq!(state["retained_payload_bytes"].as_u64(), Some(cap));
+    assert_eq!(state["payload_refusals"].as_u64(), Some(1));
+    let done = &retired["remote_execution"];
+    assert_eq!(done["active"].as_u64(), Some(0));
+    assert_eq!(done["pending"].as_u64(), Some(0));
+    assert_eq!(done["cancellations"].as_u64(), Some(1));
+    assert_eq!(done["retained_payload_bytes"].as_u64(), Some(0));
+}
+
+#[tokio::test]
+async fn actual_search_explain_projects_versioned_execution_without_payload_labels() {
+    let fixture = search_phase_tests::Fixture::new(HybridStages::default());
+    let value = call_tool(
+        &fixture.shared,
+        Some(fixture.session),
+        "search_docs",
+        json!({"query":"privatequerywidget","explain":true}),
+    )
+    .await
+    .unwrap();
+    let execution = value["meta"]["execution"]
+        .as_object()
+        .expect("actual explain execution projection");
+    assert_eq!(execution["execution_version"], 1);
+    for name in ["cpu_ms", "network_ms", "backoff_ms", "provider_attempts"] {
+        assert!(execution[name].is_u64(), "numeric {name}");
+    }
+    assert_eq!(execution["shared_work"], false);
+    assert!(value["meta"]["queue_ms"].is_u64());
+    assert!(value["meta"]["stage_ms"]["total"].is_u64());
+    assert_eq!(
+        execution.len(),
+        6,
+        "fixed numeric/bool fields only, no input/key/model/body labels"
+    );
+    assert!(
+        !serde_json::to_string(execution)
+            .unwrap()
+            .contains("privatequerywidget")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_request_execution_attribution_never_copies_aggregate_attempts() {
+    let wire = wire_gate();
+    let remote = remote_fixture(&wire);
+    let fixture = search_phase_tests::Fixture::new(HybridStages {
+        embedder: Some(remote.clone()),
+        ranking: Ranking::Rrf,
+        reranker: None,
+    });
+    let (joined, joins) = std::sync::mpsc::channel();
+    fixture.shared.dense.observe_query_joins(joined);
+    let first_op = search_operation(&fixture.shared, "search_docs")
+        .unwrap()
+        .unwrap();
+    let launch = |operation| {
+        let shared = fixture.shared.clone();
+        let session = fixture.session;
+        tokio::spawn(async move {
+            call_tool_in(
+                &shared,
+                Some(session),
+                "search_docs",
+                json!({"query":"widgets","explain":true}),
+                Some(operation),
+                None,
+            )
+            .await
+        })
+    };
+    let first = launch(first_op.clone());
+    wire.entered.acquire().await.unwrap().forget();
+    let second_op = search_operation(&fixture.shared, "search_docs")
+        .unwrap()
+        .unwrap();
+    let second = launch(second_op.clone());
+    joins_observed(joins, 2).await;
+    first_op.cancellation().cancel();
+    assert!(first.await.unwrap().is_err());
+    assert_eq!(remote.execution.snapshot().attempts, 1);
+    assert_eq!(remote.execution.snapshot().shared_calls, 1);
+    wire.release.add_permits(1);
+    let result = second.await.unwrap().unwrap();
+    assert_eq!(result["meta"]["execution"]["shared_work"], true);
+    assert_eq!(result["meta"]["execution"]["provider_attempts"], 0);
+    let cached = call_tool(
+        &fixture.shared,
+        Some(fixture.session),
+        "search_docs",
+        json!({"query":"widgets","explain":true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cached["meta"]["execution"]["shared_work"], false);
+    assert_eq!(cached["meta"]["execution"]["network_ms"], 0);
+    assert_eq!(cached["meta"]["execution"]["provider_attempts"], 0);
+    let counters = remote.execution.snapshot();
+    assert_eq!(counters.calls, 1);
+    assert_eq!(counters.shared_calls, 1);
+    assert_eq!(counters.attempts, 1);
+    assert_eq!(counters.cancellations, 0);
+    assert_eq!(wire.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_tracks_actual_codec_cpu_after_caller_cancellation_until_physical_retirement() {
+    let mut fixture = search_phase_tests::Fixture::new(HybridStages::default());
+    let shared = Arc::get_mut(&mut fixture.shared).unwrap();
+    let mut remote = RemoteExecution::with_owners(
+        &shared.global_config.remote,
+        wire_gate(),
+        shared.workers.clone(),
+        shared.activity.clone(),
+    )
+    .unwrap();
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let entered_cpu = entered.clone();
+    let (release, proceed) = std::sync::mpsc::channel();
+    let proceed = Mutex::new(proceed);
+    remote.observe_cpu(Arc::new(move || {
+        entered_cpu.add_permits(1);
+        proceed
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+    }));
+    shared.remote = Arc::new(remote);
+    let client = Arc::new(
+        crate::hybrid::openrouter::OpenRouterClient::with_execution(
+            crate::hybrid::openrouter::BASE_URL,
+            "fixture-secret",
+            shared.remote.clone(),
+        )
+        .unwrap(),
+    );
+    let embedder = crate::hybrid::openrouter::OpenRouterEmbedder::with_client(
+        crate::hybrid::EmbeddingCfg::default(),
+        client,
+    );
+    let op = search_operation(&fixture.shared, "search_docs")
+        .unwrap()
+        .unwrap();
+    let cancel = op.cancellation().clone();
+    let codec = tokio::spawn(async move {
+        AsyncEmbedder::embed_query(
+            &embedder,
+            Arc::from("privatecodecwidget"),
+            &RemoteCall::new(op),
+        )
+        .await
+    });
+    entered.acquire().await.unwrap().forget();
+    cancel.cancel();
+    assert!(codec.await.unwrap().is_err());
+    let held = call_tool(&fixture.shared, None, "status", json!({}))
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    fixture
+        .shared
+        .activity
+        .drain(Duration::from_millis(1))
+        .await;
+    let retired = call_tool(&fixture.shared, None, "status", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(held["remote_execution"]["cpu_search_active"], 1);
+    assert_eq!(held["remote_execution"]["cpu_control_active"], 1);
+    assert_eq!(retired["remote_execution"]["cpu_search_active"], 0);
+    assert_eq!(
+        retired["remote_execution"]["attempts"], 0,
+        "cancelled encoding starts no HTTP"
+    );
+}

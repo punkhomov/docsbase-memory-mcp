@@ -9,19 +9,72 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::Instant;
 
-struct SearchSession {
-    shared: Arc<Shared>,
+/// Existing prepared owners shared by daemon and read-only direct search.
+pub(crate) struct SearchOwners {
+    pub(crate) cache: std::path::PathBuf,
+    pub(crate) readers: Arc<crate::store::read_pool::ReadPool>,
+    pub(crate) dense: Arc<crate::hybrid::dense::DenseCache>,
+    pub(crate) workers: Arc<crate::daemon::worker_admission::WorkerAdmission>,
+    pub(crate) payload_budget: crate::search::budget::PayloadBudget,
+    pub(crate) policy: crate::search::settings::SearchSettings,
+    pub(crate) revision: Option<Arc<super::ProjectCell>>,
+    pub(crate) _daemon: Option<Arc<Shared>>,
+}
+
+pub(crate) struct SearchSession {
+    owners: Arc<SearchOwners>,
     project: crate::store::models::Project,
     config: Arc<Config>,
     stages: Arc<HybridStages>,
     operation: SearchOperation,
 }
+#[cfg(all(test, feature = "hybrid-remote"))]
+impl Drop for SearchSession {
+    fn drop(&mut self) {
+        test_drop::record();
+    }
+}
+#[cfg(all(test, feature = "hybrid-remote"))]
+pub(crate) mod test_drop {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    static ASYNC_DROP: AtomicBool = AtomicBool::new(false);
+    pub(super) fn record() {
+        COUNT.fetch_add(1, Ordering::SeqCst);
+        if tokio::runtime::Handle::try_current()
+            .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread)
+        {
+            ASYNC_DROP.store(true, Ordering::SeqCst);
+        }
+    }
+    pub(crate) fn snapshot() -> (usize, bool) {
+        (
+            COUNT.load(Ordering::SeqCst),
+            ASYNC_DROP.load(Ordering::SeqCst),
+        )
+    }
+}
 impl SearchSession {
+    pub(crate) fn direct(
+        owners: SearchOwners,
+        project: crate::store::models::Project,
+        config: Arc<Config>,
+        stages: Arc<HybridStages>,
+        operation: SearchOperation,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            owners: Arc::new(owners),
+            project,
+            config,
+            stages,
+            operation,
+        })
+    }
     fn context(&self) -> tools::SearchContext<'_> {
         tools::SearchContext {
             stages: &self.stages,
-            dense: &self.shared.dense,
-            cache: &self.shared.cache,
+            dense: &self.owners.dense,
+            cache: &self.owners.cache,
             project: &self.project,
             window: self
                 .config
@@ -31,9 +84,24 @@ impl SearchSession {
                 .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |stage| {
                     stage.window
                 }),
-            payload_budget: &self.shared.payload_budget,
+            payload_budget: &self.owners.payload_budget,
             operation: self.operation.clone(),
         }
+    }
+    fn preparation(&self) -> Result<Option<std::sync::RwLockReadGuard<'_, ()>>> {
+        self.owners
+            .revision
+            .as_ref()
+            .map(|slot| slot.search_preparation_lease(&self.config, &self.stages))
+            .transpose()
+    }
+    fn start(&self, args: &Value) -> Result<tools::SearchStart> {
+        tools::start_search(
+            &self.context(),
+            MetadataSource::Prepared(&self.owners.readers),
+            args,
+            || self.preparation(),
+        )
     }
     async fn query_vector(
         self: &Arc<Self>,
@@ -41,7 +109,7 @@ impl SearchSession {
         activity: &Arc<Activity>,
     ) -> Result<Option<Arc<[f32]>>> {
         let captured = Arc::clone(self);
-        let shared = &self.shared;
+        let shared = &self.owners;
         let operation = self.operation.clone();
         let vector = if let Some(query) = start.query() {
             let embedder = captured
@@ -49,10 +117,14 @@ impl SearchSession {
                 .embedder
                 .clone()
                 .ok_or_else(|| Error::internal("RRF requires an embedding stage"))?;
+            #[cfg(feature = "hybrid-remote")]
+            let _network_wait = embedder
+                .async_remote()
+                .map(|_| operation.shared_network_timer());
             let text: Arc<str> = Arc::from(query);
             let owner = captured.clone();
             let model = embedder.model_id().to_owned();
-            let slot = shared.project_slot(captured.project.id);
+            let slot = shared.revision.clone();
             // Keep ingress capacity until the leader's actual physical work retires.
             let leader_activity = activity.clone();
             Some(
@@ -67,23 +139,27 @@ impl SearchSession {
                                 stages: captured.stages.clone(),
                             },
                             operation: &operation,
-                            policy: &shared.global_config.search,
+                            policy: &shared.policy,
                         },
                         |publication| {
                             let captured = captured.clone();
                             let operation = operation.clone();
                             let slot = slot.clone();
                             async move {
-                                phase(&captured.shared, &operation, activity, {
+                                phase(&captured.owners.workers, &operation, activity, {
                                     let captured = captured.clone();
                                     let operation = operation.clone();
                                     let slot = slot.clone();
                                     move || {
                                         publication.complete(&operation, || {
-                                            slot.search_preparation_lease(
-                                                &captured.config,
-                                                &captured.stages,
-                                            )
+                                            slot.as_ref()
+                                                .map(|slot| {
+                                                    slot.search_preparation_lease(
+                                                        &captured.config,
+                                                        &captured.stages,
+                                                    )
+                                                })
+                                                .transpose()
                                         })
                                     }
                                 })
@@ -97,10 +173,15 @@ impl SearchSession {
                                 return remote.embed_query(text, &call).await;
                             }
                             let operation = call.operation().clone();
-                            phase(&owner.shared, &operation, &leader_activity, move || {
-                                call.check()?;
-                                crate::hybrid::blocking::enter(|| embedder.embed_query(&text))
-                            })
+                            phase(
+                                &owner.owners.workers,
+                                &operation,
+                                &leader_activity,
+                                move || {
+                                    call.check()?;
+                                    crate::hybrid::blocking::enter(|| embedder.embed_query(&text))
+                                },
+                            )
                             .await
                         },
                     )
@@ -118,16 +199,16 @@ impl SearchSession {
         activity: &Arc<Activity>,
     ) -> Result<Value> {
         let captured = Arc::clone(self);
-        let shared = &self.shared;
+        let shared = &self.owners;
         let operation = self.operation.clone();
         #[cfg(feature = "hybrid-remote")]
         if let Some(reranker) = captured.stages.reranker.as_ref()
             && let Some(remote) = reranker.async_remote()
         {
             let owner = captured.clone();
-            let (prepared, input) = phase(shared, &operation, activity, move || {
+            let (prepared, input) = phase(&shared.workers, &operation, activity, move || {
                 let input = prepared.remote_rerank_input(
-                    &owner.shared.payload_budget,
+                    &owner.owners.payload_budget,
                     owner
                         .config
                         .hybrid_cfg
@@ -151,12 +232,12 @@ impl SearchSession {
                 Vec::new()
             };
             let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            return phase(shared, &operation, activity, move || {
+            return phase(&shared.workers, &operation, activity, move || {
                 prepared.finish_with_rerank(ranked, elapsed)
             })
             .await;
         }
-        phase(shared, &operation, activity, move || {
+        phase(&shared.workers, &operation, activity, move || {
             prepared.finish(&captured.stages)
         })
         .await
@@ -164,18 +245,19 @@ impl SearchSession {
 }
 
 async fn phase<T: Send + 'static>(
-    shared: &Arc<Shared>,
+    workers: &crate::daemon::worker_admission::WorkerAdmission,
     operation: &SearchOperation,
     activity: &Arc<Activity>,
     work: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    let permit = shared.workers.search(operation).await?;
+    let permit = workers.search(operation).await?;
     operation.check()?;
     let started = Instant::now();
     let worker_operation = operation.clone();
     let worker = request::spawn(Some(permit), Some(activity.clone()), move || {
         worker_operation.record_queue(started.elapsed());
         worker_operation.check()?;
+        let _cpu = worker_operation.cpu_timer();
         work()
     });
     request::run(worker, Some(operation)).await
@@ -191,45 +273,85 @@ pub(super) async fn run(
     let activity = activity.unwrap_or_else(|| shared.activity.track());
     let owner = shared.clone();
     let call = operation.clone();
-    let (captured, start) = phase(shared, &operation, &activity, move || {
+    let (captured, start) = phase(&shared.workers, &operation, &activity, move || {
         let project = {
             let reader = MetadataSource::Prepared(&owner.readers).acquire(&call)?;
             bound_project(&owner, &reader, session)?
         };
         let (config, stages) = owner.project_runtime_for_search(&project)?;
+        let owners = Arc::new(SearchOwners {
+            cache: owner.cache.clone(),
+            readers: owner.readers.clone(),
+            dense: Arc::new(owner.dense.snapshot()),
+            workers: owner.workers.clone(),
+            payload_budget: owner.payload_budget.clone(),
+            policy: owner.global_config.search.clone(),
+            revision: Some(owner.project_slot(project.id)),
+            _daemon: Some(owner.clone()),
+        });
         let captured = Arc::new(SearchSession {
-            shared: owner,
+            owners,
             project,
             config,
             stages,
             operation: call,
         });
-        let slot = captured.shared.project_slot(captured.project.id);
-        let start = tools::start_search(
-            &captured.context(),
-            MetadataSource::Prepared(&captured.shared.readers),
-            &args,
-            || slot.search_preparation_lease(&captured.config, &captured.stages),
-        )?;
+        let start = captured.start(&args)?;
         Ok((captured, start))
     })
     .await?;
+    continue_search(captured, start, activity).await
+}
+
+pub(crate) async fn run_direct(
+    captured: Arc<SearchSession>,
+    args: Value,
+    activity: Arc<Activity>,
+) -> Result<Value> {
+    let owner = captured.clone();
+    let start = phase(
+        &captured.owners.workers,
+        &captured.operation,
+        &activity,
+        move || owner.start(&args),
+    )
+    .await?;
+    continue_search(captured, start, activity).await
+}
+
+async fn continue_search(
+    captured: Arc<SearchSession>,
+    start: tools::SearchStart,
+    activity: Arc<Activity>,
+) -> Result<Value> {
+    let operation = captured.operation.clone();
     let start = match start {
-        tools::SearchStart::Complete(value) => return Ok(value),
+        tools::SearchStart::Complete(value) => return execution_meta(value, &operation),
         tools::SearchStart::Prepared(start) => start,
     };
     let vector = captured.query_vector(&start, &activity).await?;
     let owner = captured.clone();
-    let prepared = phase(shared, &operation, &activity, move || {
-        let slot = owner.shared.project_slot(owner.project.id);
+    let prepared = phase(&captured.owners.workers, &operation, &activity, move || {
         tools::prepare_with_query_vector(
             &owner.context(),
-            MetadataSource::Prepared(&owner.shared.readers),
-            &|| slot.search_preparation_lease(&owner.config, &owner.stages),
+            MetadataSource::Prepared(&owner.owners.readers),
+            &|| owner.preparation(),
             start,
             vector.as_deref(),
         )
     })
     .await?;
-    captured.finish(prepared, &activity).await
+    let value = captured.finish(prepared, &activity).await?;
+    execution_meta(value, &operation)
+}
+fn execution_meta(mut value: Value, operation: &SearchOperation) -> Result<Value> {
+    if let Some(meta) = value.get_mut("meta").and_then(Value::as_object_mut) {
+        meta.insert(
+            "execution".into(),
+            serde_json::to_value(operation.execution()).map_err(|error| {
+                Error::internal_with_source("serialize search execution", error)
+            })?,
+        );
+    }
+    Ok(value)
 }

@@ -1,5 +1,6 @@
 //! `docsbase search` — read-only snapshot search (FR-20, FR-30).
 
+#[cfg(test)]
 use std::future::Future;
 use std::path::Path;
 
@@ -7,8 +8,6 @@ use serde_json::Value;
 
 use crate::cli::status::read_project_with_settings;
 use crate::config::Config;
-use crate::config::paths;
-use crate::daemon::tools;
 use crate::error::{Error, Result};
 use crate::hybrid::work::Cancellation;
 use crate::index::QueryMode;
@@ -135,62 +134,144 @@ pub(crate) fn run_with_policies_started(
 ) -> anyhow::Result<()> {
     dense_settings.query_cache_settings().validate()?;
     let global = Config::global()?;
-    let operation = SearchOperation::new(&global.search, started, Cancellation::new())?;
-    let cache = paths::cache_dir()?;
-    let cwd = std::env::current_dir()
-        .map_err(|error| Error::internal_with_source("resolve current directory", error))?;
     let args = options.args(query, mode);
-    if let Some(value) = try_daemon_search(&cache, &cwd, args.clone(), &operation, settings)? {
-        println!("{}", serde_json::to_string_pretty(&value)?);
-        return Ok(());
-    }
-
-    if matches!(
-        global.daemon.profile,
-        crate::daemon::settings::DaemonProfile::Website { .. }
-    ) {
-        return Err(crate::daemon::launch::website_unavailable().into());
-    }
-    operation.check()?;
-    let (db, project) = read_project_with_settings(settings)?;
-    // Direct mode honors the project's hybrid configuration exactly like the
-    // daemon route: stages resolved up front (explicit admission on failure,
-    // FR-14) and the same explicit search context (FR-11/12).
-    let config = Config::for_project(&global, &project.canonical_root)?;
-    operation.check()?;
-    let stages = crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)?;
-    operation.check()?;
-    let window = config
-        .hybrid_cfg
-        .reranker
-        .as_ref()
-        .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |reranker| {
-            reranker.window
-        });
-    // Direct mode loads a persisted ANN index if one exists and never builds
-    // one (FR-8, FR-5): a one-shot process must not pay for HNSW build
-    // latency.
-    let dense = direct_dense_cache(&cache, config.hybrid_cfg.cache.max_bytes, dense_settings)?;
-    let budget = crate::search::budget::PayloadBudget::new(config.search.clone())?;
-    let value = tools::search_docs_in(
-        &tools::SearchContext {
-            stages: &stages,
-            dense: &dense,
-            cache: &cache,
-            project: &project,
-            window,
-            payload_budget: &budget,
-            operation,
-        },
-        &db,
-        // Every search argument, including explain, reaches the same pipeline.
-        &args,
-    )?;
+    let settings = settings.clone();
+    let dense_settings = dense_settings.clone();
+    let pool = crate::store::settings::standalone_read_pool()?;
+    let value = super::command::run(global, move |context| {
+        run_in(context, args, settings, pool, dense_settings, started)
+    })?;
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
 
+async fn run_in(
+    context: super::command::Context,
+    args: Value,
+    settings: crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    pool: crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
+    dense_settings: crate::hybrid::dense_settings::DenseSettings,
+    started: std::time::Instant,
+) -> Result<Value> {
+    let operation = SearchOperation::new(&context.global.search, started, Cancellation::new())?;
+    let mut cancelled =
+        crate::daemon::request::CancelOnDrop(Some(operation.cancellation().clone()));
+    let activity = context.activity.track();
+    let cwd = context
+        .control(&operation, &activity, || {
+            std::env::current_dir()
+                .map_err(|e| Error::internal_with_source("resolve current directory", e))
+        })
+        .await?;
+    // Only failure to make the initial connection admits direct fallback.
+    if let Some(value) = daemon_in(
+        &context,
+        &cwd,
+        args.clone(),
+        &operation,
+        &settings,
+        &activity,
+    )
+    .await?
+    {
+        cancelled.0 = None;
+        return Ok(value);
+    }
+    if matches!(
+        context.global.daemon.profile,
+        crate::daemon::settings::DaemonProfile::Website { .. }
+    ) {
+        return Err(crate::daemon::launch::website_unavailable());
+    }
+    let owner = context.clone();
+    let original = operation.clone();
+    let captured = context
+        .control(&operation, &activity, move || {
+            let (db, project) = read_project_with_settings(&settings)?;
+            let config =
+                std::sync::Arc::new(Config::for_project(&owner.global, &project.canonical_root)?);
+            let stages = std::sync::Arc::new(owner.stages(&config)?);
+            let readers = std::sync::Arc::new(crate::store::read_pool::ReadPool::prepare(
+                &owner.cache,
+                &settings,
+                &pool,
+            )?);
+            let dense = std::sync::Arc::new(direct_dense_cache(
+                &owner.cache,
+                config.hybrid_cfg.cache.max_bytes,
+                &dense_settings,
+            )?);
+            drop(db); // Native readonly connection never crosses an await.
+            let owners = crate::daemon::server::search_async::SearchOwners {
+                cache: owner.cache,
+                readers,
+                dense,
+                workers: owner.workers,
+                payload_budget: owner.budget,
+                policy: owner.global.search.clone(),
+                revision: None,
+                _daemon: None,
+            };
+            let captured = crate::daemon::server::search_async::SearchSession::direct(
+                owners, project, config, stages, original,
+            );
+            let mut retained = owner
+                .search
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if retained.is_some() {
+                return Err(Error::internal("direct command search already prepared"));
+            }
+            *retained = Some(captured.clone());
+            Ok(captured)
+        })
+        .await?;
+    let result = crate::daemon::server::search_async::run_direct(captured, args, activity).await;
+    if result.is_ok() {
+        cancelled.0 = None;
+    }
+    result
+}
+
+async fn daemon_in(
+    context: &super::command::Context,
+    cwd: &Path,
+    args: Value,
+    operation: &SearchOperation,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    activity: &std::sync::Arc<crate::daemon::request::Activity>,
+) -> Result<Option<Value>> {
+    within_operation(operation, async {
+        let Ok(mut client) = AsyncClient::connect(&context.cache).await else {
+            operation.check()?;
+            return Ok(None);
+        };
+        client.handshake_registry().await?;
+        if client
+            .capabilities()
+            .iter()
+            .any(|c| c == crate::ipc::protocol::ACTIVE_WEBSITE_CAPABILITY)
+        {
+            let cache = context.cache.clone();
+            let cwd = cwd.to_path_buf();
+            let settings = settings.clone();
+            let project = context
+                .control(operation, activity, move || {
+                    crate::cli::existing_website_project(&cache, &cwd, &settings)
+                })
+                .await?;
+            operation.check()?;
+            client.bind_read_only(Some(project.id)).await?;
+        } else {
+            client.register_session(cwd).await?;
+        }
+        client.search(args, operation).await.map(Some)
+    })
+    .await
+}
+
 /// Only an initial failed connect permits direct mode; connected failures propagate.
+#[cfg(test)]
 fn try_daemon_search(
     cache: &Path,
     cwd: &Path,
@@ -219,6 +300,7 @@ fn try_daemon_search(
     }))
 }
 
+#[cfg(test)]
 fn block_on_io<T>(work: impl Future<Output = Result<T>>) -> Result<T> {
     if crate::hybrid::blocking::in_context()
         && let Some(bridge) = crate::hybrid::blocking::bridge()

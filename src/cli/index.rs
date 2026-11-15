@@ -3,12 +3,12 @@
 
 use std::path::Path;
 
-use anyhow::Context;
-
-use crate::config::{Config, paths};
+use crate::config::Config;
 use crate::daemon::registry;
-use crate::daemon::tools;
+use crate::error::{Error, Result};
 use crate::store::Db;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Runs `docsbase index [path]`, printing `{"project_id":…,"stats":…}`.
 ///
@@ -23,37 +23,89 @@ pub(crate) fn run_with_settings(
     path: Option<&Path>,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
-    let cwd = std::env::current_dir().context("resolve current directory")?;
-    let target = path.map_or(cwd, Path::to_path_buf);
-    let target = target.canonicalize().map_err(|err| {
-        if err.kind() == std::io::ErrorKind::NotFound {
-            anyhow::anyhow!(
-                "{} does not exist: re-create the worktree/directory or run from a valid project root",
-                target.display()
-            )
-        } else {
-            anyhow::anyhow!("resolve {}: {err}", target.display())
-        }
+    let started = Instant::now();
+    let global = Config::global()?;
+    let path = path.map(Path::to_path_buf);
+    let settings = settings.clone();
+    let payload = super::command::run(global, move |context| {
+        run_in(context, path, settings, started)
     })?;
-
-    let mut db = Db::open_with_settings(&paths::cache_dir()?, settings)?;
-    let project = registry::ensure_project(&mut db, &target)?;
-    let config = Config::load(Some(&project.canonical_root))?;
-    // Fail fast (FR-14): a hybrid misconfiguration must surface on command
-    // start, not after the index commit already happened.
-    let stages = crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)?;
-    let cache_root = db.cache_root().to_path_buf();
-    let source = crate::vector_cache::VectorCacheSource::Legacy(config.hybrid_cfg.cache.limits());
-    let stats = tools::run_project_index_with_vectors(
-        &mut db,
-        &cache_root,
-        &project,
-        &config,
-        &stages,
-        &source,
-    )?;
-
-    let payload = serde_json::json!({ "project_id": project.id, "stats": stats });
     println!("{payload}");
     Ok(())
+}
+
+pub(super) async fn run_in(
+    context: super::command::Context,
+    path: Option<std::path::PathBuf>,
+    settings: crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    started: Instant,
+) -> Result<serde_json::Value> {
+    let operation = crate::search::operation::SearchOperation::with_timeout(
+        started,
+        Duration::from_millis(context.global.remote.background_timeout_ms),
+        crate::hybrid::work::Cancellation::new(),
+    )?;
+    let mut cancelled =
+        crate::daemon::request::CancelOnDrop(Some(operation.cancellation().clone()));
+    let activity = context.activity.track();
+    let result = run_with_operation(context, path, settings, operation, activity).await;
+    if result.is_ok() {
+        cancelled.0 = None;
+    }
+    result
+}
+
+pub(super) async fn run_with_operation(
+    context: super::command::Context,
+    path: Option<std::path::PathBuf>,
+    settings: crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    operation: crate::search::operation::SearchOperation,
+    activity: Arc<crate::daemon::request::Activity>,
+) -> Result<serde_json::Value> {
+    let owner = context.clone();
+    let captured = context
+        .control(&operation, &activity, move || {
+            let cwd = std::env::current_dir()
+                .map_err(|e| Error::internal_with_source("resolve current directory", e))?;
+            let target = path.unwrap_or(cwd);
+            let target = target.canonicalize().map_err(|e| Error::Project {
+                message: format!(
+                    "{} does not exist or cannot be resolved: {e}",
+                    target.display()
+                ),
+                instruction: Some(
+                    "re-create the worktree/directory or run from a valid project root".into(),
+                ),
+            })?;
+            let mut db = Db::open_with_settings(&owner.cache, &settings)?;
+            let project = registry::ensure_project(&mut db, &target)?;
+            let config = Arc::new(Config::for_project(&owner.global, &project.canonical_root)?);
+            let stages = Arc::new(owner.stages(&config)?);
+            let source =
+                crate::vector_cache::VectorCacheSource::Legacy(config.hybrid_cfg.cache.limits());
+            Ok(crate::index::async_job::JobContext {
+                input: crate::index::async_job::JobInput::Full,
+                singleton: None,
+                cache: owner.cache,
+                db_settings: settings,
+                project,
+                config,
+                stages,
+                source,
+                revision: None,
+                dense: None,
+            })
+        })
+        .await?;
+    let id = captured.project.id;
+    let result = crate::index::async_job::run(
+        &context.jobs,
+        &context.workers,
+        activity,
+        operation,
+        &context.budget,
+        captured,
+    )
+    .await;
+    Ok(serde_json::json!({"project_id":id,"stats":result?}))
 }

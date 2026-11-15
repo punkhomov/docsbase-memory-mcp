@@ -234,3 +234,37 @@ fn elapsed_diagnostics_saturate_for_an_earlier_observation() {
         Duration::ZERO
     );
 }
+
+#[test]
+fn execution_timers_retain_attribution_on_unwind_and_saturate_without_waiting() {
+    use std::sync::atomic::Ordering;
+    let operation = SearchOperation::new(&policy(), Instant::now(), Cancellation::new()).unwrap();
+    let independent = SearchOperation::new(&policy(), Instant::now(), Cancellation::new()).unwrap();
+    let observe = |op: &SearchOperation| serde_json::to_value(op.execution()).unwrap();
+    let mut cpu = operation.cpu_timer();
+    cpu.started = Instant::now()
+        .checked_sub(Duration::from_millis(37))
+        .unwrap();
+    drop(cpu);
+    assert!(observe(&operation)["cpu_ms"].as_u64().unwrap() >= 37);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut timer = operation.clone().cpu_timer();
+        timer.started = Instant::now()
+            .checked_sub(Duration::from_millis(11))
+            .unwrap();
+        panic!("controlled timed closure unwind");
+    }));
+    assert!(result.is_err());
+    assert!(observe(&operation)["cpu_ms"].as_u64().unwrap() >= 48);
+    assert_eq!(observe(&independent)["cpu_ms"], 0);
+    operation
+        .execution
+        .cpu_ms
+        .store(u64::MAX - 1, Ordering::Relaxed);
+    let mut cpu = operation.cpu_timer();
+    cpu.started = Instant::now()
+        .checked_sub(Duration::from_millis(2))
+        .unwrap();
+    drop(cpu);
+    assert_eq!(observe(&operation)["cpu_ms"], u64::MAX);
+}

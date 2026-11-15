@@ -156,7 +156,7 @@ impl Drop for Activity {
     }
 }
 
-pub(super) async fn run<T>(
+pub(crate) async fn run<T>(
     worker: JoinHandle<Result<T>>,
     operation: Option<&SearchOperation>,
 ) -> Result<T> {

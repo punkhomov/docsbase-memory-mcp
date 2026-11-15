@@ -234,3 +234,21 @@ last stage-owned client, actual project reload and final Drop inside an async
 waiter. No HTTP/DNS call or new runtime owner is required. These runtime-only
 edges do not imply async index/Sync/watch/backfill/direct ownership, atomic
 metadata/Tantivy publication or native/process-wide memory guarantees.
+
+
+## MODIFIED 2026-11-15 — #81 background/direct lifetime edges
+
+Remote/daemon background admission and whole-job timeout are restart-only runtime
+inputs. Captured plan/current-file/codec bytes use the existing SearchSpec account;
+refusal precedes markers, and release follows actual data destruction. JobRoot
+holds logical/terminal authority outside work futures; unique native state moves
+through existing admitted phases and retires before writer lease/logical/physical/
+Activity release. Watchers retain their existing producer-native ownership.
+
+Job pin allocation adds persistent application_id/counter coordination in the
+existing lease format. Public negative ids are reserved; private authority moves
+to the exact ANN owner on success and cancellation releases only its own pins.
+This changes coordination format, not vector/model/recipe/schema identity.
+Completed pure query cache entries survive reload; obsolete active results remain
+revision-fenced. Direct read-only Search retains LoadOnly ANN and never bootstraps
+Shared metadata. Numeric operation/status projection adds no artifact/rebuild edge.
