@@ -1147,3 +1147,6 @@ fn actual_background_remote_factory_is_async_and_held_http_releases_cpu() {
     })
     .unwrap();
 }
+
+#[path = "async_index_budget_tests.rs"]
+mod budget_regressions;

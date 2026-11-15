@@ -45,6 +45,24 @@ pub struct Chunk {
     pub text: String,
 }
 
+#[cfg(test)]
+thread_local! {
+    static CAPTURE_PARSER_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(crate) fn capture_parser_entries() -> usize {
+    CAPTURE_PARSER_ENTRIES.get()
+}
+
+/// Allocation-free allowance for eager parser trees/ranges before construction.
+pub(crate) fn capture_parser_charge(bytes: usize) -> crate::error::Result<u64> {
+    (bytes as u64)
+        .checked_mul(96)
+        .ok_or_else(|| crate::error::Error::Admission {
+            message: "parser capture preflight overflow".into(),
+        })
+}
+
 /// Conservative logical peak before frontmatter/chunk/JSON/apply allocations.
 /// Parser internals and range arrays are bounded by source bytes; retained heading
 /// breadcrumbs are additionally bounded per section (including all chunk clones).
@@ -53,7 +71,7 @@ pub(crate) fn capture_charge(body: &str, cap: usize) -> crate::error::Result<u64
     let denied = || Error::Admission {
         message: "chunk capture preflight overflow".into(),
     };
-    let mut total = (body.len() as u64).checked_mul(96).ok_or_else(denied)?;
+    let mut total = capture_parser_charge(body.len())?;
     let mut headings = [0_u64; 6];
     let mut start = 0;
     let mut previous_heading = 0_u64;
@@ -73,6 +91,8 @@ pub(crate) fn capture_charge(body: &str, cap: usize) -> crate::error::Result<u64
         total = total.checked_add(records).ok_or_else(denied)?;
         Ok(())
     };
+    #[cfg(test)]
+    CAPTURE_PARSER_ENTRIES.set(CAPTURE_PARSER_ENTRIES.get() + 1);
     for (event, range) in Parser::new_ext(body, Options::all()).into_offset_iter() {
         if let Event::Start(Tag::Heading { level, .. }) = event {
             section(start, range.start, previous_heading)?;

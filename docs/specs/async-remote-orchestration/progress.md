@@ -456,3 +456,20 @@ original job deadlines and signal escalation still apply. A real current-thread
 accept-loop case proves new-ingress refusal, accepted later phase admission,
 physical drain ownership and closed admission after retirement. Exact full
 CLI/lean --no-fail-fast runs and fresh B1 review remain pending; B2/B3 stay open.
+
+
+2026-11-15 B1 fix round1, original review I1–I4: causal REDs demonstrate
+unreserved eager-parser entry, dead invalid-UTF8 scratch exhausting capture,
+new atomic/escaped codec input undercharge and initial control waiting beyond
+the original job deadline. Fix reserves eager parser storage before constructor,
+computes actual captured batch peaks (including oversized first chunks) and
+reserves JSON/Rig/input growth before markers. Failed files retain warning data
+only after read/parser/error-source destruction; initial control uses the same
+RemoteCall/operation deadline and cancellation. Focused capture4/background15,
+shared indexing51/root2/graceful4 pass; current cli-full/default Clippy+fmt pass.
+The functional fix is frozen for one full CLI/lean --no-fail-fast pair and original
+scoped re-review; B2/B3 remain locked. Historical failures remain in fix1 receipts.
+Ruling: 40× text workspace covers worst-case6-byte escaping and overlapping
+Rig bytes/Value/final String growth plus live input clones; actual captured text
+batch peak is scanned without allocation. Configured caps/defaults, vector/ranking
+identities and existing test assertions remain unchanged.

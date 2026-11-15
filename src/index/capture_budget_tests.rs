@@ -168,3 +168,104 @@ fn large_legal_capture_charges_live_plan_and_releases_each_destroyed_file_worksp
     drop(account);
     assert!(budget.reserve(cap).is_ok());
 }
+
+#[test]
+fn refused_parser_workspace_never_constructs_the_eager_parser() {
+    let root = tempfile::tempdir().unwrap();
+    let text = "# Heading\n\nlegal source text\n".repeat(4096);
+    let path = root.path().join("large.md");
+    std::fs::write(&path, text).unwrap();
+    let mut policy = crate::search::settings::standalone()
+        .unwrap()
+        .into_settings();
+    policy.max_request_payload_bytes = 2 * 1024 * 1024;
+    policy.max_retained_payload_bytes = 4 * 1024 * 1024;
+    let budget = crate::search::budget::PayloadBudget::new(policy).unwrap();
+    let mut account = budget.reserve(0).unwrap();
+    let operation = crate::search::operation::SearchOperation::with_timeout(
+        std::time::Instant::now(),
+        std::time::Duration::from_secs(60),
+        crate::hybrid::work::Cancellation::new(),
+    )
+    .unwrap();
+    let mut capture = CaptureBudget {
+        account: &mut account,
+        operation: &operation,
+        observed: None,
+    };
+    let before = crate::index::chunk::capture_parser_entries();
+    let result = prepare_doc_accounted(
+        &path,
+        "large.md",
+        None,
+        &Config::default(),
+        Some(&mut capture),
+    );
+    assert!(matches!(result, Err(Error::Admission { .. })));
+    assert_eq!(
+        crate::index::chunk::capture_parser_entries(),
+        before,
+        "a rejected parser allowance must precede the actual eager Parser constructor"
+    );
+}
+
+#[test]
+fn invalid_utf8_files_release_dead_scratch_and_preserve_the_valid_document() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    for index in 0..24 {
+        std::fs::write(
+            root.path().join(format!("bad-{index:02}.md")),
+            vec![0xff; 128 * 1024],
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        root.path().join("zz-valid.md"),
+        "# Valid\n\nretained widget prose\n",
+    )
+    .unwrap();
+    let mut db = Db::open(cache.path()).unwrap();
+    let project = crate::daemon::registry::ensure_project(&mut db, root.path()).unwrap();
+    let mut policy = crate::search::settings::standalone()
+        .unwrap()
+        .into_settings();
+    policy.max_request_payload_bytes = 2 * 1024 * 1024;
+    policy.max_retained_payload_bytes = 4 * 1024 * 1024;
+    let budget = crate::search::budget::PayloadBudget::new(policy).unwrap();
+    let mut account = budget.reserve(0).unwrap();
+    let operation = crate::search::operation::SearchOperation::with_timeout(
+        std::time::Instant::now(),
+        std::time::Duration::from_secs(60),
+        crate::hybrid::work::Cancellation::new(),
+    )
+    .unwrap();
+    let mut capture = CaptureBudget {
+        account: &mut account,
+        operation: &operation,
+        observed: None,
+    };
+    let plan = capture_full_accounted(&db, &project, &Config::default(), false, Some(&mut capture))
+        .unwrap();
+    assert_eq!(plan.stats.errors, 24);
+    assert_eq!(plan.stats.warnings.len(), 24);
+    assert_eq!(plan.plan.len(), 1);
+    assert_eq!(plan.plan[0].rel_path, "zz-valid.md");
+    assert!(account.bytes() >= plan.measured_retained_bytes().unwrap());
+    let mut index = IndexHandle::open_or_create(&crate::daemon::lifecycle::index_dir(
+        cache.path(),
+        project.id,
+    ))
+    .unwrap();
+    let mut plan = plan;
+    plan.begin(&mut db, &mut index, project.id).unwrap();
+    plan.commit(&mut db, &mut index, project.id).unwrap();
+    assert_eq!(
+        repo::doc_states(db.connection(), project.id).unwrap().len(),
+        1
+    );
+    drop(plan);
+    drop(index);
+    drop(account);
+    assert!(budget.reserve(2 * 1024 * 1024).is_ok());
+}

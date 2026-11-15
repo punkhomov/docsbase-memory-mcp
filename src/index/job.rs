@@ -637,6 +637,30 @@ impl PreparedPlan {
         }
         Ok(bytes)
     }
+    pub(crate) fn embedding_batch_peak(&self, max_count: usize, max_bytes: usize) -> Result<usize> {
+        let mut peak = 0_usize;
+        let mut count = 0_usize;
+        let mut bytes = 0_usize;
+        for chunk in self.plan.iter().flat_map(|pending| &pending.chunks) {
+            let next = bytes
+                .checked_add(chunk.text.len())
+                .ok_or_else(|| Error::Admission {
+                    message: "embedding batch capture overflow".into(),
+                })?;
+            if count > 0 && (count >= max_count || next > max_bytes) {
+                peak = peak.max(bytes);
+                count = 0;
+                bytes = 0;
+            }
+            bytes = bytes
+                .checked_add(chunk.text.len())
+                .ok_or_else(|| Error::Admission {
+                    message: "embedding batch capture overflow".into(),
+                })?;
+            count += 1;
+        }
+        Ok(peak.max(bytes))
+    }
     pub(crate) fn chunk_count(&self) -> usize {
         self.plan.iter().map(|p| p.chunks.len()).sum()
     }
@@ -796,6 +820,7 @@ pub(crate) fn capture_full_accounted(
 
     for (path, rel) in &files {
         let previous = by_path.get(rel.as_str()).copied();
+        let before_file = capture.as_deref().map(|budget| budget.account.bytes());
         match prepare_doc_accounted(path, rel, previous, config, capture.as_deref_mut()) {
             Ok(Some(mut prepared)) => {
                 if previous.is_none() {
@@ -819,8 +844,7 @@ pub(crate) fn capture_full_accounted(
             Ok(None) => stats.skipped += 1,
             Err(err @ Error::Admission { .. }) => return Err(err),
             Err(err) => {
-                stats.errors += 1;
-                push_warning(&mut stats, rel.clone(), err.to_string());
+                capture_file_warning(&mut stats, rel, err, before_file, capture.as_deref_mut())?;
             }
         }
     }
@@ -943,6 +967,7 @@ pub(crate) fn capture_incremental_accounted(
             }
             new_budget -= 1;
         }
+        let before_file = capture.as_deref().map(|budget| budget.account.bytes());
         match prepare_doc_accounted(path, &rel, previous, config, capture.as_deref_mut()) {
             Ok(Some(mut prepared)) => {
                 prepared.id = previous.map(|state| state.id);
@@ -951,8 +976,7 @@ pub(crate) fn capture_incremental_accounted(
             Ok(None) => stats.skipped += 1,
             Err(err @ Error::Admission { .. }) => return Err(err),
             Err(err) => {
-                stats.errors += 1;
-                push_warning(&mut stats, rel.clone(), err.to_string());
+                capture_file_warning(&mut stats, &rel, err, before_file, capture.as_deref_mut())?;
             }
         }
     }
@@ -967,6 +991,57 @@ pub(crate) fn capture_incremental_accounted(
         plan,
         stats,
     })
+}
+
+fn capture_file_warning(
+    stats: &mut JobStats,
+    path: &str,
+    error: Error,
+    before_file: Option<u64>,
+    mut capture: Option<&mut CaptureBudget<'_>>,
+) -> Result<()> {
+    stats.errors += 1;
+    let mut retained = 0_u64;
+    if stats.warnings.len() < MAX_WARNINGS {
+        if let Some(budget) = capture.as_deref_mut() {
+            budget.warning(&error)?;
+            budget.reserve(
+                (path.len() as u64)
+                    .checked_mul(2)
+                    .and_then(|bytes| {
+                        bytes.checked_add((3 * std::mem::size_of::<FileWarning>()) as u64)
+                    })
+                    .ok_or_else(|| Error::Admission {
+                        message: "file warning capture overflow".into(),
+                    })?,
+            )?;
+        }
+        let warning = FileWarning {
+            path: path.to_owned(),
+            message: error.to_string(),
+        };
+        add_capture_bytes(&mut retained, warning.path.capacity(), 1)?;
+        add_capture_bytes(&mut retained, warning.message.capacity(), 1)?;
+        add_capture_bytes(&mut retained, 3, std::mem::size_of::<FileWarning>())?;
+        stats.warnings.push(warning);
+    }
+    // Inner read/parser buffers have returned; the last transient error/source
+    // dies here too. Only the newly retained warning remains charged.
+    drop(error);
+    if let (Some(budget), Some(before)) = (capture, before_file) {
+        let total = before
+            .checked_add(retained)
+            .ok_or_else(|| Error::Admission {
+                message: "retained file warning overflow".into(),
+            })?;
+        if total > budget.account.bytes() {
+            return Err(Error::internal(
+                "file warning preflight underestimated retained storage",
+            ));
+        }
+        budget.account.shrink_to(total);
+    }
+    Ok(())
 }
 
 fn mark_pending(
@@ -1076,7 +1151,12 @@ fn prepare_doc_inner(
         None => std::fs::read_to_string(path).map_err(|err| file_error(path, &err))?,
     };
     if let Some(budget) = capture {
-        budget.reserve(crate::index::chunk::capture_charge(&text, MAX_CHUNK_CHARS)?)?;
+        // pulldown-cmark builds its first-pass tree eagerly in Parser::new_ext.
+        // Reserve that allowance before the estimator enters the constructor.
+        let parser = crate::index::chunk::capture_parser_charge(text.len())?;
+        budget.reserve(parser)?;
+        let total = crate::index::chunk::capture_charge(&text, MAX_CHUNK_CHARS)?;
+        budget.reserve(total.saturating_sub(parser))?;
         #[cfg(test)]
         if let Some(observer) = budget.observed {
             observer(CaptureEvent::Copy(

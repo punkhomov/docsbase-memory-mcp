@@ -298,22 +298,13 @@ impl IndexState {
             let longest = usize::try_from(longest)
                 .map_err(|_| Error::internal("invalid backfill text length"))?;
             let policy = &context.config.remote;
-            let workspace = (policy.embed_batch_bytes.max(longest) as u64)
-                .checked_mul(16)
-                .and_then(|bytes| {
-                    (policy.embed_batch_texts as u64)
-                        .checked_mul(self.dimension as u64)
-                        .and_then(|n| n.checked_mul(8))
-                        .and_then(|vectors| bytes.checked_add(vectors))
-                })
-                .and_then(|bytes| {
-                    (count as u64)
-                        .checked_mul(1024)
-                        .and_then(|hashes| bytes.checked_add(hashes))
-                })
-                .ok_or_else(|| Error::Admission {
-                    message: "job embedding workspace overflow".into(),
-                })?;
+            let captured_peak = self
+                .plan
+                .as_ref()
+                .ok_or_else(|| Error::internal("job plan absent"))?
+                .embedding_batch_peak(policy.embed_batch_texts, policy.embed_batch_bytes)?;
+            let workspace =
+                embedding_workspace(policy, longest, captured_peak, count, self.dimension)?;
             capture.reserve(workspace)?;
             if context.stages.ranking == crate::hybrid::config::Ranking::Rrf
                 && context.dense.as_ref().is_some_and(|dense| {
@@ -630,6 +621,33 @@ impl IndexState {
             let _ = reply.send(result);
         }
     }
+}
+
+// Includes oversized new/old atomic text, worst-case 6-byte JSON escapes,
+// concurrent Rig bytes/Value/final String growth and the live input clones.
+fn embedding_workspace(
+    policy: &crate::hybrid::remote_settings::RemoteSettings,
+    longest: usize,
+    captured_peak: usize,
+    count: usize,
+    dimension: usize,
+) -> Result<u64> {
+    (policy.embed_batch_bytes.max(longest).max(captured_peak) as u64)
+        .checked_mul(40)
+        .and_then(|bytes| {
+            (policy.embed_batch_texts as u64)
+                .checked_mul(dimension as u64)
+                .and_then(|n| n.checked_mul(8))
+                .and_then(|vectors| bytes.checked_add(vectors))
+        })
+        .and_then(|bytes| {
+            (count as u64)
+                .checked_mul(1024)
+                .and_then(|hashes| bytes.checked_add(hashes))
+        })
+        .ok_or_else(|| Error::Admission {
+            message: "job embedding workspace overflow".into(),
+        })
 }
 
 pub(crate) async fn start(

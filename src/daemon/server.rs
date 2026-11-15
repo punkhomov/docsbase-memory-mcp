@@ -1795,7 +1795,12 @@ async fn index_async(
     )?;
     let mut cancellation = request::CancelOnDrop(Some(operation.cancellation().clone()));
     let activity = activity.unwrap_or_else(|| shared.activity.track());
-    let permit = shared.workers.control().await?;
+    let permit = crate::hybrid::work::RemoteCall::new(operation.clone())
+        .wait(
+            &crate::hybrid::work::Cancellation::new(),
+            shared.workers.control(),
+        )
+        .await?;
     let context_owner = shared.clone();
     let captured_operation = operation.clone();
     let worker = request::spawn(Some(permit), Some(activity.clone()), move || {
