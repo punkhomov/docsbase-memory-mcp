@@ -3483,3 +3483,7 @@ mod tests {
 #[cfg(test)]
 #[path = "project_state_tests.rs"]
 mod project_state_tests;
+
+#[cfg(all(test, windows))]
+#[path = "windows_transport_tests.rs"]
+mod windows_transport_tests;

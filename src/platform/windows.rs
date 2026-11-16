@@ -100,6 +100,13 @@ impl AsyncWrite for Stream {
 pub struct BlockingStream(SyncStream);
 
 impl BlockingStream {
+    #[cfg(test)]
+    pub(crate) fn test_native_handle(&self) -> std::os::windows::io::RawHandle {
+        use std::os::windows::io::{AsHandle, AsRawHandle};
+        match &self.0 {
+            SyncStream::NamedPipe(stream) => stream.inner().as_handle().as_raw_handle(),
+        }
+    }
     /// Named pipes do not support I/O timeouts (ADR-10): best-effort no-op so
     /// callers keep their Unix semantics without failing to connect.
     ///
