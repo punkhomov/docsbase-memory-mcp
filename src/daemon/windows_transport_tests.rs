@@ -3,6 +3,7 @@ use super::search_phase_tests::Fixture;
 use super::*;
 use serde::Serialize;
 use std::io::{BufRead, Read, Write};
+use std::sync::atomic::AtomicU8;
 use std::sync::mpsc as std_mpsc;
 
 const WATCHDOG: Duration = Duration::from_secs(30);
@@ -103,6 +104,10 @@ fn stalled_get_doc_retains_original_connection_until_native_retirement() {
     let (finished, done) = tokio::sync::oneshot::channel();
     let endpoint = crate::platform::daemon_endpoint(&fixture.shared.cache);
     let cwd = fixture.project.canonical_root.clone();
+    // 0 setup, 1 waiting for explicit release, 2 draining, 3 returned,
+    // 4 controller/observer channel lost (failed exchange, never auto-drain).
+    let reader_phase = Arc::new(AtomicU8::new(0));
+    let peer_phase = reader_phase.clone();
     let mut client_thread = None;
     let observations = runtime.block_on(async {
         let listener = crate::platform::bind(&endpoint).unwrap();
@@ -148,9 +153,19 @@ fn stalled_get_doc_retains_original_connection_until_native_retirement() {
                     )
                     .map_err(|e| e.to_string())?;
                 let first = prefix(reader.get_mut())?;
-                let _ = entered.send(first);
-                // Reader stays connected and gated until candidate is durable.
-                let _ = proceed.recv_timeout(WATCHDOG);
+                peer_phase.store(1, Ordering::Release);
+                if entered.send(first).is_err() {
+                    peer_phase.store(4, Ordering::Release);
+                    return Err("prefix observer closed before explicit release".into());
+                }
+                // Only the controller releases this gate AFTER candidate sync.
+                // A wedged controller is contained by the independent process
+                // watchdog, never a client timeout falling through to cleanup.
+                if proceed.recv().is_err() {
+                    peer_phase.store(4, Ordering::Release);
+                    return Err("controller closed before explicit reader release".into());
+                }
+                peer_phase.store(2, Ordering::Release);
                 let mut response = vec![b'{'];
                 reader
                     .take(protocol::MAX_FRAME_BYTES as u64 + 2)
@@ -166,6 +181,9 @@ fn stalled_get_doc_retains_original_connection_until_native_retirement() {
                     _ => Err("cleanup did not consume the complete real get_doc reply".into()),
                 }
             })();
+            if peer_phase.load(Ordering::Acquire) == 2 {
+                peer_phase.store(3, Ordering::Release);
+            }
             let _ = finished.send(result.clone());
             result
         }));
@@ -186,6 +204,7 @@ fn stalled_get_doc_retains_original_connection_until_native_retirement() {
         let prefix = tokio::time::timeout(WATCHDOG, observed).await;
         fixture.shared.workers.shutdown();
         let joined = tokio::time::timeout(WATCHDOG, &mut handler).await;
+        let phase = reader_phase.load(Ordering::Acquire);
         let candidate = json!({
             "schema":1,"phase":"candidate-before-cleanup",
             "prefix":prefix.as_ref().ok().and_then(|value| value.as_ref().ok()),
@@ -193,7 +212,8 @@ fn stalled_get_doc_retains_original_connection_until_native_retirement() {
             "original_available_slots":slots.available_permits(),
             "original_activity":counter.load(Ordering::SeqCst),
             "document_bytes":document_bytes,
-            "cleanup_started":false,
+            "reader_gate_phase":phase,
+            "cleanup_started":matches!(phase, 2 | 3),
         });
         let saved = evidence("frozen-candidate.json", &candidate);
         // No assertion precedes release/drain/join: preserve failure ownership.
@@ -208,6 +228,7 @@ fn stalled_get_doc_retains_original_connection_until_native_retirement() {
     let client = client_thread.take().unwrap().join();
     let cleanup = json!({
         "schema":1,"phase":"cleanup",
+        "reader_gate_phase":reader_phase.load(Ordering::Acquire),
         "client_returned":client.as_ref().is_ok_and(|result| result.is_ok()),
         "actual_frame_bytes":client.as_ref().ok().and_then(|result| result.as_ref().ok()),
         "original_available_slots":slots.available_permits(),
@@ -218,6 +239,11 @@ fn stalled_get_doc_retains_original_connection_until_native_retirement() {
     assert!(matches!(observations.2, Ok(Ok(Ok(_)))), "{cleanup}");
     assert!(client.is_ok_and(|result| result.is_ok()), "{cleanup}");
     let candidate = observations.0;
+    assert_eq!(
+        candidate["reader_gate_phase"], 1,
+        "candidate requires an explicitly gated reader: {candidate}"
+    );
+    assert_eq!(candidate["cleanup_started"], false, "{candidate}");
     assert_eq!(candidate["handler_returned"], true, "{candidate}");
     assert_eq!(candidate["prefix"]["bytes_read"], 1, "{candidate}");
     assert_eq!(candidate["prefix"]["peek_ok"], true, "{candidate}");
