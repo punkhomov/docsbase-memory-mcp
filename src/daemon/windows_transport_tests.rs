@@ -84,8 +84,9 @@ fn evidence(name: &str, value: &impl Serialize) -> std::result::Result<(), Strin
 #[test]
 fn stalled_get_doc_retains_original_connection_until_native_retirement() {
     let fixture = Fixture::new(HybridStages::default());
-    let document_bytes = protocol::MAX_FRAME_BYTES / 2;
-    assert!(u64::try_from(document_bytes).unwrap() <= Config::default().max_file_size);
+    let document_bytes = usize::try_from(Config::default().max_file_size)
+        .unwrap()
+        .min(protocol::MAX_FRAME_BYTES / 2);
     std::fs::write(
         fixture.project.canonical_root.join("guide.md"),
         vec![b'x'; document_bytes],
