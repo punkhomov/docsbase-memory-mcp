@@ -89,10 +89,11 @@ impl Client {
                 "client connection is poisoned by a framing error; reconnect",
             ));
         }
-        let bytes = protocol::encode(&request)?;
+        let bytes = crate::ipc::encoding::encode(&request)?;
+        drop(request);
         {
             let stream = self.stream.get_mut();
-            stream.write_all(&bytes).map_err(io_error)?;
+            stream.write_all(bytes.bytes()).map_err(io_error)?;
             stream.flush().map_err(io_error)?;
         }
 

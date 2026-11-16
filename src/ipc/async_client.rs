@@ -51,10 +51,14 @@ impl AsyncClient {
         if self.poisoned {
             return Err(Error::transport("client connection is poisoned; reconnect"));
         }
-        let bytes = protocol::encode(&request)?;
+        let bytes = crate::ipc::encoding::encode(&request)?;
+        drop(request);
         // Remains true on error or future drop, including a partially read frame.
         self.poisoned = true;
-        self.writer.write_all(&bytes).await.map_err(io_error)?;
+        self.writer
+            .write_all(bytes.bytes())
+            .await
+            .map_err(io_error)?;
         let response = match self.reader.read_frame().await.map_err(io_error)? {
             Frame::Line(line) => protocol::decode_response(&line)
                 .map_err(|error| Error::transport(format!("bad response: {error}")))?,

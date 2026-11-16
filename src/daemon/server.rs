@@ -1385,8 +1385,8 @@ async fn write_frame_error(writer: &mut (impl tokio::io::AsyncWrite + Unpin), fr
     };
     let err = Error::Protocol { message };
     let response = error_response(&err);
-    if let Ok(bytes) = protocol::encode(&response) {
-        let _ = writer.write_all(&bytes).await;
+    if let Ok(bytes) = crate::ipc::encoding::encode(&response) {
+        let _ = writer.write_all(bytes.bytes()).await;
     }
 }
 

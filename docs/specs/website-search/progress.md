@@ -549,3 +549,14 @@ current check/build/format/fmt/diff passing. Shared finish/close/error/abort
 settlement retains success/failure ownership; HTTP's original abort reason governs
 504. Already-expired error writes get one immediate attempt, without flush grace.
 Full cli-full/freeze proof and both original scoped reviews remain pending.
+
+MODIFIED 2026-11-16 — #155 functional WIP checkpoint: architectural v3 reviewed;
+actual Windows application T1 at da44095 failed the expected connection-charge
+assertion with1,048,672 unread bytes/activity0, then drained the full1,048,673-byte
+reply before cleanup. This is accounting evidence, not native terminal proof.
+Daemon scoped/pre-frame replies and both IPC clients now use fixed preallocated
+capped streaming serialization; error fallback reuses that region after dropping
+the result. Focused encoding2/0. Owned IOCP/helper retirement, caller roots,
+coordinator/Stop acknowledgement and native terminal acceptance remain WIP;
+#155 is not complete and the diagnostic T1 remains intentionally RED until its
+retarget to actual terminal ownership. No policy/baseline/ignore change.

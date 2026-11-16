@@ -150,14 +150,13 @@ pub(super) async fn reply<W: AsyncWrite + Unpin>(
     {
         response = error_response(&error);
     }
-    let Some(bytes) = response_bytes(&response) else {
+    let Some(bytes) = response_bytes(response) else {
         return false;
     };
-    drop(response);
     if expired {
         // No extra time budget for an already-expired error reply. This may
         // deliver a complete frame, a prefix, or no bytes before closure.
-        let mut writing = std::pin::pin!(writer.write_all(&bytes));
+        let mut writing = std::pin::pin!(writer.write_all(bytes.bytes()));
         let _ = poll_fn(|cx| Poll::Ready(writing.as_mut().poll(cx))).await;
         return false;
     }
@@ -166,29 +165,31 @@ pub(super) async fn reply<W: AsyncWrite + Unpin>(
             let deadline = tokio::time::Instant::from_std(operation.deadline());
             write_before(
                 writer,
-                &bytes,
+                bytes.bytes(),
                 operation,
                 tokio::time::sleep_until(deadline),
             )
             .await
         }
-        None => writer.write_all(&bytes).await.is_ok(),
+        None => writer.write_all(bytes.bytes()).await.is_ok(),
     }
 }
 
-fn response_bytes(response: &Response) -> Option<Vec<u8>> {
-    let bytes = protocol::encode(response).ok()?;
-    if bytes.len() <= protocol::MAX_FRAME_BYTES + 1 {
-        return Some(bytes);
+fn response_bytes(response: Response) -> Option<crate::ipc::encoding::Frame> {
+    let mut frame = crate::ipc::encoding::Frame::new(protocol::MAX_FRAME_BYTES).ok()?;
+    let encoded = frame.encode(&response);
+    drop(response);
+    if encoded.is_ok() {
+        return Some(frame);
     }
     let error = Error::Protocol {
         message: format!(
-            "response frame is {} bytes, over {}; reduce max_file_size or the document size",
-            bytes.len(),
-            protocol::MAX_FRAME_BYTES,
+            "response frame exceeds {} bytes; reduce max_file_size or the document size",
+            protocol::MAX_FRAME_BYTES
         ),
     };
-    protocol::encode(&error_response(&error)).ok()
+    frame.encode(&error_response(&error)).ok()?;
+    Some(frame)
 }
 
 async fn write_before<W: AsyncWrite + Unpin>(
