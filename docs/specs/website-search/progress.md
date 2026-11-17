@@ -582,3 +582,16 @@ this private helper. Existing windows-sys IO/Security features are explicit;
 no new crate. Typed empty-byte comparison and the invalid Windows thread-trait
 import found by native compilation are corrected; focused encoding2/0 again.
 Native helper execution and full stream/root integration remain pending.
+
+MODIFIED 2026-11-17 — #155 bounded core-review correction checkpoint: C1 now
+uses the allocation's original mutable pointer before native submission, never a
+shared-slice cast. I1 publishes permanent driver/helper fault gates to existing
+handles and new admission, exposes owner fault, and retains fatal owners. I2
+replaces callback-under-lock consumption with bounded read copying/non-read
+consumption; Waker clone/drop also occurs outside those locks. Five controlled
+core cases are queued for native validation; local encoding2/0 and unchanged
+platform-boundary2/0 pass. The same named T1 fixture now queries native unread
+bytes only through the platform seam. Raw owned connection code and a normal
+read/write/helper-drain/token-transfer case are written but native execution and
+outer-root integration remain pending. #165 deterministic grace-fixture work is
+assigned to the same lifecycle acceptance; no grace/budget/ignore change.

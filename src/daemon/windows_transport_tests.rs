@@ -33,39 +33,25 @@ fn exchange(
     protocol::decode_response(&frame).map_err(|e| e.to_string())
 }
 
-#[allow(unsafe_code)] // Read-only PeekNamedPipe borrows the live client's handle.
 fn prefix(stream: &mut crate::platform::BlockingStream) -> std::result::Result<Prefix, String> {
-    use windows_sys::Win32::Foundation::GetLastError;
-    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
     let mut byte = [0];
     stream.read_exact(&mut byte).map_err(|e| e.to_string())?;
     if byte != *b"{" {
         return Err("response did not start with a JSON object".into());
     }
-    let mut available = 0;
-    // SAFETY: stream owns this connected pipe throughout this synchronous query;
-    // no data buffer is supplied and the available output points to a live DWORD.
-    let ok = unsafe {
-        PeekNamedPipe(
-            stream.test_native_handle(),
-            std::ptr::null_mut(),
+    let (peek_ok, peek_error, unread_native_bytes) = match stream.test_unread_bytes() {
+        Ok(bytes) => (true, 0, bytes),
+        Err(error) => (
+            false,
+            u32::try_from(error.raw_os_error().unwrap_or(0)).unwrap_or(0),
             0,
-            std::ptr::null_mut(),
-            &raw mut available,
-            std::ptr::null_mut(),
-        )
-    };
-    let error = if ok == 0 {
-        // SAFETY: immediate thread-local error capture after the failed query.
-        unsafe { GetLastError() }
-    } else {
-        0
+        ),
     };
     Ok(Prefix {
         bytes_read: byte.len(),
-        peek_ok: ok != 0,
-        peek_error: error,
-        unread_native_bytes: available,
+        peek_ok,
+        peek_error,
+        unread_native_bytes,
     })
 }
 

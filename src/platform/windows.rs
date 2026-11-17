@@ -101,11 +101,29 @@ pub struct BlockingStream(SyncStream);
 
 impl BlockingStream {
     #[cfg(test)]
-    pub(crate) fn test_native_handle(&self) -> std::os::windows::io::RawHandle {
+    #[allow(unsafe_code)] // Read-only query borrows this live pipe HANDLE.
+    pub(crate) fn test_unread_bytes(&self) -> io::Result<u32> {
         use std::os::windows::io::{AsHandle, AsRawHandle};
-        match &self.0 {
+        let handle = match &self.0 {
             SyncStream::NamedPipe(stream) => stream.inner().as_handle().as_raw_handle(),
+        };
+        let mut available = 0;
+        // SAFETY: self retains the pipe for this synchronous query, no data
+        // buffer is supplied, and the output points to a live DWORD.
+        if unsafe {
+            windows_sys::Win32::System::Pipes::PeekNamedPipe(
+                handle,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut available,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
         }
+        Ok(available)
     }
     /// Named pipes do not support I/O timeouts (ADR-10): best-effort no-op so
     /// callers keep their Unix semantics without failing to connect.
@@ -724,3 +742,5 @@ mod tests {
 mod native_io;
 
 mod flush;
+
+mod connection;

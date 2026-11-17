@@ -37,6 +37,7 @@ struct State {
     result: Option<Result<(), u32>>,
     cancel_callers: usize,
     joining: bool,
+    cancel_deferred: bool,
     waker: Option<Waker>,
 }
 struct Shared {
@@ -49,7 +50,7 @@ struct Shared {
 }
 pub(super) struct Flush {
     shared: Arc<Shared>,
-    thread: Option<JoinHandle<()>>,
+    thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 fn event() -> io::Result<OwnedHandle> {
@@ -78,6 +79,7 @@ impl Flush {
                 result: None,
                 cancel_callers: 0,
                 joining: false,
+                cancel_deferred: false,
                 waker: None,
             }),
         });
@@ -93,6 +95,7 @@ impl Flush {
                     state.phase = Phase::Faulted;
                     state.abort = true;
                     drop(state);
+                    worker.token.report_fault("dedicated drain worker failed");
                     worker.signal();
                 }
             });
@@ -108,10 +111,11 @@ impl Flush {
             .store(thread.as_raw_handle() as usize, Ordering::Release);
         Ok(Self {
             shared,
-            thread: Some(thread),
+            thread: Mutex::new(Some(thread)),
         })
     }
     pub(super) fn poll_ready(&self, cx: &Context<'_>) -> Poll<io::Result<()>> {
+        let waker = cx.waker().clone();
         let mut state = locked(&self.shared.state);
         if state.abort || self.shared.token.is_aborting() {
             return Poll::Ready(Err(failure("pipe drain is aborting")));
@@ -120,10 +124,13 @@ impl Flush {
             self.shared.token.helper_ready();
             return Poll::Ready(Ok(()));
         }
-        state.waker = Some(cx.waker().clone());
+        let previous = state.waker.replace(waker);
+        drop(state);
+        drop(previous);
         Poll::Pending
     }
     pub(super) fn poll_flush(&self, cx: &Context<'_>) -> Poll<io::Result<()>> {
+        let waker = cx.waker().clone();
         let mut state = locked(&self.shared.state);
         if state.abort || self.shared.token.is_aborting() {
             return Poll::Ready(Err(failure("pipe drain is aborting")));
@@ -139,15 +146,18 @@ impl Flush {
                 return Poll::Ready(Err(failure("flush started before native write terminal")));
             }
             state.phase = Phase::Queued;
-            state.waker = Some(cx.waker().clone());
+            let previous = state.waker.replace(waker);
             drop(state);
+            drop(previous);
             // SAFETY: ticket state published before waking this owned worker.
             if unsafe { SetEvent(self.shared.request.as_raw_handle()) } == 0 {
                 return Poll::Ready(Err(io::Error::last_os_error()));
             }
             return Poll::Pending;
         }
-        state.waker = Some(cx.waker().clone());
+        let previous = state.waker.replace(waker);
+        drop(state);
+        drop(previous);
         Poll::Pending
     }
     pub(super) fn abort(&self) {
@@ -155,6 +165,9 @@ impl Flush {
         let mut state = locked(&self.shared.state);
         state.abort = true;
         let cancel = !state.joining;
+        if !cancel {
+            state.cancel_deferred = true;
+        }
         if cancel {
             state.cancel_callers += 1;
         }
@@ -183,25 +196,51 @@ impl Flush {
         }
         self.shared.signal();
     }
+    #[cfg(test)]
+    pub(super) fn wait_signal(&self) -> io::Result<()> {
+        let thread = locked(&self.thread)
+            .as_ref()
+            .map(AsRawHandle::as_raw_handle);
+        let Some(thread) = thread else {
+            return Ok(());
+        };
+        // SAFETY: the single test owner retains JoinHandle, with no concurrent
+        // joining/cancellation. This observes the actual native thread signal.
+        if unsafe { WaitForSingleObject(thread, 30_000) } == WAIT_OBJECT_0 {
+            Ok(())
+        } else {
+            Err(io::Error::from(io::ErrorKind::TimedOut))
+        }
+    }
     /// Called by the outer owner only; no wait/join in stream/future Drop.
-    pub(super) fn join_ready(&mut self) -> io::Result<bool> {
+    pub(super) fn join_ready(&self) -> io::Result<bool> {
         let mut state = locked(&self.shared.state);
-        if state.cancel_callers != 0 {
+        if state.cancel_callers != 0 || state.joining {
             return Ok(false);
         }
-        let Some(thread) = self.thread.as_ref() else {
+        let thread = locked(&self.thread)
+            .as_ref()
+            .map(AsRawHandle::as_raw_handle);
+        let Some(thread) = thread else {
             return Ok(true);
         };
         state.joining = true;
         drop(state);
-        // SAFETY: retained dedicated thread; joining fence prevents a new
-        // cancellation caller borrowing this HANDLE until the decision returns.
-        let signaled = unsafe { WaitForSingleObject(thread.as_raw_handle(), 0) } == WAIT_OBJECT_0;
+        // SAFETY: joining fence retains the dedicated HANDLE until the zero
+        // wait completes; no Rust lock is held across this native observation.
+        let signaled = unsafe { WaitForSingleObject(thread, 0) } == WAIT_OBJECT_0;
         if !signaled {
-            locked(&self.shared.state).joining = false;
+            let mut state = locked(&self.shared.state);
+            state.joining = false;
+            let deferred = std::mem::take(&mut state.cancel_deferred);
+            drop(state);
+            if deferred {
+                self.abort();
+            }
             return Ok(false);
         }
-        if let Some(thread) = self.thread.take() {
+        let thread = locked(&self.thread).take();
+        if let Some(thread) = thread {
             thread
                 .join()
                 .map_err(|_| failure("drain worker join unwound"))?;

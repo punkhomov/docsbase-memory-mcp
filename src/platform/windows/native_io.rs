@@ -53,9 +53,9 @@ impl Completion {
 struct State {
     active: bool,
     returned: bool,
-    packet: bool,
     accounted: bool,
     cancel_callers: usize,
+    read_offset: usize,
     terminal: Option<Completion>,
     waker: Option<Waker>,
 }
@@ -83,14 +83,14 @@ impl Operation {
         kind: Kind,
         capacity: usize,
     ) -> io::Result<Arc<Self>> {
-        let storage = if kind == Kind::Connect {
+        let mut storage = if kind == Kind::Connect {
             None
         } else {
             Some(Region::new(capacity)?)
         };
         let pointer = storage
-            .as_ref()
-            .map_or(ptr::null_mut(), |region| region.bytes().as_ptr().cast_mut());
+            .as_mut()
+            .map_or(ptr::null_mut(), Region::native_pointer);
         // SAFETY: Win32 OVERLAPPED's initial state is all zero, hEvent=null for IOCP.
         let overlapped = unsafe { std::mem::zeroed() };
         let operation = Arc::new(Self {
@@ -99,10 +99,10 @@ impl Operation {
             pointer,
             capacity,
             kind,
-            token: token.clone(),
+            token,
             state: Mutex::new(State::default()),
         });
-        let mut slots = locked(&token.operations);
+        let mut slots = locked(&operation.token.operations);
         if slots
             .iter()
             .filter_map(Weak::upgrade)
@@ -112,6 +112,7 @@ impl Operation {
             return Err(failure("native operation slot already reserved"));
         }
         slots.push(Arc::downgrade(&operation));
+        drop(slots);
         Ok(operation)
     }
 
@@ -119,7 +120,7 @@ impl Operation {
     /// until its previous result was consumed and every cancellation returned.
     pub(super) fn submit(self: &Arc<Self>, bytes: &[u8]) -> io::Result<()> {
         let gate = locked(&self.token.handle);
-        if self.token.aborting.load(Ordering::Acquire) {
+        if self.token.is_aborting() {
             return Err(failure("native connection is aborting"));
         }
         let handle = gate
@@ -145,18 +146,21 @@ impl Operation {
         }
         // SAFETY: previous packet AND call returned before active became false.
         unsafe { ptr::write(self.overlapped.get(), std::mem::zeroed()) };
-        *state = State {
-            active: true,
-            packet: true,
-            accounted: true,
-            ..State::default()
-        };
+        let previous = std::mem::replace(
+            &mut *state,
+            State {
+                active: true,
+                accounted: true,
+                ..State::default()
+            },
+        );
         self.token.users.fetch_add(1, Ordering::AcqRel);
         // This exact Arc is the one packet/local-terminal reservation. Installed
         // BEFORE FFI; completion may arrive before the submitting call returns.
         let packet = Arc::into_raw(self.clone());
         drop(state);
         drop(gate);
+        drop(previous);
         // SAFETY: packet + submission Arc retain slot, buffer and physical handle.
         // No Rust lock is held across native submission or completion dispatch.
         let ok = unsafe {
@@ -197,7 +201,7 @@ impl Operation {
             unsafe { drop(Arc::from_raw(packet)) };
         }
         self.returned();
-        if self.token.aborting.load(Ordering::Acquire) {
+        if self.token.is_aborting() {
             self.cancel_native();
         }
         Ok(())
@@ -221,10 +225,9 @@ impl Operation {
     }
     fn publish(&self, completion: Completion) -> io::Result<()> {
         let mut state = locked(&self.state);
-        if !state.active || !state.packet || state.terminal.is_some() {
+        if !state.active || state.terminal.is_some() {
             return Err(failure("duplicate or unreserved native completion"));
         }
-        state.packet = false;
         state.terminal = Some(completion);
         self.finalize(&mut state);
         let waker = state.waker.take();
@@ -235,21 +238,29 @@ impl Operation {
         Ok(())
     }
     pub(super) fn poll(&self, cx: &Context<'_>) -> Poll<io::Result<Completion>> {
+        let waker = cx.waker().clone();
         let mut state = locked(&self.state);
         if state.returned
             && let Some(terminal) = state.terminal
         {
             return Poll::Ready(Ok(terminal));
         }
-        state.waker = Some(cx.waker().clone());
+        let previous = state.waker.replace(waker);
+        drop(state);
+        drop(previous);
         Poll::Pending
     }
     /// Consuming output is separate from native completion; no subsequent native
     /// read can overwrite the bytes before the logical owner copies/discards them.
-    pub(super) fn consume(&self, copy: impl FnOnce(&[u8])) -> io::Result<Completion> {
+    /// Consume a non-read result. Read output is copied by copy_read; no
+    /// application callback can execute while the operation mutex is held.
+    pub(super) fn consume(&self) -> io::Result<Completion> {
         let mut state = locked(&self.state);
         if state.cancel_callers != 0 {
             return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
+        if self.kind == Kind::Read {
+            return Err(failure("read output requires bounded copy"));
         }
         let terminal = state
             .terminal
@@ -261,16 +272,46 @@ impl Operation {
         {
             return Err(failure("native result exceeds owned buffer"));
         }
-        if self.kind == Kind::Read && terminal.error.is_none() {
-            // SAFETY: actual native terminal and submission return observed;
-            // bounds checked, state prevents slot reuse while the view exists.
-            let bytes =
-                unsafe { std::slice::from_raw_parts(self.pointer, terminal.bytes as usize) };
-            copy(bytes);
-        }
         state.active = false;
         state.terminal = None;
         Ok(terminal)
+    }
+    pub(super) fn active(&self) -> bool {
+        locked(&self.state).active
+    }
+    pub(super) fn copy_read(&self, destination: &mut [u8]) -> io::Result<usize> {
+        let mut state = locked(&self.state);
+        if self.kind != Kind::Read || !state.returned || state.cancel_callers != 0 {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
+        let completion = state
+            .terminal
+            .ok_or_else(|| failure("read is not terminal"))?;
+        if let Some(error) = completion.error {
+            state.active = false;
+            state.terminal = None;
+            return Err(io::Error::from_raw_os_error(error.cast_signed()));
+        }
+        let total = completion.bytes as usize;
+        if total > self.capacity || state.read_offset > total {
+            return Err(failure("native read exceeds owned capacity"));
+        }
+        let count = destination.len().min(total - state.read_offset);
+        // SAFETY: both terminal gates and bounds checked, no kernel user;
+        // state lock excludes reuse/another copy. No application callback runs.
+        unsafe {
+            ptr::copy_nonoverlapping(
+                self.pointer.add(state.read_offset),
+                destination.as_mut_ptr(),
+                count,
+            )
+        };
+        state.read_offset += count;
+        if state.read_offset == total {
+            state.active = false;
+            state.terminal = None;
+        }
+        Ok(count)
     }
     fn cancel_native(&self) {
         self.cancel_using(|handle, overlapped| {
@@ -316,10 +357,39 @@ pub(super) struct HandleToken {
     users: AtomicUsize,
     aborting: AtomicBool,
     helper_ready: AtomicBool,
+    port: Weak<PortInner>,
 }
 impl HandleToken {
+    pub(super) fn disconnect_failed(&self) {
+        self.aborting.store(true, Ordering::Release);
+        let gate = locked(&self.handle);
+        let handle = gate.as_ref().map(AsRawHandle::as_raw_handle);
+        if handle.is_some() {
+            self.users.fetch_add(1, Ordering::AcqRel);
+        }
+        drop(gate);
+        if let Some(handle) = handle {
+            // SAFETY: explicit control-call user retains the HANDLE through
+            // return. This sacrifices only an already failed server exchange;
+            // its return is never used as native IO completion evidence.
+            unsafe {
+                windows_sys::Win32::System::Pipes::DisconnectNamedPipe(handle);
+            }
+            self.users.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
     pub(super) fn is_aborting(&self) -> bool {
         self.aborting.load(Ordering::Acquire)
+            || self.port.upgrade().is_none_or(|port| {
+                port.failed.load(Ordering::Acquire) || port.stopping.load(Ordering::Acquire)
+            })
+    }
+    pub(super) fn report_fault(&self, message: &'static str) {
+        self.helper_ready.store(false, Ordering::Release);
+        self.aborting.store(true, Ordering::Release);
+        if let Some(port) = self.port.upgrade() {
+            port.fail(message);
+        }
     }
     pub(super) fn helper_ready(&self) {
         self.helper_ready.store(true, Ordering::Release);
@@ -387,6 +457,7 @@ struct PortInner {
     handle: OwnedHandle,
     state: Mutex<PortState>,
     stopping: AtomicBool,
+    failed: AtomicBool,
 }
 
 pub(super) struct Port {
@@ -422,6 +493,7 @@ impl Port {
                 fault: None,
             }),
             stopping: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
         });
         let worker = inner.clone();
         let thread = std::thread::Builder::new()
@@ -433,12 +505,12 @@ impl Port {
                 match result {
                     Ok(result) => {
                         if result.is_err() {
-                            locked(&worker.state).fault = Some("native completion driver failed");
+                            worker.fail("native completion driver failed");
                         }
                         result
                     }
                     Err(_) => {
-                        locked(&worker.state).fault = Some("native completion driver unwound");
+                        worker.fail("native completion driver unwound");
                         Err(failure("native completion driver unwound"))
                     }
                 }
@@ -448,9 +520,15 @@ impl Port {
             thread: Some(thread),
         })
     }
+    pub(super) fn fault(&self) -> Option<&'static str> {
+        locked(&self.inner.state).fault
+    }
     pub(super) fn reserve(&self) -> io::Result<Reservation> {
         let mut state = locked(&self.inner.state);
-        if state.fault.is_some() || self.inner.stopping.load(Ordering::Acquire) {
+        if state.fault.is_some()
+            || self.inner.failed.load(Ordering::Acquire)
+            || self.inner.stopping.load(Ordering::Acquire)
+        {
             return Err(failure("native transport is closing"));
         }
         let index = state
@@ -466,10 +544,16 @@ impl Port {
         })
     }
     pub(super) fn retire(&self, token: &Arc<HandleToken>) -> bool {
+        if self.inner.failed.load(Ordering::Acquire) {
+            return false;
+        }
         if !token.close_if_idle() {
             return false;
         }
         let mut state = locked(&self.inner.state);
+        if state.fault.is_some() {
+            return false;
+        }
         if let Some(entry) = state
             .entries
             .iter_mut()
@@ -478,6 +562,19 @@ impl Port {
             *entry = Entry::Empty;
         }
         true
+    }
+    #[cfg(test)]
+    pub(super) fn wait_progress_signal(&self) -> io::Result<()> {
+        let Some(thread) = self.thread.as_ref() else {
+            return Ok(());
+        };
+        // SAFETY: test owner retains the dedicated thread HANDLE; bounded wait
+        // observes an actual native signal, not a timing performance threshold.
+        if unsafe { WaitForSingleObject(thread.as_raw_handle(), 30_000) } == WAIT_OBJECT_0 {
+            Ok(())
+        } else {
+            Err(io::Error::from(io::ErrorKind::TimedOut))
+        }
     }
     pub(super) fn finish(&mut self) -> io::Result<()> {
         {
@@ -517,12 +614,17 @@ impl Port {
 }
 impl Reservation {
     pub(super) fn associate(mut self, handle: OwnedHandle) -> io::Result<Arc<HandleToken>> {
+        if self.inner.failed.load(Ordering::Acquire) || self.inner.stopping.load(Ordering::Acquire)
+        {
+            return Err(failure("native progress owner is closed"));
+        }
         let token = Arc::new(HandleToken {
             handle: Mutex::new(Some(handle)),
             operations: Mutex::new(Vec::with_capacity(3)),
             users: AtomicUsize::new(0),
             aborting: AtomicBool::new(false),
             helper_ready: AtomicBool::new(false),
+            port: Arc::downgrade(&self.inner),
         });
         let key = Arc::as_ptr(&token) as usize;
         locked(&self.inner.state).entries[self.index] = Entry::Live(token.clone());
@@ -553,6 +655,27 @@ impl Drop for Reservation {
     }
 }
 impl PortInner {
+    fn fail(&self, message: &'static str) {
+        self.failed.store(true, Ordering::Release);
+        let length = {
+            let mut state = locked(&self.state);
+            state.fault = Some(message);
+            state.entries.len()
+        };
+        // No allocation or application lock is held across cancellation calls.
+        // Existing prepared submissions see failed on return and reconcile the
+        // pre-entry cancellation race; no completion is fabricated here.
+        for index in 0..length {
+            let token = match &locked(&self.state).entries[index] {
+                Entry::Live(token) => Some(token.clone()),
+                _ => None,
+            };
+            if let Some(token) = token {
+                token.helper_ready.store(false, Ordering::Release);
+                token.abort();
+            }
+        }
+    }
     fn run(&self) -> io::Result<()> {
         loop {
             let mut bytes = 0;
@@ -579,7 +702,7 @@ impl PortInner {
                 if ok != 0 && key == 0 && self.stopping.load(Ordering::Acquire) {
                     return Ok(());
                 }
-                locked(&self.state).fault = Some("native completion port failed without operation");
+                self.fail("native completion port failed without operation");
                 return Err(failure("native completion port failed without operation"));
             }
             let token = {
@@ -616,11 +739,11 @@ mod tests {
             users: AtomicUsize::new(1),
             aborting: AtomicBool::new(false),
             helper_ready: AtomicBool::new(false),
+            port: Weak::new(),
         });
         let operation = Operation::new(token, Kind::Read, 8).unwrap();
         *locked(&operation.state) = State {
             active: true,
-            packet: true,
             accounted: true,
             ..State::default()
         };
@@ -638,23 +761,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(operation.token.users.load(Ordering::Acquire), 1);
-        assert!(
-            operation
-                .consume(|_| panic!("submission still owns storage"))
-                .is_err()
-        );
+        assert!(operation.copy_read(&mut [0; 8]).is_err());
         let context = Context::from_waker(Waker::noop());
         assert!(operation.poll(&context).is_pending());
         operation.returned();
         assert_eq!(operation.token.users.load(Ordering::Acquire), 0);
-        operation
-            .consume(|bytes| assert_eq!(bytes, [0; 4]))
-            .unwrap();
-        assert!(
-            operation
-                .consume(|_| panic!("terminal consumed twice"))
-                .is_err()
-        );
+        let mut bytes = [1; 4];
+        assert_eq!(operation.copy_read(&mut bytes).unwrap(), 4);
+        assert_eq!(bytes, [0; 4]);
+        assert!(operation.copy_read(&mut [0; 8]).is_err());
     }
 
     #[test]
@@ -676,6 +791,70 @@ mod tests {
                 .is_err()
         );
         assert_eq!(operation.token.users.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn bounded_read_copy_preserves_partial_output_without_a_callback() {
+        let operation = pending(None);
+        operation.returned();
+        operation
+            .publish(Completion {
+                bytes: 4,
+                error: None,
+            })
+            .unwrap();
+        let mut first = [1];
+        assert_eq!(operation.copy_read(&mut first).unwrap(), 1);
+        assert_eq!(first, [0]);
+        assert!(operation.active());
+        let mut remainder = [1; 3];
+        assert_eq!(operation.copy_read(&mut remainder).unwrap(), 3);
+        assert_eq!(remainder, [0; 3]);
+        assert!(!operation.active());
+        assert!(operation.consume().is_err());
+    }
+
+    #[test]
+    fn permanent_progress_fault_closes_existing_gates_and_preserves_owners() {
+        // Pure production fault-gate transition. No IOCP/syscall is simulated
+        // as completed: this file HANDLE merely supplies owned test storage.
+        let inner = Arc::new(PortInner {
+            handle: tempfile::tempfile().unwrap().into(),
+            state: Mutex::new(PortState {
+                entries: vec![Entry::Empty],
+                fault: None,
+            }),
+            stopping: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+        });
+        let token = Arc::new(HandleToken {
+            handle: Mutex::new(None),
+            operations: Mutex::new(Vec::with_capacity(3)),
+            users: AtomicUsize::new(0),
+            aborting: AtomicBool::new(false),
+            helper_ready: AtomicBool::new(true),
+            port: Arc::downgrade(&inner),
+        });
+        locked(&inner.state).entries[0] = Entry::Live(token.clone());
+        let write = Operation::new(token.clone(), Kind::Write, 8).unwrap();
+        let mut port = Port {
+            inner,
+            thread: None,
+        };
+        token.report_fault("controlled helper failure");
+        assert!(token.is_aborting());
+        assert_eq!(port.fault(), Some("controlled helper failure"));
+        assert!(!token.helper_ready.load(Ordering::Acquire));
+        assert_eq!(
+            write.submit(b"bytes").unwrap_err().to_string(),
+            "native connection is aborting"
+        );
+        assert!(port.reserve().is_err());
+        assert!(!port.retire(&token));
+        assert!(
+            matches!(&locked(&port.inner.state).entries[0], Entry::Live(retained) if Arc::ptr_eq(retained, &token))
+        );
+        assert!(port.finish().is_err());
     }
 
     #[test]
@@ -701,7 +880,7 @@ mod tests {
             })
             .unwrap();
         let native_users = operation.token.users.load(Ordering::Acquire);
-        let buffer_fenced = operation.consume(|_| {}).is_err();
+        let buffer_fenced = operation.copy_read(&mut [0; 8]).is_err();
         let handle_fenced = !operation.token.close_if_idle();
         release.send(()).unwrap();
         thread.join().unwrap();
@@ -711,7 +890,9 @@ mod tests {
         );
         assert!(buffer_fenced);
         assert!(handle_fenced);
-        operation.consume(|bytes| assert_eq!(bytes, [0])).unwrap();
+        let mut bytes = [1];
+        assert_eq!(operation.copy_read(&mut bytes).unwrap(), 1);
+        assert_eq!(bytes, [0]);
         assert!(operation.token.close_if_idle());
     }
 }
