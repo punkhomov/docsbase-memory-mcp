@@ -36,9 +36,9 @@ impl Options {
         self.chunk_bytes
             .checked_mul(2)
             .and_then(|bytes| bytes.checked_add(self.helper_stack_bytes))
-            .and_then(|bytes| bytes.checked_add(self.work_stack_bytes))
             .and_then(|bytes| bytes.checked_mul(self.handles))
             .and_then(|bytes| bytes.checked_add(self.helper_stack_bytes))
+            .and_then(|bytes| bytes.checked_add(self.work_stack_bytes))
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "native capacity overflow")
             })?;
@@ -46,8 +46,8 @@ impl Options {
     }
 }
 
-/// The caller retains Runtime, JobRoot, signal receiver and admission lease.
-/// Only this outer function owns the progress JoinHandle. Its native owners
+/// The caller retains `Runtime`, `JobRoot`, signal receiver and admission lease.
+/// Only this outer function owns the progress `JoinHandle`. Its native owners
 /// remain registered during work errors, cancellation, and unwinding.
 pub(super) fn run_on<T: Send, F>(
     runtime: &Runtime,
@@ -239,9 +239,7 @@ mod tests {
                     let mut pipe = Pipe::new(server)?;
                     pipe.write_all(&vec![b'x'; chunk_bytes]).await?;
                     drop(client);
-                    if unwind {
-                        panic!("controlled work unwind after native submission");
-                    }
+                    assert!(!unwind, "controlled work unwind after native submission");
                     Err(io::Error::other(
                         "controlled work failure after native submission",
                     ))

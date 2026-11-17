@@ -696,3 +696,13 @@ unwind remain inside that lifetime. The final-drain test additionally uses
 one-byte native read regions so even short completions cannot prefetch its
 unread sentinel. Exact-source cross-typecheck/fmt pass. Native GREEN, root task
 review and operational facade/application integration remain pending.
+
+Task W3a1: complete (2026-11-17, independent private native root).
+Native run44103973384 at source2ea8204 passes13/13 tests without ignores;
+its artifact confirms independent retirement during synchronous work and actual
+retirement before error/unwind returns. Fresh root review: spec PASS, quality
+APPROVED, no Critical/Important findings. Minor stack-envelope arithmetic was
+corrected to count the application stack once, outside per-handle multiplication;
+re-review ADDRESSED. Root-specific cross-target Clippy diagnostics are resolved,
+exact-source cross-typecheck and fmt pass. Operational integration remains W3.
+Ruling: private root slice approved; no claim that production #155 is solved.
