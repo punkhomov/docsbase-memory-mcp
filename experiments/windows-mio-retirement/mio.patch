@@ -1,0 +1,70 @@
+--- a/src/sys/windows/named_pipe.rs
++++ b/src/sys/windows/named_pipe.rs
+@@ -90,6 +90,8 @@
+     connecting: AtomicBool,
+     io: Mutex<Io>,
+     pool: Mutex<BufferPool>,
++    // Dropped last: HANDLE, completed-I/O state and native buffers retire first.
++    _retirement_guard: Option<Box<dyn Send + Sync>>,
+ }
+ 
+ // SAFETY: `Handles`s are, in general, not thread-safe. However, we only used `Handle`s for
+@@ -488,8 +490,22 @@
+     }
+ }
+ 
+-impl FromRawHandle for NamedPipe {
+-    unsafe fn from_raw_handle(handle: RawHandle) -> NamedPipe {
++impl NamedPipe {
++    /// Retain application accounting until this HANDLE and all I/O buffers retire.
++    ///
++    /// # Safety
++    /// The handle ownership and overlapped-I/O requirements match FromRawHandle.
++    pub unsafe fn from_raw_handle_with_retirement_guard(
++        handle: RawHandle,
++        guard: Box<dyn Send + Sync>,
++    ) -> NamedPipe {
++        unsafe { Self::from_raw_handle_with_optional_guard(handle, Some(guard)) }
++    }
++
++    unsafe fn from_raw_handle_with_optional_guard(
++        handle: RawHandle,
++        guard: Option<Box<dyn Send + Sync>>,
++    ) -> NamedPipe {
+         NamedPipe {
+             inner: Arc::new(Inner {
+                 handle: Handle::new(handle as HANDLE),
+@@ -506,8 +522,15 @@
+                     connect_error: None,
+                 }),
+                 pool: Mutex::new(BufferPool::with_capacity(2)),
++                _retirement_guard: guard,
+             }),
+         }
++    }
++}
++
++impl FromRawHandle for NamedPipe {
++    unsafe fn from_raw_handle(handle: RawHandle) -> NamedPipe {
++        unsafe { Self::from_raw_handle_with_optional_guard(handle, None) }
+     }
+ }
+ 
+@@ -612,7 +635,16 @@
+     }
+ 
+     fn flush(&mut self) -> io::Result<()> {
+-        Ok(())
++        let mut io = self.inner.io.lock()
++            .map_err(|_| io::Error::other("named pipe I/O state poisoned"))?;
++        match mem::replace(&mut io.write, State::None) {
++            State::None => Ok(()),
++            State::Err(error) => Err(error),
++            pending => {
++                io.write = pending;
++                Err(would_block())
++            }
++        }
+     }
+ }
+ 
