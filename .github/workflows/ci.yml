@@ -148,15 +148,19 @@ jobs:
             Write-Host $line
             [Console]::Out.Flush()
           }
-          $testPrefix = 'platform::windows::native_io::tests::'
+          $testPrefix = 'platform::windows::'
+          $legacyFacadeTests = 'platform::windows::tests::'
           if ($env:EXPECTED_TEST_COUNT -notmatch '^[1-9][0-9]?$') { throw 'Invalid reviewed test count' }
           $expectedCount = [int]$env:EXPECTED_TEST_COUNT
-          & $executable $testPrefix --list --format terse 1> target/transport155-t2/selected-tests.txt 2> target/transport155-t2/selected-tests.stderr.txt
+          & $executable $testPrefix --skip $legacyFacadeTests --list --format terse 1> target/transport155-t2/selected-tests.txt 2> target/transport155-t2/selected-tests.stderr.txt
           if ($LASTEXITCODE -ne 0) { throw 'Test inventory failed' }
           $selected = @(Get-Content target/transport155-t2/selected-tests.txt | Where-Object { $_.StartsWith($testPrefix) -and $_.EndsWith(': test') })
           if ($selected.Count -ne $expectedCount) { throw 'Reviewed native core test count mismatch; never zero-selected' }
+          foreach ($line in $selected) {
+            if (-not ($line.StartsWith('platform::windows::native_io::tests::') -or $line.StartsWith('platform::windows::connection::tests::') -or $line.StartsWith('platform::windows::flush::tests::'))) { throw 'Unexpected test outside reviewed owned-transport modules' }
+          }
           Record-Watchdog 'SupervisorLaunch' @{executable=$executable; deadline_ms=180000}
-          $process = Start-Process -FilePath $executable -ArgumentList @($testPrefix,'--nocapture','--test-threads=1') -PassThru -NoNewWindow -RedirectStandardOutput target/transport155-t2/supervisor.stdout.log -RedirectStandardError target/transport155-t2/supervisor.stderr.log
+          $process = Start-Process -FilePath $executable -ArgumentList @($testPrefix,'--skip',$legacyFacadeTests,'--nocapture','--test-threads=1') -PassThru -NoNewWindow -RedirectStandardOutput target/transport155-t2/supervisor.stdout.log -RedirectStandardError target/transport155-t2/supervisor.stderr.log
           Record-Watchdog 'SupervisorStarted' @{pid=$process.Id}
           if (-not $process.WaitForExit(180000)) {
             Record-Watchdog 'ExternalWatchdogExpired' @{failure=$true; candidate_missing_is_inconclusive=$true}
