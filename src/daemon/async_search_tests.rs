@@ -5,6 +5,7 @@ use crate::hybrid::remote::{
 };
 use crate::hybrid::wire::TransportResponse;
 use crate::vector_cache::Embedder;
+use tokio::io::AsyncWriteExt;
 
 struct WireGate {
     calls: AtomicUsize,

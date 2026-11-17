@@ -9,7 +9,11 @@ use docsbase_memory::ipc::protocol::{PROTOCOL_VERSION, Request, Response, encode
 use docsbase_memory::platform;
 use tempfile::TempDir;
 
+#[path = "support/transport.rs"]
+mod test_transport;
+
 struct Env {
+    transport: test_transport::TestTransport,
     cache: TempDir,
     root: TempDir,
 }
@@ -21,7 +25,11 @@ impl Env {
         for (rel, body) in files {
             write_file(root.path(), rel, body.as_bytes());
         }
-        Self { cache, root }
+        Self {
+            transport: test_transport::TestTransport::new(160),
+            cache,
+            root,
+        }
     }
 
     fn cmd(&self) -> Command {
@@ -65,9 +73,11 @@ fn spawn_fake_daemon_with_reply(
 ) -> thread::JoinHandle<()> {
     let endpoint = platform::daemon_endpoint(cache);
     fs::create_dir_all(cache.join("state")).expect("mkdir state");
-    let listener = platform::bind_blocking(&endpoint).expect("bind socket");
+    let transport = test_transport::TestTransport::new(8);
+    let listener = platform::bind_blocking(&transport, &endpoint).expect("bind socket");
 
     thread::spawn(move || {
+        let _transport = transport;
         for stream in listener.incoming().flatten() {
             let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
             let mut writer = stream;
@@ -170,7 +180,7 @@ fn falls_back_when_dead() {
 
     let endpoint = platform::daemon_endpoint(env.cache.path());
     fs::create_dir_all(env.cache.path().join("state")).expect("mkdir state");
-    let listener = platform::bind_blocking(&endpoint).expect("bind stale socket");
+    let listener = platform::bind_blocking(&env.transport, &endpoint).expect("bind stale socket");
     drop(listener);
     thread::sleep(Duration::from_millis(20));
 
@@ -189,62 +199,23 @@ fn falls_back_when_dead() {
 // Failure bounds for this fixture and its child, not product latency contracts.
 const SYNC_PEER_WATCHDOG: Duration = Duration::from_secs(10);
 
-#[cfg(unix)]
 struct SyncListener(platform::Listener);
-
-#[cfg(windows)]
-struct SyncListener(tokio::net::windows::named_pipe::NamedPipeServer);
-
 impl SyncListener {
-    #[cfg(unix)]
-    fn bind(endpoint: &platform::Endpoint) -> std::io::Result<Self> {
-        platform::bind(endpoint).map(Self)
+    fn bind(
+        transport: &platform::Transport,
+        endpoint: &platform::Endpoint,
+    ) -> std::io::Result<Self> {
+        transport.bind(endpoint).map(Self)
     }
-
-    #[cfg(windows)]
-    fn bind(endpoint: &platform::Endpoint) -> std::io::Result<Self> {
-        // interprocess flush/drop can spawn blocking flush/linger workers.
-        // Tokio's native pipe closes directly when the fixture is cancelled.
-        tokio::net::windows::named_pipe::ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(sync_pipe_path(endpoint)?)
-            .map(Self)
-    }
-
-    #[cfg(unix)]
     async fn accept(self) -> std::io::Result<platform::Stream> {
         self.0.accept().await
     }
-
-    #[cfg(windows)]
-    async fn accept(self) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
-        self.0.connect().await?;
-        Ok(self.0)
-    }
 }
-
-#[cfg(windows)]
-fn sync_pipe_path(endpoint: &platform::Endpoint) -> std::io::Result<String> {
-    match endpoint {
-        platform::Endpoint::Pipe(name) => Ok(format!(r"\\.\pipe\{name}")),
-        platform::Endpoint::Unix(_) => Err(std::io::ErrorKind::InvalidInput.into()),
-    }
-}
-
-#[cfg(unix)]
-async fn sync_test_client(endpoint: &platform::Endpoint) -> std::io::Result<platform::Stream> {
-    platform::connect_async(endpoint).await
-}
-
-#[cfg(windows)]
-fn sync_test_client(
+async fn sync_test_client(
+    transport: &platform::Transport,
     endpoint: &platform::Endpoint,
-) -> impl std::future::Future<Output = std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient>>
-{
-    std::future::ready(
-        sync_pipe_path(endpoint)
-            .and_then(|path| tokio::net::windows::named_pipe::ClientOptions::new().open(path)),
-    )
+) -> std::io::Result<platform::Stream> {
+    transport.connect_async(endpoint).await
 }
 
 fn sync_runtime() -> tokio::runtime::Runtime {
@@ -288,6 +259,7 @@ struct SyncPeer {
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
     handle: Option<thread::JoinHandle<SyncTrace>>,
     accepted: std::sync::mpsc::Receiver<()>,
+    _transport: test_transport::TestTransport,
 }
 
 impl SyncPeer {
@@ -301,13 +273,14 @@ impl SyncPeer {
 
     fn with_policy(cache: &Path, watchdog: Duration, policy: SyncPolicy) -> Self {
         let runtime = sync_runtime();
+        let transport = test_transport::TestTransport::new(8);
         let endpoint = platform::daemon_endpoint(cache);
         fs::create_dir_all(cache.join("state")).expect("mkdir state");
         // Bind before starting the command. Both native backends expose async
         // accept and IO, so cancellation also covers Windows named pipes.
         let listener = {
             let _entered = runtime.enter();
-            SyncListener::bind(&endpoint).expect("bind sync peer")
+            SyncListener::bind(&transport, &endpoint).expect("bind sync peer")
         };
         let (cancel, mut cancelled) = tokio::sync::oneshot::channel();
         let (accepted, received) = std::sync::mpsc::channel();
@@ -347,6 +320,7 @@ impl SyncPeer {
             cancel: Some(cancel),
             handle: Some(handle),
             accepted: received,
+            _transport: transport,
         }
     }
 
@@ -536,9 +510,10 @@ fn sync_peer_cancels_native_clients_without_a_complete_frame() {
         let peer = SyncPeer::new(env.cache.path());
         sync_runtime().block_on(async {
             use tokio::io::AsyncWriteExt;
-            let mut client = sync_test_client(&platform::daemon_endpoint(env.cache.path()))
-                .await
-                .expect("connect held client");
+            let mut client =
+                sync_test_client(&env.transport, &platform::daemon_endpoint(env.cache.path()))
+                    .await
+                    .expect("connect held client");
             client.write_all(prefix).await.expect("partial frame");
             peer.accepted
                 .recv_timeout(SYNC_PEER_WATCHDOG)
@@ -589,7 +564,7 @@ fn sync_rejects_missing_explicit_target_before_daemon_or_direct_work() {
     let target = env.root.path().join("missing-project");
     let endpoint = platform::daemon_endpoint(env.cache.path());
     fs::create_dir_all(env.cache.path().join("state")).expect("mkdir state");
-    let listener = platform::bind_blocking(&endpoint).expect("bind socket");
+    let listener = platform::bind_blocking(&env.transport, &endpoint).expect("bind socket");
     listener.set_nonblocking(true).expect("nonblocking accept");
 
     let output = env
@@ -662,7 +637,7 @@ fn daemon_errors_surface() {
     let env = Env::new(&[("docs/a.md", DOC)]);
     let endpoint = platform::daemon_endpoint(env.cache.path());
     fs::create_dir_all(env.cache.path().join("state")).expect("mkdir state");
-    let listener = platform::bind_blocking(&endpoint).expect("bind socket");
+    let listener = platform::bind_blocking(&env.transport, &endpoint).expect("bind socket");
 
     let handle = thread::spawn(move || {
         let stream = listener.accept().expect("accept");
@@ -678,7 +653,7 @@ fn daemon_errors_surface() {
         writer
             .write_all(&encode(&response).expect("encode"))
             .expect("write");
-        writer.flush().expect("flush");
+        writer.shutdown().expect("final error delivered");
     });
 
     let output = env

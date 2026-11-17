@@ -9,7 +9,8 @@ use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 
 use crate::error::{Error, Result};
 use crate::hybrid::work::Cancellation;
-use crate::platform::{self, Stream};
+use crate::platform;
+use crate::platform::transport::{Stream, Transport};
 use crate::search::operation::SearchOperation;
 
 use super::framing::{Frame, FrameReader};
@@ -29,8 +30,10 @@ impl AsyncClient {
     ///
     /// # Errors
     /// Returns the platform connection error when no endpoint can be opened.
-    pub async fn connect(cache: &Path) -> std::io::Result<Self> {
-        let stream = platform::connect_async(&platform::daemon_endpoint(cache)).await?;
+    pub async fn connect(transport: &Transport, cache: &Path) -> std::io::Result<Self> {
+        let stream = transport
+            .connect_async(&platform::daemon_endpoint(cache))
+            .await?;
         let (read, writer) = tokio::io::split(stream);
         Ok(Self {
             reader: FrameReader::new(BufReader::new(read)),
@@ -59,6 +62,7 @@ impl AsyncClient {
             .write_all(bytes.bytes())
             .await
             .map_err(io_error)?;
+        self.writer.flush().await.map_err(io_error)?;
         let response = match self.reader.read_frame().await.map_err(io_error)? {
             Frame::Line(line) => protocol::decode_response(&line)
                 .map_err(|error| Error::transport(format!("bad response: {error}")))?,

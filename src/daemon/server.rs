@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tokio::sync::{mpsc, watch};
 
 use crate::config::Config;
@@ -32,7 +32,7 @@ use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseRequest};
 use crate::hybrid::jobs as hybrid_jobs;
 use crate::ipc::framing::{Frame, FrameReader};
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
-use crate::platform::Stream;
+use crate::platform::transport::Stream;
 use crate::search::metadata::MetadataSource;
 use crate::store::Db;
 use crate::store::migrations;
@@ -1376,20 +1376,20 @@ pub(super) async fn handle_admitted_connection(
     .await;
 }
 
-async fn write_frame_error(writer: &mut (impl tokio::io::AsyncWrite + Unpin), frame: Frame) {
+async fn write_frame_error(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    frame: Frame,
+    deadline: Instant,
+) {
     let message = match frame {
-        Frame::TooLarge => {
-            format!("frame exceeds {} bytes", protocol::MAX_FRAME_BYTES)
-        }
+        Frame::TooLarge => format!("frame exceeds {} bytes", protocol::MAX_FRAME_BYTES),
         _ => "incomplete frame without delimiter".to_owned(),
     };
-    let err = Error::Protocol { message };
-    let response = error_response(&err);
-    if let Ok(bytes) = crate::ipc::encoding::encode(&response) {
-        let _ = writer.write_all(bytes.bytes()).await;
-    }
+    let response = error_response(&Error::Protocol { message });
+    let _ = scoped::reply(writer, response, None, false, true, deadline).await;
 }
 
+#[allow(clippy::too_many_lines)] // Ordered request ownership, delivery and connection cancellation form one scope.
 async fn handle_connection_in(
     shared: Arc<Shared>,
     stream: Stream,
@@ -1398,6 +1398,12 @@ async fn handle_connection_in(
     shutdown: watch::Sender<bool>,
     connection: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
 ) {
+    let ownership = stream.ownership();
+    if let Some(charge) = &connection
+        && ownership.retain_connection(charge.clone()).is_err()
+    {
+        return;
+    }
     let (read_half, mut writer) = tokio::io::split(stream);
     let mut reader = FrameReader::new(BufReader::new(read_half));
     let mut peer = Peer::default();
@@ -1431,12 +1437,25 @@ async fn handle_connection_in(
                         break;
                     }
                     Ok(frame @ (Frame::Incomplete | Frame::TooLarge)) => {
-                        write_frame_error(&mut writer, frame).await;
+                        let guard = Activity::new(&in_flight, &events, connection.as_ref());
+                        if ownership.retain_request(guard).is_err() {
+                            break;
+                        }
+                        let deadline = Instant::now()
+                            + Duration::from_millis(shared.daemon_settings().control_timeout_ms);
+                        write_frame_error(&mut writer, frame, deadline).await;
                         break;
                     }
                 };
                 let guard = Activity::new(&in_flight, &events, connection.as_ref());
+                if ownership.retain_request(guard.clone()).is_err() {
+                    break;
+                }
                 let decoded = protocol::decode_request(&line);
+                // Stop's drain and final ACK share its original whole budget.
+                let stop_deadline = matches!(&decoded, Ok(Request::StopDaemon)).then(|| {
+                    Instant::now() + Duration::from_millis(shared.daemon_settings().reply_drain_ms)
+                });
                 let scope = match &decoded {
                     Ok(request) => scoped::Scope::new(&shared, request, Arc::clone(&guard)),
                     Err(_) => Ok(scoped::Scope {
@@ -1468,7 +1487,24 @@ async fn handle_connection_in(
                     .as_ref()
                     .ok()
                     .and_then(|scope| scope.operation.as_ref());
-                let delivered = scoped::reply(&mut writer, response, operation, immediate).await;
+                // Non-search control delivery starts when its response is ready.
+                // Search and Stop retain their original absolute deadlines.
+                let control_deadline = stop_deadline.unwrap_or_else(|| {
+                    Instant::now()
+                        + Duration::from_millis(shared.daemon_settings().control_timeout_ms)
+                });
+                let delivered = scoped::reply(
+                    &mut writer,
+                    response,
+                    operation,
+                    immediate,
+                    close,
+                    control_deadline,
+                )
+                .await;
+                if delivered {
+                    ownership.request_completed();
+                }
                 drop(guard);
                 if !delivered {
                     break;
@@ -1691,7 +1727,7 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                 .await;
                 let _ = shutdown.send(true);
             }
-            (Response::ToolResult { value: Value::Null }, false)
+            (Response::ToolResult { value: Value::Null }, true)
         }
     }
 }

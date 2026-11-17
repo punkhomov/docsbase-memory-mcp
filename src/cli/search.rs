@@ -240,7 +240,7 @@ async fn daemon_in(
     activity: &std::sync::Arc<crate::daemon::request::Activity>,
 ) -> Result<Option<Value>> {
     within_operation(operation, async {
-        let Ok(mut client) = AsyncClient::connect(&context.cache).await else {
+        let Ok(mut client) = AsyncClient::connect(&context.transport, &context.cache).await else {
             operation.check()?;
             return Ok(None);
         };

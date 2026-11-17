@@ -15,6 +15,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub(super) struct Context {
     pub(super) global: Arc<Config>,
+    pub(super) transport: crate::platform::transport::Transport,
     pub(super) cache: std::path::PathBuf,
     pub(super) workers: Arc<WorkerAdmission>,
     pub(super) activity: ActivitySource,
@@ -66,74 +67,81 @@ impl Context {
     }
 }
 
-pub(super) fn run<T, F: Future<Output = Result<T>>>(
+pub(super) fn run<T: Send, F: Future<Output = Result<T>>>(
     global: Config,
-    work: impl FnOnce(Context) -> F,
+    work: impl FnOnce(Context) -> F + Send,
 ) -> Result<T> {
+    let native_policy =
+        crate::ipc::transport::policy(global.daemon.max_connections, &global.daemon)?;
     let run = move || {
-        global.validate()?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .max_blocking_threads(global.daemon.max_blocking_threads)
-            .enable_all()
-            .build()
-            .map_err(|e| Error::internal_with_source("build direct command runtime", e))?;
-        let workers = Arc::new(WorkerAdmission::with_policies(
-            &global.daemon,
-            &global.remote,
-        )?);
-        let (activity, _events) = ActivitySource::channel(global.daemon.max_events);
-        #[cfg(feature = "hybrid-remote")]
-        let remote = Arc::new(crate::hybrid::remote::RemoteExecution::real_with_owners(
-            &global.remote,
-            workers.clone(),
-            activity.clone(),
-        )?);
-        let mut root = JobRoot::new(&global.daemon);
-        let context = Context {
-            cache: crate::config::paths::cache_dir()?,
-            budget: PayloadBudget::new(global.search.clone())?,
-            jobs: root.service(),
-            global: Arc::new(global),
-            workers,
-            activity,
-            search: Arc::new(std::sync::Mutex::new(None)),
+        crate::ipc::transport::run(&native_policy, move |transport| {
+            global.validate()?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .max_blocking_threads(global.daemon.max_blocking_threads)
+                .enable_all()
+                .build()
+                .map_err(|e| Error::internal_with_source("build direct command runtime", e))?;
+            let workers = Arc::new(WorkerAdmission::with_policies(
+                &global.daemon,
+                &global.remote,
+            )?);
+            let (activity, _events) = ActivitySource::channel(global.daemon.max_events);
             #[cfg(feature = "hybrid-remote")]
-            remote,
-        };
-        // Keep execution/root/native receivers outside every dropped/panicking
-        // work future. JobRoot first retires issued terminal/native ownership.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            root.run(&runtime, work(context.clone()))
-        }));
-        #[cfg(feature = "hybrid-remote")]
-        context.remote.shutdown();
-        context.workers.shutdown();
-        runtime.block_on(
-            context
-                .activity
-                .drain(Duration::from_millis(context.global.daemon.drain_poll_ms)),
-        );
-        // One concrete command component, installed on admitted CPU before
-        // delivery. Taking it does not hold a lock across the physical wait.
-        let search = context
-            .search
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(search) = search {
-            runtime.block_on(async {
-                while Arc::strong_count(&search) > 1 {
-                    tokio::time::sleep(Duration::from_millis(context.global.daemon.drain_poll_ms))
+            let remote = Arc::new(crate::hybrid::remote::RemoteExecution::real_with_owners(
+                &global.remote,
+                workers.clone(),
+                activity.clone(),
+            )?);
+            let mut root = JobRoot::new(&global.daemon);
+            let context = Context {
+                transport,
+                cache: crate::config::paths::cache_dir()?,
+                budget: PayloadBudget::new(global.search.clone())?,
+                jobs: root.service(),
+                global: Arc::new(global),
+                workers,
+                activity,
+                search: Arc::new(std::sync::Mutex::new(None)),
+                #[cfg(feature = "hybrid-remote")]
+                remote,
+            };
+            // Keep execution/root/native receivers outside every dropped/panicking
+            // work future. JobRoot first retires issued terminal/native ownership.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                root.run(&runtime, work(context.clone()))
+            }));
+            #[cfg(feature = "hybrid-remote")]
+            context.remote.shutdown();
+            context.workers.shutdown();
+            runtime.block_on(
+                context
+                    .activity
+                    .drain(Duration::from_millis(context.global.daemon.drain_poll_ms)),
+            );
+            // One concrete command component, installed on admitted CPU before
+            // delivery. Taking it does not hold a lock across the physical wait.
+            let search = context
+                .search
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(search) = search {
+                runtime.block_on(async {
+                    while Arc::strong_count(&search) > 1 {
+                        tokio::time::sleep(Duration::from_millis(
+                            context.global.daemon.drain_poll_ms,
+                        ))
                         .await;
-                }
-            });
-            drop(search); // readonly DB/model/ANN owners, outside block_on
-        }
-        context.activity.retire_bridge();
-        match result {
-            Ok(result) => result,
-            Err(_) => Err(Error::internal("direct command work unwound")),
-        }
+                    }
+                });
+                drop(search); // readonly DB/model/ANN owners, outside block_on
+            }
+            context.activity.retire_bridge();
+            match result {
+                Ok(result) => result,
+                Err(_) => Err(Error::internal("direct command work unwound")),
+            }
+        })
     };
     match tokio::runtime::Handle::try_current() {
         Err(_)=>run(),

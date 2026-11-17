@@ -75,7 +75,7 @@ impl Transport {
         &self,
         endpoint: &Endpoint,
     ) -> impl Future<Output = io::Result<Stream>> + Send {
-        async move { Stream::new(self.connection(endpoint)?) }
+        poll_fn(move |_| Poll::Ready(Stream::new(self.connection(endpoint)?)))
     }
     /// One native connection attempt, using the same owned I/O as async clients.
     /// # Errors
@@ -172,6 +172,15 @@ impl Stream {
 #[derive(Clone)]
 pub(crate) struct Ownership(Arc<Connection>);
 impl Ownership {
+    #[cfg(test)]
+    pub(crate) fn test_hold_write_cancellation(
+        &self,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.0.test_hold_write_cancellation(&entered, &release);
+        drop((entered, release));
+    }
     pub(crate) fn retain_connection(&self, charge: Arc<dyn Send + Sync>) -> io::Result<()> {
         self.0.retain(false, charge)
     }
@@ -434,6 +443,10 @@ impl BlockingListener {
     /// Switch accept between blocking and polling.
     /// # Errors
     /// Retains the Unix-compatible fallible signature.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "Platform seam mirrors fallible Unix listener mode changes"
+    )]
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.nonblocking.store(nonblocking, Ordering::Release);
         Ok(())

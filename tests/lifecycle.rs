@@ -16,7 +16,11 @@ use docsbase_memory::store::DB_FILE;
 use docsbase_memory::store::MAX_SYNC_JOBS;
 use tempfile::TempDir;
 
+#[path = "support/transport.rs"]
+mod test_transport;
+
 struct Env {
+    transport: test_transport::TestTransport,
     cache: TempDir,
 }
 
@@ -44,9 +48,9 @@ fn owner_connection_limit_is_enforced_by_the_accept_loop() {
             .unwrap(),
     );
     assert!(wait_until(Duration::from_secs(10), || env.endpoint_up()));
-    let mut held = Client::connect(env.cache()).unwrap();
+    let mut held = Client::connect(&env.transport, env.cache()).unwrap();
     held.handshake_registry().unwrap();
-    let mut extra = Client::connect(env.cache()).unwrap();
+    let mut extra = Client::connect(&env.transport, env.cache()).unwrap();
     assert!(
         extra.handshake_registry().is_err(),
         "the second connection must be shed by owner max_connections=1"
@@ -57,6 +61,7 @@ fn owner_connection_limit_is_enforced_by_the_accept_loop() {
 impl Env {
     fn new() -> Self {
         Self {
+            transport: test_transport::TestTransport::new(160),
             cache: TempDir::new().expect("cache"),
         }
     }
@@ -176,8 +181,8 @@ fn stale_state_recovered() {
         br#"{"pid":999999,"socket":"/nonexistent","build_id":"old","schema_version":1,"cache_root":"/tmp"}"#,
     )
     .expect("stale state");
-    let listener =
-        platform::bind_blocking(&platform::daemon_endpoint(env.cache())).expect("stale socket");
+    let listener = platform::bind_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+        .expect("stale socket");
     drop(listener);
 
     let pid = env.start();
@@ -200,8 +205,9 @@ fn grace_shutdown_after_last_session() {
         "socket must appear"
     );
 
-    let session = platform::connect_blocking(&platform::daemon_endpoint(env.cache()))
-        .expect("connect session");
+    let session =
+        platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+            .expect("connect session");
     std::thread::sleep(Duration::from_millis(100));
     drop(session);
 
@@ -232,7 +238,7 @@ fn connection_flood_is_refused_and_daemon_survives() {
     let mut held = Vec::new();
     for _ in 0..MAX_CONNECTIONS {
         held.push(
-            platform::connect_blocking(&platform::daemon_endpoint(env.cache()))
+            platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
                 .expect("connect within cap"),
         );
     }
@@ -242,8 +248,9 @@ fn connection_flood_is_refused_and_daemon_survives() {
     // iteration, so a probe cannot hold a slot itself.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let extra = platform::connect_blocking(&platform::daemon_endpoint(env.cache()))
-            .expect("connect handshake");
+        let extra =
+            platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+                .expect("connect handshake");
         extra
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("timeout");
@@ -278,7 +285,7 @@ fn connection_flood_is_refused_and_daemon_survives() {
     let mut admitted = None;
     assert!(
         wait_until(Duration::from_secs(5), || {
-            let Some(mut client) = Client::connect(env.cache()) else {
+            let Some(mut client) = Client::connect(&env.transport, env.cache()) else {
                 return false;
             };
             if client.handshake_registry().is_err() {
@@ -314,7 +321,7 @@ fn sync_jobs_retention_via_enqueue() {
     assert!(output.status.success(), "index failed: {output:?}");
     env.start();
 
-    let mut client = Client::connect(env.cache()).expect("connect");
+    let mut client = Client::connect(&env.transport, env.cache()).expect("connect");
     client.handshake(project).expect("bind session");
     for _ in 0..(MAX_SYNC_JOBS + 5) {
         let job = client
@@ -371,7 +378,8 @@ fn stop_escalates_with_sigterm_when_wedged() {
     // Raw client: complete the handshake, request the big document and then
     // stop reading so the daemon's response write blocks.
     let stream =
-        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("connect");
+        platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+            .expect("connect");
     let mut writer = stream.try_clone().expect("clone");
     let mut reader = BufReader::new(stream);
     writer
@@ -408,7 +416,7 @@ fn stop_escalates_with_sigterm_when_wedged() {
         .expect("call");
     std::thread::sleep(Duration::from_millis(700));
 
-    let mut stopper = Client::connect(env.cache()).expect("stopper");
+    let mut stopper = Client::connect(&env.transport, env.cache()).expect("stopper");
     stopper.handshake_registry().expect("hello");
     let stop = std::thread::spawn(move || {
         let _ = stopper.call(Request::StopDaemon);

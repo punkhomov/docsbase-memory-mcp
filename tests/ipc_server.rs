@@ -17,7 +17,11 @@ use tempfile::TempDir;
 #[path = "support/search_visibility.rs"]
 mod search_visibility;
 
+#[path = "support/transport.rs"]
+mod test_transport;
+
 struct Env {
+    transport: test_transport::TestTransport,
     cache: TempDir,
     root: TempDir,
     daemon: Option<Child>,
@@ -31,6 +35,7 @@ impl Env {
             write_file(root.path(), rel, body.as_bytes());
         }
         Self {
+            transport: test_transport::TestTransport::new(160),
             cache,
             root,
             daemon: None,
@@ -79,7 +84,7 @@ impl Env {
 
     fn client(&self) -> Client {
         for _ in 0..100 {
-            if let Some(client) = Client::connect(self.cache()) {
+            if let Some(client) = Client::connect(&self.transport, self.cache()) {
                 return client;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -235,7 +240,7 @@ async fn scoped_search_preserves_upstream_time_and_default_arrays() {
     env.start_daemon();
     let stream = tokio::time::timeout(
         SCOPED_WATCHDOG,
-        platform::connect_async(&platform::daemon_endpoint(env.cache())),
+        platform::connect_async(&env.transport, &platform::daemon_endpoint(env.cache())),
     )
     .await
     .expect("connect watchdog")
@@ -311,7 +316,8 @@ fn hello_version_mismatch_rejected() {
     env.start_daemon();
 
     let stream =
-        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("connect");
+        platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+            .expect("connect");
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     let mut writer = stream;
     let hello = Request::Hello {
@@ -339,7 +345,8 @@ fn hello_build_mismatch_rejected() {
     env.start_daemon();
 
     let stream =
-        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("connect");
+        platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+            .expect("connect");
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     let mut writer = stream;
     let hello = Request::Hello {
@@ -363,7 +370,8 @@ fn call_tool_requires_hello() {
     env.start_daemon();
 
     let stream =
-        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("connect");
+        platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+            .expect("connect");
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     let mut writer = stream;
     let call = Request::CallTool {
@@ -586,7 +594,8 @@ fn oversized_frame_gets_protocol_error() {
     let mut env = Env::new(&[("a.md", "# A\n")]);
     env.start_daemon();
     let stream =
-        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("connect");
+        platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+            .expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("read timeout");
@@ -619,7 +628,8 @@ fn client_rejects_oversized_response() {
     let cache = TempDir::new().expect("cache");
     std::fs::create_dir_all(cache.path().join("state")).expect("mkdir");
     let endpoint = platform::daemon_endpoint(cache.path());
-    let listener = platform::bind_blocking(&endpoint).expect("bind");
+    let transport = test_transport::TestTransport::new(4);
+    let listener = platform::bind_blocking(&transport, &endpoint).expect("bind");
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().expect("accept");
         let chunk = vec![b'x'; 64 * 1024];
@@ -634,7 +644,7 @@ fn client_rejects_oversized_response() {
         let _ = stream.write_all(b"\n");
     });
 
-    let mut client = Client::connect(cache.path()).expect("connect");
+    let mut client = Client::connect(&transport, cache.path()).expect("connect");
     let err = client
         .call(Request::Hello {
             protocol_version: PROTOCOL_VERSION,
@@ -665,7 +675,8 @@ fn frame_boundary_is_exact() {
     // Payload of exactly MAX_FRAME_BYTES bytes is accepted as a frame and
     // fails JSON parsing instead of the frame bound.
     let stream =
-        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("connect");
+        platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+            .expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("read timeout");
@@ -692,7 +703,8 @@ fn frame_boundary_is_exact() {
 
     // One byte over is rejected as an oversized frame.
     let stream =
-        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("connect2");
+        platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+            .expect("connect2");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("read timeout");

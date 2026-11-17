@@ -2,7 +2,7 @@
 //! stale-state recovery (FR-2, FR-6, FR-9; NFR-2; R5; ADR-2).
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -18,7 +18,8 @@ use crate::daemon::launch::{AdmittedLaunch, LaunchConfig, LaunchSnapshot};
 use crate::daemon::settings::{DaemonPatch, DaemonSpec};
 use crate::error::{Error, Result};
 use crate::ipc::protocol::{self, Request};
-use crate::platform::{self, Endpoint, Listener};
+use crate::platform::transport::Listener;
+use crate::platform::{self, Endpoint};
 use crate::store::migrations;
 
 #[cfg(test)]
@@ -338,31 +339,43 @@ fn run_with_launch(
         .ok_or_else(|| Error::Admission {
             message: "daemon blocking plus async executor thread capacity overflow".to_owned(),
         })?;
+    let native_handles = launch
+        .config
+        .settings()
+        .daemon
+        .max_connections
+        .checked_add(2)
+        .ok_or_else(|| Error::internal("native daemon physical capacity overflow"))?;
+    let transport_policy =
+        crate::ipc::transport::policy(native_handles, &launch.config.settings().daemon)?;
     let launch = launch.admit(cache, settings)?;
-    let _lease = crate::daemon::admission::Lease::acquire(
-        cache,
-        &protocol::build_id(),
-        migrations::SCHEMA_VERSION,
-    )?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(workers)
-        .max_blocking_threads(launch.launch.config.settings().daemon.max_blocking_threads)
-        .enable_all()
-        .build()
-        .map_err(|err| Error::internal_with_source("build tokio runtime", err))?;
-    let mut jobs = super::job_service::JobRoot::new(&launch.launch.config.settings().daemon);
-    let service = jobs.service();
-    jobs.run(
-        &runtime,
-        serve(
+    crate::ipc::transport::run(&transport_policy, move |transport| {
+        let _lease = crate::daemon::admission::Lease::acquire(
             cache,
-            settings,
-            pool_settings,
-            dense_settings,
-            launch,
-            service,
-        ),
-    )
+            &protocol::build_id(),
+            migrations::SCHEMA_VERSION,
+        )?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .max_blocking_threads(launch.launch.config.settings().daemon.max_blocking_threads)
+            .enable_all()
+            .build()
+            .map_err(|err| Error::internal_with_source("build tokio runtime", err))?;
+        let mut jobs = super::job_service::JobRoot::new(&launch.launch.config.settings().daemon);
+        let service = jobs.service();
+        jobs.run(
+            &runtime,
+            serve(
+                cache,
+                settings,
+                pool_settings,
+                dense_settings,
+                launch,
+                service,
+                transport,
+            ),
+        )
+    })
 }
 
 /// Asks a running daemon to stop and waits for it to exit (FR-6).
@@ -380,51 +393,100 @@ pub fn stop_daemon(cache: &Path) -> Result<()> {
         cleanup_stale(cache)?;
         return Ok(());
     }
-    let endpoint = platform::daemon_endpoint(cache);
-    let bytes = protocol::encode(&Request::StopDaemon)?;
-    // Send the stop request while waiting for the process itself, not just
-    // the socket: `serve` unlinks its state and socket before the process
-    // (and its admission lease) is gone (FR-5). A daemon at connection
-    // capacity sheds new connections before reading, so a single attempt can
-    // be dropped silently — retry until the deadline.
-    let mut no_listener_since: Option<Instant> = None;
-    let deadline = Instant::now() + STOP_TIMEOUT;
-    while Instant::now() < deadline {
+    let defaults = crate::daemon::settings::standalone()?;
+    let native_policy = crate::ipc::transport::policy(1, defaults.settings())?;
+    crate::ipc::transport::run(&native_policy, |transport| {
+        let endpoint = platform::daemon_endpoint(cache);
+        let bytes = protocol::encode(&Request::StopDaemon)?;
+        // Send the stop request while waiting for the process itself, not just
+        // the socket: `serve` unlinks its state and socket before the process
+        // (and its admission lease) is gone (FR-5). A daemon at connection
+        // capacity sheds new connections before reading, so a single attempt can
+        // be dropped silently — retry until the deadline.
+        let mut no_listener_since: Option<Instant> = None;
+        let deadline = Instant::now() + STOP_TIMEOUT;
+        while Instant::now() < deadline {
+            if !pid_alive(state.pid) {
+                cleanup_stale(cache)?;
+                return Ok(());
+            }
+            match transport.connect_blocking(&endpoint) {
+                Ok(mut stream) => {
+                    no_listener_since = None;
+                    // A write can fail because the peer is already shutting down
+                    // and closed the connection; that is a stop under way, not a
+                    // client error. Keep polling the process below, which is what
+                    // decides success.
+                    // Every phase uses the original stop deadline. Read the full
+                    // ACK before dropping a successful server exchange.
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if !remaining.is_zero()
+                        && stream.set_write_timeout(Some(remaining)).is_ok()
+                        && stream.write_all(&bytes).is_ok()
+                    {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if !remaining.is_zero()
+                            && stream.set_write_timeout(Some(remaining)).is_ok()
+                            && stream.flush().is_ok()
+                            && stop_ack(&mut stream, deadline)
+                        {
+                            // Keep the successful exchange alive while the
+                            // server finishes its native drain and exits.
+                            while Instant::now() < deadline && pid_alive(state.pid) {
+                                std::thread::sleep(POLL_INTERVAL);
+                            }
+                        }
+                    }
+                }
+                Err(_) if !platform::exists(&endpoint) => {
+                    let since = *no_listener_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= NO_LISTENER_TIMEOUT {
+                        // Unix: the socket file is unlinked only once shutdown is
+                        // committed, so the stop is under way even if the process
+                        // needs longer to release the admission lease
+                        // (FR-5/FR-6). Windows pipes have no file to observe, so
+                        // fall through and verify the pid really exits.
+                        #[cfg(unix)]
+                        return Ok(());
+                    }
+                }
+                Err(_) => {}
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
         if !pid_alive(state.pid) {
             cleanup_stale(cache)?;
             return Ok(());
         }
-        match platform::connect_blocking(&endpoint) {
-            Ok(mut stream) => {
-                no_listener_since = None;
-                // A write can fail because the peer is already shutting down
-                // and closed the connection; that is a stop under way, not a
-                // client error. Keep polling the process below, which is what
-                // decides success.
-                if stream.write_all(&bytes).is_ok() {
-                    let _ = stream.flush();
-                }
-            }
-            Err(_) if !platform::exists(&endpoint) => {
-                let since = *no_listener_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= NO_LISTENER_TIMEOUT {
-                    // Unix: the socket file is unlinked only once shutdown is
-                    // committed, so the stop is under way even if the process
-                    // needs longer to release the admission lease
-                    // (FR-5/FR-6). Windows pipes have no file to observe, so
-                    // fall through and verify the pid really exits.
-                    #[cfg(unix)]
-                    return Ok(());
-                }
-            }
-            Err(_) => {}
+        Err(Error::internal(format!(
+            "daemon (pid {}) did not stop in time",
+            state.pid
+        )))
+    })
+}
+
+// Refresh the same original deadline before every native read, including
+// fragmented/untrusted replies. A per-syscall timeout is not an overall budget.
+fn stop_ack(stream: &mut crate::platform::transport::BlockingStream, deadline: Instant) -> bool {
+    let mut reply = Vec::new();
+    let mut buffer = [0; 4096];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
+            return false;
         }
-        std::thread::sleep(POLL_INTERVAL);
+        let Ok(count) = stream.read(&mut buffer) else {
+            return false;
+        };
+        if count == 0 || reply.len().saturating_add(count) > protocol::MAX_FRAME_BYTES + 1 {
+            return false;
+        }
+        reply.extend_from_slice(&buffer[..count]);
+        if reply.contains(&b'\n') {
+            return reply.ends_with(b"\n")
+                && matches!(protocol::decode_response(&reply), Ok(protocol::Response::ToolResult { value }) if value.is_null());
+        }
     }
-    Err(Error::internal(format!(
-        "daemon (pid {}) did not stop in time",
-        state.pid
-    )))
 }
 
 /// PID of the running daemon, when one is alive.
@@ -441,6 +503,7 @@ async fn serve(
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
     launch: AdmittedLaunch,
     jobs: super::job_service::JobService,
+    transport: crate::platform::transport::Transport,
 ) -> Result<()> {
     // Bootstrap uses the same component-owned lanes/source as every later
     // handler. Root owns watcher retirement before any native startup effects.
@@ -492,7 +555,7 @@ async fn serve(
         platform::remove(&endpoint)
             .map_err(|err| Error::internal_with_source("remove stale socket", err))?;
     }
-    let listener = platform::bind(&endpoint).map_err(|err| {
+    let listener = transport.bind(&endpoint).map_err(|err| {
         Error::internal_with_source(format!("bind {}", endpoint.as_path().display()), err)
     })?;
     platform::fs::secure_file(endpoint.as_path())

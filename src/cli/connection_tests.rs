@@ -11,18 +11,30 @@ use crate::platform;
 struct Peer {
     listener: platform::BlockingListener,
     cache: tempfile::TempDir,
+    transport: crate::test_transport::TestTransport,
 }
 impl Peer {
     fn new() -> Self {
         let cache = tempfile::tempdir().unwrap();
         platform::fs::secure_dir(&cache.path().join("state")).unwrap();
-        let listener = platform::bind_blocking(&platform::daemon_endpoint(cache.path())).unwrap();
-        Self { listener, cache }
+        let transport = crate::test_transport::TestTransport::new(8);
+        let listener =
+            platform::bind_blocking(&transport, &platform::daemon_endpoint(cache.path())).unwrap();
+        Self {
+            listener,
+            cache,
+            transport,
+        }
     }
 }
 
-fn injected_setup(cache: &Path, fail_read: bool) -> Result<Option<Client>> {
+fn injected_setup(
+    transport: &crate::platform::Transport,
+    cache: &Path,
+    fail_read: bool,
+) -> Result<Option<Client>> {
     Client::connect_with_setup(
+        transport,
         cache,
         |_| {
             if fail_read {
@@ -47,7 +59,7 @@ fn injected_setup(cache: &Path, fail_read: bool) -> Result<Option<Client>> {
 fn setup_errors_after_native_connect_remain_transport_errors() {
     for fail_read in [true, false] {
         let peer = Peer::new();
-        let error = injected_setup(peer.cache.path(), fail_read).err();
+        let error = injected_setup(&peer.transport, peer.cache.path(), fail_read).err();
         let error = error.expect("post-connect setup error collapsed into absence");
         assert!(matches!(error, Error::Transport { .. }));
         assert!(error.to_string().contains(if fail_read {
@@ -79,6 +91,7 @@ fn connected_setup_error_cannot_replay_cli_sync_or_create_index_state() {
                     .get_mut()
                     .write_all(b"invalid handshake response\n")
                     .unwrap();
+                reader.get_mut().shutdown().unwrap();
             }
         });
         let cache_for_command = cache.clone();
@@ -118,15 +131,20 @@ fn connected_setup_error_cannot_replay_cli_sync_or_create_index_state() {
 #[test]
 fn absent_connect_never_runs_setup_or_creates_state() {
     let cache = tempfile::tempdir().unwrap();
+    let transport = crate::test_transport::TestTransport::new(1);
     let result = Client::connect_with_setup(
+        &transport,
         cache.path(),
         |_| panic!("read setup without a connection"),
         |_| panic!("write setup without a connection"),
     );
     assert!(matches!(result, Ok(None)));
-    assert!(matches!(Client::try_connect(cache.path()), Ok(None)));
+    assert!(matches!(
+        Client::try_connect(&transport, cache.path()),
+        Ok(None)
+    ));
     assert!(
-        Client::connect(cache.path()).is_none(),
+        Client::connect(&transport, cache.path()).is_none(),
         "legacy absence adapter stays compatible"
     );
     assert_eq!(std::fs::read_dir(cache.path()).unwrap().count(), 0);
@@ -137,6 +155,7 @@ fn successful_native_setup_keeps_read_before_write_order() {
     let peer = Peer::new();
     let stage = Cell::new(0);
     let result = Client::connect_with_setup(
+        &peer.transport,
         peer.cache.path(),
         |_| {
             assert_eq!(stage.replace(1), 0);

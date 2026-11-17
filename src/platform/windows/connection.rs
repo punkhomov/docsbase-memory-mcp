@@ -1,7 +1,9 @@
 //! Raw owned pipe endpoints; IOCP keeps write buffers alive after logical acceptance.
 #![allow(unsafe_code)] // Only constructors transfer fresh Win32 pipe HANDLE ownership.
 use super::flush::Flush;
-use super::native_io::{HandleToken, Kind, Operation, PhysicalOwner, Port, Service};
+#[cfg(test)]
+use super::native_io::Port;
+use super::native_io::{HandleToken, Kind, Operation, PhysicalOwner, Service};
 use std::io;
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::pin::Pin;
@@ -44,6 +46,7 @@ pub(super) struct Listening {
     transferred: AtomicBool,
 }
 impl Listening {
+    #[cfg(test)]
     pub(super) fn new(port: &Port, path: &str, chunk: usize, first: bool) -> io::Result<Arc<Self>> {
         Self::new_in(&port.service(), path, chunk, first)
     }
@@ -95,10 +98,10 @@ impl Listening {
         if self.transferred.load(Ordering::Acquire) {
             return Poll::Ready(Err(failure("listening handle was already transferred")));
         }
-        if !self.connect.active() {
-            if let Err(error) = self.connect.submit(&[]) {
-                return Poll::Ready(Err(error));
-            }
+        if !self.connect.active()
+            && let Err(error) = self.connect.submit(&[])
+        {
+            return Poll::Ready(Err(error));
         }
         match self.connect.poll(cx) {
             Poll::Pending => Poll::Pending,
@@ -106,7 +109,7 @@ impl Listening {
             Poll::Ready(Ok(_)) => Poll::Ready(
                 self.connect
                     .consume()
-                    .and_then(|completion| completion.result())
+                    .and_then(super::native_io::Completion::result)
                     .and_then(|_| {
                         self.transferred
                             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -147,6 +150,7 @@ impl Connection {
         let service = token.service()?;
         Self::new(&service, token, chunk, stack, true)
     }
+    #[cfg(test)]
     pub(super) fn client(
         port: &Port,
         path: &str,
@@ -241,6 +245,22 @@ impl Connection {
     pub(super) fn test_read_active(&self) -> bool {
         self.read.active()
     }
+    #[cfg(test)]
+    pub(super) fn test_hold_write_cancellation(
+        &self,
+        entered: &std::sync::mpsc::Sender<()>,
+        release: &std::sync::mpsc::Receiver<()>,
+    ) {
+        self.write.controlled_cancel(|handle, overlapped| {
+            // SAFETY: controlled_cancel retains the original native handle and
+            // operation storage through this complete cancellation boundary.
+            unsafe {
+                windows_sys::Win32::System::IO::CancelIoEx(handle, overlapped);
+            }
+            let _ = entered.send(());
+            let _ = release.recv();
+        });
+    }
     /// Install ownership before submission; old owners drop outside the lock.
     pub(super) fn retain(&self, request: bool, charge: Arc<dyn Send + Sync>) -> io::Result<()> {
         let old = {
@@ -275,6 +295,7 @@ impl Connection {
         }
     }
     /// Outer cleanup calls this while progress is alive, never from async Drop.
+    #[cfg(test)]
     pub(super) fn retire(&self, port: &Port) -> io::Result<bool> {
         self.abort();
         if !self.retire_ready()? {
@@ -293,7 +314,7 @@ impl Connection {
                 let result = self
                     .write
                     .consume()
-                    .and_then(|completion| completion.result());
+                    .and_then(super::native_io::Completion::result);
                 match result {
                     Ok(count) if count == self.accepted.load(Ordering::Acquire) => {
                         Poll::Ready(Ok(()))
@@ -336,7 +357,7 @@ impl PhysicalOwner for Connection {
     fn retired(&self) {
         let old = {
             let mut charges = self.charges.lock().unwrap_or_else(PoisonError::into_inner);
-            std::mem::replace(&mut *charges, [None, None])
+            std::mem::take(&mut *charges)
         };
         drop(old);
     }
@@ -382,10 +403,10 @@ impl AsyncRead for Pipe {
         if buffer.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
-        if !connection.read.active() {
-            if let Err(error) = connection.read.submit(&[]) {
-                return Poll::Ready(Err(error));
-            }
+        if !connection.read.active()
+            && let Err(error) = connection.read.submit(&[])
+        {
+            return Poll::Ready(Err(error));
         }
         match connection.read.poll(cx) {
             Poll::Pending => Poll::Pending,

@@ -34,18 +34,24 @@ impl Pool {
 }
 pub struct DaemonClient {
     cache: PathBuf,
+    transport: crate::platform::transport::Transport,
     search: Pool,
     control: Pool,
     pub info: PanelInfo,
     settings: WebSettings,
 }
 impl DaemonClient {
-    pub async fn connect(cache: PathBuf, settings: WebSettings) -> Result<Self> {
-        let mut client = Self::connection(&cache).await?;
+    pub async fn connect(
+        transport: crate::platform::transport::Transport,
+        cache: PathBuf,
+        settings: WebSettings,
+    ) -> Result<Self> {
+        let mut client = Self::connection(&transport, &cache).await?;
         let info = serde_json::from_value(client.client.call_tool("panel_info", json!({})).await?)
             .map_err(|e| Error::internal_with_source("invalid panel info", e))?;
         let this = Self {
             cache,
+            transport,
             search: Pool::new(settings.search_connections, settings.queue_limit),
             control: Pool::new(settings.control_connections, settings.queue_limit),
             info,
@@ -57,7 +63,7 @@ impl DaemonClient {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(client);
         for _ in 1..this.settings.control_connections {
-            let conn = Self::connection(&this.cache).await?;
+            let conn = Self::connection(&this.transport, &this.cache).await?;
             this.control
                 .idle
                 .lock()
@@ -66,8 +72,11 @@ impl DaemonClient {
         }
         Ok(this)
     }
-    async fn connection(cache: &std::path::Path) -> Result<Connection> {
-        let mut client = AsyncClient::connect(cache)
+    async fn connection(
+        transport: &crate::platform::transport::Transport,
+        cache: &std::path::Path,
+    ) -> Result<Connection> {
+        let mut client = AsyncClient::connect(transport, cache)
             .await
             .map_err(|e| Error::transport_with_source("daemon unavailable", e))?;
         client.handshake_registry().await?;
@@ -128,7 +137,7 @@ impl DaemonClient {
                 .pop();
             let mut conn = match cached {
                 Some(conn) => conn,
-                None => Self::connection(&self.cache).await?,
+                None => Self::connection(&self.transport, &self.cache).await?,
             };
             // Website registry reads are already filtered by the backend. Keep
             // the actual binding when a pooled connection was previously bound;

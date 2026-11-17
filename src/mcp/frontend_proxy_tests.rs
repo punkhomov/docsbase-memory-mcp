@@ -50,6 +50,7 @@ struct Fake {
     state: std::sync::Arc<State>,
     listener: tokio::task::JoinHandle<()>,
     cache: tempfile::TempDir,
+    transport: crate::test_transport::TestTransport,
 }
 
 fn policy() -> crate::search::settings::SearchSettings {
@@ -73,7 +74,8 @@ impl Fake {
             platform::fs::secure_dir(path.parent().expect("socket directory"))
                 .expect("runtime directory");
         }
-        let listener = platform::bind(&endpoint).expect("native listener");
+        let transport = crate::test_transport::TestTransport::new(8);
+        let listener = platform::bind(&transport, &endpoint).expect("native listener");
         write_state(cache.path(), &endpoint);
         let (sent, received) = mpsc::unbounded_channel();
         let (closed_sender, closed) = mpsc::unbounded_channel();
@@ -99,12 +101,17 @@ impl Fake {
             }
         });
         Self {
-            frontend: Frontend::with_search_policy(cache.path().to_path_buf(), policy()),
+            frontend: Frontend::with_search_policy(
+                transport.clone(),
+                cache.path().to_path_buf(),
+                policy(),
+            ),
             received,
             closed,
             state,
             listener,
             cache,
+            transport,
         }
     }
 
@@ -323,7 +330,11 @@ async fn frontend_refuses_search_when_daemon_lacks_scoped_capability() {
             .into_settings();
         policy.request_timeout_ms =
             u64::try_from((WATCHDOG * 2).as_millis()).expect("safety policy");
-        fake.frontend = Frontend::with_search_policy(fake.cache.path().to_path_buf(), policy);
+        fake.frontend = Frontend::with_search_policy(
+            fake.transport.clone(),
+            fake.cache.path().to_path_buf(),
+            policy,
+        );
         let result = fake
             .frontend
             .proxy("search_docs", json!({"query":"widgets"}))
@@ -359,7 +370,11 @@ async fn scoped_frontend_retains_original_start_and_complete_owner_policy() {
         policy.request_timeout_ms =
             u64::try_from((WATCHDOG * 2).as_millis()).expect("explicit safety policy");
         let budget = policy.request_timeout_ms;
-        fake.frontend = Frontend::with_search_policy(fake.cache.path().to_path_buf(), policy);
+        fake.frontend = Frontend::with_search_policy(
+            fake.transport.clone(),
+            fake.cache.path().to_path_buf(),
+            policy,
+        );
         let started = std::time::Instant::now()
             .checked_sub(Duration::from_millis(12))
             .expect("original ingress");

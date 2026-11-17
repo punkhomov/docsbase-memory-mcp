@@ -15,7 +15,11 @@ use docsbase_memory::ipc::protocol::{
 };
 use docsbase_memory::platform::{self, BlockingStream};
 
+#[path = "support/transport.rs"]
+mod test_transport;
+
 struct Env {
+    transport: test_transport::TestTransport,
     cache: TempDir,
     root: TempDir,
     daemon: Option<Child>,
@@ -29,6 +33,7 @@ impl Env {
             write_file(root.path(), rel, body.as_bytes());
         }
         Self {
+            transport: test_transport::TestTransport::new(160),
             cache,
             root,
             daemon: None,
@@ -83,7 +88,7 @@ impl Env {
 
     fn client(&self) -> Client {
         for _ in 0..100 {
-            if let Some(client) = Client::connect(self.cache()) {
+            if let Some(client) = Client::connect(&self.transport, self.cache()) {
                 return client;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -336,7 +341,8 @@ fn dead_session_does_not_block_shutdown() {
     let live_pid = zombie.id();
 
     let mut raw =
-        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("raw connect");
+        platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+            .expect("raw connect");
     hello(&mut raw);
     let response = exchange(
         &mut raw,
@@ -396,7 +402,8 @@ fn registration_survives_armed_grace() {
 
     // A session-less connection closing arms the grace timer.
     let mut idle_conn =
-        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("idle connect");
+        platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+            .expect("idle connect");
     hello(&mut idle_conn);
     drop(idle_conn);
     std::thread::sleep(Duration::from_millis(100));
@@ -404,7 +411,8 @@ fn registration_survives_armed_grace() {
     // Registration of the big project runs a full auto-index far longer than
     // the remaining grace; it must not be cut off.
     let mut raw =
-        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("raw connect");
+        platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+            .expect("raw connect");
     hello(&mut raw);
     let response = exchange(
         &mut raw,

@@ -1,16 +1,20 @@
 //! Outer synchronous owner: a cancelled work future never owns native retirement.
 use super::native_io::{Port, Service};
+#[cfg(test)]
 use std::future::Future;
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::time::{Duration, Instant};
-use tokio::runtime::{Handle, Runtime, RuntimeFlavor};
+#[cfg(test)]
+use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, RuntimeFlavor};
 
 pub(super) use crate::platform::transport::Options;
 
 /// The caller retains `Runtime`, `JobRoot`, signal receiver and admission lease.
 /// Only this outer function owns the progress `JoinHandle`. Its native owners
 /// remain registered during work errors, cancellation, and unwinding.
+#[cfg(test)]
 pub(super) fn run_on<T: Send, F>(
     runtime: &Runtime,
     options: &Options,

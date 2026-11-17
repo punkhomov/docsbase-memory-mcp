@@ -22,7 +22,11 @@ use docsbase_memory::platform;
 use docsbase_memory::store::migrations::SCHEMA_VERSION;
 use docsbase_memory::store::repo::{self, DocState};
 
+#[path = "support/transport.rs"]
+mod test_transport;
+
 struct Env {
+    transport: test_transport::TestTransport,
     cache: TempDir,
     root: TempDir,
     daemon: Option<Child>,
@@ -36,6 +40,7 @@ impl Env {
             write_file(root.path(), rel, body.as_bytes());
         }
         Self {
+            transport: test_transport::TestTransport::new(160),
             cache,
             root,
             daemon: None,
@@ -86,7 +91,7 @@ impl Env {
 
     fn client(&self) -> Client {
         for _ in 0..100 {
-            if let Some(client) = Client::connect(self.cache()) {
+            if let Some(client) = Client::connect(&self.transport, self.cache()) {
                 return client;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -289,7 +294,8 @@ fn mismatch_message_actionable() {
     let mut env2 = Env::new(&[("README.md", DOC)]);
     env2.start_daemon();
     let mut stream =
-        platform::connect_blocking(&platform::daemon_endpoint(env2.cache())).expect("connect");
+        platform::connect_blocking(&env2.transport, &platform::daemon_endpoint(env2.cache()))
+            .expect("connect");
     let request = Request::Hello {
         protocol_version: PROTOCOL_VERSION,
         build_id: "docsbase 0.0.0-foreign".to_owned(),

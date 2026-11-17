@@ -333,3 +333,29 @@ successful server close is explicit; Drop is cancellation, never delivery.
 The private core and the new explicit facade are being integrated in W3. Legacy
 constructors remain temporarily during that task and must be removed from all
 operational Windows paths before PR readiness. No wire/schema/crate change.
+
+## Delta 2026-11-17 — W3 operational scope and delivery contract
+
+Daemon, direct CLI command, read/control CLI command, MCP and Web compose one
+explicit native scope outside their runtime. They pass its Transport capability
+into bind/client/pool constructors; constructors never own a port/reaper. CLI
+list pagination shares that scope. Test fixtures retain an explicit test owner
+and exercise the same production adapter. Remove the obsolete interprocess
+transport dependency; keep windows-sys already present in the dependency graph.
+
+Before first native read, an admitted connection installs its original permit
+on the native owner. Each decoded request installs its original Activity before
+cancellation reads/writes; ordinary successful replies release that tail only
+after native flush. Final close keeps the tail until the helper has actually
+exited/joined and the physical record retires. Idle reads charge only connection
+capacity. Physical retirement clears those tails even if cancelled runtime tasks
+retain logical references. Drop/error/expiry may discard a failed exchange;
+only successful explicit final close promises complete peer delivery.
+
+Search write/flush/final close share the original SearchOperation deadline.
+Already expired errors get only the existing immediate poll. Non-search control
+delivery uses one `control_timeout_ms` deadline when its response becomes ready;
+Stop's pre-reply drain and final ACK instead share its original `reply_drain_ms`
+whole budget. Stop now closes after its ACK. The stop command reads/validates
+that complete ACK, refreshing its original15s overall deadline before every
+native read, and still observes process exit as the final success criterion.

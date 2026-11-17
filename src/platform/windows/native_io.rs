@@ -260,7 +260,7 @@ impl Operation {
     }
     /// Consuming output is separate from native completion; no subsequent native
     /// read can overwrite the bytes before the logical owner copies/discards them.
-    /// Consume a non-read result. Read output is copied by copy_read; no
+    /// Consume a non-read result. Read output is copied by `copy_read`; no
     /// application callback can execute while the operation mutex is held.
     pub(super) fn consume(&self) -> io::Result<Completion> {
         let mut state = locked(&self.state);
@@ -312,7 +312,7 @@ impl Operation {
                 self.pointer.add(state.read_offset),
                 destination.as_mut_ptr(),
                 count,
-            )
+            );
         };
         state.read_offset += count;
         if state.read_offset == total {
@@ -553,6 +553,7 @@ impl Port {
             thread: Some(thread),
         })
     }
+    #[cfg(test)]
     pub(super) fn fault(&self) -> Option<&'static str> {
         locked(&self.inner.state).fault
     }
@@ -561,9 +562,11 @@ impl Port {
             inner: self.inner.clone(),
         }
     }
+    #[cfg(test)]
     pub(super) fn reserve(&self) -> io::Result<Reservation> {
         self.service().reserve()
     }
+    #[cfg(test)]
     pub(super) fn retire(&self, token: &Arc<HandleToken>) -> bool {
         self.service().retire(token)
     }
@@ -1015,7 +1018,7 @@ mod tests {
             cancelling.cancel_using(|_, _| {
                 entered.send(()).unwrap();
                 proceed.recv().unwrap();
-            })
+            });
         });
         observed.recv_timeout(Duration::from_secs(30)).unwrap();
         operation

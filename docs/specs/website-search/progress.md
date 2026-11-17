@@ -740,3 +740,29 @@ no policy guard crosses the wait. Add causal native first-read observation and
 a concurrent clone test: timeout update remains available and second-read
 admission expires while the first read is pending. Cross-typecheck/fmt pass;
 re-review and17-case native execution pending.
+
+Task W3a3: complete (2026-11-17, explicit native facade).
+Native source d24ccf8 run44108077434 passes16/16; reviewed correction b65e8eb
+run44108620658 passes17/17, including first-read-observed cloned admission.
+Fresh review Important timeout-lock finding corrected; re-review ADDRESSED,
+no new Critical/Important findings. Native source is cross-typechecked; full
+operational Windows lint/acceptance remain W3b-d. No fallback owners/defaults.
+Ruling: private facade contract approved with actual native verification.
+
+MODIFIED 2026-11-17 — W3 operational integration checkpoint. Explicit scopes now
+compose daemon/CLI/MCP/Web, clients and real fixtures; legacy interprocess
+transport and dependency removed. Original permits/Activities attach before
+native submission and successful ordinary/final replies use write/drain barriers.
+Stop reads a complete ACK under its original overall deadline. Catalog and
+state-invalidation inventory updated. Full cli-full library668/668 and Linux
+all-target Clippy pass; actual migrated Windows acceptance and fresh W3 review
+remain pending. The admitted stalled-reader regression now holds an actual
+native cancellation caller instead of inferring pending I/O from unread bytes.
+
+MODIFIED 2026-11-17 — W3 Linux operational verification: eight focused native
+transport/client/CLI/daemon/Web integration suites pass85/85 tests (including
+Stop, admission flooding, literal capability negotiation and real website
+sync/readiness). cli-full library668/668, all-target Clippy, exact private native
+cross-typecheck and fmt pass. Existing Windows ownership tests pass17/17 at
+sourceb65e8eb; the newly migrated actual daemon cancellation gate still requires
+Windows execution. Final closure/benchmarks/#165 and final review remain open.

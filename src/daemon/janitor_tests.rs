@@ -7,7 +7,13 @@ use super::*;
 use crate::daemon::server::Shared;
 use crate::ipc::async_client::AsyncClient;
 
-fn fixture() -> (tempfile::TempDir, tempfile::TempDir, Arc<Shared>, Listener) {
+fn fixture() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    Arc<Shared>,
+    Listener,
+    crate::test_transport::TestTransport,
+) {
     let cache = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
     let shared = Shared::open_with_launch(
@@ -27,8 +33,9 @@ fn fixture() -> (tempfile::TempDir, tempfile::TempDir, Arc<Shared>, Listener) {
     )
     .unwrap();
     create_state_dir(cache.path()).unwrap();
-    let listener = platform::bind(&platform::daemon_endpoint(cache.path())).unwrap();
-    (cache, config, shared, listener)
+    let transport = crate::test_transport::TestTransport::new(16);
+    let listener = platform::bind(&transport, &platform::daemon_endpoint(cache.path())).unwrap();
+    (cache, config, shared, listener, transport)
 }
 
 async fn poll_pending(future: std::pin::Pin<&mut impl std::future::Future>) {
@@ -38,7 +45,7 @@ async fn poll_pending(future: std::pin::Pin<&mut impl std::future::Future>) {
 
 #[tokio::test]
 async fn queued_janitor_coalesces_ticks_without_blocking_accept_or_stop() {
-    let (cache, _config, shared, listener) = fixture();
+    let (cache, _config, shared, listener, transport) = fixture();
     let _held = shared.workers.control().await.unwrap();
     let (ticks, mut tick_rx) = mpsc::channel::<()>(4);
     let (_signal, signal_rx) = tokio::sync::oneshot::channel::<()>();
@@ -63,7 +70,9 @@ async fn queued_janitor_coalesces_ticks_without_blocking_accept_or_stop() {
     let refused = poll_fn(|cx| Poll::Ready(competing.as_mut().poll(cx))).await;
     assert!(matches!(refused, Poll::Ready(Err(Error::Admission { .. }))));
     let client = async {
-        let mut client = AsyncClient::connect(cache.path()).await.unwrap();
+        let mut client = AsyncClient::connect(&transport, cache.path())
+            .await
+            .unwrap();
         client.handshake_registry().await.unwrap();
         client.call(Request::StopDaemon).await.unwrap();
     };
@@ -76,7 +85,7 @@ async fn queued_janitor_coalesces_ticks_without_blocking_accept_or_stop() {
 
 #[tokio::test]
 async fn queued_janitor_does_not_block_signal_shutdown() {
-    let (_cache, _config, shared, listener) = fixture();
+    let (_cache, _config, shared, listener, _transport) = fixture();
     let _held = shared.workers.control().await.unwrap();
     let (ticks, mut tick_rx) = mpsc::channel::<()>(1);
     let (signal, signal_rx) = tokio::sync::oneshot::channel::<()>();
@@ -99,7 +108,7 @@ async fn queued_janitor_does_not_block_signal_shutdown() {
 
 #[tokio::test]
 async fn running_janitor_coalesces_and_keeps_physical_ownership_after_waiter_drop() {
-    let (_cache, _config, shared, _listener) = fixture();
+    let (_cache, _config, shared, _listener, _transport) = fixture();
     let count = Arc::new(AtomicUsize::new(0));
     let (events, mut observed) = mpsc::channel(1);
     let (entered, started) = tokio::sync::oneshot::channel();
@@ -131,7 +140,7 @@ async fn running_janitor_coalesces_and_keeps_physical_ownership_after_waiter_dro
 
 #[tokio::test]
 async fn graceful_stop_preserves_accepted_phase_admission_and_refuses_new_ingress() {
-    let (cache, _config, shared, listener) = fixture();
+    let (cache, _config, shared, listener, transport) = fixture();
     let accepted = shared.activity.track();
     let operation = crate::search::operation::SearchOperation::with_timeout(
         std::time::Instant::now(),
@@ -154,11 +163,15 @@ async fn graceful_stop_preserves_accepted_phase_admission_and_refuses_new_ingres
         )
         .await
     });
-    let mut client = AsyncClient::connect(cache.path()).await.unwrap();
+    let mut client = AsyncClient::connect(&transport, cache.path())
+        .await
+        .unwrap();
     client.handshake_registry().await.unwrap();
     let stopping = tokio::spawn(async move { client.call(Request::StopDaemon).await });
     loop {
-        let mut late = AsyncClient::connect(cache.path()).await.unwrap();
+        let mut late = AsyncClient::connect(&transport, cache.path())
+            .await
+            .unwrap();
         if let Err(error) = late.handshake_registry().await {
             assert!(
                 error.to_string().contains("daemon is shutting down"),

@@ -474,3 +474,24 @@ Only this root's constructors serialize; there is no process registry, worker,
 new policy field or default. Failed queued admission opens no SQLite connection;
 SQLite closes before initialization unlock on constructor errors. PROTOCOL and
 other nonBusy errors remain explicit failures, never classified as BUSY.
+
+## Delta 2026-11-17 — WIPC native ownership catalog (#155/#164)
+
+`ipc::transport` owns the initial explicit native resource catalog: two64KiB
+I/O regions per physical connection,1MiB completion/helper stacks, one2MiB
+application work stack per scope. These implementation resource policies are
+resolved once into complete `platform::transport::Options`, not initialized in
+native consumers. They are not new file keys or wire/frame limits; CF12's broader
+source-configurable transport adoption remains separate. Structural and checked
+envelope validation occurs before native root creation. Changes require scope
+restart, with no lexical/vector/cache invalidation.
+
+Application caps are explicit: daemon=`daemon.max_connections+2` for listening/
+shedding in the same arena; CLI and MCP use their complete daemon owner cap;
+read/control bootstrap and Stop use the standalone owner catalog so malformed
+user config cannot disable cleanup. Stop has one physical slot for its whole
+retry command. Web uses2×(search_connections+control_connections), including
+retiring exchanges. All arithmetic is checked. Native regions allocate lazily;
+ordinary replies create no drain helpers. Pending retirement never creates a
+second allowance outside the arena. Retirement poll/observation come from
+`daemon.drain_poll_ms`/`reply_drain_ms`; observation never permits detachment.

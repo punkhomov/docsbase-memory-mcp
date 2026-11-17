@@ -13,6 +13,9 @@ use docsbase_memory::ipc::protocol::{
 };
 use docsbase_memory::platform;
 
+#[path = "support/transport.rs"]
+mod test_transport;
+
 struct Env {
     cache: TempDir,
     root: TempDir,
@@ -80,7 +83,8 @@ impl FakeDaemon {
 
         let endpoint = platform::daemon_endpoint(cache);
         fs::create_dir_all(cache.join("state")).expect("mkdir state");
-        let listener = platform::bind_blocking(&endpoint).expect("bind");
+        let transport = test_transport::TestTransport::new(8);
+        let listener = platform::bind_blocking(&transport, &endpoint).expect("bind");
         listener.set_nonblocking(true).expect("nonblocking");
         let state = json!({
             "pid": std::process::id(),
@@ -98,6 +102,7 @@ impl FakeDaemon {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
+            let _transport = transport;
             while !stop_flag.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok(stream) => serve_fake_connection(stream, &seen, &stop_flag),
