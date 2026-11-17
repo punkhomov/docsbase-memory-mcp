@@ -123,3 +123,15 @@ Per-connection drain threads remain optional and bounded until actual join.
 - **W4b:** final owned native cancellation/control-progress/early-close/deadline
   acceptance and diagnostic latency/allocation/helper measurements, then full
   source compatibility/native CI and whole-feature review.
+
+## Delta 2026-11-17 — W3e: native arrival and withdrawal races
+
+Required whole-suite Windows acceptance exposed two compatibility gaps after
+W3d: blocking burst admission sees transient PIPE_BUSY, and a client departing
+before ConnectNamedPipe yields ERROR_NO_DATA which must not stop the listener.
+- [ ] Native RED/GREEN for busy admission using one caller deadline and for a
+  peer synchronously closed before accept; keep original physical arena bounds.
+- [ ] Explicit deadline API for Windows blocking callers, existing client2s
+  IO_TIMEOUT and fixture10s admission budget; no helper/default/replay.
+- [ ] Retire only the known abandoned instance, yield/rearm; preserve other errors.
+- [ ] Fresh W3e review and required native CI before readiness.

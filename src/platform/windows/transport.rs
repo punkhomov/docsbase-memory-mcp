@@ -83,6 +83,15 @@ impl Transport {
     pub fn connect_blocking(&self, endpoint: &Endpoint) -> io::Result<BlockingStream> {
         BlockingStream::new(self.connection(endpoint)?)
     }
+
+    pub(super) fn connection_until(
+        &self,
+        endpoint: &Endpoint,
+        _deadline: Instant,
+        _wait: impl FnMut(Duration) -> io::Result<()>,
+    ) -> io::Result<Arc<Connection>> {
+        self.connection(endpoint)
+    }
 }
 
 /// Serialized accept preserves the pending physical instance across cancellation.

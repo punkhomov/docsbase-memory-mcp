@@ -504,6 +504,108 @@ impl AsyncWrite for Pipe {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn blocking_connection_waits_for_the_next_instance_with_one_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let path = super::super::pipe_path(&endpoint).unwrap();
+        let policy = super::super::root::Options {
+            handles: 4,
+            chunk_bytes: 4096,
+            helper_stack_bytes: 1024 * 1024,
+            work_stack_bytes: 2 * 1024 * 1024,
+            drain_poll: std::time::Duration::from_millis(1),
+            drain_observation: std::time::Duration::from_secs(30),
+        };
+        let options = policy.clone();
+        super::super::root::run(&policy, move |service| {
+            let transport = super::super::transport::Transport::new(service.clone(), options);
+            let _listener = transport.bind(&endpoint)?;
+            let _occupied = transport.connect_blocking(&endpoint)?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut waits = 0;
+            let mut next = None;
+            let connected = transport.connection_until(&endpoint, deadline, |remaining| {
+                waits += 1;
+                assert!(!remaining.is_zero());
+                assert!(remaining <= std::time::Duration::from_secs(30));
+                // The next real instance is published only after the busy
+                // result selected the wait path, never by a timed sleep.
+                next = Some(Listening::new_in(&service, &path, 4096, false)?);
+                Ok(())
+            })?;
+            let _client = Pipe::new(connected)?;
+            assert_eq!(waits, 1);
+            let expired = transport.connection_until(&endpoint, std::time::Instant::now(), |_| {
+                panic!("expired connection must not wait or restart its deadline")
+            });
+            assert_eq!(expired.err().unwrap().kind(), io::ErrorKind::TimedOut);
+            drop(next);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn client_departure_before_accept_retires_instance_and_keeps_listener_alive() {
+        use std::future::Future;
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let path = super::super::pipe_path(&endpoint).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let policy = super::super::root::Options {
+            handles: 3,
+            chunk_bytes: 4096,
+            helper_stack_bytes: 1024 * 1024,
+            work_stack_bytes: 2 * 1024 * 1024,
+            drain_poll: std::time::Duration::from_millis(1),
+            drain_observation: std::time::Duration::from_secs(30),
+        };
+        let options = policy.clone();
+        super::super::root::run_on(&runtime, &policy, move |service| async move {
+            let transport = super::super::transport::Transport::new(service, options);
+            let listener = transport.bind(&endpoint)?;
+            // A plain File has no background operations: dropping it closes
+            // the connected peer before ConnectNamedPipe is ever submitted.
+            let departed = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)?;
+            drop(departed);
+            let mut accepting = std::pin::pin!(listener.accept());
+            let pending =
+                std::future::poll_fn(|cx| Poll::Ready(accepting.as_mut().poll(cx).is_pending()))
+                    .await;
+            assert!(
+                pending,
+                "a departed peer must not terminate accept with ERROR_NO_DATA"
+            );
+            let connecting = async {
+                loop {
+                    match transport.connect_async(&endpoint).await {
+                        Ok(client) => return Ok::<_, io::Error>(client),
+                        Err(error) if matches!(error.raw_os_error(), Some(231)) => {
+                            tokio::task::yield_now().await;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            };
+            let (mut client, mut server) = tokio::try_join!(connecting, accepting)?;
+            client.write_all(b"alive").await?;
+            client.flush().await?;
+            let mut bytes = [0; 5];
+            server.read_exact(&mut bytes).await?;
+            assert_eq!(&bytes, b"alive");
+            Ok(())
+        })
+        .unwrap();
+    }
+
     #[test]
     fn final_server_drain_is_lazy_delivers_complete_frame_and_closes_writes() {
         let directory = tempfile::tempdir().unwrap();

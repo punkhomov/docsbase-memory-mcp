@@ -896,3 +896,24 @@ callers already refuse returned terminal operations, preserving poll/copy fencin
 No budget, ownership or error policy changes. Native GREEN and scoped re-review
 remain pending; this is the only Important final-review finding, with no Critical
 or deferred Minor findings.
+
+MODIFIED 2026-11-17 — I1 verified; W3e arrival/withdrawal follow-up. Exact native
+run44122161279 ateda37b428/tree99ed4324 passes21/21, watchdog exit0; raw
+/tmp/pr164-read-wake-native-green. Final reviewer I1 re-review: ADDRESSED, no
+new Critical/Important findings. Required Windows run44118770344 then reaches
+the real lifecycle flood fixture and fails on immediate blocking-connect busy
+error231; unwinding clients also exposes accept error232 ending the daemon.
+Linux/docs pass. macOS never acquired a runner (runner_id0, no steps; hosted
+capacity annotation), so it is not a native test result.
+
+W3e preserves bounded ownership while recovering known connection arrival races:
+keep raw async/one-attempt connect unchanged; add an explicit original-deadline
+Windows blocking wait, selected by the existing blocking client IO_TIMEOUT.
+WaitNamedPipe waits on the caller thread without a helper or handle retention;
+only documented busy231 retries and one deadline applies across races. The
+flood fixture supplies its existing10s admission deadline. Accept withdraws and
+retires only an ERROR_NO_DATA232 instance, then yields/rearms inside the same
+physical arena; other errors propagate. New deterministic native regressions
+first expose busy arrival and a File peer closed before ConnectNamedPipe.
+The initial deadline helper intentionally still delegates the old one-attempt
+path for native RED. No production settings, capacity or grace are increased.
