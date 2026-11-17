@@ -37,7 +37,6 @@ struct State {
     result: Option<Result<(), u32>>,
     cancel_callers: usize,
     joining: bool,
-    joined: Option<Result<(), &'static str>>,
     cancel_deferred: bool,
     waker: Option<Waker>,
 }
@@ -80,7 +79,6 @@ impl Flush {
                 result: None,
                 cancel_callers: 0,
                 joining: false,
-                joined: None,
                 cancel_deferred: false,
                 waker: None,
             }),
@@ -217,9 +215,6 @@ impl Flush {
     /// Called by the outer owner only; no wait/join in stream/future Drop.
     pub(super) fn join_ready(&self) -> io::Result<bool> {
         let mut state = locked(&self.shared.state);
-        if let Some(result) = state.joined {
-            return result.map(|()| true).map_err(failure);
-        }
         if state.cancel_callers != 0 || state.joining {
             return Ok(false);
         }
@@ -245,20 +240,14 @@ impl Flush {
             return Ok(false);
         }
         let thread = locked(&self.thread).take();
-        let outcome = thread.map_or(Ok(()), |thread| {
-            thread.join().map_err(|_| "drain worker join unwound")
-        });
-        self.shared.thread.store(0, Ordering::Release);
-        if outcome.is_err() {
-            self.shared.token.report_fault("drain worker join unwound");
+        if let Some(thread) = thread {
+            thread
+                .join()
+                .map_err(|_| failure("drain worker join unwound"))?;
+            self.shared.thread.store(0, Ordering::Release);
+            self.shared.token.release_helper();
         }
-        self.shared.token.release_helper();
-        let mut state = locked(&self.shared.state);
-        state.joined = Some(outcome);
-        state.joining = false;
-        state.cancel_deferred = false;
-        drop(state);
-        outcome.map(|()| true).map_err(failure)
+        Ok(true)
     }
 }
 impl Shared {
