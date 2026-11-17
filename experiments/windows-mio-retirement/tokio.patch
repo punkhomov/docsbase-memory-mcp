@@ -1,9 +1,6 @@
 --- a/src/net/windows/named_pipe.rs
 +++ b/src/net/windows/named_pipe.rs
-@@ -137,6 +137,23 @@
-         })
-     }
- 
+@@ -139,0 +140,17 @@
 +    /// Construct a pipe retaining application accounting through native retirement.
 +    ///
 +    /// # Safety
@@ -21,13 +18,7 @@
 +        Ok(Self { io: PollEvented::new(named_pipe)? })
 +    }
 +
-     /// Retrieves information about the named pipe the server is associated
-     /// with.
-     ///
-@@ -919,8 +936,16 @@
-         self.io.poll_write_vectored(cx, bufs)
-     }
- 
+@@ -922,2 +939,10 @@
 -    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
 -        Poll::Ready(Ok(()))
 +    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -40,13 +31,7 @@
 +            let mut pipe = &*self.io;
 +            std::io::Write::flush(&mut pipe)
 +        })
-     }
- 
-     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-@@ -1010,6 +1035,23 @@
-         Ok(Self {
-             io: PollEvented::new(named_pipe)?,
-         })
+@@ -1012,0 +1038,17 @@
 +    }
 +
 +    /// Construct a pipe retaining application accounting through native retirement.
@@ -64,13 +49,7 @@
 +            mio_windows::NamedPipe::from_raw_handle_with_retirement_guard(handle, guard)
 +        };
 +        Ok(Self { io: PollEvented::new(named_pipe)? })
-     }
- 
-     /// Retrieves information about the named pipe the client is associated
-@@ -1710,8 +1752,16 @@
-         self.io.poll_write_vectored(cx, bufs)
-     }
- 
+@@ -1713,2 +1755,10 @@
 -    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
 -        Poll::Ready(Ok(()))
 +    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -83,6 +62,3 @@
 +            let mut pipe = &*self.io;
 +            std::io::Write::flush(&mut pipe)
 +        })
-     }
- 
-     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

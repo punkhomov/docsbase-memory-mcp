@@ -1,18 +1,9 @@
 --- a/src/sys/windows/named_pipe.rs
 +++ b/src/sys/windows/named_pipe.rs
-@@ -90,6 +90,8 @@
-     connecting: AtomicBool,
-     io: Mutex<Io>,
-     pool: Mutex<BufferPool>,
+@@ -92,0 +93,2 @@
 +    // Dropped last: HANDLE, completed-I/O state and native buffers retire first.
 +    _retirement_guard: Option<Box<dyn Send + Sync>>,
- }
- 
- // SAFETY: `Handles`s are, in general, not thread-safe. However, we only used `Handle`s for
-@@ -488,8 +490,22 @@
-     }
- }
- 
+@@ -491,2 +493,16 @@
 -impl FromRawHandle for NamedPipe {
 -    unsafe fn from_raw_handle(handle: RawHandle) -> NamedPipe {
 +impl NamedPipe {
@@ -31,29 +22,16 @@
 +        handle: RawHandle,
 +        guard: Option<Box<dyn Send + Sync>>,
 +    ) -> NamedPipe {
-         NamedPipe {
-             inner: Arc::new(Inner {
-                 handle: Handle::new(handle as HANDLE),
-@@ -506,8 +522,15 @@
-                     connect_error: None,
-                 }),
-                 pool: Mutex::new(BufferPool::with_capacity(2)),
+@@ -508,0 +525 @@
 +                _retirement_guard: guard,
-             }),
-         }
+@@ -510,0 +528,6 @@
 +    }
 +}
 +
 +impl FromRawHandle for NamedPipe {
 +    unsafe fn from_raw_handle(handle: RawHandle) -> NamedPipe {
 +        unsafe { Self::from_raw_handle_with_optional_guard(handle, None) }
-     }
- }
- 
-@@ -612,7 +635,16 @@
-     }
- 
-     fn flush(&mut self) -> io::Result<()> {
+@@ -615 +638,10 @@
 -        Ok(())
 +        let mut io = self.inner.io.lock()
 +            .map_err(|_| io::Error::other("named pipe I/O state poisoned"))?;
@@ -65,6 +43,3 @@
 +                Err(would_block())
 +            }
 +        }
-     }
- }
- 

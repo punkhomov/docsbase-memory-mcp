@@ -33,7 +33,7 @@ def main():
             source.extractall(base / "vendor", filter="data")
         shutil.move(staging, destination)
         subprocess.run(
-            ["git", "apply", "--no-index", "--unsafe-paths", str(base / f"{name}.patch")],
+            ["git", "apply", "--no-index", "--unidiff-zero", str(base / f"{name}.patch")],
             cwd=destination,
             check=True,
         )
