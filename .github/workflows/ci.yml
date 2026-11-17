@@ -1,5 +1,5 @@
 # TEMPORARY #155 OWNED CORE T2 HARNESS ONLY. NEVER MERGE INTO MAIN.
-# Isolated exact-production-parent execution; normal four-job CI remains unchanged.
+# Isolated exact source SHA/tree checkout; normal four-job CI remains unchanged.
 name: transport155-owned-core-t2
 
 on:
@@ -45,7 +45,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 2
+          ref: ${{ inputs.production_test_revision }}
+          fetch-depth: 1
       - name: Establish exact ref and disposable-host provenance
         shell: pwsh
         env:
@@ -61,16 +62,17 @@ jobs:
           foreach ($value in @($env:PRODUCTION_TEST_REVISION, $env:PRODUCTION_TEST_TREE)) {
             if ($value -notmatch '^[0-9a-f]{40}$') { throw 'Invalid source/test identity' }
           }
-          $parent = (git rev-parse HEAD^).Trim()
-          if ($LASTEXITCODE -ne 0 -or $parent -cne $env:PRODUCTION_TEST_REVISION) { throw 'Harness parent mismatch' }
-          $sourceTree = (git rev-parse "$($env:PRODUCTION_TEST_REVISION)^{tree}").Trim()
-          if ($LASTEXITCODE -ne 0 -or $sourceTree -cne $env:PRODUCTION_TEST_TREE) { throw 'Source/test tree mismatch' }
-          git diff --exit-code $env:PRODUCTION_TEST_REVISION HEAD -- . ':(exclude).github/workflows/ci.yml'
-          if ($LASTEXITCODE -ne 0) { throw 'Harness changes functional source outside its temporary workflow' }
+          $sourceRevision = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $sourceRevision -cne $env:PRODUCTION_TEST_REVISION) { throw 'Exact source revision mismatch' }
+          $sourceTree = (git rev-parse 'HEAD^{tree}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $sourceTree -cne $env:PRODUCTION_TEST_TREE) { throw 'Exact source tree mismatch' }
+          git diff --exit-code HEAD -- .
+          if ($LASTEXITCODE -ne 0) { throw 'Checked-out tracked source was modified' }
           if ('${{ runner.environment }}' -ne 'github-hosted') { throw 'Disposable hosted VM required' }
           $os = Get-CimInstance Win32_OperatingSystem
           @{
-            schema = 1; revision = '${{ github.sha }}'; production_test_revision = $parent; production_test_tree = $sourceTree; ref = '${{ github.ref }}'
+            schema = 1; revision = '${{ github.sha }}'; production_test_revision = $sourceRevision; production_test_tree = $sourceTree; ref = '${{ github.ref }}'
+            workflow_source_contract = 'github.sha identifies harness; git HEAD identifies exact compiled source input';
             run_id = '${{ github.run_id }}'; run_attempt = '${{ github.run_attempt }}'
             runner_environment = '${{ runner.environment }}'; runner_os = '${{ runner.os }}'
             image_os = $env:ImageOS; image_version = $env:ImageVersion
@@ -110,6 +112,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          git diff --exit-code HEAD -- Cargo.toml Cargo.lock src
+          if ($LASTEXITCODE -ne 0) { throw 'Tracked build inputs changed during asset preparation' }
           rustc -Vv | Set-Content target/transport155-t2/rustc.txt
           cargo -Vv | Set-Content target/transport155-t2/cargo.txt
           cargo test --locked --features cli-full --lib --no-run --message-format=json 1> target/transport155-t2/build.jsonl 2> target/transport155-t2/build.stderr.log
