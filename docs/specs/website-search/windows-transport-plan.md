@@ -35,14 +35,14 @@ and NDJSON bytes with checked allocation before serialization copying.
 Files: src/platform/windows/{connection,flush,native_io,root}.rs.
 Consumes the bounded Service/HandleToken/Operation arena; produces Pipe whose
 flush waits for write completion and explicit drain waits for client reads.
-- [ ] RED: real persistent pipe exchange completes native writes without
+- [x] RED: real persistent pipe exchange completes native writes without
   creating a flush worker; explicit final drain delivers the complete frame.
-- [ ] Lazily create a dedicated drain worker only for explicit final drain.
+- [x] Lazily create a dedicated drain worker only for explicit final drain.
   Reserve its capacity before creation; keep its native HANDLE, buffer and
   cancellation callers owned through actual thread signal/join.
-- [ ] Cover pending write/cancel-return interleavings and pre-entry helper
+- [x] Cover pending write/cancel-return interleavings and pre-entry helper
   cancellation; retain bounded quarantine when completion is unproved.
-- [ ] Cross-check exact native source, execute Windows cases; fresh task review.
+- [x] Cross-check exact native source, execute Windows cases; fresh task review.
 
 ## W3 — platform/application ownership integration
 

@@ -672,3 +672,16 @@ blocking-client resource stall. Exact-source cross-typecheck/fmt pass; native
 RED execution is pending. W3 integration slices/API are recorded in the plan.
 W2 fixed-source native execution is tracked separately in run44101312055;
 re-review addresses both reported findings, no new Critical/Important findings.
+
+Task W2: complete (2026-11-17, private native write/drain boundary). Fixed
+sourceff1f57b passes all12 actual cli-full Windows core/root cases in
+run44101312055, following native RED44097740879 and candidate GREEN44099804924.
+Persistent exchanges create no drain helpers; final server drain delivers the
+whole frame; writes are closed after shutdown. Native pre-entry cancellation
+returns actual NOT_FOUND while the dedicated thread still holds its charge;
+join, submission-return, terminal and cancel-caller gates stay independent.
+Exact-source Windows cross-typecheck and fmt pass. No full native lint claim
+until operational integration removes unused private adapters in W3.
+Ruling: fresh review Important/Minor findings corrected; re-review ADDRESSED
+for both, no new Critical/Important findings. Full #155/#165 and PR readiness
+remain W3/W4 work. No wire, baseline, budgets or grace policy changes.
