@@ -638,3 +638,8 @@ escaped overflow is rejected before output allocation. Oversized responses drop
 before allocating the small fallback. No wire/baseline/threshold change.
 Ruling: fresh task review PASS / APPROVED, no findings. Whole Windows transport
 and final cli-full/native acceptance remain WIP; W1 is not #155 completion.
+
+MODIFIED 2026-11-17 — W2 RED preparation: added an actual raw-pipe repeated
+exchange asserting native write completion without an eager/drain helper.
+Existing adapter still eagerly creates helpers; native RED execution is pending.
+This intermediate commit is intentionally not feature acceptance.

@@ -425,6 +425,46 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     #[test]
+    fn persistent_exchange_completes_native_writes_without_a_drain_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let path = super::super::pipe_path(&endpoint).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let policy = super::super::root::Options {
+            handles: 2,
+            chunk_bytes: 4096,
+            helper_stack_bytes: 1024 * 1024,
+            drain_poll: std::time::Duration::from_millis(1),
+            drain_observation: std::time::Duration::from_secs(30),
+        };
+        let (before, after) = super::super::root::run_on(&runtime, &policy, |service| async move {
+            let listening = Listening::new_in(&service, &path, 4096, true)?;
+            let client = Connection::client_in(&service, &path, 4096, 1024 * 1024)?;
+            let token = std::future::poll_fn(|cx| listening.poll_accept(cx)).await?;
+            let server = Connection::accepted(token, 4096, 1024 * 1024)?;
+            let before = (server.drain.get().is_some(), client.drain.get().is_some());
+            let mut writer = Pipe::new(server.clone());
+            let mut reader = Pipe::new(client.clone());
+            for _ in 0..3 {
+                let mut received = [0; 5];
+                let sending = async {
+                    writer.write_all(b"pong\n").await?;
+                    writer.flush().await
+                };
+                let reading = reader.read_exact(&mut received);
+                tokio::try_join!(sending, reading)?;
+                assert_eq!(&received, b"pong\n");
+                assert!(!server.write.active(), "last native write was consumed");
+            }
+            Ok((before, (server.drain.get().is_some(), client.drain.get().is_some())))
+        }).unwrap();
+        assert_eq!(before, (false, false), "no eager helper at connect/accept");
+        assert_eq!(after, (false, false), "ordinary replies need no peer drain");
+    }
+    #[test]
     fn dropped_dirty_pipe_keeps_registered_owner_until_actual_helper_retirement() {
         let directory = tempfile::tempdir().unwrap();
         let endpoint = crate::platform::daemon_endpoint(directory.path());
