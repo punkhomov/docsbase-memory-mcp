@@ -643,3 +643,14 @@ MODIFIED 2026-11-17 — W2 RED preparation: added an actual raw-pipe repeated
 exchange asserting native write completion without an eager/drain helper.
 Existing adapter still eagerly creates helpers; native RED execution is pending.
 This intermediate commit is intentionally not feature acceptance.
+
+MODIFIED 2026-11-17 — W2 implementation checkpoint: native Windows RED run
+44097740879 compiled source61326a4 and failed the intended helper-absence
+assertion (true/true vs false/false), after cleanup; external watchdog unused.
+The private adapter now completes native writes without a helper and creates
+one reserved dedicated helper only for explicit final server shutdown. Client
+shutdown completes its writes only; closed writers reject further output.
+Tests cover exact multi-chunk final delivery, optional-helper retirement and
+actual NOT_FOUND cancellation in a controlled pre-entry interval. Exact-source
+Windows cross-typecheck and fmt pass; native GREEN and task review are pending.
+This is not operational integration or #155 acceptance.

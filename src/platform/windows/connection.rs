@@ -125,8 +125,11 @@ pub(super) struct Connection {
     pub token: Arc<HandleToken>,
     read: Arc<Operation>,
     write: Arc<Operation>,
-    drain: OnceLock<Flush>,
+    drain: OnceLock<io::Result<Flush>>,
     initializing: AtomicBool,
+    helper_stack_bytes: usize,
+    closing: AtomicBool,
+    closed: AtomicBool,
     chunk: usize,
     accepted: AtomicUsize,
     dirty: AtomicBool,
@@ -185,18 +188,22 @@ impl Connection {
         stack: usize,
         server: bool,
     ) -> io::Result<Arc<Self>> {
-        let read = Operation::new(token.clone(), Kind::Read, chunk)?;
-        let write = Operation::new(token.clone(), Kind::Write, chunk)?;
-        // Register the complete envelope before starting its helper. If helper
-        // construction fails or the caller disappears after this return, the
-        // SAME bounded registry still owns all physical cleanup. Reaping cannot
-        // retire an envelope while this synchronous construction is in flight.
+        let read =
+            Operation::new(token.clone(), Kind::Read, chunk).inspect_err(|_| token.abort())?;
+        let write =
+            Operation::new(token.clone(), Kind::Write, chunk).inspect_err(|_| token.abort())?;
+        // Every connection reserves one possible helper in its root policy,
+        // but ordinary exchanges allocate only the owned native I/O regions.
+        // Register the envelope before exposing any cancellable submission.
         let owner = Arc::new(Self {
             token,
             read,
             write,
             drain: OnceLock::new(),
-            initializing: AtomicBool::new(true),
+            initializing: AtomicBool::new(false),
+            helper_stack_bytes: stack,
+            closing: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
             chunk,
             accepted: AtomicUsize::new(0),
             dirty: AtomicBool::new(false),
@@ -204,29 +211,31 @@ impl Connection {
             disconnected: AtomicBool::new(false),
         });
         service.attach(&owner.token, owner.clone())?;
-        match Flush::new(owner.token.clone(), stack) {
-            Ok(drain) => {
-                // This private synchronous constructor is the sole writer;
-                // the helper cannot be exposed to a logical stream beforehand.
-                owner.drain.get_or_init(|| drain);
-                owner.initializing.store(false, Ordering::Release);
-                Ok(owner)
-            }
+        Ok(owner)
+    }
+    fn drain(&self) -> io::Result<&Flush> {
+        // Synchronous construction is fenced from outer reaping. retain_helper
+        // independently fences the HANDLE before the worker can enter Win32.
+        // On unwind this flag stays set and the root preserves quarantine.
+        self.initializing.store(true, Ordering::Release);
+        let result = self
+            .drain
+            .get_or_init(|| Flush::new(self.token.clone(), self.helper_stack_bytes));
+        self.initializing.store(false, Ordering::Release);
+        match result {
+            Ok(drain) => Ok(drain),
             Err(error) => {
-                owner.abort();
-                owner.initializing.store(false, Ordering::Release);
-                Err(error)
+                self.abort();
+                Err(error.raw_os_error().map_or_else(
+                    || io::Error::new(error.kind(), error.to_string()),
+                    io::Error::from_raw_os_error,
+                ))
             }
         }
     }
-    fn drain(&self) -> io::Result<&Flush> {
-        self.drain
-            .get()
-            .ok_or_else(|| failure("native helper is not initialized"))
-    }
     pub(super) fn abort(&self) {
         self.token.abort();
-        if let Some(drain) = self.drain.get() {
+        if let Some(Ok(drain)) = self.drain.get() {
             drain.abort();
         }
         if self.server
@@ -290,7 +299,10 @@ impl PhysicalOwner for Connection {
         if self.initializing.load(Ordering::Acquire) {
             return Ok(false);
         }
-        self.drain.get().map_or(Ok(true), Flush::join_ready)
+        match self.drain.get() {
+            Some(Ok(drain)) => drain.join_ready(),
+            None | Some(Err(_)) => Ok(true),
+        }
     }
 }
 
@@ -302,7 +314,7 @@ impl Drop for Logical {
         // Cancellation/wake only. The arena, not this logical Arc, owns native
         // buffers, helper JoinHandle, and eventual physical retirement.
         self.connection.token.abort();
-        if let Some(drain) = self.connection.drain.get() {
+        if let Some(Ok(drain)) = self.connection.drain.get() {
             drain.abort();
         }
     }
@@ -361,19 +373,13 @@ impl AsyncWrite for Pipe {
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
         let connection = &self.get_mut().logical.connection;
+        if connection.closing.load(Ordering::Acquire) {
+            return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
+        }
         if bytes.is_empty() {
             return Poll::Ready(Ok(0));
         }
         match connection.write_terminal(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-            Poll::Ready(Ok(())) => {}
-        }
-        let drain = match connection.drain() {
-            Ok(drain) => drain,
-            Err(error) => return Poll::Ready(Err(error)),
-        };
-        match drain.poll_ready(cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {}
@@ -386,17 +392,30 @@ impl AsyncWrite for Pipe {
             return Poll::Ready(Err(error));
         }
         // Logical acceptance is explicit; fixed owned storage survives pending
-        // native write and future Drop. Flush below proves actual write/drain.
+        // native write and future Drop. flush proves native completion;
+        // shutdown separately proves peer drain for a successful server close.
         Poll::Ready(Ok(count))
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let connection = &self.get_mut().logical.connection;
+        connection.write_terminal(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let connection = &self.get_mut().logical.connection;
+        connection.closing.store(true, Ordering::Release);
+        if connection.closed.load(Ordering::Acquire) {
+            return Poll::Ready(Ok(()));
+        }
         match connection.write_terminal(cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {}
         }
-        if !connection.dirty.load(Ordering::Acquire) {
+        // Named pipes have no socket-style half-close. Clients need native
+        // write completion only; a final server reply must additionally be read
+        // by its peer before this physical instance can be safely closed.
+        if !connection.server || !connection.dirty.load(Ordering::Acquire) {
+            connection.closed.store(true, Ordering::Release);
             return Poll::Ready(Ok(()));
         }
         let drain = match connection.drain() {
@@ -406,6 +425,7 @@ impl AsyncWrite for Pipe {
         match drain.poll_flush(cx) {
             Poll::Ready(Ok(())) => {
                 connection.dirty.store(false, Ordering::Release);
+                connection.closed.store(true, Ordering::Release);
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(error)) => {
@@ -415,15 +435,126 @@ impl AsyncWrite for Pipe {
             Poll::Pending => Poll::Pending,
         }
     }
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_flush(cx)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[test]
+    fn final_server_drain_is_lazy_delivers_complete_frame_and_closes_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let path = super::super::pipe_path(&endpoint).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let policy = super::super::root::Options {
+            handles: 2,
+            chunk_bytes: 4096,
+            helper_stack_bytes: 1024 * 1024,
+            drain_poll: std::time::Duration::from_millis(1),
+            drain_observation: std::time::Duration::from_secs(30),
+        };
+        super::super::root::run_on(&runtime, &policy, |service| async move {
+            let listening = Listening::new_in(&service, &path, 4096, true)?;
+            let client = Connection::client_in(&service, &path, 4096, 1024 * 1024)?;
+            let token = std::future::poll_fn(|cx| listening.poll_accept(cx)).await?;
+            let server = Connection::accepted(token, 4096, 1024 * 1024)?;
+            let mut writer = Pipe::new(server.clone());
+            let mut reader = Pipe::new(client.clone());
+            let mut frame = vec![b'x'; 16384];
+            frame.push(b'\n');
+            let sending = async {
+                writer.write_all(&frame).await?;
+                writer.flush().await?;
+                assert!(server.drain.get().is_none(), "native write needs no helper");
+                writer.shutdown().await?;
+                assert!(
+                    server.drain.get().is_some(),
+                    "final server close drains peer"
+                );
+                writer.shutdown().await?;
+                assert_eq!(
+                    writer.write(b"late").await.unwrap_err().kind(),
+                    io::ErrorKind::BrokenPipe
+                );
+                Ok::<_, io::Error>(())
+            };
+            let reading = async {
+                let mut received = vec![0; frame.len()];
+                reader.read_exact(&mut received).await?;
+                assert_eq!(received, frame);
+                reader.shutdown().await?;
+                assert!(
+                    client.drain.get().is_none(),
+                    "client never waits for peer drain"
+                );
+                Ok::<_, io::Error>(())
+            };
+            tokio::try_join!(sending, reading)?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    #[test]
+    fn pre_entry_drain_cancellation_not_found_keeps_native_owner_until_thread_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let path = super::super::pipe_path(&endpoint).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let policy = super::super::root::Options {
+            handles: 2,
+            chunk_bytes: 4096,
+            helper_stack_bytes: 1024 * 1024,
+            drain_poll: std::time::Duration::from_millis(1),
+            drain_observation: std::time::Duration::from_secs(30),
+        };
+        let weak = super::super::root::run_on(&runtime, &policy, |service| async move {
+            let listening = Listening::new_in(&service, &path, 4096, true)?;
+            let client = Connection::client_in(&service, &path, 4096, 1024 * 1024)?;
+            let token = std::future::poll_fn(|cx| listening.poll_accept(cx)).await?;
+            let server = Connection::accepted(token, 4096, 1024 * 1024)?;
+            let mut writer = Pipe::new(server.clone());
+            writer.write_all(b"tail\n").await?;
+            writer.flush().await?;
+            let drain = server.drain()?;
+            let (entered, observing) = tokio::sync::oneshot::channel();
+            let (release, proceed) = std::sync::mpsc::channel();
+            drain.pause_before_native(entered, proceed);
+            let mut closing = Box::pin(writer.shutdown());
+            tokio::select! {
+                result = observing => result.map_err(io::Error::other)?,
+                result = &mut closing => panic!("drain returned before native entry: {result:?}"),
+            }
+            // The helper is deliberately BETWEEN its abort check and Win32
+            // entry. NOT_FOUND is an actual CancelSynchronousIo observation,
+            // never evidence of thread exit or permission to release capacity.
+            server.abort();
+            assert_eq!(
+                drain.cancel_status(),
+                windows_sys::Win32::Foundation::ERROR_NOT_FOUND
+            );
+            assert!(!drain.join_ready()?);
+            assert_eq!(service.reap()?, 2);
+            assert!(
+                matches!(service.reserve(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+            );
+            release.send(()).map_err(io::Error::other)?;
+            assert!(closing.await.is_err());
+            drop(client);
+            Ok(Arc::downgrade(&server))
+        })
+        .unwrap();
+        assert!(
+            weak.upgrade().is_none(),
+            "outer owner observed actual thread exit/join"
+        );
+    }
     #[test]
     fn persistent_exchange_completes_native_writes_without_a_drain_worker() {
         let directory = tempfile::tempdir().unwrap();
@@ -459,13 +590,17 @@ mod tests {
                 assert_eq!(&received, b"pong\n");
                 assert!(!server.write.active(), "last native write was consumed");
             }
-            Ok((before, (server.drain.get().is_some(), client.drain.get().is_some())))
-        }).unwrap();
+            Ok((
+                before,
+                (server.drain.get().is_some(), client.drain.get().is_some()),
+            ))
+        })
+        .unwrap();
         assert_eq!(before, (false, false), "no eager helper at connect/accept");
         assert_eq!(after, (false, false), "ordinary replies need no peer drain");
     }
     #[test]
-    fn dropped_dirty_pipe_keeps_registered_owner_until_actual_helper_retirement() {
+    fn dropped_dirty_pipe_keeps_registered_owner_until_actual_native_retirement() {
         let directory = tempfile::tempdir().unwrap();
         let endpoint = crate::platform::daemon_endpoint(directory.path());
         let path = super::super::pipe_path(&endpoint).unwrap();
@@ -501,8 +636,8 @@ mod tests {
         let retained = weak.upgrade().unwrap();
         retained.abort();
         client.abort();
-        retained.drain().unwrap().wait_signal().unwrap();
-        client.drain().unwrap().wait_signal().unwrap();
+        assert!(retained.drain.get().is_none());
+        assert!(client.drain.get().is_none());
         runtime
             .block_on(std::future::poll_fn(|cx| retained.write.poll(cx)))
             .unwrap();
@@ -540,6 +675,9 @@ mod tests {
             .block_on(std::future::poll_fn(|cx| listening.poll_accept(cx)))
             .unwrap();
         let server = Connection::accepted(token, 4096, 1024 * 1024).unwrap();
+        // This test explicitly creates the optional final-drain helper. Its
+        // joined state must stay terminal while another native user is held.
+        server.drain().unwrap();
         server.read.submit(&[]).unwrap();
         let (entered, observing) = std::sync::mpsc::channel();
         let (release, proceed) = std::sync::mpsc::channel();
@@ -576,7 +714,7 @@ mod tests {
             .unwrap();
         assert!(server.retire(&port).unwrap());
         client.abort();
-        client.drain().unwrap().wait_signal().unwrap();
+        assert!(client.drain.get().is_none());
         assert!(client.retire(&port).unwrap());
         match port.finish() {
             Ok(()) => {}
@@ -615,7 +753,7 @@ mod tests {
             assert_eq!(frame.len(), received.len());
             let sending = async {
                 writer.write_all(frame).await.unwrap();
-                writer.flush().await.unwrap();
+                writer.shutdown().await.unwrap();
             };
             let reading = async {
                 reader.read_exact(&mut received).await.unwrap();
@@ -630,9 +768,9 @@ mod tests {
         client.abort();
         next.abort();
         assert!(!port.retire(&server.token));
-        assert!(!port.retire(&client.token));
+        assert!(client.drain.get().is_none());
         server.drain().unwrap().wait_signal().unwrap();
-        client.drain().unwrap().wait_signal().unwrap();
+        assert!(client.drain.get().is_none());
         assert!(server.retire(&port).unwrap());
         assert!(client.retire(&port).unwrap());
         assert!(port.retire(&next.token));

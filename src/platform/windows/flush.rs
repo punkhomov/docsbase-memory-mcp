@@ -48,6 +48,15 @@ struct Shared {
     returned: OwnedHandle,
     thread: AtomicUsize,
     state: Mutex<State>,
+    #[cfg(test)]
+    before_native: Mutex<Option<BeforeNative>>,
+    #[cfg(test)]
+    cancel_status: std::sync::atomic::AtomicU32,
+}
+#[cfg(test)]
+struct BeforeNative {
+    entered: tokio::sync::oneshot::Sender<()>,
+    proceed: std::sync::mpsc::Receiver<()>,
 }
 pub(super) struct Flush {
     shared: Arc<Shared>,
@@ -84,6 +93,10 @@ impl Flush {
                 cancel_deferred: false,
                 waker: None,
             }),
+            #[cfg(test)]
+            before_native: Mutex::new(None),
+            #[cfg(test)]
+            cancel_status: std::sync::atomic::AtomicU32::new(u32::MAX),
         });
         let worker = shared.clone();
         let spawned = std::thread::Builder::new()
@@ -115,21 +128,6 @@ impl Flush {
             shared,
             thread: Mutex::new(Some(thread)),
         })
-    }
-    pub(super) fn poll_ready(&self, cx: &Context<'_>) -> Poll<io::Result<()>> {
-        let waker = cx.waker().clone();
-        let mut state = locked(&self.shared.state);
-        if state.abort || self.shared.token.is_aborting() {
-            return Poll::Ready(Err(failure("pipe drain is aborting")));
-        }
-        if state.phase == Phase::Ready && self.shared.thread.load(Ordering::Acquire) != 0 {
-            self.shared.token.helper_ready();
-            return Poll::Ready(Ok(()));
-        }
-        let previous = state.waker.replace(waker);
-        drop(state);
-        drop(previous);
-        Poll::Pending
     }
     pub(super) fn poll_flush(&self, cx: &Context<'_>) -> Poll<io::Result<()>> {
         let waker = cx.waker().clone();
@@ -183,9 +181,19 @@ impl Flush {
             // SAFETY: dedicated helper HANDLE is retained by JoinHandle until
             // ALL cancel callers return; never a reused/pool thread. Result is
             // only an abort request, including NOT_FOUND, never completion.
-            unsafe {
-                CancelSynchronousIo(thread as _);
-            }
+            let cancelled = unsafe { CancelSynchronousIo(thread as _) };
+            #[cfg(test)]
+            self.shared.cancel_status.store(
+                if cancelled != 0 {
+                    0
+                } else {
+                    // SAFETY: capture this caller's native cancellation status.
+                    unsafe { GetLastError() }
+                },
+                Ordering::Release,
+            );
+            #[cfg(not(test))]
+            let _ = cancelled;
         }
         let mut state = locked(&self.shared.state);
         if cancel {
@@ -197,6 +205,18 @@ impl Flush {
             SetEvent(self.shared.request.as_raw_handle());
         }
         self.shared.signal();
+    }
+    #[cfg(test)]
+    pub(super) fn pause_before_native(
+        &self,
+        entered: tokio::sync::oneshot::Sender<()>,
+        proceed: std::sync::mpsc::Receiver<()>,
+    ) {
+        *locked(&self.shared.before_native) = Some(BeforeNative { entered, proceed });
+    }
+    #[cfg(test)]
+    pub(super) fn cancel_status(&self) -> u32 {
+        self.shared.cancel_status.load(Ordering::Acquire)
     }
     #[cfg(test)]
     pub(super) fn wait_signal(&self) -> io::Result<()> {
@@ -298,6 +318,18 @@ impl Shared {
             }
             state.phase = Phase::Flushing;
             drop(state);
+            #[cfg(test)]
+            {
+                let gate = locked(&self.before_native).take();
+                if let Some(gate) = gate {
+                    gate.entered
+                        .send(())
+                        .map_err(|()| failure("test observer lost"))?;
+                    gate.proceed
+                        .recv_timeout(std::time::Duration::from_secs(30))
+                        .map_err(io::Error::other)?;
+                }
+            }
             // SAFETY: retain_helper keeps the pipe open until actual thread
             // signal+join. This is the sole helper and all writes are terminal.
             let ok = unsafe { FlushFileBuffers(self.pipe as _) };

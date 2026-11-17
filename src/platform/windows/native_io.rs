@@ -132,9 +132,6 @@ impl Operation {
             .ok_or_else(|| failure("native pipe is closed"))?
             .as_raw_handle();
         let mut state = locked(&self.state);
-        if self.kind == Kind::Write && !self.token.helper_ready.load(Ordering::Acquire) {
-            return Err(io::Error::from(io::ErrorKind::WouldBlock));
-        }
         if state.active {
             return Err(failure("native operation is already submitted"));
         }
@@ -374,7 +371,6 @@ pub(super) struct HandleToken {
     operations: Mutex<Vec<Weak<Operation>>>,
     users: AtomicUsize,
     aborting: AtomicBool,
-    helper_ready: AtomicBool,
     port: Weak<PortInner>,
 }
 impl HandleToken {
@@ -409,14 +405,10 @@ impl HandleToken {
             })
     }
     pub(super) fn report_fault(&self, message: &'static str) {
-        self.helper_ready.store(false, Ordering::Release);
         self.aborting.store(true, Ordering::Release);
         if let Some(port) = self.port.upgrade() {
             port.fail(message);
         }
-    }
-    pub(super) fn helper_ready(&self) {
-        self.helper_ready.store(true, Ordering::Release);
     }
     pub(super) fn retain_helper(&self) -> io::Result<std::os::windows::io::RawHandle> {
         let gate = locked(&self.handle);
@@ -755,7 +747,6 @@ impl Reservation {
             operations: Mutex::new(Vec::with_capacity(3)),
             users: AtomicUsize::new(0),
             aborting: AtomicBool::new(false),
-            helper_ready: AtomicBool::new(false),
             port: Arc::downgrade(&self.inner),
         });
         let key = Arc::as_ptr(&token) as usize;
@@ -806,7 +797,6 @@ impl PortInner {
                 _ => None,
             };
             if let Some(token) = token {
-                token.helper_ready.store(false, Ordering::Release);
                 token.abort();
             }
         }
@@ -875,7 +865,6 @@ mod tests {
             operations: Mutex::new(Vec::with_capacity(3)),
             users: AtomicUsize::new(1),
             aborting: AtomicBool::new(false),
-            helper_ready: AtomicBool::new(false),
             port: Weak::new(),
         });
         let operation = Operation::new(token, Kind::Read, 8).unwrap();
@@ -970,7 +959,6 @@ mod tests {
             operations: Mutex::new(Vec::with_capacity(3)),
             users: AtomicUsize::new(0),
             aborting: AtomicBool::new(false),
-            helper_ready: AtomicBool::new(true),
             port: Arc::downgrade(&inner),
         });
         locked(&inner.state).entries[0] = Entry::Live(Record {
@@ -985,7 +973,6 @@ mod tests {
         token.report_fault("controlled helper failure");
         assert!(token.is_aborting());
         assert_eq!(port.fault(), Some("controlled helper failure"));
-        assert!(!token.helper_ready.load(Ordering::Acquire));
         assert_eq!(
             write.submit(b"bytes").unwrap_err().to_string(),
             "native connection is aborting"
