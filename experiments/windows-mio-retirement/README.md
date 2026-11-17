@@ -3,6 +3,9 @@
 This branch is an experiment, never a production PR or a replacement for #164's
 required CI. Main and PR #164 remain unchanged. No provider calls are made.
 
+The bounded probe is complete. See [RESULT.md](RESULT.md) for exact native
+RED/GREEN evidence, independent review, remaining obligations and recommendation.
+
 Question: can existing Mio/Tokio own connection accounting through actual native
 retirement, without docsbase's IOCP implementation?
 
