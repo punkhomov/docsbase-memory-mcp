@@ -237,6 +237,10 @@ impl Connection {
             }
         }
     }
+    #[cfg(test)]
+    pub(super) fn test_read_active(&self) -> bool {
+        self.read.active()
+    }
     /// Install ownership before submission; old owners drop outside the lock.
     pub(super) fn retain(&self, request: bool, charge: Arc<dyn Send + Sync>) -> io::Result<()> {
         let old = {
@@ -655,6 +659,51 @@ mod tests {
             "outer owner observed actual thread exit/join"
         );
     }
+    #[test]
+    fn owned_facade_clone_admission_and_timeout_updates_do_not_wait_for_a_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let policy = super::super::root::Options {
+            handles: 2,
+            chunk_bytes: 4096,
+            helper_stack_bytes: 1024 * 1024,
+            work_stack_bytes: 2 * 1024 * 1024,
+            drain_poll: std::time::Duration::from_millis(1),
+            drain_observation: std::time::Duration::from_secs(30),
+        };
+        let options = policy.clone();
+        super::super::root::run(&policy, move |service| {
+            let transport = super::super::transport::Transport::new(service, options);
+            let listener = transport.bind_blocking(&endpoint)?;
+            let _client = transport.connect_blocking(&endpoint)?;
+            let mut server = listener.accept()?;
+            server.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+            let mut first_reader = server.try_clone()?;
+            std::thread::scope(|scope| -> io::Result<()> {
+                let first = scope.spawn(move || std::io::Read::read(&mut first_reader, &mut [0]));
+                let watchdog = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !server.test_read_active() && std::time::Instant::now() < watchdog {
+                    std::thread::yield_now();
+                }
+                assert!(
+                    server.test_read_active(),
+                    "first native read entered before cloned admission"
+                );
+                // This setter must not wait for the pending read. The second
+                // clone's original deadline includes direction-lock admission.
+                server.set_read_timeout(Some(std::time::Duration::from_millis(1)))?;
+                let second = std::io::Read::read(&mut server, &mut [0]).unwrap_err();
+                assert_eq!(second.kind(), io::ErrorKind::TimedOut);
+                assert!(
+                    first.join().unwrap().is_err(),
+                    "timed-out exchange cancels the first native read too"
+                );
+                Ok(())
+            })
+        })
+        .unwrap();
+    }
+
     #[test]
     fn owned_facade_blocking_timeout_aborts_without_waiting_for_peer() {
         let directory = tempfile::tempdir().unwrap();

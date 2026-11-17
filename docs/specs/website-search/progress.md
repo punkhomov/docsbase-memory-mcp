@@ -732,3 +732,11 @@ the same native operations. New native cases cover timed-out blocking reads,
 shared blocking directions/final delivery and a next listener waiting for actual
 arena capacity. Source cross-typecheck and lean-library Clippy pass; actual
 native execution/fresh facade review and consumer migration remain pending.
+
+MODIFIED 2026-11-17 — W3a3 review fix. Fresh review found Important: temporary
+policy MutexGuards lived through blocking waits, so cloned-stream admission
+could wait before starting its deadline. Snapshot each timeout before polling;
+no policy guard crosses the wait. Add causal native first-read observation and
+a concurrent clone test: timeout update remains available and second-read
+admission expires while the first read is pending. Cross-typecheck/fmt pass;
+re-review and17-case native execution pending.

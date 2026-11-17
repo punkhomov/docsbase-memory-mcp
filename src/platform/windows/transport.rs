@@ -305,6 +305,10 @@ impl BlockingStream {
             }),
         })
     }
+    #[cfg(test)]
+    pub(super) fn test_read_active(&self) -> bool {
+        self.state.ownership.0.test_read_active()
+    }
     /// Set a real native-read deadline; zero is invalid.
     /// # Errors
     /// Zero timeout.
@@ -346,52 +350,56 @@ impl BlockingStream {
     /// # Errors
     /// Native failure or the configured write timeout. Failure aborts the exchange.
     pub fn shutdown(&mut self) -> io::Result<()> {
+        let timeout = *self
+            .state
+            .write_timeout
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         self.result(blocking(
             async { self.state.write.lock().await.shutdown().await },
-            *self
-                .state
-                .write_timeout
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
+            timeout,
             false,
         ))
     }
 }
 impl Read for BlockingStream {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let timeout = *self
+            .state
+            .read_timeout
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         self.result(blocking(
             async {
                 tokio::io::AsyncReadExt::read(&mut *self.state.read.lock().await, bytes).await
             },
-            *self
-                .state
-                .read_timeout
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
+            timeout,
             false,
         ))
     }
 }
 impl Write for BlockingStream {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let timeout = *self
+            .state
+            .write_timeout
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         self.result(blocking(
             async { self.state.write.lock().await.write(bytes).await },
-            *self
-                .state
-                .write_timeout
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
+            timeout,
             false,
         ))
     }
     fn flush(&mut self) -> io::Result<()> {
+        let timeout = *self
+            .state
+            .write_timeout
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         self.result(blocking(
             async { self.state.write.lock().await.flush().await },
-            *self
-                .state
-                .write_timeout
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
+            timeout,
             false,
         ))
     }
