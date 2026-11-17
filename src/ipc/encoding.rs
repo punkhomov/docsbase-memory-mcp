@@ -108,8 +108,37 @@ impl Write for Frame {
     }
 }
 
+/// A first serialization measures escaped JSON without retaining output.
+/// Both passes remain independently capped, even for a stateful Serialize impl.
+struct Size {
+    bytes: usize,
+    limit: usize,
+}
+impl Write for Size {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes.len())
+            .filter(|size| *size <= self.limit)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "encoded frame exceeds limit")
+            })?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 pub(crate) fn encode(value: &impl Serialize) -> crate::error::Result<Frame> {
-    let mut frame = Frame::new(super::protocol::MAX_FRAME_BYTES).map_err(|error| {
+    let mut size = Size {
+        bytes: 0,
+        limit: super::protocol::MAX_FRAME_BYTES,
+    };
+    serde_json::to_writer(&mut size, value).map_err(|error| {
+        crate::error::Error::internal_with_source("measure capped IPC frame", error)
+    })?;
+    let mut frame = Frame::new(size.bytes).map_err(|error| {
         crate::error::Error::internal_with_source("reserve encoded IPC frame", error)
     })?;
     frame.encode(value).map_err(|error| {
@@ -121,6 +150,30 @@ pub(crate) fn encode(value: &impl Serialize) -> crate::error::Result<Frame> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn small_wire_messages_allocate_only_their_encoded_size() {
+        let request = crate::ipc::protocol::Request::Hello {
+            protocol_version: crate::ipc::protocol::PROTOCOL_VERSION,
+            build_id: "test-build".into(),
+            client: "test-client".into(),
+        };
+        let expected = crate::ipc::protocol::encode(&request).unwrap();
+        let frame = encode(&request).unwrap();
+        assert_eq!(frame.bytes(), expected);
+        assert_eq!(frame.storage.bytes().len(), expected.len());
+        assert!(frame.storage.bytes().len() < 1024);
+    }
+    #[test]
+    fn encoded_size_accounts_for_escaping_before_allocation() {
+        let value = "\n".repeat(super::super::protocol::MAX_FRAME_BYTES / 2);
+        assert!(encode(&value).is_err(), "escaped JSON exceeds the wire cap");
+        let value = "x".repeat(super::super::protocol::MAX_FRAME_BYTES - 2);
+        let frame = encode(&value).unwrap();
+        assert_eq!(
+            frame.bytes().len(),
+            super::super::protocol::MAX_FRAME_BYTES + 1
+        );
+    }
     #[test]
     fn serialization_reserves_exact_capacity_and_reuses_it_after_escaped_overflow() {
         let mut frame = Frame::new(8).unwrap();

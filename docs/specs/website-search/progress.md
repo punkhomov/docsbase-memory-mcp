@@ -630,3 +630,11 @@ claim. Existing wire format, test budgets and baseline remain unchanged.
 Ruling: fresh research review PASS / APPROVED, no findings. Native lifetime,
 deadline, helper-capacity, delivery, performance and #165 acceptance remain
 unverified implementation work; this review does not qualify PR #164 for merge.
+
+Task W1: complete (2026-11-17, proportional capped serialization). Actual Hello
+allocation RED8,388,609 vs98 bytes; GREEN encoding4/0 and scoped7/0, lean library
+Clippy with -D warnings and fmt pass. Both passes enforce their storage bound;
+escaped overflow is rejected before output allocation. Oversized responses drop
+before allocating the small fallback. No wire/baseline/threshold change.
+Ruling: fresh task review PASS / APPROVED, no findings. Whole Windows transport
+and final cli-full/native acceptance remain WIP; W1 is not #155 completion.

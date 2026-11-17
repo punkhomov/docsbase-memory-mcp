@@ -176,10 +176,9 @@ pub(super) async fn reply<W: AsyncWrite + Unpin>(
 }
 
 fn response_bytes(response: Response) -> Option<crate::ipc::encoding::Frame> {
-    let mut frame = crate::ipc::encoding::Frame::new(protocol::MAX_FRAME_BYTES).ok()?;
-    let encoded = frame.encode(&response);
+    let encoded = crate::ipc::encoding::encode(&response);
     drop(response);
-    if encoded.is_ok() {
+    if let Ok(frame) = encoded {
         return Some(frame);
     }
     let error = Error::Protocol {
@@ -188,8 +187,7 @@ fn response_bytes(response: Response) -> Option<crate::ipc::encoding::Frame> {
             protocol::MAX_FRAME_BYTES
         ),
     };
-    frame.encode(&error_response(&error)).ok()?;
-    Some(frame)
+    crate::ipc::encoding::encode(&error_response(&error)).ok()
 }
 
 async fn write_before<W: AsyncWrite + Unpin>(
