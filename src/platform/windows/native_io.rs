@@ -322,6 +322,13 @@ impl Operation {
             }
         });
     }
+    #[cfg(test)]
+    pub(super) fn controlled_cancel(
+        &self,
+        cancel: impl FnOnce(std::os::windows::io::RawHandle, *mut OVERLAPPED),
+    ) {
+        self.cancel_using(cancel);
+    }
     fn cancel_using(&self, cancel: impl FnOnce(std::os::windows::io::RawHandle, *mut OVERLAPPED)) {
         // Same lock order as submit: handle -> operation. The extra user charge
         // prevents close even if actual IO completes while CancelIoEx is delayed.

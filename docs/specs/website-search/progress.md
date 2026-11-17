@@ -595,3 +595,12 @@ bytes only through the platform seam. Raw owned connection code and a normal
 read/write/helper-drain/token-transfer case are written but native execution and
 outer-root integration remain pending. #165 deterministic grace-fixture work is
 assigned to the same lifecycle acceptance; no grace/budget/ignore change.
+
+MODIFIED 2026-11-17 — #155 scoped core fix2: dedicated-helper retirement now
+publishes its joined success/error outcome persistently. Repeated outer drive
+passes preserve that result without a second join or helper-charge release;
+concurrent cancellation remains fenced through HANDLE clearing and publication.
+A new actual raw-pipe case holds a native cancellation caller past helper join
+and checks repeated retirement observations. Windows execution is pending;
+current formatting passes. This is a correction of the core-review Important
+finding, not a completed transport/root delivery claim.

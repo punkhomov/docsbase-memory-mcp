@@ -315,6 +315,69 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     #[test]
+    fn helper_join_remains_terminal_before_last_native_cancel_caller_returns() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let path = super::super::pipe_path(&endpoint).unwrap();
+        let mut port = Port::new(2, 1024 * 1024).unwrap();
+        let listening = Listening::new(&port, &path, 4096, true).unwrap();
+        let client = Connection::client(&port, &path, 4096, 1024 * 1024).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let token = runtime
+            .block_on(std::future::poll_fn(|cx| listening.poll_accept(cx)))
+            .unwrap();
+        let server = Connection::accepted(token, 4096, 1024 * 1024).unwrap();
+        server.read.submit(&[]).unwrap();
+        let (entered, observing) = std::sync::mpsc::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let read = server.read.clone();
+        let caller = std::thread::spawn(move || {
+            read.controlled_cancel(|handle, overlapped| {
+                entered.send(()).unwrap();
+                proceed.recv().unwrap();
+                // SAFETY: cancel_using retains this actual HANDLE/OVERLAPPED
+                // until this caller returns, even after another cancellation.
+                unsafe {
+                    windows_sys::Win32::System::IO::CancelIoEx(handle, overlapped);
+                }
+            });
+        });
+        observing
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap();
+        server.abort();
+        server.drain.wait_signal().unwrap();
+        assert!(server.drain.join_ready().unwrap());
+        // The dedicated helper is joined, while the deliberately held actual
+        // native cancel caller independently keeps this connection physical.
+        assert!(!port.retire(&server.token));
+        assert!(server.drain.join_ready().unwrap());
+        assert!(!server.retire(&port).unwrap());
+        release.send(()).unwrap();
+        caller.join().unwrap();
+        assert!(server.drain.join_ready().unwrap());
+        // Let the completion port publish the cancelled read, independently
+        // from the cancellation caller's return.
+        runtime
+            .block_on(std::future::poll_fn(|cx| server.read.poll(cx)))
+            .unwrap();
+        assert!(server.retire(&port).unwrap());
+        client.abort();
+        client.drain.wait_signal().unwrap();
+        assert!(client.retire(&port).unwrap());
+        match port.finish() {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                port.wait_progress_signal().unwrap();
+                port.finish().unwrap();
+            }
+            Err(error) => panic!("native progress retirement: {error}"),
+        }
+    }
+    #[test]
     fn owned_pipe_transfers_handle_key_and_drains_while_next_listener_exists() {
         let directory = tempfile::tempdir().unwrap();
         let endpoint = crate::platform::daemon_endpoint(directory.path());
