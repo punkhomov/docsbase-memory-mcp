@@ -166,7 +166,7 @@ mod tests {
                     let token = std::future::poll_fn(|cx| listening.poll_accept(cx)).await?;
                     let server = Connection::accepted(token, chunk_bytes, stack_bytes)?;
                     *observation.lock().unwrap() = Some((Arc::downgrade(&server), service));
-                    let mut pipe = Pipe::new(server);
+                    let mut pipe = Pipe::new(server)?;
                     pipe.write_all(&vec![b'x'; chunk_bytes]).await?;
                     drop(client);
                     if unwind {

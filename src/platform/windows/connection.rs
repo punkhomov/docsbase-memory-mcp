@@ -127,6 +127,7 @@ pub(super) struct Connection {
     write: Arc<Operation>,
     drain: OnceLock<io::Result<Flush>>,
     initializing: AtomicBool,
+    logical_claimed: AtomicBool,
     helper_stack_bytes: usize,
     closing: AtomicBool,
     closed: AtomicBool,
@@ -201,6 +202,7 @@ impl Connection {
             write,
             drain: OnceLock::new(),
             initializing: AtomicBool::new(false),
+            logical_claimed: AtomicBool::new(false),
             helper_stack_bytes: stack,
             closing: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -319,15 +321,21 @@ impl Drop for Logical {
         }
     }
 }
-#[derive(Clone)]
 pub(super) struct Pipe {
     logical: Arc<Logical>,
 }
 impl Pipe {
-    pub(super) fn new(connection: Arc<Connection>) -> Self {
-        Self {
+    pub(super) fn new(connection: Arc<Connection>) -> io::Result<Self> {
+        // One writable stream per physical connection. Tokio split serializes
+        // access to that stream; cloning a writer would let it race shutdown
+        // between the closing check and native submission.
+        connection
+            .logical_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| failure("native connection already has a logical stream"))?;
+        Ok(Self {
             logical: Arc::new(Logical { connection }),
-        }
+        })
     }
 }
 impl AsyncRead for Pipe {
@@ -462,15 +470,32 @@ mod tests {
             let client = Connection::client_in(&service, &path, 4096, 1024 * 1024)?;
             let token = std::future::poll_fn(|cx| listening.poll_accept(cx)).await?;
             let server = Connection::accepted(token, 4096, 1024 * 1024)?;
-            let mut writer = Pipe::new(server.clone());
-            let mut reader = Pipe::new(client.clone());
+            let mut writer = Pipe::new(server.clone())?;
+            assert!(
+                Pipe::new(server.clone()).is_err(),
+                "one logical writer per connection"
+            );
+            let mut reader = Pipe::new(client.clone())?;
             let mut frame = vec![b'x'; 16384];
             frame.push(b'\n');
+            let (prefix_sent, prefix_read) = tokio::sync::oneshot::channel();
+            let (release_tail, read_tail) = tokio::sync::oneshot::channel();
             let sending = async {
                 writer.write_all(&frame).await?;
                 writer.flush().await?;
                 assert!(server.drain.get().is_none(), "native write needs no helper");
-                writer.shutdown().await?;
+                prefix_read.await.map_err(io::Error::other)?;
+                let mut closing = Box::pin(writer.shutdown());
+                assert!(
+                    std::future::poll_fn(|cx| std::task::Poll::Ready(closing.as_mut().poll(cx)))
+                        .await
+                        .is_pending(),
+                    "native write completion cannot stand in for peer drain"
+                );
+                release_tail
+                    .send(())
+                    .map_err(|()| failure("tail reader lost"))?;
+                closing.await?;
                 assert!(
                     server.drain.get().is_some(),
                     "final server close drains peer"
@@ -484,7 +509,16 @@ mod tests {
             };
             let reading = async {
                 let mut received = vec![0; frame.len()];
-                reader.read_exact(&mut received).await?;
+                // The prefix is exactly four native read regions. No fifth
+                // read is submitted until release, so the trailing newline
+                // stays in the kernel pipe, not in an adapter prefetch region.
+                let tail = frame.len() - 1;
+                reader.read_exact(&mut received[..tail]).await?;
+                prefix_sent
+                    .send(())
+                    .map_err(|()| failure("close observer lost"))?;
+                read_tail.await.map_err(io::Error::other)?;
+                reader.read_exact(&mut received[tail..]).await?;
                 assert_eq!(received, frame);
                 reader.shutdown().await?;
                 assert!(
@@ -519,7 +553,7 @@ mod tests {
             let client = Connection::client_in(&service, &path, 4096, 1024 * 1024)?;
             let token = std::future::poll_fn(|cx| listening.poll_accept(cx)).await?;
             let server = Connection::accepted(token, 4096, 1024 * 1024)?;
-            let mut writer = Pipe::new(server.clone());
+            let mut writer = Pipe::new(server.clone())?;
             writer.write_all(b"tail\n").await?;
             writer.flush().await?;
             let drain = server.drain()?;
@@ -577,8 +611,8 @@ mod tests {
             let token = std::future::poll_fn(|cx| listening.poll_accept(cx)).await?;
             let server = Connection::accepted(token, 4096, 1024 * 1024)?;
             let before = (server.drain.get().is_some(), client.drain.get().is_some());
-            let mut writer = Pipe::new(server.clone());
-            let mut reader = Pipe::new(client.clone());
+            let mut writer = Pipe::new(server.clone())?;
+            let mut reader = Pipe::new(client.clone())?;
             for _ in 0..3 {
                 let mut received = [0; 5];
                 let sending = async {
@@ -618,7 +652,7 @@ mod tests {
         let server = Connection::accepted(token, 65_536, 1024 * 1024).unwrap();
         drop(listening);
         let weak = Arc::downgrade(&server);
-        let mut pipe = Pipe::new(server.clone());
+        let mut pipe = Pipe::new(server.clone()).unwrap();
         let bytes = vec![b'x'; 65_536];
         assert_eq!(runtime.block_on(pipe.write(&bytes)).unwrap(), bytes.len());
         // Actual native return status, not a pre-entry marker or poll-count
@@ -747,8 +781,8 @@ mod tests {
             let server = Connection::accepted(token, 4096, 1024 * 1024).unwrap();
             let next = Listening::new(&port, &path, 4096, false).unwrap();
             let frame = b"{\"owned\":\"adapter\"}\n";
-            let mut writer = Pipe::new(server.clone());
-            let mut reader = Pipe::new(client.clone());
+            let mut writer = Pipe::new(server.clone()).unwrap();
+            let mut reader = Pipe::new(client.clone()).unwrap();
             let mut received = [0; 20];
             assert_eq!(frame.len(), received.len());
             let sending = async {

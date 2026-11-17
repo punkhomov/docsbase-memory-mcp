@@ -654,3 +654,12 @@ Tests cover exact multi-chunk final delivery, optional-helper retirement and
 actual NOT_FOUND cancellation in a controlled pre-entry interval. Exact-source
 Windows cross-typecheck and fmt pass; native GREEN and task review are pending.
 This is not operational integration or #155 acceptance.
+
+MODIFIED 2026-11-17 — W2 review correction: candidate9c473fb passed all12
+actual Windows core/root cases in run44099804924. Fresh static review found an
+Important unchecked-writer-clone race and Minor noncausal final-read ordering.
+Pipe is now nonclonable and each Connection permits only one logical stream;
+Tokio split owns that stream. The final delivery case gates client reads at an
+exact native-region boundary, retaining the final newline in the kernel until
+a pending final-drain observation. Fix cross-typecheck/fmt pass; fixed-source
+native execution and re-review are pending, so W2 is not yet marked complete.
