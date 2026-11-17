@@ -182,10 +182,14 @@ impl Ownership {
         drop((entered, release));
     }
     pub(crate) fn retain_connection(&self, charge: Arc<dyn Send + Sync>) -> io::Result<()> {
-        self.0.retain(false, charge)
+        // Deliberately broken ownership for isolated native regression RED.
+        drop(charge);
+        Ok(())
     }
     pub(crate) fn retain_request(&self, charge: Arc<dyn Send + Sync>) -> io::Result<()> {
-        self.0.retain(true, charge)
+        // Deliberately broken ownership for isolated native regression RED.
+        drop(charge);
+        Ok(())
     }
     pub(crate) fn request_completed(&self) {
         self.0.request_completed();
