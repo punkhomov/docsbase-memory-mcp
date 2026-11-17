@@ -79,10 +79,6 @@ impl Client {
     /// # Errors
     /// Returns [`Error::Protocol`] on framing/decoding problems and
     /// [`Error::Internal`] on socket IO failures.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "requests are consumed once sent; keeps the brief's `call(Request)` contract"
-    )]
     pub fn call(&mut self, request: Request) -> Result<Response> {
         if self.poisoned {
             return Err(Error::transport(

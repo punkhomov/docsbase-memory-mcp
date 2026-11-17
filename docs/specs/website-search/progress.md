@@ -560,3 +560,15 @@ the result. Focused encoding2/0. Owned IOCP/helper retirement, caller roots,
 coordinator/Stop acknowledgement and native terminal acceptance remain WIP;
 #155 is not complete and the diagnostic T1 remains intentionally RED until its
 retarget to actual terminal ownership. No policy/baseline/ignore change.
+
+MODIFIED 2026-11-17 — #155 native-core WIP: private raw IOCP core now owns
+reserved physical-handle tokens, stable OVERLAPPED/buffer slots and packet
+references installed before submission. Submission return and native completion
+are separate gates. Cancellation uses handle→slot lock order and charges each
+cancel caller until return, fencing buffer reuse and handle close. Three native-
+compiled state tests cover completion-before-return, duplicate completion and a
+delayed cancellation caller; they are not pending-I/O/physical-retirement proof.
+Windows ABI/state execution is pending the isolated exact-source harness. Four
+first-draft Clippy findings are corrected in-task. Stream/helper ownership,
+outer-root migration and final normal native gates remain WIP; no clean-retirement
+or #155 completion claim. Existing test/baseline/ignore budgets unchanged.

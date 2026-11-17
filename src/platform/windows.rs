@@ -720,3 +720,5 @@ mod tests {
         assert!(!present, "embedded NUL must not probe the live prefix");
     }
 }
+
+mod native_io;

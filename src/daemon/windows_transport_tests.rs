@@ -83,6 +83,7 @@ fn evidence(name: &str, value: &impl Serialize) -> std::result::Result<(), Strin
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One ordered native observation/cleanup protocol; assertions follow cleanup.
 fn stalled_get_doc_retains_original_connection_until_native_retirement() {
     let fixture = Fixture::new(HybridStages::default());
     let document_bytes = usize::try_from(Config::default().max_file_size)
@@ -229,7 +230,7 @@ fn stalled_get_doc_retains_original_connection_until_native_retirement() {
     let cleanup = json!({
         "schema":1,"phase":"cleanup",
         "reader_gate_phase":reader_phase.load(Ordering::Acquire),
-        "client_returned":client.as_ref().is_ok_and(|result| result.is_ok()),
+        "client_returned":client.as_ref().is_ok_and(std::result::Result::is_ok),
         "actual_frame_bytes":client.as_ref().ok().and_then(|result| result.as_ref().ok()),
         "original_available_slots":slots.available_permits(),
         "original_activity":fixture.shared.activity.counter.load(Ordering::SeqCst),
