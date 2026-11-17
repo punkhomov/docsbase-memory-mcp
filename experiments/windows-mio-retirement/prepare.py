@@ -32,8 +32,11 @@ def main():
         with tarfile.open(archive) as source:
             source.extractall(base / "vendor", filter="data")
         shutil.move(staging, destination)
+        # Windows checkout may use CRLF; crate archives contain LF source.
+        patch = (base / f"{name}.patch").read_bytes().replace(b"\r\n", b"\n")
         subprocess.run(
-            ["git", "apply", "--no-index", "--unidiff-zero", str(base / f"{name}.patch")],
+            ["git", "apply", "--no-index", "--unidiff-zero", "-"],
+            input=patch,
             cwd=destination,
             check=True,
         )

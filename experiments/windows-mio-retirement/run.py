@@ -45,7 +45,7 @@ def main():
         "tree": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=BASE).decode().strip(),
         "rustc": subprocess.check_output(["rustc", "-Vv"], env=env).decode(),
         "patches": {
-            name: hashlib.sha256((BASE / name).read_bytes()).hexdigest()
+            name: hashlib.sha256((BASE / name).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
             for name in ["mio.patch", "tokio.patch"]
         },
     }
