@@ -148,7 +148,7 @@ jobs:
             Write-Host $line
             [Console]::Out.Flush()
           }
-          $testPrefix = 'platform::windows::connection::tests::persistent_exchange_completes_native_writes_without_a_drain_worker'
+          $testPrefix = 'platform::windows::'
           $legacyFacadeTests = 'platform::windows::tests::'
           if ($env:EXPECTED_TEST_COUNT -notmatch '^[1-9][0-9]?$') { throw 'Invalid reviewed test count' }
           $expectedCount = [int]$env:EXPECTED_TEST_COUNT
@@ -157,7 +157,7 @@ jobs:
           $selected = @(Get-Content target/transport155-t2/selected-tests.txt | Where-Object { $_.StartsWith($testPrefix) -and $_.EndsWith(': test') })
           if ($selected.Count -ne $expectedCount) { throw 'Reviewed native core test count mismatch; never zero-selected' }
           foreach ($line in $selected) {
-            if (-not ($line.StartsWith('platform::windows::native_io::tests::') -or $line.StartsWith('platform::windows::connection::tests::') -or $line.StartsWith('platform::windows::flush::tests::'))) { throw 'Unexpected test outside reviewed owned-transport modules' }
+            if (-not ($line.StartsWith('platform::windows::native_io::tests::') -or $line.StartsWith('platform::windows::connection::tests::') -or $line.StartsWith('platform::windows::flush::tests::') -or $line.StartsWith('platform::windows::root::tests::'))) { throw 'Unexpected test outside reviewed owned-transport modules' }
           }
           Record-Watchdog 'SupervisorLaunch' @{executable=$executable; deadline_ms=180000}
           $process = Start-Process -FilePath $executable -ArgumentList @($testPrefix,'--skip',$legacyFacadeTests,'--nocapture','--test-threads=1') -PassThru -NoNewWindow -RedirectStandardOutput target/transport155-t2/supervisor.stdout.log -RedirectStandardError target/transport155-t2/supervisor.stderr.log
