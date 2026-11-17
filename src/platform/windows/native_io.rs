@@ -67,6 +67,8 @@ pub(super) struct Operation {
     storage: UnsafeCell<Option<Region>>,
     pointer: *mut u8,
     capacity: usize,
+    #[cfg(test)]
+    pending_submission: AtomicBool,
     kind: Kind,
     token: Arc<HandleToken>,
     state: Mutex<State>,
@@ -98,6 +100,8 @@ impl Operation {
             storage: UnsafeCell::new(storage),
             pointer,
             capacity,
+            #[cfg(test)]
+            pending_submission: AtomicBool::new(false),
             kind,
             token,
             state: Mutex::new(State::default()),
@@ -188,6 +192,9 @@ impl Operation {
         } else {
             0
         };
+        #[cfg(test)]
+        self.pending_submission
+            .store(ok == 0 && error == ERROR_IO_PENDING, Ordering::Release);
         let local = ok == 0 && error != ERROR_IO_PENDING;
         if local {
             let error = if self.kind == Kind::Connect && error == ERROR_PIPE_CONNECTED {
@@ -207,6 +214,10 @@ impl Operation {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(super) fn submitted_pending(&self) -> bool {
+        self.pending_submission.load(Ordering::Acquire)
+    }
     fn finalize(&self, state: &mut State) {
         if state.returned && state.terminal.is_some() && state.accounted {
             state.accounted = false;
@@ -367,6 +378,12 @@ pub(super) struct HandleToken {
     port: Weak<PortInner>,
 }
 impl HandleToken {
+    pub(super) fn service(&self) -> io::Result<Service> {
+        self.port
+            .upgrade()
+            .map(|inner| Service { inner })
+            .ok_or_else(|| failure("native transport owner is gone"))
+    }
     pub(super) fn disconnect_failed(&self) {
         self.aborting.store(true, Ordering::Release);
         let gate = locked(&self.handle);
@@ -451,10 +468,20 @@ impl HandleToken {
     }
 }
 
+/// Registered before exposing a connection to a cancellable task. Only the
+/// synchronous outer owner invokes retirement; IOCP never joins helpers.
+pub(super) trait PhysicalOwner: Send + Sync {
+    fn abort(&self);
+    fn retire_ready(&self) -> io::Result<bool>;
+}
+struct Record {
+    token: Arc<HandleToken>,
+    owner: Option<Arc<dyn PhysicalOwner>>,
+}
 enum Entry {
     Empty,
     Reserved,
-    Live(Arc<HandleToken>),
+    Live(Record),
 }
 struct PortState {
     entries: Vec<Entry>,
@@ -463,6 +490,7 @@ struct PortState {
 struct PortInner {
     handle: OwnedHandle,
     state: Mutex<PortState>,
+    accepting: AtomicBool,
     stopping: AtomicBool,
     failed: AtomicBool,
 }
@@ -470,6 +498,11 @@ struct PortInner {
 pub(super) struct Port {
     inner: Arc<PortInner>,
     thread: Option<JoinHandle<io::Result<()>>>,
+}
+/// Clonable submission capability, never ownership of the progress thread.
+#[derive(Clone)]
+pub(super) struct Service {
+    inner: Arc<PortInner>,
 }
 pub(super) struct Reservation {
     inner: Arc<PortInner>,
@@ -499,6 +532,7 @@ impl Port {
                 entries,
                 fault: None,
             }),
+            accepting: AtomicBool::new(true),
             stopping: AtomicBool::new(false),
             failed: AtomicBool::new(false),
         });
@@ -509,17 +543,14 @@ impl Port {
             .spawn(move || {
                 let result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| worker.run()));
-                match result {
-                    Ok(result) => {
-                        if result.is_err() {
-                            worker.fail("native completion driver failed");
-                        }
-                        result
+                if let Ok(result) = result {
+                    if result.is_err() {
+                        worker.fail("native completion driver failed");
                     }
-                    Err(_) => {
-                        worker.fail("native completion driver unwound");
-                        Err(failure("native completion driver unwound"))
-                    }
+                    result
+                } else {
+                    worker.fail("native completion driver unwound");
+                    Err(failure("native completion driver unwound"))
                 }
             })?;
         Ok(Self {
@@ -530,45 +561,16 @@ impl Port {
     pub(super) fn fault(&self) -> Option<&'static str> {
         locked(&self.inner.state).fault
     }
-    pub(super) fn reserve(&self) -> io::Result<Reservation> {
-        let mut state = locked(&self.inner.state);
-        if state.fault.is_some()
-            || self.inner.failed.load(Ordering::Acquire)
-            || self.inner.stopping.load(Ordering::Acquire)
-        {
-            return Err(failure("native transport is closing"));
-        }
-        let index = state
-            .entries
-            .iter()
-            .position(|entry| matches!(entry, Entry::Empty))
-            .ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))?;
-        state.entries[index] = Entry::Reserved;
-        Ok(Reservation {
+    pub(super) fn service(&self) -> Service {
+        Service {
             inner: self.inner.clone(),
-            index,
-            consumed: false,
-        })
+        }
+    }
+    pub(super) fn reserve(&self) -> io::Result<Reservation> {
+        self.service().reserve()
     }
     pub(super) fn retire(&self, token: &Arc<HandleToken>) -> bool {
-        if self.inner.failed.load(Ordering::Acquire) {
-            return false;
-        }
-        if !token.close_if_idle() {
-            return false;
-        }
-        let mut state = locked(&self.inner.state);
-        if state.fault.is_some() {
-            return false;
-        }
-        if let Some(entry) = state
-            .entries
-            .iter_mut()
-            .find(|entry| matches!(entry, Entry::Live(found) if Arc::ptr_eq(found,token)))
-        {
-            *entry = Entry::Empty;
-        }
-        true
+        self.service().retire(token)
     }
     #[cfg(test)]
     pub(super) fn wait_progress_signal(&self) -> io::Result<()> {
@@ -619,9 +621,132 @@ impl Port {
         Ok(())
     }
 }
+impl Service {
+    pub(super) fn reserve(&self) -> io::Result<Reservation> {
+        let mut state = locked(&self.inner.state);
+        if !self.inner.accepting.load(Ordering::Acquire)
+            || state.fault.is_some()
+            || self.inner.failed.load(Ordering::Acquire)
+            || self.inner.stopping.load(Ordering::Acquire)
+        {
+            return Err(failure("native transport is closing"));
+        }
+        let index = state
+            .entries
+            .iter()
+            .position(|entry| matches!(entry, Entry::Empty))
+            .ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))?;
+        state.entries[index] = Entry::Reserved;
+        Ok(Reservation {
+            inner: self.inner.clone(),
+            index,
+            consumed: false,
+        })
+    }
+    pub(super) fn attach(
+        &self,
+        token: &Arc<HandleToken>,
+        owner: Arc<dyn PhysicalOwner>,
+    ) -> io::Result<()> {
+        let previous = {
+            let mut state = locked(&self.inner.state);
+            let record = state
+                .entries
+                .iter_mut()
+                .find_map(|entry| match entry {
+                    Entry::Live(record) if Arc::ptr_eq(&record.token, token) => Some(record),
+                    _ => None,
+                })
+                .ok_or_else(|| failure("native owner registration disappeared"))?;
+            // Acceptance transfers the SAME physical token. The previous
+            // listening envelope is taken out of the registry lock before Drop.
+            record.owner.replace(owner)
+        };
+        drop(previous);
+        Ok(())
+    }
+    pub(super) fn retire(&self, token: &Arc<HandleToken>) -> bool {
+        if self.inner.failed.load(Ordering::Acquire) || !token.close_if_idle() {
+            return false;
+        }
+        let removed = {
+            let mut state = locked(&self.inner.state);
+            if state.fault.is_some() {
+                return false;
+            }
+            state.entries.iter_mut()
+                .find(|entry| matches!(entry, Entry::Live(record) if Arc::ptr_eq(&record.token, token)))
+                .map(|entry| std::mem::replace(entry, Entry::Empty))
+        };
+        // Native storage/helper owners can contain application permit/Activity
+        // tails. Their final Drop must never execute under the arena mutex.
+        drop(removed);
+        true
+    }
+    pub(super) fn quiesce(&self) {
+        self.inner.accepting.store(false, Ordering::Release);
+    }
+    pub(super) fn abort(&self) {
+        self.quiesce();
+        let length = locked(&self.inner.state).entries.len();
+        for index in 0..length {
+            let record = {
+                let state = locked(&self.inner.state);
+                match &state.entries[index] {
+                    Entry::Live(record) => Some((record.token.clone(), record.owner.clone())),
+                    _ => None,
+                }
+            };
+            if let Some((token, owner)) = record {
+                token.abort();
+                if let Some(owner) = owner {
+                    owner.abort();
+                }
+            }
+        }
+    }
+    /// Synchronous outer-root drive only. Each helper join first observes its
+    /// actual native thread signal; no waiting or application callback on IOCP.
+    pub(super) fn reap(&self) -> io::Result<usize> {
+        let length = locked(&self.inner.state).entries.len();
+        let mut retained = 0;
+        for index in 0..length {
+            let record = {
+                let state = locked(&self.inner.state);
+                match &state.entries[index] {
+                    Entry::Live(record) => Some((record.token.clone(), record.owner.clone())),
+                    Entry::Reserved => {
+                        retained += 1;
+                        None
+                    }
+                    Entry::Empty => None,
+                }
+            };
+            if let Some((token, owner)) = record {
+                if !token.is_aborting() {
+                    retained += 1;
+                    continue;
+                }
+                if let Some(owner) = owner {
+                    owner.abort();
+                    if !owner.retire_ready()? {
+                        retained += 1;
+                        continue;
+                    }
+                }
+                if !self.retire(&token) {
+                    retained += 1;
+                }
+            }
+        }
+        Ok(retained)
+    }
+}
 impl Reservation {
     pub(super) fn associate(mut self, handle: OwnedHandle) -> io::Result<Arc<HandleToken>> {
-        if self.inner.failed.load(Ordering::Acquire) || self.inner.stopping.load(Ordering::Acquire)
+        if !self.inner.accepting.load(Ordering::Acquire)
+            || self.inner.failed.load(Ordering::Acquire)
+            || self.inner.stopping.load(Ordering::Acquire)
         {
             return Err(failure("native progress owner is closed"));
         }
@@ -634,7 +759,10 @@ impl Reservation {
             port: Arc::downgrade(&self.inner),
         });
         let key = Arc::as_ptr(&token) as usize;
-        locked(&self.inner.state).entries[self.index] = Entry::Live(token.clone());
+        locked(&self.inner.state).entries[self.index] = Entry::Live(Record {
+            token: token.clone(),
+            owner: None,
+        });
         self.consumed = true;
         let handle = locked(&token.handle)
             .as_ref()
@@ -674,7 +802,7 @@ impl PortInner {
         // pre-entry cancellation race; no completion is fabricated here.
         for index in 0..length {
             let token = match &locked(&self.state).entries[index] {
-                Entry::Live(token) => Some(token.clone()),
+                Entry::Live(record) => Some(record.token.clone()),
                 _ => None,
             };
             if let Some(token) = token {
@@ -715,7 +843,9 @@ impl PortInner {
             let token = {
                 let state = locked(&self.state);
                 state.entries.iter().find_map(|entry| match entry {
-                    Entry::Live(token) if Arc::as_ptr(token) as usize == key => Some(token.clone()),
+                    Entry::Live(record) if Arc::as_ptr(&record.token) as usize == key => {
+                        Some(record.token.clone())
+                    }
                     _ => None,
                 })
             }
@@ -831,6 +961,7 @@ mod tests {
                 entries: vec![Entry::Empty],
                 fault: None,
             }),
+            accepting: AtomicBool::new(true),
             stopping: AtomicBool::new(false),
             failed: AtomicBool::new(false),
         });
@@ -842,7 +973,10 @@ mod tests {
             helper_ready: AtomicBool::new(true),
             port: Arc::downgrade(&inner),
         });
-        locked(&inner.state).entries[0] = Entry::Live(token.clone());
+        locked(&inner.state).entries[0] = Entry::Live(Record {
+            token: token.clone(),
+            owner: None,
+        });
         let write = Operation::new(token.clone(), Kind::Write, 8).unwrap();
         let mut port = Port {
             inner,
@@ -859,7 +993,7 @@ mod tests {
         assert!(port.reserve().is_err());
         assert!(!port.retire(&token));
         assert!(
-            matches!(&locked(&port.inner.state).entries[0], Entry::Live(retained) if Arc::ptr_eq(retained, &token))
+            matches!(&locked(&port.inner.state).entries[0], Entry::Live(retained) if Arc::ptr_eq(&retained.token, &token))
         );
         assert!(port.finish().is_err());
     }

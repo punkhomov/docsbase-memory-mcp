@@ -604,3 +604,16 @@ A new actual raw-pipe case holds a native cancellation caller past helper join
 and checks repeated retirement observations. Windows execution is pending;
 current formatting passes. This is a correction of the core-review Important
 finding, not a completed transport/root delivery claim.
+
+MODIFIED 2026-11-17 — #155 physical-owner WIP: the bounded IOCP registry
+now retains the listening/connection envelope before cancellable exposure and
+before helper startup. A transfer preserves the physical token; replaced
+envelopes and terminal owners drop outside the registry lock. A shared service
+capability supplies admission, irreversible quiescence/abort and outer reaping;
+escaped capabilities cannot reopen a finished scope. Logical stream Drop only
+cancels/wakes; registered buffers and helper handles stay with the outer root.
+A scoped runner drives native/helper retirement outside Tokio on work return or
+unwind and retains quarantine after an observation interval. Three actual
+connection cases plus one outer error/unwind case now await native execution;
+Linux encoding2/0 and formatting pass. Operational daemon/client facade,
+Activity/permit and complete policy migration remain WIP, not #155 acceptance.

@@ -740,6 +740,7 @@ mod tests {
 }
 
 mod native_io;
+mod root;
 
 mod flush;
 
