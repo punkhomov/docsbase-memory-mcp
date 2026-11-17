@@ -465,6 +465,7 @@ impl HandleToken {
 pub(super) trait PhysicalOwner: Send + Sync {
     fn abort(&self);
     fn retire_ready(&self) -> io::Result<bool>;
+    fn retired(&self) {}
 }
 struct Record {
     token: Arc<HandleToken>,
@@ -672,6 +673,11 @@ impl Service {
         };
         // Native storage/helper owners can contain application permit/Activity
         // tails. Their final Drop must never execute under the arena mutex.
+        if let Some(Entry::Live(record)) = &removed
+            && let Some(owner) = &record.owner
+        {
+            owner.retired();
+        }
         drop(removed);
         true
     }

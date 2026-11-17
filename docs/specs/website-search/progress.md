@@ -706,3 +706,13 @@ corrected to count the application stack once, outside per-handle multiplication
 re-review ADDRESSED. Root-specific cross-target Clippy diagnostics are resolved,
 exact-source cross-typecheck and fmt pass. Operational integration remains W3.
 Ruling: private root slice approved; no claim that production #155 is solved.
+
+MODIFIED 2026-11-17 — W3a2 native ownership-tail checkpoint. Physical retirement
+now releases installed connection/request charges outside the arena mutex,
+even if a cancelled task retains its logical Connection Arc. Installation
+checks the abort gate under the charge mutex; ordinary request completion waits
+for its native-write barrier, while final-drain charges remain until retirement.
+The controlled pre-entry cancellation case checks the original semaphore
+permits remain unavailable until actual retirement and become available with a
+logical owner still retained. Exact-source cross-typecheck/fmt pass; native
+execution and fresh review are pending. Operational daemon migration remains W3.

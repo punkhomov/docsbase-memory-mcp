@@ -7,7 +7,7 @@ use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::pin::Pin;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
@@ -128,6 +128,7 @@ pub(super) struct Connection {
     drain: OnceLock<io::Result<Flush>>,
     initializing: AtomicBool,
     logical_claimed: AtomicBool,
+    charges: Mutex<[Option<Arc<dyn Send + Sync>>; 2]>,
     helper_stack_bytes: usize,
     closing: AtomicBool,
     closed: AtomicBool,
@@ -203,6 +204,7 @@ impl Connection {
             drain: OnceLock::new(),
             initializing: AtomicBool::new(false),
             logical_claimed: AtomicBool::new(false),
+            charges: Mutex::new([None, None]),
             helper_stack_bytes: stack,
             closing: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -234,6 +236,27 @@ impl Connection {
                 ))
             }
         }
+    }
+    /// Install ownership before submission; old owners drop outside the lock.
+    pub(super) fn retain(&self, request: bool, charge: Arc<dyn Send + Sync>) -> io::Result<()> {
+        let old = {
+            let mut charges = self.charges.lock().unwrap_or_else(PoisonError::into_inner);
+            if self.token.is_aborting() {
+                return Err(failure("native connection is aborting"));
+            }
+            charges[usize::from(request)].replace(charge)
+        };
+        drop(old);
+        Ok(())
+    }
+    pub(super) fn request_completed(&self) {
+        // A final-drain worker keeps the request through its actual thread
+        // exit/join. Persistent replies end at the native-write barrier.
+        if self.closing.load(Ordering::Acquire) || self.write.active() {
+            return;
+        }
+        let old = self.charges.lock().unwrap_or_else(PoisonError::into_inner)[1].take();
+        drop(old);
     }
     pub(super) fn abort(&self) {
         self.token.abort();
@@ -305,6 +328,13 @@ impl PhysicalOwner for Connection {
             Some(Ok(drain)) => drain.join_ready(),
             None | Some(Err(_)) => Ok(true),
         }
+    }
+    fn retired(&self) {
+        let old = {
+            let mut charges = self.charges.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::replace(&mut *charges, [None, None])
+        };
+        drop(old);
     }
 }
 
@@ -550,11 +580,19 @@ mod tests {
             drain_poll: std::time::Duration::from_millis(1),
             drain_observation: std::time::Duration::from_secs(30),
         };
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let admitted = slots.clone().try_acquire_owned().unwrap();
+        let request_slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let request = request_slots.clone().try_acquire_owned().unwrap();
+        let inspect_slots = slots.clone();
+        let inspect_requests = request_slots.clone();
         let weak = super::super::root::run_on(&runtime, &policy, |service| async move {
             let listening = Listening::new_in(&service, &path, 4096, true)?;
             let client = Connection::client_in(&service, &path, 4096, 1024 * 1024)?;
             let token = std::future::poll_fn(|cx| listening.poll_accept(cx)).await?;
             let server = Connection::accepted(token, 4096, 1024 * 1024)?;
+            server.retain(false, Arc::new(admitted))?;
+            server.retain(true, Arc::new(request))?;
             let mut writer = Pipe::new(server.clone())?;
             writer.write_all(b"tail\n").await?;
             writer.flush().await?;
@@ -576,6 +614,16 @@ mod tests {
                 windows_sys::Win32::Foundation::ERROR_NOT_FOUND
             );
             assert!(!drain.join_ready()?);
+            assert_eq!(
+                inspect_slots.available_permits(),
+                0,
+                "original connection charge is still live"
+            );
+            assert_eq!(
+                inspect_requests.available_permits(),
+                0,
+                "original request charge is still live"
+            );
             assert_eq!(service.reap()?, 2);
             assert!(
                 matches!(service.reserve(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
@@ -583,9 +631,25 @@ mod tests {
             release.send(()).map_err(io::Error::other)?;
             assert!(closing.await.is_err());
             drop(client);
-            Ok(Arc::downgrade(&server))
+            Ok((Arc::downgrade(&server), server))
         })
         .unwrap();
+        let (weak, logical_owner) = weak;
+        assert_eq!(
+            slots.available_permits(),
+            1,
+            "physical retirement releases the original connection charge"
+        );
+        assert_eq!(
+            request_slots.available_permits(),
+            1,
+            "physical retirement releases the original request charge"
+        );
+        assert!(
+            weak.upgrade().is_some(),
+            "logical references may outlive retirement"
+        );
+        drop(logical_owner);
         assert!(
             weak.upgrade().is_none(),
             "outer owner observed actual thread exit/join"
