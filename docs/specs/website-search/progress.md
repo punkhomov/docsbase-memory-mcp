@@ -936,3 +936,48 @@ Windows core cross-typecheck and cross-Clippy pass; the compile-only harness
 suppresses only its unrelated stub unused-import reexports, never production
 lints. These are not native runtime acceptance. New cases retain the original
 external watchdog; departure recovery additionally bounds its joined exchange.
+
+Task W3: complete (2026-11-17, explicit operational ownership and delivery).
+The real admitted-daemon ownership mutation RED44115118167 and original native
+GREEN44112474352 establish sensitivity to original permit/Activity tails.
+The strengthened control-overlap case passes44118429594/44118927632. The existing
+CLI ambient-runtime case passes44118927632 and the final source run below.
+Common full cli-full1685/lean494, Node69/example15, native library and focused
+integration evidence is recorded above. No new crate, protocol/schema/reindex,
+retrieval baseline, ignore, production grace or detached native owner.
+Ruling: fresh operational/root/facade task reviews approved; final I1 lost-wake
+finding corrected ineda37b4, native RED44120796760 -> GREEN44122161279, scoped
+re-review ADDRESSED with no new Critical/Important findings.
+
+Task W3e: complete (2026-11-17, native connection arrival/withdrawal).
+Exact sourcec7a7bcb280681c554f7d8da1d0fe98d04eb46eca/tree
+bb3308f7c547a1ae8bc828cce57d8770c0de727d, isolated harness6dbec478,
+run44126814441:23/23, no ignores, independent watchdog normal exit0.
+Raw /tmp/pr164-arrival-native-green includes both added regressions, I1 wake,
+original slots0/Activity1 while native caller held and cleanup slots1/Activity0.
+The new busy/departure RED44124370836 fails exactly those2cases,21others pass.
+Linux lifecycle11/11, real CLI setup/no-replay4/4, all-target Clippy/fmt and
+compile-only native cross-check/Clippy pass. Existing probe/connection budgets
+remain explicit; no new worker or capacity default. The fixture now waits for
+busy connection admission under its explicit10s setup/probe deadline.
+Ruling: fresh review_164_arrival PASS / APPROVED, no findings. Independent final
+reviewer's W3e integration follow-up approved, no Critical/Important findings;
+I1 stays addressed and no deferred minors remain.
+
+Task W4b: complete (2026-11-17, source/native/review acceptance).
+Final production sourcec7a7bcb run44126814441 passes23/23 with actual native
+source/tree and disposable host provenance. All32cycles retain both actual
+cancellation callers and4physical records across a complete control reply,
+refuse extra admission, then release/join/reap to2control owners. Diagnostic
+128persistent5-byte transfers: p50=22us,p95=30us,max=51us,drain_helpers=0.
+W1's small actual Hello allocation98bytes versus old8388609 remains covered;
+these figures are not a before/after speedup or an application capacity result.
+W4a's causal real registration paths and retained subprocess cleanup remain
+accepted. Tests preserve deadlines/grace/baselines/ignores and paid APIs are unused.
+Ruling: final whole-feature review found I1 only, now ADDRESSED; W3e follow-up
+also approved. Source/review tasks are closed; **external readiness remains
+pending required docs/linux/macos/windows on the closing PR head**. Previous
+macOS cancellation acquired no runner and is not a passed native check. The
+closing documentation-only commit changes no production/test source from the
+verifiedc7a7bcb. Mark PR ready only after its exact-head required checks pass;
+merging remains a human action. No deferred minors.

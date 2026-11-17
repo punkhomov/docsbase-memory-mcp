@@ -50,31 +50,31 @@ Files: platform seam/facades, daemon lifecycle/server/scoped, IPC clients and
 CLI/MCP/Web composition roots; owner policy/catalog documentation.
 Consumes complete transport policy and Service; produces explicit capabilities
 for bind/connect, bounded buffering and outer-root retirement.
-- [ ] RED: real admitted stalled-reader regression observes actual native
+- [x] RED: real admitted stalled-reader regression observes actual native
   terminal state and original permit/Activity ownership; normal close delivers.
-- [ ] Install one explicit outer owner per application scope; pass submission
+- [x] Install one explicit outer owner per application scope; pass submission
   capability to daemon/client consumers. Never create a migrating port per RPC,
   wait indefinitely in a client timeout/Drop, or use a hidden global reaper.
-- [ ] Retain permit/Activity tails before native submission; pending retirement
+- [x] Retain permit/Activity tails before native submission; pending retirement
   consumes the same capacity. Include listening/rejected physical instances.
-- [ ] Both clients await native writes, preserve poisoned exchange behavior and
+- [x] Both clients await native writes, preserve poisoned exchange behavior and
   use actual blocking deadlines. Stop client reads a complete acknowledgement
   under the original overall deadline before observing process exit.
-- [ ] Normal final replies drain explicitly; abort paths discard only failed
+- [x] Normal final replies drain explicitly; abort paths discard only failed
   exchanges. Signal escalation does not free unresolved native storage.
-- [ ] Full/lean and relevant feature verification; fresh task review and ledger.
+- [x] Full/lean and relevant feature verification; fresh task review and ledger.
 
 ## W4 — deterministic lifecycle and final acceptance
 
 Files: tests/cleanup.rs, daemon lifecycle acceptance tests, Windows transport
 acceptance and website-search specs/progress.
-- [ ] Replace #165's sleep/workload inference with causal registration/work
+- [x] Replace #165's sleep/workload inference with causal registration/work
   barriers and a controllable grace clock; preserve real cleanup coverage.
-- [ ] Exercise repeated cancellation/admission exhaustion, clean final delivery,
+- [x] Exercise repeated cancellation/admission exhaustion, clean final delivery,
   root unwind, StopDaemon, blocking/async deadlines and control progress.
-- [ ] Final-source latency/allocation/helper measurements; no budget changes.
-- [ ] Required native CI and independent whole-feature review; resolve findings,
-  reconcile PR body/specs/ledger and mark ready only after evidence is complete.
+- [x] Final-source latency/allocation/helper measurements; no budget changes.
+- [x] Independent whole-feature review; resolve findings and reconcile PR
+  body/specs/ledger. Final-head CI remains the external readiness gate below.
 
 ## Delta 2026-11-17 — W3 integration slices and explicit ownership API
 
@@ -129,9 +129,19 @@ Per-connection drain threads remain optional and bounded until actual join.
 Required whole-suite Windows acceptance exposed two compatibility gaps after
 W3d: blocking burst admission sees transient PIPE_BUSY, and a client departing
 before ConnectNamedPipe yields ERROR_NO_DATA which must not stop the listener.
-- [ ] Native RED/GREEN for busy admission using one caller deadline and for a
+- [x] Native RED/GREEN for busy admission using one caller deadline and for a
   peer synchronously closed before accept; keep original physical arena bounds.
-- [ ] Explicit deadline API for Windows blocking callers, existing client2s
+- [x] Explicit deadline API for Windows blocking callers, existing client2s
   IO_TIMEOUT and fixture10s admission budget; no helper/default/replay.
-- [ ] Retire only the known abandoned instance, yield/rearm; preserve other errors.
-- [ ] Fresh W3e review and required native CI before readiness.
+- [x] Retire only the known abandoned instance, yield/rearm; preserve other errors.
+- [x] Fresh W3e review; final-head required native CI precedes readiness.
+
+## Delta 2026-11-17 — source closure and external readiness gate
+
+W3/W4/W3e implementation, scoped acceptance, diagnostics and independent reviews
+are complete at production sourcec7a7bcb. The final aggregate checkbox is split
+into source/review closure and the external PR-state gate: **docs, linux, macos
+and windows must all pass on the final PR head before marking ready**. This is
+not a waiver or a claim that the final CI has already passed. Exact-head checks
+and readiness are recorded by PR#164; the closing source commit documents the
+completed evidence and leaves that external gate pending. Human merge only.
