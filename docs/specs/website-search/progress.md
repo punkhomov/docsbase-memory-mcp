@@ -617,3 +617,16 @@ unwind and retains quarantine after an observation interval. Three actual
 connection cases plus one outer error/unwind case now await native execution;
 Linux encoding2/0 and formatting pass. Operational daemon/client facade,
 Activity/permit and complete policy migration remain WIP, not #155 acceptance.
+
+MODIFIED 2026-11-17 — #155/PR #164 research checkpoint: compared Microsoft
+cancellation/pipe lifecycle documentation, pinned libuv v1.x source and v2
+shutdown removal, Mio #1944, compio/Asio ownership contracts, Windows threadpool
+I/O and AF_UNIX alternatives. `windows-transport-research.md` records the three
+acceptance/write-completion/peer-drain boundaries, a candidate separating normal
+write completion from explicit normal-close drain, resource/performance
+hypotheses and discriminating native tests. No application implementation or
+native acceptance changed; no final design, finite-retirement or completion
+claim. Existing wire format, test budgets and baseline remain unchanged.
+Ruling: fresh research review PASS / APPROVED, no findings. Native lifetime,
+deadline, helper-capacity, delivery, performance and #165 acceptance remain
+unverified implementation work; this review does not qualify PR #164 for merge.
