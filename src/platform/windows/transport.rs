@@ -11,6 +11,35 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
+use windows_sys::Win32::Foundation::ERROR_SEM_TIMEOUT;
+use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+
+#[allow(unsafe_code)] // Borrowed name and finite caller-owned wait; no handle or worker.
+pub(super) fn wait_named_pipe(endpoint: &Endpoint, remaining: Duration) -> io::Result<()> {
+    if remaining.is_zero() {
+        return Err(io::Error::from(io::ErrorKind::TimedOut));
+    }
+    let path = super::pipe_path(endpoint)?;
+    let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    // Round to Win32 milliseconds without selecting either special value:
+    // zero asks for the server default, DWORD::MAX waits forever.
+    let millis = remaining
+        .as_nanos()
+        .div_ceil(1_000_000)
+        .clamp(1, u128::from(u32::MAX - 1));
+    let millis = u32::try_from(millis).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: the validated NUL-terminated name stays live for this synchronous
+    // call. The timeout is finite; IOCP progress stays on its independent owner.
+    if unsafe { WaitNamedPipeW(wide.as_ptr(), millis) } != 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_SEM_TIMEOUT.cast_signed()) {
+        Err(io::Error::new(io::ErrorKind::TimedOut, error))
+    } else {
+        Err(error)
+    }
+}
 
 pub(in crate::platform) fn run<T: Send>(
     options: &Options,
@@ -53,14 +82,16 @@ impl Transport {
             nonblocking: AtomicBool::new(false),
         })
     }
-    fn connection(&self, endpoint: &Endpoint) -> io::Result<Arc<Connection>> {
+    fn connection_raw(&self, endpoint: &Endpoint) -> io::Result<Arc<Connection>> {
         Connection::client_in(
             &self.service,
             &super::pipe_path(endpoint)?,
             self.options.chunk_bytes,
             self.options.helper_stack_bytes,
         )
-        .map_err(|error| {
+    }
+    fn connection(&self, endpoint: &Endpoint) -> io::Result<Arc<Connection>> {
+        self.connection_raw(endpoint).map_err(|error| {
             if error.raw_os_error() == Some(231) {
                 io::Error::new(io::ErrorKind::TimedOut, error)
             } else {
@@ -84,13 +115,54 @@ impl Transport {
         BlockingStream::new(self.connection(endpoint)?)
     }
 
+    /// Wait for a busy Windows pipe on this caller's thread, using one deadline.
+    /// No worker is created and no request is replayed after connection.
+    /// # Errors
+    /// Deadline expiry, exhausted local capacity or a non-busy native error.
+    pub fn connect_blocking_until(
+        &self,
+        endpoint: &Endpoint,
+        deadline: Instant,
+    ) -> io::Result<BlockingStream> {
+        BlockingStream::new(self.connection_until(endpoint, deadline, |remaining| {
+            wait_named_pipe(endpoint, remaining)
+        })?)
+    }
+
     pub(super) fn connection_until(
         &self,
         endpoint: &Endpoint,
-        _deadline: Instant,
-        _wait: impl FnMut(Duration) -> io::Result<()>,
+        deadline: Instant,
+        mut wait: impl FnMut(Duration) -> io::Result<()>,
     ) -> io::Result<Arc<Connection>> {
-        self.connection(endpoint)
+        loop {
+            if Instant::now() >= deadline {
+                return Err(io::Error::from(io::ErrorKind::TimedOut));
+            }
+            match self.connection_raw(endpoint) {
+                Ok(connection) => {
+                    if Instant::now() >= deadline {
+                        connection.abort();
+                        return Err(io::Error::from(io::ErrorKind::TimedOut));
+                    }
+                    return Ok(connection);
+                }
+                Err(error) if error.raw_os_error() == Some(231) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(io::Error::from(io::ErrorKind::TimedOut));
+                    }
+                    match wait(remaining) {
+                        Ok(()) => {}
+                        // A finite DWORD wait can end before a very long
+                        // caller deadline; its original Instant still governs.
+                        Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 }
 
@@ -107,45 +179,64 @@ impl Listener {
     /// Returns native accept errors or closure of the enclosing root.
     pub async fn accept(&self) -> io::Result<Stream> {
         let _accept = self.accepting.lock().await;
-        let pending = loop {
-            let changed = self.transport.service.capacity_changed();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            if let Some(pending) = self
-                .pending
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone()
-            {
-                break pending;
-            }
-            match Listening::new_in(
-                &self.transport.service,
-                &self.path,
-                self.transport.options.chunk_bytes,
-                false,
-            ) {
-                Ok(pending) => {
-                    *self.pending.lock().unwrap_or_else(PoisonError::into_inner) =
-                        Some(pending.clone());
+        loop {
+            let pending = loop {
+                let changed = self.transport.service.capacity_changed();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if let Some(pending) = self
+                    .pending
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone()
+                {
                     break pending;
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => changed.await,
+                match Listening::new_in(
+                    &self.transport.service,
+                    &self.path,
+                    self.transport.options.chunk_bytes,
+                    false,
+                ) {
+                    Ok(pending) => {
+                        *self.pending.lock().unwrap_or_else(PoisonError::into_inner) =
+                            Some(pending.clone());
+                        break pending;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => changed.await,
+                    Err(error) => return Err(error),
+                }
+            };
+            let token = match poll_fn(|cx| pending.poll_accept(cx)).await {
+                Ok(token) => token,
+                Err(error) if error.raw_os_error() == Some(232) => {
+                    // The peer connected and closed before ConnectNamedPipe. This
+                    // instance is not reusable; retire its original physical owner.
+                    self.pending
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take();
+                    pending.abort();
+                    drop(pending);
+                    // Connection churn must not monopolize the executor or prevent
+                    // cancellation while we prepare the next bounded instance.
+                    tokio::task::yield_now().await;
+                    continue;
+                }
                 Err(error) => return Err(error),
-            }
-        };
-        let token = poll_fn(|cx| pending.poll_accept(cx)).await?;
-        // No await after transfer: the same token becomes the admitted owner
-        // before a cancelled accept future could abandon the transition.
-        self.pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        Stream::new(Connection::accepted(
-            token,
-            self.transport.options.chunk_bytes,
-            self.transport.options.helper_stack_bytes,
-        )?)
+            };
+            // No await after transfer: the same token becomes the admitted owner
+            // before a cancelled accept future could abandon the transition.
+            self.pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            return Stream::new(Connection::accepted(
+                token,
+                self.transport.options.chunk_bytes,
+                self.transport.options.helper_stack_bytes,
+            )?);
+        }
     }
 }
 impl Drop for Listener {

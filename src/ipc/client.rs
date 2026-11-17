@@ -52,7 +52,12 @@ impl Client {
     ) -> Result<Option<Self>> {
         // No existence pre-check: named pipes have no file to stat.
         let endpoint = platform::daemon_endpoint(cache);
-        let Ok(stream) = transport.connect_blocking(&endpoint) else {
+        #[cfg(windows)]
+        let connected =
+            transport.connect_blocking_until(&endpoint, std::time::Instant::now() + IO_TIMEOUT);
+        #[cfg(unix)]
+        let connected = transport.connect_blocking(&endpoint);
+        let Ok(stream) = connected else {
             return Ok(None);
         };
         read_timeout(&stream).map_err(io_error)?;

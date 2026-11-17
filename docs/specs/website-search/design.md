@@ -389,3 +389,22 @@ submit, terminal completion и нулевого числа выполняющи�
 отмены не входят в уже returned/terminal операцию, поэтому после Ready не
 возникает нового caller между poll и копированием/потреблением результата.
 Это исправляет потерянное пробуждение без изменения deadline или lifetime.
+
+## Delta 2026-11-17 — W3e: подключение и уход клиента до accept
+
+Windows blocking Client использует прежний IO_TIMEOUT2s как явный бюджет
+первичного подключения. Новый `Transport::connect_blocking_until` принимает
+исходный Instant deadline; только PIPE_BUSY231 запускает WaitNamedPipe на том же
+вызывающем потоке. Успешное ожидание не резервирует экземпляр: последующий busy
+повторяется под тем же deadline. Каждый конечный Win32 wait получает оставшееся
+время в миллисекундах без значений server-default0/INFINITE; после него deadline
+проверяется до новой попытки. Отсутствие endpoint, локальный capacity refusal и
+другие ошибки не повторяются. Никакого запроса до соединения нет, replay после
+него отсутствует. Raw connect_blocking и async connect остаются одной попыткой;
+Stop сохраняет свой прежний общий15s цикл и не получает новый вложенный бюджет.
+
+Если peer уже закрылся до ConnectNamedPipe, ERROR_NO_DATA232 завершает только
+этот физический экземпляр. Listener убирает его из pending, просит abort,
+сохраняет arena-владение до retirement и после cooperative yield начинает новый
+accept в той же capacity. Прочие ошибки не маскируются; новый экземпляр ждёт
+фактической ёмкости. Отмена accept после yield не оставляет reusable stale handle.

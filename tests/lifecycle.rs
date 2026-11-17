@@ -70,6 +70,24 @@ impl Env {
         self.cache.path()
     }
 
+    fn connect_until(
+        &self,
+        deadline: Instant,
+    ) -> std::io::Result<platform::transport::BlockingStream> {
+        let endpoint = platform::daemon_endpoint(self.cache());
+        #[cfg(windows)]
+        {
+            self.transport.connect_blocking_until(&endpoint, deadline)
+        }
+        #[cfg(unix)]
+        {
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+            }
+            platform::connect_blocking(&self.transport, &endpoint)
+        }
+    }
+
     fn endpoint_up(&self) -> bool {
         platform::exists(&platform::daemon_endpoint(self.cache()))
     }
@@ -238,7 +256,7 @@ fn connection_flood_is_refused_and_daemon_survives() {
     let mut held = Vec::new();
     for _ in 0..MAX_CONNECTIONS {
         held.push(
-            platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+            env.connect_until(Instant::now() + Duration::from_secs(10))
                 .expect("connect within cap"),
         );
     }
@@ -248,9 +266,7 @@ fn connection_flood_is_refused_and_daemon_survives() {
     // iteration, so a probe cannot hold a slot itself.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let extra =
-            platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
-                .expect("connect handshake");
+        let extra = env.connect_until(deadline).expect("connect handshake");
         extra
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("timeout");

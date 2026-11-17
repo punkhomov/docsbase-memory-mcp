@@ -917,3 +917,22 @@ physical arena; other errors propagate. New deterministic native regressions
 first expose busy arrival and a File peer closed before ConnectNamedPipe.
 The initial deadline helper intentionally still delegates the old one-attempt
 path for native RED. No production settings, capacity or grace are increased.
+
+MODIFIED 2026-11-17 — W3e native RED and correction. Run44124370836 atfa215a1
+/tree106e0c14 fails exactly the new busy-arrival and pre-accept-departure cases;
+21existing cases pass, watchdog normal exit101. Raw /tmp/pr164-arrival-native-red.
+Implement explicit original-deadline Windows blocking admission with finite native
+WaitNamedPipe, selected by existing Client IO_TIMEOUT2s. Native raw231 is classified
+before one-attempt APIs map it to TimedOut. Only known abandoned232 instances
+retire/rearm after yield; all original arena limits remain. The actual public
+wait timeout and successful native wait are covered, including a second busy
+race with monotonically decreasing remaining time and expiry before submission.
+Linux lifecycle11/11 passes; exact native cross-typecheck passes (compile only).
+Fresh task review, native GREEN and full required CI remain pending.
+
+W3e local verification checkpoint: lifecycle11/11 and real CLI connection/setup
+regressions4/4 pass; all-target cli-full Clippy and fmt/diff pass. Exact-source
+Windows core cross-typecheck and cross-Clippy pass; the compile-only harness
+suppresses only its unrelated stub unused-import reexports, never production
+lints. These are not native runtime acceptance. New cases retain the original
+external watchdog; departure recovery additionally bounds its joined exchange.

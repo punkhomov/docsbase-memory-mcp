@@ -523,20 +523,38 @@ mod tests {
             let transport = super::super::transport::Transport::new(service.clone(), options);
             let _listener = transport.bind(&endpoint)?;
             let _occupied = transport.connect_blocking(&endpoint)?;
+            let timed_out = transport.connect_blocking_until(
+                &endpoint,
+                std::time::Instant::now() + std::time::Duration::from_millis(1),
+            );
+            assert_eq!(timed_out.err().unwrap().kind(), io::ErrorKind::TimedOut);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             let mut waits = 0;
+            let mut previous_remaining = std::time::Duration::from_secs(30);
             let mut next = None;
             let connected = transport.connection_until(&endpoint, deadline, |remaining| {
                 waits += 1;
                 assert!(!remaining.is_zero());
-                assert!(remaining <= std::time::Duration::from_secs(30));
-                // The next real instance is published only after the busy
-                // result selected the wait path, never by a timed sleep.
-                next = Some(Listening::new_in(&service, &path, 4096, false)?);
-                Ok(())
+                assert!(remaining <= previous_remaining);
+                previous_remaining = remaining;
+                if waits == 1 {
+                    // Availability can be consumed by another client before
+                    // CreateFile. The next busy result keeps the same deadline.
+                    return Ok(());
+                }
+                // Publish a real pending instance only after busy selected
+                // the wait path, then exercise the actual Win32 wait.
+                let listening = Listening::new_in(&service, &path, 4096, false)?;
+                assert!(
+                    listening
+                        .poll_accept(&Context::from_waker(std::task::Waker::noop()))
+                        .is_pending()
+                );
+                next = Some(listening);
+                super::super::transport::wait_named_pipe(&endpoint, remaining)
             })?;
             let _client = Pipe::new(connected)?;
-            assert_eq!(waits, 1);
+            assert_eq!(waits, 2);
             let expired = transport.connection_until(&endpoint, std::time::Instant::now(), |_| {
                 panic!("expired connection must not wait or restart its deadline")
             });
@@ -588,14 +606,19 @@ mod tests {
                 loop {
                     match transport.connect_async(&endpoint).await {
                         Ok(client) => return Ok::<_, io::Error>(client),
-                        Err(error) if matches!(error.raw_os_error(), Some(231)) => {
+                        Err(error) if error.kind() == io::ErrorKind::TimedOut => {
                             tokio::task::yield_now().await;
                         }
                         Err(error) => return Err(error),
                     }
                 }
             };
-            let (mut client, mut server) = tokio::try_join!(connecting, accepting)?;
+            let (mut client, mut server) =
+                tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                    tokio::try_join!(connecting, accepting)
+                })
+                .await
+                .map_err(io::Error::other)??;
             client.write_all(b"alive").await?;
             client.flush().await?;
             let mut bytes = [0; 5];

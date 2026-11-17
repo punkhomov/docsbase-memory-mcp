@@ -495,3 +495,10 @@ retiring exchanges. All arithmetic is checked. Native regions allocate lazily;
 ordinary replies create no drain helpers. Pending retirement never creates a
 second allowance outside the arena. Retirement poll/observation come from
 `daemon.drain_poll_ms`/`reply_drain_ms`; observation never permits detachment.
+
+MODIFIED 2026-11-17 — W3e/I49 subset: existing blocking IPC client IO_TIMEOUT2s
+also supplies an explicit Windows connection-admission deadline. Busy231 alone
+waits via finite WaitNamedPipe on its existing caller; native/control worker
+capacity and defaults are unchanged. Raw/async one-attempt constructors and
+Stop's original15s overall deadline are preserved. This adds no file key,
+invalidation edge, replay policy or private timeout fallback.

@@ -176,6 +176,11 @@ create one `ipc::transport::run` scope around the application or command. Constr
 and run any Tokio runtime inside that scope; pass clones of its Transport
 capability to clients and pools. Reuse the scope across RPCs and pagination.
 
+The Windows blocking Client uses its existing two-second IPC timeout for busy
+connection admission. Low-level callers can pass their own original deadline to
+`Transport::connect_blocking_until`; raw `connect_blocking` and async connection
+remain single attempts. Waiting creates no helper and never replays a request.
+
 On Windows the scope owns completion progress, native storage and optional final
 reply drain workers. A timeout or dropped exchange does not release resources
 still referenced by Windows. Such resources keep their original capacity until

@@ -217,3 +217,18 @@ controlled core-state tests alone are not whole-transport acceptance.
 - R12: [Microsoft: AF_UNIX on Windows](https://devblogs.microsoft.com/commandline/af_unix-comes-to-windows/).
 - R13: [CreateNamedPipeW buffer/quota remarks](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createnamedpipew).
 - R14: [Raymond Chen: overlapped PIPE_WAIT versus PIPE_NOWAIT](https://devblogs.microsoft.com/oldnewthing/20110114-00/?p=11753).
+
+## Delta 2026-11-17 — W3e native arrival/withdrawal references
+
+- [ConnectNamedPipe](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-connectnamedpipe):
+  client arrival before connect may produce ERROR_PIPE_CONNECTED (valid connection);
+  an already closed peer produces ERROR_NO_DATA and its instance must be retired.
+- [WaitNamedPipeW](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-waitnamedpipew):
+  TRUE is availability, not a reservation; another client can consume the instance
+  before CreateFile. No instances returns immediately; expiry is ERROR_SEM_TIMEOUT.
+  DWORD0 selects server default and DWORD_MAX waits forever, so explicit finite
+  caller waits select neither. Repeated busy races preserve one original deadline.
+
+Both primary pages were fetched and their parameter/error/remark sections read
+on2026-11-17. Native regressions distinguish busy admission from a departed peer;
+no blanket accept retry, helper/thread pool or new timeout default is proposed.
