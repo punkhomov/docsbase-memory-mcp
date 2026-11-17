@@ -1007,6 +1007,12 @@ mod tests {
 
     #[test]
     fn delayed_cancel_return_fences_buffer_reuse_and_physical_handle_close() {
+        struct WakeCount(AtomicUsize);
+        impl std::task::Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::AcqRel);
+            }
+        }
         let file = tempfile::tempfile().unwrap();
         let operation = pending(Some(file.into()));
         operation.token.aborting.store(true, Ordering::Release);
@@ -1021,6 +1027,10 @@ mod tests {
             });
         });
         observed.recv_timeout(Duration::from_secs(30)).unwrap();
+        let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = Waker::from(wakes.clone());
+        let context = Context::from_waker(&waker);
+        let initially_pending = operation.poll(&context).is_pending();
         operation
             .publish(Completion {
                 bytes: 1,
@@ -1030,14 +1040,26 @@ mod tests {
         let native_users = operation.token.users.load(Ordering::Acquire);
         let buffer_fenced = operation.copy_read(&mut [0; 8]).is_err();
         let handle_fenced = !operation.token.close_if_idle();
+        let publication_wakes = wakes.0.load(Ordering::Acquire);
+        // Publication consumed the first waker. A caller whose output is still
+        // fenced must register again for the last cancellation caller's return.
+        let pending_on_cancel_return = operation.poll(&context).is_pending();
         release.send(()).unwrap();
         thread.join().unwrap();
+        assert!(initially_pending);
         assert_eq!(
             native_users, 1,
             "cancel caller is still inside native boundary"
         );
         assert!(buffer_fenced);
         assert!(handle_fenced);
+        assert_eq!(publication_wakes, 1);
+        assert!(
+            pending_on_cancel_return,
+            "native terminal output is not ready while a cancellation caller holds it"
+        );
+        assert_eq!(wakes.0.load(Ordering::Acquire), 2);
+        assert!(operation.poll(&context).is_ready());
         let mut bytes = [1];
         assert_eq!(operation.copy_read(&mut bytes).unwrap(), 1);
         assert_eq!(bytes, [0]);

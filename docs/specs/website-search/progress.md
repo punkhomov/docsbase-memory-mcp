@@ -872,3 +872,15 @@ nested synchronous scopes are still refused. This preserves the original
 construction/polling distinction; no executor, timeout or ownership policy added.
 The exact existing regression is added to the isolated native selection for
 GREEN evidence; required whole-suite re-execution remains pending.
+
+MODIFIED 2026-11-17 — final review read-notification regression checkpoint.
+Native run44118927632 atbd4ff22 passes21/21, including the exact existing CLI
+runtime success/error/unwind/liveness case and strengthened32-cycle control
+overlap; watchdog exit0, raw /tmp/pr164-context-native-green. Final whole-feature
+review identified a separate late-cancellation lost wake: Operation::poll could
+report a terminal result while copy_read still returned WouldBlock because a
+cancellation caller retained the buffer. Terminal publication had consumed the
+waker, so caller return could leave the read asleep. Extend the existing controlled
+late-caller regression with a counting waker and observations before/after terminal
+publication and caller release. Release/join precede assertions. Native RED and
+correction remain pending; this checkpoint is not PR readiness.
