@@ -1007,3 +1007,29 @@ Ruling: fresh W4b acceptance reviewer PASS / APPROVED, no findings: original
 complete reply and removal/absence/probe assertions remain; the existing outer
 owner join supplies the required physical boundary. Focused Linux5/5 and target
 Clippy/fmt/diff pass. Corrected required native GREEN remains pending.
+
+MODIFIED 2026-11-17 — W4b shared search fixture launch isolation. Required
+run44133126075 atc5a6fd7 has green docs/Linux, but Windows reports689/690 library
+tests: actual_watch_reload_while_remote_is_held_retries_the_original_raw_batch
+fails its existing second-provider-entry assertion. Search Fixture still captures
+the process-global config directory changed concurrently by CLI tests. Replaying
+the unchanged test alone with a foreign max_file_size=1 reproduces the exact
+assertion after a real transient retry; an empty launch source passes. The retry
+correctly refilters under the inherited one-byte cap, so it never re-enters the
+provider. Give the shared fixture its own empty captured LaunchSnapshot, using
+the same component-owned DB, one-reader and dense policies. No production change,
+assertion/deadline adjustment, ignore, gate or workflow change.
+
+The same foreign-config command is now GREEN; full cli-full library669/669 and
+lean library494/494, all-target cli-full Clippy, fmt/diff pass. Evidence:
+/tmp/pr164-watch-{foreign-red,empty-green,foreign-green}.log and
+/tmp/pr164-watch-fixture-{cli-lib,lean,clippy}.log. Fresh scoped review and
+final-head required native checks gate readiness after this test isolation fix.
+
+Ruling: fresh W4b task reviewer PASS / APPROVED, no findings; final reviewer
+reports no new Critical/Important and previous review remains converged. The
+failed Windows run did not record its captured config; deterministic RED/GREEN
+proves the contamination mechanism and isolation, not that unrecorded value.
+macOS134215310028 cancelled with runner_id0 and no steps: hosted runner not
+acquired after multiple attempts, with arm64 capacity notices. This is not native
+source acceptance. All four required checks on the new head remain mandatory.
