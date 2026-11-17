@@ -716,3 +716,19 @@ The controlled pre-entry cancellation case checks the original semaphore
 permits remain unavailable until actual retirement and become available with a
 logical owner still retained. Exact-source cross-typecheck/fmt pass; native
 execution and fresh review are pending. Operational daemon migration remains W3.
+
+Task W3a2: complete (2026-11-17, private native ownership tails).
+Native run44106917232 source0e4b149 passes13/13; controlled pre-entry helper
+cancellation retains original permits until physical retirement, then releases
+them while a logical Connection owner still exists. Fresh review PASS / APPROVED,
+no findings. Exact-source cross-typecheck/fmt pass. Daemon attachment and
+persistent-reply completion ordering remain operational W3 acceptance.
+Ruling: ownership-tail slice approved; no production completion claim.
+
+MODIFIED 2026-11-17 — W3a3 explicit facade checkpoint. Add public complete
+transport Options/scope and a private Windows capability with cancellation-safe
+accept, physical-capacity notifications and blocking read/write deadlines over
+the same native operations. New native cases cover timed-out blocking reads,
+shared blocking directions/final delivery and a next listener waiting for actual
+arena capacity. Source cross-typecheck and lean-library Clippy pass; actual
+native execution/fresh facade review and consumer migration remain pending.

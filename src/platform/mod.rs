@@ -10,6 +10,7 @@
 //! directly; it is not a stable API.
 
 pub mod paths;
+pub mod transport;
 
 #[cfg(unix)]
 mod unix;

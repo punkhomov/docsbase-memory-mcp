@@ -486,6 +486,7 @@ struct PortInner {
     accepting: AtomicBool,
     stopping: AtomicBool,
     failed: AtomicBool,
+    capacity: tokio::sync::Notify,
 }
 
 pub(super) struct Port {
@@ -528,6 +529,7 @@ impl Port {
             accepting: AtomicBool::new(true),
             stopping: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            capacity: tokio::sync::Notify::new(),
         });
         let worker = inner.clone();
         let thread = std::thread::Builder::new()
@@ -615,6 +617,9 @@ impl Port {
     }
 }
 impl Service {
+    pub(super) fn capacity_changed(&self) -> tokio::sync::futures::Notified<'_> {
+        self.inner.capacity.notified()
+    }
     pub(super) fn reserve(&self) -> io::Result<Reservation> {
         let mut state = locked(&self.inner.state);
         if !self.inner.accepting.load(Ordering::Acquire)
@@ -679,10 +684,12 @@ impl Service {
             owner.retired();
         }
         drop(removed);
+        self.inner.capacity.notify_waiters();
         true
     }
     pub(super) fn quiesce(&self) {
         self.inner.accepting.store(false, Ordering::Release);
+        self.inner.capacity.notify_waiters();
     }
     pub(super) fn abort(&self) {
         self.quiesce();
@@ -774,6 +781,7 @@ impl Reservation {
             token.abort();
             token.close_if_idle();
             locked(&self.inner.state).entries[self.index] = Entry::Empty;
+            self.inner.capacity.notify_waiters();
             return Err(error);
         }
         Ok(token)
@@ -783,12 +791,14 @@ impl Drop for Reservation {
     fn drop(&mut self) {
         if !self.consumed {
             locked(&self.inner.state).entries[self.index] = Entry::Empty;
+            self.inner.capacity.notify_waiters();
         }
     }
 }
 impl PortInner {
     fn fail(&self, message: &'static str) {
         self.failed.store(true, Ordering::Release);
+        self.capacity.notify_waiters();
         let length = {
             let mut state = locked(&self.state);
             state.fault = Some(message);
@@ -959,6 +969,7 @@ mod tests {
             accepting: AtomicBool::new(true),
             stopping: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            capacity: tokio::sync::Notify::new(),
         });
         let token = Arc::new(HandleToken {
             handle: Mutex::new(None),

@@ -656,6 +656,147 @@ mod tests {
         );
     }
     #[test]
+    fn owned_facade_blocking_timeout_aborts_without_waiting_for_peer() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let policy = super::super::root::Options {
+            handles: 2,
+            chunk_bytes: 4096,
+            helper_stack_bytes: 1024 * 1024,
+            work_stack_bytes: 2 * 1024 * 1024,
+            drain_poll: std::time::Duration::from_millis(1),
+            drain_observation: std::time::Duration::from_secs(30),
+        };
+        let options = policy.clone();
+        super::super::root::run(&policy, move |service| {
+            let transport = super::super::transport::Transport::new(service, options);
+            let listener = transport.bind_blocking(&endpoint)?;
+            listener.set_nonblocking(true)?;
+            assert_eq!(
+                listener.accept().err().unwrap().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            let mut client = transport.connect_blocking(&endpoint)?;
+            listener.set_nonblocking(false)?;
+            let _server = listener.accept()?;
+            client.set_read_timeout(Some(std::time::Duration::from_millis(1)))?;
+            let error = std::io::Read::read(&mut client, &mut [0]).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn owned_facade_blocking_split_preserves_final_frame() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let policy = super::super::root::Options {
+            handles: 2,
+            chunk_bytes: 4096,
+            helper_stack_bytes: 1024 * 1024,
+            work_stack_bytes: 2 * 1024 * 1024,
+            drain_poll: std::time::Duration::from_millis(1),
+            drain_observation: std::time::Duration::from_secs(30),
+        };
+        let options = policy.clone();
+        super::super::root::run(&policy, move |service| {
+            let transport = super::super::transport::Transport::new(service, options);
+            let listener = transport.bind_blocking(&endpoint)?;
+            let mut client = transport.connect_blocking(&endpoint)?;
+            let server = listener.accept()?;
+            let mut reader = server.try_clone()?;
+            let mut writer = server;
+            let expected = vec![b'x'; 16_384];
+            std::thread::scope(|scope| -> io::Result<()> {
+                let bytes = &expected;
+                let serving = scope.spawn(move || -> io::Result<()> {
+                    let mut request = [0; 1];
+                    std::io::Read::read_exact(&mut reader, &mut request)?;
+                    assert_eq!(request, [b'?']);
+                    std::io::Write::write_all(&mut writer, bytes)?;
+                    std::io::Write::flush(&mut writer)?;
+                    writer.shutdown()
+                });
+                std::io::Write::write_all(&mut client, b"?")?;
+                std::io::Write::flush(&mut client)?;
+                let mut actual = vec![0; expected.len()];
+                std::io::Read::read_exact(&mut client, &mut actual)?;
+                assert_eq!(actual, expected);
+                serving.join().unwrap()
+            })
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn owned_facade_waits_for_physical_capacity_before_next_accept() {
+        use std::future::Future;
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let policy = super::super::root::Options {
+            handles: 2,
+            chunk_bytes: 4096,
+            helper_stack_bytes: 1024 * 1024,
+            work_stack_bytes: 2 * 1024 * 1024,
+            drain_poll: std::time::Duration::from_millis(1),
+            drain_observation: std::time::Duration::from_secs(30),
+        };
+        let options = policy.clone();
+        super::super::root::run_on(&runtime, &policy, move |service| async move {
+            let transport = super::super::transport::Transport::new(service.clone(), options);
+            let listener = transport.bind(&endpoint)?;
+            let client = transport.connect_async(&endpoint).await?;
+            let server = listener.accept().await?;
+            let mut next = std::pin::pin!(listener.accept());
+            std::future::poll_fn(|cx| {
+                assert!(
+                    next.as_mut().poll(cx).is_pending(),
+                    "full arena waits, never fatal accept"
+                );
+                std::task::Poll::Ready(())
+            })
+            .await;
+            drop(server);
+            drop(client);
+            // A registered capacity waiter must wake when actual retirement
+            // frees the old two physical records, without another application RPC.
+            let connecting = async {
+                loop {
+                    match transport.connect_async(&endpoint).await {
+                        Ok(client) => break Ok::<_, io::Error>(client),
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::WouldBlock
+                                    | io::ErrorKind::NotFound
+                                    | io::ErrorKind::TimedOut
+                            ) =>
+                        {
+                            tokio::task::yield_now().await;
+                        }
+                        Err(error) => break Err(error),
+                    }
+                }
+            };
+            let (server, client) =
+                tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                    tokio::try_join!(&mut next, connecting)
+                })
+                .await
+                .map_err(io::Error::other)??;
+            drop(server);
+            drop(client);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn persistent_exchange_completes_native_writes_without_a_drain_worker() {
         let directory = tempfile::tempdir().unwrap();
         let endpoint = crate::platform::daemon_endpoint(directory.path());

@@ -6,45 +6,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::time::{Duration, Instant};
 use tokio::runtime::{Handle, Runtime, RuntimeFlavor};
 
-/// Complete resolved composition. No native consumer supplies fallback policy.
-#[derive(Clone)]
-pub(super) struct Options {
-    pub handles: usize,
-    pub chunk_bytes: usize,
-    pub helper_stack_bytes: usize,
-    pub work_stack_bytes: usize,
-    pub drain_poll: Duration,
-    pub drain_observation: Duration,
-}
-impl Options {
-    fn validate(&self) -> io::Result<()> {
-        if self.handles == 0
-            || self.chunk_bytes == 0
-            || u32::try_from(self.chunk_bytes).is_err()
-            || self.helper_stack_bytes == 0
-            || self.work_stack_bytes == 0
-            || self.drain_poll.is_zero()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid complete native policy",
-            ));
-        }
-        // Reserve the entire retained-native/helper envelope before any HANDLE
-        // or helper creation. Frame/staging owners add their separate checked
-        // reservations at the application composition boundary.
-        self.chunk_bytes
-            .checked_mul(2)
-            .and_then(|bytes| bytes.checked_add(self.helper_stack_bytes))
-            .and_then(|bytes| bytes.checked_mul(self.handles))
-            .and_then(|bytes| bytes.checked_add(self.helper_stack_bytes))
-            .and_then(|bytes| bytes.checked_add(self.work_stack_bytes))
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "native capacity overflow")
-            })?;
-        Ok(())
-    }
-}
+pub(super) use crate::platform::transport::Options;
 
 /// The caller retains `Runtime`, `JobRoot`, signal receiver and admission lease.
 /// Only this outer function owns the progress `JoinHandle`. Its native owners

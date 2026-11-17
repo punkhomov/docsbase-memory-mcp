@@ -309,3 +309,27 @@ state-dependencies, without artifact invalidation. Full configurable bootstrap
 I52, source writes, CF5/v2 execution and strict activation stay deferred.
 Plan addendum scope/commands are in server-plan.md; original reviewer scoped
 PASS is required before runtime implementation. #152 closes with S1 integration.
+
+## Delta 2026-11-17 — ADR-W1: application-owned Windows transport
+
+Supersedes only ADR-10's interprocess transport ownership and no-op Windows I/O
+timeouts. Keep byte-stream NDJSON, names, protocol and non-consuming probes.
+Use the existing windows-sys dependency for an application-owned bounded IOCP
+arena. Explicit `platform::transport::Options` and a synchronous `run` scope
+produce a clonable Transport submission capability. The scope owns progress and
+retirement outside the application runtime. Capabilities may not construct their
+own ports or acquire hidden fallback policy. Unix delegates to existing sockets.
+
+A pending listener is preserved across accept-future cancellation. Acceptance
+transfers the same physical token; the next instance waits for an arena-capacity
+notification registered before its allocation attempt. Pending, admitted,
+rejected and retiring physical instances all consume that arena. Notification
+alone never proves native retirement. Blocking streams poll the same operations
+using a wake/condition and one absolute deadline per read/write/flush; timeout
+aborts the exchange without waiting for native completion. Reader/writer clones
+share the single serialized writer and never duplicate its logical Pipe. Final
+successful server close is explicit; Drop is cancellation, never delivery.
+
+The private core and the new explicit facade are being integrated in W3. Legacy
+constructors remain temporarily during that task and must be removed from all
+operational Windows paths before PR readiness. No wire/schema/crate change.

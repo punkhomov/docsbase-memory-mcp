@@ -740,8 +740,10 @@ mod tests {
 }
 
 mod native_io;
-mod root;
+pub(super) mod root;
 
 mod flush;
 
 mod connection;
+
+pub(super) mod transport;
