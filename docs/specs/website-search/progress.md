@@ -981,3 +981,11 @@ macOS cancellation acquired no runner and is not a passed native check. The
 closing documentation-only commit changes no production/test source from the
 verifiedc7a7bcb. Mark PR ready only after its exact-head required checks pass;
 merging remains a human action. No deferred minors.
+
+MODIFIED 2026-11-17 — final native lint correction. Required Windows job
+134198152329/run44128325322 atd053ae1 stops before tests on pedantic
+similar_names in I1's test-only `wakes`/`waker` bindings. Rename the counter to
+notifications; no production code, assertion, schedule or lint setting changes.
+The prior compile-only harness did not enable the repository's pedantic catalog;
+its check was never a substitute for required native CI. Final exact-head
+required checks remain the readiness gate.
