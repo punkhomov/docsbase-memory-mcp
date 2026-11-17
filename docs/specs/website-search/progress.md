@@ -804,3 +804,60 @@ native write/read sampling to128transfers and print diagnostic p50/p95/max;
 no latency threshold changes or claimed before/after improvement. The exact
 Windows core compile-only harness passes; native runtime evidence is pending.
 Real subprocess cleanup3/3also passes after moving #165 coverage.
+
+Task W4a: complete (2026-11-17, deterministic #165 regression).
+Ruling: fresh review_164_grace at32b5857 PASS / APPROVED, no findings. Both real
+registration paths, actual worker gate, controlled original grace expiry,
+indexed/session binding and clean disconnect/idle exit are checked. Mutation
+RED and restored lifecycle5/5 plus subprocess cleanup3/3pass. Native execution
+is part of the still-pending W4b final-source acceptance.
+
+MODIFIED 2026-11-17 — local full-suite environment correction. The first full
+cli-full run reached install after669library tests and earlier suites passed,
+then parallel install fixtures exhausted the20GiB filesystem (explicit ENOSPC).
+Standard cargo clean -p docsbase --profile dev freed8.3GiB; incremental cache is
+disabled for this verification run. Full suite rerun is in progress; no test,
+assertion, concurrency policy, baseline or threshold was changed to hide it.
+
+MODIFIED 2026-11-17 — W3/W4 common verification. After cache cleanup, the full
+cli-full suite passes1685tests across98targets/suites;18existingignored cases
+remain unchanged. Node client69/69and Website example15/15tests plus both TS
+checks pass. Lean's first parallel run exposed an existing project-state
+fixture inheriting another unit test's temporary global max_file_size=1.
+An isolated foreign launch config deterministically reproduces the identical
+0/0coverage failure; giving that fixture its own empty captured LaunchSnapshot
+makes the same reproduction pass. No production config behavior changed.
+Final project-state cli-full tests18/18and full lean library494/494pass;
+all-target and opt-in perf_budget/artifact Clippy pass. Full cli-full functional
+evidence precedes this test-fixture-only correction; native checks remain pending.
+
+MODIFIED 2026-11-17 — W3 strengthened native RED. Isolated never-merge mutation
+ e7010ff/tree9b44284 disables only the two facade ownership-tail attachments.
+Run44115118167fails exactly the real admitted-daemon regression,17other native
+tests pass and watchdog observes normal failure exit101. Frozen candidate:
+handler_returned=true, native_cancel_caller_held=true, reader_gate_phase=1,
+original_available_slots=1, original_activity=0. Cleanup joins/retire completes.
+The original source185bb7c's equivalent GREEN retained slots=0/activity=1.
+Artifacts /tmp/pr164-no-tail-native-red. This directly validates ownership-tail
+regression sensitivity without using unread-byte counts as a retirement proof.
+
+MODIFIED 2026-11-17 — W4b native checkpoint and review fix. Run44115522775,
+source32b5857/tree8f5e03c, harness457d6b9:20/20, watchdog exit0; raw artifacts
+/tmp/pr164-w4-native-green. Native128write/read diagnostic samples: p50=22us,
+p95=35us, max=53us, no drain helpers; not an application-load benchmark or a
+before/after speedup claim. Original admitted ownership candidate remains
+slots=0/activity=1 until cancellation caller release, then slots=1/activity=0.
+Ruling: fresh review_164_acceptance found Important: the new cancellation-churn
+case did not causally retain work across the control exchange. Revised it to
+hold actual CancelIoEx callers for BOTH native read endpoints, drop logical
+streams, require all4physical records and refused extra admission before and
+after the completed control reply, then release/join both callers and retire
+back to2control owners. Test-only gate Drop releases/joins on errors/unwind.
+Minor stale interprocess documentation corrected. Cross-typecheck passes;
+revised native execution/re-review pending. The earlier20/20run does not prove
+this strengthened control-overlap assertion.
+
+MODIFIED 2026-11-17 — frame-error local ownership audit. Keep a local Arc of
+Activity through explicit final error delivery as well as attaching its clone
+to native retirement. Unix's no-op native attachment must not consume the only
+logical Activity before the error write; Windows retention is unchanged.

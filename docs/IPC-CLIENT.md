@@ -159,10 +159,28 @@ pruning share control capacity. Fixed-project sync owns its singleton slot; a
 caller disconnect never returns a running closure's permit or physical Activity.
 The checked S+C+sync1+headroom1 <= B sum applies to this application inventory.
 
-On Windows the current interprocess dependency can retain separate std-thread
-linger work after a pipe owner is dropped. This work is outside the application's
-Tokio worker lanes and the sum above. Native adapter redesign is tracked by
-[#155](https://github.com/punkhomov/docsbase-memory-mcp/issues/155), independently
-parked; it is not a prerequisite for the application admission change. No
-process-wide thread/IPC-retirement or unconditional control-availability claim
-is made.
+On Windows the native transport has its own bounded physical arena outside
+Tokio worker lanes and the sum above. It retains native buffers, handles,
+cancellation callers and optional final-drain workers through actual retirement.
+This replaces the former interprocess linger path tracked by
+[#155](https://github.com/punkhomov/docsbase-memory-mcp/issues/155). Application
+worker admission alone still makes no process-wide thread or unconditional
+control-availability promise; the transport scope below owns native retirement.
+
+## Rust transport ownership (2026-11-17)
+
+Rust IPC callers now supply an explicit `&platform::transport::Transport` to
+`Client::{connect, try_connect}`, `AsyncClient::connect` and platform bind/connect
+functions. Resolve the complete owner policy with `ipc::transport::policy`, then
+create one `ipc::transport::run` scope around the application or command. Construct
+and run any Tokio runtime inside that scope; pass clones of its Transport
+capability to clients and pools. Reuse the scope across RPCs and pagination.
+
+On Windows the scope owns completion progress, native storage and optional final
+reply drain workers. A timeout or dropped exchange does not release resources
+still referenced by Windows. Such resources keep their original capacity until
+native retirement; unresolved retirement is retained and reported as draining or
+quarantined. The scope can therefore outlive the logical timeout. Returning a
+Transport clone does not transfer ownership of the scope. Unix retains its socket
+behavior behind the same explicit API. NDJSON, endpoint names and the Node client
+wire contract are unchanged; no persisted-index migration or reindex is needed.

@@ -197,3 +197,14 @@ Its explicit executor inventory/sum bounds application-owned Tokio work, with
 original deadlines and closure-held permits/Activity; no process-wide/native IPC
 retirement/control availability claim. Complete S1a/b/c and #152 in one functional
 server PR, then readiness+HTTP in a second functional PR to close #79.
+
+## Delta 2026-11-17 — Windows IPC completion (#155/#165)
+
+The exact ordered briefs and verification contracts are in
+[windows-transport-plan.md](windows-transport-plan.md): W1 bounded proportional
+serialization; W2 native-write barrier versus explicit final peer drain; W3
+explicit outer ownership and daemon/client/composition-root migration; W4a
+causal armed-grace registration regression and W4b final native acceptance.
+Each slice gets fresh task review and evidence in the progress ledger. Required
+native CI and a fresh whole-feature review precede ready status; merge is human.
+No protocol/index migration, new crate, golden delta or budget relaxation.

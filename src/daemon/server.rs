@@ -1450,7 +1450,7 @@ async fn handle_connection_in(
                     }
                     Ok(frame @ (Frame::Incomplete | Frame::TooLarge)) => {
                         let guard = Activity::new(&in_flight, &events, connection.as_ref());
-                        if ownership.retain_request(guard).is_err() {
+                        if ownership.retain_request(guard.clone()).is_err() {
                             break;
                         }
                         let deadline = Instant::now()

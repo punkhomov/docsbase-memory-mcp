@@ -866,12 +866,55 @@ mod tests {
         .unwrap();
     }
 
+    /// Test-only owner: every unwind/error releases and joins the actual caller.
+    struct HeldReadCancellation {
+        held: bool,
+        release: Option<std::sync::mpsc::Sender<()>>,
+        caller: Option<std::thread::JoinHandle<()>>,
+    }
+    impl HeldReadCancellation {
+        fn new(connection: Arc<Connection>) -> Self {
+            let (entered, observed) = std::sync::mpsc::channel();
+            let (release, proceed) = std::sync::mpsc::channel();
+            let caller = std::thread::spawn(move || {
+                connection.read.controlled_cancel(|handle, overlapped| {
+                    // SAFETY: controlled_cancel owns this handle/operation until
+                    // this actual cancellation caller returns, including the gate.
+                    unsafe {
+                        windows_sys::Win32::System::IO::CancelIoEx(handle, overlapped);
+                    }
+                    let _ = entered.send(());
+                    let _ = proceed.recv();
+                });
+            });
+            let held = observed
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .is_ok();
+            Self {
+                held,
+                release: Some(release),
+                caller: Some(caller),
+            }
+        }
+    }
+    impl Drop for HeldReadCancellation {
+        fn drop(&mut self) {
+            drop(self.release.take());
+            if let Some(caller) = self.caller.take() {
+                caller.join().unwrap();
+            }
+        }
+    }
+
     #[test]
+    #[allow(clippy::too_many_lines)] // One causal cancel/retention/control/release protocol.
     fn repeated_cancelled_reads_keep_bounded_capacity_and_control_progress() {
+        use std::future::Future;
         let directory = tempfile::tempdir().unwrap();
         let control = crate::platform::daemon_endpoint(directory.path());
         let churn = crate::platform::daemon_endpoint(&directory.path().join("churn"));
         let path = super::super::pipe_path(&control).unwrap();
+        let churn_path = super::super::pipe_path(&churn).unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -884,7 +927,6 @@ mod tests {
             drain_poll: std::time::Duration::from_millis(1),
             drain_observation: std::time::Duration::from_secs(30),
         };
-        let options = policy.clone();
         super::super::root::run_on(&runtime, &policy, move |service| async move {
             let listening = Listening::new_in(&service, &path, 4096, true)?;
             let client = Connection::client_in(&service, &path, 4096, 1024 * 1024)?;
@@ -892,30 +934,48 @@ mod tests {
             let server = Connection::accepted(token, 4096, 1024 * 1024)?;
             let mut writer = Pipe::new(server.clone())?;
             let mut reader = Pipe::new(client.clone())?;
-            let transport = super::super::transport::Transport::new(service.clone(), options);
             let mut high_water = 0;
             for _ in 0..32 {
-                let listener = transport.bind(&churn)?;
-                let peer = transport.connect_async(&churn).await?;
-                let mut dirty = listener.accept().await?;
+                let pending_listener = Listening::new_in(&service, &churn_path, 4096, true)?;
+                let peer = Connection::client_in(&service, &churn_path, 4096, 1024 * 1024)?;
+                let token = std::future::poll_fn(|cx| pending_listener.poll_accept(cx)).await?;
+                let accepted = Connection::accepted(token, 4096, 1024 * 1024)?;
+                let mut dirty = Pipe::new(accepted.clone())?;
+                let mut other = Pipe::new(peer.clone())?;
                 let mut byte = [0];
+                let mut opposite = [0];
                 {
                     let pending = dirty.read_exact(&mut byte);
-                    tokio::pin!(pending);
+                    let reverse = other.read_exact(&mut opposite);
+                    tokio::pin!(pending, reverse);
                     std::future::poll_fn(|cx| {
-                        use std::future::Future;
                         assert!(pending.as_mut().poll(cx).is_pending());
+                        assert!(reverse.as_mut().poll(cx).is_pending());
                         std::task::Poll::Ready(())
                     }).await;
                 }
-                high_water = high_water.max(service.reap()?);
-                drop((dirty, peer, listener));
-                // Control traffic progresses while the cancelled native read retires.
+                // Actual CancelIoEx caller charges remain live on BOTH endpoints
+                // across the entire control exchange, even after IOCP completion.
+                let cancellation = HeldReadCancellation::new(accepted);
+                let peer_cancel = HeldReadCancellation::new(peer);
+                let held = cancellation.held && peer_cancel.held;
+                drop((dirty, other, pending_listener));
+                let retained = service.reap()?;
+                let full = matches!(service.reserve(), Err(error) if error.kind() == io::ErrorKind::WouldBlock);
                 let mut received = [0; 5];
-                tokio::try_join!(async {
-                    writer.write_all(b"tick\n").await?;
-                    writer.flush().await
-                }, reader.read_exact(&mut received))?;
+                let control_reply = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                    tokio::try_join!(async {
+                        writer.write_all(b"tick\n").await?;
+                        writer.flush().await
+                    }, reader.read_exact(&mut received))
+                }).await;
+                let after_reply = service.reap()?;
+                high_water = high_water.max(after_reply);
+                drop((cancellation, peer_cancel)); // Release and join before assertions.
+                assert!(held, "both actual native cancellation callers must enter");
+                assert_eq!((retained, after_reply), (4, 4), "retirement remains charged through the control reply");
+                assert!(full, "retiring native work must exhaust the physical arena");
+                control_reply.map_err(io::Error::other)??;
                 assert_eq!(&received, b"tick\n");
                 tokio::time::timeout(std::time::Duration::from_secs(30), async {
                     loop {
@@ -928,7 +988,7 @@ mod tests {
             }
             assert_eq!(high_water, 4, "active plus retiring physical cap");
             assert!(server.drain.get().is_none() && client.drain.get().is_none());
-            eprintln!("native cancellation churn: cycles=32 physical_high_water=4 remaining_control=2 control_replies=32 helpers=0");
+            eprintln!("native cancellation churn: cycles=32 held_cancel_callers=2 physical_before_and_after_control=4 remaining_control=2 control_replies=32 drain_helpers=0");
             Ok(())
         }).unwrap();
     }
