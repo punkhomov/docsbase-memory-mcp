@@ -6,6 +6,7 @@ use std::task::Poll;
 use super::*;
 use crate::daemon::server::Shared;
 use crate::ipc::async_client::AsyncClient;
+use crate::ipc::protocol::Response;
 
 fn fixture() -> (
     tempfile::TempDir,
@@ -14,8 +15,21 @@ fn fixture() -> (
     Listener,
     crate::test_transport::TestTransport,
 ) {
+    fixture_with_config("")
+}
+
+fn fixture_with_config(
+    config_text: &str,
+) -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    Arc<Shared>,
+    Listener,
+    crate::test_transport::TestTransport,
+) {
     let cache = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
+    std::fs::write(config.path().join("config.toml"), config_text).unwrap();
     let shared = Shared::open_with_launch(
         cache.path(),
         &crate::store::settings::standalone().unwrap(),
@@ -193,4 +207,186 @@ async fn graceful_stop_preserves_accepted_phase_admission_and_refuses_new_ingres
         shared.workers.background(&operation).await.is_err(),
         "ordinary admission closes after physical drain"
     );
+}
+
+// A watchdog catches a broken fixture; it never decides admission or grace.
+const REGISTRATION_WATCHDOG: Duration = Duration::from_mins(5);
+
+async fn grace_state(
+    state: &mut watch::Receiver<Option<tokio::time::Instant>>,
+    armed: bool,
+) -> std::result::Result<Option<tokio::time::Instant>, watch::error::RecvError> {
+    loop {
+        let deadline = *state.borrow_and_update();
+        if deadline.is_some() == armed {
+            return Ok(deadline);
+        }
+        state.changed().await?;
+    }
+}
+
+struct GraceControl {
+    now: Arc<std::sync::Mutex<tokio::time::Instant>>,
+    trigger: mpsc::Sender<()>,
+    state: watch::Receiver<Option<tokio::time::Instant>>,
+}
+
+fn controlled_accept(
+    owner: Arc<Shared>,
+    listener: Listener,
+) -> (tokio::task::JoinHandle<Result<()>>, GraceControl) {
+    let (observed, state) = watch::channel(None);
+    let (trigger, receiver) = mpsc::channel::<()>(1);
+    let receiver = Arc::new(tokio::sync::Mutex::new(receiver));
+    let clock = Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
+    let now = clock.clone();
+    let serving = tokio::spawn(async move {
+        accept_loop_events(
+            owner,
+            &listener,
+            std::future::pending(),
+            async || std::future::pending().await,
+            || *now.lock().unwrap(),
+            |deadline| {
+                let observed = observed.clone();
+                let receiver = receiver.clone();
+                async move {
+                    observed.send_replace(deadline);
+                    if deadline.is_some() {
+                        receiver.lock().await.recv().await.unwrap();
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }
+            },
+        )
+        .await
+    });
+    (
+        serving,
+        GraceControl {
+            now: clock,
+            trigger,
+            state,
+        },
+    )
+}
+
+#[test]
+fn registration_survives_armed_grace() {
+    for rooted in [false, true] {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let policy = crate::daemon::settings::standalone().unwrap();
+        let mut root = crate::daemon::job_service::JobRoot::new(policy.settings());
+        let service = root.service();
+        root.run(&runtime, armed_registration(rooted, service))
+            .unwrap();
+    }
+}
+
+async fn armed_registration(
+    rooted: bool,
+    service: crate::daemon::job_service::JobService,
+) -> Result<()> {
+    let (cache, _config, shared, listener, transport) = fixture_with_config("auto_index = true\n");
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join(".git")).unwrap();
+    std::fs::write(
+        project.path().join("guide.md"),
+        "# Guide\n\nwidget registration\n",
+    )
+    .unwrap();
+    if rooted {
+        shared.activate_jobs(service).unwrap();
+    }
+    let (entered, work_started) = tokio::sync::oneshot::channel();
+    let (release, proceed) = std::sync::mpsc::channel();
+    *shared.registration_work_gate.lock().unwrap() = Some(Box::new(move || {
+        let _ = entered.send(());
+        // Disconnect also releases the real worker if an earlier assertion fails.
+        let _ = proceed.recv_timeout(REGISTRATION_WATCHDOG);
+    }));
+    let (mut serving, mut clock) = controlled_accept(shared.clone(), listener);
+    let mut client = AsyncClient::connect(&transport, cache.path())
+        .await
+        .unwrap();
+    client.handshake_registry().await.unwrap();
+    let deadline = tokio::time::timeout(REGISTRATION_WATCHDOG, grace_state(&mut clock.state, true))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let cwd = project.path().to_path_buf();
+    let registering = tokio::spawn(async move {
+        let reply = client
+            .call(Request::RegisterSession {
+                pid: std::process::id(),
+                cwd,
+            })
+            .await;
+        (client, reply)
+    });
+    tokio::time::timeout(REGISTRATION_WATCHDOG, work_started)
+        .await
+        .unwrap()
+        .unwrap();
+    let active = shared.activity.counter.load(Ordering::SeqCst);
+    let unbound = shared.sessions.count();
+    let original_deadline = *clock.state.borrow_and_update();
+    *clock.now.lock().unwrap() = deadline;
+    clock.trigger.send(()).await.unwrap();
+    // Observing None proves the actual expired-deadline branch ran and rechecked
+    // physical Activity while the admitted registration worker was still gated.
+    let survived =
+        tokio::time::timeout(REGISTRATION_WATCHDOG, grace_state(&mut clock.state, false)).await;
+    let _ = release.send(());
+    let (client, reply) = tokio::time::timeout(REGISTRATION_WATCHDOG, registering)
+        .await
+        .unwrap()
+        .unwrap();
+    let bound = shared.sessions.count();
+    drop(client);
+    let rearmed =
+        tokio::time::timeout(REGISTRATION_WATCHDOG, grace_state(&mut clock.state, true)).await;
+    if let Ok(Ok(Some(deadline))) = rearmed {
+        *clock.now.lock().unwrap() = deadline;
+        let _ = clock.trigger.send(()).await;
+    }
+    let stopped = tokio::time::timeout(REGISTRATION_WATCHDOG, &mut serving).await;
+    if stopped.is_err() {
+        serving.abort();
+        let _ = serving.await;
+    }
+    // Assertions follow release and cleanup, including the intentionally broken RED.
+    assert!(
+        active > 0 && unbound == 0,
+        "real admitted work must precede session binding"
+    );
+    assert_eq!(
+        original_deadline,
+        Some(deadline),
+        "the original grace must still be armed"
+    );
+    assert!(
+        matches!(survived, Ok(Ok(None))),
+        "expired grace cut off admitted registration: {survived:?}"
+    );
+    assert!(
+        matches!(reply, Ok(Response::ToolResult { ref value }) if value["status"] == "indexed"),
+        "{reply:?}"
+    );
+    assert_eq!(bound, 1, "successful registration must bind a real session");
+    assert!(
+        matches!(rearmed, Ok(Ok(Some(_)))),
+        "disconnect must rearm real idle exit: {rearmed:?}"
+    );
+    assert!(
+        matches!(stopped, Ok(Ok(Ok(())))),
+        "controlled idle expiry must exit cleanly: {stopped:?}"
+    );
+    Ok(())
 }

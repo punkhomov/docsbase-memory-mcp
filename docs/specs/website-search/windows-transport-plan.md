@@ -114,3 +114,12 @@ Windows retirement scope and must migrate at their real composition boundaries.
 The root thread topology is fixed per application scope (one application work
 thread plus the existing native progress thread), not proportional to requests.
 Per-connection drain threads remain optional and bounded until actual join.
+
+## Delta 2026-11-17 — W4 acceptance slices
+
+- **W4a / #165:** deterministic real accept/registration regression, both legacy
+  and JobRoot-enabled paths; mutation RED, focused lifecycle/subprocess checks,
+  fresh task review. Original production grace and idle checks stay unchanged.
+- **W4b:** final owned native cancellation/control-progress/early-close/deadline
+  acceptance and diagnostic latency/allocation/helper measurements, then full
+  source compatibility/native CI and whole-feature review.

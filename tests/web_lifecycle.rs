@@ -1,4 +1,5 @@
 #![cfg(feature = "web")]
+#[cfg(unix)]
 #[path = "support/transport.rs"]
 mod test_transport;
 

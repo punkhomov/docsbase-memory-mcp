@@ -867,6 +867,73 @@ mod tests {
     }
 
     #[test]
+    fn repeated_cancelled_reads_keep_bounded_capacity_and_control_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let control = crate::platform::daemon_endpoint(directory.path());
+        let churn = crate::platform::daemon_endpoint(&directory.path().join("churn"));
+        let path = super::super::pipe_path(&control).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let policy = super::super::root::Options {
+            handles: 4,
+            chunk_bytes: 4096,
+            helper_stack_bytes: 1024 * 1024,
+            work_stack_bytes: 2 * 1024 * 1024,
+            drain_poll: std::time::Duration::from_millis(1),
+            drain_observation: std::time::Duration::from_secs(30),
+        };
+        let options = policy.clone();
+        super::super::root::run_on(&runtime, &policy, move |service| async move {
+            let listening = Listening::new_in(&service, &path, 4096, true)?;
+            let client = Connection::client_in(&service, &path, 4096, 1024 * 1024)?;
+            let token = std::future::poll_fn(|cx| listening.poll_accept(cx)).await?;
+            let server = Connection::accepted(token, 4096, 1024 * 1024)?;
+            let mut writer = Pipe::new(server.clone())?;
+            let mut reader = Pipe::new(client.clone())?;
+            let transport = super::super::transport::Transport::new(service.clone(), options);
+            let mut high_water = 0;
+            for _ in 0..32 {
+                let listener = transport.bind(&churn)?;
+                let peer = transport.connect_async(&churn).await?;
+                let mut dirty = listener.accept().await?;
+                let mut byte = [0];
+                {
+                    let pending = dirty.read_exact(&mut byte);
+                    tokio::pin!(pending);
+                    std::future::poll_fn(|cx| {
+                        use std::future::Future;
+                        assert!(pending.as_mut().poll(cx).is_pending());
+                        std::task::Poll::Ready(())
+                    }).await;
+                }
+                high_water = high_water.max(service.reap()?);
+                drop((dirty, peer, listener));
+                // Control traffic progresses while the cancelled native read retires.
+                let mut received = [0; 5];
+                tokio::try_join!(async {
+                    writer.write_all(b"tick\n").await?;
+                    writer.flush().await
+                }, reader.read_exact(&mut received))?;
+                assert_eq!(&received, b"tick\n");
+                tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                    loop {
+                        if service.reap()? == 2 {
+                            break Ok::<_, io::Error>(());
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                }).await.map_err(io::Error::other)??;
+            }
+            assert_eq!(high_water, 4, "active plus retiring physical cap");
+            assert!(server.drain.get().is_none() && client.drain.get().is_none());
+            eprintln!("native cancellation churn: cycles=32 physical_high_water=4 remaining_control=2 control_replies=32 helpers=0");
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
     fn persistent_exchange_completes_native_writes_without_a_drain_worker() {
         let directory = tempfile::tempdir().unwrap();
         let endpoint = crate::platform::daemon_endpoint(directory.path());
@@ -891,7 +958,9 @@ mod tests {
             let before = (server.drain.get().is_some(), client.drain.get().is_some());
             let mut writer = Pipe::new(server.clone())?;
             let mut reader = Pipe::new(client.clone())?;
-            for _ in 0..3 {
+            let mut samples = Vec::with_capacity(128);
+            for _ in 0..128 {
+                let began = std::time::Instant::now();
                 let mut received = [0; 5];
                 let sending = async {
                     writer.write_all(b"pong\n").await?;
@@ -901,7 +970,13 @@ mod tests {
                 tokio::try_join!(sending, reading)?;
                 assert_eq!(&received, b"pong\n");
                 assert!(!server.write.active(), "last native write was consumed");
+                samples.push(began.elapsed().as_micros());
             }
+            samples.sort_unstable();
+            eprintln!(
+                "native persistent 5-byte write/read: n={} p50_us={} p95_us={} max_us={} helper_creations=0",
+                samples.len(), samples[64], samples[121], samples[127]
+            );
             Ok((
                 before,
                 (server.drain.get().is_some(), client.drain.get().is_some()),

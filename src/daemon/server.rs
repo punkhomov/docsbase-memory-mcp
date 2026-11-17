@@ -79,6 +79,8 @@ pub struct Shared {
     pub(super) activity: request::ActivitySource,
     activity_events: Mutex<Option<mpsc::Receiver<()>>>,
     jobs: std::sync::OnceLock<super::job_service::JobService>,
+    #[cfg(test)]
+    pub(super) registration_work_gate: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     // Website has exactly one fixed-project background sync closure.
     sync_slot: Arc<tokio::sync::Semaphore>,
     #[cfg(feature = "hybrid-remote")]
@@ -440,6 +442,8 @@ impl Shared {
             activity,
             activity_events: Mutex::new(Some(activity_events)),
             jobs: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            registration_work_gate: Mutex::new(None),
             sync_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: SessionRegistry::with_settings(&global_config.daemon)?,
             watchers,
@@ -472,6 +476,14 @@ impl Shared {
             .set(service)
             .map_err(|_| Error::internal("job root already activated"))?;
         self.watchers.activate_async(Arc::downgrade(self))
+    }
+
+    #[cfg(test)]
+    fn observe_registration_work(&self) {
+        let gate = self.registration_work_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate();
+        }
     }
 
     pub(crate) async fn run_watch_batch(
@@ -1847,6 +1859,8 @@ async fn register_session_in(
         Some(permit),
         activity,
         move || -> Result<crate::store::models::Project> {
+            #[cfg(test)]
+            shared_for_task.observe_registration_work();
             // Own connection: the shared read connection must stay free while a
             // full index runs (F4/NFR-1).
             let mut db =

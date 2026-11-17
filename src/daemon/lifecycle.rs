@@ -667,7 +667,33 @@ async fn accept_loop_with(
     shared: Arc<crate::daemon::server::Shared>,
     listener: &Listener,
     shutdown_signal: impl std::future::Future<Output = ()>,
+    tick: impl std::ops::AsyncFnMut(),
+) -> Result<()> {
+    accept_loop_events(
+        shared,
+        listener,
+        shutdown_signal,
+        tick,
+        tokio::time::Instant::now,
+        |deadline| async move {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        },
+    )
+    .await
+}
+
+// The production clock and sleep are injected together: tests advance only the
+// grace clock, while real accept, admission, registration and work stay intact.
+async fn accept_loop_events<G: std::future::Future<Output = ()>>(
+    shared: Arc<crate::daemon::server::Shared>,
+    listener: &Listener,
+    shutdown_signal: impl std::future::Future<Output = ()>,
     mut tick: impl std::ops::AsyncFnMut(),
+    mut now: impl FnMut() -> tokio::time::Instant,
+    mut wait_grace: impl FnMut(Option<tokio::time::Instant>) -> G,
 ) -> Result<()> {
     tokio::pin!(shutdown_signal);
     let settings = shared.daemon_settings().clone();
@@ -687,12 +713,7 @@ async fn accept_loop_with(
     let mut janitor = Janitor::default();
 
     loop {
-        let grace_sleep = async {
-            match grace_deadline {
-                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                None => std::future::pending().await,
-            }
-        };
+        let grace_sleep = wait_grace(grace_deadline);
         tokio::select! {
             accepted = listener.accept() => {
                 let stream = accepted
@@ -719,7 +740,7 @@ async fn accept_loop_with(
                 // connections (CLI handshakes) do not. A pending deadline is
                 // not extended by connection churn, only reset by a session.
                 grace_deadline = idle_deadline(&settings.profile, grace_deadline,
-                    idle(&shared, &in_flight), tokio::time::Instant::now(), grace);
+                    idle(&shared, &in_flight), now(), grace);
             }
             // An armed deadline must never cut off a session-less request or
             // a registration that is still running. The check happens in the
@@ -744,7 +765,7 @@ async fn accept_loop_with(
                             eprintln!("cleanup: pruned {} dead session(s)", pruned.len());
                         }
                         grace_deadline = idle_deadline(&settings.profile, grace_deadline,
-                            idle(&shared, &in_flight), tokio::time::Instant::now(), grace);
+                            idle(&shared, &in_flight), now(), grace);
                     }
                     Err(error) => eprintln!("warning: session janitor: {error}"),
                 }

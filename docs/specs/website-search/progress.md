@@ -773,3 +773,34 @@ platform-only Clippy findings: a test-only Duration import, two obsolete
 unnecessary_wraps expectations on now-public seam methods, statement
 termination and test import placement. Corrected all five without changing
 transport behavior. fmt/diff checks pass; native re-execution remains pending.
+
+MODIFIED 2026-11-17 — W3 operational native evidence. Exact source185bb7c/tree
+ df080a09da51ad22a559d0bc728231afa058e10d, isolated harness466620a, native run
+44112474352:18/18, independent watchdog exit0. Frozen admitted-daemon candidate
+has handler_returned=true, bytes_read=1, original_available_slots=0,
+original_activity=1 and native_cancel_caller_held=true. Cleanup establishes
+slots=1/activity=0 after actual caller return/retirement; unread tail discarded
+only as a failed exchange. Artifacts /tmp/pr164-integration-native-green.
+Ruling: fresh review_164_operational at6f62a1d PASS / APPROVED, no findings;
+current full/lean/native-final checks and W4 remain pending. Follow-up native
+lint found a Unix-only test helper unconditionally compiled by web_lifecycle;
+its module now has the same Unix cfg as its only consumer.
+
+MODIFIED 2026-11-17 — W4a deterministic grace checkpoint. The named regression
+now exercises real accept/admission/registration in both compatible and
+JobRoot-enabled modes. Explicit original-deadline observation, actual admitted
+worker gate and controlled grace expiry replace800files/100ms inference.
+Temporary mutation removing only the expired-grace Activity recheck fails
+at the intended assertion (0.04s): expired grace cut off admitted registration.
+Restored implementation passes all5janitor/lifecycle tests (0.09s). Three real
+subprocess cleanup tests remain. All-target cli-full Linux Clippy passes.
+Fresh W4a review and final native execution remain pending.
+
+MODIFIED 2026-11-17 — W4 native acceptance preparation. Add32actual
+pending-read cancellation cycles sharing a four-handle physical arena with
+persistent control traffic. Every cycle must deliver control bytes and retire
+back to the two original control owners before reuse. Expand helper-free
+native write/read sampling to128transfers and print diagnostic p50/p95/max;
+no latency threshold changes or claimed before/after improvement. The exact
+Windows core compile-only harness passes; native runtime evidence is pending.
+Real subprocess cleanup3/3also passes after moving #165 coverage.

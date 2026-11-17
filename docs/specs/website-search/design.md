@@ -359,3 +359,22 @@ Stop's pre-reply drain and final ACK instead share its original `reply_drain_ms`
 whole budget. Stop now closes after its ACK. The stop command reads/validates
 that complete ACK, refreshing its original15s overall deadline before every
 native read, and still observes process exit as the final success criterion.
+
+## Delta 2026-11-17 — причинная проверка вооружённого idle grace (#165)
+
+Регрессионный тест `registration_survives_armed_grace` перенесён из subprocess
+fixture в настоящий in-process accept/RegisterSession pipeline. Наблюдение
+вооружённого deadline происходит после sessionless Hello; однократный test-only
+барьер расположен внутри уже допущенного registration worker, до его настоящей
+работы с БД. Проверяются совместимый путь и путь с JobRoot. Источник `now` и
+ожидание grace внедряются вместе в приватную accept-loop функцию; production
+передаёт прежние Tokio Instant/sleep_until. Остальные deadlines/работа идут в
+реальном времени, production grace и правила idle не меняются.
+
+Тест доводит исходный grace до истечения при удерживаемой Activity и ещё
+отсутствующей сессии, наблюдает повторную проверку idle, затем освобождает worker
+и требует настоящий indexed-ответ и session binding. После disconnect требуется
+повторное взведение grace и чистый idle exit. Проверки следуют за освобождением
+барьеров/cleanup. Три существующие subprocess-проверки dead-session cleanup,
+повторных соединений и shutdown сохраняются. Размер корпуса и задержка потока
+больше не служат доказательством регистрации.
