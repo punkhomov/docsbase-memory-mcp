@@ -394,8 +394,9 @@ mod tests {
 
     #[tokio::test]
     async fn available_pipe_async_connect_preserves_byte_stream() {
-        let transport = crate::test_transport::TestTransport::new(2);
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let transport = crate::test_transport::TestTransport::new(2);
         let cache = tempfile::TempDir::new().expect("cache");
         let endpoint = daemon_endpoint(cache.path());
         let listener = bind(&transport, &endpoint).expect("bind");

@@ -4,7 +4,9 @@ use super::native_io::{Port, Service};
 use std::future::Future;
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 #[cfg(test)]
 use tokio::runtime::Runtime;
 use tokio::runtime::{Handle, RuntimeFlavor};

@@ -340,10 +340,6 @@ impl BlockingStream {
     /// Share the same serialized stream for a reader/writer split.
     /// # Errors
     /// Retains the Unix-compatible fallible signature; does not duplicate native handles.
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "Platform seam mirrors fallible Unix handle cloning"
-    )]
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             state: self.state.clone(),
@@ -443,10 +439,6 @@ impl BlockingListener {
     /// Switch accept between blocking and polling.
     /// # Errors
     /// Retains the Unix-compatible fallible signature.
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "Platform seam mirrors fallible Unix listener mode changes"
-    )]
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.nonblocking.store(nonblocking, Ordering::Release);
         Ok(())

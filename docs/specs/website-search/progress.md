@@ -766,3 +766,10 @@ sync/readiness). cli-full library668/668, all-target Clippy, exact private nativ
 cross-typecheck and fmt pass. Existing Windows ownership tests pass17/17 at
 sourceb65e8eb; the newly migrated actual daemon cancellation gate still requires
 Windows execution. Final closure/benchmarks/#165 and final review remain open.
+
+MODIFIED 2026-11-17 — W3 native lint correction. Required Windows job
+134141350866 at 185bb7c stopped before functional execution on five
+platform-only Clippy findings: a test-only Duration import, two obsolete
+unnecessary_wraps expectations on now-public seam methods, statement
+termination and test import placement. Corrected all five without changing
+transport behavior. fmt/diff checks pass; native re-execution remains pending.

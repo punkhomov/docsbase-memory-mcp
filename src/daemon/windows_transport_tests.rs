@@ -183,7 +183,7 @@ fn stalled_get_doc_retains_original_connection_until_native_retirement() {
             // Hold an actual cancellation caller's original native-user charge.
             // Unread bytes alone do not establish that native retirement is pending.
             let cancelling = std::thread::spawn(move || {
-                ownership.test_hold_write_cancellation(cancel_entered, cancel_proceed)
+                ownership.test_hold_write_cancellation(cancel_entered, cancel_proceed);
             });
             let cancel_held = cancel_observed.recv_timeout(WATCHDOG).is_ok();
             fixture.shared.workers.shutdown();
