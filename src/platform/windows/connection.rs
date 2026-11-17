@@ -462,12 +462,13 @@ mod tests {
             handles: 2,
             chunk_bytes: 4096,
             helper_stack_bytes: 1024 * 1024,
+            work_stack_bytes: 2 * 1024 * 1024,
             drain_poll: std::time::Duration::from_millis(1),
             drain_observation: std::time::Duration::from_secs(30),
         };
         super::super::root::run_on(&runtime, &policy, |service| async move {
             let listening = Listening::new_in(&service, &path, 4096, true)?;
-            let client = Connection::client_in(&service, &path, 4096, 1024 * 1024)?;
+            let client = Connection::client_in(&service, &path, 1, 1024 * 1024)?;
             let token = std::future::poll_fn(|cx| listening.poll_accept(cx)).await?;
             let server = Connection::accepted(token, 4096, 1024 * 1024)?;
             let mut writer = Pipe::new(server.clone())?;
@@ -476,7 +477,7 @@ mod tests {
                 "one logical writer per connection"
             );
             let mut reader = Pipe::new(client.clone())?;
-            let mut frame = vec![b'x'; 16384];
+            let mut frame = vec![b'x'; 4096];
             frame.push(b'\n');
             let (prefix_sent, prefix_read) = tokio::sync::oneshot::channel();
             let (release_tail, read_tail) = tokio::sync::oneshot::channel();
@@ -509,9 +510,9 @@ mod tests {
             };
             let reading = async {
                 let mut received = vec![0; frame.len()];
-                // The prefix is exactly four native read regions. No fifth
-                // read is submitted until release, so the trailing newline
-                // stays in the kernel pipe, not in an adapter prefetch region.
+                // One-byte native read regions make read-ahead impossible,
+                // including short ReadFile completions. The final newline
+                // stays in the kernel pipe until this explicit release.
                 let tail = frame.len() - 1;
                 reader.read_exact(&mut received[..tail]).await?;
                 prefix_sent
@@ -545,6 +546,7 @@ mod tests {
             handles: 2,
             chunk_bytes: 4096,
             helper_stack_bytes: 1024 * 1024,
+            work_stack_bytes: 2 * 1024 * 1024,
             drain_poll: std::time::Duration::from_millis(1),
             drain_observation: std::time::Duration::from_secs(30),
         };
@@ -602,6 +604,7 @@ mod tests {
             handles: 2,
             chunk_bytes: 4096,
             helper_stack_bytes: 1024 * 1024,
+            work_stack_bytes: 2 * 1024 * 1024,
             drain_poll: std::time::Duration::from_millis(1),
             drain_observation: std::time::Duration::from_secs(30),
         };

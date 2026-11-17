@@ -7,10 +7,12 @@ use std::time::{Duration, Instant};
 use tokio::runtime::{Handle, Runtime, RuntimeFlavor};
 
 /// Complete resolved composition. No native consumer supplies fallback policy.
+#[derive(Clone)]
 pub(super) struct Options {
     pub handles: usize,
     pub chunk_bytes: usize,
     pub helper_stack_bytes: usize,
+    pub work_stack_bytes: usize,
     pub drain_poll: Duration,
     pub drain_observation: Duration,
 }
@@ -20,6 +22,7 @@ impl Options {
             || self.chunk_bytes == 0
             || u32::try_from(self.chunk_bytes).is_err()
             || self.helper_stack_bytes == 0
+            || self.work_stack_bytes == 0
             || self.drain_poll.is_zero()
         {
             return Err(io::Error::new(
@@ -33,6 +36,7 @@ impl Options {
         self.chunk_bytes
             .checked_mul(2)
             .and_then(|bytes| bytes.checked_add(self.helper_stack_bytes))
+            .and_then(|bytes| bytes.checked_add(self.work_stack_bytes))
             .and_then(|bytes| bytes.checked_mul(self.handles))
             .and_then(|bytes| bytes.checked_add(self.helper_stack_bytes))
             .ok_or_else(|| {
@@ -45,15 +49,24 @@ impl Options {
 /// The caller retains Runtime, JobRoot, signal receiver and admission lease.
 /// Only this outer function owns the progress JoinHandle. Its native owners
 /// remain registered during work errors, cancellation, and unwinding.
-pub(super) fn run_on<T, F>(
+pub(super) fn run_on<T: Send, F>(
     runtime: &Runtime,
     options: &Options,
-    work: impl FnOnce(Service) -> F,
+    work: impl FnOnce(Service) -> F + Send,
 ) -> io::Result<T>
 where
     F: Future<Output = io::Result<T>>,
 {
-    let run = || run_outside(runtime, options, work);
+    run(options, move |service| runtime.block_on(work(service)))
+}
+
+/// One outer scope for synchronous or asynchronous application work. Native
+/// retirement progresses even when that work cannot cooperatively yield.
+pub(super) fn run<T: Send>(
+    options: &Options,
+    work: impl FnOnce(Service) -> io::Result<T> + Send,
+) -> io::Result<T> {
+    let run = || run_outside(options, work);
     match Handle::try_current() {
         Err(_) => run(),
         Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
@@ -66,34 +79,45 @@ where
     }
 }
 
-fn run_outside<T, F>(
-    runtime: &Runtime,
+fn run_outside<T: Send>(
     options: &Options,
-    work: impl FnOnce(Service) -> F,
-) -> io::Result<T>
-where
-    F: Future<Output = io::Result<T>>,
-{
+    work: impl FnOnce(Service) -> io::Result<T> + Send,
+) -> io::Result<T> {
     options.validate()?;
     let mut port = Port::new(options.handles, options.helper_stack_bytes)?;
     let service = port.service();
-    // Future construction is also inside the unwind boundary, while the root
-    // and its thread/helper ownership remain outside it.
+    // Only application work moves to this scoped thread. Port, the progress
+    // JoinHandle and physical owners stay on this synchronous outer thread.
+    // FnOnce includes future/runtime construction, not just later polling.
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut future = Box::pin(work(service.clone()));
-        loop {
-            service.reap()?;
-            let completed = runtime.block_on(async {
-                tokio::select! {
-                    biased;
-                    result = &mut future => Some(result),
-                    () = tokio::time::sleep(options.drain_poll) => None,
+        std::thread::scope(|scope| {
+            // If outer housekeeping unwinds, request cancellation BEFORE
+            // thread::scope waits for application work to return.
+            struct AbortOnReturn<'a>(&'a Service);
+            impl Drop for AbortOnReturn<'_> {
+                fn drop(&mut self) {
+                    self.0.abort();
                 }
-            });
-            if let Some(result) = completed {
-                return result;
             }
-        }
+            let _abort = AbortOnReturn(&service);
+            let submission = service.clone();
+            let application = std::thread::Builder::new()
+                .name("docsbase-transport-work".into())
+                .stack_size(options.work_stack_bytes)
+                .spawn_scoped(scope, move || work(submission))?;
+            while !application.is_finished() {
+                if service.reap().is_err() {
+                    // Fault means closed admission/quarantine, never detaching
+                    // physical owners or abandoning the application thread.
+                    service.abort();
+                }
+                std::thread::sleep(options.drain_poll);
+            }
+            match application.join() {
+                Ok(result) => result,
+                Err(panic) => resume_unwind(panic),
+            }
+        })
     }));
     // The work future is gone, but its physical envelopes stay in the arena.
     // A successful work return means no healthy exchange remains admitted;
@@ -120,10 +144,9 @@ where
             );
             reported = true;
         }
-        // Existing owner poll policy also rediscovers permanent state if a
-        // runtime wake failed. This is observation, never a native completion
-        // timeout or permission to detach/close unresolved native storage.
-        runtime.block_on(async { tokio::time::sleep(options.drain_poll).await });
+        // This owner does not require a live/polling application runtime.
+        // Observation is never a native timeout or permission to detach.
+        std::thread::sleep(options.drain_poll);
     }
     match result {
         Ok(result) => result,
@@ -151,6 +174,7 @@ mod tests {
             handles: 2,
             chunk_bytes: 65_536,
             helper_stack_bytes: 1024 * 1024,
+            work_stack_bytes: 2 * 1024 * 1024,
             drain_poll: Duration::from_millis(1),
             drain_observation: Duration::from_secs(30),
         };
@@ -197,6 +221,7 @@ mod tests {
                 handles: 2,
                 chunk_bytes: 65_536,
                 helper_stack_bytes: 1024 * 1024,
+                work_stack_bytes: 2 * 1024 * 1024,
                 drain_poll: Duration::from_millis(1),
                 drain_observation: Duration::from_secs(30),
             };

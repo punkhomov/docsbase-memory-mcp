@@ -685,3 +685,14 @@ until operational integration removes unused private adapters in W3.
 Ruling: fresh review Important/Minor findings corrected; re-review ADDRESSED
 for both, no new Critical/Important findings. Full #155/#165 and PR readiness
 remain W3/W4 work. No wire, baseline, budgets or grace policy changes.
+
+MODIFIED 2026-11-17 — W3a independent owner checkpoint: actual Windows
+RED44102404929 source7192006 passes12 prior cases and fails only the new
+synchronous-work retirement assertion, after its30s liveness watchdog; outer
+cleanup returns without external watchdog. Root now retains Port outside one
+scoped application thread and reaps independently of work polling; the explicit
+work stack is counted with native/helper reservations. Construction, errors and
+unwind remain inside that lifetime. The final-drain test additionally uses
+one-byte native read regions so even short completions cannot prefetch its
+unread sentinel. Exact-source cross-typecheck/fmt pass. Native GREEN, root task
+review and operational facade/application integration remain pending.
