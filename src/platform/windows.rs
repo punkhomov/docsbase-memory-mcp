@@ -722,3 +722,5 @@ mod tests {
 }
 
 mod native_io;
+
+mod flush;

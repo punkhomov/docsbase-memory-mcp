@@ -3,7 +3,6 @@
 use std::cell::UnsafeCell;
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::os::windows::thread::JoinHandleExt;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -128,6 +127,9 @@ impl Operation {
             .ok_or_else(|| failure("native pipe is closed"))?
             .as_raw_handle();
         let mut state = locked(&self.state);
+        if self.kind == Kind::Write && !self.token.helper_ready.load(Ordering::Acquire) {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
         if state.active {
             return Err(failure("native operation is already submitted"));
         }
@@ -313,8 +315,40 @@ pub(super) struct HandleToken {
     operations: Mutex<Vec<Weak<Operation>>>,
     users: AtomicUsize,
     aborting: AtomicBool,
+    helper_ready: AtomicBool,
 }
 impl HandleToken {
+    pub(super) fn is_aborting(&self) -> bool {
+        self.aborting.load(Ordering::Acquire)
+    }
+    pub(super) fn helper_ready(&self) {
+        self.helper_ready.store(true, Ordering::Release);
+    }
+    pub(super) fn retain_helper(&self) -> io::Result<std::os::windows::io::RawHandle> {
+        let gate = locked(&self.handle);
+        if self.is_aborting() {
+            return Err(failure("native pipe is aborting"));
+        }
+        let handle = gate
+            .as_ref()
+            .map(AsRawHandle::as_raw_handle)
+            .ok_or_else(|| failure("native pipe is closed"))?;
+        self.users.fetch_add(1, Ordering::AcqRel);
+        Ok(handle)
+    }
+    pub(super) fn release_helper(&self) {
+        self.users.fetch_sub(1, Ordering::AcqRel);
+    }
+    pub(super) fn writes_idle(&self) -> bool {
+        let write = locked(&self.operations)
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|slot| slot.kind == Kind::Write);
+        write.is_none_or(|write| {
+            let state = locked(&write.state);
+            !state.active && state.cancel_callers == 0
+        })
+    }
     pub(super) fn abort(&self) {
         self.aborting.store(true, Ordering::Release);
         let slots: [Option<Arc<Operation>>; 3] = {
@@ -488,6 +522,7 @@ impl Reservation {
             operations: Mutex::new(Vec::with_capacity(3)),
             users: AtomicUsize::new(0),
             aborting: AtomicBool::new(false),
+            helper_ready: AtomicBool::new(false),
         });
         let key = Arc::as_ptr(&token) as usize;
         locked(&self.inner.state).entries[self.index] = Entry::Live(token.clone());
@@ -580,6 +615,7 @@ mod tests {
             operations: Mutex::new(Vec::with_capacity(3)),
             users: AtomicUsize::new(1),
             aborting: AtomicBool::new(false),
+            helper_ready: AtomicBool::new(false),
         });
         let operation = Operation::new(token, Kind::Read, 8).unwrap();
         *locked(&operation.state) = State {

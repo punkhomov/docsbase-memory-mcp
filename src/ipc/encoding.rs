@@ -123,7 +123,7 @@ mod tests {
         frame.encode(&"123456").unwrap();
         assert_eq!(frame.bytes(), b"\"123456\"\n");
         assert!(frame.encode(&"\n\n\n\n").is_err());
-        assert_eq!(frame.bytes(), []);
+        assert_eq!(frame.bytes(), b"");
         frame.encode(&0).unwrap();
         assert_eq!(frame.bytes(), b"0\n");
         assert_eq!(frame.storage.bytes().as_ptr(), address);

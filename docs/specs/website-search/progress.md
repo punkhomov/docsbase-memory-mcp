@@ -572,3 +572,13 @@ Windows ABI/state execution is pending the isolated exact-source harness. Four
 first-draft Clippy findings are corrected in-task. Stream/helper ownership,
 outer-root migration and final normal native gates remain WIP; no clean-retirement
 or #155 completion claim. Existing test/baseline/ignore budgets unchanged.
+
+MODIFIED 2026-11-17 — #155 helper WIP: a dedicated connection-owned flush
+worker now has fixed request/return events, explicit ticket/return phases and
+retained pipe/thread ownership. Native writes are fenced until helper Ready;
+helper/cancel-callers survive cancellation, and outer join observes actual
+thread signaling. No dependency linger or pooled-thread cancellation is used by
+this private helper. Existing windows-sys IO/Security features are explicit;
+no new crate. Typed empty-byte comparison and the invalid Windows thread-trait
+import found by native compilation are corrected; focused encoding2/0 again.
+Native helper execution and full stream/root integration remain pending.
