@@ -34,13 +34,14 @@ pub(super) fn run<T: Send>(
     options: &Options,
     work: impl FnOnce(Service) -> io::Result<T> + Send,
 ) -> io::Result<T> {
-    let run = || run_outside(options, work);
-    match Handle::try_current() {
-        Err(_) => run(),
-        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+    let ambient = Handle::try_current().ok();
+    let run = || run_outside(options, work, ambient.clone());
+    match ambient.as_ref() {
+        None => run(),
+        Some(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(run)
         }
-        Ok(_) => Err(io::Error::new(
+        Some(_) => Err(io::Error::new(
             io::ErrorKind::WouldBlock,
             "native synchronous owner cannot nest in a current-thread runtime",
         )),
@@ -50,6 +51,7 @@ pub(super) fn run<T: Send>(
 fn run_outside<T: Send>(
     options: &Options,
     work: impl FnOnce(Service) -> io::Result<T> + Send,
+    ambient: Option<Handle>,
 ) -> io::Result<T> {
     options.validate()?;
     let mut port = Port::new(options.handles, options.helper_stack_bytes)?;
@@ -72,7 +74,13 @@ fn run_outside<T: Send>(
             let application = std::thread::Builder::new()
                 .name("docsbase-transport-work".into())
                 .stack_size(options.work_stack_bytes)
-                .spawn_scoped(scope, move || work(submission))?;
+                .spawn_scoped(scope, move || {
+                    // Preserve future-construction context without polling on
+                    // the caller's executor. A runtime built by work enters its
+                    // own context for block_on and restores this guard on exit.
+                    let _ambient = ambient.as_ref().map(Handle::enter);
+                    work(submission)
+                })?;
             while !application.is_finished() {
                 if service.reap().is_err() {
                     // Fault means closed admission/quarantine, never detaching

@@ -861,3 +861,14 @@ MODIFIED 2026-11-17 — frame-error local ownership audit. Keep a local Arc of
 Activity through explicit final error delivery as well as attaching its clone
 to native retirement. Unix's no-op native attachment must not consume the only
 logical Activity before the error write; Windows retention is unchanged.
+
+MODIFIED 2026-11-17 — W3 required Windows runtime-bridge correction. Required
+run44115391432at32b5857passes687library tests but the existing multi-thread
+CLI bridge regression fails during future construction: the new scoped work
+thread has no ambient Tokio Handle. Root now captures the caller Handle and
+enters its context on that thread, while application polling uses its own
+explicit runtime and native progress remains outside both. Current-thread
+nested synchronous scopes are still refused. This preserves the original
+construction/polling distinction; no executor, timeout or ownership policy added.
+The exact existing regression is added to the isolated native selection for
+GREEN evidence; required whole-suite re-execution remains pending.
