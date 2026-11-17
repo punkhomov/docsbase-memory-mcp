@@ -67,6 +67,9 @@ fn roundtrip_and_remove() {
     assert_eq!(line, "pong\n");
     server.join().expect("server thread");
 
+    // Logical stream/thread completion does not prove native HANDLE retirement.
+    // Join the explicit physical owner before checking that the name is gone.
+    drop(transport);
     platform::remove(&endpoint).expect("remove");
     assert!(!platform::exists(&endpoint), "endpoint removed");
     assert!(

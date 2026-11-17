@@ -989,3 +989,21 @@ notifications; no production code, assertion, schedule or lint setting changes.
 The prior compile-only harness did not enable the repository's pedantic catalog;
 its check was never a substitute for required native CI. Final exact-head
 required checks remain the readiness gate.
+
+MODIFIED 2026-11-17 — W4b platform fixture retirement barrier. Required Windows
+run44129404843 at87338b5 passes the library, actual lifecycle flood and later
+CLI/MCP suites, then roundtrip_and_remove fails its immediate endpoint-absence
+assertion. The fixture still owns the native arena after logical streams/server
+thread return; remove is intentionally a no-op for Windows pipe names. Join its
+existing TestTransport owner before the unchanged remove/absence assertions.
+This is the physical completion boundary already required by ADR-W1; no sleeps,
+probe-until-success, relaxed assertion, ignore or production change. A source
+scan finds no other analogous in-process removal assertion; lifecycle assertions
+follow actual daemon process exit and already pass on this native run.
+Full Linux required CI on87338b5 is green, including browser/static checks.
+Final exact-head required native CI still gates readiness after this fixture fix.
+
+Ruling: fresh W4b acceptance reviewer PASS / APPROVED, no findings: original
+complete reply and removal/absence/probe assertions remain; the existing outer
+owner join supplies the required physical boundary. Focused Linux5/5 and target
+Clippy/fmt/diff pass. Corrected required native GREEN remains pending.
