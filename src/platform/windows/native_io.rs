@@ -248,7 +248,12 @@ impl Operation {
     pub(super) fn poll(&self, cx: &Context<'_>) -> Poll<io::Result<Completion>> {
         let waker = cx.waker().clone();
         let mut state = locked(&self.state);
+        // Consumers cannot copy/reuse the result until every cancellation
+        // caller returns. Register their waker under this same lock while
+        // fenced; publish may already have consumed the completion waker.
+        // New cancellation callers reject returned terminal operations.
         if state.returned
+            && state.cancel_callers == 0
             && let Some(terminal) = state.terminal
         {
             return Poll::Ready(Ok(terminal));

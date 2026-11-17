@@ -884,3 +884,15 @@ waker, so caller return could leave the read asleep. Extend the existing control
 late-caller regression with a counting waker and observations before/after terminal
 publication and caller release. Release/join precede assertions. Native RED and
 correction remain pending; this checkpoint is not PR readiness.
+
+MODIFIED 2026-11-17 — final review I1 native RED and correction. Isolated
+run44120796760 at3401b425/treea41e9f5f fails exactly the extended late-caller
+regression at its intended readiness assertion;20other cases pass and normal
+watchdog-observed exit101 follows joined cancellation cleanup. Raw evidence:
+/tmp/pr164-read-wake-native-red. Operation::poll now requires cancel_callers=0
+alongside submission return and terminal publication under the same state lock.
+Otherwise it installs the waker consumed by final caller return. New cancellation
+callers already refuse returned terminal operations, preserving poll/copy fencing.
+No budget, ownership or error policy changes. Native GREEN and scoped re-review
+remain pending; this is the only Important final-review finding, with no Critical
+or deferred Minor findings.
