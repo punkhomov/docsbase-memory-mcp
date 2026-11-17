@@ -663,3 +663,12 @@ Tokio split owns that stream. The final delivery case gates client reads at an
 exact native-region boundary, retaining the final newline in the kernel until
 a pending final-drain observation. Fix cross-typecheck/fmt pass; fixed-source
 native execution and re-review are pending, so W2 is not yet marked complete.
+
+MODIFIED 2026-11-17 — W3a RED preparation: added an actual owned-pipe
+case requiring physical retirement while synchronous application work is still
+running, without cooperative async yield. The existing run_on driver only reaps
+between work polls, so this distinguishes independent outer driving from a
+blocking-client resource stall. Exact-source cross-typecheck/fmt pass; native
+RED execution is pending. W3 integration slices/API are recorded in the plan.
+W2 fixed-source native execution is tracked separately in run44101312055;
+re-review addresses both reported findings, no new Critical/Important findings.

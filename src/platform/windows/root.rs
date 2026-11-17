@@ -139,6 +139,51 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     #[test]
+    fn synchronous_work_does_not_block_outer_native_retirement() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let path = crate::platform::windows::pipe_path(&endpoint).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let options = Options {
+            handles: 2,
+            chunk_bytes: 65_536,
+            helper_stack_bytes: 1024 * 1024,
+            drain_poll: Duration::from_millis(1),
+            drain_observation: Duration::from_secs(30),
+        };
+        run_on(&runtime, &options, |service| async move {
+            let listening = Listening::new_in(&service, &path, 4096, true)?;
+            let client = Connection::client_in(&service, &path, 65_536, 1024 * 1024)?;
+            let token = std::future::poll_fn(|cx| listening.poll_accept(cx)).await?;
+            let server = Connection::accepted(token, 65_536, 1024 * 1024)?;
+            let weak = Arc::downgrade(&server);
+            let mut writer = Pipe::new(server.clone())?;
+            writer.write_all(&vec![b'x'; 65_536]).await?;
+            drop(writer);
+            drop(server);
+            drop(listening);
+            client.abort();
+            drop(client);
+            // Synchronous clients cannot yield the enclosing async future to
+            // drive retirement. This is only a liveness watchdog: actual owner
+            // destruction, not elapsed time or cancel return, is the evidence.
+            let watchdog = Instant::now() + Duration::from_secs(30);
+            while weak.upgrade().is_some() && Instant::now() < watchdog {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                weak.upgrade().is_none(),
+                "physical owner must retire while synchronous work is running"
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn outer_scope_retires_dirty_registered_endpoints_before_error_or_unwind_returns() {
         for unwind in [false, true] {
             let directory = tempfile::tempdir().unwrap();

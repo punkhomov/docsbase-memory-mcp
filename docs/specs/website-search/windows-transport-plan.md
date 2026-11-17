@@ -75,3 +75,42 @@ acceptance and website-search specs/progress.
 - [ ] Final-source latency/allocation/helper measurements; no budget changes.
 - [ ] Required native CI and independent whole-feature review; resolve findings,
   reconcile PR body/specs/ledger and mark ready only after evidence is complete.
+
+## Delta 2026-11-17 — W3 integration slices and explicit ownership API
+
+W3 remains the application integration task; these slices avoid a single opaque
+facade/root rewrite. Existing context-free constructors cannot safely own a
+Windows retirement scope and must migrate at their real composition boundaries.
+
+1. **W3a: root and platform seam.** Add an explicit synchronous transport scope
+   and clonable submission capability. The outer caller owns Port/progress and
+   drives retirement independently of application polling; application work runs
+   on one scoped, named thread with an explicit stack reservation. Scope spans
+   the application/command, never one RPC. Its work constructs/uses its runtime
+   (or synchronous clients) and existing JobRoot normally. Error/unwind closes
+   ingress and joins actual physical retirement before leaving the scope.
+   A real blocking-work/churn test must first demonstrate that the existing
+   cooperative run_on driver cannot reap while synchronous work is running.
+   The platform capability supplies bind/connect_async/connect_blocking; no
+   hidden global reaper or operational interprocess fallback. Native/worker
+   stacks, two native regions per handle and optional drain workers are counted
+   before creation. Unix remains a thin delegated capability.
+2. **W3b: daemon and delivery.** One scope outside JobRoot/Runtime/lease; pass
+   capability into serve/bind. Keep physical listening/admitted/shedding owners
+   in the same bounded arena. Add native connection/request ownership tails
+   before submission; idle reads charge connections only. Add native write
+   barriers and explicit successful final close under existing deadlines.
+3. **W3c: clients and entrypoints.** Explicit capabilities in blocking/async
+   client constructors, CLI Context, MCP Frontend and Web pool. Blocking I/O
+   polls the same owned operations with a wake/condition and actual deadline;
+   timeout cancels the exchange while the outer root keeps native storage.
+   Blocking clone/split must preserve one serialized writable stream. Stop
+   reads a complete acknowledgement under the original overall deadline.
+4. **W3d: operational acceptance.** Migrate real fixtures to the same explicit
+   root API; prove capacity retention, deadlines, cancellation and final reply
+   delivery through actual daemon/client paths. Remove unused core adapters,
+   resolve native lints, run full/lean verification and fresh W3 review.
+
+The root thread topology is fixed per application scope (one application work
+thread plus the existing native progress thread), not proportional to requests.
+Per-connection drain threads remain optional and bounded until actual join.
