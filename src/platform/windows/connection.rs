@@ -799,6 +799,7 @@ mod tests {
                     writer.write(b"late").await.unwrap_err().kind(),
                     io::ErrorKind::BrokenPipe
                 );
+                drop(writer);
                 Ok::<_, io::Error>(())
             };
             let reading = async {

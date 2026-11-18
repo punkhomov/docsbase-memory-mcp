@@ -224,13 +224,18 @@ impl Flush {
     }
     #[cfg(test)]
     pub(super) fn test_native_io_pending(&self) -> io::Result<bool> {
+        let state = locked(&self.shared.state);
+        if state.phase != Phase::Flushing || state.result.is_some() {
+            return Ok(false);
+        }
         let thread = locked(&self.thread);
         let thread = thread
             .as_ref()
             .ok_or_else(|| failure("drain worker already joined"))?;
         let mut pending = 0;
         // SAFETY: the JoinHandle remains locked and owned through this query;
-        // this dedicated thread performs only the final FlushFileBuffers I/O.
+        // the phase fence excludes startup and post-flush work. The dedicated
+        // helper's only native I/O during Flushing is FlushFileBuffers.
         if unsafe {
             windows_sys::Win32::System::Threading::GetThreadIOPendingFlag(
                 thread.as_raw_handle(),

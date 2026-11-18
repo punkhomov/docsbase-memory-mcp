@@ -1086,3 +1086,14 @@ capacity policy and deadlines. All five original source findings were addressed
 in scoped review; this newly exposed transition and its native acceptance remain
 under review. The diagnostic full Windows run is for production composition,
 not a replacement for the still-blocked mandatory Node audit.
+
+MODIFIED 2026-11-18 — L1 native GREEN, extra mutation not yet accepted.
+Run44262732333/source817149a passes all18scenarios, including the real daemon.
+Disabling original permit/Activity attachment produces the intended assertion
+with frozen candidate slots1/activity0 and completed cleanup. However, bypassing
+FlushFileBuffers leaves the final-drain test green; the run correctly fails its
+mutation acceptance. Restrict its native pending-I/O observation to the actual
+Flushing phase with no published result, excluding helper startup/idle I/O, and
+drop the logical writer after successful-close assertions. This is test-proof
+work, not a new production lifetime fix. Repeat the mutation before accepting
+the strengthened test; do not count the failed workflow as final acceptance.
