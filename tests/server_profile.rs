@@ -7,6 +7,9 @@ use docsbase_memory::ipc::client::Client;
 use docsbase_memory::ipc::protocol::Request;
 use docsbase_memory::platform;
 
+#[path = "support/transport.rs"]
+mod test_transport;
+
 struct Daemon(Child);
 impl Drop for Daemon {
     fn drop(&mut self) {
@@ -24,7 +27,7 @@ fn cli(cache: &Path, config: &Path) -> Command {
     command
 }
 
-fn await_started(daemon: &mut Daemon, cache: &Path) {
+fn await_started(transport: &platform::Transport, daemon: &mut Daemon, cache: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(status) = daemon.0.try_wait().unwrap() {
@@ -39,7 +42,7 @@ fn await_started(daemon: &mut Daemon, cache: &Path) {
             panic!("indexed Website startup failed: {status}: {diagnostic}");
         }
         if platform::exists(&platform::daemon_endpoint(cache))
-            && let Some(mut client) = Client::connect(cache)
+            && let Some(mut client) = Client::connect(transport, cache)
             && client.handshake_registry().is_ok()
         {
             return;
@@ -89,8 +92,9 @@ fn indexed_global_website_profile_starts_with_zero_owned_watchers() {
             .spawn()
             .unwrap(),
     );
-    await_started(&mut daemon, cache.path());
-    let mut client = Client::connect(cache.path()).unwrap();
+    let transport = test_transport::TestTransport::new(4);
+    await_started(&transport, &mut daemon, cache.path());
+    let mut client = Client::connect(&transport, cache.path()).unwrap();
     client.handshake_registry().unwrap();
     let status = client.call_tool("status", serde_json::json!({})).unwrap();
     assert_eq!(status["watchers"], 0);
@@ -122,8 +126,9 @@ fn cli_project_selects_a_complete_website_profile_from_unrelated_cwd() {
             .spawn()
             .unwrap(),
     );
-    await_started(&mut daemon, cache.path());
-    let mut client = Client::connect(cache.path()).unwrap();
+    let transport = test_transport::TestTransport::new(4);
+    await_started(&transport, &mut daemon, cache.path());
+    let mut client = Client::connect(&transport, cache.path()).unwrap();
     client.handshake_registry().unwrap();
     let status = client.call_tool("status", serde_json::json!({})).unwrap();
     assert_eq!(status["watchers"], 0);
@@ -134,6 +139,7 @@ fn cli_project_selects_a_complete_website_profile_from_unrelated_cwd() {
 }
 
 struct ProfileEnv {
+    transport: test_transport::TestTransport,
     cache: tempfile::TempDir,
     root: tempfile::TempDir,
     config: tempfile::TempDir,
@@ -141,6 +147,7 @@ struct ProfileEnv {
 impl ProfileEnv {
     fn indexed() -> Self {
         let env = Self {
+            transport: test_transport::TestTransport::new(16),
             cache: tempfile::tempdir().unwrap(),
             root: tempfile::tempdir().unwrap(),
             config: tempfile::tempdir().unwrap(),
@@ -176,11 +183,11 @@ impl ProfileEnv {
                 .spawn()
                 .unwrap(),
         );
-        await_started(&mut daemon, self.cache.path());
+        await_started(&self.transport, &mut daemon, self.cache.path());
         daemon
     }
     fn connect(&self) -> Client {
-        let mut client = Client::connect(self.cache.path()).unwrap();
+        let mut client = Client::connect(&self.transport, self.cache.path()).unwrap();
         client.handshake_registry().unwrap();
         client
     }
@@ -354,7 +361,7 @@ fn explicit_shared_replaces_global_website_and_invalid_selectors_never_start() {
             .output()
             .unwrap();
         assert!(!output.status.success(), "{output:?}");
-        assert!(Client::connect(env.cache.path()).is_none());
+        assert!(Client::connect(&env.transport, env.cache.path()).is_none());
     }
 }
 
@@ -381,7 +388,7 @@ fn wrong_schema_cli_admission_creates_no_conflict_listener_or_runtime_state() {
     for name in ["state", "logs", "vectors.db"] {
         assert!(!env.cache.path().join(name).exists(), "unexpected {name}");
     }
-    assert!(Client::connect(env.cache.path()).is_none());
+    assert!(Client::connect(&env.transport, env.cache.path()).is_none());
 }
 
 #[test]
@@ -454,7 +461,10 @@ fn observe_startup_failure(env: &ProfileEnv, args: &[&str]) -> StartupFailure {
             status = Some(exited);
             break;
         }
-        if matches!(Client::try_connect(env.cache.path()), Ok(Some(_))) {
+        if matches!(
+            Client::try_connect(&env.transport, env.cache.path()),
+            Ok(Some(_))
+        ) {
             published = true;
             break;
         }
@@ -624,7 +634,7 @@ fn explicit_project_status_uses_fixed_readonly_binding_from_unrelated_cwd() {
         !output.status.success(),
         "explicit project status needs the daemon"
     );
-    assert!(Client::connect(env.cache.path()).is_none());
+    assert!(Client::connect(&env.transport, env.cache.path()).is_none());
 }
 
 #[test]

@@ -68,7 +68,8 @@ async fn transport_scenario(timeout_ms: u64, disconnect: bool) {
     if let platform::Endpoint::Unix(path) = &endpoint {
         platform::fs::secure_dir(path.parent().unwrap()).unwrap();
     }
-    let listener = platform::bind(&endpoint).unwrap();
+    let transport = crate::test_transport::TestTransport::new(16);
+    let listener = platform::bind(&transport, &endpoint).unwrap();
     let (entered_tx, mut entered) = mpsc::channel(8);
     let (closed_tx, mut closed) = mpsc::channel(8);
     let acceptor = tokio::spawn(async move {
@@ -124,9 +125,13 @@ async fn transport_scenario(timeout_ms: u64, disconnect: bool) {
     settings.search_connections = 1;
     settings.control_connections = 1;
     settings.queue_limit = 0;
-    let daemon = daemon_client::DaemonClient::connect(cache.path().to_owned(), settings.clone())
-        .await
-        .unwrap();
+    let daemon = daemon_client::DaemonClient::connect(
+        transport.clone(),
+        cache.path().to_owned(),
+        settings.clone(),
+    )
+    .await
+    .unwrap();
     let http = platform::web::bind_loopback(0).await.unwrap();
     let address = http.local_addr().unwrap();
     let state = Arc::new(server::AppState {
@@ -248,7 +253,8 @@ async fn missing_panel_capability_refuses_before_binding() {
         if let platform::Endpoint::Unix(path) = &endpoint {
             platform::fs::secure_dir(path.parent().unwrap()).unwrap();
         }
-        let listener = platform::bind(&endpoint).unwrap();
+        let transport = crate::test_transport::TestTransport::new(16);
+        let listener = platform::bind(&transport, &endpoint).unwrap();
         let peer = tokio::spawn(async move {
             let stream = listener.accept().await.unwrap();
             let (read, mut write) = tokio::io::split(stream);
@@ -273,7 +279,12 @@ async fn missing_panel_capability_refuses_before_binding() {
             assert!(matches!(reader.read_frame().await.unwrap(), Frame::Eof));
         });
         let policy = settings::WebSpec::defaults(&DefaultsContext::standalone());
-        let outcome = daemon_client::DaemonClient::connect(cache.path().to_owned(), policy).await;
+        let outcome = daemon_client::DaemonClient::connect(
+            transport.clone(),
+            cache.path().to_owned(),
+            policy,
+        )
+        .await;
         assert!(matches!(outcome, Err(crate::error::Error::Protocol { .. })));
         peer.await.unwrap();
     }
@@ -308,7 +319,8 @@ async fn active_website_panel_uses_hello_only_registry_reads_and_fixed_id_bindin
     if let platform::Endpoint::Unix(path) = &endpoint {
         platform::fs::secure_dir(path.parent().unwrap()).unwrap();
     }
-    let listener = platform::bind(&endpoint).unwrap();
+    let transport = crate::test_transport::TestTransport::new(16);
+    let listener = platform::bind(&transport, &endpoint).unwrap();
     let policy = crate::search::settings::standalone()
         .unwrap()
         .into_settings();
@@ -357,9 +369,10 @@ async fn active_website_panel_uses_hello_only_registry_reads_and_fixed_id_bindin
     });
     let mut settings = settings::WebSpec::defaults(&DefaultsContext::standalone());
     settings.control_connections = 1;
-    let client = daemon_client::DaemonClient::connect(cache.path().to_owned(), settings)
-        .await
-        .unwrap();
+    let client =
+        daemon_client::DaemonClient::connect(transport.clone(), cache.path().to_owned(), settings)
+            .await
+            .unwrap();
     for (project, tool) in [
         (None, "panel_projects"),
         (Some(1), "panel_config"),

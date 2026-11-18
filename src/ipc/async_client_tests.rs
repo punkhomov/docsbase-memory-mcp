@@ -23,6 +23,7 @@ struct Harness {
     entered: oneshot::Receiver<()>,
     server: tokio::task::JoinHandle<Vec<Request>>,
     _cache: tempfile::TempDir,
+    _transport: crate::test_transport::TestTransport,
 }
 
 impl Harness {
@@ -33,10 +34,13 @@ impl Harness {
             platform::fs::secure_dir(path.parent().expect("socket directory"))
                 .expect("runtime directory");
         }
-        let listener = platform::bind(&endpoint).expect("native listener");
-        let (client, stream) =
-            tokio::try_join!(AsyncClient::connect(cache.path()), listener.accept(),)
-                .expect("native connection");
+        let transport = crate::test_transport::TestTransport::new(4);
+        let listener = platform::bind(&transport, &endpoint).expect("native listener");
+        let (client, stream) = tokio::try_join!(
+            AsyncClient::connect(&transport, cache.path()),
+            listener.accept(),
+        )
+        .expect("native connection");
         let (entered, observed) = oneshot::channel();
         let server = tokio::spawn(serve(stream, capable, answer, entered));
         Self {
@@ -44,6 +48,7 @@ impl Harness {
             entered: observed,
             server,
             _cache: cache,
+            _transport: transport,
         }
     }
 }

@@ -19,3 +19,9 @@ pub mod watch;
 
 #[cfg(feature = "web")]
 pub mod web;
+
+#[cfg(test)]
+extern crate self as docsbase_memory;
+#[cfg(test)]
+#[path = "../tests/support/transport.rs"]
+pub(crate) mod test_transport;

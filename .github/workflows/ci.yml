@@ -45,6 +45,8 @@ jobs:
           grep -q 'README.ru.md' README.md
           grep -q 'README.md' README.ru.md
           echo "docs gate OK (version $VERSION)"
+      - name: Verify exact upstream source and reviewed Windows patches
+        run: python3 vendor/verify.py
       - name: Audit locked Cargo publication ages
         run: python3 .github/scripts/check-cargo-age.py
       - name: CI observer regression checks

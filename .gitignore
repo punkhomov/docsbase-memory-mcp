@@ -3,6 +3,7 @@
 *.tmp
 *.log
 *.orig
+!/vendor/**/Cargo.toml.orig
 *.rej
 .env
 .DS_Store

@@ -3,6 +3,7 @@
 import concurrent.futures
 import datetime as dt
 import json
+import importlib.util
 from pathlib import Path
 import sys
 import tomllib
@@ -10,6 +11,11 @@ import urllib.request
 
 MIN_AGE = dt.timedelta(days=14)
 SOURCE = 'registry+https://github.com/rust-lang/crates.io-index'
+
+_manifest_spec = importlib.util.spec_from_file_location(
+    'docsbase_vendor_manifest', Path(__file__).resolve().parents[2] / 'vendor' / 'manifest.py')
+_manifest = importlib.util.module_from_spec(_manifest_spec)
+_manifest_spec.loader.exec_module(_manifest)
 
 def check_record(record, now):
     stamp = record.get('pubtime')
@@ -48,6 +54,13 @@ def main():
             continue
         if source != SOURCE:
             raise ValueError(f'unsupported source: {package["name"]}: {source}')
+        groups.setdefault(package['name'], []).append((package['version'], package['checksum']))
+    # ADR-WLIB1: path overrides retain the original archive's publication/age
+    # audit. Exact source-plus-patch verification runs separately in docs CI.
+    for package in _manifest.load_upstream(lock.parent):
+        if not any(p['name'] == package['name'] and p['version'] == package['version']
+                   and p.get('source') is None for p in packages):
+            raise ValueError(f'vendored source absent from lock: {package["name"]}')
         groups.setdefault(package['name'], []).append((package['version'], package['checksum']))
     if not groups:
         raise ValueError('no registry packages found')

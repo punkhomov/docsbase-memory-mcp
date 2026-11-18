@@ -16,7 +16,11 @@ use docsbase_memory::ipc::client::Client;
 use docsbase_memory::ipc::protocol::MAX_FRAME_BYTES;
 use docsbase_memory::platform;
 
+#[path = "support/transport.rs"]
+mod test_transport;
+
 struct Env {
+    transport: test_transport::TestTransport,
     cache: TempDir,
     root: TempDir,
     #[cfg(unix)]
@@ -34,6 +38,7 @@ impl Env {
             write_file(root.path(), rel, body.as_bytes());
         }
         Self {
+            transport: test_transport::TestTransport::new(160),
             cache,
             root,
             #[cfg(unix)]
@@ -84,7 +89,7 @@ impl Env {
 
     fn client(&self) -> Client {
         for _ in 0..100 {
-            if let Some(client) = Client::connect(self.cache()) {
+            if let Some(client) = Client::connect(&self.transport, self.cache()) {
                 return client;
             }
             std::thread::sleep(Duration::from_millis(20));

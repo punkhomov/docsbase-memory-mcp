@@ -432,15 +432,27 @@ fn daemon_stop() -> anyhow::Result<()> {
 /// tools such as `status` skip it so they work from any directory.
 ///
 /// # Errors
+/// One read/control command scope, including all list pages. Bootstrap policy
+/// is independent of a malformed user config so stop/status remain usable.
+fn with_transport<T: Send>(
+    work: impl FnOnce(crate::platform::transport::Transport) -> anyhow::Result<T> + Send,
+) -> anyhow::Result<T> {
+    let settings = crate::daemon::settings::standalone()?;
+    let policy =
+        crate::ipc::transport::policy(settings.settings().max_connections, settings.settings())?;
+    crate::platform::transport::run(&policy, |transport| Ok(work(transport)))?
+}
+
 /// Surfaces handshake/tool errors from a daemon that did answer.
 pub(crate) fn try_daemon(
+    transport: &crate::platform::transport::Transport,
     tool: &str,
     args: serde_json::Value,
     bind_session: bool,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let cache = paths::cache_dir()?;
-    let Some(mut client) = Client::try_connect(&cache)? else {
+    let Some(mut client) = Client::try_connect(transport, &cache)? else {
         crate::daemon::launch::require_shared_without_daemon()?;
         return Ok(None);
     };

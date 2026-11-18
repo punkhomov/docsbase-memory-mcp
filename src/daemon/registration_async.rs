@@ -93,6 +93,8 @@ async fn prepare_and_index(
 }
 
 fn prepare(shared: &Arc<Shared>, cwd: &Path, operation: &SearchOperation) -> Result<Plan> {
+    #[cfg(test)]
+    shared.observe_registration_work();
     operation.check()?;
     let mut db = Db::open_with_settings(&shared.cache, &shared.db_settings)?;
     let error = match registry::resolve_by_cwd(&db, cwd) {

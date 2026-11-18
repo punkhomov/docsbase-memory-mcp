@@ -28,3 +28,9 @@ verifyDepsBeforeRun: error
 verifyStoreIntegrity: true
 strictStorePkgContentCheck: true
 saveExact: true
+
+# Human-approved temporary dev-tooling risk acceptance (2026-11-18, #166).
+# picomatch@4.0.7 via Vite/Svelte only; remove when an eligible fix is available.
+audit:
+  ignore:
+    - GHSA-fc5q-39xc-vjpf

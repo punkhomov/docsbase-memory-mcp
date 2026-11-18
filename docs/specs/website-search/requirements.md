@@ -337,3 +337,42 @@ spawn, исходный SearchOperation deadline/token и permit/Activity до �
 bounded-read исправлением #152, затем readiness+HTTP для закрытия #79. Отдельная
 цепочка docs-only PR не требуется. #47/#48/#117/#128 вне scope; #12 закрыта как
 not planned. Real ~20k acceptance по-прежнему отложен пользователем.
+
+## Delta 2026-11-17 — ADDED: Windows owned IPC retirement (#155)
+
+- **FR-W1:** Native operations/buffers/HANDLEs and cancellation callers remain
+  owned and charged after logical cancellation until actual terminal evidence.
+  Admitted plus retiring resources share the same bounded capacity.
+- **FR-W2:** Ordinary persistent replies wait for native write completion under
+  their existing budget. Successful final server replies additionally prove
+  peer drain before normal close. Failed exchanges may abort and discard data;
+  abort is never successful delivery. StopDaemon acknowledgement is complete.
+- **FR-W3:** A synchronous outer application owner retains transport progress
+  through errors/unwind/runtime cancellation. Unproved retirement stays in a
+  bounded quarantine; neither deadline nor cancellation return implies clean exit.
+- **FR-W4:** Serialize into storage bounded before copying, with allocation
+  proportional to actual encoded size; reject oversized escaped output. No eager
+  flush worker is required for ordinary persistent request/response traffic.
+- **FR-W5:** Deterministically prove admitted registration survives armed idle
+  grace (#165), without larger grace, sleep-based admission inference or ignores.
+
+
+## Delta 2026-11-17 — L1, библиотечный Windows native owner
+
+Candidate implementation supersedes ADR-W1 own-IOCP choice, pending native
+acceptance: same #155 delivery/admission/Activity/deadline obligations, using
+Mio/Tokio-owned operations. Original cap also bounds dependency read/write
+buffers. A cancelled native caller retains the original endpoint through its
+actual return; helpers retain it through native thread signal/join. No new
+protocol, default, timeout, quality baseline or weaker shutdown guarantee.
+Plan and ADR: windows-library-plan.md (ADR-WLIB1).
+
+## Delta 2026-11-18 — FR-W1/W3 complete composition boundaries
+
+Daemon admission remains held through native drain after application return or
+failure. Connection admission attaches before a handler's first poll, including
+runtime cancellation of a never-polled handler and a racing native abort.
+Completion accounting distinguishes submitted synchronous connect success from
+local already-connected success. The library replacement preserves prior client
+identification-only SQOS and read EOF semantics, and every Cargo path override
+must be covered by both provenance and original publication-age validation.

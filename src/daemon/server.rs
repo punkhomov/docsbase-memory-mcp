@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tokio::sync::{mpsc, watch};
 
 use crate::config::Config;
@@ -32,7 +32,7 @@ use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseRequest};
 use crate::hybrid::jobs as hybrid_jobs;
 use crate::ipc::framing::{Frame, FrameReader};
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
-use crate::platform::Stream;
+use crate::platform::transport::Stream;
 use crate::search::metadata::MetadataSource;
 use crate::store::Db;
 use crate::store::migrations;
@@ -79,6 +79,8 @@ pub struct Shared {
     pub(super) activity: request::ActivitySource,
     activity_events: Mutex<Option<mpsc::Receiver<()>>>,
     jobs: std::sync::OnceLock<super::job_service::JobService>,
+    #[cfg(test)]
+    pub(super) registration_work_gate: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     // Website has exactly one fixed-project background sync closure.
     sync_slot: Arc<tokio::sync::Semaphore>,
     #[cfg(feature = "hybrid-remote")]
@@ -440,6 +442,8 @@ impl Shared {
             activity,
             activity_events: Mutex::new(Some(activity_events)),
             jobs: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            registration_work_gate: Mutex::new(None),
             sync_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: SessionRegistry::with_settings(&global_config.daemon)?,
             watchers,
@@ -472,6 +476,14 @@ impl Shared {
             .set(service)
             .map_err(|_| Error::internal("job root already activated"))?;
         self.watchers.activate_async(Arc::downgrade(self))
+    }
+
+    #[cfg(test)]
+    fn observe_registration_work(&self) {
+        let gate = self.registration_work_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate();
+        }
     }
 
     pub(crate) async fn run_watch_batch(
@@ -1357,39 +1369,46 @@ pub async fn handle_connection(
 }
 
 /// Real accept retains its existing connection slot through actual work.
-pub(super) async fn handle_admitted_connection(
+pub(super) fn handle_admitted_connection(
     shared: Arc<Shared>,
     stream: Stream,
     in_flight: Arc<AtomicUsize>,
     events: mpsc::Sender<()>,
     shutdown: watch::Sender<bool>,
     permit: tokio::sync::OwnedSemaphorePermit,
-) {
-    handle_connection_in(
-        shared,
-        stream,
-        in_flight,
-        events,
-        shutdown,
-        Some(Arc::new(permit)),
-    )
-    .await;
-}
-
-async fn write_frame_error(writer: &mut (impl tokio::io::AsyncWrite + Unpin), frame: Frame) {
-    let message = match frame {
-        Frame::TooLarge => {
-            format!("frame exceeds {} bytes", protocol::MAX_FRAME_BYTES)
+) -> impl std::future::Future<Output = ()> + Send {
+    let connection = Arc::new(permit);
+    let attached = stream.ownership().retain_connection(connection.clone());
+    async move {
+        if attached.is_err() {
+            return;
         }
-        _ => "incomplete frame without delimiter".to_owned(),
-    };
-    let err = Error::Protocol { message };
-    let response = error_response(&err);
-    if let Ok(bytes) = protocol::encode(&response) {
-        let _ = writer.write_all(&bytes).await;
+        handle_connection_in(
+            shared,
+            stream,
+            in_flight,
+            events,
+            shutdown,
+            Some(connection),
+        )
+        .await;
     }
 }
 
+async fn write_frame_error(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    frame: Frame,
+    deadline: Instant,
+) {
+    let message = match frame {
+        Frame::TooLarge => format!("frame exceeds {} bytes", protocol::MAX_FRAME_BYTES),
+        _ => "incomplete frame without delimiter".to_owned(),
+    };
+    let response = error_response(&Error::Protocol { message });
+    let _ = scoped::reply(writer, response, None, false, true, deadline).await;
+}
+
+#[allow(clippy::too_many_lines)] // Ordered request ownership, delivery and connection cancellation form one scope.
 async fn handle_connection_in(
     shared: Arc<Shared>,
     stream: Stream,
@@ -1398,6 +1417,7 @@ async fn handle_connection_in(
     shutdown: watch::Sender<bool>,
     connection: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
 ) {
+    let ownership = stream.ownership();
     let (read_half, mut writer) = tokio::io::split(stream);
     let mut reader = FrameReader::new(BufReader::new(read_half));
     let mut peer = Peer::default();
@@ -1431,12 +1451,25 @@ async fn handle_connection_in(
                         break;
                     }
                     Ok(frame @ (Frame::Incomplete | Frame::TooLarge)) => {
-                        write_frame_error(&mut writer, frame).await;
+                        let guard = Activity::new(&in_flight, &events, connection.as_ref());
+                        if ownership.retain_request(guard.clone()).is_err() {
+                            break;
+                        }
+                        let deadline = Instant::now()
+                            + Duration::from_millis(shared.daemon_settings().control_timeout_ms);
+                        write_frame_error(&mut writer, frame, deadline).await;
                         break;
                     }
                 };
                 let guard = Activity::new(&in_flight, &events, connection.as_ref());
+                if ownership.retain_request(guard.clone()).is_err() {
+                    break;
+                }
                 let decoded = protocol::decode_request(&line);
+                // Stop's drain and final ACK share its original whole budget.
+                let stop_deadline = matches!(&decoded, Ok(Request::StopDaemon)).then(|| {
+                    Instant::now() + Duration::from_millis(shared.daemon_settings().reply_drain_ms)
+                });
                 let scope = match &decoded {
                     Ok(request) => scoped::Scope::new(&shared, request, Arc::clone(&guard)),
                     Err(_) => Ok(scoped::Scope {
@@ -1468,7 +1501,24 @@ async fn handle_connection_in(
                     .as_ref()
                     .ok()
                     .and_then(|scope| scope.operation.as_ref());
-                let delivered = scoped::reply(&mut writer, response, operation, immediate).await;
+                // Non-search control delivery starts when its response is ready.
+                // Search and Stop retain their original absolute deadlines.
+                let control_deadline = stop_deadline.unwrap_or_else(|| {
+                    Instant::now()
+                        + Duration::from_millis(shared.daemon_settings().control_timeout_ms)
+                });
+                let delivered = scoped::reply(
+                    &mut writer,
+                    response,
+                    operation,
+                    immediate,
+                    close,
+                    control_deadline,
+                )
+                .await;
+                if delivered {
+                    ownership.request_completed();
+                }
                 drop(guard);
                 if !delivered {
                     break;
@@ -1691,7 +1741,7 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                 .await;
                 let _ = shutdown.send(true);
             }
-            (Response::ToolResult { value: Value::Null }, false)
+            (Response::ToolResult { value: Value::Null }, true)
         }
     }
 }
@@ -1811,6 +1861,8 @@ async fn register_session_in(
         Some(permit),
         activity,
         move || -> Result<crate::store::models::Project> {
+            #[cfg(test)]
+            shared_for_task.observe_registration_work();
             // Own connection: the shared read connection must stay free while a
             // full index runs (F4/NFR-1).
             let mut db =
@@ -3483,3 +3535,7 @@ mod tests {
 #[cfg(test)]
 #[path = "project_state_tests.rs"]
 mod project_state_tests;
+
+#[cfg(all(test, windows))]
+#[path = "windows_transport_tests.rs"]
+mod windows_transport_tests;

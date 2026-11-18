@@ -1,4 +1,8 @@
 #![cfg(feature = "web")]
+#[cfg(unix)]
+#[path = "support/transport.rs"]
+mod test_transport;
+
 use std::{process::Command, time::Duration};
 
 fn command(root: &std::path::Path) -> Command {
@@ -74,7 +78,8 @@ fn ctrl_c_leaves_shared_daemon_alive_and_open_failure_is_nonfatal() {
     });
     let line = rx.recv_timeout(Duration::from_secs(30)).unwrap();
     assert!(line.starts_with("docsbase Web: http://127.0.0.1:"));
-    let mut client = Client::connect(&root.path().join("cache")).unwrap();
+    let transport = test_transport::TestTransport::new(4);
+    let mut client = Client::connect(&transport, &root.path().join("cache")).unwrap();
     client.handshake_registry().unwrap();
     client
         .call(Request::BindReadOnly {

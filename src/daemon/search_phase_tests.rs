@@ -39,10 +39,17 @@ impl Fixture {
             )],
         )
         .expect("one prepared reader");
-        let shared = Shared::open_with_policies(
+        // Parallel CLI tests redirect the process-global config path. Keep this
+        // fixture's launch policy independent, including later project reloads.
+        let shared = Shared::open_with_launch(
             cache.path(),
             &crate::store::settings::standalone().expect("DB policy"),
             &pool,
+            crate::hybrid::dense_settings::standalone()
+                .expect("dense policy")
+                .settings(),
+            &LaunchSnapshot::capture_from(&cache.path().join("test-config")),
+            DaemonPatch::default(),
         )
         .expect("shared");
         let project = {

@@ -142,6 +142,8 @@ pub(super) async fn reply<W: AsyncWrite + Unpin>(
     mut response: Response,
     operation: Option<&SearchOperation>,
     immediate: bool,
+    close: bool,
+    control_deadline: Instant,
 ) -> bool {
     let boundary = operation.and_then(|operation| operation.check().err());
     let expired = immediate || boundary.is_some();
@@ -150,52 +152,81 @@ pub(super) async fn reply<W: AsyncWrite + Unpin>(
     {
         response = error_response(&error);
     }
-    let Some(bytes) = response_bytes(&response) else {
+    let Some(bytes) = response_bytes(response) else {
         return false;
     };
-    drop(response);
     if expired {
         // No extra time budget for an already-expired error reply. This may
         // deliver a complete frame, a prefix, or no bytes before closure.
-        let mut writing = std::pin::pin!(writer.write_all(&bytes));
+        let mut writing = std::pin::pin!(writer.write_all(bytes.bytes()));
         let _ = poll_fn(|cx| Poll::Ready(writing.as_mut().poll(cx))).await;
         return false;
     }
     match operation {
         Some(operation) => {
             let deadline = tokio::time::Instant::from_std(operation.deadline());
-            write_before(
+            deliver_before(
                 writer,
-                &bytes,
+                bytes.bytes(),
                 operation,
                 tokio::time::sleep_until(deadline),
+                close,
             )
             .await
         }
-        None => writer.write_all(&bytes).await.is_ok(),
+        None => tokio::time::timeout_at(
+            tokio::time::Instant::from_std(control_deadline),
+            deliver(writer, bytes.bytes(), close),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok()),
     }
 }
 
-fn response_bytes(response: &Response) -> Option<Vec<u8>> {
-    let bytes = protocol::encode(response).ok()?;
-    if bytes.len() <= protocol::MAX_FRAME_BYTES + 1 {
-        return Some(bytes);
+fn response_bytes(response: Response) -> Option<crate::ipc::encoding::Frame> {
+    let encoded = crate::ipc::encoding::encode(&response);
+    drop(response);
+    if let Ok(frame) = encoded {
+        return Some(frame);
     }
     let error = Error::Protocol {
         message: format!(
-            "response frame is {} bytes, over {}; reduce max_file_size or the document size",
-            bytes.len(),
-            protocol::MAX_FRAME_BYTES,
+            "response frame exceeds {} bytes; reduce max_file_size or the document size",
+            protocol::MAX_FRAME_BYTES
         ),
     };
-    protocol::encode(&error_response(&error)).ok()
+    crate::ipc::encoding::encode(&error_response(&error)).ok()
 }
 
+async fn deliver<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    bytes: &[u8],
+    close: bool,
+) -> std::io::Result<()> {
+    writer.write_all(bytes).await?;
+    writer.flush().await?;
+    if close {
+        writer.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 async fn write_before<W: AsyncWrite + Unpin>(
     writer: &mut W,
     bytes: &[u8],
     operation: &SearchOperation,
     expiry: impl Future<Output = ()>,
+) -> bool {
+    deliver_before(writer, bytes, operation, expiry, false).await
+}
+
+async fn deliver_before<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    bytes: &[u8],
+    operation: &SearchOperation,
+    expiry: impl Future<Output = ()>,
+    close: bool,
 ) -> bool {
     tokio::select! {
         biased;
@@ -203,7 +234,7 @@ async fn write_before<W: AsyncWrite + Unpin>(
             operation.cancellation().cancel();
             false
         }
-        result = writer.write_all(bytes) => operation.check().is_ok() && result.is_ok(),
+        result = deliver(writer, bytes, close) => operation.check().is_ok() && result.is_ok(),
     }
 }
 
@@ -236,6 +267,7 @@ mod tests {
     impl<T: AsyncRead + AsyncWrite + Unpin + Send> TestIo for T {}
 
     struct Peers {
+        _transport: crate::test_transport::TestTransport,
         client: Box<dyn TestIo>,
         reader: FrameReader<BufReader<tokio::io::ReadHalf<Box<dyn TestIo>>>>,
         writer: tokio::io::WriteHalf<Box<dyn TestIo>>,
@@ -243,6 +275,7 @@ mod tests {
 
     impl Peers {
         async fn new(native: bool, cache: &std::path::Path) -> Self {
+            let transport = crate::test_transport::TestTransport::new(2);
             tokio::time::timeout(WATCHDOG, async {
                 let (mut client, backend): (Box<dyn TestIo>, Box<dyn TestIo>) = if native {
                     let endpoint = crate::platform::daemon_endpoint(cache);
@@ -250,9 +283,10 @@ mod tests {
                         crate::platform::fs::secure_dir(path.parent().expect("socket directory"))
                             .expect("private socket directory");
                     }
-                    let listener = crate::platform::bind(&endpoint).expect("native listener");
+                    let listener =
+                        crate::platform::bind(&transport, &endpoint).expect("native listener");
                     let (client, backend) = tokio::try_join!(
-                        crate::platform::connect_async(&endpoint),
+                        crate::platform::connect_async(&transport, &endpoint),
                         listener.accept(),
                     )
                     .expect("native streams");
@@ -284,6 +318,7 @@ mod tests {
                     .expect("read prelude reply");
                 assert_eq!(&reply, b"ok\n");
                 Self {
+                    _transport: transport,
                     client,
                     reader,
                     writer,
