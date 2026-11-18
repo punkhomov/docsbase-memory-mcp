@@ -1127,3 +1127,28 @@ hello_version_mismatch EOF assertion receives native233. Restore the prior
 no assertion is weakened. Exact vendor verification and Windows-target strict
 Clippy pass. Scoped final re-review,21native GREEN plus controlled REDs and final
 full native composition remain pending; required Node audit166 is unchanged.
+
+Task L1: complete (2026-11-18, library-backed Windows ownership).
+Exact production7e106a4/run44267931680 passes21native cases, including lease
+contention after work return, both never-polled admission paths, native SQOS,
+the actual stalled daemon and successful final delivery/EOF. Original counters
+before cleanup are slots0/activity1; disabling attachment gives slots1/activity0
+and intended assertion after completed cleanup. Bypassing FlushFileBuffers also
+fails its intended assertion. A real queued connect routed through the submitted
+success branch completes and retires correctly; native TRUE itself is not
+claimed forced. All source files are restored after controls. Lean lib494/0,
+full Linux cli-full, strict Linux/Windows-target Clippy, offline syscall check,
+14Python checks,487registry age records and7real-daemon browser cases pass.
+Ruling: fresh task review and final whole-source fix review have all findings
+addressed, no new Critical/Important and no deferred minors. L2 remains pending
+full Windows composition and required exact-head CI; human merge only.
+
+MODIFIED 2026-11-18 — L2 clean-checkout packaging correction. Required docs
+run44268839451 rejects missing upstream Cargo.toml.orig despite local tree
+verification passing. The repository's generic *.orig ignore omitted exactly
+the Mio and Tokio source manifests from Git. Explicitly retain vendor manifests
+and add the two exact archive files; no runtime/Cargo normalized manifest or patch
+changes. A staged-tree git archive verifies both complete source trees and exact
+patches from a clean directory. Native production evidence remains7e106a4;
+required docs must pass on the packaging head. The three native jobs separately
+stop at unchanged picomatch audit166, not Rust checks. Do not mark L2 complete.

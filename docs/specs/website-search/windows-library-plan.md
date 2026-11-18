@@ -28,19 +28,19 @@ write completion; final peer drain остаётся отдельным bounded h
 Files: vendor/{mio,tokio}, vendor/patches, Cargo.toml/lock,
 src/platform/windows/{native_io,connection,root,flush,transport}.rs.
 
-- [ ] RED: сохранить реальный stalled_get_doc regression; mutation attachment
+- [x] RED: сохранить реальный stalled_get_doc regression; mutation attachment
   должна падать только после cleanup. Существующие final-delivery, deadlines,
   cancel/helper и root cases портируются без ослабления гарантий.
-- [ ] Зафиксировать исходники existing locked crates, checksums и exact patches;
+- [x] Зафиксировать исходники existing locked crates, checksums и exact patches;
   guard last-field, native flush, Tokio forwarding; устранить redundant Arc retain.
-- [ ] Заменить Operation/OVERLAPPED/IOCP код библиотечными endpoints. Reserve до
+- [x] Заменить Operation/OVERLAPPED/IOCP код библиотечными endpoints. Reserve до
   HANDLE creation; registration под transport runtime; guard до first I/O.
-- [ ] Native cancellation caller и drain helper удерживают strong endpoint owner
+- [x] Native cancellation caller и drain helper удерживают strong endpoint owner
   до возврата/join. Abort закрывает logical endpoint, arena держит only accounting;
   исключить циклы arena → endpoint → guard → arena.
-- [ ] Проверить bounded buffer capacity (Mio read buffer тоже часть envelope),
+- [x] Проверить bounded buffer capacity (Mio read buffer тоже часть envelope),
   listening/admitted/rejected instances и повторное использование исходных slots.
-- [ ] Windows-target check/clippy, native real-daemon RED/GREEN, fresh task review.
+- [x] Windows-target check/clippy, native real-daemon RED/GREEN, fresh task review.
 
 ## L2 — production acceptance и завершение PR
 
@@ -65,3 +65,9 @@ Status: selected for implementation, pending production acceptance. Новых c
 native lifecycle кода; unpatched libraries не дают физический guard/write barrier.
 Размер vendored source не является размером собственного патча или доказательством
 меньшей production complexity. CPU/RSS/latency improvement не заявляется.
+
+Delta 2026-11-18: L1 implemented and independently reviewed; native source7e106a4
+passes21ownership scenarios, two meaningful mutation REDs and the controlled
+submitted-connect classification probe (run44267931680). L2 full composition
+and required PR checks remain separate acceptance gates; advisory166 blocks the
+mandatory native jobs. No production readiness or merge is implied by L1.
