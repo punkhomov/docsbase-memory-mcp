@@ -198,6 +198,11 @@ impl Port {
     }
 }
 impl Service {
+    #[cfg(test)]
+    pub(super) fn test_quiesced(&self) -> bool {
+        !self.inner.accepting.load(Ordering::Acquire)
+    }
+
     pub(super) fn capacity_changed(&self) -> tokio::sync::futures::Notified<'_> {
         self.inner.capacity.notified()
     }

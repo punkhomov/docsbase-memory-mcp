@@ -349,12 +349,7 @@ fn run_with_launch(
     let transport_policy =
         crate::ipc::transport::policy(native_handles, &launch.config.settings().daemon)?;
     let launch = launch.admit(cache, settings)?;
-    crate::ipc::transport::run(&transport_policy, move |transport| {
-        let _lease = crate::daemon::admission::Lease::acquire(
-            cache,
-            &protocol::build_id(),
-            migrations::SCHEMA_VERSION,
-        )?;
+    run_with_admission(cache, &transport_policy, move |transport| {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(workers)
             .max_blocking_threads(launch.launch.config.settings().daemon.max_blocking_threads)
@@ -375,6 +370,21 @@ fn run_with_launch(
                 transport,
             ),
         )
+    })
+}
+
+pub(super) fn run_with_admission<T: Send>(
+    cache: &Path,
+    policy: &crate::platform::transport::Options,
+    work: impl FnOnce(crate::platform::transport::Transport) -> Result<T> + Send,
+) -> Result<T> {
+    crate::ipc::transport::run(policy, move |transport| {
+        let _lease = crate::daemon::admission::Lease::acquire(
+            cache,
+            &protocol::build_id(),
+            migrations::SCHEMA_VERSION,
+        )?;
+        work(transport)
     })
 }
 

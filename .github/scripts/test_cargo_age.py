@@ -52,6 +52,48 @@ class AuditIntegrationTests(unittest.TestCase):
 
 
 class VendoredAgeTests(unittest.TestCase):
+    def test_override_manifest_rejects_duplicate_wrong_package_and_wrong_path(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'Cargo.toml').write_text('[patch.crates-io]\nmio={path="vendor/mio"}\n')
+            vendored = root / 'vendor' / 'mio'
+            vendored.mkdir(parents=True)
+            package = vendored / 'Cargo.toml'
+            package.write_text('[package]\nname="mio"\nversion="1.2.4"\n')
+            manifest = root / 'vendor' / 'UPSTREAM.json'
+            record = {'name': 'mio', 'version': '1.2.4', 'checksum': 'archive'}
+            for records in [[], [record, record], [dict(record, version='1.2.3')]]:
+                manifest.write_text(json.dumps(records))
+                with self.subTest(records=records), self.assertRaises(ValueError):
+                    age._manifest.load_upstream(root)
+            manifest.write_text(json.dumps([record]))
+            package.write_text('[package]\nname="other"\nversion="1.2.4"\n')
+            with self.assertRaisesRegex(ValueError, 'package mismatch'):
+                age._manifest.load_upstream(root)
+            (root / 'Cargo.toml').write_text('[patch.crates-io]\nmio={path="somewhere-else"}\n')
+            with self.assertRaisesRegex(ValueError, 'path mismatch'):
+                age._manifest.load_upstream(root)
+
+    def test_missing_override_record_is_rejected_before_network_audit(self):
+        import json
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock = root / 'Cargo.lock'
+            lock.write_text('[[package]]\nname="dep"\nversion="1"\nsource="' + age.SOURCE + '"\nchecksum="registry"\n[[package]]\nname="mio"\nversion="1.2.4"\n[[package]]\nname="tokio"\nversion="1.54.1"\n')
+            (root / 'Cargo.toml').write_text('[patch.crates-io]\nmio={path="vendor/mio"}\ntokio={path="vendor/tokio"}\n')
+            (root / 'vendor').mkdir()
+            (root / 'vendor' / 'UPSTREAM.json').write_text(json.dumps([
+                {'name': 'mio', 'version': '1.2.4', 'checksum': 'original-archive'}
+            ]))
+            with patch.object(age.sys, 'argv', ['audit', str(lock)]), patch.object(age, 'audit') as audit:
+                with self.assertRaisesRegex(ValueError, 'override coverage'):
+                    age.main()
+                audit.assert_not_called()
+
     def test_path_override_keeps_original_publication_age_audit(self):
         import json
         import tempfile
@@ -60,7 +102,10 @@ class VendoredAgeTests(unittest.TestCase):
             root = Path(directory)
             lock = root / 'Cargo.lock'
             lock.write_text('[[package]]\nname="dep"\nversion="1"\nsource="' + age.SOURCE + '"\nchecksum="registry"\n[[package]]\nname="mio"\nversion="1.2.4"\n')
+            (root / 'Cargo.toml').write_text('[patch.crates-io]\nmio={path="vendor/mio"}\n')
             (root / 'vendor').mkdir()
+            (root / 'vendor' / 'mio').mkdir()
+            (root / 'vendor' / 'mio' / 'Cargo.toml').write_text('[package]\nname="mio"\nversion="1.2.4"\n')
             (root / 'vendor' / 'UPSTREAM.json').write_text(json.dumps([
                 {'name': 'mio', 'version': '1.2.4', 'checksum': 'original-archive'}
             ]))

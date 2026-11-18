@@ -1,12 +1,12 @@
 """Verify exact upstream crate archives plus the only reviewed local patches."""
 import argparse
 import hashlib
-import json
 from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
 import urllib.request
+from manifest import load_upstream
 
 
 def main():
@@ -14,7 +14,7 @@ def main():
     parser.add_argument('--archives', type=Path)
     args = parser.parse_args()
     base = Path(__file__).resolve().parent
-    records = json.loads((base / 'UPSTREAM.json').read_text())
+    records = load_upstream(base.parent)
     with tempfile.TemporaryDirectory(prefix='docsbase-vendor-') as temporary:
         staging = Path(temporary)
         for record in records:

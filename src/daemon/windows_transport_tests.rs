@@ -58,6 +58,124 @@ fn evidence(name: &str, value: &impl Serialize) -> std::result::Result<(), Strin
 }
 
 #[test]
+fn daemon_admission_lease_survives_returned_work_and_held_native_tail() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().to_path_buf();
+    let endpoint = crate::platform::daemon_endpoint(&cache);
+    let defaults = crate::daemon::settings::standalone().unwrap();
+    let policy = crate::ipc::transport::policy(2, defaults.settings()).unwrap();
+    let (bound, ready) = std_mpsc::channel();
+    let (release, proceed) = std_mpsc::channel();
+    let (caller_sent, caller_received) = std_mpsc::channel();
+    let daemon_cache = cache.clone();
+    let daemon_endpoint = endpoint.clone();
+    let daemon = std::thread::spawn(move || {
+        crate::daemon::lifecycle::run_with_admission(&daemon_cache, &policy, |transport| {
+            let listener = transport.bind(&daemon_endpoint).unwrap();
+            bound.send(transport.clone()).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let stream = runtime.block_on(listener.accept()).unwrap();
+            let ownership = stream.ownership();
+            let (entered, observed) = std_mpsc::channel();
+            let caller = std::thread::spawn(move || {
+                ownership.test_hold_write_cancellation(entered, proceed);
+            });
+            observed.recv_timeout(WATCHDOG).unwrap();
+            caller_sent.send(caller).unwrap();
+            Err::<(), _>(Error::internal("controlled daemon work failure"))
+        })
+    });
+    let transport = ready.recv_timeout(WATCHDOG).unwrap();
+    let client = transport.connect_blocking(&endpoint).unwrap();
+    let caller = caller_received.recv_timeout(WATCHDOG).unwrap();
+    let deadline = std::time::Instant::now() + WATCHDOG;
+    while !transport.test_quiesced() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    let work_returned = transport.test_quiesced();
+    let competing = crate::daemon::admission::Lease::acquire(
+        &cache,
+        &protocol::build_id(),
+        crate::store::migrations::SCHEMA_VERSION,
+    );
+    let busy = competing
+        .as_ref()
+        .is_err_and(crate::daemon::admission::is_lock_busy);
+    drop(competing);
+    // Complete physical retirement before asserting the recorded lock result.
+    release.send(()).unwrap();
+    caller.join().unwrap();
+    drop(client);
+    let result = daemon.join().unwrap();
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "internal error: controlled daemon work failure"
+    );
+    assert!(
+        work_returned,
+        "observe outer quiescence, not an early work notification"
+    );
+    assert!(
+        busy,
+        "a competing owner must remain excluded during native retirement"
+    );
+    crate::daemon::admission::Lease::acquire(
+        &cache,
+        &protocol::build_id(),
+        crate::store::migrations::SCHEMA_VERSION,
+    )
+    .expect("lease is released after the native root returns");
+}
+
+#[test]
+fn never_polled_admitted_handler_retains_original_permit_through_native_tail() {
+    let fixture = Fixture::new(HybridStages::default());
+    let policy = crate::ipc::transport::policy(2, fixture.shared.daemon_settings()).unwrap();
+    let endpoint = crate::platform::daemon_endpoint(&fixture.shared.cache);
+    let slots = Arc::new(tokio::sync::Semaphore::new(1));
+    let observed = crate::ipc::transport::run(&policy, |transport| {
+        let listener = transport.bind(&endpoint).unwrap();
+        let client = transport.connect_blocking(&endpoint).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let stream = runtime.block_on(listener.accept()).unwrap();
+        let ownership = stream.ownership();
+        let (entered, observing) = std_mpsc::channel();
+        let (release, proceed) = std_mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            ownership.test_hold_write_cancellation(entered, proceed);
+        });
+        observing.recv_timeout(WATCHDOG).unwrap();
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let handler = handle_admitted_connection(
+            fixture.shared.clone(),
+            stream,
+            fixture.shared.activity.counter.clone(),
+            fixture.shared.activity.events.clone(),
+            shutdown,
+            slots.clone().try_acquire_owned().unwrap(),
+        );
+        drop(handler); // It is deliberately never polled or submitted to Tokio.
+        let available_while_held = slots.available_permits();
+        release.send(()).unwrap();
+        caller.join().unwrap();
+        drop(client);
+        Ok(available_while_held)
+    })
+    .unwrap();
+    assert_eq!(
+        observed, 0,
+        "unpolled handler must not release original admission before native retirement"
+    );
+    assert_eq!(slots.available_permits(), 1);
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // One ordered native observation/cleanup protocol; assertions follow cleanup.
 fn stalled_get_doc_retains_original_connection_until_native_retirement() {
     let fixture = Fixture::new(HybridStages::default());

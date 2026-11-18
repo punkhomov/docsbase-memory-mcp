@@ -1097,3 +1097,17 @@ Flushing phase with no published result, excluding helper startup/idle I/O, and
 drop the logical writer after successful-close assertions. This is test-proof
 work, not a new production lifetime fix. Repeat the mutation before accepting
 the strengthened test; do not count the failed workflow as final acceptance.
+
+MODIFIED 2026-11-18 — final whole-source review fix-pass preparation. Source
+a0c4466/run44263760781 passes18native scenarios and both controlled REDs;
+helper phase fencing closes the startup-observation gap. Whole-source final
+review nevertheless finds one Critical and four Important source gaps: native
+synchronous connect-success completion Arc, daemon lease across outer drain,
+unpolled admitted-handler permit, native client identification-only SQOS and
+complete manifest coverage of Cargo path overrides. Add real native tail/lock,
+never-polled handler and impersonation-level regressions; extract the actual
+admission/root composition unchanged so its old ordering remains observable.
+Manifest omission RED is reproduced locally; shared validation now checks all
+path overrides, actual vendor paths and package names/versions before either
+archive or age audit. Rust source corrections and new native RED/GREEN remain
+pending. No final completion/readiness claim.

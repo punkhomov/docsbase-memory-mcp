@@ -506,6 +506,92 @@ mod tests {
     use std::future::Future;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    fn impersonation_level(pipe: &NativePipe) -> io::Result<i32> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, RevertToSelf, TOKEN_QUERY, TokenImpersonationLevel,
+        };
+        use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+        // SAFETY: the borrowed server endpoint remains strongly owned after a
+        // real read. The test always restores this thread before inspecting errors.
+        if unsafe { ImpersonateNamedPipeClient(pipe.raw()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let observed = (|| {
+            let mut raw = ptr::null_mut();
+            // SAFETY: query only this thread's token into an initialized output.
+            if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &raw mut raw) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: successful OpenThreadToken transfers one owned HANDLE.
+            let token = unsafe { OwnedHandle::from_raw_handle(raw) };
+            let mut level = 0_i32;
+            let mut returned = 0;
+            // SAFETY: this information class returns one i32 in the supplied
+            // exact-size output; the token remains owned through the query.
+            if unsafe {
+                GetTokenInformation(
+                    token.as_raw_handle(),
+                    TokenImpersonationLevel,
+                    (&raw mut level).cast(),
+                    4,
+                    &raw mut returned,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(level)
+        })();
+        // SAFETY: restore the test thread regardless of the token-query result.
+        assert_ne!(
+            unsafe { RevertToSelf() },
+            0,
+            "restore original test identity"
+        );
+        observed
+    }
+
+    #[test]
+    fn native_client_requests_identification_only_impersonation() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let path = super::super::pipe_path(&endpoint).unwrap();
+        let mut port = Port::new(2, 1024 * 1024).unwrap();
+        let listening = Listening::new(&port, &path, 4096, true).unwrap();
+        let client = Connection::client(&port, &path, 4096, 1024 * 1024).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let token = runtime
+            .block_on(std::future::poll_fn(|cx| listening.poll_accept(cx)))
+            .unwrap();
+        let server = Connection::accepted(token, 4096, 1024 * 1024).unwrap();
+        let mut writer = Pipe::new(client.clone()).unwrap();
+        let mut reader = Pipe::new(server.clone()).unwrap();
+        runtime.block_on(async {
+            writer.write_all(b"x").await.unwrap();
+            writer.flush().await.unwrap();
+            reader.read_exact(&mut [0]).await.unwrap();
+        });
+        let observed = impersonation_level(&server.native().unwrap());
+        drop((reader, writer));
+        runtime.block_on(async {
+            server.token.test_native_terminal().await;
+            client.token.test_native_terminal().await;
+        });
+        assert!(server.retire(&port).unwrap());
+        assert!(client.retire(&port).unwrap());
+        port.finish().unwrap();
+        assert_eq!(
+            observed.unwrap(),
+            windows_sys::Win32::Security::SecurityIdentification,
+            "native client must preserve Tokio's identification-only SQOS"
+        );
+    }
+
     #[test]
     fn failed_native_opens_return_unassociated_capacity_without_a_reaper() {
         let directory = tempfile::tempdir().unwrap();

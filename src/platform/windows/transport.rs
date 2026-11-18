@@ -57,6 +57,11 @@ pub struct Transport {
     options: Options,
 }
 impl Transport {
+    #[cfg(test)]
+    pub(crate) fn test_quiesced(&self) -> bool {
+        self.service.test_quiesced()
+    }
+
     pub(super) fn new(service: Service, options: Options) -> Self {
         Self { service, options }
     }
