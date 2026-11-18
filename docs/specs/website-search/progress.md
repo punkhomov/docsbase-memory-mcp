@@ -1051,3 +1051,13 @@ lean494/0; Windows-target lib/tests check and strict Clippy pass. Six Python age
 checks pass, including a RED on the old path-source bypass. Exact archive+patch
 verification passes and rejects a one-byte unreviewed source mutation. Native
 Windows daemon/connection/root evidence and fresh review remain pending.
+
+MODIFIED 2026-11-18 — L1 review RED preparation. Fresh source review identified
+that failed native opens retain an unused reservation until the periodic reaper.
+Add a direct one-slot Port regression: repeated actual opens of an absent pipe
+must keep returning FILE_NOT_FOUND, then allow a listening HANDLE in that slot,
+without any reaper between attempts. No production correction is included in
+this checkpoint; native RED/GREEN remains pending. Full Linux cli-full suite
+passes after removing obsolete build executables that exhausted the sandbox
+disk during the first installer run. Web/client/example checks and 12 Python
+CI regressions pass; original Cargo age audit covers all487 registry records.

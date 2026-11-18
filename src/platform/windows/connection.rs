@@ -507,6 +507,81 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
+    fn failed_native_opens_return_unassociated_capacity_without_a_reaper() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let path = super::super::pipe_path(&endpoint).unwrap();
+        let mut port = Port::new(1, 1024 * 1024).unwrap();
+        for _ in 0..32 {
+            let error = Connection::client(&port, &path, 4096, 1024 * 1024)
+                .err()
+                .expect("no server exists");
+            assert_eq!(
+                error.raw_os_error(),
+                Some(2),
+                "failed CreateFile must release its unused reservation immediately"
+            );
+        }
+        let listening = Listening::new(&port, &path, 4096, true)
+            .expect("failed opens cannot exhaust the one physical slot");
+        listening.abort();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(listening.token.test_native_terminal());
+        assert!(port.retire(&listening.token));
+        port.finish().unwrap();
+    }
+
+    #[test]
+    fn accept_polled_before_client_keeps_its_native_wakeup() {
+        struct AcceptWake(std::sync::mpsc::Sender<()>);
+        impl std::task::Wake for AcceptWake {
+            fn wake(self: Arc<Self>) {
+                let _ = self.0.send(());
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                let _ = self.0.send(());
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let path = super::super::pipe_path(&endpoint).unwrap();
+        let mut port = Port::new(2, 1024 * 1024).unwrap();
+        let listening = Listening::new(&port, &path, 4096, true).unwrap();
+        let (notifications, observed) = std::sync::mpsc::channel();
+        let waker = std::task::Waker::from(Arc::new(AcceptWake(notifications)));
+        assert!(
+            listening
+                .poll_accept(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        let client = Connection::client(&port, &path, 4096, 1024 * 1024).unwrap();
+        // No application runtime, timer or manual re-poll can supply this wake.
+        let notified = observed
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .is_ok();
+        listening.abort();
+        client.abort();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            listening.token.test_native_terminal().await;
+            client.token.test_native_terminal().await;
+        });
+        assert!(port.retire(&listening.token));
+        assert!(client.retire(&port).unwrap());
+        port.finish().unwrap();
+        assert!(
+            notified,
+            "native connect completion must wake pending accept"
+        );
+    }
+
+    #[test]
     fn blocking_connection_waits_for_the_next_instance_with_one_deadline() {
         let directory = tempfile::tempdir().unwrap();
         let endpoint = crate::platform::daemon_endpoint(directory.path());
