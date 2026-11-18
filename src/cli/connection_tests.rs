@@ -91,7 +91,15 @@ fn connected_setup_error_cannot_replay_cli_sync_or_create_index_state() {
                     .get_mut()
                     .write_all(b"invalid handshake response\n")
                     .unwrap();
-                reader.get_mut().shutdown().unwrap();
+                let shutdown = reader.get_mut().shutdown();
+                // The malformed reply deliberately makes the client close.
+                // Darwin may observe that close before this fixture's half-close.
+                #[cfg(unix)]
+                if let Err(error) = shutdown {
+                    assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+                }
+                #[cfg(windows)]
+                shutdown.unwrap();
             }
         });
         let cache_for_command = cache.clone();

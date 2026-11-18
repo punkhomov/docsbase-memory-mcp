@@ -1190,3 +1190,19 @@ install passes and lock SHA-256 remainsf5dbbf7b4d9ad6b314ca9e1e6548f0c85ba8b3782
 Ruling: fresh scoped reviewer PASS/APPROVED, no findings. No runtime/dependency
 changes or mirrored config tests; actual audit RED/GREEN verifies behavior.
 Required CI still must pass on the resulting PR head before L2/readiness closes.
+
+MODIFIED 2026-11-18 — required macOS fixture cleanup after audit unblocked.
+Run44273759084 passes the accepted pnpm audit and strict lints, then reports
+669/670library tests: connected_setup_error_cannot_replay_cli_sync_or_create_index_state
+fails in its fake server shutdown with Darwin57/NotConnected. The intentionally
+malformed response makes the real client close before the fake peer's half-close;
+that cleanup result is allowed by the Unix socket API. Accept only NotConnected
+from this test-only Unix cleanup, keep unexpected errors and Windows shutdown
+strict, and preserve every Transport/bad-response/no-index-replay assertion.
+No runtime code, timing, ignores or thresholds change. Focused verification,
+fresh scoped review and required native rerun remain pending.
+
+Ruling: fresh scoped fixture reviewer PASS/APPROVED, no findings. Four focused
+Linux connection tests and strict Linux/Windows-target Clippy, fmt/diff checks
+pass. This is not native macOS GREEN; the unchanged required macOS job must
+verify the new head. All audit exception evidence remains unchanged.
