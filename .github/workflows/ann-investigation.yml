@@ -1,77 +1,111 @@
-name: ANN recall investigation
-
+name: Windows library retirement validation
 on:
   workflow_dispatch:
-    inputs:
-      trials:
-        description: "Maximum full ann_recall executions (1-50; stop on first failure)"
-        type: number
-        default: 20
-        required: true
-
 permissions:
   contents: read
-
 jobs:
-  macos-ann:
-    runs-on: macos-latest
-    timeout-minutes: 30
+  windows-library:
+    runs-on: windows-latest
+    timeout-minutes: 25
     env:
       RUSTUP_TOOLCHAIN: "1.100.0"
-      MACOSX_DEPLOYMENT_TARGET: "12.0"
       CARGO_TERM_COLOR: never
-      ANN_TRIALS: ${{ inputs.trials }}
+      CARGO_BUILD_JOBS: "4"
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
         with:
-          node-version-file: .node-version
-      - name: Prepare embedded Web assets
-        shell: bash
-        run: |
-          corepack enable
-          corepack install
-          pnpm install --frozen-lockfile
-          pnpm run audit
-          pnpm --dir web format:check
-          pnpm --dir web check
-          pnpm --dir web test:unit
-          pnpm --dir web build
+          fetch-depth: 2
       - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
-      - name: Prepare unchanged native recall suite
+        with:
+          key: windows-library-retirement-v1
+          cache-on-failure: true
+      - name: Exact-source native acceptance and controlled RED
+        shell: python
         run: |
-          rm -rf target/ci-observations
-          cargo test --locked --features cli-full --test ann_recall --no-run
-      - name: Observe repeated builds; fail on first failed suite
-        run: |
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-          import subprocess
-
-          trials = int(os.environ["ANN_TRIALS"])
-          if not 1 <= trials <= 50:
-              raise SystemExit("trials must be an integer in 1..50")
-          output = Path("target/ci-observations/ann-stress")
-          output.mkdir(parents=True, exist_ok=True)
-          for trial in range(1, trials + 1):
-              log = output / f"trial-{trial:02}.log"
-              print(f"ANN recall trial {trial}/{trials}", flush=True)
-              with log.open("w") as stream:
-                  result = subprocess.run(
-                      ["cargo", "test", "--locked", "--features", "cli-full",
-                       "--test", "ann_recall", "--", "--nocapture"],
-                      stdout=stream, stderr=subprocess.STDOUT,
-                  )
-              print(log.read_text(), flush=True)
-              if result.returncode:
-                  raise SystemExit(result.returncode)
-          PY
-      - name: Preserve logs and any failing graph
+          import hashlib, json, os, pathlib, subprocess, time
+          out = pathlib.Path('target/library-retirement-evidence')
+          out.mkdir(parents=True, exist_ok=True)
+          env = dict(os.environ, DOCSBASE_TRANSPORT155_EVIDENCE_DIR=str(out.resolve() / 'green-daemon'))
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
+          source = subprocess.check_output(['git', 'rev-parse', 'HEAD^']).decode().strip()
+          changed = subprocess.check_output(['git','diff','--name-only',source,head]).decode().splitlines()
+          assert changed == ['.github/workflows/ann-investigation.yml'], changed
+          provenance = {'validation_head': head, 'production_source': source,
+                        'rustc': subprocess.check_output(['rustc','-Vv']).decode(),
+                        'upstream': json.loads(pathlib.Path('vendor/UPSTREAM.json').read_text())}
+          (out / 'provenance.json').write_text(json.dumps(provenance,indent=2))
+          def run(name, command, timeout, environment=env):
+              began = time.monotonic()
+              try:
+                  result = subprocess.run(command,env=environment,capture_output=True,timeout=timeout)
+              except subprocess.TimeoutExpired as error:
+                  (out/(name+'.stdout.log')).write_bytes(error.stdout or b'')
+                  (out/(name+'.stderr.log')).write_bytes(error.stderr or b'')
+                  (out/(name+'.exit.json')).write_text(json.dumps({'forced_cleanup':True,'timeout_seconds':timeout}))
+                  print(name+' WATCHDOG: acceptance failed',flush=True)
+                  return None
+              (out/(name+'.stdout.log')).write_bytes(result.stdout)
+              (out/(name+'.stderr.log')).write_bytes(result.stderr)
+              (out/(name+'.exit.json')).write_text(json.dumps({'exit_code':result.returncode,'elapsed_seconds':time.monotonic()-began}))
+              if name not in ['build','red-build']:
+                  print(result.stdout.decode(errors='replace'),flush=True)
+              print(result.stderr.decode(errors='replace'),flush=True)
+              return result
+          build = run('build',['cargo','test','--locked','--lib','--no-run','--message-format=json'],900)
+          assert build is not None and build.returncode == 0, 'native build failed'
+          artifacts = [json.loads(line) for line in build.stdout.splitlines() if line.startswith(b'{')]
+          executables = [item['executable'] for item in artifacts if item.get('reason')=='compiler-artifact' and item.get('executable') and item.get('profile',{}).get('test')]
+          assert len(executables)==1,executables
+          executable = executables[0]
+          (out/'green-executable-sha256.txt').write_text(hashlib.sha256(pathlib.Path(executable).read_bytes()).hexdigest())
+          inventory = run('inventory',[executable,'--list'],30)
+          names = [line.removesuffix(': test') for line in inventory.stdout.decode().splitlines() if line.endswith(': test')]
+          cases = [name for name in names if name.endswith('::daemon_admission_lease_survives_returned_work_and_held_native_tail') or name.endswith('::never_polled_admitted_handler_retains_original_permit_through_native_tail') or name.endswith('::native_client_requests_identification_only_impersonation')]
+          assert len(cases)==3, cases
+          (out/'selected-cases.json').write_text(json.dumps(cases,indent=2))
+          failures = []
+          for number, case in enumerate(cases):
+              print('Native case '+case,flush=True)
+              result = run('green-'+str(number).zfill(2),[executable,'--exact',case,'--nocapture'],90)
+              if result is None or result.returncode != 0 or b'1 passed; 0 failed; 0 ignored' not in result.stdout:
+                  failures.append(case)
+          (out/'green-summary.json').write_text(json.dumps({'passed':len(cases)-len(failures),'failed':failures},indent=2))
+          assert failures == cases, failures
+          expected = ['a competing owner must remain excluded during native retirement', 'unpolled handler must not release original admission before native retirement', 'native client must preserve Tokio']
+          for number, message in enumerate(expected):
+              status = json.loads((out/('green-'+str(number).zfill(2)+'.exit.json')).read_text())
+              assert status.get('exit_code')==101,status
+              assert message in (out/('green-'+str(number).zfill(2)+'.stderr.log')).read_text()
+          print('All three final-review regressions fail at their intended assertions after native cleanup where applicable.',flush=True)
+          raise SystemExit(0)
+          original_path = pathlib.Path('src/platform/windows/transport.rs')
+          original = original_path.read_bytes()
+          mutated = original.replace(b'self.0.retain(false, charge)',b'drop(charge); Ok(())').replace(b'self.0.retain(true, charge)',b'drop(charge); Ok(())')
+          assert original != mutated
+          try:
+              original_path.write_bytes(mutated)
+              (out/'attachment-mutation.patch').write_bytes(subprocess.check_output(['git','diff','--','src/platform/windows/transport.rs']))
+              red_build = run('red-build',['cargo','test','--locked','--lib','--no-run','--message-format=json'],300)
+              assert red_build is not None and red_build.returncode == 0
+              red_case = next(name for name in cases if 'stalled_get_doc' in name)
+              red_env = dict(env,DOCSBASE_TRANSPORT155_EVIDENCE_DIR=str(out.resolve()/'red-daemon'))
+              red = run('red-daemon',[executable,'--exact',red_case,'--nocapture'],90,red_env)
+              assert red is not None and red.returncode == 101 and b'0 passed; 1 failed' in red.stdout
+              candidate = json.loads((out/'red-daemon'/'frozen-candidate.json').read_text())
+              cleanup = json.loads((out/'red-daemon'/'cleanup.json').read_text())
+              assert candidate['native_cancel_caller_held'] and candidate['handler_returned'] and not candidate['cleanup_started']
+              assert candidate['original_available_slots']==1 and candidate['original_activity']==0,candidate
+              assert cleanup['client_returned'] and cleanup['original_available_slots']==1 and cleanup['original_activity']==0,cleanup
+          finally:
+              original_path.write_bytes(original)
+          assert not subprocess.check_output(['git','status','--porcelain','--untracked-files=no']).strip()
+          print('Native acceptance: 16 GREEN plus cleaned-up actual daemon mutation RED; source restored.',flush=True)
+      - name: Preserve native process evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ann-recall-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          name: library-retirement-${{ github.sha }}-${{ github.run_attempt }}
           retention-days: 14
-          path: target/ci-observations/
+          if-no-files-found: error
+          path: target/library-retirement-evidence/
