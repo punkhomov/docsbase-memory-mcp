@@ -138,9 +138,9 @@ impl Inner {
     /// This function will issue a request to connect a client to this server,
     /// returning immediately after starting the overlapped operation.
     ///
-    /// If this function immediately succeeds then `Ok(true)` is returned. If
-    /// the overlapped operation is enqueued and pending, then `Ok(false)` is
-    /// returned. Otherwise an error is returned indicating what went wrong.
+    /// `Ok(true)` denotes an already-connected client with no submitted I/O.
+    /// A submitted operation returns `Ok(false)` until its IOCP packet retires,
+    /// including native synchronous success. Otherwise an error is returned.
     ///
     /// # Unsafety
     ///
@@ -154,7 +154,11 @@ impl Inner {
     /// ports and waiting to receive the completion notification on the port.
     pub unsafe fn connect_overlapped(&self, overlapped: *mut OVERLAPPED) -> io::Result<bool> {
         if ConnectNamedPipe(self.handle.raw(), overlapped) != 0 {
-            return Ok(true);
+            // Native TRUE still queues a completion packet. Unlike local
+            // ERROR_PIPE_CONNECTED, it must retain the completion Arc and
+            // connecting state until that packet is consumed. As with reads
+            // and writes, completion-on-success notifications are required.
+            return Ok(false);
         }
 
         let err = io::Error::last_os_error();
@@ -450,8 +454,8 @@ impl NamedPipe {
                 Ok(())
             }
 
-            // If the overlapped operation was successful and didn't finish
-            // immediately then we forget a copy of the arc we hold
+            // Submitted operations retain a completion Arc even when native
+            // success was synchronous. We forget a copy of the arc we hold
             // internally. This ensures that when the completion status comes
             // in for the I/O operation finishing it'll have a reference
             // associated with it and our data will still be valid. The
@@ -499,6 +503,7 @@ impl NamedPipe {
     ///
     /// # Safety
     /// The handle ownership and overlapped-I/O requirements match FromRawHandle.
+    /// Completion notifications, including synchronous success, must be enabled.
     pub unsafe fn from_raw_handle_with_retirement_guard(
         handle: RawHandle,
         guard: Box<dyn Send + Sync>,

@@ -441,3 +441,17 @@ Abandoned-instance replacement is reserved before closing the last HANDLE when
 the existing arena has capacity, preserving the pipe namespace across accept's
 cooperative yield. A saturated arena still retires the old owner and waits for
 capacity; it never exceeds the physical limit to keep an instance available.
+
+## Delta 2026-11-18 — final ownership-boundary corrections
+
+The daemon admission lease encloses the entire native transport root, including
+post-work drain/quarantine. The admitted-handler factory attaches its original
+permit synchronously before spawn; an unpolled future cannot release native
+admission. A racing abort rejects new logical work while retaining its attached
+charge until physical retirement. Native ConnectNamedPipe TRUE is a submitted
+operation with a normal completion packet, including synchronous success;
+ERROR_PIPE_CONNECTED is local success without a packet. Only the latter skips
+the completion Arc. Raw client opens preserve Tokio's identification-only SQOS.
+Pipe read statuses109/232/233 preserve the existing EOF contract; write errors
+and truncated-frame handling are unchanged. Both upstream checks share a strict
+manifest-to-Cargo-path mapping with matching actual package identities.

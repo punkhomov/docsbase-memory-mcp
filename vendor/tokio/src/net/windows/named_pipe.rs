@@ -141,6 +141,7 @@ impl NamedPipeServer {
     ///
     /// # Safety
     /// The raw-handle ownership contract is the same as from_raw_handle.
+    /// Completion-on-success notifications must not be disabled on this handle.
     ///
     /// # Errors
     /// Returns registration errors, retaining the guard through cleanup.
@@ -1060,6 +1061,7 @@ impl NamedPipeClient {
     ///
     /// # Safety
     /// The raw-handle ownership contract is the same as from_raw_handle.
+    /// Completion-on-success notifications must not be disabled on this handle.
     ///
     /// # Errors
     /// Returns registration errors, retaining the guard through cleanup.

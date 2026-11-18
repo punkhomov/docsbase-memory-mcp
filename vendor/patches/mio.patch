@@ -11,7 +11,32 @@
  }
  
  // SAFETY: `Handles`s are, in general, not thread-safe. However, we only used `Handle`s for
-@@ -157,7 +161,9 @@
+@@ -134,9 +138,9 @@
+     /// This function will issue a request to connect a client to this server,
+     /// returning immediately after starting the overlapped operation.
+     ///
+-    /// If this function immediately succeeds then `Ok(true)` is returned. If
+-    /// the overlapped operation is enqueued and pending, then `Ok(false)` is
+-    /// returned. Otherwise an error is returned indicating what went wrong.
++    /// `Ok(true)` denotes an already-connected client with no submitted I/O.
++    /// A submitted operation returns `Ok(false)` until its IOCP packet retires,
++    /// including native synchronous success. Otherwise an error is returned.
+     ///
+     /// # Unsafety
+     ///
+@@ -150,14 +154,20 @@
+     /// ports and waiting to receive the completion notification on the port.
+     pub unsafe fn connect_overlapped(&self, overlapped: *mut OVERLAPPED) -> io::Result<bool> {
+         if ConnectNamedPipe(self.handle.raw(), overlapped) != 0 {
+-            return Ok(true);
++            // Native TRUE still queues a completion packet. Unlike local
++            // ERROR_PIPE_CONNECTED, it must retain the completion Arc and
++            // connecting state until that packet is consumed. As with reads
++            // and writes, completion-on-success notifications are required.
++            return Ok(false);
+         }
+ 
+         let err = io::Error::last_os_error();
  
          match err.raw_os_error().map(|e| e as u32) {
              Some(ERROR_PIPE_CONNECTED) => Ok(true),
@@ -22,7 +47,18 @@
              Some(ERROR_IO_PENDING) => Ok(false),
              _ => Err(err),
          }
-@@ -488,8 +494,24 @@
+@@ -444,8 +454,8 @@
+                 Ok(())
+             }
+ 
+-            // If the overlapped operation was successful and didn't finish
+-            // immediately then we forget a copy of the arc we hold
++            // Submitted operations retain a completion Arc even when native
++            // success was synchronous. We forget a copy of the arc we hold
+             // internally. This ensures that when the completion status comes
+             // in for the I/O operation finishing it'll have a reference
+             // associated with it and our data will still be valid. The
+@@ -488,8 +498,25 @@
      }
  }
  
@@ -33,6 +69,7 @@
 +    ///
 +    /// # Safety
 +    /// The handle ownership and overlapped-I/O requirements match FromRawHandle.
++    /// Completion notifications, including synchronous success, must be enabled.
 +    pub unsafe fn from_raw_handle_with_retirement_guard(
 +        handle: RawHandle,
 +        guard: Box<dyn Send + Sync>,
@@ -49,7 +86,7 @@
          NamedPipe {
              inner: Arc::new(Inner {
                  handle: Handle::new(handle as HANDLE),
-@@ -506,8 +528,17 @@
+@@ -506,8 +533,17 @@
                      connect_error: None,
                  }),
                  pool: Mutex::new(BufferPool::with_capacity(2)),
@@ -67,7 +104,7 @@
      }
  }
  
-@@ -612,7 +643,16 @@
+@@ -612,7 +648,16 @@
      }
  
      fn flush(&mut self) -> io::Result<()> {
@@ -85,7 +122,7 @@
      }
  }
  
-@@ -690,6 +730,16 @@
+@@ -690,6 +735,16 @@
  
  impl Drop for NamedPipe {
      fn drop(&mut self) {
@@ -102,7 +139,7 @@
          // Cancel pending reads/connects, but don't cancel writes to ensure that
          // everything is flushed out.
          unsafe {
-@@ -716,6 +766,9 @@
+@@ -716,6 +771,9 @@
      /// If the pipe is no longer connected (ERROR_PIPE_LISTENING) then `false` is
      /// returned and no read is scheduled.
      fn schedule_read(me: &Arc<Inner>, io: &mut Io, events: Option<&mut Vec<Event>>) -> bool {
@@ -112,7 +149,7 @@
          // Check to see if a read is already scheduled/completed
          match io.read {
              State::None => {}
-@@ -763,6 +816,9 @@
+@@ -763,6 +821,9 @@
          pos: usize,
          io: &mut Io,
      ) -> io::Result<Option<usize>> {
@@ -122,7 +159,7 @@
          // Very similar to `schedule_read` above, just done for the write half.
          let e = unsafe {
              let overlapped = me.write.as_ptr() as *mut _;
-@@ -804,7 +860,7 @@
+@@ -804,7 +865,7 @@
                      // io is locked, so this branch is unreachable
                      _ => unreachable!(),
                  };
@@ -131,7 +168,7 @@
              }
              Ok(None) => (),
              Err(e) => {
-@@ -825,7 +881,7 @@
+@@ -825,7 +886,7 @@
      }
  
      fn get_buffer(&self) -> Vec<u8> {

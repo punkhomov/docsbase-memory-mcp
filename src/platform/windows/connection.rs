@@ -16,7 +16,7 @@ use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer};
 use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
-    PIPE_ACCESS_DUPLEX,
+    PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
 };
 use windows_sys::Win32::System::IO::CancelIoEx;
 use windows_sys::Win32::System::Pipes::{
@@ -59,6 +59,7 @@ impl NativePipe {
         let guard = Box::new(RetirementGuard(token));
         // SAFETY: sole ownership of a fresh overlapped byte-mode HANDLE moves
         // together with its accounting guard BEFORE registration/first read.
+        // These constructors never disable completion-on-success notifications.
         let io = unsafe {
             if server {
                 Endpoint::Server(NamedPipeServer::from_raw_handle_with_retirement_guard(
@@ -271,7 +272,7 @@ impl Connection {
                 0,
                 ptr::null(),
                 OPEN_EXISTING,
-                FILE_FLAG_OVERLAPPED,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
                 ptr::null_mut(),
             )
         };
@@ -444,7 +445,12 @@ impl AsyncRead for Pipe {
         connection
             .read_active
             .store(result.is_pending(), Ordering::Release);
-        result
+        match result {
+            Poll::Ready(Err(error)) if matches!(error.raw_os_error(), Some(109 | 232 | 233)) => {
+                Poll::Ready(Ok(()))
+            }
+            other => other,
+        }
     }
 }
 impl AsyncWrite for Pipe {
@@ -900,6 +906,7 @@ mod tests {
                 read_tail.await.map_err(io::Error::other)?;
                 reader.read_exact(&mut received[tail..]).await?;
                 assert_eq!(received, frame);
+                assert_eq!(reader.read(&mut [0]).await?, 0, "final disconnect is EOF");
                 reader.shutdown().await?;
                 assert!(
                     client.drain.get().is_none(),

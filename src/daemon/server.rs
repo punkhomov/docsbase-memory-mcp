@@ -1369,23 +1369,30 @@ pub async fn handle_connection(
 }
 
 /// Real accept retains its existing connection slot through actual work.
-pub(super) async fn handle_admitted_connection(
+pub(super) fn handle_admitted_connection(
     shared: Arc<Shared>,
     stream: Stream,
     in_flight: Arc<AtomicUsize>,
     events: mpsc::Sender<()>,
     shutdown: watch::Sender<bool>,
     permit: tokio::sync::OwnedSemaphorePermit,
-) {
-    handle_connection_in(
-        shared,
-        stream,
-        in_flight,
-        events,
-        shutdown,
-        Some(Arc::new(permit)),
-    )
-    .await;
+) -> impl std::future::Future<Output = ()> + Send {
+    let connection = Arc::new(permit);
+    let attached = stream.ownership().retain_connection(connection.clone());
+    async move {
+        if attached.is_err() {
+            return;
+        }
+        handle_connection_in(
+            shared,
+            stream,
+            in_flight,
+            events,
+            shutdown,
+            Some(connection),
+        )
+        .await;
+    }
 }
 
 async fn write_frame_error(
@@ -1411,11 +1418,6 @@ async fn handle_connection_in(
     connection: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
 ) {
     let ownership = stream.ownership();
-    if let Some(charge) = &connection
-        && ownership.retain_connection(charge.clone()).is_err()
-    {
-        return;
-    }
     let (read_half, mut writer) = tokio::io::split(stream);
     let mut reader = FrameReader::new(BufReader::new(read_half));
     let mut peer = Peer::default();

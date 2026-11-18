@@ -366,3 +366,13 @@ buffers. A cancelled native caller retains the original endpoint through its
 actual return; helpers retain it through native thread signal/join. No new
 protocol, default, timeout, quality baseline or weaker shutdown guarantee.
 Plan and ADR: windows-library-plan.md (ADR-WLIB1).
+
+## Delta 2026-11-18 — FR-W1/W3 complete composition boundaries
+
+Daemon admission remains held through native drain after application return or
+failure. Connection admission attaches before a handler's first poll, including
+runtime cancellation of a never-polled handler and a racing native abort.
+Completion accounting distinguishes submitted synchronous connect success from
+local already-connected success. The library replacement preserves prior client
+identification-only SQOS and read EOF semantics, and every Cargo path override
+must be covered by both provenance and original publication-age validation.

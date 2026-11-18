@@ -1111,3 +1111,19 @@ Manifest omission RED is reproduced locally; shared validation now checks all
 path overrides, actual vendor paths and package names/versions before either
 archive or age audit. Rust source corrections and new native RED/GREEN remain
 pending. No final completion/readiness claim.
+
+MODIFIED 2026-11-18 — final-review RED verified, source fix pass. Native
+run44266369887 atdc27bc8 fails all three new cases at their intended assertions
+after cleanup: competing lease acquired during native tail; never-polled handler
+returns its original slot; actual client impersonation level2instead of1.
+Move the lease outside the transport root, attach permits synchronously before
+spawn (including the abort/admission race), restore identification SQOS and
+retain a completion Arc for native synchronous ConnectNamedPipe success. The
+rare native TRUE return is source-proven, not claimed to be forced on Windows.
+The independent full Windows diagnostic44264238496 on earliera0c4466 passes
+all687library tests and later integration suites until ipc_server's existing
+hello_version_mismatch EOF assertion receives native233. Restore the prior
+109/232/233 read-to-EOF adapter and require EOF in the final-delivery scenario;
+no assertion is weakened. Exact vendor verification and Windows-target strict
+Clippy pass. Scoped final re-review,21native GREEN plus controlled REDs and final
+full native composition remain pending; required Node audit166 is unchanged.

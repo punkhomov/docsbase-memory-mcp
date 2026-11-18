@@ -132,47 +132,53 @@ fn daemon_admission_lease_survives_returned_work_and_held_native_tail() {
 
 #[test]
 fn never_polled_admitted_handler_retains_original_permit_through_native_tail() {
-    let fixture = Fixture::new(HybridStages::default());
-    let policy = crate::ipc::transport::policy(2, fixture.shared.daemon_settings()).unwrap();
-    let endpoint = crate::platform::daemon_endpoint(&fixture.shared.cache);
-    let slots = Arc::new(tokio::sync::Semaphore::new(1));
-    let observed = crate::ipc::transport::run(&policy, |transport| {
-        let listener = transport.bind(&endpoint).unwrap();
-        let client = transport.connect_blocking(&endpoint).unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let stream = runtime.block_on(listener.accept()).unwrap();
-        let ownership = stream.ownership();
-        let (entered, observing) = std_mpsc::channel();
-        let (release, proceed) = std_mpsc::channel();
-        let caller = std::thread::spawn(move || {
-            ownership.test_hold_write_cancellation(entered, proceed);
-        });
-        observing.recv_timeout(WATCHDOG).unwrap();
-        let (shutdown, _) = tokio::sync::watch::channel(false);
-        let handler = handle_admitted_connection(
-            fixture.shared.clone(),
-            stream,
-            fixture.shared.activity.counter.clone(),
-            fixture.shared.activity.events.clone(),
-            shutdown,
-            slots.clone().try_acquire_owned().unwrap(),
+    for abort_before_admission in [false, true] {
+        let fixture = Fixture::new(HybridStages::default());
+        let policy = crate::ipc::transport::policy(2, fixture.shared.daemon_settings()).unwrap();
+        let endpoint = crate::platform::daemon_endpoint(&fixture.shared.cache);
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let observed = crate::ipc::transport::run(&policy, |transport| {
+            let listener = transport.bind(&endpoint).unwrap();
+            let client = transport.connect_blocking(&endpoint).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let stream = runtime.block_on(listener.accept()).unwrap();
+            let ownership = stream.ownership();
+            let cancellation = ownership.clone();
+            let (entered, observing) = std_mpsc::channel();
+            let (release, proceed) = std_mpsc::channel();
+            let caller = std::thread::spawn(move || {
+                ownership.test_hold_write_cancellation(entered, proceed);
+            });
+            observing.recv_timeout(WATCHDOG).unwrap();
+            if abort_before_admission {
+                cancellation.abort();
+            }
+            let (shutdown, _) = tokio::sync::watch::channel(false);
+            let handler = handle_admitted_connection(
+                fixture.shared.clone(),
+                stream,
+                fixture.shared.activity.counter.clone(),
+                fixture.shared.activity.events.clone(),
+                shutdown,
+                slots.clone().try_acquire_owned().unwrap(),
+            );
+            drop(handler); // It is deliberately never polled or submitted to Tokio.
+            let available_while_held = slots.available_permits();
+            release.send(()).unwrap();
+            caller.join().unwrap();
+            drop(client);
+            Ok(available_while_held)
+        })
+        .unwrap();
+        assert_eq!(
+            observed, 0,
+            "unpolled handler must not release original admission before native retirement"
         );
-        drop(handler); // It is deliberately never polled or submitted to Tokio.
-        let available_while_held = slots.available_permits();
-        release.send(()).unwrap();
-        caller.join().unwrap();
-        drop(client);
-        Ok(available_while_held)
-    })
-    .unwrap();
-    assert_eq!(
-        observed, 0,
-        "unpolled handler must not release original admission before native retirement"
-    );
-    assert_eq!(slots.available_permits(), 1);
+        assert_eq!(slots.available_permits(), 1);
+    }
 }
 
 #[test]

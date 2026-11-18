@@ -378,14 +378,14 @@ pub(super) fn run_with_admission<T: Send>(
     policy: &crate::platform::transport::Options,
     work: impl FnOnce(crate::platform::transport::Transport) -> Result<T> + Send,
 ) -> Result<T> {
-    crate::ipc::transport::run(policy, move |transport| {
-        let _lease = crate::daemon::admission::Lease::acquire(
-            cache,
-            &protocol::build_id(),
-            migrations::SCHEMA_VERSION,
-        )?;
-        work(transport)
-    })
+    // The daemon remains admitted while the outer transport root drains native
+    // tails after application return, errors or unwind.
+    let _lease = crate::daemon::admission::Lease::acquire(
+        cache,
+        &protocol::build_id(),
+        migrations::SCHEMA_VERSION,
+    )?;
+    crate::ipc::transport::run(policy, work)
 }
 
 /// Asks a running daemon to stop and waits for it to exit (FR-6).
@@ -738,12 +738,11 @@ async fn accept_loop_events<G: std::future::Future<Output = ()>>(
                 let events = events_tx.clone();
                 let shutdown = shutdown_tx.clone();
                 let shared = Arc::clone(&shared);
-                tokio::spawn(async move {
-                    crate::daemon::server::handle_admitted_connection(
-                        shared, stream, in_flight, events, shutdown, permit,
-                    )
-                    .await;
-                });
+                // This factory attaches admission before spawn can retain or
+                // discard a future which has never been polled.
+                tokio::spawn(crate::daemon::server::handle_admitted_connection(
+                    shared, stream, in_flight, events, shutdown, permit,
+                ));
             }
             Some(()) = events_rx.recv() => {
                 // Only live frontend sessions keep the daemon alive; plain

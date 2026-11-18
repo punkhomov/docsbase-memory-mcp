@@ -88,13 +88,17 @@ impl HandleToken {
     }
     pub(super) fn retain(&self, request: bool, charge: Arc<dyn Send + Sync>) -> io::Result<()> {
         let mut charges = locked(&self.charges);
-        if self.is_aborting() {
-            return Err(failure("native connection is aborting"));
-        }
+        let aborting = self.is_aborting();
         let previous = charges[usize::from(request)].replace(charge);
         drop(charges);
         drop(previous);
-        Ok(())
+        // Refuse new logical work, but retain its charge even if quiescence
+        // raced admission. The caller's future may be dropped without a poll.
+        if aborting {
+            Err(failure("native connection is aborting"))
+        } else {
+            Ok(())
+        }
     }
     pub(super) fn request_completed(&self) {
         let previous = locked(&self.charges)[1].take();
