@@ -212,10 +212,27 @@ impl Listener {
                 Err(error) if error.raw_os_error() == Some(232) => {
                     // The peer connected and closed before ConnectNamedPipe. This
                     // instance is not reusable; retire its original physical owner.
-                    self.pending
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .take();
+                    // Reserve/rearm before closing the last named instance when
+                    // capacity permits. Otherwise even a healthy new client can
+                    // observe FILE_NOT_FOUND during our cooperative yield.
+                    let replacement = match Listening::new_in(
+                        &self.transport.service,
+                        &self.path,
+                        self.transport.options.chunk_bytes,
+                        false,
+                    ) {
+                        Ok(replacement) => Some(replacement),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => None,
+                        Err(error) => {
+                            self.pending
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .take();
+                            pending.abort();
+                            return Err(error);
+                        }
+                    };
+                    *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = replacement;
                     pending.abort();
                     drop(pending);
                     // Connection churn must not monopolize the executor or prevent

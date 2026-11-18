@@ -1074,3 +1074,15 @@ propagation and test helper-join ordering. Strengthen final drain with two gated
 bytes, one-byte prefetch cap and an actual dedicated-thread pending-I/O query.
 Native GREEN, mutation sensitivity and scoped re-review are still pending.
 Seven real-daemon browser cases pass; dependency audit166 remains unchanged.
+
+MODIFIED 2026-11-18 — L1 scoped native follow-up. Sourceb52bc2f/run44261618659
+passes17of18 native scenarios, including the actual daemon, wake-only regression,
+one-slot failed opens and real helper pending-I/O drain. The abandoned-client
+case now reaches a new failure: FILE_NOT_FOUND during the deliberate accept
+yield after closing the last instance. Rearm a replacement before closing the
+abandoned instance when an existing arena slot permits; a full arena retains
+the bounded retirement/wait path. Preserve the same test, assertions, yields,
+capacity policy and deadlines. All five original source findings were addressed
+in scoped review; this newly exposed transition and its native acceptance remain
+under review. The diagnostic full Windows run is for production composition,
+not a replacement for the still-blocked mandatory Node audit.

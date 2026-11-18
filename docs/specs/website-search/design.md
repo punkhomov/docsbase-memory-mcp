@@ -436,3 +436,8 @@ tests must join a signalled drain worker before awaiting native terminal state.
 Final-drain acceptance leaves more kernel bytes unread than Mio can prefetch and
 observes GetThreadIOPendingFlag on the retained dedicated helper HANDLE before
 releasing the reader; startup Pending alone cannot establish peer drain.
+
+Abandoned-instance replacement is reserved before closing the last HANDLE when
+the existing arena has capacity, preserving the pipe namespace across accept's
+cooperative yield. A saturated arena still retires the old owner and waits for
+capacity; it never exceeds the physical limit to keep an instance available.
