@@ -408,3 +408,19 @@ Stop сохраняет свой прежний общий15s цикл и не �
 сохраняет arena-владение до retirement и после cooperative yield начинает новый
 accept в той же capacity. Прочие ошибки не маскируются; новый экземпляр ждёт
 фактической ёмкости. Отмена accept после yield не оставляет reusable stale handle.
+
+
+## Delta 2026-11-17 — L1, замена completion implementation
+
+Retain PR164 application scopes and resource accounting; replace Operation,
+OVERLAPPED storage and own IOCP dispatch with exact patched Mio/Tokio. A dedicated
+transport I/O runtime is owned outside application work and remains alive until
+Mio's last-field guards and optional drain workers retire. The bounded arena
+contains tokens/accounting/helper ownership; tokens weakly reference endpoints
+and the arena, avoiding a guard-to-endpoint reference cycle. Strong endpoint
+references fence cancellation and helper FFI. Aborting the logical stream drops
+its endpoint; the dependency owns remaining native buffers and completions.
+Read capacity is explicit before registration, outgoing writes are capped,
+guarded Drop prevents callback resubmission and cancels pending native work.
+Successful close still has explicit native-write and final peer-drain boundaries.
+No performance advantage is claimed by source size alone. See ADR-WLIB1/plan.

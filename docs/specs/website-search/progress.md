@@ -1033,3 +1033,21 @@ proves the contamination mechanism and isolation, not that unrecorded value.
 macOS134215310028 cancelled with runner_id0 and no steps: hosted runner not
 acquired after multiple attempts, with arm64 capacity notices. This is not native
 source acceptance. All four required checks on the new head remain mandatory.
+
+
+STARTED 2026-11-17 — L1 library-backed retirement implementation, isolated branch
+fix/windows-library-retirement from frozen PR1645982286. Baseline lean494/0.
+Windows-target check and strict Clippy of lib/all integration test source pass.
+Own kernel operations/dispatch are replaced by dependency ownership; original
+application cancellation, Activity, deadlines and final drain integration remain.
+Native acceptance, mutation sensitivity and independent review are pending; no
+production completion/readiness claim. ADR-WLIB1 and the plan document scope.
+Five implementation-specific Operation/packet tests are retired with that
+implementation; all13 connection scenarios,2 root scenarios and actual daemon
+stalled-get-doc regression are retained/ported to dependency guard observations.
+
+MODIFIED 2026-11-18 — L1 source checkpoint before native acceptance. Patched source
+lean494/0; Windows-target lib/tests check and strict Clippy pass. Six Python age
+checks pass, including a RED on the old path-source bypass. Exact archive+patch
+verification passes and rejects a one-byte unreviewed source mutation. Native
+Windows daemon/connection/root evidence and fresh review remain pending.

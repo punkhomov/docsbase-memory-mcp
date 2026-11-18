@@ -49,3 +49,27 @@ class AuditIntegrationTests(unittest.TestCase):
             lock.write_text('[[package]]\nname="dep"\nversion="1"\nsource="git+https://example.invalid/repo"\n')
             with patch.object(age.sys,'argv',['audit',str(lock)]):
                 with self.assertRaises(ValueError): age.main()
+
+
+class VendoredAgeTests(unittest.TestCase):
+    def test_path_override_keeps_original_publication_age_audit(self):
+        import json
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock = root / 'Cargo.lock'
+            lock.write_text('[[package]]\nname="dep"\nversion="1"\nsource="' + age.SOURCE + '"\nchecksum="registry"\n[[package]]\nname="mio"\nversion="1.2.4"\n')
+            (root / 'vendor').mkdir()
+            (root / 'vendor' / 'UPSTREAM.json').write_text(json.dumps([
+                {'name': 'mio', 'version': '1.2.4', 'checksum': 'original-archive'}
+            ]))
+            with patch.object(age.sys, 'argv', ['audit', str(lock)]), patch.object(age, 'audit') as audit:
+                age.main()
+                observed = {call.args[0]: call.args[1] for call in audit.call_args_list}
+                self.assertEqual(observed['mio'], [('1.2.4', 'original-archive')])
+                self.assertEqual(observed['dep'], [('1', 'registry')])
+            lock.write_text('[[package]]\nname="dep"\nversion="1"\nsource="' + age.SOURCE + '"\nchecksum="registry"\n')
+            with patch.object(age.sys, 'argv', ['audit', str(lock)]):
+                with self.assertRaisesRegex(ValueError, 'vendored source absent from lock'):
+                    age.main()

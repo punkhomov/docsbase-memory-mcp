@@ -1,0 +1,14 @@
+[
+  {
+    "name": "mio",
+    "version": "1.2.4",
+    "checksum": "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee",
+    "patch_sha256": "1d39fecf7e27bc0b0a2d0fc110e2967cf0b1e62f9ba1752588a38a0217469de2"
+  },
+  {
+    "name": "tokio",
+    "version": "1.54.1",
+    "checksum": "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3",
+    "patch_sha256": "c6ecfd8b07150abd94956e7fbc5ebe12d707479fad2817d1a822607c3f33b2ad"
+  }
+]

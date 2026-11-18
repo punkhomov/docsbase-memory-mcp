@@ -355,3 +355,14 @@ not planned. Real ~20k acceptance по-прежнему отложен поль�
   flush worker is required for ordinary persistent request/response traffic.
 - **FR-W5:** Deterministically prove admitted registration survives armed idle
   grace (#165), without larger grace, sleep-based admission inference or ignores.
+
+
+## Delta 2026-11-17 — L1, библиотечный Windows native owner
+
+Candidate implementation supersedes ADR-W1 own-IOCP choice, pending native
+acceptance: same #155 delivery/admission/Activity/deadline obligations, using
+Mio/Tokio-owned operations. Original cap also bounds dependency read/write
+buffers. A cancelled native caller retains the original endpoint through its
+actual return; helpers retain it through native thread signal/join. No new
+protocol, default, timeout, quality baseline or weaker shutdown guarantee.
+Plan and ADR: windows-library-plan.md (ADR-WLIB1).

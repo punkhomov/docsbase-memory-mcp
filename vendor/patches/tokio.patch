@@ -1,0 +1,96 @@
+--- a/src/net/windows/named_pipe.rs
++++ b/src/net/windows/named_pipe.rs
+@@ -137,6 +137,27 @@
+         })
+     }
+ 
++    /// Construct a pipe retaining application accounting through native retirement.
++    ///
++    /// # Safety
++    /// The raw-handle ownership contract is the same as from_raw_handle.
++    ///
++    /// # Errors
++    /// Returns registration errors, retaining the guard through cleanup.
++    ///
++    /// # Panics
++    /// Panics when called outside a Tokio runtime with I/O enabled.
++    pub unsafe fn from_raw_handle_with_retirement_guard(
++        handle: RawHandle,
++        guard: Box<dyn Send + Sync>,
++        buffer_capacity: usize,
++    ) -> io::Result<Self> {
++        let named_pipe = unsafe {
++            mio_windows::NamedPipe::from_raw_handle_with_retirement_guard(handle, guard, buffer_capacity)
++        };
++        Ok(Self { io: PollEvented::new(named_pipe)? })
++    }
++
+     /// Retrieves information about the named pipe the server is associated
+     /// with.
+     ///
+@@ -919,8 +940,16 @@
+         self.io.poll_write_vectored(cx, bufs)
+     }
+ 
+-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+-        Poll::Ready(Ok(()))
++    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        let mut pipe = &*self.io;
++        match std::io::Write::flush(&mut pipe) {
++            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
++            result => return Poll::Ready(result),
++        }
++        self.io.registration().poll_write_io(cx, || {
++            let mut pipe = &*self.io;
++            std::io::Write::flush(&mut pipe)
++        })
+     }
+ 
+     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+@@ -1010,6 +1039,27 @@
+         Ok(Self {
+             io: PollEvented::new(named_pipe)?,
+         })
++    }
++
++    /// Construct a pipe retaining application accounting through native retirement.
++    ///
++    /// # Safety
++    /// The raw-handle ownership contract is the same as from_raw_handle.
++    ///
++    /// # Errors
++    /// Returns registration errors, retaining the guard through cleanup.
++    ///
++    /// # Panics
++    /// Panics when called outside a Tokio runtime with I/O enabled.
++    pub unsafe fn from_raw_handle_with_retirement_guard(
++        handle: RawHandle,
++        guard: Box<dyn Send + Sync>,
++        buffer_capacity: usize,
++    ) -> io::Result<Self> {
++        let named_pipe = unsafe {
++            mio_windows::NamedPipe::from_raw_handle_with_retirement_guard(handle, guard, buffer_capacity)
++        };
++        Ok(Self { io: PollEvented::new(named_pipe)? })
+     }
+ 
+     /// Retrieves information about the named pipe the client is associated
+@@ -1710,8 +1760,16 @@
+         self.io.poll_write_vectored(cx, bufs)
+     }
+ 
+-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+-        Poll::Ready(Ok(()))
++    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        let mut pipe = &*self.io;
++        match std::io::Write::flush(&mut pipe) {
++            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
++            result => return Poll::Ready(result),
++        }
++        self.io.registration().poll_write_io(cx, || {
++            let mut pipe = &*self.io;
++            std::io::Write::flush(&mut pipe)
++        })
+     }
+ 
+     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

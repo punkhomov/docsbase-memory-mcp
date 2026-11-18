@@ -49,6 +49,15 @@ def main():
         if source != SOURCE:
             raise ValueError(f'unsupported source: {package["name"]}: {source}')
         groups.setdefault(package['name'], []).append((package['version'], package['checksum']))
+    # ADR-WLIB1: path overrides retain the original archive's publication/age
+    # audit. Exact source-plus-patch verification runs separately in docs CI.
+    upstream = lock.parent / 'vendor' / 'UPSTREAM.json'
+    if upstream.exists():
+        for package in json.loads(upstream.read_text()):
+            if not any(p['name'] == package['name'] and p['version'] == package['version']
+                       and p.get('source') is None for p in packages):
+                raise ValueError(f'vendored source absent from lock: {package["name"]}')
+            groups.setdefault(package['name'], []).append((package['version'], package['checksum']))
     if not groups:
         raise ValueError('no registry packages found')
     now = dt.datetime.now(dt.timezone.utc)

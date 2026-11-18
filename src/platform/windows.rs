@@ -1,6 +1,7 @@
 //! Windows x64 backend of the platform seam (ADR-10, T39–T41).
 //!
-//! Application-owned IOCP implements named-pipe byte streams (ADR-W1).
+//! Mio/Tokio own named-pipe native I/O; the application owns accounting and
+//! final delivery (ADR-WLIB1).
 //! Signals, process liveness and filesystem operations remain the ADR-10 seam.
 
 use std::fs::{self, File, OpenOptions};

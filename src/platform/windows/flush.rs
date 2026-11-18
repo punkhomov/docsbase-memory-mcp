@@ -1,5 +1,6 @@
 //! One dedicated, connection-owned drain worker. Cancellation never means return.
 #![allow(unsafe_code)] // Owned event/thread/pipe handles; no pool-thread cancellation.
+use super::connection::NativePipe;
 use super::native_io::HandleToken;
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -44,6 +45,7 @@ struct State {
 struct Shared {
     token: Arc<HandleToken>,
     pipe: usize,
+    pipe_owner: Mutex<Option<Arc<NativePipe>>>,
     request: OwnedHandle,
     returned: OwnedHandle,
     thread: AtomicUsize,
@@ -76,10 +78,12 @@ impl Flush {
     pub(super) fn new(token: Arc<HandleToken>, stack_bytes: usize) -> io::Result<Self> {
         let request = event()?;
         let returned = event()?;
-        let pipe = token.retain_helper()? as usize;
+        let pipe_owner = token.retain_helper()?;
+        let pipe = pipe_owner.raw() as usize;
         let shared = Arc::new(Shared {
             token,
             pipe,
+            pipe_owner: Mutex::new(Some(pipe_owner)),
             request,
             returned,
             thread: AtomicUsize::new(0),
@@ -272,6 +276,7 @@ impl Flush {
         if outcome.is_err() {
             self.shared.token.report_fault("drain worker join unwound");
         }
+        drop(locked(&self.shared.pipe_owner).take());
         self.shared.token.release_helper();
         let mut state = locked(&self.shared.state);
         state.joined = Some(outcome);

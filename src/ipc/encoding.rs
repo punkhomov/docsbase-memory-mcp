@@ -35,12 +35,6 @@ impl Region {
             .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
         Ok(Self { pointer, layout })
     }
-    /// Original allocation provenance, obtained before the region is submitted.
-    /// Native owners must exclude every Rust byte view until terminal return.
-    #[cfg(windows)]
-    pub(crate) fn native_pointer(&mut self) -> *mut u8 {
-        self.pointer.as_ptr()
-    }
     pub(crate) fn bytes(&self) -> &[u8] {
         // SAFETY: allocation is initialized, live and exactly layout.size bytes.
         unsafe { std::slice::from_raw_parts(self.pointer.as_ptr(), self.layout.size()) }

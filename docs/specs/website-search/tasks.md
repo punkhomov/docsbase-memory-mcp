@@ -208,3 +208,14 @@ causal armed-grace registration regression and W4b final native acceptance.
 Each slice gets fresh task review and evidence in the progress ledger. Required
 native CI and a fresh whole-feature review precede ready status; merge is human.
 No protocol/index migration, new crate, golden delta or budget relaxation.
+
+
+## Delta 2026-11-17 — библиотечная интеграция
+
+- L1: replace own IOCP with guarded Mio/Tokio, port actual native acceptance
+  without weakening original physical resource and delivery guarantees.
+- L2: exact upstream/patch verification and original publication-age audit,
+  full production acceptance, fresh review and ready PR; human merge only.
+
+Detailed steps and immutable experiment evidence: windows-library-plan.md and
+experiment/windows-mio-retirement RESULT.md at9ffae6b.

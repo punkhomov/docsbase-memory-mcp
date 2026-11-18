@@ -1,24 +1,27 @@
-//! Raw owned pipe endpoints; IOCP keeps write buffers alive after logical acceptance.
-#![allow(unsafe_code)] // Only constructors transfer fresh Win32 pipe HANDLE ownership.
+//! Application facade over dependency-owned Windows named-pipe I/O.
+#![allow(unsafe_code)] // Checked Win32 constructors/cancellation; dependency owns all OVERLAPPED storage.
 use super::flush::Flush;
 #[cfg(test)]
 use super::native_io::Port;
-use super::native_io::{HandleToken, Kind, Operation, PhysicalOwner, Service};
+use super::native_io::{HandleToken, PhysicalOwner, RetirementGuard, Service};
+use std::future::Future;
 use std::io;
-use std::os::windows::io::{FromRawHandle, OwnedHandle};
+use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
 use std::pin::Pin;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer};
 use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
     PIPE_ACCESS_DUPLEX,
 };
+use windows_sys::Win32::System::IO::CancelIoEx;
 use windows_sys::Win32::System::Pipes::{
-    CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES,
+    CreateNamedPipeW, DisconnectNamedPipe, PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES,
 };
 
 fn failure(message: &'static str) -> io::Error {
@@ -30,19 +33,99 @@ fn name(path: &str) -> io::Result<Vec<u16>> {
     }
     let mut wide: Vec<u16> = path.encode_utf16().collect();
     if wide.len() > 256 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "native pipe name exceeds Windows limit",
-        ));
+        return Err(failure("native pipe name exceeds Windows limit"));
     }
     wide.push(0);
     Ok(wide)
 }
 
-/// The listening physical HANDLE/token is transferred intact, never re-keyed.
+enum Endpoint {
+    Server(NamedPipeServer),
+    Client(NamedPipeClient),
+}
+/// Strong references fence every raw-handle caller, including drain/cancel.
+/// Last destruction delegates read/write/connect retirement to patched Mio.
+pub(super) struct NativePipe {
+    io: Mutex<Endpoint>,
+    raw: usize,
+}
+impl NativePipe {
+    pub(super) fn new(
+        handle: OwnedHandle,
+        server: bool,
+        capacity: usize,
+        token: Arc<HandleToken>,
+    ) -> io::Result<Self> {
+        let raw = handle.into_raw_handle();
+        let guard = Box::new(RetirementGuard(token));
+        // SAFETY: sole ownership of a fresh overlapped byte-mode HANDLE moves
+        // together with its accounting guard BEFORE registration/first read.
+        let io = unsafe {
+            if server {
+                Endpoint::Server(NamedPipeServer::from_raw_handle_with_retirement_guard(
+                    raw, guard, capacity,
+                )?)
+            } else {
+                Endpoint::Client(NamedPipeClient::from_raw_handle_with_retirement_guard(
+                    raw, guard, capacity,
+                )?)
+            }
+        };
+        Ok(Self {
+            io: Mutex::new(io),
+            raw: raw as usize,
+        })
+    }
+    pub(super) fn raw(&self) -> std::os::windows::io::RawHandle {
+        self.raw as _
+    }
+    pub(super) fn cancel(&self) {
+        // SAFETY: caller's strong NativePipe reference retains this exact HANDLE
+        // until CancelIoEx returns. Return (including NOT_FOUND) is not retirement.
+        unsafe {
+            CancelIoEx(self.raw(), ptr::null());
+        }
+    }
+    pub(super) fn disconnect(&self) {
+        // SAFETY: strong reference fences the HANDLE; only failed server
+        // exchanges invoke this discard path. No delivery claim follows it.
+        unsafe {
+            DisconnectNamedPipe(self.raw());
+        }
+    }
+    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let io = self.io.lock().unwrap_or_else(PoisonError::into_inner);
+        match &*io {
+            Endpoint::Server(pipe) => std::pin::pin!(pipe.connect()).as_mut().poll(cx),
+            Endpoint::Client(_) => Poll::Ready(Err(failure("client cannot accept"))),
+        }
+    }
+    fn poll_read(&self, cx: &mut Context<'_>, buffer: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        let mut io = self.io.lock().unwrap_or_else(PoisonError::into_inner);
+        match &mut *io {
+            Endpoint::Server(pipe) => Pin::new(pipe).poll_read(cx, buffer),
+            Endpoint::Client(pipe) => Pin::new(pipe).poll_read(cx, buffer),
+        }
+    }
+    fn poll_write(&self, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+        let mut io = self.io.lock().unwrap_or_else(PoisonError::into_inner);
+        match &mut *io {
+            Endpoint::Server(pipe) => Pin::new(pipe).poll_write(cx, bytes),
+            Endpoint::Client(pipe) => Pin::new(pipe).poll_write(cx, bytes),
+        }
+    }
+    fn poll_flush(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut io = self.io.lock().unwrap_or_else(PoisonError::into_inner);
+        match &mut *io {
+            Endpoint::Server(pipe) => Pin::new(pipe).poll_flush(cx),
+            Endpoint::Client(pipe) => Pin::new(pipe).poll_flush(cx),
+        }
+    }
+}
+
 pub(super) struct Listening {
     pub token: Arc<HandleToken>,
-    connect: Arc<Operation>,
+    pipe: Mutex<Option<Arc<NativePipe>>>,
     transferred: AtomicBool,
 }
 impl Listening {
@@ -66,8 +149,8 @@ impl Listening {
             } else {
                 0
             };
-        // SAFETY: fresh byte-mode local pipe, checked owned name/quotas. The
-        // application reservation, not the sentinel, bounds actual instances.
+        // SAFETY: reservation precedes HANDLE creation; checked owned name and
+        // quota describe a local byte-mode pipe. Physical arena bounds instances.
         let raw = unsafe {
             CreateNamedPipeW(
                 name.as_ptr(),
@@ -83,63 +166,76 @@ impl Listening {
         if raw == INVALID_HANDLE_VALUE || raw.is_null() {
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: one successful native creation, transferred exactly once.
-        let token = reservation.associate(unsafe { OwnedHandle::from_raw_handle(raw) })?;
-        let connect = Operation::new(token.clone(), Kind::Connect, 0)?;
+        // SAFETY: fresh sole HANDLE ownership transfers once to dependency.
+        let (token, pipe) =
+            reservation.associate(unsafe { OwnedHandle::from_raw_handle(raw) }, true, chunk)?;
         let owner = Arc::new(Self {
             token,
-            connect,
+            pipe: Mutex::new(Some(pipe)),
             transferred: AtomicBool::new(false),
         });
         service.attach(&owner.token, owner.clone())?;
         Ok(owner)
     }
-    pub(super) fn poll_accept(&self, cx: &Context<'_>) -> Poll<io::Result<Arc<HandleToken>>> {
+    pub(super) fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<Arc<HandleToken>>> {
         if self.transferred.load(Ordering::Acquire) {
-            return Poll::Ready(Err(failure("listening handle was already transferred")));
+            return Poll::Ready(Err(failure("listening handle already transferred")));
         }
-        if !self.connect.active()
-            && let Err(error) = self.connect.submit(&[])
-        {
-            return Poll::Ready(Err(error));
-        }
-        match self.connect.poll(cx) {
+        let pipe = self
+            .pipe
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| failure("listener is closed"))?;
+        match pipe.poll_connect(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-            Poll::Ready(Ok(_)) => Poll::Ready(
-                self.connect
-                    .consume()
-                    .and_then(super::native_io::Completion::result)
-                    .and_then(|_| {
-                        self.transferred
-                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                            .map(|_| self.token.clone())
-                            .map_err(|_| failure("listening handle was already transferred"))
-                    }),
-            ),
+            Poll::Ready(Ok(())) => {
+                self.transferred.store(true, Ordering::Release);
+                Poll::Ready(Ok(self.token.clone()))
+            }
         }
     }
     pub(super) fn abort(&self) {
         self.token.abort();
+        drop(
+            self.pipe
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
+    }
+}
+impl PhysicalOwner for Listening {
+    fn abort(&self) {
+        self.abort();
+    }
+    fn retire_ready(&self) -> io::Result<bool> {
+        Ok(true)
+    }
+    fn take_native(&self) -> Option<Arc<NativePipe>> {
+        self.pipe
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 }
 
 pub(super) struct Connection {
     pub token: Arc<HandleToken>,
-    read: Arc<Operation>,
-    write: Arc<Operation>,
+    pipe: Mutex<Option<Arc<NativePipe>>>,
     drain: OnceLock<io::Result<Flush>>,
     initializing: AtomicBool,
     logical_claimed: AtomicBool,
-    charges: Mutex<[Option<Arc<dyn Send + Sync>>; 2]>,
     helper_stack_bytes: usize,
     closing: AtomicBool,
     closed: AtomicBool,
     chunk: usize,
-    accepted: AtomicUsize,
     dirty: AtomicBool,
     server: bool,
     disconnected: AtomicBool,
+    #[cfg(test)]
+    read_active: AtomicBool,
 }
 impl Connection {
     pub(super) fn accepted(
@@ -148,7 +244,8 @@ impl Connection {
         stack: usize,
     ) -> io::Result<Arc<Self>> {
         let service = token.service()?;
-        Self::new(&service, token, chunk, stack, true)
+        let pipe = service.accepted(&token)?;
+        Self::new(&service, token, pipe, chunk, stack, true)
     }
     #[cfg(test)]
     pub(super) fn client(
@@ -167,8 +264,7 @@ impl Connection {
     ) -> io::Result<Arc<Self>> {
         let reservation = service.reserve()?;
         let name = name(path)?;
-        // SAFETY: single nonblocking native open; busy/absence is returned to
-        // caller-owned connect admission, never WaitNamedPipe/helper fallback.
+        // SAFETY: single overlapped open, under pre-reserved physical capacity.
         let raw = unsafe {
             CreateFileW(
                 name.as_ptr(),
@@ -183,48 +279,46 @@ impl Connection {
         if raw == INVALID_HANDLE_VALUE || raw.is_null() {
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: sole fresh client HANDLE, no interprocess/Mio dirty owner.
-        let token = reservation.associate(unsafe { OwnedHandle::from_raw_handle(raw) })?;
-        Self::new(service, token, chunk, stack, false)
+        // SAFETY: fresh sole ownership moves once to guarded dependency.
+        let (token, pipe) =
+            reservation.associate(unsafe { OwnedHandle::from_raw_handle(raw) }, false, chunk)?;
+        Self::new(service, token, pipe, chunk, stack, false)
     }
     fn new(
         service: &Service,
         token: Arc<HandleToken>,
+        pipe: Arc<NativePipe>,
         chunk: usize,
         stack: usize,
         server: bool,
     ) -> io::Result<Arc<Self>> {
-        let read =
-            Operation::new(token.clone(), Kind::Read, chunk).inspect_err(|_| token.abort())?;
-        let write =
-            Operation::new(token.clone(), Kind::Write, chunk).inspect_err(|_| token.abort())?;
-        // Every connection reserves one possible helper in its root policy,
-        // but ordinary exchanges allocate only the owned native I/O regions.
-        // Register the envelope before exposing any cancellable submission.
         let owner = Arc::new(Self {
             token,
-            read,
-            write,
+            pipe: Mutex::new(Some(pipe)),
             drain: OnceLock::new(),
             initializing: AtomicBool::new(false),
             logical_claimed: AtomicBool::new(false),
-            charges: Mutex::new([None, None]),
             helper_stack_bytes: stack,
             closing: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             chunk,
-            accepted: AtomicUsize::new(0),
             dirty: AtomicBool::new(false),
             server,
             disconnected: AtomicBool::new(false),
+            #[cfg(test)]
+            read_active: AtomicBool::new(false),
         });
         service.attach(&owner.token, owner.clone())?;
         Ok(owner)
     }
+    fn native(&self) -> io::Result<Arc<NativePipe>> {
+        self.pipe
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))
+    }
     fn drain(&self) -> io::Result<&Flush> {
-        // Synchronous construction is fenced from outer reaping. retain_helper
-        // independently fences the HANDLE before the worker can enter Win32.
-        // On unwind this flag stays set and the root preserves quarantine.
         self.initializing.store(true, Ordering::Release);
         let result = self
             .drain
@@ -234,16 +328,20 @@ impl Connection {
             Ok(drain) => Ok(drain),
             Err(error) => {
                 self.abort();
-                Err(error.raw_os_error().map_or_else(
-                    || io::Error::new(error.kind(), error.to_string()),
-                    io::Error::from_raw_os_error,
-                ))
+                Err(io::Error::new(error.kind(), error.to_string()))
             }
         }
     }
     #[cfg(test)]
     pub(super) fn test_read_active(&self) -> bool {
-        self.read.active()
+        self.read_active.load(Ordering::Acquire)
+    }
+    #[cfg(test)]
+    pub(super) fn test_cancel_using(&self, work: impl FnOnce(std::os::windows::io::RawHandle)) {
+        if let Ok(pipe) = self.token.native() {
+            work(pipe.raw());
+            drop(pipe); // The original HANDLE remains live across the whole caller.
+        }
     }
     #[cfg(test)]
     pub(super) fn test_hold_write_cancellation(
@@ -251,36 +349,22 @@ impl Connection {
         entered: &std::sync::mpsc::Sender<()>,
         release: &std::sync::mpsc::Receiver<()>,
     ) {
-        self.write.controlled_cancel(|handle, overlapped| {
-            // SAFETY: controlled_cancel retains the original native handle and
-            // operation storage through this complete cancellation boundary.
+        self.test_cancel_using(|handle| {
+            // SAFETY: strong native owner fences the HANDLE through this gate.
             unsafe {
-                windows_sys::Win32::System::IO::CancelIoEx(handle, overlapped);
+                CancelIoEx(handle, ptr::null());
             }
             let _ = entered.send(());
             let _ = release.recv();
         });
     }
-    /// Install ownership before submission; old owners drop outside the lock.
     pub(super) fn retain(&self, request: bool, charge: Arc<dyn Send + Sync>) -> io::Result<()> {
-        let old = {
-            let mut charges = self.charges.lock().unwrap_or_else(PoisonError::into_inner);
-            if self.token.is_aborting() {
-                return Err(failure("native connection is aborting"));
-            }
-            charges[usize::from(request)].replace(charge)
-        };
-        drop(old);
-        Ok(())
+        self.token.retain(request, charge)
     }
     pub(super) fn request_completed(&self) {
-        // A final-drain worker keeps the request through its actual thread
-        // exit/join. Persistent replies end at the native-write barrier.
-        if self.closing.load(Ordering::Acquire) || self.write.active() {
-            return;
+        if !self.closing.load(Ordering::Acquire) && self.token.writes_idle() {
+            self.token.request_completed();
         }
-        let old = self.charges.lock().unwrap_or_else(PoisonError::into_inner)[1].take();
-        drop(old);
     }
     pub(super) fn abort(&self) {
         self.token.abort();
@@ -293,52 +377,24 @@ impl Connection {
         {
             self.token.disconnect_failed();
         }
+        drop(
+            self.pipe
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
     }
-    /// Outer cleanup calls this while progress is alive, never from async Drop.
     #[cfg(test)]
     pub(super) fn retire(&self, port: &Port) -> io::Result<bool> {
         self.abort();
-        if !self.retire_ready()? {
-            return Ok(false);
-        }
-        Ok(port.retire(&self.token))
+        Ok(self.retire_ready()? && port.retire(&self.token))
     }
-    fn write_terminal(&self, cx: &Context<'_>) -> Poll<io::Result<()>> {
-        if !self.write.active() {
-            return Poll::Ready(Ok(()));
+    fn write_terminal(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let result = self.native()?.poll_flush(cx);
+        if let Poll::Ready(Ok(())) = result {
+            self.token.write_active.store(false, Ordering::Release);
         }
-        match self.write.poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-            Poll::Ready(Ok(_)) => {
-                let result = self
-                    .write
-                    .consume()
-                    .and_then(super::native_io::Completion::result);
-                match result {
-                    Ok(count) if count == self.accepted.load(Ordering::Acquire) => {
-                        Poll::Ready(Ok(()))
-                    }
-                    Ok(_) => {
-                        self.abort();
-                        Poll::Ready(Err(failure("short native pipe write")))
-                    }
-                    Err(error) => {
-                        self.abort();
-                        Poll::Ready(Err(error))
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl PhysicalOwner for Listening {
-    fn abort(&self) {
-        self.abort();
-    }
-    fn retire_ready(&self) -> io::Result<bool> {
-        Ok(true)
+        result
     }
 }
 impl PhysicalOwner for Connection {
@@ -354,26 +410,13 @@ impl PhysicalOwner for Connection {
             None | Some(Err(_)) => Ok(true),
         }
     }
-    fn retired(&self) {
-        let old = {
-            let mut charges = self.charges.lock().unwrap_or_else(PoisonError::into_inner);
-            std::mem::take(&mut *charges)
-        };
-        drop(old);
-    }
 }
-
 struct Logical {
     connection: Arc<Connection>,
 }
 impl Drop for Logical {
     fn drop(&mut self) {
-        // Cancellation/wake only. The arena, not this logical Arc, owns native
-        // buffers, helper JoinHandle, and eventual physical retirement.
-        self.connection.token.abort();
-        if let Some(Ok(drain)) = self.connection.drain.get() {
-            drain.abort();
-        }
+        self.connection.abort();
     }
 }
 pub(super) struct Pipe {
@@ -381,9 +424,6 @@ pub(super) struct Pipe {
 }
 impl Pipe {
     pub(super) fn new(connection: Arc<Connection>) -> io::Result<Self> {
-        // One writable stream per physical connection. Tokio split serializes
-        // access to that stream; cloning a writer would let it race shutdown
-        // between the closing check and native submission.
         connection
             .logical_claimed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -400,33 +440,12 @@ impl AsyncRead for Pipe {
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let connection = &self.get_mut().logical.connection;
-        if buffer.remaining() == 0 {
-            return Poll::Ready(Ok(()));
-        }
-        if !connection.read.active()
-            && let Err(error) = connection.read.submit(&[])
-        {
-            return Poll::Ready(Err(error));
-        }
-        match connection.read.poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-            Poll::Ready(Ok(_)) => {
-                let count = buffer.remaining().min(connection.chunk);
-                let output = buffer.initialize_unfilled_to(count);
-                match connection.read.copy_read(output) {
-                    Ok(count) => {
-                        buffer.advance(count);
-                        Poll::Ready(Ok(()))
-                    }
-                    Err(error) if matches!(error.raw_os_error(), Some(109 | 233 | 232)) => {
-                        Poll::Ready(Ok(()))
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
-                    Err(error) => Poll::Ready(Err(error)),
-                }
-            }
-        }
+        let result = connection.native()?.poll_read(cx, buffer);
+        #[cfg(test)]
+        connection
+            .read_active
+            .store(result.is_pending(), Ordering::Release);
+        result
     }
 }
 impl AsyncWrite for Pipe {
@@ -437,31 +456,21 @@ impl AsyncWrite for Pipe {
     ) -> Poll<io::Result<usize>> {
         let connection = &self.get_mut().logical.connection;
         if connection.closing.load(Ordering::Acquire) {
-            return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
-        if bytes.is_empty() {
-            return Poll::Ready(Ok(0));
+        let result = connection
+            .native()?
+            .poll_write(cx, &bytes[..bytes.len().min(connection.chunk)]);
+        if let Poll::Ready(Ok(count)) = result
+            && count != 0
+        {
+            connection.token.write_active.store(true, Ordering::Release);
+            connection.dirty.store(true, Ordering::Release);
         }
-        match connection.write_terminal(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-            Poll::Ready(Ok(())) => {}
-        }
-        let count = bytes.len().min(connection.chunk);
-        connection.accepted.store(count, Ordering::Release);
-        connection.dirty.store(true, Ordering::Release);
-        if let Err(error) = connection.write.submit(&bytes[..count]) {
-            connection.abort();
-            return Poll::Ready(Err(error));
-        }
-        // Logical acceptance is explicit; fixed owned storage survives pending
-        // native write and future Drop. flush proves native completion;
-        // shutdown separately proves peer drain for a successful server close.
-        Poll::Ready(Ok(count))
+        result
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let connection = &self.get_mut().logical.connection;
-        connection.write_terminal(cx)
+        self.get_mut().logical.connection.write_terminal(cx)
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let connection = &self.get_mut().logical.connection;
@@ -474,20 +483,12 @@ impl AsyncWrite for Pipe {
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {}
         }
-        // Named pipes have no socket-style half-close. Clients need native
-        // write completion only; a final server reply must additionally be read
-        // by its peer before this physical instance can be safely closed.
         if !connection.server || !connection.dirty.load(Ordering::Acquire) {
             connection.closed.store(true, Ordering::Release);
             return Poll::Ready(Ok(()));
         }
-        let drain = match connection.drain() {
-            Ok(drain) => drain,
-            Err(error) => return Poll::Ready(Err(error)),
-        };
-        match drain.poll_flush(cx) {
+        match connection.drain()?.poll_flush(cx) {
             Poll::Ready(Ok(())) => {
-                connection.dirty.store(false, Ordering::Release);
                 connection.closed.store(true, Ordering::Release);
                 Poll::Ready(Ok(()))
             }
@@ -547,7 +548,7 @@ mod tests {
                 let listening = Listening::new_in(&service, &path, 4096, false)?;
                 assert!(
                     listening
-                        .poll_accept(&Context::from_waker(std::task::Waker::noop()))
+                        .poll_accept(&mut Context::from_waker(std::task::Waker::noop()))
                         .is_pending()
                 );
                 next = Some(listening);
@@ -1002,11 +1003,11 @@ mod tests {
             let (entered, observed) = std::sync::mpsc::channel();
             let (release, proceed) = std::sync::mpsc::channel();
             let caller = std::thread::spawn(move || {
-                connection.read.controlled_cancel(|handle, overlapped| {
+                connection.test_cancel_using(|handle| {
                     // SAFETY: controlled_cancel owns this handle/operation until
                     // this actual cancellation caller returns, including the gate.
                     unsafe {
-                        windows_sys::Win32::System::IO::CancelIoEx(handle, overlapped);
+                        windows_sys::Win32::System::IO::CancelIoEx(handle, std::ptr::null());
                     }
                     let _ = entered.send(());
                     let _ = proceed.recv();
@@ -1154,7 +1155,7 @@ mod tests {
                 let reading = reader.read_exact(&mut received);
                 tokio::try_join!(sending, reading)?;
                 assert_eq!(&received, b"pong\n");
-                assert!(!server.write.active(), "last native write was consumed");
+                assert!(server.token.writes_idle(), "native write barrier completed");
                 samples.push(began.elapsed().as_micros());
             }
             samples.sort_unstable();
@@ -1179,7 +1180,7 @@ mod tests {
         let mut port = Port::new(2, 1024 * 1024).unwrap();
         let service = port.service();
         let listening = Listening::new(&port, &path, 4096, true).unwrap();
-        let client = Connection::client(&port, &path, 65_536, 1024 * 1024).unwrap();
+        let client = Connection::client(&port, &path, 1, 1024 * 1024).unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1191,46 +1192,38 @@ mod tests {
         drop(listening);
         let weak = Arc::downgrade(&server);
         let mut pipe = Pipe::new(server.clone()).unwrap();
-        let bytes = vec![b'x'; 65_536];
-        assert_eq!(runtime.block_on(pipe.write(&bytes)).unwrap(), bytes.len());
-        // Actual native return status, not a pre-entry marker or poll-count
-        // guess: the unread large WriteFile is pending beyond logical write.
-        assert!(server.write.submitted_pending());
-        drop(server);
-        drop(pipe);
-        assert!(
-            weak.upgrade().is_some(),
-            "the registry owns the dirty envelope"
-        );
-        assert!(
-            matches!(service.reserve(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
-        );
-        let retained = weak.upgrade().unwrap();
-        retained.abort();
-        client.abort();
-        assert!(retained.drain.get().is_none());
-        assert!(client.drain.get().is_none());
         runtime
-            .block_on(std::future::poll_fn(|cx| retained.write.poll(cx)))
+            .block_on(pipe.write_all(&vec![b'x'; 65_536]))
             .unwrap();
-        drop(retained);
+        assert!(
+            Pin::new(&mut pipe)
+                .poll_flush(&mut Context::from_waker(std::task::Waker::noop()))
+                .is_pending()
+        );
+        let held = HeldReadCancellation::new(server.clone());
+        assert!(held.held, "actual native caller must be retained");
+        drop((pipe, server));
+        assert!(weak.upgrade().is_some());
+        assert!(matches!(service.reserve(), Err(error) if error.kind()==io::ErrorKind::WouldBlock));
+        assert_eq!(
+            service.reap().unwrap(),
+            2,
+            "held native caller preserves physical capacity"
+        );
+        drop(held);
+        client.abort();
+        runtime.block_on(async {
+            client.token.test_native_terminal().await;
+            weak.upgrade().unwrap().token.test_native_terminal().await;
+        });
         drop(client);
         assert_eq!(service.reap().unwrap(), 0);
-        assert!(weak.upgrade().is_none(), "final physical owner is retired");
+        assert!(weak.upgrade().is_none());
         service.quiesce();
-        assert!(
-            service.reserve().is_err(),
-            "escaped capability stays closed"
-        );
-        match port.finish() {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                port.wait_progress_signal().unwrap();
-                port.finish().unwrap();
-            }
-            Err(error) => panic!("native progress retirement: {error}"),
-        }
+        assert!(service.reserve().is_err());
+        port.finish().unwrap();
     }
+
     #[test]
     fn helper_join_remains_terminal_before_last_native_cancel_caller_returns() {
         let directory = tempfile::tempdir().unwrap();
@@ -1247,21 +1240,17 @@ mod tests {
             .block_on(std::future::poll_fn(|cx| listening.poll_accept(cx)))
             .unwrap();
         let server = Connection::accepted(token, 4096, 1024 * 1024).unwrap();
-        // This test explicitly creates the optional final-drain helper. Its
-        // joined state must stay terminal while another native user is held.
         server.drain().unwrap();
-        server.read.submit(&[]).unwrap();
         let (entered, observing) = std::sync::mpsc::channel();
         let (release, proceed) = std::sync::mpsc::channel();
-        let read = server.read.clone();
+        let original = server.clone();
         let caller = std::thread::spawn(move || {
-            read.controlled_cancel(|handle, overlapped| {
+            original.test_cancel_using(|handle| {
                 entered.send(()).unwrap();
                 proceed.recv().unwrap();
-                // SAFETY: cancel_using retains this actual HANDLE/OVERLAPPED
-                // until this caller returns, even after another cancellation.
+                // SAFETY: test_cancel_using retains the original HANDLE through return.
                 unsafe {
-                    windows_sys::Win32::System::IO::CancelIoEx(handle, overlapped);
+                    CancelIoEx(handle, std::ptr::null());
                 }
             });
         });
@@ -1271,31 +1260,17 @@ mod tests {
         server.abort();
         server.drain().unwrap().wait_signal().unwrap();
         assert!(server.drain().unwrap().join_ready().unwrap());
-        // The dedicated helper is joined, while the deliberately held actual
-        // native cancel caller independently keeps this connection physical.
         assert!(!port.retire(&server.token));
         assert!(server.drain().unwrap().join_ready().unwrap());
         assert!(!server.retire(&port).unwrap());
         release.send(()).unwrap();
         caller.join().unwrap();
-        assert!(server.drain().unwrap().join_ready().unwrap());
-        // Let the completion port publish the cancelled read, independently
-        // from the cancellation caller's return.
-        runtime
-            .block_on(std::future::poll_fn(|cx| server.read.poll(cx)))
-            .unwrap();
+        runtime.block_on(server.token.test_native_terminal());
         assert!(server.retire(&port).unwrap());
         client.abort();
-        assert!(client.drain.get().is_none());
+        runtime.block_on(client.token.test_native_terminal());
         assert!(client.retire(&port).unwrap());
-        match port.finish() {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                port.wait_progress_signal().unwrap();
-                port.finish().unwrap();
-            }
-            Err(error) => panic!("native progress retirement: {error}"),
-        }
+        port.finish().unwrap();
     }
     #[test]
     fn owned_pipe_transfers_handle_key_and_drains_while_next_listener_exists() {
@@ -1343,16 +1318,14 @@ mod tests {
         assert!(client.drain.get().is_none());
         server.drain().unwrap().wait_signal().unwrap();
         assert!(client.drain.get().is_none());
+        runtime.block_on(async {
+            server.token.test_native_terminal().await;
+            client.token.test_native_terminal().await;
+            next.token.test_native_terminal().await;
+        });
         assert!(server.retire(&port).unwrap());
         assert!(client.retire(&port).unwrap());
         assert!(port.retire(&next.token));
-        match port.finish() {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                port.wait_progress_signal().unwrap();
-                port.finish().unwrap();
-            }
-            Err(error) => panic!("native progress retirement: {error}"),
-        }
+        port.finish().unwrap();
     }
 }
