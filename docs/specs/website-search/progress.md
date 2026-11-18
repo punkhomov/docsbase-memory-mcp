@@ -1169,3 +1169,24 @@ Ruling: final independent reviewer SOURCE CONVERGED, no outstanding
 Critical/Important or deferred minors; PR readiness PARTIAL. PR164 contains the
 library-backed implementation and remains draft. L2 stays open until all four
 required checks pass after166 is resolved; merge remains a human action.
+
+MODIFIED 2026-11-18 — #166 explicit owner-approved audit exception. The owner
+requested a pnpm exception for the unpatched development dependency. Current
+advisory still has no patched version; the unchanged lock reports21paths, all
+dev:true through Vite/Svelte tooling. Add only GHSA-fc5q-39xc-vjpf to pnpm's
+workspace ignore list and document residual ReDoS risk and removal/reassessment
+conditions in supply-chain.md. No package version, lockfile, age/trust rule,
+moderate audit threshold or workflow command changes. This deliberate policy
+decision supersedes earlier no-exception checkpoints; it is not a security fix.
+Audit/frozen-install verification, fresh scoped review and required CI on this
+new head remain pending. Keep166 open for an actual upstream update; human merge.
+
+Task A166: complete (2026-11-18, explicitly approved advisory exception).
+Actual pnpm12 effective audit config contains only the requested GHSA. The raw
+pre-change audit fails with one high advisory/21dev-only paths; production-only
+audit has no advisories. The unchanged moderate gate now exits0 and explicitly
+reports1ignored/high, rather than claiming the vulnerability is fixed. Frozen
+install passes and lock SHA-256 remainsf5dbbf7b4d9ad6b314ca9e1e6548f0c85ba8b378241dcde9efab185cd49a011b.
+Ruling: fresh scoped reviewer PASS/APPROVED, no findings. No runtime/dependency
+changes or mirrored config tests; actual audit RED/GREEN verifies behavior.
+Required CI still must pass on the resulting PR head before L2/readiness closes.
