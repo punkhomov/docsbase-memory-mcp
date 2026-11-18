@@ -1152,3 +1152,20 @@ changes. A staged-tree git archive verifies both complete source trees and exact
 patches from a clean directory. Native production evidence remains7e106a4;
 required docs must pass on the packaging head. The three native jobs separately
 stop at unchanged picomatch audit166, not Rust checks. Do not mark L2 complete.
+
+MODIFIED 2026-11-18 — L2 operational acceptance verified, external gate remains.
+Full native Windows composition run44267991792 at production7e106a4 is GREEN:
+690library tests,1688reported test executions across98Cargo suite results,
+18existing ignores unchanged; actual official Node reconnection and website HTTP
+tests, strict all-target Clippy, offline provider capability and embedded Web
+checks pass. Validation8171441 differs from its production parent only in the
+manual diagnostic workflow. This run supplies native execution evidence, not a
+waiver of mandatory CI. Packaging178c711 changes no runtime source and has GREEN
+required docs/run44269826903, including full archive/patch/tree and original-age
+verification. Its required Linux/macOS/Windows jobs stop at the unchanged
+picomatch advisory166 before Rust; the closing documentation commit must retain
+those gates. No schema/config/protocol migration or reindex is required.
+Ruling: final independent reviewer SOURCE CONVERGED, no outstanding
+Critical/Important or deferred minors; PR readiness PARTIAL. PR164 contains the
+library-backed implementation and remains draft. L2 stays open until all four
+required checks pass after166 is resolved; merge remains a human action.

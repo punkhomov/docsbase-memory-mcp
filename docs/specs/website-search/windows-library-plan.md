@@ -44,9 +44,9 @@ src/platform/windows/{native_io,connection,root,flush,transport}.rs.
 
 ## L2 — production acceptance и завершение PR
 
-- [ ] Native persistent/final delivery, repeated cancellation, held caller/control,
+- [x] Native persistent/final delivery, repeated cancellation, held caller/control,
   blocking deadlines, root error/unwind; whole CLI/daemon/Node composition checks.
-- [ ] Проверить происхождение vendored patches в docs CI, включая original age
+- [x] Проверить происхождение vendored patches в docs CI, включая original age
   records: local source не является обходом Cargo supply-chain gate.
 - [ ] Full lean/cli-full, clippy/fmt, existing quality/offline gates и required
   docs/linux/macos/windows без weakening. Picomatch blocker166 отдельно видим.
