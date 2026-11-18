@@ -4,7 +4,6 @@ use super::flush::Flush;
 #[cfg(test)]
 use super::native_io::Port;
 use super::native_io::{HandleToken, PhysicalOwner, RetirementGuard, Service};
-use std::future::Future;
 use std::io;
 use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
 use std::pin::Pin;
@@ -96,7 +95,7 @@ impl NativePipe {
     fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let io = self.io.lock().unwrap_or_else(PoisonError::into_inner);
         match &*io {
-            Endpoint::Server(pipe) => std::pin::pin!(pipe.connect()).as_mut().poll(cx),
+            Endpoint::Server(pipe) => pipe.poll_connect(cx),
             Endpoint::Client(_) => Poll::Ready(Err(failure("client cannot accept"))),
         }
     }
@@ -504,6 +503,7 @@ impl AsyncWrite for Pipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
@@ -706,6 +706,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One causal prefix/native-pending/tail-release delivery protocol.
     fn final_server_drain_is_lazy_delivers_complete_frame_and_closes_writes() {
         let directory = tempfile::tempdir().unwrap();
         let endpoint = crate::platform::daemon_endpoint(directory.path());
@@ -742,7 +743,43 @@ mod tests {
                 writer.flush().await?;
                 assert!(server.drain.get().is_none(), "native write needs no helper");
                 prefix_read.await.map_err(io::Error::other)?;
+                let drain = server.drain()?;
                 let mut closing = Box::pin(writer.shutdown());
+                tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                    loop {
+                        let progress =
+                            std::future::poll_fn(|cx| Poll::Ready(closing.as_mut().poll(cx))).await;
+                        assert!(
+                            progress.is_pending(),
+                            "close returned before reading the kernel tail: {progress:?}"
+                        );
+                        if drain.test_native_io_pending()? {
+                            break Ok::<_, io::Error>(());
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .map_err(io::Error::other)??;
+                let peer = client.native()?;
+                let mut unread = 0;
+                // SAFETY: this strong endpoint owner retains the borrowed pipe;
+                // PeekNamedPipe only observes kernel bytes and consumes none.
+                let peeked = unsafe {
+                    windows_sys::Win32::System::Pipes::PeekNamedPipe(
+                        peer.raw(),
+                        ptr::null_mut(),
+                        0,
+                        ptr::null_mut(),
+                        &raw mut unread,
+                        ptr::null_mut(),
+                    )
+                };
+                assert_ne!(peeked, 0, "peek must observe the live peer");
+                assert!(
+                    unread > 0,
+                    "read-ahead cannot consume the gated kernel tail"
+                );
                 assert!(
                     std::future::poll_fn(|cx| std::task::Poll::Ready(closing.as_mut().poll(cx)))
                         .await
@@ -766,10 +803,9 @@ mod tests {
             };
             let reading = async {
                 let mut received = vec![0; frame.len()];
-                // One-byte native read regions make read-ahead impossible,
-                // including short ReadFile completions. The final newline
-                // stays in the kernel pipe until this explicit release.
-                let tail = frame.len() - 1;
+                // Mio may prefetch one more byte after the consumed prefix.
+                // Leave two bytes gated, so at least one remains in the kernel.
+                let tail = frame.len() - 2;
                 reader.read_exact(&mut received[..tail]).await?;
                 prefix_sent
                     .send(())
@@ -1392,6 +1428,7 @@ mod tests {
         assert!(!port.retire(&server.token));
         assert!(client.drain.get().is_none());
         server.drain().unwrap().wait_signal().unwrap();
+        assert!(server.drain().unwrap().join_ready().unwrap());
         assert!(client.drain.get().is_none());
         runtime.block_on(async {
             server.token.test_native_terminal().await;

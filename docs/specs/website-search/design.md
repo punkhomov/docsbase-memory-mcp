@@ -424,3 +424,15 @@ Read capacity is explicit before registration, outgoing writes are capped,
 guarded Drop prevents callback resubmission and cancels pending native work.
 Successful close still has explicit native-write and final peer-drain boundaries.
 No performance advantage is claimed by source size alone. See ADR-WLIB1/plan.
+
+## Delta 2026-11-18 — L1 review corrections
+
+Tokio exposes a poll-connect adapter using its persistent registration write
+waker; an ephemeral async-connect future cannot own the waiter across facade
+polls. Guarded Mio preserves ERROR_NO_DATA so the existing listener retires an
+abandoned instance. Failed opens return never-associated capacity synchronously;
+association failures with a still-live native guard remain charged. Direct-Port
+tests must join a signalled drain worker before awaiting native terminal state.
+Final-drain acceptance leaves more kernel bytes unread than Mio can prefetch and
+observes GetThreadIOPendingFlag on the retained dedicated helper HANDLE before
+releasing the reader; startup Pending alone cannot establish peer drain.

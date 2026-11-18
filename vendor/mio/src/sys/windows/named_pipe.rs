@@ -161,7 +161,9 @@ impl Inner {
 
         match err.raw_os_error().map(|e| e as u32) {
             Some(ERROR_PIPE_CONNECTED) => Ok(true),
-            Some(ERROR_NO_DATA) => Ok(true),
+            // Guarded adapters retire this abandoned instance and accept on a
+            // fresh one. Preserve the original behavior for unguarded users.
+            Some(ERROR_NO_DATA) if self._retirement_guard.is_none() => Ok(true),
             Some(ERROR_IO_PENDING) => Ok(false),
             _ => Err(err),
         }

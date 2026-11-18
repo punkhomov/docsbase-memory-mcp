@@ -356,6 +356,14 @@ impl Drop for Reservation {
         self.token.initializing.store(false, Ordering::Release);
         if locked(&self.token.native).strong_count() == 0 {
             self.token.aborting.store(true, Ordering::Release);
+            // A failed open has no HANDLE, dependency owner or I/O to reap.
+            // Release that reservation before the caller's next native retry.
+            // An association failure with a still-live guard is not terminal
+            // and remains charged for the outer reaper.
+            Service {
+                inner: self.inner.clone(),
+            }
+            .retire(&self.token);
         }
         self.inner.capacity.notify_waiters();
     }

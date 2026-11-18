@@ -223,6 +223,26 @@ impl Flush {
         self.shared.cancel_status.load(Ordering::Acquire)
     }
     #[cfg(test)]
+    pub(super) fn test_native_io_pending(&self) -> io::Result<bool> {
+        let thread = locked(&self.thread);
+        let thread = thread
+            .as_ref()
+            .ok_or_else(|| failure("drain worker already joined"))?;
+        let mut pending = 0;
+        // SAFETY: the JoinHandle remains locked and owned through this query;
+        // this dedicated thread performs only the final FlushFileBuffers I/O.
+        if unsafe {
+            windows_sys::Win32::System::Threading::GetThreadIOPendingFlag(
+                thread.as_raw_handle(),
+                &raw mut pending,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(pending != 0)
+    }
+    #[cfg(test)]
     pub(super) fn wait_signal(&self) -> io::Result<()> {
         let thread = locked(&self.thread)
             .as_ref()

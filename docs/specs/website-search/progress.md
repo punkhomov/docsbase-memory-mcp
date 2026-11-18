@@ -1061,3 +1061,16 @@ this checkpoint; native RED/GREEN remains pending. Full Linux cli-full suite
 passes after removing obsolete build executables that exhausted the sandbox
 disk during the first installer run. Web/client/example checks and 12 Python
 CI regressions pass; original Cargo age audit covers all487 registry records.
+
+MODIFIED 2026-11-18 — L1 native RED and scoped review correction. Run44259454206
+at production3ecb3dc has12passing native scenarios and4failures: actual daemon
+watchdog90s, failed-open WouldBlock, departure-before-accept assertion and direct
+Port helper/guard wait30s. Fresh L1 reviewer found five Important findings.
+Dedicated run44260766624 at8cb55c9 reproduces both added regressions at intended
+assertions (native accept wake lost after30s, second absent-pipe open loses its
+one physical slot); no watchdog is counted as acceptance. Correct persistent
+connect registration, immediate terminal reservation release, guarded NO_DATA
+propagation and test helper-join ordering. Strengthen final drain with two gated
+bytes, one-byte prefetch cap and an actual dedicated-thread pending-I/O query.
+Native GREEN, mutation sensitivity and scoped re-review are still pending.
+Seven real-daemon browser cases pass; dependency audit166 remains unchanged.

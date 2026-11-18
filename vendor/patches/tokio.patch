@@ -28,7 +28,29 @@
      /// Retrieves information about the named pipe the server is associated
      /// with.
      ///
-@@ -919,8 +940,16 @@
+@@ -202,6 +223,21 @@
+                     .await
+             }
+             x => x,
++        }
++    }
++
++    /// Poll for a client connection, retaining the last caller's write waker
++    /// in the I/O registration across `Pending` returns.
++    ///
++    /// Only the most recent caller is notified; serialize connection polling
++    /// and do not poll writes until connection succeeds.
++    pub fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        match self.io.connect() {
++            Err(error) if error.kind() == io::ErrorKind::WouldBlock => self
++                .io
++                .registration()
++                .poll_write_io(cx, || self.io.connect()),
++            result => Poll::Ready(result),
+         }
+     }
+ 
+@@ -919,8 +955,16 @@
          self.io.poll_write_vectored(cx, bufs)
      }
  
@@ -47,7 +69,7 @@
      }
  
      fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-@@ -1010,6 +1039,27 @@
+@@ -1010,6 +1054,27 @@
          Ok(Self {
              io: PollEvented::new(named_pipe)?,
          })
@@ -75,7 +97,7 @@
      }
  
      /// Retrieves information about the named pipe the client is associated
-@@ -1710,8 +1760,16 @@
+@@ -1710,8 +1775,16 @@
          self.io.poll_write_vectored(cx, bufs)
      }
  

@@ -11,7 +11,18 @@
  }
  
  // SAFETY: `Handles`s are, in general, not thread-safe. However, we only used `Handle`s for
-@@ -488,8 +492,24 @@
+@@ -157,7 +161,9 @@
+ 
+         match err.raw_os_error().map(|e| e as u32) {
+             Some(ERROR_PIPE_CONNECTED) => Ok(true),
+-            Some(ERROR_NO_DATA) => Ok(true),
++            // Guarded adapters retire this abandoned instance and accept on a
++            // fresh one. Preserve the original behavior for unguarded users.
++            Some(ERROR_NO_DATA) if self._retirement_guard.is_none() => Ok(true),
+             Some(ERROR_IO_PENDING) => Ok(false),
+             _ => Err(err),
+         }
+@@ -488,8 +494,24 @@
      }
  }
  
@@ -38,7 +49,7 @@
          NamedPipe {
              inner: Arc::new(Inner {
                  handle: Handle::new(handle as HANDLE),
-@@ -506,8 +526,17 @@
+@@ -506,8 +528,17 @@
                      connect_error: None,
                  }),
                  pool: Mutex::new(BufferPool::with_capacity(2)),
@@ -56,7 +67,7 @@
      }
  }
  
-@@ -612,7 +641,16 @@
+@@ -612,7 +643,16 @@
      }
  
      fn flush(&mut self) -> io::Result<()> {
@@ -74,7 +85,7 @@
      }
  }
  
-@@ -690,6 +728,16 @@
+@@ -690,6 +730,16 @@
  
  impl Drop for NamedPipe {
      fn drop(&mut self) {
@@ -91,7 +102,7 @@
          // Cancel pending reads/connects, but don't cancel writes to ensure that
          // everything is flushed out.
          unsafe {
-@@ -716,6 +764,9 @@
+@@ -716,6 +766,9 @@
      /// If the pipe is no longer connected (ERROR_PIPE_LISTENING) then `false` is
      /// returned and no read is scheduled.
      fn schedule_read(me: &Arc<Inner>, io: &mut Io, events: Option<&mut Vec<Event>>) -> bool {
@@ -101,7 +112,7 @@
          // Check to see if a read is already scheduled/completed
          match io.read {
              State::None => {}
-@@ -763,6 +814,9 @@
+@@ -763,6 +816,9 @@
          pos: usize,
          io: &mut Io,
      ) -> io::Result<Option<usize>> {
@@ -111,7 +122,7 @@
          // Very similar to `schedule_read` above, just done for the write half.
          let e = unsafe {
              let overlapped = me.write.as_ptr() as *mut _;
-@@ -804,7 +858,7 @@
+@@ -804,7 +860,7 @@
                      // io is locked, so this branch is unreachable
                      _ => unreachable!(),
                  };
@@ -120,7 +131,7 @@
              }
              Ok(None) => (),
              Err(e) => {
-@@ -825,7 +879,7 @@
+@@ -825,7 +881,7 @@
      }
  
      fn get_buffer(&self) -> Vec<u8> {

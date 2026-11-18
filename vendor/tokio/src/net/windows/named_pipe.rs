@@ -226,6 +226,21 @@ impl NamedPipeServer {
         }
     }
 
+    /// Poll for a client connection, retaining the last caller's write waker
+    /// in the I/O registration across `Pending` returns.
+    ///
+    /// Only the most recent caller is notified; serialize connection polling
+    /// and do not poll writes until connection succeeds.
+    pub fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.io.connect() {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => self
+                .io
+                .registration()
+                .poll_write_io(cx, || self.io.connect()),
+            result => Poll::Ready(result),
+        }
+    }
+
     /// Disconnects the server end of a named pipe instance from a client
     /// process.
     ///
