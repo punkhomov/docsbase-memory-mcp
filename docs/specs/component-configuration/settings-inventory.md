@@ -502,3 +502,16 @@ waits via finite WaitNamedPipe on its existing caller; native/control worker
 capacity and defaults are unchanged. Raw/async one-attempt constructors and
 Stop's original15s overall deadline are preserved. This adds no file key,
 invalidation edge, replay policy or private timeout fallback.
+
+## Delta 2026-11-24 — ASK1 request contract
+
+`ask::AskLimits` owns the initial ask_docs protocol caps: 120s total, six turns,
+16 calls, 4096 output tokens/turn, 128KiB context, 32KiB read result/whole document,
+256KiB provider reply, five search hits and one neighbor per side; question/model
+caps are 8192/512 bytes. These are explicit MVP ceilings; only max_turns may be
+lowered per call. They are not new TOML keys or SDK constructor defaults. The
+request reserves 8MiB from the existing aggregate payload owner; SQLite rows are
+checked before owned text copies, and HTTP response reads obey the smaller cap.
+Model address is request-scoped, credentials stay with the existing provider.
+Future configurable generation policy belongs to the ask/model owners in #128;
+this delta does not claim full CF adoption or create another resolution registry.

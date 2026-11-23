@@ -187,3 +187,12 @@ and cannot enforce absent pubtime; the required docs CI job independently
 audits all crates.io lock entries, including transitives, against publication
 dates and checksums. Missing dates and unsupported external sources fail closed.
 Lockfiles are regenerated from scratch with Cargo 1.100.0; no exception added.
+
+## Delta 2026-11-24 — explicit documentation generation
+
+`ask_docs` extends the explicit network opt-in beyond retrieval stages: a caller
+provides a generation model and authorizes sending the question/read documentation
+to that provider for this bounded request. The implementation stays optional under
+hybrid-remote, reuses provider/execution ownership and introduces no default network
+traffic. Search/index operation and their model configuration remain independent.
+Contract and owner ceilings: docs/specs/ask-docs/ (ADR-ASK1).

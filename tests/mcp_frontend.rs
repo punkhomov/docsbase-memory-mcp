@@ -301,7 +301,7 @@ fn initialize_and_list_tools() {
         "params": {}
     }));
     let tools = response["result"]["tools"].as_array().expect("tools");
-    assert_eq!(tools.len(), 9, "catalogue must expose exactly 9 tools");
+    assert_eq!(tools.len(), 10, "catalogue must expose exactly 10 tools");
     for tool in tools {
         let schema = tool["inputSchema"].as_object().expect("inputSchema");
         assert!(!schema.is_empty(), "empty schema for {tool:?}");

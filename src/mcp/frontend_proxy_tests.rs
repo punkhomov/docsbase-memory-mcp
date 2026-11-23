@@ -171,7 +171,9 @@ async fn serve(stream: platform::Stream, state: std::sync::Arc<State>) {
             panic!("native fake read: {frame:?}");
         };
         let request = protocol::decode_request(&line).expect("request");
-        let response = if matches!(&request, Request::Search { .. }) {
+        let response = if matches!(&request, Request::Search { .. })
+            || matches!(&request, Request::CallTool { name, .. } if name == "ask_docs")
+        {
             search_reply(&state, request, &mut reader).await
         } else {
             state.sent.send(request.clone()).expect("observe request");
@@ -882,4 +884,39 @@ fn cancelled_startup_queued_on_blocking_pool_cannot_start_daemon() {
     drop(runtime); // joins the actual detached queued startup closure too
     assert_eq!(observations, (true, true));
     assert_eq!(starts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn ask_disconnect_is_not_replayed() {
+    let fake = Fake::with_mode(true, Mode::CloseAlways);
+    let result = fake
+        .frontend
+        .proxy(
+            "ask_docs",
+            json!({"question":"widgets","model":"openrouter/fixture"}),
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(
+        fake.calls(),
+        1,
+        "a lost generation reply must never trigger another generation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_mcp_ask_cancellation_closes_the_exchange_without_replay() {
+    tokio::time::timeout(WATCHDOG, async {
+        let mut fake = Fake::with_mode(true, Mode::HoldFirst);
+        let mut peer = McpPeer::new(fake.frontend.clone()).await;
+        peer.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"ask_docs","arguments":{"question":"widgets","model":"openrouter/fixture"}}})).await;
+        loop {
+            if matches!(fake.received.recv().await.unwrap(),Request::CallTool { name, .. } if name == "ask_docs") { break; }
+        }
+        peer.send(json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2}})).await;
+        fake.closed.recv().await.expect("ask exchange closed");
+        assert_eq!(fake.calls(),1);
+        assert!(fake.frontend.conn.lock().await.is_none());
+    }).await.expect("ask cancellation watchdog");
 }

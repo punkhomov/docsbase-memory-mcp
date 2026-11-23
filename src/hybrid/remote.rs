@@ -41,6 +41,22 @@ pub trait AsyncTransport: Send + Sync {
         request: &'a WireRequest,
         timeout: Duration,
     ) -> StageFuture<'a, TransportResponse>;
+
+    /// A caller may impose a smaller response cap. Real transports bound reads.
+    fn post_json_limited<'a>(
+        &'a self,
+        request: &'a WireRequest,
+        timeout: Duration,
+        maximum: u64,
+    ) -> StageFuture<'a, TransportResponse> {
+        Box::pin(async move {
+            let response = self.post_json(request, timeout).await?;
+            if response.body.len() as u64 > maximum {
+                return Err(denied("remote response exceeds caller limit"));
+            }
+            Ok(response)
+        })
+    }
 }
 
 /// Remote embedding capability of an existing provider stage.
@@ -472,35 +488,82 @@ impl RemoteStage<'_> {
         call: &RemoteCall,
         request: &WireRequest,
     ) -> Result<TransportResponse> {
+        self.post_attempts(call, request, self.execution.settings.retry_attempts, None)
+            .await
+    }
+
+    /// Single-shot generation: never repeat a potentially billable request.
+    /// # Errors
+    /// Deadline/cancellation, bounded transport or sanitized provider failure.
+    pub async fn post_once(
+        &self,
+        call: &RemoteCall,
+        request: &WireRequest,
+        maximum: u64,
+    ) -> Result<TransportResponse> {
+        self.post_attempts(call, request, 1, Some(maximum)).await
+    }
+
+    async fn attempt(
+        &self,
+        call: &RemoteCall,
+        request: &WireRequest,
+        timeout: Duration,
+        maximum: u64,
+    ) -> Result<TransportResponse> {
+        let execution = self.execution;
+        // Charge only when polled; cancellation may win before this attempt starts.
+        increment(&execution.counters.attempts);
+        call.operation().record_attempt();
+        let _time = DurationCharge(&execution.counters.network_ms, Instant::now());
+        let _operation_time = call.operation().network_timer();
+        tokio::time::timeout(
+            timeout,
+            execution
+                .transport
+                .post_json_limited(request, timeout, maximum),
+        )
+        .await
+        .map_err(|error| Error::internal_with_source("remote HTTP attempt timed out", error))?
+    }
+
+    async fn post_attempts(
+        &self,
+        call: &RemoteCall,
+        request: &WireRequest,
+        attempts: u32,
+        maximum: Option<u64>,
+    ) -> Result<TransportResponse> {
         let execution = self.execution;
         let policy = &execution.settings;
         let mut delay = Duration::from_millis(policy.retry_initial_ms);
-        for attempt in 1..=policy.retry_attempts {
+        for attempt in 1..=attempts {
             call.check()?;
             execution.shutdown.check()?;
             let timeout = call.attempt_timeout(policy)?;
-            let result = {
-                call.wait(&execution.shutdown, async {
-                    // Count only when the selected attempt future starts, not
-                    // when cancellation wins before it is ever polled.
-                    increment(&execution.counters.attempts);
-                    call.operation().record_attempt();
-                    let _time = DurationCharge(&execution.counters.network_ms, Instant::now());
-                    let _operation_time = call.operation().network_timer();
-                    tokio::time::timeout(timeout, execution.transport.post_json(request, timeout))
-                        .await
-                        .map_err(|error| {
-                            Error::internal_with_source("remote HTTP attempt timed out", error)
-                        })?
-                })
-                .await
-            };
+            let result = call
+                .wait(
+                    &execution.shutdown,
+                    self.attempt(
+                        call,
+                        request,
+                        timeout,
+                        maximum.unwrap_or(policy.max_response_bytes),
+                    ),
+                )
+                .await;
             // Deadline/cancellation is terminal, never another transport retry.
             call.check()?;
             execution.shutdown.check()?;
             let (error, after) = match result {
                 Ok(response) if (200..300).contains(&response.status) => return Ok(response),
                 Ok(response) => {
+                    if maximum.is_some() {
+                        return Err(denied(&format!(
+                            "generation provider returned HTTP {}",
+                            response.status
+                        )));
+                    }
                     let retryable = is_retryable(response.status);
                     let after = (response.status == 429)
                         .then_some(response.retry_after)
@@ -518,7 +581,7 @@ impl RemoteStage<'_> {
                 Err(error @ Error::Admission { .. }) => return Err(error),
                 Err(error) => (error, None),
             };
-            if attempt == policy.retry_attempts {
+            if attempt == attempts {
                 return Err(error);
             }
             let noise = {

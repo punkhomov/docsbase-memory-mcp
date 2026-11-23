@@ -252,3 +252,11 @@ This changes coordination format, not vector/model/recipe/schema identity.
 Completed pure query cache entries survive reload; obsolete active results remain
 revision-fenced. Direct read-only Search retains LoadOnly ANN and never bootstraps
 Shared metadata. Numeric operation/status projection adds no artifact/rebuild edge.
+
+## Delta 2026-11-24 — ASK1 generation
+
+A request-scoped generation model and AskLimits affect only that request's
+conversation/admission. They do not invalidate lexical, vector, query-vector or
+ANN artifacts. Existing search still consumes its captured project/runtime
+configuration. Read evidence carries a content hash; the multi-step harness does
+not promise a single snapshot across filesystem/index changes.

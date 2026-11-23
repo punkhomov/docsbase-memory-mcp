@@ -22,6 +22,7 @@ tools bind correctly.
 | Tool | Scope | Input | Notes |
 |---|---|---|---|
 | `search_docs` | project | `{query: string, query_mode?: "syntax"\|"literal", limit?: int ≥ 1 (default 10), scope?: "project", rerank?: bool, explain?: bool, snippet?: bool, dedupe?: "none"\|"path", n_per_doc?: int 1…10, path_prefix?: string, tags?: [string]}` | Lexical BM25 over chunks, or hybrid when the project enables it; returns `{chunk_id, path, heading_path, lines, score}` citations. `scope` is reserved: v1 serves the current project only. `rerank` overrides the project setting per request; `true` requires a rerank stage. `explain` returns `{hits, meta}` — see [Telemetry](#telemetry). `path_prefix`/`tags` define the search scope; `dedupe` caps documents — see [Scope, snippets and document caps](#scope-snippets-and-document-caps) |
+| `ask_docs` | project | `{question: string, model: "<provider>/<model>", max_turns?: 1…6}` | Explicit remote prepared answer with verified source IDs; see [Prepared answers](#prepared-answers-with-ask_docs) |
 | `get_doc` | project | `{path: string}` | Full document by project-relative path |
 | `read_neighbors` | project | `{chunk_id: int, before?: int (default 1), after?: int (default 1)}` | Adjacent chunks for progressive disclosure |
 | `list_docs` | project | `{limit?: int (default 50), cursor?: string}` | Keyset-paginated `{title, size, chunks}` |
@@ -223,3 +224,61 @@ budgets. See [the IPC contract](ARCHITECTURE.md#scoped-search-ipc).
 - File access is confined to registered roots (symlink escape rejected).
 - Errors are machine-readable (`code`, `message`, `instruction`); a missing
   project is actionable, not fatal.
+
+## Prepared answers with `ask_docs`
+
+`ask_docs` is an explicit remote generation request over the current project's
+existing search and document tools. It requires a `hybrid-remote` build (included
+in `cli-full`), a tool-capable OpenRouter model, and `OPENROUTER_API_KEY` in the
+**daemon's** environment. Pass credentials through your client/secret manager,
+not in tool arguments or project files. If the daemon was already running
+without that environment, stop it with `docsbase daemon stop` and start the MCP
+client with the key available.
+
+```json
+{
+  "question": "How does this project cancel an active search?",
+  "model": "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "max_turns": 6
+}
+```
+
+The model above is a user-selected example, not a verified availability guarantee.
+Model selection is independent of embeddings/rerank. Each call requires the model
+address; generation does not enable hybrid retrieval or persist new settings.
+An explicitly disabled provider is rejected. The website daemon profile does
+not expose generation.
+
+The model can search, read documents and neighboring chunks, refine its query,
+and finish with an answer. Retrieved text is sent to the selected provider.
+The result contains `answer`, `sources` (host-generated IDs, relative paths,
+line ranges and content hashes), `model`, `stop_reason`, `turns`, `tool_calls`
+and per-turn provider-reported `usage`. Missing usage fields remain missing.
+Source validation proves that a cited document was read; it does not prove each
+claim follows from it. Files can change between reads; hashes identify the text
+observed on each read.
+
+The initial limits are 120 seconds for the whole request, six model turns,
+16 tool calls, 4096 output tokens per turn (including reasoning), 128 KiB
+serialized context, 32 KiB per read result, and 256 KiB per provider response.
+`max_turns` may lower the turn limit. Full-document reads over 32 KiB are refused;
+use chunk reads instead. Searches return at most five hits; neighbors are capped
+at one per side. Generation HTTP requests and lost MCP replies are not retried.
+Provider inference may continue remotely after local cancellation; no billing
+refund is implied.
+
+`answered` and `insufficient_evidence` return the model's prepared text.
+`turn_limit`, `tool_limit`, `context_limit`, `output_limit` and `empty_response`
+return `answer: null`. Deadline/cancellation/provider failures use the usual
+MCP error result. Reasoning and conversation history are not returned or persisted.
+Existing lexical search remains available without a generative model.
+
+A manual live smoke test is ignored by default and limited to a `:free` model:
+
+```sh
+DOCSBASE_ASK_MODEL=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free \
+  cargo test --locked --features hybrid-remote --lib live_ask_docs_smoke -- --ignored --nocapture
+```
+
+Supply `OPENROUTER_API_KEY` through the process environment; this smoke sends only
+a synthetic fixture document and allows at most four single-shot turns.

@@ -245,7 +245,7 @@ impl SearchSession {
     }
 }
 
-async fn phase<T: Send + 'static>(
+pub(super) async fn phase<T: Send + 'static>(
     workers: &crate::daemon::worker_admission::WorkerAdmission,
     operation: &SearchOperation,
     activity: &Arc<Activity>,

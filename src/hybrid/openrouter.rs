@@ -126,6 +126,45 @@ impl OpenRouterClient {
         Self::with_execution(BASE_URL, &key, execution)
     }
 
+    pub(crate) fn generation(
+        self: Arc<Self>,
+        model: String,
+    ) -> Arc<dyn super::generation::Generator> {
+        Arc::new(super::generation::OpenRouterGenerator {
+            client: self,
+            model,
+        })
+    }
+
+    pub(crate) async fn complete(
+        self: &Arc<Self>,
+        model: String,
+        input: rig_core::completion::CompletionRequest,
+        call: &super::remote::RemoteCall,
+    ) -> Result<rig_core::completion::CompletionResponse> {
+        let execution = self
+            .execution
+            .as_ref()
+            .ok_or_else(|| Error::internal("generation needs an execution owner"))?;
+        let stage = execution.admit(call).await?;
+        let client = self.clone();
+        let prepared = execution
+            .cpu(call, move || {
+                super::generation::prepare(&client.api_key.0, &model, input)
+            })
+            .await?;
+        let response = stage
+            .post_once(
+                call,
+                &prepared.request,
+                crate::ask::AskLimits::RESPONSE_BYTES,
+            )
+            .await?;
+        execution
+            .cpu(call, move || prepared.decode(&response.body))
+            .await
+    }
+
     /// Embeds `texts` in bounded batches, preserving input order.
     ///
     /// # Errors
@@ -546,6 +585,15 @@ impl super::remote::AsyncTransport for ReqwestTransport {
         request: &'a super::remote::WireRequest,
         timeout: Duration,
     ) -> super::remote::StageFuture<'a, TransportResponse> {
+        self.post_json_limited(request, timeout, self.max_response_bytes)
+    }
+
+    fn post_json_limited<'a>(
+        &'a self,
+        request: &'a super::remote::WireRequest,
+        timeout: Duration,
+        maximum: u64,
+    ) -> super::remote::StageFuture<'a, TransportResponse> {
         Box::pin(async move {
             #[cfg(not(test))]
             let url = &request.url;
@@ -562,7 +610,7 @@ impl super::remote::AsyncTransport for ReqwestTransport {
             let response = send.send().await.map_err(|error| {
                 Error::internal_with_source("OpenRouter request failed", error.without_url())
             })?;
-            read_response(response, self.max_response_bytes).await
+            read_response(response, self.max_response_bytes.min(maximum)).await
         })
     }
 }
