@@ -18,5 +18,21 @@ jobs:
         with:
           key: pr164-review-regression
           cache-on-failure: true
-      - name: Read remains pending while the native reactor is paused
-        run: cargo test --locked --lib abort_wakes_pending_read_without_native_completion -- --nocapture
+      - name: Verify native wake and reproduce review deadline failures
+        shell: python
+        run: |
+          import subprocess
+          cases = [
+              ('abort_wakes_pending_read_without_native_completion', None),
+              ('idle_owner_returns_when_application_finishes_before_reap_interval', 'idle root must wake on application exit'),
+              ('wake_after_blocking_deadline_cannot_repoll_operation', 'wake after the absolute deadline cannot admit another poll'),
+          ]
+          for test, failure in cases:
+              result = subprocess.run(['cargo', 'test', '--locked', '--lib', test, '--', '--nocapture'],
+                                      capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=900)
+              print(result.stdout, flush=True)
+              print(result.stderr, flush=True)
+              if failure is None:
+                  assert result.returncode == 0 and '1 passed; 0 failed' in result.stdout, test
+              else:
+                  assert result.returncode != 0 and '0 passed; 1 failed' in result.stdout and failure in result.stderr, test

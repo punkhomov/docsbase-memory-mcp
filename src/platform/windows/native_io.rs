@@ -8,6 +8,7 @@ use std::io;
 use std::os::windows::io::OwnedHandle;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::task::{Context, Poll, Waker};
 use tokio::runtime::{Builder, Handle, Runtime};
 
 fn locked<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -15,6 +16,12 @@ fn locked<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 fn failure(message: &'static str) -> io::Error {
     io::Error::other(message)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Direction {
+    Read,
+    Write,
 }
 
 pub(super) struct HandleToken {
@@ -25,6 +32,7 @@ pub(super) struct HandleToken {
     helpers: AtomicUsize,
     pub(super) write_active: AtomicBool,
     charges: Mutex<[Option<Arc<dyn Send + Sync>>; 2]>,
+    waiters: Mutex<[Option<Waker>; 2]>,
     root: Weak<Inner>,
 }
 impl HandleToken {
@@ -70,8 +78,44 @@ impl HandleToken {
     pub(super) fn writes_idle(&self) -> bool {
         !self.write_active.load(Ordering::Acquire)
     }
+    pub(super) fn poll_io<T>(
+        &self,
+        direction: Direction,
+        cx: &mut Context<'_>,
+        poll: impl FnOnce(&mut Context<'_>) -> Poll<io::Result<T>>,
+    ) -> Poll<io::Result<T>> {
+        let index = direction as usize;
+        let previous = {
+            let mut waiters = locked(&self.waiters);
+            if self.is_aborting() {
+                return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+            }
+            // One logical waiter per serialized direction. Register before
+            // polling Mio/Tokio, whose registration can be dropped on abort.
+            let slot = &mut waiters[index];
+            if slot
+                .as_ref()
+                .is_some_and(|waker| waker.will_wake(cx.waker()))
+            {
+                None
+            } else {
+                slot.replace(cx.waker().clone())
+            }
+        };
+        drop(previous);
+        let result = poll(cx);
+        if result.is_ready() {
+            let waiter = locked(&self.waiters)[index].take();
+            drop(waiter);
+        }
+        result
+    }
     pub(super) fn abort(&self) {
         self.aborting.store(true, Ordering::Release);
+        let waiters = std::mem::take(&mut *locked(&self.waiters));
+        for waker in waiters.into_iter().flatten() {
+            waker.wake();
+        }
         if let Ok(native) = self.native() {
             native.cancel();
         }
@@ -139,6 +183,8 @@ struct Inner {
     fault: Mutex<Option<&'static str>>,
     capacity: tokio::sync::Notify,
     runtime: Handle,
+    #[cfg(test)]
+    reaped: AtomicBool,
 }
 
 pub(super) struct Port {
@@ -176,6 +222,8 @@ impl Port {
             fault: Mutex::new(None),
             capacity: tokio::sync::Notify::new(),
             runtime: runtime.handle().clone(),
+            #[cfg(test)]
+            reaped: AtomicBool::new(false),
         });
         Ok(Self {
             inner,
@@ -231,6 +279,7 @@ impl Service {
             helpers: AtomicUsize::new(0),
             write_active: AtomicBool::new(false),
             charges: Mutex::new([None, None]),
+            waiters: Mutex::new([None, None]),
             root: Arc::downgrade(&self.inner),
         });
         *slot = Some(Record {
@@ -312,7 +361,13 @@ impl Service {
             }
         }
     }
+    #[cfg(test)]
+    pub(super) fn test_reaped(&self) -> bool {
+        self.inner.reaped.load(Ordering::Acquire)
+    }
     pub(super) fn reap(&self) -> io::Result<usize> {
+        #[cfg(test)]
+        self.inner.reaped.store(true, Ordering::Release);
         if let Some(message) = *locked(&self.inner.fault) {
             return Err(failure(message));
         }

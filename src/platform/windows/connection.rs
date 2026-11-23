@@ -3,7 +3,7 @@
 use super::flush::Flush;
 #[cfg(test)]
 use super::native_io::Port;
-use super::native_io::{HandleToken, PhysicalOwner, RetirementGuard, Service};
+use super::native_io::{Direction, HandleToken, PhysicalOwner, RetirementGuard, Service};
 use std::io;
 use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
 use std::pin::Pin;
@@ -187,7 +187,10 @@ impl Listening {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
             .ok_or_else(|| failure("listener is closed"))?;
-        match pipe.poll_connect(cx) {
+        match self
+            .token
+            .poll_io(Direction::Write, cx, |cx| pipe.poll_connect(cx))
+        {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {
@@ -390,7 +393,9 @@ impl Connection {
         Ok(self.retire_ready()? && port.retire(&self.token))
     }
     fn write_terminal(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let result = self.native()?.poll_flush(cx);
+        let result = self
+            .token
+            .poll_io(Direction::Write, cx, |cx| self.native()?.poll_flush(cx));
         if let Poll::Ready(Ok(())) = result {
             self.token.write_active.store(false, Ordering::Release);
         }
@@ -440,7 +445,9 @@ impl AsyncRead for Pipe {
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let connection = &self.get_mut().logical.connection;
-        let result = connection.native()?.poll_read(cx, buffer);
+        let result = connection.token.poll_io(Direction::Read, cx, |cx| {
+            connection.native()?.poll_read(cx, buffer)
+        });
         #[cfg(test)]
         connection
             .read_active
@@ -463,9 +470,11 @@ impl AsyncWrite for Pipe {
         if connection.closing.load(Ordering::Acquire) {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
-        let result = connection
-            .native()?
-            .poll_write(cx, &bytes[..bytes.len().min(connection.chunk)]);
+        let result = connection.token.poll_io(Direction::Write, cx, |cx| {
+            connection
+                .native()?
+                .poll_write(cx, &bytes[..bytes.len().min(connection.chunk)])
+        });
         if let Poll::Ready(Ok(count)) = result
             && count != 0
         {
@@ -494,6 +503,7 @@ impl AsyncWrite for Pipe {
         }
         match connection.drain()?.poll_flush(cx) {
             Poll::Ready(Ok(())) => {
+                connection.dirty.store(false, Ordering::Release);
                 connection.closed.store(true, Ordering::Release);
                 Poll::Ready(Ok(()))
             }
