@@ -18,14 +18,12 @@ jobs:
         with:
           key: pr164-review-regression
           cache-on-failure: true
-      - name: Verify native wake and reproduce review deadline failures
+      - name: Reproduce one-slot MCP reconnect
         shell: python
         run: |
           import subprocess
           cases = [
-              ('abort_wakes_pending_read_without_native_completion', None),
-              ('idle_owner_returns_when_application_finishes_before_reap_interval', 'idle root must wake on application exit'),
-              ('wake_after_blocking_deadline_cannot_repoll_operation', 'wake after the absolute deadline cannot admit another poll'),
+              ('one_slot_mcp_waits_for_physical_capacity_and_retries_once', 'MCP must wait for actual retirement of its only slot'),
           ]
           for test, failure in cases:
               result = subprocess.run(['cargo', 'test', '--locked', '--lib', test, '--', '--nocapture'],

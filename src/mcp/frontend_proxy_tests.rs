@@ -567,6 +567,59 @@ async fn transport_retry_retains_one_original_policy_budget() {
     .expect("retry budget watchdog");
 }
 
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_slot_mcp_waits_for_physical_capacity_and_retries_once() {
+    use std::future::{Future as _, poll_fn};
+    use std::task::Poll;
+
+    tokio::time::timeout(WATCHDOG, async {
+        let mut fake = Fake::with_mode(true, Mode::CloseFirst);
+        let client_transport = crate::test_transport::TestTransport::new(1);
+        fake.frontend.transport = (*client_transport).clone();
+        let endpoint = platform::daemon_endpoint(fake.cache.path());
+        let old = client_transport
+            .connect_async(&endpoint)
+            .await
+            .expect("open the only client slot");
+        let owner = old.ownership();
+        let (entered, observed) = std::sync::mpsc::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let caller = std::thread::spawn(move || owner.test_hold_write_cancellation(entered, proceed));
+        observed.recv_timeout(WATCHDOG).expect("native caller holds owner");
+        drop(old);
+
+        let raw_connect = client_transport.connect_async(&endpoint).await;
+        let mut open = std::pin::pin!(super::open_conn(&client_transport, fake.cache.path()));
+        let while_full = poll_fn(|cx| Poll::Ready(open.as_mut().poll(cx))).await;
+        let sent_while_full = fake.received.try_recv().is_ok();
+        release.send(()).expect("release native owner");
+        caller.join().expect("native caller joined");
+
+        assert!(matches!(raw_connect, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        assert!(while_full.is_pending(), "MCP must wait for actual retirement of its only slot");
+        assert!(!sent_while_full, "local admission must send no daemon request");
+        *fake.frontend.conn.lock().await = Some(open.await.expect("one handshake after retirement"));
+
+        let value = fake
+            .frontend
+            .proxy("search_docs", json!({"query":"widgets"}))
+            .await
+            .expect("one reconnect after the fake closes the first search");
+        assert_eq!(value, json!([]));
+        assert_eq!(fake.calls(), 2);
+        let mut hellos = 0;
+        while let Ok(request) = fake.received.try_recv() {
+            if matches!(request, Request::Hello { .. }) {
+                hellos += 1;
+            }
+        }
+        assert_eq!(hellos, 2, "only the original exchange and its reconnect open a session");
+    })
+    .await
+    .expect("one-slot MCP admission watchdog");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repeated_transport_failure_stops_after_one_reconnect() {
     tokio::time::timeout(WATCHDOG, async {

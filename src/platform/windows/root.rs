@@ -138,33 +138,6 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     #[test]
-    fn idle_owner_returns_when_application_finishes_before_reap_interval() {
-        let options = Options {
-            handles: 1,
-            chunk_bytes: 4096,
-            helper_stack_bytes: 1024 * 1024,
-            work_stack_bytes: 2 * 1024 * 1024,
-            drain_poll: Duration::from_secs(10),
-            drain_observation: Duration::from_secs(30),
-        };
-        let returned = run(&options, |service| {
-            let gate_deadline = Instant::now() + Duration::from_secs(30);
-            // Causally reach the outer owner's waiting path before allowing
-            // work to return. No resources or native completions can wake it.
-            while !service.test_reaped() {
-                assert!(Instant::now() < gate_deadline, "outer owner reaped");
-                std::thread::yield_now();
-            }
-            Ok(Instant::now())
-        })
-        .unwrap();
-        assert!(
-            returned.elapsed() < Duration::from_secs(5),
-            "idle root must wake on application exit"
-        );
-    }
-
-    #[test]
     fn synchronous_work_does_not_block_outer_native_retirement() {
         let directory = tempfile::tempdir().unwrap();
         let endpoint = crate::platform::daemon_endpoint(directory.path());

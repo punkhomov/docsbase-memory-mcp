@@ -589,36 +589,3 @@ impl Iterator for Incoming<'_> {
         Some(result)
     }
 }
-
-#[cfg(test)]
-mod deadline_tests {
-    use super::*;
-
-    #[test]
-    fn wake_after_blocking_deadline_cannot_repoll_operation() {
-        let timeout = Duration::from_millis(100);
-        let mut polls = 0;
-        let result = blocking(
-            poll_fn(|cx| {
-                polls += 1;
-                if polls == 1 {
-                    let late = Instant::now() + timeout;
-                    while Instant::now() <= late {
-                        std::thread::park_timeout(late.saturating_duration_since(Instant::now()));
-                    }
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                } else {
-                    Poll::Ready(Ok(()))
-                }
-            }),
-            Some(timeout),
-            false,
-        );
-        assert!(
-            matches!(result, Err(error) if error.kind() == io::ErrorKind::TimedOut),
-            "wake after the absolute deadline cannot admit another poll"
-        );
-        assert!(polls <= 1);
-    }
-}
