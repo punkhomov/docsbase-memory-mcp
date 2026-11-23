@@ -674,6 +674,81 @@ mod tests {
     }
 
     #[test]
+    fn abort_wakes_pending_read_without_native_completion() {
+        use std::sync::atomic::AtomicUsize;
+        use std::task::{Wake, Waker};
+
+        #[derive(Default)]
+        struct ReadWake(AtomicUsize);
+        impl Wake for ReadWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let path = super::super::pipe_path(&endpoint).unwrap();
+        let mut port = Port::new(2, 1024 * 1024).unwrap();
+        let listening = Listening::new(&port, &path, 4096, true).unwrap();
+        let client = Connection::client(&port, &path, 4096, 1024 * 1024).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let token = runtime
+            .block_on(std::future::poll_fn(|cx| listening.poll_accept(cx)))
+            .unwrap();
+        let server = Connection::accepted(token, 4096, 1024 * 1024).unwrap();
+        let mut reader = Pipe::new(server.clone()).unwrap();
+
+        // Pause only the dedicated I/O reactor, so its cancellation completion
+        // cannot supply the wake before the logical-abort observation.
+        let (entered, active) = std::sync::mpsc::channel();
+        let (release, paused) = std::sync::mpsc::channel();
+        let reactor = port.test_runtime().spawn(async move {
+            entered.send(()).unwrap();
+            paused.recv().unwrap();
+        });
+        active
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap();
+        let observed = Arc::new(ReadWake::default());
+        let waker = Waker::from(observed.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut bytes = [0];
+        let mut buffer = ReadBuf::new(&mut bytes);
+        let initial = Pin::new(&mut reader).poll_read(&mut cx, &mut buffer);
+        let before = observed.0.load(Ordering::Relaxed);
+        server.abort();
+        let after = observed.0.load(Ordering::Relaxed);
+        let aborted = Pin::new(&mut reader).poll_read(&mut cx, &mut buffer);
+        release.send(()).unwrap();
+        runtime.block_on(reactor).unwrap();
+
+        drop(reader);
+        client.abort();
+        runtime.block_on(async {
+            server.token.test_native_terminal().await;
+            client.token.test_native_terminal().await;
+        });
+        assert!(server.retire(&port).unwrap());
+        assert!(client.retire(&port).unwrap());
+        port.finish().unwrap();
+        assert!(initial.is_pending(), "the real native read must be pending");
+        assert!(
+            after > before,
+            "logical abort must wake the reader before native completion"
+        );
+        assert!(
+            matches!(aborted, Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe)
+        );
+    }
+
+    #[test]
     fn blocking_connection_waits_for_the_next_instance_with_one_deadline() {
         let directory = tempfile::tempdir().unwrap();
         let endpoint = crate::platform::daemon_endpoint(directory.path());

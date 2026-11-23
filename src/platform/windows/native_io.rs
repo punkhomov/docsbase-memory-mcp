@@ -188,6 +188,10 @@ impl Port {
         }
     }
     #[cfg(test)]
+    pub(super) fn test_runtime(&self) -> &Handle {
+        &self.inner.runtime
+    }
+    #[cfg(test)]
     pub(super) fn retire(&self, token: &Arc<HandleToken>) -> bool {
         self.service().retire(token)
     }
