@@ -616,3 +616,21 @@ score indices to original citations and recorded ordered method arguments.
 Re-review ADDRESSED both; no new Critical/Important findings, no deferred
 minors. Fresh final review/native CI and guarded squash integration follow.
 #71 remains open for separately scoped recordings and measured quality.
+
+## Delta 2026-11-23 — T24: live command runtime (#167)
+
+Task T24: complete (each of the three ignored live entries builds and uses
+its HTTP clients within the existing synchronous daemon command runtime).
+The old blocking marker reproduced the missing-runtime admission error
+from the Nov 16 and Nov 23 `bench-live` runs. With the owned bridge an
+offline regression reaches Reqwest's malformed-URL validation through the
+real synchronous POST adapter. Rust 1.100.0: eight tests passed with
+`hybrid-remote` and with `cli-full`, with three existing manual ignores
+each. Focused strict Clippy, fmt and diff checks passed. No live
+measurement was dispatched. Provider quality, cost and report generation
+remain to be measured by a scheduled live run.
+
+Ruling: fresh task review flagged a potential hang caused by environmental
+proxy settings in the loopback regression. The test now uses the real
+request validation before any network I/O. Re-review confirmed the finding
+was addressed, with no new Critical or Important findings.
