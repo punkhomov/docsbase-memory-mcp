@@ -1,5 +1,14 @@
 --- a/src/sys/windows/named_pipe.rs
 +++ b/src/sys/windows/named_pipe.rs
+@@ -4,7 +4,7 @@
+ use std::sync::atomic::Ordering::{Relaxed, SeqCst};
+ use std::sync::atomic::{AtomicBool, AtomicUsize};
+ use std::sync::{Arc, Mutex};
+-use std::{fmt, mem, slice};
++use std::{fmt, mem};
+
+ use windows_sys::Win32::Foundation::{
+     ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
 @@ -90,6 +90,10 @@
      connecting: AtomicBool,
      io: Mutex<Io>,
@@ -47,7 +56,33 @@
              Some(ERROR_IO_PENDING) => Ok(false),
              _ => Err(err),
          }
-@@ -444,8 +454,8 @@
+@@ -192,6 +202,7 @@
+     ///
+     /// This function is unsafe because the kernel requires that the `buf` and
+     /// `overlapped` pointers to be valid until the end of the I/O operation.
++    /// The allocation at `buf` must cover `capacity` writable bytes.
+     /// The kernel also requires that `overlapped` is unique for this I/O
+     /// operation and is not in use for any other I/O.
+     ///
+@@ -200,13 +211,14 @@
+     /// ports and waiting to receive the completion notification on the port.
+     pub unsafe fn read_overlapped(
+         &self,
+-        buf: &mut [u8],
++        buf: *mut u8,
++        capacity: usize,
+         overlapped: *mut OVERLAPPED,
+     ) -> io::Result<Option<usize>> {
+-        let len = std::cmp::min(buf.len(), u32::MAX as usize) as u32;
++        let len = std::cmp::min(capacity, u32::MAX as usize) as u32;
+         let res = ReadFile(
+             self.handle.raw(),
+-            buf.as_mut_ptr() as *mut _,
++            buf,
+             len,
+             std::ptr::null_mut(),
+             overlapped,
+@@ -444,8 +456,8 @@
                  Ok(())
              }
  
@@ -58,7 +93,7 @@
              // internally. This ensures that when the completion status comes
              // in for the I/O operation finishing it'll have a reference
              // associated with it and our data will still be valid. The
-@@ -488,8 +498,25 @@
+@@ -488,8 +500,25 @@
      }
  }
  
@@ -86,7 +121,7 @@
          NamedPipe {
              inner: Arc::new(Inner {
                  handle: Handle::new(handle as HANDLE),
-@@ -506,8 +533,17 @@
+@@ -506,11 +535,20 @@
                      connect_error: None,
                  }),
                  pool: Mutex::new(BufferPool::with_capacity(2)),
@@ -95,16 +130,19 @@
 +                _retirement_guard: guard,
              }),
          }
-+    }
-+}
-+
+     }
+ }
+
 +impl FromRawHandle for NamedPipe {
 +    unsafe fn from_raw_handle(handle: RawHandle) -> NamedPipe {
 +        unsafe { Self::from_raw_handle_with_optional_guard(handle, None, 4 * 1024) }
-     }
- }
- 
-@@ -612,7 +648,16 @@
++    }
++}
++
+ impl Read for NamedPipe {
+     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+         <&NamedPipe as Read>::read(&mut &*self, buf)
+@@ -612,7 +650,16 @@
      }
  
      fn flush(&mut self) -> io::Result<()> {
@@ -122,7 +160,7 @@
      }
  }
  
-@@ -690,6 +735,16 @@
+@@ -690,6 +737,16 @@
  
  impl Drop for NamedPipe {
      fn drop(&mut self) {
@@ -139,7 +177,7 @@
          // Cancel pending reads/connects, but don't cancel writes to ensure that
          // everything is flushed out.
          unsafe {
-@@ -716,6 +771,9 @@
+@@ -716,18 +773,22 @@
      /// If the pipe is no longer connected (ERROR_PIPE_LISTENING) then `false` is
      /// returned and no read is scheduled.
      fn schedule_read(me: &Arc<Inner>, io: &mut Io, events: Option<&mut Vec<Event>>) -> bool {
@@ -149,7 +187,23 @@
          // Check to see if a read is already scheduled/completed
          match io.read {
              State::None => {}
-@@ -763,6 +821,9 @@
+             _ => return true,
+         }
+
+-        // Allocate a buffer and schedule the read.
+         let mut buf = me.get_buffer();
++        // SAFETY: the destination is allocated but may be uninitialized.
++        // A submitted operation retains the allocation and OVERLAPPED until
++        // its completion reports which bytes Windows initialized.
+         let e = unsafe {
+             let overlapped = me.read.as_ptr() as *mut _;
+-            let slice = slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.capacity());
+-            me.read_overlapped(slice, overlapped)
++            me.read_overlapped(buf.as_mut_ptr(), buf.capacity(), overlapped)
+         };
+
+         match e {
+@@ -763,6 +824,9 @@
          pos: usize,
          io: &mut Io,
      ) -> io::Result<Option<usize>> {
@@ -159,7 +213,7 @@
          // Very similar to `schedule_read` above, just done for the write half.
          let e = unsafe {
              let overlapped = me.write.as_ptr() as *mut _;
-@@ -804,7 +865,7 @@
+@@ -804,7 +868,7 @@
                      // io is locked, so this branch is unreachable
                      _ => unreachable!(),
                  };
@@ -168,7 +222,7 @@
              }
              Ok(None) => (),
              Err(e) => {
-@@ -825,7 +886,7 @@
+@@ -825,7 +889,7 @@
      }
  
      fn get_buffer(&self) -> Vec<u8> {

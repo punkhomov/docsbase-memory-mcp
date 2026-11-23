@@ -162,24 +162,31 @@ pub(super) async fn reply<W: AsyncWrite + Unpin>(
         let _ = poll_fn(|cx| Poll::Ready(writing.as_mut().poll(cx))).await;
         return false;
     }
-    match operation {
-        Some(operation) => {
-            let deadline = tokio::time::Instant::from_std(operation.deadline());
-            deliver_before(
-                writer,
-                bytes.bytes(),
-                operation,
-                tokio::time::sleep_until(deadline),
-                close,
-            )
-            .await
-        }
-        None => tokio::time::timeout_at(
-            tokio::time::Instant::from_std(control_deadline),
-            deliver(writer, bytes.bytes(), close),
+    if let Some(operation) = operation {
+        let deadline = tokio::time::Instant::from_std(operation.deadline());
+        deliver_before(
+            writer,
+            bytes.bytes(),
+            operation,
+            tokio::time::sleep_until(deadline),
+            close,
         )
         .await
-        .is_ok_and(|result| result.is_ok()),
+    } else {
+        let mut writing = std::pin::pin!(deliver(writer, bytes.bytes(), close));
+        let guarded = poll_fn(|cx| {
+            // timeout_at polls its inner future first, including after expiry.
+            if Instant::now() >= control_deadline {
+                return Poll::Ready(false);
+            }
+            writing
+                .as_mut()
+                .poll(cx)
+                .map(|result| result.is_ok() && Instant::now() < control_deadline)
+        });
+        tokio::time::timeout_at(tokio::time::Instant::from_std(control_deadline), guarded)
+            .await
+            .unwrap_or(false)
     }
 }
 
@@ -327,6 +334,29 @@ mod tests {
             .await
             .expect("native/prelude watchdog")
         }
+    }
+
+    #[tokio::test]
+    async fn stop_ack_past_original_deadline_submits_no_bytes() {
+        let (mut client, mut writer) = tokio::io::duplex(1024);
+        let deadline = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        let delivered = reply(
+            &mut writer,
+            Response::ToolResult { value: Value::Null },
+            None,
+            false,
+            true,
+            deadline,
+        )
+        .await;
+        drop(writer);
+
+        let mut bytes = Vec::new();
+        client
+            .read_to_end(&mut bytes)
+            .await
+            .expect("stop ACK bytes");
+        assert!(!delivered && bytes.is_empty(), "late stop ACK: {bytes:?}");
     }
 
     #[tokio::test]
@@ -558,7 +588,6 @@ mod tests {
                 session_id: Some(gated.fixture.session),
                 cancel_rx: None,
             };
-            let (shutdown, _) = tokio::sync::watch::channel(false);
             let args = json!({"query":"widgets", "rerank":true});
             if legacy {
                 peers.client.shutdown().await.expect("write half-close");
@@ -570,8 +599,7 @@ mod tests {
                 if legacy {
                     super::super::handle_request(
                         &shared,
-                        &shutdown,
-                        &count,
+                        None,
                         &mut peer,
                         Request::CallTool {
                             name: "search_docs".to_owned(),

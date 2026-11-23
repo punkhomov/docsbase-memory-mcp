@@ -1206,3 +1206,32 @@ Ruling: fresh scoped fixture reviewer PASS/APPROVED, no findings. Four focused
 Linux connection tests and strict Linux/Windows-target Clippy, fmt/diff checks
 pass. This is not native macOS GREEN; the unchanged required macOS job must
 verify the new head. All audit exception evidence remains unchanged.
+
+MODIFIED 2026-11-23 — #164 reopened for a pre-merge review. The earlier
+all-platform green run did not cover cancellation with the native reactor
+paused, a wake after a blocking operation's deadline, idle application exit
+with a long reap interval, or MCP reconnect with a one-slot arena. Exact native
+regression runs 45242957854, 45244018743 and 45244292711 confirmed these gaps.
+The Web test also reproduced a failure to attach to a serving daemon after a
+legacy config edit. Deterministic Stop tests exposed a renewed drain budget and
+an already-expired successful ACK submitting bytes.
+
+The follow-up preserves separate native and logical cancellation, wakes the
+outer owner when work returns, checks the original deadline before a blocking
+re-poll, and uses the Stop deadline through drain and ACK. Web resolves its
+standalone native policy. MCP waits for actual local capacity before its one
+native open and gives expiry priority before that open. Mio passes the read
+allocation as a raw pointer with writable capacity and keeps it through the
+existing completion path. The withdrawn picomatch advisory no longer needs
+an exception. No cache settings or workflow test inventory change.
+
+Task W-review: complete (2026-11-23, scoped source and regression verification).
+Ruling: fresh follow-up review confirmed the original fixes and identified the
+MCP open/expiry race. Deterministic cases cover an expired legacy open with
+a pending timer and a cancelled search resuming after physical admission.
+Native integration run 45245026252 passed 521 lean Windows library tests
+with the main review fixes. Focused cli-full daemon, Web and MCP tests on
+Linux supplement that run; the final combined head requires all four PR checks.
+The final scoped re-review approved all reported fixes. Linux verification
+included 118 daemon server tests, 19 MCP frontend tests, 4 Web lifecycle
+tests and strict cli-full Clippy. The existing draft remains through required CI.

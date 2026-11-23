@@ -3,7 +3,7 @@
     "name": "mio",
     "version": "1.2.4",
     "checksum": "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee",
-    "patch_sha256": "5c71dc624c86847fde8b7cde82c3855293960552bd0e1d4a6a9c28524e3eee85"
+    "patch_sha256": "1493ec69db52cf384b045581c7a5962025da22fece3987a213fd05f3d0ccecc6"
   },
   {
     "name": "tokio",

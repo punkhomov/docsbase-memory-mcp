@@ -60,24 +60,3 @@ Biome is pinned and used for frontend formatting, including its explicitly
 enabled experimental Svelte 5 support. Changes must pass formatting,
 `svelte-check`, build and real browser tests; generated Rust contracts are
 excluded from formatting. No formatter runs automatically during Cargo builds.
-
-## Delta 2026-11-18 — accepted development-tool advisory (#166)
-
-The project owner explicitly approved a temporary audit exception for
-[GHSA-fc5q-39xc-vjpf / CVE-2026-112366](https://github.com/advisories/GHSA-fc5q-39xc-vjpf).
-The locked `picomatch@4.0.7` has 21 development-only audit paths through Vite,
-tinyglobby/fdir and svelte-check. It is build/check tooling, not a dependency of
-the shipped Node IPC client or Rust search server. No upstream patched version
-is published in the advisory at this decision.
-
-The ReDoS vulnerability remains; this is a recorded risk acceptance for the
-current dev-tool graph, not remediation. `pnpm-workspace.yaml` ignores only this
-GHSA. The complete dependency audit, moderate failure threshold, frozen lockfile,
-publication-age and trust policies remain enforced. The pinned pnpm reports
-ignored advisories separately. Other advisories, including other picomatch
-advisories, remain subject to the audit gate.
-
-Remove the exception when a compatible upstream fix can be adopted under the
-existing release-age policy. Reassess it if dependency changes introduce a
-production path to picomatch. Issue #166 remains the tracking record for that
-follow-up; accepting the exception does not declare the vulnerability fixed.

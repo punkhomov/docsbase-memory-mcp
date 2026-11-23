@@ -1,6 +1,6 @@
 //! stdio MCP server proxying tool calls to the daemon (FR-7, FR-34; I8).
 
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -127,14 +127,13 @@ impl Frontend {
             check_operation(operation)?;
             let result = async {
                 if lease.is_none() {
-                    lease = Some(
-                        legacy_budget(
-                            operation,
-                            tools::QUICK_TIMEOUT,
-                            open_conn(&self.transport, &self.cache),
-                        )
-                        .await?,
-                    );
+                    let open = open_conn(&self.transport, &self.cache);
+                    lease = Some(if let Some(operation) = operation {
+                        open_for_search(operation, open).await?
+                    } else {
+                        let deadline = tokio::time::Instant::now() + tools::QUICK_TIMEOUT;
+                        open_before(open, deadline, tokio::time::sleep_until(deadline)).await?
+                    });
                 }
                 let conn = lease
                     .as_mut()
@@ -254,12 +253,43 @@ async fn legacy_budget<T>(
         .map_err(|_| Error::transport("timed out waiting for the daemon"))?
 }
 
+async fn open_for_search<T>(
+    operation: &SearchOperation,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::pin!(work);
+    poll_fn(|cx| {
+        operation.check()?;
+        work.as_mut().poll(cx)
+    })
+    .await
+}
+
+async fn open_before<T>(
+    work: impl Future<Output = Result<T>>,
+    deadline: tokio::time::Instant,
+    expiry: impl Future<Output = ()>,
+) -> Result<T> {
+    tokio::pin!(work, expiry);
+    poll_fn(|cx| {
+        // Capacity can wake the task before the timer driver observes the deadline.
+        if expiry.as_mut().poll(cx).is_ready() || tokio::time::Instant::now() >= deadline {
+            return Poll::Ready(Err(Error::transport("timed out waiting for the daemon")));
+        }
+        work.as_mut().poll(cx)
+    })
+    .await
+}
+
 async fn open_conn(
     transport: &crate::platform::transport::Transport,
     cache: &Path,
 ) -> Result<Conn> {
-    let mut client = AsyncClient::connect(transport, cache)
-        .await
+    #[cfg(windows)]
+    let client = AsyncClient::connect_with_capacity(transport, cache).await;
+    #[cfg(unix)]
+    let client = AsyncClient::connect(transport, cache).await;
+    let mut client = client
         .map_err(|error| Error::transport_with_source("connect daemon after startup", error))?;
     let cwd = std::env::current_dir()
         .map_err(|error| Error::internal_with_source("resolve cwd", error))?;
@@ -447,7 +477,15 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for CappedRead<R> {
 /// Returns an error when the runtime or MCP transport fails.
 pub async fn run(transport: crate::platform::transport::Transport) -> anyhow::Result<()> {
     let cache = paths::cache_dir()?;
-    let service = Frontend::with_search_policy(transport, cache, Config::global()?.search);
+    serve_stdio(Frontend::with_search_policy(
+        transport,
+        cache,
+        Config::global()?.search,
+    ))
+    .await
+}
+
+async fn serve_stdio(service: Frontend) -> anyhow::Result<()> {
     let stdin = CappedRead::new(tokio::io::stdin(), MAX_FRAME_BYTES);
     let transport = rmcp::transport::async_rw::AsyncRwTransport::<RoleServer, _, _>::new_server(
         stdin,
@@ -468,14 +506,16 @@ pub async fn run(transport: crate::platform::transport::Transport) -> anyhow::Re
 /// # Errors
 /// Returns an error when the tokio runtime cannot start or the server fails.
 pub fn run_blocking() -> anyhow::Result<()> {
-    let daemon = Config::global()?.daemon;
-    let policy = crate::ipc::transport::policy(daemon.max_connections, &daemon)?;
+    let config = Config::global()?;
+    let policy = crate::ipc::transport::policy(config.daemon.max_connections, &config.daemon)?;
     crate::platform::transport::run(&policy, move |transport| {
         let result = (|| {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(run(transport))
+            let service =
+                Frontend::with_search_policy(transport, paths::cache_dir()?, config.search);
+            runtime.block_on(serve_stdio(service))
         })();
         Ok(result)
     })?

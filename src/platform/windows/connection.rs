@@ -3,7 +3,9 @@
 use super::flush::Flush;
 #[cfg(test)]
 use super::native_io::Port;
-use super::native_io::{HandleToken, PhysicalOwner, RetirementGuard, Service};
+use super::native_io::{
+    Direction, HandleToken, PhysicalOwner, Reservation, RetirementGuard, Service,
+};
 use std::io;
 use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
 use std::pin::Pin;
@@ -187,7 +189,10 @@ impl Listening {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
             .ok_or_else(|| failure("listener is closed"))?;
-        match pipe.poll_connect(cx) {
+        match self
+            .token
+            .poll_io(Direction::Write, cx, |cx| pipe.poll_connect(cx))
+        {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {
@@ -262,7 +267,15 @@ impl Connection {
         chunk: usize,
         stack: usize,
     ) -> io::Result<Arc<Self>> {
-        let reservation = service.reserve()?;
+        Self::client_reserved(service, service.reserve()?, path, chunk, stack)
+    }
+    pub(super) fn client_reserved(
+        service: &Service,
+        reservation: Reservation,
+        path: &str,
+        chunk: usize,
+        stack: usize,
+    ) -> io::Result<Arc<Self>> {
         let name = name(path)?;
         // SAFETY: single overlapped open, under pre-reserved physical capacity.
         let raw = unsafe {
@@ -390,7 +403,9 @@ impl Connection {
         Ok(self.retire_ready()? && port.retire(&self.token))
     }
     fn write_terminal(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let result = self.native()?.poll_flush(cx);
+        let result = self
+            .token
+            .poll_io(Direction::Write, cx, |cx| self.native()?.poll_flush(cx));
         if let Poll::Ready(Ok(())) = result {
             self.token.write_active.store(false, Ordering::Release);
         }
@@ -440,7 +455,9 @@ impl AsyncRead for Pipe {
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let connection = &self.get_mut().logical.connection;
-        let result = connection.native()?.poll_read(cx, buffer);
+        let result = connection.token.poll_io(Direction::Read, cx, |cx| {
+            connection.native()?.poll_read(cx, buffer)
+        });
         #[cfg(test)]
         connection
             .read_active
@@ -463,9 +480,11 @@ impl AsyncWrite for Pipe {
         if connection.closing.load(Ordering::Acquire) {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
-        let result = connection
-            .native()?
-            .poll_write(cx, &bytes[..bytes.len().min(connection.chunk)]);
+        let result = connection.token.poll_io(Direction::Write, cx, |cx| {
+            connection
+                .native()?
+                .poll_write(cx, &bytes[..bytes.len().min(connection.chunk)])
+        });
         if let Poll::Ready(Ok(count)) = result
             && count != 0
         {
@@ -494,6 +513,7 @@ impl AsyncWrite for Pipe {
         }
         match connection.drain()?.poll_flush(cx) {
             Poll::Ready(Ok(())) => {
+                connection.dirty.store(false, Ordering::Release);
                 connection.closed.store(true, Ordering::Release);
                 Poll::Ready(Ok(()))
             }
@@ -670,6 +690,81 @@ mod tests {
         assert!(
             notified,
             "native connect completion must wake pending accept"
+        );
+    }
+
+    #[test]
+    fn abort_wakes_pending_read_without_native_completion() {
+        use std::sync::atomic::AtomicUsize;
+        use std::task::{Wake, Waker};
+
+        #[derive(Default)]
+        struct ReadWake(AtomicUsize);
+        impl Wake for ReadWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = crate::platform::daemon_endpoint(directory.path());
+        let path = super::super::pipe_path(&endpoint).unwrap();
+        let mut port = Port::new(2, 1024 * 1024).unwrap();
+        let listening = Listening::new(&port, &path, 4096, true).unwrap();
+        let client = Connection::client(&port, &path, 4096, 1024 * 1024).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let token = runtime
+            .block_on(std::future::poll_fn(|cx| listening.poll_accept(cx)))
+            .unwrap();
+        let server = Connection::accepted(token, 4096, 1024 * 1024).unwrap();
+        let mut reader = Pipe::new(server.clone()).unwrap();
+
+        // Pause only the dedicated I/O reactor, so its cancellation completion
+        // cannot supply the wake before the logical-abort observation.
+        let (entered, active) = std::sync::mpsc::channel();
+        let (release, paused) = std::sync::mpsc::channel();
+        let reactor = port.test_runtime().spawn(async move {
+            entered.send(()).unwrap();
+            paused.recv().unwrap();
+        });
+        active
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap();
+        let observed = Arc::new(ReadWake::default());
+        let waker = Waker::from(observed.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut bytes = [0];
+        let mut buffer = ReadBuf::new(&mut bytes);
+        let initial = Pin::new(&mut reader).poll_read(&mut cx, &mut buffer);
+        let before = observed.0.load(Ordering::Relaxed);
+        server.abort();
+        let after = observed.0.load(Ordering::Relaxed);
+        let aborted = Pin::new(&mut reader).poll_read(&mut cx, &mut buffer);
+        release.send(()).unwrap();
+        runtime.block_on(reactor).unwrap();
+
+        drop(reader);
+        client.abort();
+        runtime.block_on(async {
+            server.token.test_native_terminal().await;
+            client.token.test_native_terminal().await;
+        });
+        assert!(server.retire(&port).unwrap());
+        assert!(client.retire(&port).unwrap());
+        port.finish().unwrap();
+        assert!(initial.is_pending(), "the real native read must be pending");
+        assert!(
+            after > before,
+            "logical abort must wake the reader before native completion"
+        );
+        assert!(
+            matches!(aborted, Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe)
         );
     }
 
