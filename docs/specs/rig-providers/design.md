@@ -89,3 +89,15 @@ Rig::Local может стать адаптером для нашего FastEmbe
 Источники: опубликованные исходники rig-core 0.45.0 (wire.rs, providers/openai/
 wire/{dialects,modality}.rs), sparse index rig-core и rig-fastembed;
 https://github.com/0xPlaygrounds/rig, https://rig.rs/docs/.
+
+
+## Delta 2026-11-24 — execution delivered separately
+
+The earlier "next execution" paragraph is historical. #81 is closed following
+merged #162 (8b96c8c): async remote execution, budgets and explicit command owners
+are documented in [async-remote-orchestration](../async-remote-orchestration/design.md).
+RIG1 remains the codec integration from #130. Generation, provider profiles/custom
+endpoints including Inception and bounded ask_docs are still future #128 work.
+The three additional legacy manual live entries are audited separately in
+[maintenance-audit](../maintenance-audit/runtime-callers.md); no live provider
+coverage or new provider support follows from their runtime fix.

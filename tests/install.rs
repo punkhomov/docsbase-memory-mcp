@@ -3,7 +3,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -191,11 +191,30 @@ fn launcher_publication_preserves_the_previous_file() {
 /// making the immediately following exec fail with `ExecutableFileBusy`.
 fn output_retry(command: &mut Command) -> std::process::Output {
     for _ in 0..100 {
-        match command.output() {
+        // Match Command::output's standard streams, but retain the real child PID
+        // for correlation with macOS crash reports. No retry after a spawn.
+        match command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
             Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            other => return other.expect("run command"),
+            other => {
+                let child = other.expect("run command");
+                let pid = child.id();
+                let test = std::thread::current();
+                eprintln!(
+                    "installer child: test={:?} pid={pid} program={:?}",
+                    test.name(),
+                    command.get_program()
+                );
+                let output = child.wait_with_output().expect("wait for command");
+                eprintln!("installer child: pid={pid} status={:?}", output.status);
+                return output;
+            }
         }
     }
     panic!("command kept failing with ExecutableFileBusy");

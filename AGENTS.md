@@ -74,8 +74,9 @@ feature-compatibility job. The
 cheap lean dependency boundary stays required in Linux.
 
 Component-owned settings and state invalidation design: `docs/specs/component-configuration/`.
-CF0 is a design baseline; runtime adoption and v2 configuration are future tasks,
-not current product capabilities. Start with its inventory and dependency matrix
+CF0 is the design baseline; several construction/consumer slices and async remote
+execution have shipped. Full v2 source activation, stopped migration/recovery and
+online publication remain unfinished; see the dated progress and task ledgers. Start with its inventory and dependency matrix
 before adding a new runtime constant, hidden default or invalidation callback.
 
 Code graph (GitNexus): reindex with

@@ -18,11 +18,35 @@ use docsbase_memory::config::Config;
 use docsbase_memory::daemon::registry;
 use docsbase_memory::daemon::tools::run_project_index;
 use docsbase_memory::hybrid::config::DEFAULT_RERANK_WINDOW;
-use docsbase_memory::hybrid::{HybridCfg, HybridStages, Ranking, Reranker, blocking, from_config};
+use docsbase_memory::hybrid::{HybridCfg, HybridStages, Ranking, Reranker, from_config};
 use docsbase_memory::store::Db;
 use docsbase_memory::store::models::ProjectStatus;
 use docsbase_memory::vector_cache::Embedder;
 use tempfile::TempDir;
+
+fn with_live_command<T: Send + 'static>(
+    work: impl FnOnce() -> docsbase_memory::error::Result<T> + Send + 'static,
+) -> docsbase_memory::error::Result<T> {
+    let policy = docsbase_memory::daemon::settings::standalone()?;
+    docsbase_memory::daemon::remote::with_sync_command(policy.settings(), work)
+}
+
+#[test]
+fn live_entries_drive_the_real_sync_transport() {
+    use docsbase_memory::hybrid::openrouter::ReqwestTransport;
+    use docsbase_memory::hybrid::wire::Transport;
+    use std::error::Error as _;
+
+    let result = with_live_command(|| ReqwestTransport::new()?.post_json("http://[", &[], "{}"));
+    let error = result.expect_err("malformed URL must fail before network I/O");
+    assert!(
+        error
+            .source()
+            .and_then(|source| source.downcast_ref::<reqwest::Error>())
+            .is_some_and(reqwest::Error::is_builder),
+        "live entry must reach reqwest validation: {error:?}"
+    );
+}
 
 const CASES: &[(&str, &str)] = &[
     ("замена", "ru/binary-replace.md"),
@@ -61,7 +85,7 @@ fn copy_tree(from: &Path, to: &Path) {
 #[ignore = "live: needs OPENROUTER_API_KEY and network"]
 fn live_smoke_embed_and_rerank() {
     let _key = api_key();
-    blocking::enter(|| {
+    with_live_command(|| {
         let embedder = docsbase_memory::hybrid::openrouter::OpenRouterEmbedder::new(
             docsbase_memory::hybrid::EmbeddingCfg::default(),
         )
@@ -110,7 +134,10 @@ fn live_smoke_embed_and_rerank() {
 #[ignore = "live: needs OPENROUTER_API_KEY and network (embedding pass + rerank calls)"]
 fn live_golden_rerank_measurement() {
     let _key = api_key();
+    with_live_command(measure_golden_rerank).expect("owned live command");
+}
 
+fn measure_golden_rerank() -> docsbase_memory::error::Result<()> {
     let cache = TempDir::new().expect("cache");
     let root = TempDir::new().expect("root");
     let fixtures = Path::new("tests/fixtures/search-quality");
@@ -127,7 +154,7 @@ fn live_golden_rerank_measurement() {
     let mut db = Db::open(cache.path()).expect("db");
     let project = registry::ensure_project(&mut db, &root.path().canonicalize().expect("canon"))
         .expect("project");
-    run_project_index(&mut db, cache.path(), &project, &config).expect("live index + embed");
+    run_project_index(&mut db, cache.path(), &project, &config)?;
     let mut project = project;
     project.status = ProjectStatus::Indexed;
 
@@ -202,13 +229,17 @@ fn live_golden_rerank_measurement() {
         "live BM25 sanity: {bm25_hits}/{} hits",
         CASES.len()
     );
+    Ok(())
 }
 
 #[test]
 #[ignore = "live: needs OPENROUTER_API_KEY and network (embedding pass + rerank calls)"]
 fn live_golden_dense_rrf_measurement() {
     let _key = api_key();
+    with_live_command(measure_golden_dense_rrf).expect("owned live command");
+}
 
+fn measure_golden_dense_rrf() -> docsbase_memory::error::Result<()> {
     let cache = TempDir::new().expect("cache");
     let root = TempDir::new().expect("root");
     let fixtures = Path::new("tests/fixtures/search-quality");
@@ -228,7 +259,7 @@ fn live_golden_dense_rrf_measurement() {
     let mut db = Db::open(cache.path()).expect("db");
     let project = registry::ensure_project(&mut db, &root.path().canonicalize().expect("canon"))
         .expect("project");
-    run_project_index(&mut db, cache.path(), &project, &config).expect("live index + embed");
+    run_project_index(&mut db, cache.path(), &project, &config)?;
     let mut project = project;
     project.status = ProjectStatus::Indexed;
 
@@ -298,4 +329,5 @@ fn live_golden_dense_rrf_measurement() {
         "live BM25 sanity: {}/{n} hits",
         hits[0]
     );
+    Ok(())
 }
