@@ -249,6 +249,39 @@ fn explicit_model_and_small_validated_request_are_required() {
 }
 
 #[tokio::test]
+async fn exact_call_limit_stops_without_another_model_request() {
+    let calls: Vec<_> = (0..AskLimits::CALLS)
+        .map(|_| ("search_docs", json!({"query":"widget"})))
+        .collect();
+    let (wire, generator, call) = setup(vec![(200, turn(&calls))]);
+    let reads = Reads::default();
+    let result = run(request(6), generator.as_ref(), &reads, &call)
+        .await
+        .unwrap();
+    assert_eq!(result["stop_reason"], "tool_limit");
+    assert_eq!(reads.0.lock().unwrap().len(), AskLimits::CALLS);
+    assert_eq!(wire.sent.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn valid_finish_on_last_allowed_call_is_accepted() {
+    let mut calls: Vec<_> = (0..AskLimits::CALLS - 2)
+        .map(|_| ("search_docs", json!({"query":"widget"})))
+        .collect();
+    calls.push(("get_doc", json!({"path":"guide.md"})));
+    let (wire, generator, call) = setup(vec![
+        (200, turn(&calls)),
+        (200, turn(&[("finish_answer", finish(&["S1"]))])),
+    ]);
+    let result = run(request(6), generator.as_ref(), &Reads::default(), &call)
+        .await
+        .unwrap();
+    assert_eq!(result["stop_reason"], "answered");
+    assert_eq!(result["tool_calls"], AskLimits::CALLS);
+    assert_eq!(wire.sent.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn oversized_provider_reply_is_rejected_without_retry() {
     let (wire, generator, call) = setup(vec![(
         200,

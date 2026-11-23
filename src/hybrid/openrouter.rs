@@ -549,6 +549,9 @@ impl ReqwestTransport {
         use crate::config::schema::{Capabilities, SettingsSpec};
         super::remote_settings::RemoteSpec::validate(settings, &Capabilities::current())?;
         let http = reqwest::Client::builder()
+            // Keep the allowlisted origin and all retries owned by RemoteStage.
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .timeout(Duration::from_millis(settings.attempt_timeout_ms))
             .pool_max_idle_per_host(settings.interactive_active)
             .dns_resolver(resolver)
@@ -686,6 +689,94 @@ impl Transport for ReqwestTransport {
 }
 
 // ---------- stage probes (single-shot, no retry wrapper) ----------
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use crate::hybrid::remote::{AsyncTransport, WireRequest};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn receive_request(socket: &mut TcpStream) {
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            assert!(headers.len() < 4096);
+            headers.push(socket.read_u8().await.unwrap());
+        }
+        let length = String::from_utf8(headers)
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap();
+        assert!(length < 4096);
+        socket.read_exact(&mut vec![0; length]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn completion_redirect_does_not_forward_documents() {
+        for status in [307, 308] {
+            let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/chat/completions", origin.local_addr().unwrap());
+            let destination = format!("http://{}/capture", target.local_addr().unwrap());
+            let reached = Arc::new(AtomicUsize::new(0));
+            let seen = reached.clone();
+            let target_task = tokio::spawn(async move {
+                let (mut socket, _) = target.accept().await.unwrap();
+                seen.fetch_add(1, Ordering::SeqCst);
+                receive_request(&mut socket).await;
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    )
+                    .await
+                    .unwrap();
+            });
+            let origin_task = tokio::spawn(async move {
+                let (mut socket, _) = origin.accept().await.unwrap();
+                receive_request(&mut socket).await;
+                let response = format!(
+                    "HTTP/1.1 {status} Redirect\r\nLocation: {destination}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+            let settings = super::super::remote_settings::standalone().unwrap();
+            let daemon = crate::daemon::settings::standalone().unwrap();
+            let resolver = Arc::new(
+                crate::daemon::remote::BoundedResolver::with_settings(
+                    settings.settings(),
+                    daemon.settings(),
+                )
+                .unwrap(),
+            );
+            let transport = ReqwestTransport::with_settings(settings.settings(), resolver).unwrap();
+            let request = WireRequest {
+                url,
+                headers: vec![("Content-Type".into(), "application/json".into())],
+                body: "{\"document\":\"synthetic private fixture\"}".into(),
+            };
+            let result = transport
+                .post_json_limited(&request, Duration::from_secs(3), 4096)
+                .await;
+            tokio::time::timeout(Duration::from_secs(4), origin_task)
+                .await
+                .unwrap()
+                .unwrap();
+            target_task.abort();
+            assert_eq!(
+                reached.load(Ordering::SeqCst),
+                0,
+                "redirect target was contacted"
+            );
+            assert_eq!(result.unwrap().status, status);
+        }
+    }
+}
 
 /// One embed POST, single-shot (no retry wrapper).
 #[cfg(feature = "hybrid-remote")]

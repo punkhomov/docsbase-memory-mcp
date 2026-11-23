@@ -29,3 +29,11 @@ Frontend увеличивает только timeout ask, сохраняя су�
 
 Один task ASK1: вертикальный MVP с тестами и документацией. Ревью и финальная
 acceptance публикуются в progress/PR. Waiting Actions не входит в час пользователя.
+
+## Delta 2026-11-23 — final review
+
+Shared Reqwest transport disables automatic redirects and protocol retries:
+the allowlisted provider origin must not change, and RemoteStage owns every
+attempt. Existing declared embedding/rerank stage retries remain in place;
+generation stays single-shot. At the exact global tool-call boundary, an accepted
+finish may return; any other result stops before another model request.

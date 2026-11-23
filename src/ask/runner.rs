@@ -219,6 +219,9 @@ pub async fn run(
             if !fits_json(&input, AskLimits::CONTEXT) {
                 return Ok(state.stopped(&request.model, "context_limit"));
             }
+            if state.calls == AskLimits::CALLS {
+                return Ok(state.stopped(&request.model, "tool_limit"));
+            }
         }
     }
     Ok(state.stopped(&request.model, "turn_limit"))

@@ -34,3 +34,18 @@ all 18 runner tests and strict cli-full Clippy pass after the fix. Fresh re-revi
 ADDRESSED, no new Critical/Important findings. No deferred code minors.
 Native/final review receipt is maintained in PR #170 at its exact tested head;
 SC-3 live remains blocked by environment policy, with no inference/key transmission.
+
+2026-11-23 final review fix pass:
+Ruling: two Important findings reproduced with failing regressions: a 307/308
+could forward a completion to another origin, and exactly 16 unfinished calls
+could trigger an extra model request. Shared Reqwest redirects/protocol retries
+are disabled; the host stops immediately at the exhausted tool budget while
+accepting a valid finish on call 16. Existing stage retry ownership is unchanged.
+Final fix validation and re-review receipts are recorded on PR #170.
+Fix validation: 20 runner tests, the real-HTTP 307/308 regression and strict
+cli-full all-target Clippy passed. Final re-review: both Important findings
+ADDRESSED, no new Critical/Important breakage from the fix diff.
+minor (deferred): model-facing read schemas advertise some settings overridden
+by harness policy and do not show the one-neighbor cap; align schemas in follow-up.
+minor (deferred): an empty Markdown read has a [1, 0] source range; normalize
+empty-document metadata in follow-up. Neither permits a fabricated source ID.
