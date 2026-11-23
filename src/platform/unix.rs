@@ -38,6 +38,45 @@ impl Listener {
 /// Async connection stream (`AsyncRead + AsyncWrite`).
 pub struct Stream(tokio::net::UnixStream);
 
+#[derive(Clone)]
+pub(crate) struct Ownership;
+#[expect(
+    clippy::unused_self,
+    reason = "Unix ownership calls are no-ops; Windows retains native ownership tails"
+)]
+impl Ownership {
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "Native ownership seam is fallible on Windows"
+    )]
+    pub(crate) fn retain_connection(
+        &self,
+        _charge: std::sync::Arc<dyn Send + Sync>,
+    ) -> io::Result<()> {
+        Ok(())
+    }
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "Native ownership seam is fallible on Windows"
+    )]
+    pub(crate) fn retain_request(
+        &self,
+        _charge: std::sync::Arc<dyn Send + Sync>,
+    ) -> io::Result<()> {
+        Ok(())
+    }
+    pub(crate) fn request_completed(&self) {}
+}
+impl Stream {
+    #[expect(
+        clippy::unused_self,
+        reason = "Windows reads its native owner through this platform seam"
+    )]
+    pub(crate) fn ownership(&self) -> Ownership {
+        Ownership
+    }
+}
+
 impl AsyncRead for Stream {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -70,6 +109,13 @@ impl AsyncWrite for Stream {
 pub struct BlockingStream(UnixStream);
 
 impl BlockingStream {
+    /// Explicit successful close of the write direction.
+    /// # Errors
+    /// Returns a native socket shutdown error.
+    pub fn shutdown(&mut self) -> io::Result<()> {
+        self.0.shutdown(std::net::Shutdown::Write)
+    }
+
     /// Adjusts the read timeout of one exchange (long tools need longer).
     ///
     /// # Errors

@@ -41,7 +41,16 @@ pub fn status() -> anyhow::Result<()> {
 pub(crate) fn status_with_settings(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
-    if let Some(value) = crate::cli::try_daemon("status", serde_json::json!({}), false, settings)? {
+    super::with_transport(|transport| status_with_settings_in(&transport, settings))
+}
+
+pub(crate) fn status_with_settings_in(
+    transport: &crate::platform::transport::Transport,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> anyhow::Result<()> {
+    if let Some(value) =
+        crate::cli::try_daemon(transport, "status", serde_json::json!({}), false, settings)?
+    {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
@@ -81,6 +90,14 @@ pub(crate) fn project_status_with_settings(
     root: &std::path::Path,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
+    super::with_transport(|transport| project_status_with_settings_in(&transport, root, settings))
+}
+
+pub(crate) fn project_status_with_settings_in(
+    transport: &crate::platform::transport::Transport,
+    root: &std::path::Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> anyhow::Result<()> {
     if !root.is_absolute() {
         return Err(Error::Admission {
             message: "status --project requires an absolute root".into(),
@@ -88,7 +105,7 @@ pub(crate) fn project_status_with_settings(
         .into());
     }
     let cache = paths::cache_dir()?;
-    let mut client = crate::ipc::client::Client::try_connect(&cache)?
+    let mut client = crate::ipc::client::Client::try_connect(transport, &cache)?
         .ok_or_else(crate::daemon::launch::website_unavailable)?;
     client.handshake_registry()?;
     if !client.active_website() {
@@ -134,6 +151,13 @@ pub fn list() -> anyhow::Result<()> {
 pub(crate) fn list_with_settings(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
+    super::with_transport(|transport| list_with_settings_in(&transport, settings))
+}
+
+pub(crate) fn list_with_settings_in(
+    transport: &crate::platform::transport::Transport,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> anyhow::Result<()> {
     const PAGE: usize = 500;
     let mut cursor: Option<String> = None;
     let mut docs: Vec<serde_json::Value> = Vec::new();
@@ -144,7 +168,8 @@ pub(crate) fn list_with_settings(
             Some(cursor) => serde_json::json!({ "limit": PAGE, "cursor": cursor }),
             None => serde_json::json!({ "limit": PAGE }),
         };
-        let daemon_value = crate::cli::try_daemon("list_docs", args.clone(), true, settings)?;
+        let daemon_value =
+            crate::cli::try_daemon(transport, "list_docs", args.clone(), true, settings)?;
         let value = if let Some(value) = daemon_value {
             value
         } else {

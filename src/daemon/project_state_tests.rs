@@ -18,7 +18,19 @@ impl Fixture {
     fn new() -> Self {
         let cache = tempfile::TempDir::new().expect("cache");
         let root = tempfile::TempDir::new().expect("root");
-        let shared = Shared::open(cache.path()).expect("empty daemon state");
+        // Other unit tests temporarily redirect process-global configuration.
+        // This fixture owns its launch policy and must never inherit their caps.
+        let shared = Shared::open_with_launch(
+            cache.path(),
+            &crate::store::settings::standalone().unwrap(),
+            &crate::store::settings::standalone_read_pool().unwrap(),
+            crate::hybrid::dense_settings::standalone()
+                .unwrap()
+                .settings(),
+            &LaunchSnapshot::capture_from(&cache.path().join("test-config")),
+            DaemonPatch::default(),
+        )
+        .expect("empty daemon state");
         let mut db = Db::open(cache.path()).expect("registry");
         let project = registry::ensure_project(
             &mut db,

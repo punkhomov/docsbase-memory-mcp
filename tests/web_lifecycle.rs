@@ -1,4 +1,8 @@
 #![cfg(feature = "web")]
+#[cfg(unix)]
+#[path = "support/transport.rs"]
+mod test_transport;
+
 use std::{process::Command, time::Duration};
 
 fn command(root: &std::path::Path) -> Command {
@@ -49,6 +53,70 @@ fn startup_lock_timeout_exits_without_waiting_for_blocking_thread() {
     let output = child.assert().failure().get_output().clone();
     assert!(String::from_utf8_lossy(&output.stderr).contains("daemon startup deadline"));
 }
+#[test]
+fn web_attaches_to_running_daemon_after_global_config_becomes_invalid() {
+    use docsbase_memory::daemon::lifecycle::daemon_pid;
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Child, Stdio},
+        time::Instant,
+    };
+
+    struct ChildGuard(Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let cache = root.path().join("cache");
+    let config = root.path().join("config");
+    std::fs::create_dir(&config).unwrap();
+    std::fs::write(config.join("web.toml"), "port = 0\n").unwrap();
+
+    let mut daemon = ChildGuard(
+        command(root.path())
+            .args(["serve", "--grace-ms", "60000"])
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while daemon_pid(&cache) != Some(daemon.0.id()) {
+        assert!(
+            daemon.0.try_wait().unwrap().is_none(),
+            "daemon exited during startup"
+        );
+        assert!(Instant::now() < deadline, "daemon did not become ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::write(config.join("config.toml"), "[daemon]\ndrain_poll_ms = 0\n").unwrap();
+
+    let mut web = ChildGuard(
+        command(root.path())
+            .arg("web")
+            .env(
+                "DOCSBASE_DAEMON_EXE",
+                root.path().join("unexpected-autostart"),
+            )
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let stdout = web.0.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
+        let _ = tx.send(result);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+    assert!(
+        line.starts_with("docsbase Web: http://127.0.0.1:"),
+        "Web did not attach to the running daemon: {line:?}"
+    );
+}
 #[cfg(unix)]
 #[test]
 fn ctrl_c_leaves_shared_daemon_alive_and_open_failure_is_nonfatal() {
@@ -74,7 +142,8 @@ fn ctrl_c_leaves_shared_daemon_alive_and_open_failure_is_nonfatal() {
     });
     let line = rx.recv_timeout(Duration::from_secs(30)).unwrap();
     assert!(line.starts_with("docsbase Web: http://127.0.0.1:"));
-    let mut client = Client::connect(&root.path().join("cache")).unwrap();
+    let transport = test_transport::TestTransport::new(4);
+    let mut client = Client::connect(&transport, &root.path().join("cache")).unwrap();
     client.handshake_registry().unwrap();
     client
         .call(Request::BindReadOnly {

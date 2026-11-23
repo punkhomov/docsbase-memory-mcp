@@ -1,4 +1,3 @@
-use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -15,7 +14,11 @@ use docsbase_memory::ipc::protocol::{
 };
 use docsbase_memory::platform::{self, BlockingStream};
 
+#[path = "support/transport.rs"]
+mod test_transport;
+
 struct Env {
+    transport: test_transport::TestTransport,
     cache: TempDir,
     root: TempDir,
     daemon: Option<Child>,
@@ -29,6 +32,7 @@ impl Env {
             write_file(root.path(), rel, body.as_bytes());
         }
         Self {
+            transport: test_transport::TestTransport::new(160),
             cache,
             root,
             daemon: None,
@@ -83,7 +87,7 @@ impl Env {
 
     fn client(&self) -> Client {
         for _ in 0..100 {
-            if let Some(client) = Client::connect(self.cache()) {
+            if let Some(client) = Client::connect(&self.transport, self.cache()) {
                 return client;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -336,7 +340,8 @@ fn dead_session_does_not_block_shutdown() {
     let live_pid = zombie.id();
 
     let mut raw =
-        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("raw connect");
+        platform::connect_blocking(&env.transport, &platform::daemon_endpoint(env.cache()))
+            .expect("raw connect");
     hello(&mut raw);
     let response = exchange(
         &mut raw,
@@ -375,47 +380,7 @@ fn dead_session_does_not_block_shutdown() {
     drop(raw);
 }
 
-#[test]
-fn registration_survives_armed_grace() {
-    let mut env = Env::new(&[("README.md", DOC)]);
-    let big = env.root().join("big-project");
-    for index in 0..800 {
-        let mut body = format!("# File {index}\n\nintro widget prose number {index}.\n");
-        for section in 0..40 {
-            let _ = writeln!(
-                body,
-                "\n## Section {section}\n\ninstaller prose about widget-{index}-{section} and gadgets."
-            );
-        }
-        write_file(&big, &format!("docs/file-{index}.md"), body.as_bytes());
-    }
-    let config_dir = env.cache().join("config");
-    fs::create_dir_all(&config_dir).expect("config dir");
-    fs::write(config_dir.join("config.toml"), "auto_index = true\n").expect("global config");
-    env.start_daemon_with_grace(300);
-
-    // A session-less connection closing arms the grace timer.
-    let mut idle_conn =
-        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("idle connect");
-    hello(&mut idle_conn);
-    drop(idle_conn);
-    std::thread::sleep(Duration::from_millis(100));
-
-    // Registration of the big project runs a full auto-index far longer than
-    // the remaining grace; it must not be cut off.
-    let mut raw =
-        platform::connect_blocking(&platform::daemon_endpoint(env.cache())).expect("raw connect");
-    hello(&mut raw);
-    let response = exchange(
-        &mut raw,
-        &Request::RegisterSession {
-            pid: std::process::id(),
-            cwd: big.clone(),
-        },
-    );
-    let Response::ToolResult { value } = response else {
-        panic!("registration was cut off: {response:?}");
-    };
-    assert_eq!(value["status"], "indexed", "{value}");
-    drop(raw);
-}
+// The armed-grace registration regression runs through the real in-process
+// accept/registration path in daemon::lifecycle::janitor_tests. It uses causal
+// admission/work gates and a controlled grace clock; subprocess cleanup, idle
+// shutdown and dead-session behavior remain covered above.

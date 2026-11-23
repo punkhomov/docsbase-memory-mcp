@@ -10,6 +10,7 @@
 //! directly; it is not a stable API.
 
 pub mod paths;
+pub mod transport;
 
 #[cfg(unix)]
 mod unix;
@@ -21,16 +22,42 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+pub use transport::{BlockingListener, BlockingStream, Listener, Stream, Transport};
 #[cfg(unix)]
-pub use unix::{
-    BlockingListener, BlockingStream, Listener, ShutdownSignal, Stream, bind, bind_blocking,
-    connect_async, connect_blocking, connect_probe, daemon_endpoint, exists, remove,
-};
+pub use unix::{ShutdownSignal, connect_probe, daemon_endpoint, exists, remove};
 #[cfg(windows)]
-pub use windows::{
-    BlockingListener, BlockingStream, Listener, ShutdownSignal, Stream, bind, bind_blocking,
-    connect_async, connect_blocking, connect_probe, daemon_endpoint, exists, remove,
-};
+pub use windows::{ShutdownSignal, connect_probe, daemon_endpoint, exists, remove};
+
+/// Bind using an explicit application submission capability.
+/// # Errors
+/// Returns the platform bind error.
+pub fn bind(transport: &Transport, endpoint: &Endpoint) -> std::io::Result<Listener> {
+    transport.bind(endpoint)
+}
+/// Bind a blocking listener using the explicit application capability.
+/// # Errors
+/// Returns the platform bind error.
+pub fn bind_blocking(
+    transport: &Transport,
+    endpoint: &Endpoint,
+) -> std::io::Result<BlockingListener> {
+    transport.bind_blocking(endpoint)
+}
+/// Connect a blocking stream in the enclosing application scope.
+/// # Errors
+/// Returns the platform connection error.
+pub fn connect_blocking(
+    transport: &Transport,
+    endpoint: &Endpoint,
+) -> std::io::Result<BlockingStream> {
+    transport.connect_blocking(endpoint)
+}
+/// Make an asynchronous connection attempt in the enclosing application scope.
+/// # Errors
+/// Returns the platform connection error.
+pub async fn connect_async(transport: &Transport, endpoint: &Endpoint) -> std::io::Result<Stream> {
+    transport.connect_async(endpoint).await
+}
 
 /// Private directory/file modes and logs (NFR-5); free-space probe for the
 /// fetch/connect preflight (FR-13).

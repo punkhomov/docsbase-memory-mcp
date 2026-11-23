@@ -9,8 +9,13 @@ use tempfile::TempDir;
 
 use docsbase_memory::platform::{self, Endpoint};
 
+#[path = "support/transport.rs"]
+mod test_transport;
+
 #[test]
 fn roundtrip_and_remove() {
+    let transport = test_transport::TestTransport::new(4);
+    let server_transport = transport.clone();
     let dir = TempDir::new().expect("cache");
     let endpoint = platform::daemon_endpoint(dir.path());
     // The endpoint path is a pipe name on Windows, so derive the state dir
@@ -28,7 +33,7 @@ fn roundtrip_and_remove() {
             .expect("runtime");
         runtime.block_on(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let listener = platform::bind(&server_endpoint).expect("bind");
+            let listener = platform::bind(&server_transport, &server_endpoint).expect("bind");
             ready_tx.send(()).expect("signal bind");
             // The liveness probe connects and drops immediately; skip it.
             loop {
@@ -40,7 +45,7 @@ fn roundtrip_and_remove() {
                 }
                 assert_eq!(&buf[..read], b"ping\n");
                 stream.write_all(b"pong\n").await.expect("write");
-                stream.flush().await.expect("flush");
+                stream.shutdown().await.expect("final reply delivered");
                 break;
             }
         });
@@ -52,7 +57,7 @@ fn roundtrip_and_remove() {
     assert!(platform::exists(&endpoint), "bound endpoint must exist");
     assert!(platform::connect_probe(&endpoint), "probe must connect");
 
-    let mut client = platform::connect_blocking(&endpoint).expect("connect");
+    let mut client = platform::connect_blocking(&transport, &endpoint).expect("connect");
     client.write_all(b"ping\n").expect("send");
     client.flush().expect("flush");
     let mut line = String::new();
@@ -62,6 +67,9 @@ fn roundtrip_and_remove() {
     assert_eq!(line, "pong\n");
     server.join().expect("server thread");
 
+    // Logical stream/thread completion does not prove native HANDLE retirement.
+    // Join the explicit physical owner before checking that the name is gone.
+    drop(transport);
     platform::remove(&endpoint).expect("remove");
     assert!(!platform::exists(&endpoint), "endpoint removed");
     assert!(
@@ -150,16 +158,17 @@ fn pipe_name_is_cache_unique() {
 #[cfg(unix)]
 #[test]
 fn oversized_socket_path_is_rejected() {
+    let transport = test_transport::TestTransport::new(2);
     let dir = TempDir::new().expect("cache");
     let long = dir.path().join("x".repeat(200));
     std::fs::create_dir_all(&long).expect("mkdir long");
     let endpoint = Endpoint::Unix(long.join("daemon.sock"));
-    let Err(err) = platform::bind_blocking(&endpoint) else {
+    let Err(err) = platform::bind_blocking(&transport, &endpoint) else {
         panic!("bind must reject an over-long path")
     };
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
     assert!(err.to_string().contains("socket path"), "{err}");
-    let Err(err) = platform::connect_blocking(&endpoint) else {
+    let Err(err) = platform::connect_blocking(&transport, &endpoint) else {
         panic!("connect must reject an over-long path")
     };
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");

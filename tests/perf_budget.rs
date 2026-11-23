@@ -5,6 +5,9 @@
 //! Debug builds skip these tests (`--release` required): the budgets are
 //! defined for optimized builds only.
 
+#[path = "support/transport.rs"]
+mod test_transport;
+
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -464,7 +467,8 @@ fn rss_budget() {
     assert!(output.status.success(), "index failed: {output:?}");
 
     // Bind a session so the daemon holds the project open, then measure.
-    let mut client = Client::connect(cache.path()).expect("connect");
+    let transport = test_transport::TestTransport::new(4);
+    let mut client = Client::connect(&transport, cache.path()).expect("connect");
     client.handshake(root.path()).expect("bind session");
     let pid = daemon_pid(cache.path()).expect("daemon pid");
     let rss_kb = read_vm_rss_kb(pid);

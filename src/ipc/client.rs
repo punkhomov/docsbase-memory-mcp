@@ -8,7 +8,8 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
-use crate::platform::{self, BlockingStream};
+use crate::platform;
+use crate::platform::transport::{BlockingStream, Transport};
 
 /// Timeout for a single request/response exchange.
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -25,16 +26,17 @@ impl Client {
     /// Legacy lossy connection probe. Strict CLI routing uses [`Self::try_connect`].
     /// Returns `None` for both initial absence and post-connect setup failure.
     #[must_use]
-    pub fn connect(cache: &Path) -> Option<Self> {
-        Self::try_connect(cache).ok().flatten()
+    pub fn connect(transport: &Transport, cache: &Path) -> Option<Self> {
+        Self::try_connect(transport, cache).ok().flatten()
     }
 
     /// Connects without confusing a connected setup failure with initial absence.
     ///
     /// # Errors
     /// Returns transport errors from configuring an already connected stream.
-    pub fn try_connect(cache: &Path) -> Result<Option<Self>> {
+    pub fn try_connect(transport: &Transport, cache: &Path) -> Result<Option<Self>> {
         Self::connect_with_setup(
+            transport,
             cache,
             |stream| stream.set_read_timeout(Some(IO_TIMEOUT)),
             |stream| stream.set_write_timeout(Some(IO_TIMEOUT)),
@@ -43,13 +45,19 @@ impl Client {
 
     // Narrow deterministic setup seam; native connection and frame state stay real.
     pub(crate) fn connect_with_setup(
+        transport: &Transport,
         cache: &Path,
         read_timeout: impl FnOnce(&BlockingStream) -> std::io::Result<()>,
         write_timeout: impl FnOnce(&BlockingStream) -> std::io::Result<()>,
     ) -> Result<Option<Self>> {
         // No existence pre-check: named pipes have no file to stat.
         let endpoint = platform::daemon_endpoint(cache);
-        let Ok(stream) = platform::connect_blocking(&endpoint) else {
+        #[cfg(windows)]
+        let connected =
+            transport.connect_blocking_until(&endpoint, std::time::Instant::now() + IO_TIMEOUT);
+        #[cfg(unix)]
+        let connected = transport.connect_blocking(&endpoint);
+        let Ok(stream) = connected else {
             return Ok(None);
         };
         read_timeout(&stream).map_err(io_error)?;
@@ -79,20 +87,18 @@ impl Client {
     /// # Errors
     /// Returns [`Error::Protocol`] on framing/decoding problems and
     /// [`Error::Internal`] on socket IO failures.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "requests are consumed once sent; keeps the brief's `call(Request)` contract"
-    )]
     pub fn call(&mut self, request: Request) -> Result<Response> {
         if self.poisoned {
             return Err(Error::transport(
                 "client connection is poisoned by a framing error; reconnect",
             ));
         }
-        let bytes = protocol::encode(&request)?;
+        let bytes = crate::ipc::encoding::encode(&request)?;
+        drop(request);
+        self.poisoned = true;
         {
             let stream = self.stream.get_mut();
-            stream.write_all(&bytes).map_err(io_error)?;
+            stream.write_all(bytes.bytes()).map_err(io_error)?;
             stream.flush().map_err(io_error)?;
         }
 
@@ -120,7 +126,10 @@ impl Client {
             return Err(Error::transport("incomplete response frame"));
         }
         match protocol::decode_response(&line) {
-            Ok(response) => Ok(response),
+            Ok(response) => {
+                self.poisoned = false;
+                Ok(response)
+            }
             Err(err) => {
                 self.poisoned = true;
                 Err(Error::transport(format!("bad response: {err}")))

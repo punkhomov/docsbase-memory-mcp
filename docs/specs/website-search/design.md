@@ -309,3 +309,149 @@ state-dependencies, without artifact invalidation. Full configurable bootstrap
 I52, source writes, CF5/v2 execution and strict activation stay deferred.
 Plan addendum scope/commands are in server-plan.md; original reviewer scoped
 PASS is required before runtime implementation. #152 closes with S1 integration.
+
+## Delta 2026-11-17 — ADR-W1: application-owned Windows transport
+
+Supersedes only ADR-10's interprocess transport ownership and no-op Windows I/O
+timeouts. Keep byte-stream NDJSON, names, protocol and non-consuming probes.
+Use the existing windows-sys dependency for an application-owned bounded IOCP
+arena. Explicit `platform::transport::Options` and a synchronous `run` scope
+produce a clonable Transport submission capability. The scope owns progress and
+retirement outside the application runtime. Capabilities may not construct their
+own ports or acquire hidden fallback policy. Unix delegates to existing sockets.
+
+A pending listener is preserved across accept-future cancellation. Acceptance
+transfers the same physical token; the next instance waits for an arena-capacity
+notification registered before its allocation attempt. Pending, admitted,
+rejected and retiring physical instances all consume that arena. Notification
+alone never proves native retirement. Blocking streams poll the same operations
+using a wake/condition and one absolute deadline per read/write/flush; timeout
+aborts the exchange without waiting for native completion. Reader/writer clones
+share the single serialized writer and never duplicate its logical Pipe. Final
+successful server close is explicit; Drop is cancellation, never delivery.
+
+The private core and the new explicit facade are being integrated in W3. Legacy
+constructors remain temporarily during that task and must be removed from all
+operational Windows paths before PR readiness. No wire/schema/crate change.
+
+## Delta 2026-11-17 — W3 operational scope and delivery contract
+
+Daemon, direct CLI command, read/control CLI command, MCP and Web compose one
+explicit native scope outside their runtime. They pass its Transport capability
+into bind/client/pool constructors; constructors never own a port/reaper. CLI
+list pagination shares that scope. Test fixtures retain an explicit test owner
+and exercise the same production adapter. Remove the obsolete interprocess
+transport dependency; keep windows-sys already present in the dependency graph.
+
+Before first native read, an admitted connection installs its original permit
+on the native owner. Each decoded request installs its original Activity before
+cancellation reads/writes; ordinary successful replies release that tail only
+after native flush. Final close keeps the tail until the helper has actually
+exited/joined and the physical record retires. Idle reads charge only connection
+capacity. Physical retirement clears those tails even if cancelled runtime tasks
+retain logical references. Drop/error/expiry may discard a failed exchange;
+only successful explicit final close promises complete peer delivery.
+
+Search write/flush/final close share the original SearchOperation deadline.
+Already expired errors get only the existing immediate poll. Non-search control
+delivery uses one `control_timeout_ms` deadline when its response becomes ready;
+Stop's pre-reply drain and final ACK instead share its original `reply_drain_ms`
+whole budget. Stop now closes after its ACK. The stop command reads/validates
+that complete ACK, refreshing its original15s overall deadline before every
+native read, and still observes process exit as the final success criterion.
+
+## Delta 2026-11-17 — причинная проверка вооружённого idle grace (#165)
+
+Регрессионный тест `registration_survives_armed_grace` перенесён из subprocess
+fixture в настоящий in-process accept/RegisterSession pipeline. Наблюдение
+вооружённого deadline происходит после sessionless Hello; однократный test-only
+барьер расположен внутри уже допущенного registration worker, до его настоящей
+работы с БД. Проверяются совместимый путь и путь с JobRoot. Источник `now` и
+ожидание grace внедряются вместе в приватную accept-loop функцию; production
+передаёт прежние Tokio Instant/sleep_until. Остальные deadlines/работа идут в
+реальном времени, production grace и правила idle не меняются.
+
+Тест доводит исходный grace до истечения при удерживаемой Activity и ещё
+отсутствующей сессии, наблюдает повторную проверку idle, затем освобождает worker
+и требует настоящий indexed-ответ и session binding. После disconnect требуется
+повторное взведение grace и чистый idle exit. Проверки следуют за освобождением
+барьеров/cleanup. Три существующие subprocess-проверки dead-session cleanup,
+повторных соединений и shutdown сохраняются. Размер корпуса и задержка потока
+больше не служат доказательством регистрации.
+
+## Delta 2026-11-17 — I1: уведомление читателя после возврата отмены
+
+Готовность native-операции для потребителя требует одновременно возврата
+submit, terminal completion и нулевого числа выполняющихся cancellation callers.
+Проверка и сохранение waker выполняются под одним mutex состояния операции.
+Публикация completion может уже забрать прежний waker; пока caller удерживает
+буфер, повторный poll сохраняет новый waker для его возврата. Новые попытки
+отмены не входят в уже returned/terminal операцию, поэтому после Ready не
+возникает нового caller между poll и копированием/потреблением результата.
+Это исправляет потерянное пробуждение без изменения deadline или lifetime.
+
+## Delta 2026-11-17 — W3e: подключение и уход клиента до accept
+
+Windows blocking Client использует прежний IO_TIMEOUT2s как явный бюджет
+первичного подключения. Новый `Transport::connect_blocking_until` принимает
+исходный Instant deadline; только PIPE_BUSY231 запускает WaitNamedPipe на том же
+вызывающем потоке. Успешное ожидание не резервирует экземпляр: последующий busy
+повторяется под тем же deadline. Каждый конечный Win32 wait получает оставшееся
+время в миллисекундах без значений server-default0/INFINITE; после него deadline
+проверяется до новой попытки. Отсутствие endpoint, локальный capacity refusal и
+другие ошибки не повторяются. Никакого запроса до соединения нет, replay после
+него отсутствует. Raw connect_blocking и async connect остаются одной попыткой;
+Stop сохраняет свой прежний общий15s цикл и не получает новый вложенный бюджет.
+
+Если peer уже закрылся до ConnectNamedPipe, ERROR_NO_DATA232 завершает только
+этот физический экземпляр. Listener убирает его из pending, просит abort,
+сохраняет arena-владение до retirement и после cooperative yield начинает новый
+accept в той же capacity. Прочие ошибки не маскируются; новый экземпляр ждёт
+фактической ёмкости. Отмена accept после yield не оставляет reusable stale handle.
+
+
+## Delta 2026-11-17 — L1, замена completion implementation
+
+Retain PR164 application scopes and resource accounting; replace Operation,
+OVERLAPPED storage and own IOCP dispatch with exact patched Mio/Tokio. A dedicated
+transport I/O runtime is owned outside application work and remains alive until
+Mio's last-field guards and optional drain workers retire. The bounded arena
+contains tokens/accounting/helper ownership; tokens weakly reference endpoints
+and the arena, avoiding a guard-to-endpoint reference cycle. Strong endpoint
+references fence cancellation and helper FFI. Aborting the logical stream drops
+its endpoint; the dependency owns remaining native buffers and completions.
+Read capacity is explicit before registration, outgoing writes are capped,
+guarded Drop prevents callback resubmission and cancels pending native work.
+Successful close still has explicit native-write and final peer-drain boundaries.
+No performance advantage is claimed by source size alone. See ADR-WLIB1/plan.
+
+## Delta 2026-11-18 — L1 review corrections
+
+Tokio exposes a poll-connect adapter using its persistent registration write
+waker; an ephemeral async-connect future cannot own the waiter across facade
+polls. Guarded Mio preserves ERROR_NO_DATA so the existing listener retires an
+abandoned instance. Failed opens return never-associated capacity synchronously;
+association failures with a still-live native guard remain charged. Direct-Port
+tests must join a signalled drain worker before awaiting native terminal state.
+Final-drain acceptance leaves more kernel bytes unread than Mio can prefetch and
+observes GetThreadIOPendingFlag on the retained dedicated helper HANDLE before
+releasing the reader; startup Pending alone cannot establish peer drain.
+
+Abandoned-instance replacement is reserved before closing the last HANDLE when
+the existing arena has capacity, preserving the pipe namespace across accept's
+cooperative yield. A saturated arena still retires the old owner and waits for
+capacity; it never exceeds the physical limit to keep an instance available.
+
+## Delta 2026-11-18 — final ownership-boundary corrections
+
+The daemon admission lease encloses the entire native transport root, including
+post-work drain/quarantine. The admitted-handler factory attaches its original
+permit synchronously before spawn; an unpolled future cannot release native
+admission. A racing abort rejects new logical work while retaining its attached
+charge until physical retirement. Native ConnectNamedPipe TRUE is a submitted
+operation with a normal completion packet, including synchronous success;
+ERROR_PIPE_CONNECTED is local success without a packet. Only the latter skips
+the completion Arc. Raw client opens preserve Tokio's identification-only SQOS.
+Pipe read statuses109/232/233 preserve the existing EOF contract; write errors
+and truncated-frame handling are unchanged. Both upstream checks share a strict
+manifest-to-Cargo-path mapping with matching actual package identities.

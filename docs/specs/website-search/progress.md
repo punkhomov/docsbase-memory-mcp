@@ -549,3 +549,689 @@ current check/build/format/fmt/diff passing. Shared finish/close/error/abort
 settlement retains success/failure ownership; HTTP's original abort reason governs
 504. Already-expired error writes get one immediate attempt, without flush grace.
 Full cli-full/freeze proof and both original scoped reviews remain pending.
+
+MODIFIED 2026-11-16 — #155 functional WIP checkpoint: architectural v3 reviewed;
+actual Windows application T1 at da44095 failed the expected connection-charge
+assertion with1,048,672 unread bytes/activity0, then drained the full1,048,673-byte
+reply before cleanup. This is accounting evidence, not native terminal proof.
+Daemon scoped/pre-frame replies and both IPC clients now use fixed preallocated
+capped streaming serialization; error fallback reuses that region after dropping
+the result. Focused encoding2/0. Owned IOCP/helper retirement, caller roots,
+coordinator/Stop acknowledgement and native terminal acceptance remain WIP;
+#155 is not complete and the diagnostic T1 remains intentionally RED until its
+retarget to actual terminal ownership. No policy/baseline/ignore change.
+
+MODIFIED 2026-11-17 — #155 native-core WIP: private raw IOCP core now owns
+reserved physical-handle tokens, stable OVERLAPPED/buffer slots and packet
+references installed before submission. Submission return and native completion
+are separate gates. Cancellation uses handle→slot lock order and charges each
+cancel caller until return, fencing buffer reuse and handle close. Three native-
+compiled state tests cover completion-before-return, duplicate completion and a
+delayed cancellation caller; they are not pending-I/O/physical-retirement proof.
+Windows ABI/state execution is pending the isolated exact-source harness. Four
+first-draft Clippy findings are corrected in-task. Stream/helper ownership,
+outer-root migration and final normal native gates remain WIP; no clean-retirement
+or #155 completion claim. Existing test/baseline/ignore budgets unchanged.
+
+MODIFIED 2026-11-17 — #155 helper WIP: a dedicated connection-owned flush
+worker now has fixed request/return events, explicit ticket/return phases and
+retained pipe/thread ownership. Native writes are fenced until helper Ready;
+helper/cancel-callers survive cancellation, and outer join observes actual
+thread signaling. No dependency linger or pooled-thread cancellation is used by
+this private helper. Existing windows-sys IO/Security features are explicit;
+no new crate. Typed empty-byte comparison and the invalid Windows thread-trait
+import found by native compilation are corrected; focused encoding2/0 again.
+Native helper execution and full stream/root integration remain pending.
+
+MODIFIED 2026-11-17 — #155 bounded core-review correction checkpoint: C1 now
+uses the allocation's original mutable pointer before native submission, never a
+shared-slice cast. I1 publishes permanent driver/helper fault gates to existing
+handles and new admission, exposes owner fault, and retains fatal owners. I2
+replaces callback-under-lock consumption with bounded read copying/non-read
+consumption; Waker clone/drop also occurs outside those locks. Five controlled
+core cases are queued for native validation; local encoding2/0 and unchanged
+platform-boundary2/0 pass. The same named T1 fixture now queries native unread
+bytes only through the platform seam. Raw owned connection code and a normal
+read/write/helper-drain/token-transfer case are written but native execution and
+outer-root integration remain pending. #165 deterministic grace-fixture work is
+assigned to the same lifecycle acceptance; no grace/budget/ignore change.
+
+MODIFIED 2026-11-17 — #155 scoped core fix2: dedicated-helper retirement now
+publishes its joined success/error outcome persistently. Repeated outer drive
+passes preserve that result without a second join or helper-charge release;
+concurrent cancellation remains fenced through HANDLE clearing and publication.
+A new actual raw-pipe case holds a native cancellation caller past helper join
+and checks repeated retirement observations. Windows execution is pending;
+current formatting passes. This is a correction of the core-review Important
+finding, not a completed transport/root delivery claim.
+
+MODIFIED 2026-11-17 — #155 physical-owner WIP: the bounded IOCP registry
+now retains the listening/connection envelope before cancellable exposure and
+before helper startup. A transfer preserves the physical token; replaced
+envelopes and terminal owners drop outside the registry lock. A shared service
+capability supplies admission, irreversible quiescence/abort and outer reaping;
+escaped capabilities cannot reopen a finished scope. Logical stream Drop only
+cancels/wakes; registered buffers and helper handles stay with the outer root.
+A scoped runner drives native/helper retirement outside Tokio on work return or
+unwind and retains quarantine after an observation interval. Three actual
+connection cases plus one outer error/unwind case now await native execution;
+Linux encoding2/0 and formatting pass. Operational daemon/client facade,
+Activity/permit and complete policy migration remain WIP, not #155 acceptance.
+
+MODIFIED 2026-11-17 — #155/PR #164 research checkpoint: compared Microsoft
+cancellation/pipe lifecycle documentation, pinned libuv v1.x source and v2
+shutdown removal, Mio #1944, compio/Asio ownership contracts, Windows threadpool
+I/O and AF_UNIX alternatives. `windows-transport-research.md` records the three
+acceptance/write-completion/peer-drain boundaries, a candidate separating normal
+write completion from explicit normal-close drain, resource/performance
+hypotheses and discriminating native tests. No application implementation or
+native acceptance changed; no final design, finite-retirement or completion
+claim. Existing wire format, test budgets and baseline remain unchanged.
+Ruling: fresh research review PASS / APPROVED, no findings. Native lifetime,
+deadline, helper-capacity, delivery, performance and #165 acceptance remain
+unverified implementation work; this review does not qualify PR #164 for merge.
+
+Task W1: complete (2026-11-17, proportional capped serialization). Actual Hello
+allocation RED8,388,609 vs98 bytes; GREEN encoding4/0 and scoped7/0, lean library
+Clippy with -D warnings and fmt pass. Both passes enforce their storage bound;
+escaped overflow is rejected before output allocation. Oversized responses drop
+before allocating the small fallback. No wire/baseline/threshold change.
+Ruling: fresh task review PASS / APPROVED, no findings. Whole Windows transport
+and final cli-full/native acceptance remain WIP; W1 is not #155 completion.
+
+MODIFIED 2026-11-17 — W2 RED preparation: added an actual raw-pipe repeated
+exchange asserting native write completion without an eager/drain helper.
+Existing adapter still eagerly creates helpers; native RED execution is pending.
+This intermediate commit is intentionally not feature acceptance.
+
+MODIFIED 2026-11-17 — W2 implementation checkpoint: native Windows RED run
+44097740879 compiled source61326a4 and failed the intended helper-absence
+assertion (true/true vs false/false), after cleanup; external watchdog unused.
+The private adapter now completes native writes without a helper and creates
+one reserved dedicated helper only for explicit final server shutdown. Client
+shutdown completes its writes only; closed writers reject further output.
+Tests cover exact multi-chunk final delivery, optional-helper retirement and
+actual NOT_FOUND cancellation in a controlled pre-entry interval. Exact-source
+Windows cross-typecheck and fmt pass; native GREEN and task review are pending.
+This is not operational integration or #155 acceptance.
+
+MODIFIED 2026-11-17 — W2 review correction: candidate9c473fb passed all12
+actual Windows core/root cases in run44099804924. Fresh static review found an
+Important unchecked-writer-clone race and Minor noncausal final-read ordering.
+Pipe is now nonclonable and each Connection permits only one logical stream;
+Tokio split owns that stream. The final delivery case gates client reads at an
+exact native-region boundary, retaining the final newline in the kernel until
+a pending final-drain observation. Fix cross-typecheck/fmt pass; fixed-source
+native execution and re-review are pending, so W2 is not yet marked complete.
+
+MODIFIED 2026-11-17 — W3a RED preparation: added an actual owned-pipe
+case requiring physical retirement while synchronous application work is still
+running, without cooperative async yield. The existing run_on driver only reaps
+between work polls, so this distinguishes independent outer driving from a
+blocking-client resource stall. Exact-source cross-typecheck/fmt pass; native
+RED execution is pending. W3 integration slices/API are recorded in the plan.
+W2 fixed-source native execution is tracked separately in run44101312055;
+re-review addresses both reported findings, no new Critical/Important findings.
+
+Task W2: complete (2026-11-17, private native write/drain boundary). Fixed
+sourceff1f57b passes all12 actual cli-full Windows core/root cases in
+run44101312055, following native RED44097740879 and candidate GREEN44099804924.
+Persistent exchanges create no drain helpers; final server drain delivers the
+whole frame; writes are closed after shutdown. Native pre-entry cancellation
+returns actual NOT_FOUND while the dedicated thread still holds its charge;
+join, submission-return, terminal and cancel-caller gates stay independent.
+Exact-source Windows cross-typecheck and fmt pass. No full native lint claim
+until operational integration removes unused private adapters in W3.
+Ruling: fresh review Important/Minor findings corrected; re-review ADDRESSED
+for both, no new Critical/Important findings. Full #155/#165 and PR readiness
+remain W3/W4 work. No wire, baseline, budgets or grace policy changes.
+
+MODIFIED 2026-11-17 — W3a independent owner checkpoint: actual Windows
+RED44102404929 source7192006 passes12 prior cases and fails only the new
+synchronous-work retirement assertion, after its30s liveness watchdog; outer
+cleanup returns without external watchdog. Root now retains Port outside one
+scoped application thread and reaps independently of work polling; the explicit
+work stack is counted with native/helper reservations. Construction, errors and
+unwind remain inside that lifetime. The final-drain test additionally uses
+one-byte native read regions so even short completions cannot prefetch its
+unread sentinel. Exact-source cross-typecheck/fmt pass. Native GREEN, root task
+review and operational facade/application integration remain pending.
+
+Task W3a1: complete (2026-11-17, independent private native root).
+Native run44103973384 at source2ea8204 passes13/13 tests without ignores;
+its artifact confirms independent retirement during synchronous work and actual
+retirement before error/unwind returns. Fresh root review: spec PASS, quality
+APPROVED, no Critical/Important findings. Minor stack-envelope arithmetic was
+corrected to count the application stack once, outside per-handle multiplication;
+re-review ADDRESSED. Root-specific cross-target Clippy diagnostics are resolved,
+exact-source cross-typecheck and fmt pass. Operational integration remains W3.
+Ruling: private root slice approved; no claim that production #155 is solved.
+
+MODIFIED 2026-11-17 — W3a2 native ownership-tail checkpoint. Physical retirement
+now releases installed connection/request charges outside the arena mutex,
+even if a cancelled task retains its logical Connection Arc. Installation
+checks the abort gate under the charge mutex; ordinary request completion waits
+for its native-write barrier, while final-drain charges remain until retirement.
+The controlled pre-entry cancellation case checks the original semaphore
+permits remain unavailable until actual retirement and become available with a
+logical owner still retained. Exact-source cross-typecheck/fmt pass; native
+execution and fresh review are pending. Operational daemon migration remains W3.
+
+Task W3a2: complete (2026-11-17, private native ownership tails).
+Native run44106917232 source0e4b149 passes13/13; controlled pre-entry helper
+cancellation retains original permits until physical retirement, then releases
+them while a logical Connection owner still exists. Fresh review PASS / APPROVED,
+no findings. Exact-source cross-typecheck/fmt pass. Daemon attachment and
+persistent-reply completion ordering remain operational W3 acceptance.
+Ruling: ownership-tail slice approved; no production completion claim.
+
+MODIFIED 2026-11-17 — W3a3 explicit facade checkpoint. Add public complete
+transport Options/scope and a private Windows capability with cancellation-safe
+accept, physical-capacity notifications and blocking read/write deadlines over
+the same native operations. New native cases cover timed-out blocking reads,
+shared blocking directions/final delivery and a next listener waiting for actual
+arena capacity. Source cross-typecheck and lean-library Clippy pass; actual
+native execution/fresh facade review and consumer migration remain pending.
+
+MODIFIED 2026-11-17 — W3a3 review fix. Fresh review found Important: temporary
+policy MutexGuards lived through blocking waits, so cloned-stream admission
+could wait before starting its deadline. Snapshot each timeout before polling;
+no policy guard crosses the wait. Add causal native first-read observation and
+a concurrent clone test: timeout update remains available and second-read
+admission expires while the first read is pending. Cross-typecheck/fmt pass;
+re-review and17-case native execution pending.
+
+Task W3a3: complete (2026-11-17, explicit native facade).
+Native source d24ccf8 run44108077434 passes16/16; reviewed correction b65e8eb
+run44108620658 passes17/17, including first-read-observed cloned admission.
+Fresh review Important timeout-lock finding corrected; re-review ADDRESSED,
+no new Critical/Important findings. Native source is cross-typechecked; full
+operational Windows lint/acceptance remain W3b-d. No fallback owners/defaults.
+Ruling: private facade contract approved with actual native verification.
+
+MODIFIED 2026-11-17 — W3 operational integration checkpoint. Explicit scopes now
+compose daemon/CLI/MCP/Web, clients and real fixtures; legacy interprocess
+transport and dependency removed. Original permits/Activities attach before
+native submission and successful ordinary/final replies use write/drain barriers.
+Stop reads a complete ACK under its original overall deadline. Catalog and
+state-invalidation inventory updated. Full cli-full library668/668 and Linux
+all-target Clippy pass; actual migrated Windows acceptance and fresh W3 review
+remain pending. The admitted stalled-reader regression now holds an actual
+native cancellation caller instead of inferring pending I/O from unread bytes.
+
+MODIFIED 2026-11-17 — W3 Linux operational verification: eight focused native
+transport/client/CLI/daemon/Web integration suites pass85/85 tests (including
+Stop, admission flooding, literal capability negotiation and real website
+sync/readiness). cli-full library668/668, all-target Clippy, exact private native
+cross-typecheck and fmt pass. Existing Windows ownership tests pass17/17 at
+sourceb65e8eb; the newly migrated actual daemon cancellation gate still requires
+Windows execution. Final closure/benchmarks/#165 and final review remain open.
+
+MODIFIED 2026-11-17 — W3 native lint correction. Required Windows job
+134141350866 at 185bb7c stopped before functional execution on five
+platform-only Clippy findings: a test-only Duration import, two obsolete
+unnecessary_wraps expectations on now-public seam methods, statement
+termination and test import placement. Corrected all five without changing
+transport behavior. fmt/diff checks pass; native re-execution remains pending.
+
+MODIFIED 2026-11-17 — W3 operational native evidence. Exact source185bb7c/tree
+ df080a09da51ad22a559d0bc728231afa058e10d, isolated harness466620a, native run
+44112474352:18/18, independent watchdog exit0. Frozen admitted-daemon candidate
+has handler_returned=true, bytes_read=1, original_available_slots=0,
+original_activity=1 and native_cancel_caller_held=true. Cleanup establishes
+slots=1/activity=0 after actual caller return/retirement; unread tail discarded
+only as a failed exchange. Artifacts /tmp/pr164-integration-native-green.
+Ruling: fresh review_164_operational at6f62a1d PASS / APPROVED, no findings;
+current full/lean/native-final checks and W4 remain pending. Follow-up native
+lint found a Unix-only test helper unconditionally compiled by web_lifecycle;
+its module now has the same Unix cfg as its only consumer.
+
+MODIFIED 2026-11-17 — W4a deterministic grace checkpoint. The named regression
+now exercises real accept/admission/registration in both compatible and
+JobRoot-enabled modes. Explicit original-deadline observation, actual admitted
+worker gate and controlled grace expiry replace800files/100ms inference.
+Temporary mutation removing only the expired-grace Activity recheck fails
+at the intended assertion (0.04s): expired grace cut off admitted registration.
+Restored implementation passes all5janitor/lifecycle tests (0.09s). Three real
+subprocess cleanup tests remain. All-target cli-full Linux Clippy passes.
+Fresh W4a review and final native execution remain pending.
+
+MODIFIED 2026-11-17 — W4 native acceptance preparation. Add32actual
+pending-read cancellation cycles sharing a four-handle physical arena with
+persistent control traffic. Every cycle must deliver control bytes and retire
+back to the two original control owners before reuse. Expand helper-free
+native write/read sampling to128transfers and print diagnostic p50/p95/max;
+no latency threshold changes or claimed before/after improvement. The exact
+Windows core compile-only harness passes; native runtime evidence is pending.
+Real subprocess cleanup3/3also passes after moving #165 coverage.
+
+Task W4a: complete (2026-11-17, deterministic #165 regression).
+Ruling: fresh review_164_grace at32b5857 PASS / APPROVED, no findings. Both real
+registration paths, actual worker gate, controlled original grace expiry,
+indexed/session binding and clean disconnect/idle exit are checked. Mutation
+RED and restored lifecycle5/5 plus subprocess cleanup3/3pass. Native execution
+is part of the still-pending W4b final-source acceptance.
+
+MODIFIED 2026-11-17 — local full-suite environment correction. The first full
+cli-full run reached install after669library tests and earlier suites passed,
+then parallel install fixtures exhausted the20GiB filesystem (explicit ENOSPC).
+Standard cargo clean -p docsbase --profile dev freed8.3GiB; incremental cache is
+disabled for this verification run. Full suite rerun is in progress; no test,
+assertion, concurrency policy, baseline or threshold was changed to hide it.
+
+MODIFIED 2026-11-17 — W3/W4 common verification. After cache cleanup, the full
+cli-full suite passes1685tests across98targets/suites;18existingignored cases
+remain unchanged. Node client69/69and Website example15/15tests plus both TS
+checks pass. Lean's first parallel run exposed an existing project-state
+fixture inheriting another unit test's temporary global max_file_size=1.
+An isolated foreign launch config deterministically reproduces the identical
+0/0coverage failure; giving that fixture its own empty captured LaunchSnapshot
+makes the same reproduction pass. No production config behavior changed.
+Final project-state cli-full tests18/18and full lean library494/494pass;
+all-target and opt-in perf_budget/artifact Clippy pass. Full cli-full functional
+evidence precedes this test-fixture-only correction; native checks remain pending.
+
+MODIFIED 2026-11-17 — W3 strengthened native RED. Isolated never-merge mutation
+ e7010ff/tree9b44284 disables only the two facade ownership-tail attachments.
+Run44115118167fails exactly the real admitted-daemon regression,17other native
+tests pass and watchdog observes normal failure exit101. Frozen candidate:
+handler_returned=true, native_cancel_caller_held=true, reader_gate_phase=1,
+original_available_slots=1, original_activity=0. Cleanup joins/retire completes.
+The original source185bb7c's equivalent GREEN retained slots=0/activity=1.
+Artifacts /tmp/pr164-no-tail-native-red. This directly validates ownership-tail
+regression sensitivity without using unread-byte counts as a retirement proof.
+
+MODIFIED 2026-11-17 — W4b native checkpoint and review fix. Run44115522775,
+source32b5857/tree8f5e03c, harness457d6b9:20/20, watchdog exit0; raw artifacts
+/tmp/pr164-w4-native-green. Native128write/read diagnostic samples: p50=22us,
+p95=35us, max=53us, no drain helpers; not an application-load benchmark or a
+before/after speedup claim. Original admitted ownership candidate remains
+slots=0/activity=1 until cancellation caller release, then slots=1/activity=0.
+Ruling: fresh review_164_acceptance found Important: the new cancellation-churn
+case did not causally retain work across the control exchange. Revised it to
+hold actual CancelIoEx callers for BOTH native read endpoints, drop logical
+streams, require all4physical records and refused extra admission before and
+after the completed control reply, then release/join both callers and retire
+back to2control owners. Test-only gate Drop releases/joins on errors/unwind.
+Minor stale interprocess documentation corrected. Cross-typecheck passes;
+revised native execution/re-review pending. The earlier20/20run does not prove
+this strengthened control-overlap assertion.
+
+MODIFIED 2026-11-17 — frame-error local ownership audit. Keep a local Arc of
+Activity through explicit final error delivery as well as attaching its clone
+to native retirement. Unix's no-op native attachment must not consume the only
+logical Activity before the error write; Windows retention is unchanged.
+
+MODIFIED 2026-11-17 — W3 required Windows runtime-bridge correction. Required
+run44115391432at32b5857passes687library tests but the existing multi-thread
+CLI bridge regression fails during future construction: the new scoped work
+thread has no ambient Tokio Handle. Root now captures the caller Handle and
+enters its context on that thread, while application polling uses its own
+explicit runtime and native progress remains outside both. Current-thread
+nested synchronous scopes are still refused. This preserves the original
+construction/polling distinction; no executor, timeout or ownership policy added.
+The exact existing regression is added to the isolated native selection for
+GREEN evidence; required whole-suite re-execution remains pending.
+
+MODIFIED 2026-11-17 — final review read-notification regression checkpoint.
+Native run44118927632 atbd4ff22 passes21/21, including the exact existing CLI
+runtime success/error/unwind/liveness case and strengthened32-cycle control
+overlap; watchdog exit0, raw /tmp/pr164-context-native-green. Final whole-feature
+review identified a separate late-cancellation lost wake: Operation::poll could
+report a terminal result while copy_read still returned WouldBlock because a
+cancellation caller retained the buffer. Terminal publication had consumed the
+waker, so caller return could leave the read asleep. Extend the existing controlled
+late-caller regression with a counting waker and observations before/after terminal
+publication and caller release. Release/join precede assertions. Native RED and
+correction remain pending; this checkpoint is not PR readiness.
+
+MODIFIED 2026-11-17 — final review I1 native RED and correction. Isolated
+run44120796760 at3401b425/treea41e9f5f fails exactly the extended late-caller
+regression at its intended readiness assertion;20other cases pass and normal
+watchdog-observed exit101 follows joined cancellation cleanup. Raw evidence:
+/tmp/pr164-read-wake-native-red. Operation::poll now requires cancel_callers=0
+alongside submission return and terminal publication under the same state lock.
+Otherwise it installs the waker consumed by final caller return. New cancellation
+callers already refuse returned terminal operations, preserving poll/copy fencing.
+No budget, ownership or error policy changes. Native GREEN and scoped re-review
+remain pending; this is the only Important final-review finding, with no Critical
+or deferred Minor findings.
+
+MODIFIED 2026-11-17 — I1 verified; W3e arrival/withdrawal follow-up. Exact native
+run44122161279 ateda37b428/tree99ed4324 passes21/21, watchdog exit0; raw
+/tmp/pr164-read-wake-native-green. Final reviewer I1 re-review: ADDRESSED, no
+new Critical/Important findings. Required Windows run44118770344 then reaches
+the real lifecycle flood fixture and fails on immediate blocking-connect busy
+error231; unwinding clients also exposes accept error232 ending the daemon.
+Linux/docs pass. macOS never acquired a runner (runner_id0, no steps; hosted
+capacity annotation), so it is not a native test result.
+
+W3e preserves bounded ownership while recovering known connection arrival races:
+keep raw async/one-attempt connect unchanged; add an explicit original-deadline
+Windows blocking wait, selected by the existing blocking client IO_TIMEOUT.
+WaitNamedPipe waits on the caller thread without a helper or handle retention;
+only documented busy231 retries and one deadline applies across races. The
+flood fixture supplies its existing10s admission deadline. Accept withdraws and
+retires only an ERROR_NO_DATA232 instance, then yields/rearms inside the same
+physical arena; other errors propagate. New deterministic native regressions
+first expose busy arrival and a File peer closed before ConnectNamedPipe.
+The initial deadline helper intentionally still delegates the old one-attempt
+path for native RED. No production settings, capacity or grace are increased.
+
+MODIFIED 2026-11-17 — W3e native RED and correction. Run44124370836 atfa215a1
+/tree106e0c14 fails exactly the new busy-arrival and pre-accept-departure cases;
+21existing cases pass, watchdog normal exit101. Raw /tmp/pr164-arrival-native-red.
+Implement explicit original-deadline Windows blocking admission with finite native
+WaitNamedPipe, selected by existing Client IO_TIMEOUT2s. Native raw231 is classified
+before one-attempt APIs map it to TimedOut. Only known abandoned232 instances
+retire/rearm after yield; all original arena limits remain. The actual public
+wait timeout and successful native wait are covered, including a second busy
+race with monotonically decreasing remaining time and expiry before submission.
+Linux lifecycle11/11 passes; exact native cross-typecheck passes (compile only).
+Fresh task review, native GREEN and full required CI remain pending.
+
+W3e local verification checkpoint: lifecycle11/11 and real CLI connection/setup
+regressions4/4 pass; all-target cli-full Clippy and fmt/diff pass. Exact-source
+Windows core cross-typecheck and cross-Clippy pass; the compile-only harness
+suppresses only its unrelated stub unused-import reexports, never production
+lints. These are not native runtime acceptance. New cases retain the original
+external watchdog; departure recovery additionally bounds its joined exchange.
+
+Task W3: complete (2026-11-17, explicit operational ownership and delivery).
+The real admitted-daemon ownership mutation RED44115118167 and original native
+GREEN44112474352 establish sensitivity to original permit/Activity tails.
+The strengthened control-overlap case passes44118429594/44118927632. The existing
+CLI ambient-runtime case passes44118927632 and the final source run below.
+Common full cli-full1685/lean494, Node69/example15, native library and focused
+integration evidence is recorded above. No new crate, protocol/schema/reindex,
+retrieval baseline, ignore, production grace or detached native owner.
+Ruling: fresh operational/root/facade task reviews approved; final I1 lost-wake
+finding corrected ineda37b4, native RED44120796760 -> GREEN44122161279, scoped
+re-review ADDRESSED with no new Critical/Important findings.
+
+Task W3e: complete (2026-11-17, native connection arrival/withdrawal).
+Exact sourcec7a7bcb280681c554f7d8da1d0fe98d04eb46eca/tree
+bb3308f7c547a1ae8bc828cce57d8770c0de727d, isolated harness6dbec478,
+run44126814441:23/23, no ignores, independent watchdog normal exit0.
+Raw /tmp/pr164-arrival-native-green includes both added regressions, I1 wake,
+original slots0/Activity1 while native caller held and cleanup slots1/Activity0.
+The new busy/departure RED44124370836 fails exactly those2cases,21others pass.
+Linux lifecycle11/11, real CLI setup/no-replay4/4, all-target Clippy/fmt and
+compile-only native cross-check/Clippy pass. Existing probe/connection budgets
+remain explicit; no new worker or capacity default. The fixture now waits for
+busy connection admission under its explicit10s setup/probe deadline.
+Ruling: fresh review_164_arrival PASS / APPROVED, no findings. Independent final
+reviewer's W3e integration follow-up approved, no Critical/Important findings;
+I1 stays addressed and no deferred minors remain.
+
+Task W4b: complete (2026-11-17, source/native/review acceptance).
+Final production sourcec7a7bcb run44126814441 passes23/23 with actual native
+source/tree and disposable host provenance. All32cycles retain both actual
+cancellation callers and4physical records across a complete control reply,
+refuse extra admission, then release/join/reap to2control owners. Diagnostic
+128persistent5-byte transfers: p50=22us,p95=30us,max=51us,drain_helpers=0.
+W1's small actual Hello allocation98bytes versus old8388609 remains covered;
+these figures are not a before/after speedup or an application capacity result.
+W4a's causal real registration paths and retained subprocess cleanup remain
+accepted. Tests preserve deadlines/grace/baselines/ignores and paid APIs are unused.
+Ruling: final whole-feature review found I1 only, now ADDRESSED; W3e follow-up
+also approved. Source/review tasks are closed; **external readiness remains
+pending required docs/linux/macos/windows on the closing PR head**. Previous
+macOS cancellation acquired no runner and is not a passed native check. The
+closing documentation-only commit changes no production/test source from the
+verifiedc7a7bcb. Mark PR ready only after its exact-head required checks pass;
+merging remains a human action. No deferred minors.
+
+MODIFIED 2026-11-17 — final native lint correction. Required Windows job
+134198152329/run44128325322 atd053ae1 stops before tests on pedantic
+similar_names in I1's test-only `wakes`/`waker` bindings. Rename the counter to
+notifications; no production code, assertion, schedule or lint setting changes.
+The prior compile-only harness did not enable the repository's pedantic catalog;
+its check was never a substitute for required native CI. Final exact-head
+required checks remain the readiness gate.
+
+MODIFIED 2026-11-17 — W4b platform fixture retirement barrier. Required Windows
+run44129404843 at87338b5 passes the library, actual lifecycle flood and later
+CLI/MCP suites, then roundtrip_and_remove fails its immediate endpoint-absence
+assertion. The fixture still owns the native arena after logical streams/server
+thread return; remove is intentionally a no-op for Windows pipe names. Join its
+existing TestTransport owner before the unchanged remove/absence assertions.
+This is the physical completion boundary already required by ADR-W1; no sleeps,
+probe-until-success, relaxed assertion, ignore or production change. A source
+scan finds no other analogous in-process removal assertion; lifecycle assertions
+follow actual daemon process exit and already pass on this native run.
+Full Linux required CI on87338b5 is green, including browser/static checks.
+Final exact-head required native CI still gates readiness after this fixture fix.
+
+Ruling: fresh W4b acceptance reviewer PASS / APPROVED, no findings: original
+complete reply and removal/absence/probe assertions remain; the existing outer
+owner join supplies the required physical boundary. Focused Linux5/5 and target
+Clippy/fmt/diff pass. Corrected required native GREEN remains pending.
+
+MODIFIED 2026-11-17 — W4b shared search fixture launch isolation. Required
+run44133126075 atc5a6fd7 has green docs/Linux, but Windows reports689/690 library
+tests: actual_watch_reload_while_remote_is_held_retries_the_original_raw_batch
+fails its existing second-provider-entry assertion. Search Fixture still captures
+the process-global config directory changed concurrently by CLI tests. Replaying
+the unchanged test alone with a foreign max_file_size=1 reproduces the exact
+assertion after a real transient retry; an empty launch source passes. The retry
+correctly refilters under the inherited one-byte cap, so it never re-enters the
+provider. Give the shared fixture its own empty captured LaunchSnapshot, using
+the same component-owned DB, one-reader and dense policies. No production change,
+assertion/deadline adjustment, ignore, gate or workflow change.
+
+The same foreign-config command is now GREEN; full cli-full library669/669 and
+lean library494/494, all-target cli-full Clippy, fmt/diff pass. Evidence:
+/tmp/pr164-watch-{foreign-red,empty-green,foreign-green}.log and
+/tmp/pr164-watch-fixture-{cli-lib,lean,clippy}.log. Fresh scoped review and
+final-head required native checks gate readiness after this test isolation fix.
+
+Ruling: fresh W4b task reviewer PASS / APPROVED, no findings; final reviewer
+reports no new Critical/Important and previous review remains converged. The
+failed Windows run did not record its captured config; deterministic RED/GREEN
+proves the contamination mechanism and isolation, not that unrecorded value.
+macOS134215310028 cancelled with runner_id0 and no steps: hosted runner not
+acquired after multiple attempts, with arm64 capacity notices. This is not native
+source acceptance. All four required checks on the new head remain mandatory.
+
+
+STARTED 2026-11-17 — L1 library-backed retirement implementation, isolated branch
+fix/windows-library-retirement from frozen PR1645982286. Baseline lean494/0.
+Windows-target check and strict Clippy of lib/all integration test source pass.
+Own kernel operations/dispatch are replaced by dependency ownership; original
+application cancellation, Activity, deadlines and final drain integration remain.
+Native acceptance, mutation sensitivity and independent review are pending; no
+production completion/readiness claim. ADR-WLIB1 and the plan document scope.
+Five implementation-specific Operation/packet tests are retired with that
+implementation; all13 connection scenarios,2 root scenarios and actual daemon
+stalled-get-doc regression are retained/ported to dependency guard observations.
+
+MODIFIED 2026-11-18 — L1 source checkpoint before native acceptance. Patched source
+lean494/0; Windows-target lib/tests check and strict Clippy pass. Six Python age
+checks pass, including a RED on the old path-source bypass. Exact archive+patch
+verification passes and rejects a one-byte unreviewed source mutation. Native
+Windows daemon/connection/root evidence and fresh review remain pending.
+
+MODIFIED 2026-11-18 — L1 review RED preparation. Fresh source review identified
+that failed native opens retain an unused reservation until the periodic reaper.
+Add a direct one-slot Port regression: repeated actual opens of an absent pipe
+must keep returning FILE_NOT_FOUND, then allow a listening HANDLE in that slot,
+without any reaper between attempts. No production correction is included in
+this checkpoint; native RED/GREEN remains pending. Full Linux cli-full suite
+passes after removing obsolete build executables that exhausted the sandbox
+disk during the first installer run. Web/client/example checks and 12 Python
+CI regressions pass; original Cargo age audit covers all487 registry records.
+
+MODIFIED 2026-11-18 — L1 native RED and scoped review correction. Run44259454206
+at production3ecb3dc has12passing native scenarios and4failures: actual daemon
+watchdog90s, failed-open WouldBlock, departure-before-accept assertion and direct
+Port helper/guard wait30s. Fresh L1 reviewer found five Important findings.
+Dedicated run44260766624 at8cb55c9 reproduces both added regressions at intended
+assertions (native accept wake lost after30s, second absent-pipe open loses its
+one physical slot); no watchdog is counted as acceptance. Correct persistent
+connect registration, immediate terminal reservation release, guarded NO_DATA
+propagation and test helper-join ordering. Strengthen final drain with two gated
+bytes, one-byte prefetch cap and an actual dedicated-thread pending-I/O query.
+Native GREEN, mutation sensitivity and scoped re-review are still pending.
+Seven real-daemon browser cases pass; dependency audit166 remains unchanged.
+
+MODIFIED 2026-11-18 — L1 scoped native follow-up. Sourceb52bc2f/run44261618659
+passes17of18 native scenarios, including the actual daemon, wake-only regression,
+one-slot failed opens and real helper pending-I/O drain. The abandoned-client
+case now reaches a new failure: FILE_NOT_FOUND during the deliberate accept
+yield after closing the last instance. Rearm a replacement before closing the
+abandoned instance when an existing arena slot permits; a full arena retains
+the bounded retirement/wait path. Preserve the same test, assertions, yields,
+capacity policy and deadlines. All five original source findings were addressed
+in scoped review; this newly exposed transition and its native acceptance remain
+under review. The diagnostic full Windows run is for production composition,
+not a replacement for the still-blocked mandatory Node audit.
+
+MODIFIED 2026-11-18 — L1 native GREEN, extra mutation not yet accepted.
+Run44262732333/source817149a passes all18scenarios, including the real daemon.
+Disabling original permit/Activity attachment produces the intended assertion
+with frozen candidate slots1/activity0 and completed cleanup. However, bypassing
+FlushFileBuffers leaves the final-drain test green; the run correctly fails its
+mutation acceptance. Restrict its native pending-I/O observation to the actual
+Flushing phase with no published result, excluding helper startup/idle I/O, and
+drop the logical writer after successful-close assertions. This is test-proof
+work, not a new production lifetime fix. Repeat the mutation before accepting
+the strengthened test; do not count the failed workflow as final acceptance.
+
+MODIFIED 2026-11-18 — final whole-source review fix-pass preparation. Source
+a0c4466/run44263760781 passes18native scenarios and both controlled REDs;
+helper phase fencing closes the startup-observation gap. Whole-source final
+review nevertheless finds one Critical and four Important source gaps: native
+synchronous connect-success completion Arc, daemon lease across outer drain,
+unpolled admitted-handler permit, native client identification-only SQOS and
+complete manifest coverage of Cargo path overrides. Add real native tail/lock,
+never-polled handler and impersonation-level regressions; extract the actual
+admission/root composition unchanged so its old ordering remains observable.
+Manifest omission RED is reproduced locally; shared validation now checks all
+path overrides, actual vendor paths and package names/versions before either
+archive or age audit. Rust source corrections and new native RED/GREEN remain
+pending. No final completion/readiness claim.
+
+MODIFIED 2026-11-18 — final-review RED verified, source fix pass. Native
+run44266369887 atdc27bc8 fails all three new cases at their intended assertions
+after cleanup: competing lease acquired during native tail; never-polled handler
+returns its original slot; actual client impersonation level2instead of1.
+Move the lease outside the transport root, attach permits synchronously before
+spawn (including the abort/admission race), restore identification SQOS and
+retain a completion Arc for native synchronous ConnectNamedPipe success. The
+rare native TRUE return is source-proven, not claimed to be forced on Windows.
+The independent full Windows diagnostic44264238496 on earliera0c4466 passes
+all687library tests and later integration suites until ipc_server's existing
+hello_version_mismatch EOF assertion receives native233. Restore the prior
+109/232/233 read-to-EOF adapter and require EOF in the final-delivery scenario;
+no assertion is weakened. Exact vendor verification and Windows-target strict
+Clippy pass. Scoped final re-review,21native GREEN plus controlled REDs and final
+full native composition remain pending; required Node audit166 is unchanged.
+
+Task L1: complete (2026-11-18, library-backed Windows ownership).
+Exact production7e106a4/run44267931680 passes21native cases, including lease
+contention after work return, both never-polled admission paths, native SQOS,
+the actual stalled daemon and successful final delivery/EOF. Original counters
+before cleanup are slots0/activity1; disabling attachment gives slots1/activity0
+and intended assertion after completed cleanup. Bypassing FlushFileBuffers also
+fails its intended assertion. A real queued connect routed through the submitted
+success branch completes and retires correctly; native TRUE itself is not
+claimed forced. All source files are restored after controls. Lean lib494/0,
+full Linux cli-full, strict Linux/Windows-target Clippy, offline syscall check,
+14Python checks,487registry age records and7real-daemon browser cases pass.
+Ruling: fresh task review and final whole-source fix review have all findings
+addressed, no new Critical/Important and no deferred minors. L2 remains pending
+full Windows composition and required exact-head CI; human merge only.
+
+MODIFIED 2026-11-18 — L2 clean-checkout packaging correction. Required docs
+run44268839451 rejects missing upstream Cargo.toml.orig despite local tree
+verification passing. The repository's generic *.orig ignore omitted exactly
+the Mio and Tokio source manifests from Git. Explicitly retain vendor manifests
+and add the two exact archive files; no runtime/Cargo normalized manifest or patch
+changes. A staged-tree git archive verifies both complete source trees and exact
+patches from a clean directory. Native production evidence remains7e106a4;
+required docs must pass on the packaging head. The three native jobs separately
+stop at unchanged picomatch audit166, not Rust checks. Do not mark L2 complete.
+
+MODIFIED 2026-11-18 — L2 operational acceptance verified, external gate remains.
+Full native Windows composition run44267991792 at production7e106a4 is GREEN:
+690library tests,1688reported test executions across98Cargo suite results,
+18existing ignores unchanged; actual official Node reconnection and website HTTP
+tests, strict all-target Clippy, offline provider capability and embedded Web
+checks pass. Validation8171441 differs from its production parent only in the
+manual diagnostic workflow. This run supplies native execution evidence, not a
+waiver of mandatory CI. Packaging178c711 changes no runtime source and has GREEN
+required docs/run44269826903, including full archive/patch/tree and original-age
+verification. Its required Linux/macOS/Windows jobs stop at the unchanged
+picomatch advisory166 before Rust; the closing documentation commit must retain
+those gates. No schema/config/protocol migration or reindex is required.
+Ruling: final independent reviewer SOURCE CONVERGED, no outstanding
+Critical/Important or deferred minors; PR readiness PARTIAL. PR164 contains the
+library-backed implementation and remains draft. L2 stays open until all four
+required checks pass after166 is resolved; merge remains a human action.
+
+MODIFIED 2026-11-18 — #166 explicit owner-approved audit exception. The owner
+requested a pnpm exception for the unpatched development dependency. Current
+advisory still has no patched version; the unchanged lock reports21paths, all
+dev:true through Vite/Svelte tooling. Add only GHSA-fc5q-39xc-vjpf to pnpm's
+workspace ignore list and document residual ReDoS risk and removal/reassessment
+conditions in supply-chain.md. No package version, lockfile, age/trust rule,
+moderate audit threshold or workflow command changes. This deliberate policy
+decision supersedes earlier no-exception checkpoints; it is not a security fix.
+Audit/frozen-install verification, fresh scoped review and required CI on this
+new head remain pending. Keep166 open for an actual upstream update; human merge.
+
+Task A166: complete (2026-11-18, explicitly approved advisory exception).
+Actual pnpm12 effective audit config contains only the requested GHSA. The raw
+pre-change audit fails with one high advisory/21dev-only paths; production-only
+audit has no advisories. The unchanged moderate gate now exits0 and explicitly
+reports1ignored/high, rather than claiming the vulnerability is fixed. Frozen
+install passes and lock SHA-256 remainsf5dbbf7b4d9ad6b314ca9e1e6548f0c85ba8b378241dcde9efab185cd49a011b.
+Ruling: fresh scoped reviewer PASS/APPROVED, no findings. No runtime/dependency
+changes or mirrored config tests; actual audit RED/GREEN verifies behavior.
+Required CI still must pass on the resulting PR head before L2/readiness closes.
+
+MODIFIED 2026-11-18 — required macOS fixture cleanup after audit unblocked.
+Run44273759084 passes the accepted pnpm audit and strict lints, then reports
+669/670library tests: connected_setup_error_cannot_replay_cli_sync_or_create_index_state
+fails in its fake server shutdown with Darwin57/NotConnected. The intentionally
+malformed response makes the real client close before the fake peer's half-close;
+that cleanup result is allowed by the Unix socket API. Accept only NotConnected
+from this test-only Unix cleanup, keep unexpected errors and Windows shutdown
+strict, and preserve every Transport/bad-response/no-index-replay assertion.
+No runtime code, timing, ignores or thresholds change. Focused verification,
+fresh scoped review and required native rerun remain pending.
+
+Ruling: fresh scoped fixture reviewer PASS/APPROVED, no findings. Four focused
+Linux connection tests and strict Linux/Windows-target Clippy, fmt/diff checks
+pass. This is not native macOS GREEN; the unchanged required macOS job must
+verify the new head. All audit exception evidence remains unchanged.
+
+MODIFIED 2026-11-23 — #164 reopened for a pre-merge review. The earlier
+all-platform green run did not cover cancellation with the native reactor
+paused, a wake after a blocking operation's deadline, idle application exit
+with a long reap interval, or MCP reconnect with a one-slot arena. Exact native
+regression runs 45242957854, 45244018743 and 45244292711 confirmed these gaps.
+The Web test also reproduced a failure to attach to a serving daemon after a
+legacy config edit. Deterministic Stop tests exposed a renewed drain budget and
+an already-expired successful ACK submitting bytes.
+
+The follow-up preserves separate native and logical cancellation, wakes the
+outer owner when work returns, checks the original deadline before a blocking
+re-poll, and uses the Stop deadline through drain and ACK. Web resolves its
+standalone native policy. MCP waits for actual local capacity before its one
+native open and gives expiry priority before that open. Mio passes the read
+allocation as a raw pointer with writable capacity and keeps it through the
+existing completion path. The withdrawn picomatch advisory no longer needs
+an exception. No cache settings or workflow test inventory change.
+
+Task W-review: complete (2026-11-23, scoped source and regression verification).
+Ruling: fresh follow-up review confirmed the original fixes and identified the
+MCP open/expiry race. Deterministic cases cover an expired legacy open with
+a pending timer and a cancelled search resuming after physical admission.
+Native integration run 45245026252 passed 521 lean Windows library tests
+with the main review fixes. Focused cli-full daemon, Web and MCP tests on
+Linux supplement that run; the final combined head requires all four PR checks.
+The final scoped re-review approved all reported fixes. Linux verification
+included 118 daemon server tests, 19 MCP frontend tests, 4 Web lifecycle
+tests and strict cli-full Clippy. The existing draft remains through required CI.

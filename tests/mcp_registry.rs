@@ -17,7 +17,11 @@ use docsbase_memory::ipc::protocol::{PROTOCOL_VERSION, build_id};
 use docsbase_memory::mcp::tools::LONG_TIMEOUT;
 use docsbase_memory::platform;
 
+#[path = "support/transport.rs"]
+mod test_transport;
+
 struct Env {
+    transport: test_transport::TestTransport,
     cache: TempDir,
     root: TempDir,
     daemon: Option<Child>,
@@ -31,6 +35,7 @@ impl Env {
             write_file(root.path(), rel, body.as_bytes());
         }
         Self {
+            transport: test_transport::TestTransport::new(160),
             cache,
             root,
             daemon: None,
@@ -95,7 +100,7 @@ impl Env {
 
     fn client(&self) -> Client {
         for _ in 0..100 {
-            if let Some(client) = Client::connect(self.cache()) {
+            if let Some(client) = Client::connect(&self.transport, self.cache()) {
                 return client;
             }
             std::thread::sleep(Duration::from_millis(20));

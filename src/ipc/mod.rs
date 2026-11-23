@@ -9,3 +9,7 @@ pub mod protocol;
 mod async_client_tests;
 
 pub mod panel;
+
+pub(crate) mod encoding;
+
+pub mod transport;

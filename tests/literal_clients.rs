@@ -17,7 +17,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 const WATCHDOG: Duration = Duration::from_mins(5);
 const LITERAL_CAP: &str = "literal-query-v1";
 
+#[path = "support/transport.rs"]
+mod test_transport;
+
 struct Peer {
+    transport: test_transport::TestTransport,
     cache: TempDir,
     task: Option<tokio::task::JoinHandle<Vec<Request>>>,
 }
@@ -37,7 +41,8 @@ impl Peer {
             platform::fs::secure_dir(path.parent().expect("runtime parent"))
                 .expect("secure runtime");
         }
-        let listener = platform::bind(&endpoint).expect("native bind");
+        let transport = test_transport::TestTransport::new(4);
+        let listener = platform::bind(&transport, &endpoint).expect("native bind");
         let mut capabilities = vec![SEARCH_CONTEXT_CAPABILITY.to_owned()];
         if literal {
             capabilities.push(LITERAL_CAP.to_owned());
@@ -95,6 +100,7 @@ impl Peer {
             requests
         });
         Self {
+            transport,
             cache,
             task: Some(task),
         }
@@ -129,7 +135,7 @@ fn literal() -> Value {
 async fn async_helpers_refuse_literal_and_invalid_modes_before_old_peer_dispatch() {
     tokio::time::timeout(WATCHDOG, async {
         let peer = Peer::new(false, false);
-        let mut client = AsyncClient::connect(peer.cache.path()).await.expect("connect");
+        let mut client = AsyncClient::connect(&peer.transport, peer.cache.path()).await.expect("connect");
         client.handshake_registry().await.expect("old scoped Hello");
         for args in [literal(), json!({"query":"widgets","query_mode":"auto"}), json!({"query":"widgets","query_mode":4})] {
             let generic = client.call_tool("search_docs", args.clone()).await;
@@ -150,8 +156,9 @@ async fn blocking_helper_refuses_literal_and_invalid_modes_before_old_peer_dispa
     tokio::time::timeout(WATCHDOG, async {
         let peer = Peer::new(false, false);
         let cache = peer.cache.path().to_path_buf();
+        let transport = peer.transport.clone();
         tokio::task::spawn_blocking(move || {
-            let mut client = Client::connect(&cache).expect("connect");
+            let mut client = Client::connect(&transport, &cache).expect("connect");
             client.handshake_registry().expect("old scoped Hello");
             for args in [literal(), json!({"query":"widgets","query_mode":true})] {
                 let result = client.call_tool("search_docs", args);
@@ -168,7 +175,7 @@ async fn blocking_helper_refuses_literal_and_invalid_modes_before_old_peer_dispa
 async fn capable_async_helpers_forward_the_original_literal_request() {
     tokio::time::timeout(WATCHDOG, async {
         let peer = Peer::new(true, false);
-        let mut client = AsyncClient::connect(peer.cache.path())
+        let mut client = AsyncClient::connect(&peer.transport, peer.cache.path())
             .await
             .expect("connect");
         client
@@ -202,8 +209,9 @@ async fn capable_blocking_helper_forwards_the_original_literal_request() {
     tokio::time::timeout(WATCHDOG, async {
         let peer = Peer::new(true, false);
         let cache = peer.cache.path().to_path_buf();
+        let transport = peer.transport.clone();
         tokio::task::spawn_blocking(move || {
-            let mut client = Client::connect(&cache).expect("connect");
+            let mut client = Client::connect(&transport, &cache).expect("connect");
             client.handshake_registry().expect("Hello");
             assert_eq!(
                 client.call_tool("search_docs", literal()).expect("tool"),
@@ -222,7 +230,7 @@ async fn capable_blocking_helper_forwards_the_original_literal_request() {
 async fn failed_async_hello_clears_previous_literal_capability() {
     tokio::time::timeout(WATCHDOG, async {
         let peer = Peer::new(true, true);
-        let mut client = AsyncClient::connect(peer.cache.path())
+        let mut client = AsyncClient::connect(&peer.transport, peer.cache.path())
             .await
             .expect("connect");
         client.handshake_registry().await.expect("first Hello");
@@ -244,8 +252,9 @@ async fn failed_blocking_hello_clears_previous_literal_capability() {
     tokio::time::timeout(WATCHDOG, async {
         let peer = Peer::new(true, true);
         let cache = peer.cache.path().to_path_buf();
+        let transport = peer.transport.clone();
         tokio::task::spawn_blocking(move || {
-            let mut client = Client::connect(&cache).expect("connect");
+            let mut client = Client::connect(&transport, &cache).expect("connect");
             client.handshake_registry().expect("first Hello");
             assert!(matches!(
                 client.handshake_registry(),

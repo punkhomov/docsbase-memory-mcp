@@ -59,7 +59,7 @@ pub(super) async fn run_in(
         })
         .await?;
     let outcome = within_operation(&operation, async {
-        let connected = AsyncClient::connect(&context.cache).await;
+        let connected = AsyncClient::connect(&context.transport, &context.cache).await;
         if let Ok(mut client) = connected {
             client.handshake_registry().await?;
             let website = client

@@ -30,7 +30,11 @@ const FRESHNESS_BUDGET: Duration = Duration::from_secs(5);
 /// 30 s per 1000 files, so unbounded growth would starve the watcher).
 const NOTE_SLOTS: usize = 32;
 
+#[path = "support/transport.rs"]
+mod test_transport;
+
 struct Env {
+    transport: test_transport::TestTransport,
     cache: TempDir,
     root: TempDir,
     daemon: Option<Child>,
@@ -42,6 +46,7 @@ impl Env {
         let root = TempDir::new().expect("root");
         write_file(root.path(), "watch.md", b"# Watch\n\ninitial soakwidget.\n");
         Self {
+            transport: test_transport::TestTransport::new(160),
             cache,
             root,
             daemon: None,
@@ -91,7 +96,7 @@ impl Env {
 
     fn client(&self) -> Client {
         for _ in 0..100 {
-            if let Some(client) = Client::connect(self.cache()) {
+            if let Some(client) = Client::connect(&self.transport, self.cache()) {
                 return client;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -192,8 +197,14 @@ fn wait_for_marker(client: &mut Client, marker: &str, path: &str, budget: Durati
     false
 }
 
-fn run_agent(agent: usize, cache: &Path, root: &Path, deadline: Instant) -> usize {
-    let mut client = Client::connect(cache).expect("connect");
+fn run_agent(
+    transport: &platform::Transport,
+    agent: usize,
+    cache: &Path,
+    root: &Path,
+    deadline: Instant,
+) -> usize {
+    let mut client = Client::connect(transport, cache).expect("connect");
     client.handshake(root).expect("bind agent session");
     let mut written = 0_usize;
     while Instant::now() < deadline {
@@ -238,7 +249,10 @@ fn run_soak(soak: Duration) {
         .map(|agent| {
             let cache = env.cache().to_path_buf();
             let root = env.root().to_path_buf();
-            std::thread::spawn(move || run_agent(agent, &cache, &root, deadline))
+            {
+                let transport = env.transport.clone();
+                std::thread::spawn(move || run_agent(&transport, agent, &cache, &root, deadline))
+            }
         })
         .collect();
 

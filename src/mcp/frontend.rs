@@ -1,6 +1,6 @@
 //! stdio MCP server proxying tool calls to the daemon (FR-7, FR-34; I8).
 
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -39,6 +39,7 @@ struct Conn {
 #[derive(Clone)]
 pub struct Frontend {
     cache: PathBuf,
+    transport: crate::platform::transport::Transport,
     conn: Arc<Mutex<Option<Conn>>>,
     search_policy: SearchSettings,
 }
@@ -47,16 +48,21 @@ impl Frontend {
     /// Compatibility constructor using the search owner's explicit defaults.
     /// Normal startup passes its parsed global policy to `with_search_policy`.
     #[must_use]
-    pub fn new(cache: PathBuf) -> Self {
+    pub fn new(transport: crate::platform::transport::Transport, cache: PathBuf) -> Self {
         let defaults = SearchSpec::defaults(&DefaultsContext::standalone());
-        Self::with_search_policy(cache, SearchSpec::initial(&defaults))
+        Self::with_search_policy(transport, cache, SearchSpec::initial(&defaults))
     }
 
     /// Builds with complete owner policy; each search validates it before IO.
     #[must_use]
-    pub fn with_search_policy(cache: PathBuf, search_policy: SearchSettings) -> Self {
+    pub fn with_search_policy(
+        transport: crate::platform::transport::Transport,
+        cache: PathBuf,
+        search_policy: SearchSettings,
+    ) -> Self {
         Self {
             cache,
+            transport,
             conn: Arc::new(Mutex::new(None)),
             search_policy,
         }
@@ -121,10 +127,13 @@ impl Frontend {
             check_operation(operation)?;
             let result = async {
                 if lease.is_none() {
-                    lease = Some(
-                        legacy_budget(operation, tools::QUICK_TIMEOUT, open_conn(&self.cache))
-                            .await?,
-                    );
+                    let open = open_conn(&self.transport, &self.cache);
+                    lease = Some(if let Some(operation) = operation {
+                        open_for_search(operation, open).await?
+                    } else {
+                        let deadline = tokio::time::Instant::now() + tools::QUICK_TIMEOUT;
+                        open_before(open, deadline, tokio::time::sleep_until(deadline)).await?
+                    });
                 }
                 let conn = lease
                     .as_mut()
@@ -244,9 +253,43 @@ async fn legacy_budget<T>(
         .map_err(|_| Error::transport("timed out waiting for the daemon"))?
 }
 
-async fn open_conn(cache: &Path) -> Result<Conn> {
-    let mut client = AsyncClient::connect(cache)
-        .await
+async fn open_for_search<T>(
+    operation: &SearchOperation,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::pin!(work);
+    poll_fn(|cx| {
+        operation.check()?;
+        work.as_mut().poll(cx)
+    })
+    .await
+}
+
+async fn open_before<T>(
+    work: impl Future<Output = Result<T>>,
+    deadline: tokio::time::Instant,
+    expiry: impl Future<Output = ()>,
+) -> Result<T> {
+    tokio::pin!(work, expiry);
+    poll_fn(|cx| {
+        // Capacity can wake the task before the timer driver observes the deadline.
+        if expiry.as_mut().poll(cx).is_ready() || tokio::time::Instant::now() >= deadline {
+            return Poll::Ready(Err(Error::transport("timed out waiting for the daemon")));
+        }
+        work.as_mut().poll(cx)
+    })
+    .await
+}
+
+async fn open_conn(
+    transport: &crate::platform::transport::Transport,
+    cache: &Path,
+) -> Result<Conn> {
+    #[cfg(windows)]
+    let client = AsyncClient::connect_with_capacity(transport, cache).await;
+    #[cfg(unix)]
+    let client = AsyncClient::connect(transport, cache).await;
+    let mut client = client
         .map_err(|error| Error::transport_with_source("connect daemon after startup", error))?;
     let cwd = std::env::current_dir()
         .map_err(|error| Error::internal_with_source("resolve cwd", error))?;
@@ -432,9 +475,17 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for CappedRead<R> {
 ///
 /// # Errors
 /// Returns an error when the runtime or MCP transport fails.
-pub async fn run() -> anyhow::Result<()> {
+pub async fn run(transport: crate::platform::transport::Transport) -> anyhow::Result<()> {
     let cache = paths::cache_dir()?;
-    let service = Frontend::with_search_policy(cache, Config::global()?.search);
+    serve_stdio(Frontend::with_search_policy(
+        transport,
+        cache,
+        Config::global()?.search,
+    ))
+    .await
+}
+
+async fn serve_stdio(service: Frontend) -> anyhow::Result<()> {
     let stdin = CappedRead::new(tokio::io::stdin(), MAX_FRAME_BYTES);
     let transport = rmcp::transport::async_rw::AsyncRwTransport::<RoleServer, _, _>::new_server(
         stdin,
@@ -455,10 +506,19 @@ pub async fn run() -> anyhow::Result<()> {
 /// # Errors
 /// Returns an error when the tokio runtime cannot start or the server fails.
 pub fn run_blocking() -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(run())
+    let config = Config::global()?;
+    let policy = crate::ipc::transport::policy(config.daemon.max_connections, &config.daemon)?;
+    crate::platform::transport::run(&policy, move |transport| {
+        let result = (|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let service =
+                Frontend::with_search_policy(transport, paths::cache_dir()?, config.search);
+            runtime.block_on(serve_stdio(service))
+        })();
+        Ok(result)
+    })?
 }
 
 #[cfg(test)]
