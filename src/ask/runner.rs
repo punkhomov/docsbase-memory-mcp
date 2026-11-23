@@ -169,11 +169,17 @@ pub async fn run(
         };
         // Keep Rig's full assistant turn: tool identities and native continuation data.
         input.chat_history.push(Arc::new(message));
+        if !fits_json(&input, AskLimits::CONTEXT) {
+            return Ok(state.stopped(&request.model, "context_limit"));
+        }
         let calls: Vec<_> = reply.tool_calls().collect();
         if calls.is_empty() {
             input.chat_history.push(Arc::new(Message::user(
                 "Use the read tools and finish_answer; free text is not the final response.",
             )));
+            if !fits_json(&input, AskLimits::CONTEXT) {
+                return Ok(state.stopped(&request.model, "context_limit"));
+            }
             continue;
         }
         for tool_call in calls {
@@ -210,6 +216,9 @@ pub async fn run(
                 tool_call.function.name.clone(),
                 output.to_string(),
             )));
+            if !fits_json(&input, AskLimits::CONTEXT) {
+                return Ok(state.stopped(&request.model, "context_limit"));
+            }
         }
     }
     Ok(state.stopped(&request.model, "turn_limit"))

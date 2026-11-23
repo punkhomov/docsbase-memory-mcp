@@ -24,3 +24,13 @@ have appeared in a previous model request, not merely in a just-executed read.
 Source metadata overhead participates in the read byte limit.
 Fresh ASK1 review requested; final/native acceptance will be recorded in the PR
 against its exact head to avoid a documentation-only CI head cycle.
+
+Task ASK1: implementation complete (generation/read loop, MCP/daemon routing,
+source provenance, offline boundary and deterministic acceptance).
+Ruling: fresh task review found one Important context-cap gap within a model turn.
+Checks now run after every history addition, including the fallback instruction.
+Three regressions demonstrate the original final-answer/read/fallback failures;
+all 18 runner tests and strict cli-full Clippy pass after the fix. Fresh re-review:
+ADDRESSED, no new Critical/Important findings. No deferred code minors.
+Native/final review receipt is maintained in PR #170 at its exact tested head;
+SC-3 live remains blocked by environment policy, with no inference/key transmission.

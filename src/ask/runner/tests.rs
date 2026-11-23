@@ -347,3 +347,88 @@ fn source_envelope_is_included_in_the_read_limit() {
         "undelivered text must not authorize a citation"
     );
 }
+
+#[tokio::test]
+async fn within_turn_overflow_cannot_finish_with_previously_valid_sources() {
+    let mut final_turn = turn(&[("finish_answer", finish(&["S1"]))]);
+    final_turn["choices"][0]["message"]["reasoning"] = json!("r".repeat(AskLimits::CONTEXT));
+    let (_, generator, call) = setup(vec![
+        (
+            200,
+            turn(&[
+                ("search_docs", json!({"query":"widget"})),
+                ("get_doc", json!({"path":"guide.md"})),
+            ]),
+        ),
+        (200, final_turn),
+    ]);
+    let result = run(request(2), generator.as_ref(), &Reads::default(), &call)
+        .await
+        .unwrap();
+    assert_eq!(result["stop_reason"], "context_limit");
+    assert!(result["answer"].is_null());
+}
+
+#[tokio::test]
+async fn within_turn_overflow_stops_before_another_document_read() {
+    struct LargeReads(std::sync::atomic::AtomicUsize);
+    impl DocumentTools for LargeReads {
+        fn call<'a>(&'a self, _: &'a str, _: Value) -> StageFuture<'a, Value> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(json!({"path":"large.md","content":"x".repeat(30*1024)})) })
+        }
+    }
+    let calls: Vec<_> = (0..8)
+        .map(|_| ("get_doc", json!({"path":"large.md"})))
+        .collect();
+    let (_, generator, call) = setup(vec![(200, turn(&calls))]);
+    let reads = LargeReads(std::sync::atomic::AtomicUsize::new(0));
+    let result = run(request(1), generator.as_ref(), &reads, &call)
+        .await
+        .unwrap();
+    assert_eq!(result["stop_reason"], "context_limit");
+    assert!(reads.0.load(std::sync::atomic::Ordering::SeqCst) < 8);
+}
+
+#[tokio::test]
+async fn within_turn_overflow_in_the_fallback_instruction_is_a_context_stop() {
+    let request = request(1);
+    let mut input = CompletionRequest::new(request.question.clone())
+        .preamble(PROMPT)
+        .max_tokens(AskLimits::OUTPUT_TOKENS);
+    input.tools = definitions().unwrap().into_iter().map(Arc::new).collect();
+    let codec = rig_core::providers::openai::wire::OpenAIConfig::with_key(
+        &rig_core::providers::openai::wire::OPENROUTER,
+        "fixture",
+    )
+    .chat("fixture/model");
+    let body = |n| json!({"id":"plain","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x".repeat(n)}}]});
+    // Find the boundary using actual Rig message/native serialization.
+    let (mut low, mut high) = (0, AskLimits::CONTEXT);
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        let reply = rig_core::wire::decode_reply(
+            &codec,
+            &input,
+            rig_core::wire::Mode::Unary,
+            [rig_core::wire::WireFrame::Bytes(
+                body(middle).to_string().into_bytes(),
+            )],
+        )
+        .unwrap();
+        let mut candidate = input.clone();
+        candidate
+            .chat_history
+            .push(Arc::new(reply.message().unwrap()));
+        if fits_json(&candidate, AskLimits::CONTEXT) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    let (_, generator, call) = setup(vec![(200, body(low))]);
+    let result = run(request, generator.as_ref(), &Reads::default(), &call)
+        .await
+        .unwrap();
+    assert_eq!(result["stop_reason"], "context_limit");
+}
