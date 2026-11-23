@@ -3,7 +3,9 @@
 use super::flush::Flush;
 #[cfg(test)]
 use super::native_io::Port;
-use super::native_io::{Direction, HandleToken, PhysicalOwner, RetirementGuard, Service};
+use super::native_io::{
+    Direction, HandleToken, PhysicalOwner, Reservation, RetirementGuard, Service,
+};
 use std::io;
 use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
 use std::pin::Pin;
@@ -265,7 +267,15 @@ impl Connection {
         chunk: usize,
         stack: usize,
     ) -> io::Result<Arc<Self>> {
-        let reservation = service.reserve()?;
+        Self::client_reserved(service, service.reserve()?, path, chunk, stack)
+    }
+    pub(super) fn client_reserved(
+        service: &Service,
+        reservation: Reservation,
+        path: &str,
+        chunk: usize,
+        stack: usize,
+    ) -> io::Result<Arc<Self>> {
         let name = name(path)?;
         // SAFETY: single overlapped open, under pre-reserved physical capacity.
         let raw = unsafe {

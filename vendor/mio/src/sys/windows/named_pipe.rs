@@ -4,7 +4,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
 use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
-use std::{fmt, mem, slice};
+use std::{fmt, mem};
 
 use windows_sys::Win32::Foundation::{
     ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
@@ -210,13 +210,14 @@ impl Inner {
     /// ports and waiting to receive the completion notification on the port.
     pub unsafe fn read_overlapped(
         &self,
-        buf: &mut [u8],
+        buf: *mut u8,
+        capacity: usize,
         overlapped: *mut OVERLAPPED,
     ) -> io::Result<Option<usize>> {
-        let len = std::cmp::min(buf.len(), u32::MAX as usize) as u32;
+        let len = std::cmp::min(capacity, u32::MAX as usize) as u32;
         let res = ReadFile(
             self.handle.raw(),
-            buf.as_mut_ptr() as *mut _,
+            buf,
             len,
             std::ptr::null_mut(),
             overlapped,
@@ -780,12 +781,13 @@ impl Inner {
             _ => return true,
         }
 
-        // Allocate a buffer and schedule the read.
         let mut buf = me.get_buffer();
+        // SAFETY: the destination is allocated but may be uninitialized.
+        // A submitted operation retains the allocation and OVERLAPPED until
+        // its completion reports which bytes Windows initialized.
         let e = unsafe {
             let overlapped = me.read.as_ptr() as *mut _;
-            let slice = slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.capacity());
-            me.read_overlapped(slice, overlapped)
+            me.read_overlapped(buf.as_mut_ptr(), buf.capacity(), overlapped)
         };
 
         match e {

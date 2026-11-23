@@ -32,8 +32,9 @@ pub fn run(port: Option<u16>, open: bool) -> anyhow::Result<()> {
         .checked_add(settings.control_connections)
         .and_then(|count| count.checked_mul(2))
         .ok_or_else(|| anyhow::anyhow!("Web native capacity overflow"))?;
-    let native_policy =
-        crate::ipc::transport::policy(native_handles, &crate::config::Config::global()?.daemon)?;
+    // Web's client scope can attach to an existing daemon even if its source config changed.
+    let defaults = crate::daemon::settings::standalone()?;
+    let native_policy = crate::ipc::transport::policy(native_handles, defaults.settings())?;
     crate::platform::transport::run(&native_policy, move |transport| {
         Ok((|| {
             let runtime = tokio::runtime::Runtime::new()?;

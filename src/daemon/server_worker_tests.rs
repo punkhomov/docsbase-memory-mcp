@@ -71,7 +71,6 @@ async fn readonly_bind_obeys_control_lane_before_session_effects() {
     let _held = shared.workers.control().await.unwrap();
     let in_flight = Arc::new(AtomicUsize::new(0));
     let (events, _) = mpsc::channel(1);
-    let (shutdown, _) = watch::channel(false);
     let scope = scoped::Scope {
         activity: Activity::new(&in_flight, &events, None),
         operation: None,
@@ -83,8 +82,7 @@ async fn readonly_bind_obeys_control_lane_before_session_effects() {
     let mut reader = FrameReader::new(BufReader::new(&b""[..]));
     let (response, _) = handle_request(
         &shared,
-        &shutdown,
-        &in_flight,
+        None,
         &mut peer,
         Request::BindReadOnly {
             pid: std::process::id(),

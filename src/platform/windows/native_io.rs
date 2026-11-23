@@ -7,8 +7,9 @@ use super::connection::NativePipe;
 use std::io;
 use std::os::windows::io::OwnedHandle;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 use tokio::runtime::{Builder, Handle, Runtime};
 
 fn locked<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -111,7 +112,10 @@ impl HandleToken {
         result
     }
     pub(super) fn abort(&self) {
-        self.aborting.store(true, Ordering::Release);
+        let already_aborting = self.aborting.swap(true, Ordering::AcqRel);
+        if !already_aborting && let Some(root) = self.root.upgrade() {
+            root.progress.signal();
+        }
         let waiters = std::mem::take(&mut *locked(&self.waiters));
         for waker in waiters.into_iter().flatten() {
             waker.wake();
@@ -163,6 +167,7 @@ impl Drop for RetirementGuard {
         self.0.native_done.store(true, Ordering::Release);
         if let Some(root) = self.0.root.upgrade() {
             root.capacity.notify_waiters();
+            root.progress.signal();
         }
     }
 }
@@ -177,8 +182,27 @@ struct Record {
     token: Arc<HandleToken>,
     owner: Option<Arc<dyn PhysicalOwner>>,
 }
+#[derive(Default)]
+struct Progress {
+    signalled: Mutex<bool>,
+    changed: Condvar,
+}
+impl Progress {
+    fn signal(&self) {
+        *locked(&self.signalled) = true;
+        self.changed.notify_one();
+    }
+    fn wait(&self, timeout: Duration) {
+        let (mut signalled, _) = self
+            .changed
+            .wait_timeout_while(locked(&self.signalled), timeout, |signalled| !*signalled)
+            .unwrap_or_else(PoisonError::into_inner);
+        *signalled = false;
+    }
+}
 struct Inner {
     records: Mutex<Vec<Option<Record>>>,
+    progress: Progress,
     accepting: AtomicBool,
     fault: Mutex<Option<&'static str>>,
     capacity: tokio::sync::Notify,
@@ -218,6 +242,7 @@ impl Port {
             .build()?;
         let inner = Arc::new(Inner {
             records: Mutex::new(records),
+            progress: Progress::default(),
             accepting: AtomicBool::new(true),
             fault: Mutex::new(None),
             capacity: tokio::sync::Notify::new(),
@@ -234,6 +259,9 @@ impl Port {
         Service {
             inner: self.inner.clone(),
         }
+    }
+    pub(super) fn wait_for_progress(&self, fallback: Duration) {
+        self.inner.progress.wait(fallback);
     }
     #[cfg(test)]
     pub(super) fn test_runtime(&self) -> &Handle {
@@ -254,6 +282,10 @@ impl Port {
     }
 }
 impl Service {
+    pub(super) fn notify_progress(&self) {
+        self.inner.progress.signal();
+    }
+
     #[cfg(test)]
     pub(super) fn test_quiesced(&self) -> bool {
         !self.inner.accepting.load(Ordering::Acquire)
@@ -434,5 +466,6 @@ impl Drop for Reservation {
             .retire(&self.token);
         }
         self.inner.capacity.notify_waiters();
+        self.inner.progress.signal();
     }
 }

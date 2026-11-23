@@ -11,7 +11,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
-use windows_sys::Win32::Foundation::ERROR_SEM_TIMEOUT;
+use windows_sys::Win32::Foundation::{ERROR_PIPE_BUSY, ERROR_SEM_TIMEOUT};
 use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
 
 #[allow(unsafe_code)] // Borrowed name and finite caller-owned wait; no handle or worker.
@@ -96,13 +96,14 @@ impl Transport {
         )
     }
     fn connection(&self, endpoint: &Endpoint) -> io::Result<Arc<Connection>> {
-        self.connection_raw(endpoint).map_err(|error| {
-            if error.raw_os_error() == Some(231) {
-                io::Error::new(io::ErrorKind::TimedOut, error)
-            } else {
-                error
-            }
-        })
+        self.connection_raw(endpoint).map_err(Self::connect_error)
+    }
+    fn connect_error(error: io::Error) -> io::Error {
+        if error.raw_os_error() == Some(ERROR_PIPE_BUSY.cast_signed()) {
+            io::Error::new(io::ErrorKind::TimedOut, error)
+        } else {
+            error
+        }
     }
     /// One nonblocking native connection attempt; no helper or retry.
     /// # Errors
@@ -112,6 +113,32 @@ impl Transport {
         endpoint: &Endpoint,
     ) -> impl Future<Output = io::Result<Stream>> + Send {
         poll_fn(move |_| Poll::Ready(Stream::new(self.connection(endpoint)?)))
+    }
+    /// Wait for a local physical slot under the caller's deadline, then make one native open.
+    pub(crate) async fn connect_async_with_capacity(
+        &self,
+        endpoint: &Endpoint,
+    ) -> io::Result<Stream> {
+        let path = super::pipe_path(endpoint)?;
+        let reservation = loop {
+            let changed = self.service.capacity_changed();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            match self.service.reserve() {
+                Ok(reservation) => break reservation,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => changed.await,
+                Err(error) => return Err(error),
+            }
+        };
+        let connection = Connection::client_reserved(
+            &self.service,
+            reservation,
+            &path,
+            self.options.chunk_bytes,
+            self.options.helper_stack_bytes,
+        )
+        .map_err(Self::connect_error)?;
+        Stream::new(connection)
     }
     /// One native connection attempt, using the same owned I/O as async clients.
     /// # Errors
@@ -376,6 +403,9 @@ fn blocking<T>(
     let mut cx = Context::from_waker(&waker);
     let mut future = std::pin::pin!(future);
     loop {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
         *signal
             .signalled
             .lock()
@@ -587,5 +617,38 @@ impl Iterator for Incoming<'_> {
         let result = self.listener.accept();
         self.done = result.is_err();
         Some(result)
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn wake_after_blocking_deadline_cannot_repoll_operation() {
+        let timeout = Duration::from_millis(100);
+        let mut polls = 0;
+        let result = blocking(
+            poll_fn(|cx| {
+                polls += 1;
+                if polls == 1 {
+                    let late = Instant::now() + timeout;
+                    while Instant::now() <= late {
+                        std::thread::park_timeout(late.saturating_duration_since(Instant::now()));
+                    }
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            }),
+            Some(timeout),
+            false,
+        );
+        assert!(
+            matches!(result, Err(error) if error.kind() == io::ErrorKind::TimedOut),
+            "wake after the absolute deadline cannot admit another poll"
+        );
+        assert!(polls <= 1);
     }
 }

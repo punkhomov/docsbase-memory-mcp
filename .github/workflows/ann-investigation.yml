@@ -18,19 +18,5 @@ jobs:
         with:
           key: pr164-review-regression
           cache-on-failure: true
-      - name: Reproduce one-slot MCP reconnect
-        shell: python
-        run: |
-          import subprocess
-          cases = [
-              ('one_slot_mcp_waits_for_physical_capacity_and_retries_once', 'MCP must wait for actual retirement of its only slot'),
-          ]
-          for test, failure in cases:
-              result = subprocess.run(['cargo', 'test', '--locked', '--lib', test, '--', '--nocapture'],
-                                      capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=900)
-              print(result.stdout, flush=True)
-              print(result.stderr, flush=True)
-              if failure is None:
-                  assert result.returncode == 0 and '1 passed; 0 failed' in result.stdout, test
-              else:
-                  assert result.returncode != 0 and '0 passed; 1 failed' in result.stdout and failure in result.stderr, test
+      - name: Exercise all lean native library tests including review regressions
+        run: cargo test --locked --lib -- --test-threads=4

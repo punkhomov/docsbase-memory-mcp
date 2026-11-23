@@ -34,13 +34,29 @@ impl AsyncClient {
         let stream = transport
             .connect_async(&platform::daemon_endpoint(cache))
             .await?;
+        Ok(Self::from_stream(stream))
+    }
+
+    /// Waits for local physical capacity under the caller's deadline before one open.
+    #[cfg(windows)]
+    pub(crate) async fn connect_with_capacity(
+        transport: &Transport,
+        cache: &Path,
+    ) -> std::io::Result<Self> {
+        let stream = transport
+            .connect_async_with_capacity(&platform::daemon_endpoint(cache))
+            .await?;
+        Ok(Self::from_stream(stream))
+    }
+
+    fn from_stream(stream: Stream) -> Self {
         let (read, writer) = tokio::io::split(stream);
-        Ok(Self {
+        Self {
             reader: FrameReader::new(BufReader::new(read)),
             writer,
             capabilities: Vec::new(),
             poisoned: false,
-        })
+        }
     }
 
     /// Exchanges one capped frame. Dropping this future poisons the connection.

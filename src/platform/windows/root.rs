@@ -4,6 +4,7 @@ use super::native_io::{Port, Service};
 use std::future::Future;
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::time::Duration;
 use std::time::Instant;
@@ -59,6 +60,7 @@ fn run_outside<T: Send>(
     // Only application work moves to this scoped thread. Port, the progress
     // JoinHandle and physical owners stay on this synchronous outer thread.
     // FnOnce includes future/runtime construction, not just later polling.
+    let work_returned = AtomicBool::new(false);
     let result = catch_unwind(AssertUnwindSafe(|| {
         std::thread::scope(|scope| {
             // If outer housekeeping unwinds, request cancellation BEFORE
@@ -69,8 +71,16 @@ fn run_outside<T: Send>(
                     self.0.abort();
                 }
             }
+            struct NotifyOnWorkReturn<'a>(&'a AtomicBool, Service);
+            impl Drop for NotifyOnWorkReturn<'_> {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Release);
+                    self.1.notify_progress();
+                }
+            }
             let _abort = AbortOnReturn(&service);
             let submission = service.clone();
+            let returned = &work_returned;
             let application = std::thread::Builder::new()
                 .name("docsbase-transport-work".into())
                 .stack_size(options.work_stack_bytes)
@@ -78,16 +88,19 @@ fn run_outside<T: Send>(
                     // Preserve future-construction context without polling on
                     // the caller's executor. A runtime built by work enters its
                     // own context for block_on and restores this guard on exit.
+                    let _return_signal = NotifyOnWorkReturn(returned, submission.clone());
                     let _ambient = ambient.as_ref().map(Handle::enter);
                     work(submission)
                 })?;
-            while !application.is_finished() {
+            // The completion signal says the user work returned or unwound.
+            // It can precede the OS thread signal, so joining is still required.
+            while !work_returned.load(Ordering::Acquire) {
                 if service.reap().is_err() {
                     // Fault means closed admission/quarantine, never detaching
                     // physical owners or abandoning the application thread.
                     service.abort();
                 }
-                std::thread::sleep(options.drain_poll);
+                port.wait_for_progress(options.drain_poll);
             }
             match application.join() {
                 Ok(result) => result,
@@ -122,7 +135,7 @@ fn run_outside<T: Send>(
         }
         // This owner does not require a live/polling application runtime.
         // Observation is never a native timeout or permission to detach.
-        std::thread::sleep(options.drain_poll);
+        port.wait_for_progress(options.drain_poll);
     }
     match result {
         Ok(result) => result,
@@ -136,6 +149,33 @@ mod tests {
     use crate::platform::windows::connection::{Connection, Listening, Pipe};
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn idle_owner_returns_when_application_finishes_before_reap_interval() {
+        let options = Options {
+            handles: 1,
+            chunk_bytes: 4096,
+            helper_stack_bytes: 1024 * 1024,
+            work_stack_bytes: 2 * 1024 * 1024,
+            drain_poll: Duration::from_secs(10),
+            drain_observation: Duration::from_secs(30),
+        };
+        let returned = run(&options, |service| {
+            let gate_deadline = Instant::now() + Duration::from_secs(30);
+            // Causally reach the outer owner's waiting path before allowing
+            // work to return. No resources or native completions can wake it.
+            while !service.test_reaped() {
+                assert!(Instant::now() < gate_deadline, "outer owner reaped");
+                std::thread::yield_now();
+            }
+            Ok(Instant::now())
+        })
+        .unwrap();
+        assert!(
+            returned.elapsed() < Duration::from_secs(5),
+            "idle root must wake on application exit"
+        );
+    }
 
     #[test]
     fn synchronous_work_does_not_block_outer_native_retirement() {

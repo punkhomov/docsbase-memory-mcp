@@ -71,3 +71,11 @@ passes21ownership scenarios, two meaningful mutation REDs and the controlled
 submitted-connect classification probe (run44267931680). L2 full composition
 and required PR checks remain separate acceptance gates; advisory166 blocks the
 mandatory native jobs. No production readiness or merge is implied by L1.
+
+Delta 2026-11-23: GitHub withdrew GHSA-fc5q-39xc-vjpf and the pinned pnpm
+12.16.1 audit passes on the frozen workspace. Remove the temporary exception
+from #164. The published build path uses the repository root Cargo manifest.
+Cargo ignores dependency manifests' [patch] tables. A downstream Windows Cargo
+workspace embedding docsbase from source currently needs to apply the same two
+path overrides at its workspace root. Crates.io publication and a supported
+embedded Windows API remain separate work under #80.

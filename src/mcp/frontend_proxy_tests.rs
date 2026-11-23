@@ -578,15 +578,26 @@ async fn one_slot_mcp_waits_for_physical_capacity_and_retries_once() {
         let client_transport = crate::test_transport::TestTransport::new(1);
         fake.frontend.transport = (*client_transport).clone();
         let endpoint = platform::daemon_endpoint(fake.cache.path());
+        let filler_cache = tempfile::tempdir().expect("filler cache");
+        let filler_endpoint = platform::daemon_endpoint(filler_cache.path());
+        let filler_listener =
+            platform::bind(&fake.transport, &filler_endpoint).expect("separate filler listener");
         let old = client_transport
-            .connect_async(&endpoint)
+            .connect_async(&filler_endpoint)
             .await
             .expect("open the only client slot");
+        let _filler_peer = filler_listener
+            .accept()
+            .await
+            .expect("accept filler connection");
         let owner = old.ownership();
         let (entered, observed) = std::sync::mpsc::channel();
         let (release, proceed) = std::sync::mpsc::channel();
-        let caller = std::thread::spawn(move || owner.test_hold_write_cancellation(entered, proceed));
-        observed.recv_timeout(WATCHDOG).expect("native caller holds owner");
+        let caller =
+            std::thread::spawn(move || owner.test_hold_write_cancellation(entered, proceed));
+        observed
+            .recv_timeout(WATCHDOG)
+            .expect("native caller holds owner");
         drop(old);
 
         let raw_connect = client_transport.connect_async(&endpoint).await;
@@ -596,10 +607,19 @@ async fn one_slot_mcp_waits_for_physical_capacity_and_retries_once() {
         release.send(()).expect("release native owner");
         caller.join().expect("native caller joined");
 
-        assert!(matches!(raw_connect, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
-        assert!(while_full.is_pending(), "MCP must wait for actual retirement of its only slot");
-        assert!(!sent_while_full, "local admission must send no daemon request");
-        *fake.frontend.conn.lock().await = Some(open.await.expect("one handshake after retirement"));
+        assert!(
+            matches!(raw_connect, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        assert!(
+            while_full.is_pending(),
+            "MCP must wait for actual retirement of its only slot"
+        );
+        assert!(
+            !sent_while_full,
+            "local admission must send no daemon request"
+        );
+        *fake.frontend.conn.lock().await =
+            Some(open.await.expect("one handshake after retirement"));
 
         let value = fake
             .frontend
@@ -614,7 +634,10 @@ async fn one_slot_mcp_waits_for_physical_capacity_and_retries_once() {
                 hellos += 1;
             }
         }
-        assert_eq!(hellos, 2, "only the original exchange and its reconnect open a session");
+        assert_eq!(
+            hellos, 2,
+            "only the original exchange and its reconnect open a session"
+        );
     })
     .await
     .expect("one-slot MCP admission watchdog");

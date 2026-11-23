@@ -258,8 +258,11 @@ async fn open_conn(
     transport: &crate::platform::transport::Transport,
     cache: &Path,
 ) -> Result<Conn> {
-    let mut client = AsyncClient::connect(transport, cache)
-        .await
+    #[cfg(windows)]
+    let client = AsyncClient::connect_with_capacity(transport, cache).await;
+    #[cfg(unix)]
+    let client = AsyncClient::connect(transport, cache).await;
+    let mut client = client
         .map_err(|error| Error::transport_with_source("connect daemon after startup", error))?;
     let cwd = std::env::current_dir()
         .map_err(|error| Error::internal_with_source("resolve cwd", error))?;
@@ -447,7 +450,15 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for CappedRead<R> {
 /// Returns an error when the runtime or MCP transport fails.
 pub async fn run(transport: crate::platform::transport::Transport) -> anyhow::Result<()> {
     let cache = paths::cache_dir()?;
-    let service = Frontend::with_search_policy(transport, cache, Config::global()?.search);
+    serve_stdio(Frontend::with_search_policy(
+        transport,
+        cache,
+        Config::global()?.search,
+    ))
+    .await
+}
+
+async fn serve_stdio(service: Frontend) -> anyhow::Result<()> {
     let stdin = CappedRead::new(tokio::io::stdin(), MAX_FRAME_BYTES);
     let transport = rmcp::transport::async_rw::AsyncRwTransport::<RoleServer, _, _>::new_server(
         stdin,
@@ -468,14 +479,16 @@ pub async fn run(transport: crate::platform::transport::Transport) -> anyhow::Re
 /// # Errors
 /// Returns an error when the tokio runtime cannot start or the server fails.
 pub fn run_blocking() -> anyhow::Result<()> {
-    let daemon = Config::global()?.daemon;
-    let policy = crate::ipc::transport::policy(daemon.max_connections, &daemon)?;
+    let config = Config::global()?;
+    let policy = crate::ipc::transport::policy(config.daemon.max_connections, &config.daemon)?;
     crate::platform::transport::run(&policy, move |transport| {
         let result = (|| {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(run(transport))
+            let service =
+                Frontend::with_search_policy(transport, paths::cache_dir()?, config.search);
+            runtime.block_on(serve_stdio(service))
         })();
         Ok(result)
     })?

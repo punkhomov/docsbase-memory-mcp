@@ -1408,6 +1408,12 @@ async fn write_frame_error(
     let _ = scoped::reply(writer, response, None, false, true, deadline).await;
 }
 
+struct StopRequest<'a> {
+    shutdown: &'a watch::Sender<bool>,
+    in_flight: &'a AtomicUsize,
+    deadline: Instant,
+}
+
 #[allow(clippy::too_many_lines)] // Ordered request ownership, delivery and connection cancellation form one scope.
 async fn handle_connection_in(
     shared: Arc<Shared>,
@@ -1467,8 +1473,11 @@ async fn handle_connection_in(
                 }
                 let decoded = protocol::decode_request(&line);
                 // Stop's drain and final ACK share its original whole budget.
-                let stop_deadline = matches!(&decoded, Ok(Request::StopDaemon)).then(|| {
-                    Instant::now() + Duration::from_millis(shared.daemon_settings().reply_drain_ms)
+                let stop = matches!(&decoded, Ok(Request::StopDaemon)).then(|| StopRequest {
+                    shutdown: &shutdown,
+                    in_flight: &in_flight,
+                    deadline: Instant::now()
+                        + Duration::from_millis(shared.daemon_settings().reply_drain_ms),
                 });
                 let scope = match &decoded {
                     Ok(request) => scoped::Scope::new(&shared, request, Arc::clone(&guard)),
@@ -1485,8 +1494,7 @@ async fn handle_connection_in(
                     (Ok(request), Ok(scope)) => {
                         handle_request(
                             &shared,
-                            &shutdown,
-                            &in_flight,
+                            stop.as_ref(),
                             &mut peer,
                             request,
                             scope,
@@ -1503,10 +1511,13 @@ async fn handle_connection_in(
                     .and_then(|scope| scope.operation.as_ref());
                 // Non-search control delivery starts when its response is ready.
                 // Search and Stop retain their original absolute deadlines.
-                let control_deadline = stop_deadline.unwrap_or_else(|| {
-                    Instant::now()
-                        + Duration::from_millis(shared.daemon_settings().control_timeout_ms)
-                });
+                let control_deadline = stop.map_or_else(
+                    || {
+                        Instant::now()
+                            + Duration::from_millis(shared.daemon_settings().control_timeout_ms)
+                    },
+                    |stop| stop.deadline,
+                );
                 let delivered = scoped::reply(
                     &mut writer,
                     response,
@@ -1552,8 +1563,7 @@ async fn handle_connection_in(
 #[allow(clippy::too_many_lines)] // Exhaustive wire dispatcher; each arm owns one protocol operation.
 async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
     shared: &Arc<Shared>,
-    shutdown: &watch::Sender<bool>,
-    in_flight: &Arc<AtomicUsize>,
+    stop: Option<&StopRequest<'_>>,
     peer: &mut Peer,
     request: Request,
     scope: &scoped::Scope,
@@ -1726,6 +1736,12 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
             }
         }
         Request::StopDaemon => {
+            let Some(stop) = stop else {
+                return (
+                    error_response(&Error::internal("missing stop context")),
+                    true,
+                );
+            };
             // Idempotent: only the first stop drains and signals shutdown, so
             // concurrent stops (install retries) cannot wait on each other
             // (FR-5, FR-6). The drain lets every other request finish; the
@@ -1734,12 +1750,12 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                 shared.close_watchers();
                 let settings = shared.daemon_settings();
                 wait_for_drain(
-                    in_flight,
-                    Duration::from_millis(settings.reply_drain_ms),
+                    stop.in_flight,
+                    tokio::time::Instant::from_std(stop.deadline),
                     Duration::from_millis(settings.drain_poll_ms),
                 )
                 .await;
-                let _ = shutdown.send(true);
+                let _ = stop.shutdown.send(true);
             }
             (Response::ToolResult { value: Value::Null }, true)
         }
@@ -1775,36 +1791,40 @@ async fn call_and_respond(
 /// Waits until only the stopping request itself is in flight; `false` on
 /// timeout so a wedged request cannot hold shutdown forever (T46). SIGTERM
 /// remains the operator's escalation path.
-async fn wait_for_drain(in_flight: &AtomicUsize, timeout: Duration, poll: Duration) -> bool {
+async fn wait_for_drain(
+    in_flight: &AtomicUsize,
+    deadline: tokio::time::Instant,
+    poll: Duration,
+) -> bool {
     wait_for_drain_with(
         in_flight,
-        timeout,
+        deadline,
         poll,
         tokio::time::Instant::now,
-        tokio::time::sleep,
+        tokio::time::sleep_until,
     )
     .await
 }
 
 async fn wait_for_drain_with<N, S, F>(
     in_flight: &AtomicUsize,
-    timeout: Duration,
+    deadline: tokio::time::Instant,
     poll: Duration,
     mut now: N,
-    mut sleep: S,
+    mut sleep_until: S,
 ) -> bool
 where
     N: FnMut() -> tokio::time::Instant,
-    S: FnMut(Duration) -> F,
+    S: FnMut(tokio::time::Instant) -> F,
     F: std::future::Future<Output = ()>,
 {
-    let deadline = now() + timeout;
     while in_flight.load(Ordering::SeqCst) > 1 {
         let current = now();
         if current >= deadline {
             return false;
         }
-        sleep(poll.min(deadline.duration_since(current))).await;
+        let wake_at = current + poll.min(deadline.duration_since(current));
+        sleep_until(wake_at).await;
     }
     true
 }
@@ -2905,23 +2925,24 @@ mod tests {
             .unwrap();
         let stuck = AtomicUsize::new(2);
         let base = tokio::time::Instant::now();
-        let elapsed = Cell::new(Duration::ZERO);
+        // Work after StopDaemon admission has already spent most of the budget.
+        let elapsed = Cell::new(Duration::from_micros(900));
         let sleeps = RefCell::new(Vec::new());
         let result = wait_for_drain_with(
             &stuck,
-            Duration::from_millis(policy.settings().reply_drain_ms),
+            base + Duration::from_millis(policy.settings().reply_drain_ms),
             Duration::from_millis(policy.settings().drain_poll_ms),
             || base + elapsed.get(),
-            |duration| {
-                sleeps.borrow_mut().push(duration);
-                elapsed.set(elapsed.get() + duration);
+            |wake_at| {
+                sleeps.borrow_mut().push(wake_at);
+                elapsed.set(wake_at.duration_since(base));
                 std::future::ready(())
             },
         )
         .await;
         assert!(!result);
         assert_eq!(elapsed.get(), Duration::from_millis(1));
-        assert_eq!(*sleeps.borrow(), [Duration::from_millis(1)]);
+        assert_eq!(*sleeps.borrow(), [base + Duration::from_millis(1)]);
     }
 
     #[tokio::test]
@@ -2931,7 +2952,7 @@ mod tests {
         assert!(
             !wait_for_drain(
                 &stuck,
-                Duration::from_millis(50),
+                started + Duration::from_millis(50),
                 Duration::from_millis(crate::daemon::settings::DaemonSpec::DEFAULTS.drain_poll_ms)
             )
             .await
@@ -2945,7 +2966,7 @@ mod tests {
         assert!(
             wait_for_drain(
                 &idle,
-                Duration::from_millis(50),
+                tokio::time::Instant::now() + Duration::from_millis(50),
                 Duration::from_millis(crate::daemon::settings::DaemonSpec::DEFAULTS.drain_poll_ms)
             )
             .await
