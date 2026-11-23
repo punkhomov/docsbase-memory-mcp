@@ -778,3 +778,11 @@ tests/search_representation.rs, dated specs/progress. No production/live edits.
 - [x] Test independent axes/citations/reuse and fail-closed error cases.
 - [x] Default/cli-full, unchanged gate, fmt/Clippy; fresh review/fixes/ledger.
 - [ ] Final review/native CI/guarded squash integration; #71 remains open.
+
+## Delta 2026-11-23 — T24: live command runtime (#167)
+
+Use one existing synchronous command runtime per manual live entry. Construct
+and use the HTTP clients within that scope so the standalone harness can drive
+the synchronous adapter introduced by #162. Verify the real adapter reaches
+HTTP request validation without sending a request. Preserve the four modes,
+cost and pacing rules, frozen data and weekly/manual workflow.

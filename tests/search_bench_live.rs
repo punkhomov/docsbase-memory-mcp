@@ -14,6 +14,35 @@ use docsbase_memory::vector_cache::Embedder;
 
 mod support;
 
+// Construct each transport inside the command. Reqwest captures the bridge
+// at construction, and the same runtime must drive it through the last call.
+fn with_live_command<T: Send + 'static>(
+    work: impl FnOnce() -> docsbase_memory::error::Result<T> + Send + 'static,
+) -> docsbase_memory::error::Result<T> {
+    let policy = docsbase_memory::daemon::settings::standalone()?;
+    docsbase_memory::daemon::remote::with_sync_command(policy.settings(), work)
+}
+
+/// A malformed URL exercises the real transport's request future without I/O.
+#[test]
+fn live_runner_drives_the_real_sync_transport() {
+    use docsbase_memory::hybrid::openrouter::ReqwestTransport;
+    use docsbase_memory::hybrid::wire::Transport;
+    use std::error::Error as _;
+
+    let result = with_live_command(|| ReqwestTransport::new()?.post_json("http://[", &[], "{}"));
+    let Err(error) = result else {
+        panic!("reqwest must reject a malformed URL");
+    };
+    let source = error
+        .source()
+        .and_then(|source| source.downcast_ref::<reqwest::Error>());
+    assert!(
+        source.is_some_and(reqwest::Error::is_builder),
+        "the benchmark command must reach reqwest request validation: {error:?}"
+    );
+}
+
 fn openrouter_key() -> Option<String> {
     std::env::var("OPENROUTER_API_KEY")
         .ok()
@@ -29,6 +58,10 @@ fn openrouter_key() -> Option<String> {
 #[ignore = "manual: records production fixtures with OPENROUTER_API_KEY (FR-19)"]
 fn record_fixtures() {
     openrouter_key().expect("export OPENROUTER_API_KEY to record fixtures");
+    with_live_command(record_full_corpus).expect("run fixture recording command");
+}
+
+fn record_full_corpus() -> docsbase_memory::error::Result<()> {
     let embed_cfg = EmbeddingCfg::default();
     let rerank_cfg = RerankerCfg::default();
     let embed_pin = embedding_model_id(&embed_cfg);
@@ -48,29 +81,23 @@ fn record_fixtures() {
         "record needs the finalized corpus (T6+)"
     );
     let env = support::bench::build_env(&root.join("corpus"), "record", 60..=85).expect("index");
-    let embedder: Arc<dyn Embedder> =
-        Arc::new(OpenRouterEmbedder::new(embed_cfg).expect("embedder"));
-    let reranker = OpenRouterReranker::new(rerank_cfg).expect("reranker");
+    let embedder: Arc<dyn Embedder> = Arc::new(OpenRouterEmbedder::new(embed_cfg)?);
+    let reranker = OpenRouterReranker::new(rerank_cfg)?;
     let vectors_dir = root
         .join("vectors")
         .join(support::bench::pin_slug(&embed_pin));
     let rerank_path = root
         .join("rerank")
         .join(format!("{}.json", support::bench::pin_slug(&rerank_pin)));
-    // Network calls require the sanctioned blocking context (I3); the test
-    // thread is not one, so enter it explicitly.
-    docsbase_memory::hybrid::blocking::enter(|| {
-        support::bench::record_fixtures_with(
-            &env,
-            &fixtures.cases,
-            &embedder,
-            &reranker,
-            &rerank_pin,
-            &vectors_dir,
-            &rerank_path,
-        )
-        .map_err(|err| docsbase_memory::error::Error::internal(err.to_string()))
-    })
+    support::bench::record_fixtures_with(
+        &env,
+        &fixtures.cases,
+        &embedder,
+        &reranker,
+        &rerank_pin,
+        &vectors_dir,
+        &rerank_path,
+    )
     .expect("record");
     // Reload what was written: the replay path must accept it verbatim.
     let loaded_vectors = support::bench::VectorFixture::load(&vectors_dir).expect("reload vectors");
@@ -86,6 +113,7 @@ fn record_fixtures() {
             .map_or(0, std::collections::HashMap::len),
         loaded_rerank.pools.len()
     );
+    Ok(())
 }
 /// Tiny live smoke: records 5 docs + 2 cases, then replays offline.
 /// Cost is negligible (FR-18 $2 cap).
@@ -97,6 +125,10 @@ fn live_record_and_replay() {
         return;
     };
     assert_ne!(key.trim(), "");
+    with_live_command(record_smoke_corpus).expect("run live record smoke command");
+}
+
+fn record_smoke_corpus() -> docsbase_memory::error::Result<()> {
     let tmp = tempfile::TempDir::new().expect("tmp");
     let corpus = tmp.path().join("corpus");
     std::fs::create_dir_all(&corpus).expect("mkdir corpus");
@@ -125,23 +157,19 @@ fn live_record_and_replay() {
             reviewed_by: vec![],
         })
         .collect::<Vec<_>>();
-    let embedder: Arc<dyn Embedder> =
-        Arc::new(OpenRouterEmbedder::new(EmbeddingCfg::default()).expect("embedder"));
-    let reranker = OpenRouterReranker::new(RerankerCfg::default()).expect("reranker");
+    let embedder: Arc<dyn Embedder> = Arc::new(OpenRouterEmbedder::new(EmbeddingCfg::default())?);
+    let reranker = OpenRouterReranker::new(RerankerCfg::default())?;
     let vectors_dir = tmp.path().join("vectors");
     let rerank_path = tmp.path().join("rerank.json");
-    docsbase_memory::hybrid::blocking::enter(|| {
-        support::bench::record_fixtures_with(
-            &env,
-            &cases,
-            &embedder,
-            &reranker,
-            "openrouter/nvidia/llama-nemotron-rerank-vl-1b-v2:free",
-            &vectors_dir,
-            &rerank_path,
-        )
-        .map_err(|err| docsbase_memory::error::Error::internal(err.to_string()))
-    })
+    support::bench::record_fixtures_with(
+        &env,
+        &cases,
+        &embedder,
+        &reranker,
+        "openrouter/nvidia/llama-nemotron-rerank-vl-1b-v2:free",
+        &vectors_dir,
+        &rerank_path,
+    )
     .expect("live record");
     // Reload from disk and replay fully offline.
     let loaded_vectors = support::bench::VectorFixture::load(&vectors_dir).expect("load vectors");
@@ -175,6 +203,7 @@ fn live_record_and_replay() {
             "{cfg:?}: replay produced no citations"
         );
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -419,16 +448,13 @@ fn measure_live_config(
         rerank_recorder.usage().calls,
         rerank_recorder.usage().search_units,
     );
-    let (run, latencies) = docsbase_memory::hybrid::blocking::enter(|| {
-        support::bench::run_config_timed_with_query_cache(
-            env,
-            &fixtures.cases,
-            cfg,
-            stages,
-            Some(query_cache),
-        )
-        .map_err(|err| docsbase_memory::error::Error::internal(err.to_string()))
-    })
+    let (run, latencies) = support::bench::run_config_timed_with_query_cache(
+        env,
+        &fixtures.cases,
+        cfg,
+        stages,
+        Some(query_cache),
+    )
     .expect("live run");
     let spent_after = embed_recorder.spent_usd() + rerank_recorder.spent_usd();
     let cost = (spent_after - spent_before).max(0.0);
@@ -506,23 +532,20 @@ fn baseline_delta_warnings(root: &std::path::Path, points: &[ParetoPoint]) -> Ve
 fn live_client(
     key: &str,
     pin: &str,
-) -> (
+) -> docsbase_memory::error::Result<(
     docsbase_memory::hybrid::openrouter::OpenRouterClient,
     support::bench::live_transport::RecordingTransport,
-) {
+)> {
     let recorder = support::bench::live_transport::RecordingTransport::new(
-        std::sync::Arc::new(
-            docsbase_memory::hybrid::openrouter::ReqwestTransport::new().expect("transport"),
-        ),
+        Arc::new(docsbase_memory::hybrid::openrouter::ReqwestTransport::new()?),
         pin,
     );
     let client = docsbase_memory::hybrid::openrouter::OpenRouterClient::new(
         docsbase_memory::hybrid::openrouter::BASE_URL,
         key,
         Box::new(recorder.clone()),
-    )
-    .expect("client");
-    (client, recorder)
+    )?;
+    Ok((client, recorder))
 }
 
 /// Full live run of the four configs against the real provider (FR-17):
@@ -532,12 +555,14 @@ fn live_client(
 #[test]
 #[ignore = "manual: live measurement with OPENROUTER_API_KEY (FR-17)"]
 fn live_measurement() {
-    use std::sync::Arc;
-
     let Some(key) = openrouter_key() else {
         eprintln!("SKIP: export OPENROUTER_API_KEY to run the live measurement");
         return;
     };
+    with_live_command(move || measure_live(&key)).expect("run live benchmark command");
+}
+
+fn measure_live(key: &str) -> docsbase_memory::error::Result<()> {
     let (cap, defaulted) = cost_cap_from_env();
     if defaulted {
         eprintln!("note: DOCSBASE_BENCH_COST_CAP_USD unset, using default $2.00");
@@ -549,7 +574,7 @@ fn live_measurement() {
     let rerank_cfg = RerankerCfg::default();
     let embed_pin = embedding_model_id(&embed_cfg);
     let rerank_pin = format!("{}/{}", rerank_cfg.provider, rerank_cfg.model);
-    let (embed_client, embed_recorder) = live_client(&key, &embed_pin);
+    let (embed_client, embed_recorder) = live_client(key, &embed_pin)?;
     // Per-query search embeds go through pacing (free tier ~20 req/min);
     // the same instance serves the index-time backfill below.
     let embedder: Arc<dyn Embedder> = Arc::new(support::bench::PacingEmbedder::new(
@@ -558,20 +583,17 @@ fn live_measurement() {
     ));
     // Production parity: index-time backfill through the live embedder, so
     // dense configs measure with real cached chunks (never an empty cache).
-    docsbase_memory::hybrid::blocking::enter(|| {
-        docsbase_memory::hybrid::jobs::embed_project_chunks_with(
-            &env.db,
-            embedder.as_ref(),
-            env.project.id,
-        )
-        .map_err(|err| docsbase_memory::error::Error::internal(err.to_string()))
-    })
+    docsbase_memory::hybrid::jobs::embed_project_chunks_with(
+        &env.db,
+        embedder.as_ref(),
+        env.project.id,
+    )
     .expect("backfill");
     // One query-vector cache for the whole run: the two dense configs embed the
     // same queries, so the second one is served from the cache
     // (`search-cost` SC-4).
     let query_cache = docsbase_memory::hybrid::dense::DenseCache::new();
-    let (rerank_client, rerank_recorder) = live_client(&key, &rerank_pin);
+    let (rerank_client, rerank_recorder) = live_client(key, &rerank_pin)?;
     let reranker: Arc<dyn docsbase_memory::hybrid::Reranker> = Arc::new(
         // Free tiers allow ~20 requests/minute; pace bulk live calls.
         support::bench::PacingReranker::new(
@@ -630,6 +652,7 @@ fn live_measurement() {
     }
     std::fs::write(&out, serde_json::to_string_pretty(&report).expect("json")).expect("write");
     println!("live report: {} (cost ${total_cost:.4})", out.display());
+    Ok(())
 }
 
 /// Offline wire verification through the real provider adapter and recorder.
