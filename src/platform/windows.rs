@@ -298,6 +298,17 @@ pub(crate) fn file_identity_and_links(
     ))
 }
 
+/// Inspect an ordinary single-link file using a no-follow handle. Closing
+/// this handle leaves locks owned by other handles intact.
+pub(crate) fn check_single_link(path: &Path) -> io::Result<()> {
+    let file = open_readonly_nofollow(path)?;
+    let metadata = file.metadata()?;
+    if !is_regular_nofollow(&metadata) || file_identity_and_links(&file, &metadata)?.1 != 1 {
+        return Err(io::Error::other("expected one link to an ordinary file"));
+    }
+    Ok(())
+}
+
 /// Opens an existing path read-only, opening a final reparse point itself.
 /// Does not create or truncate; callers reject symlink/non-regular handles.
 ///

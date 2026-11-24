@@ -635,3 +635,15 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   local metadata identity and its content revision under the appropriate
   leases. Connect explicit legacy registration to the stopped-storage path
   and keep activation behind CF11b–CF11d.
+
+## Delta 2026-11-24 — CF11a, inspect the selected storage pair
+
+- [x] CF11a-2b1: Resolve one registered project from a quiescent v3/v4
+  registry. Hold the existing project lease and the v4 generation read
+  lease while validating the selected SQLite metadata and Tantivy files.
+  Check the local metadata format, project/generation identity, revision
+  and pending state. Never use another layout on failure. Test real pairs
+  and the absence of filesystem writes through the library inspector.
+- [ ] CF11a-2b2: Add the stopped, explicitly authorized transition that
+  registers existing legacy pairs. The publisher and live reader pool
+  remain CF11b–CF11d work.

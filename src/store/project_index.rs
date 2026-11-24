@@ -36,8 +36,9 @@ impl ProjectIndex {
 }
 
 pub(crate) fn legacy_tantivy_dir(cache: &Path, project_id: i64) -> PathBuf {
-    cache
-        .join("projects")
-        .join(project_id.to_string())
-        .join("tantivy")
+    project_directory(cache, project_id).join("tantivy")
+}
+
+pub(super) fn project_directory(cache: &Path, project_id: i64) -> PathBuf {
+    cache.join("projects").join(project_id.to_string())
 }

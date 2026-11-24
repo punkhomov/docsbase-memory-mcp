@@ -520,6 +520,17 @@ pub(crate) fn file_identity_and_links(
     ))
 }
 
+/// Inspect an ordinary single-link file without opening a descriptor. Closing
+/// a second descriptor for a database can release the process's SQLite locks.
+pub(crate) fn check_single_link(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(path)?;
+    if !is_regular_nofollow(&metadata) || metadata.nlink() != 1 {
+        return Err(io::Error::other("expected one link to an ordinary file"));
+    }
+    Ok(())
+}
+
 /// Opens an existing path read-only without following a final symlink.
 /// Does not create, truncate or change permissions; callers check file type.
 /// Nonblocking open lets callers reject FIFOs without waiting for a writer.

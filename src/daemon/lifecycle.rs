@@ -1101,7 +1101,11 @@ pub(crate) fn with_existing_project_read_lease<T>(
     with_read_lock(file, &path, work)
 }
 
-fn with_read_lock<T>(file: File, path: &Path, work: impl FnOnce() -> Result<T>) -> Result<T> {
+pub(crate) fn with_read_lock<T>(
+    file: File,
+    path: &Path,
+    work: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let lock = RwLock::new(file);
     let _guard = lock.try_read().map_err(|err| {
         if err.kind() == std::io::ErrorKind::WouldBlock {

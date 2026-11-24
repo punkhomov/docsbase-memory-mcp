@@ -1,0 +1,327 @@
+//! Quiescent read of the metadata/Tantivy pair selected by one registry head.
+use std::fs;
+use std::path::Path;
+
+use rusqlite::Connection;
+
+use super::{
+    InspectionLimits, UnavailableReason as Why, presence, schema_version, sqlite_failure, validate,
+    with_locked_db, with_registry,
+};
+use crate::config::capture::{ReadFailure, read_bounded};
+use crate::config::schema::{Capabilities, Resolved, SettingsSpec};
+use crate::daemon::lifecycle;
+use crate::error::Result;
+use crate::index::tantivy_index::{ReadIndex, TOKENIZER_VERSION_FILE};
+use crate::limits::MAX_STATE_BYTES;
+use crate::platform::fs::{
+    check_single_link, file_identity_and_links, is_regular_nofollow, open_readonly_nofollow,
+};
+use crate::store::generation_catalog::{self, Head, Layout};
+use crate::store::models::ProjectStatus;
+use crate::store::project_index::{ProjectIndex, project_directory};
+use crate::store::settings::{DbSettings, DbSpec};
+use crate::store::{migrations, repo};
+
+type Observed<T> = std::result::Result<T, Why>;
+const LOCAL_SCHEMA_VERSION: u32 = 1;
+
+/// Physical layout selected by the observed project generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectIndexLayout {
+    /// Metadata in the registry, with the historical Tantivy directory.
+    Legacy,
+    /// Metadata and Tantivy inside the selected generation directory.
+    Local,
+}
+
+/// Identity of the pair checked while its read leases were held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObservedProjectIndex {
+    /// Registered numeric project ID.
+    pub project_id: i64,
+    /// Installation epoch assigned by a generation-aware registry.
+    pub epoch: Option<[u8; 16]>,
+    /// Active generation ID, when a generation catalog is installed.
+    pub generation_id: Option<i64>,
+    /// Current revision from the selected metadata store.
+    pub content_revision: i64,
+    /// Location model used by the observation.
+    pub layout: ProjectIndexLayout,
+}
+
+/// Point-in-time result for one selected project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectIndexObservation {
+    /// No registered index generation was selected.
+    Missing,
+    /// Observation could not establish a readable pair.
+    Unavailable(Why),
+    /// The selected metadata and Tantivy components opened under one lease.
+    Present(ObservedProjectIndex),
+}
+
+/// Checks the selected pair from a quiescent registry without creating files.
+/// Database and index handles are released before the result is returned.
+/// # Errors
+/// Invalid project ID, cache context, limits or storage settings.
+pub fn inspect_project_index(
+    cache: &Path,
+    project_id: i64,
+    settings: &Resolved<DbSettings>,
+    limits: InspectionLimits,
+) -> Result<ProjectIndexObservation> {
+    let initial_bytes = validate(cache, limits)?;
+    DbSpec::validate(settings.settings(), &Capabilities::current())?;
+    if project_id <= 0 {
+        return Err(crate::error::Error::Admission {
+            message: "index inspection requires a positive project ID".to_owned(),
+        });
+    }
+    let result = presence(cache).and_then(|present| {
+        if !present {
+            return Ok(None);
+        }
+        with_registry(
+            cache,
+            limits,
+            || {},
+            |conn, root| observe_project(conn, root, project_id, limits, initial_bytes),
+        )
+    });
+    Ok(match result {
+        Ok(Some(index)) => ProjectIndexObservation::Present(index),
+        Ok(None) => ProjectIndexObservation::Missing,
+        Err(reason) => ProjectIndexObservation::Unavailable(reason),
+    })
+}
+
+fn observe_project(
+    registry: &Connection,
+    cache: &Path,
+    project_id: i64,
+    limits: InspectionLimits,
+    initial_bytes: usize,
+) -> Observed<Option<ObservedProjectIndex>> {
+    let version = schema_version(registry)?;
+    if !matches!(
+        version,
+        migrations::SCHEMA_VERSION | generation_catalog::SCHEMA_VERSION
+    ) {
+        return Err(Why::UnsupportedSchema);
+    }
+    let registered: bool = registry
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+            [project_id],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_failure)?;
+    if !registered {
+        return Ok(None);
+    }
+    let catalog = if version == generation_catalog::SCHEMA_VERSION {
+        let epoch = generation_catalog::read_epoch(registry)?;
+        let Some(head) = generation_catalog::active_head(registry, project_id)? else {
+            return Ok(None);
+        };
+        Some((epoch, head))
+    } else {
+        None
+    };
+    // Retained numeric identity, tag and optional catalog identity.
+    let identity_bytes = 2 * size_of::<i64>()
+        + 1
+        + catalog
+            .as_ref()
+            .map_or(0, |(epoch, _)| epoch.len() + size_of::<i64>());
+    if limits.max_projects == 0 || identity_bytes > limits.max_metadata_bytes - initial_bytes {
+        return Err(Why::LimitExceeded);
+    }
+    let project = project_directory(cache, project_id);
+    if catalog.is_none() && legacy_revision(registry, project_id)?.is_none() {
+        return Ok(None);
+    }
+    check_directory(&project)?;
+    with_read_lease(&project.join(".writer.lock"), || match catalog {
+        None => observe_legacy(registry, cache, project_id, None).map(Some),
+        Some((epoch, head)) => {
+            let index = match head.layout {
+                Layout::Legacy => {
+                    with_read_lease(&project.join(".legacy-generation.lock"), || {
+                        observe_legacy(registry, cache, project_id, Some((epoch, head.id)))
+                    })?
+                }
+                Layout::Local { seal_digest } => {
+                    observe_local(&project, epoch, &head, seal_digest, limits)?
+                }
+            };
+            Ok(Some(index))
+        }
+    })
+}
+
+fn observe_legacy(
+    registry: &Connection,
+    cache: &Path,
+    project_id: i64,
+    catalog: Option<([u8; 16], i64)>,
+) -> Observed<ObservedProjectIndex> {
+    let revision = legacy_revision(registry, project_id)?.ok_or(Why::InvalidRegistry)?;
+    let index = ProjectIndex::legacy(project_id, revision).map_err(|_| Why::InvalidRegistry)?;
+    check_pair(registry, project_id, &index.tantivy_dir(cache))?;
+    Ok(ObservedProjectIndex {
+        project_id,
+        epoch: catalog.map(|(epoch, _)| epoch),
+        generation_id: catalog.map(|(_, id)| id),
+        content_revision: index.content_revision(),
+        layout: ProjectIndexLayout::Legacy,
+    })
+}
+
+fn legacy_revision(registry: &Connection, project_id: i64) -> Observed<Option<i64>> {
+    let (revision, status, version): (i64, String, u32) = registry
+        .query_row(
+            "SELECT index_generation, status, schema_version FROM projects WHERE id = ?1",
+            [project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(sqlite_failure)?;
+    match status.parse().map_err(|_| Why::InvalidRegistry)? {
+        ProjectStatus::NotIndexed => Ok(None),
+        ProjectStatus::Indexed if version == migrations::PROJECT_SCHEMA_VERSION => {
+            Ok(Some(revision))
+        }
+        ProjectStatus::Indexed => Err(Why::UnsupportedSchema),
+        ProjectStatus::Error | ProjectStatus::Indexing => Err(Why::RecoveryRequired),
+    }
+}
+
+fn observe_local(
+    project: &Path,
+    epoch: [u8; 16],
+    head: &Head,
+    seal_digest: [u8; 32],
+    limits: InspectionLimits,
+) -> Observed<ObservedProjectIndex> {
+    let generation = project.join("generations").join(head.id.to_string());
+    check_directory(&generation)?;
+    with_read_lease(&generation.join(".read.lock"), || {
+        check_seal(&generation.join("seal.json"), &seal_digest)?;
+        let metadata_path = generation.join("metadata.db");
+        check_single_link(&metadata_path).map_err(|_| Why::Io)?;
+        with_locked_db(
+            &metadata_path,
+            limits,
+            || {},
+            |metadata| {
+                if schema_version(metadata)? != LOCAL_SCHEMA_VERSION {
+                    return Err(Why::UnsupportedSchema);
+                }
+                let mut query = metadata.prepare(
+                "SELECT singleton, project_id, generation_id, content_revision FROM generation_state LIMIT 2"
+            ).map_err(sqlite_failure)?;
+                let mut rows = query.query([]).map_err(sqlite_failure)?;
+                let row = rows
+                    .next()
+                    .map_err(sqlite_failure)?
+                    .ok_or(Why::InvalidRegistry)?;
+                let id = |column| row.get::<_, i64>(column).map_err(|_| Why::InvalidRegistry);
+                let (singleton, project_id, generation_id, revision) =
+                    (id(0)?, id(1)?, id(2)?, id(3)?);
+                if singleton != 1
+                    || project_id != head.project_id
+                    || generation_id != head.id
+                    || revision < 0
+                    || rows.next().map_err(sqlite_failure)?.is_some()
+                {
+                    return Err(Why::InvalidRegistry);
+                }
+                check_pair(metadata, project_id, &generation.join("tantivy"))?;
+                Ok(ObservedProjectIndex {
+                    project_id,
+                    epoch: Some(epoch),
+                    generation_id: Some(generation_id),
+                    content_revision: revision,
+                    layout: ProjectIndexLayout::Local,
+                })
+            },
+        )
+    })
+}
+
+fn check_seal(path: &Path, expected: &[u8; 32]) -> Observed<()> {
+    let file = open_checked_file(path)?;
+    let bytes = read_bounded(file, MAX_STATE_BYTES).map_err(|error| match error {
+        ReadFailure::LimitExceeded => Why::LimitExceeded,
+        _ => Why::Io,
+    })?;
+    if blake3::hash(&bytes).as_bytes() != expected {
+        return Err(Why::InvalidRegistry);
+    }
+    Ok(())
+}
+
+fn check_pair(metadata: &Connection, project_id: i64, tantivy: &Path) -> Observed<()> {
+    if repo::has_pending_docs(metadata, project_id).map_err(|_| Why::Io)? {
+        return Err(Why::RecoveryRequired);
+    }
+    check_directory(tantivy)?;
+    // Tantivy owns the component opens. Check the flat directory first under
+    // the cooperating writer lease, including files read through its mmap backend.
+    for entry in fs::read_dir(tantivy).map_err(|_| Why::Io)? {
+        let entry = entry.map_err(|_| Why::Io)?;
+        check_single_link(&entry.path()).map_err(|_| Why::Io)?;
+    }
+    // Use Tantivy's lookup paths so the bound also applies on filesystems
+    // that resolve a different spelling of the same name.
+    for name in ["meta.json", ".managed.json", TOKENIZER_VERSION_FILE] {
+        match fs::symlink_metadata(tantivy.join(name)) {
+            Ok(metadata) if metadata.len() > MAX_STATE_BYTES => {
+                return Err(Why::LimitExceeded);
+            }
+            Ok(_) => {}
+            Err(error)
+                if name == ".managed.json" && error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(Why::Io),
+        }
+    }
+    ReadIndex::check_health_with_project_lease(tantivy).map_err(|_| Why::Io)
+}
+
+fn check_directory(path: &Path) -> Observed<()> {
+    if !path.is_dir() || fs::canonicalize(path).map_err(|_| Why::Io)? != path {
+        return Err(Why::Io);
+    }
+    Ok(())
+}
+
+fn open_checked_file(path: &Path) -> Observed<fs::File> {
+    #[cfg(unix)]
+    check_single_link(path).map_err(|_| Why::Io)?;
+    let file = open_readonly_nofollow(path).map_err(|_| Why::Io)?;
+    let metadata = file.metadata().map_err(|_| Why::Io)?;
+    if !is_regular_nofollow(&metadata)
+        || file_identity_and_links(&file, &metadata)
+            .map_err(|_| Why::Io)?
+            .1
+            != 1
+    {
+        return Err(Why::Io);
+    }
+    Ok(file)
+}
+
+fn with_read_lease<T>(path: &Path, read: impl FnOnce() -> Observed<T>) -> Observed<T> {
+    let file = open_checked_file(path)?;
+    lifecycle::with_read_lock(file, path, || Ok(read())).map_err(|error| {
+        if lifecycle::is_lease_conflict(&error) {
+            Why::Busy
+        } else {
+            Why::Io
+        }
+    })?
+}
+
+#[cfg(test)]
+pub(super) const LOCAL_SCHEMA_SQL: &str = include_str!("project_schema.sql");
