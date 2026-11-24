@@ -3,12 +3,17 @@ use serde::Serialize;
 
 use crate::config::schema::SourceId;
 use crate::config::source::SourceLayer;
+use crate::platform::{FileIdentity, fs};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum SourceState {
     Missing,
-    Loaded { revision: String, version: u32 },
+    Loaded {
+        revision: String,
+        precondition: String,
+        version: u32,
+    },
     Unavailable(SourceFailure),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -16,6 +21,8 @@ pub enum SourceState {
 pub enum SourceFailure {
     Io,
     NonRegular,
+    MultipleLinks,
+    IdentityUnavailable,
     Changed,
     LimitExceeded,
     Invalid,
@@ -33,16 +40,20 @@ pub(super) fn capture(source: SourceId, bytes_left: &mut usize) -> Captured {
     let result = read(&source, bytes_left);
     let (state, layer) = match result {
         Ok(None) => (SourceState::Missing, None),
-        Ok(Some(layer)) => (
-            SourceState::Loaded {
-                revision: revision(&layer.original),
-                version: match layer.version() {
-                    crate::config::source::ConfigVersion::V1 => 1,
-                    crate::config::source::ConfigVersion::V2 => 2,
+        Ok(Some((layer, identity))) => {
+            let revision = revision(&layer.original);
+            (
+                SourceState::Loaded {
+                    precondition: precondition(identity, &revision),
+                    revision,
+                    version: match layer.version() {
+                        crate::config::source::ConfigVersion::V1 => 1,
+                        crate::config::source::ConfigVersion::V2 => 2,
+                    },
                 },
-            },
-            Some(layer),
-        ),
+                Some(layer),
+            )
+        }
         Err(reason) => (SourceState::Unavailable(reason), None),
     };
     Captured {
@@ -53,7 +64,33 @@ pub(super) fn capture(source: SourceId, bytes_left: &mut usize) -> Captured {
 pub(super) fn revision(text: &str) -> String {
     format!("source-bytes-v1:{}", blake3::hash(text.as_bytes()).to_hex())
 }
-fn read(source: &SourceId, bytes_left: &mut usize) -> Result<Option<SourceLayer>, SourceFailure> {
+fn precondition(identity: FileIdentity, revision: &str) -> String {
+    let mut hash = blake3::Hasher::new_derive_key("docsbase.observed-source.v1");
+    hash.update(std::env::consts::FAMILY.as_bytes());
+    hash.update(&identity.volume.to_le_bytes());
+    hash.update(&identity.object.to_le_bytes());
+    hash.update(revision.as_bytes());
+    format!("observed-source-v1:{}", hash.finalize().to_hex())
+}
+
+fn inspect(file: &std::fs::File) -> Result<(std::fs::Metadata, FileIdentity), SourceFailure> {
+    let metadata = file.metadata().map_err(|_| SourceFailure::Io)?;
+    if !fs::is_regular_nofollow(&metadata) {
+        return Err(SourceFailure::NonRegular);
+    }
+    let (identity, links) = fs::file_identity_and_links(file, &metadata)
+        .map_err(|_| SourceFailure::IdentityUnavailable)?;
+    match links {
+        1 => Ok((metadata, identity)),
+        0 => Err(SourceFailure::Changed),
+        _ => Err(SourceFailure::MultipleLinks),
+    }
+}
+
+fn read(
+    source: &SourceId,
+    bytes_left: &mut usize,
+) -> Result<Option<(SourceLayer, FileIdentity)>, SourceFailure> {
     read_with(source, bytes_left, || {}, || {})
 }
 fn read_with(
@@ -61,14 +98,14 @@ fn read_with(
     bytes_left: &mut usize,
     before_open: impl FnOnce(),
     after_read: impl FnOnce(),
-) -> Result<Option<SourceLayer>, SourceFailure> {
+) -> Result<Option<(SourceLayer, FileIdentity)>, SourceFailure> {
     let (SourceId::Global(path) | SourceId::Project(path)) = source else {
         return Err(SourceFailure::Invalid);
     };
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(SourceFailure::Io),
-        Ok(metadata) if !crate::platform::fs::is_regular_nofollow(&metadata) => {
+        Ok(metadata) if !fs::is_regular_nofollow(&metadata) => {
             return Err(SourceFailure::NonRegular);
         }
         Ok(_) => {}
@@ -78,12 +115,8 @@ fn read_with(
     let name = path.file_name().ok_or(SourceFailure::Invalid)?;
     let resolved = directory.join(name);
     before_open();
-    let file =
-        crate::platform::fs::open_readonly_nofollow(&resolved).map_err(|_| SourceFailure::Io)?;
-    let before = file.metadata().map_err(|_| SourceFailure::Io)?;
-    if !crate::platform::fs::is_regular_nofollow(&before) {
-        return Err(SourceFailure::NonRegular);
-    }
+    let file = fs::open_readonly_nofollow(&resolved).map_err(|_| SourceFailure::Io)?;
+    let (before, identity) = inspect(&file)?;
     let cap = crate::limits::MAX_STATE_BYTES.min(*bytes_left as u64);
     if before.len() > cap {
         return Err(SourceFailure::LimitExceeded);
@@ -95,19 +128,22 @@ fn read_with(
     })?;
     *bytes_left -= bytes.len();
     after_read();
-    let after = file.metadata().map_err(|_| SourceFailure::Changed)?;
-    let current = std::fs::symlink_metadata(&resolved).map_err(|_| SourceFailure::Changed)?;
-    if !crate::platform::fs::is_regular_nofollow(&current)
+    // Pin the first object until comparison so its ID cannot be recycled.
+    let current = fs::open_readonly_nofollow(&resolved).map_err(|_| SourceFailure::Changed)?;
+    let (after, current_identity) = inspect(&current).map_err(|failure| match failure {
+        SourceFailure::IdentityUnavailable => failure,
+        _ => SourceFailure::Changed,
+    })?;
+    if identity != current_identity
         || before.len() != bytes.len() as u64
         || !same_metadata(&before, &after)
-        || !same_metadata(&after, &current)
         || std::fs::canonicalize(parent).map_err(|_| SourceFailure::Changed)? != directory
     {
         return Err(SourceFailure::Changed);
     }
     let text = std::str::from_utf8(&bytes).map_err(|_| SourceFailure::Invalid)?;
     SourceLayer::parse(source.clone(), text)
-        .map(Some)
+        .map(|layer| Some((layer, identity)))
         .map_err(|_| SourceFailure::Invalid)
 }
 fn same_metadata(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
@@ -122,6 +158,36 @@ fn same_metadata(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replacing_file_with_matching_length_and_mtime_during_read_is_detected() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let replacement = root.path().join("replacement");
+        std::fs::write(&path, "auto_index=true").unwrap();
+        std::fs::write(&replacement, "auto_index=true").unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&replacement).unwrap().modified().unwrap(),
+            modified
+        );
+        let result = read_with(
+            &SourceId::Global(path.clone()),
+            &mut 1024,
+            || {},
+            || {
+                std::fs::rename(&path, root.path().join("old")).unwrap();
+                std::fs::rename(&replacement, &path).unwrap();
+            },
+        );
+        assert_eq!(result.unwrap_err(), SourceFailure::Changed);
+    }
+
     #[test]
     fn mutation_during_read_is_not_published_as_loaded() {
         let dir = tempfile::tempdir().unwrap();

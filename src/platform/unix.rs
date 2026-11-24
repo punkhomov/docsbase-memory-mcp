@@ -502,6 +502,24 @@ pub fn is_regular_nofollow(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_file()
 }
 
+/// Use the fstat already taken on the open handle.
+pub(crate) fn file_identity_and_links(
+    _file: &File,
+    metadata: &fs::Metadata,
+) -> io::Result<(super::FileIdentity, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    if metadata.ino() == 0 {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "missing inode"));
+    }
+    Ok((
+        super::FileIdentity {
+            volume: metadata.dev(),
+            object: metadata.ino().into(),
+        },
+        metadata.nlink(),
+    ))
+}
+
 /// Opens an existing path read-only without following a final symlink.
 /// Does not create, truncate or change permissions; callers check file type.
 /// Nonblocking open lets callers reject FIFOs without waiting for a writer.

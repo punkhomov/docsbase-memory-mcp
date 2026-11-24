@@ -1044,3 +1044,15 @@ improvement. The existing recall test now compares configured search with
 the explicit beam on the same graph for 100 queries at five beam widths.
 Re-review confirmed the finding was addressed. No deferred minors.
 Final independent review on af0aeab: converged for CF8a with no findings.
+
+## 2026-11-24 — observed migration source identity
+
+Task CF5b2b read-side identity: complete (single-link admission, retained-handle
+comparison, and object-bound preconditions in the observed plan). Three new
+regressions failed on 3207fa1 and passed with the change. Local Rust 1.100.0
+cli-full library and config observation suites, Linux all-target Clippy and
+Windows GNU cross-target Clippy passed. Source bytes and proposed edits keep
+their original revision scheme. Journal and publication work remain under CF5b2b.
+
+Ruling: the independent task review approved the implementation. Clarified the
+documented reason when a second hard link appears during the read.

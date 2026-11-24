@@ -504,3 +504,11 @@ multiplier>0. Explicit fetch above max is refused before HNSW's internal ef
 promotion. Legacy search preserves its existing high-fetch behavior and soft cap.
 Changing search policy alone never rewrites graph/vector identities or files.
 This is not a total RSS guarantee, source-key activation or full CF8 completion.
+
+## Delta 2026-11-24 — CF5b2b migration source identity
+
+For every loaded input to the observed migration plan, including unchanged v2
+files, bind its native file identity and exact byte revision to the expected
+state. Refuse the complete proposal when a source has multiple hard links, when
+identity or link count is unavailable, or when the object changes across the
+bounded read. Byte revisions retain their existing meaning for proposed edits.

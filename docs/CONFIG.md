@@ -480,7 +480,7 @@ remain distinct from empty files. It does not create directories, locks, databas
 or sidecars, write configuration, start a daemon, load models or call providers.
 Existing v1 runtime loading is unchanged; v2 is accepted here for planning only.
 
-The version1 JSON envelope contains `observation_id`, selected roots, registry,
+The version 2 JSON envelope contains `observation_id`, selected roots, registry,
 `registry_stable`, all source states/revisions, the budget decision, a summary and
 the versioned `plan` action graph. The summary shows observed/proposed numeric
 budgets, legacy scope conflicts, source rewrites with target versions/hashes and
@@ -502,9 +502,13 @@ all source rewrites. Invalid semantic settings or exceeded envelope/context limi
 produce a redacted error and nonzero exit; a successfully emitted blocked plan
 returns exit 0. No prompts or partial JSON are emitted on planning errors.
 
-Sources must be regular UTF-8 files, at most 1 MiB each; final symlinks and special
-files are rejected. Parent aliases are resolved and checked around reads. Official
-planning limits are 256 projects, 1 MiB path/registry metadata, 16 MiB aggregate source
+Each existing source must be a regular UTF-8 file of at most 1 MiB with one hard
+link. Multiple links at the first open report `multiple_links`. A link added
+during the read and detected on recheck reports `changed`. If the filesystem
+cannot report file identity or link count, the source reports
+`identity_unavailable`. Each condition blocks the complete proposal, as do final
+symlinks and special files. Parent aliases are resolved and checked around reads.
+Official planning limits are 256 projects, 1 MiB path/registry metadata, 16 MiB aggregate source
 bytes and 8 MiB encoded plan/output. Registry SQL uses a 1 MiB value limit and 256 KiB
 soft page-cache target. These bound logical inputs/output, not exact RSS or time.
 The library takes explicit alternate `PlanningLimits`; these are planning policy,
@@ -516,7 +520,13 @@ registry is observed again after source reads; a difference blocks proposals.
 absence of intermediate changes. The identity binds context, registry, every input
 source (including unchanged files), choice and output, not future freshness. Future
 apply must revalidate all those facts under its own publication protocol. Source
-observation hashes describe exact file bytes, not semantic artifact fingerprints.
+byte revisions (`source-bytes-v1`) describe exact TOML bytes. The `precondition`
+of each loaded source binds its byte revision to its native file identity. For
+example, replacing a project config with a new file containing identical bytes
+can keep the proposed edits identical while changing both `plan_id` and
+`observation_id`. Re-run the command to obtain a version 2 observation. Native
+file IDs may be reused after deletion, and observations expire as files change.
+
 ## Local Web panel
 
 See [WEB.md](WEB.md) for `docsbase web --open`, session security, Web settings,
