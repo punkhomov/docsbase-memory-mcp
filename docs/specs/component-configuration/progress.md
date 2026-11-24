@@ -1172,3 +1172,19 @@ Ruling: the native Linux boundary scanner recognizes the explicit test
 module marker. The Unix-only fixture now uses a separate `cfg(unix)`
 attribute, preserving the production platform boundary. Both boundary
 tests and the path encoding regression passed locally.
+
+## 2026-11-24 — CF5c, v2 без глобального файла
+
+Task CF5c implicit v2: complete (операционный CLI, запуск демона и
+effective view используют v2 при отсутствии глобального источника).
+Устаревший демон отклоняется до привязки проекта, в том числе после
+переподключения MCP. Неверсионированный глобальный файл по-прежнему
+выбирает v1. Проверены прямой и подключённый index, поиск, sync, отсутствие
+vectors.db на лексическом маршруте и исключительное владение векторами.
+
+Ruling: по независимому ревью добавлены проверка версии на входе MCP,
+процессный тест со старым демоном и поиск по проекту, созданному через
+работающий демон. Legacy-тест лимита проектного файла явно выбирает v1.
+Повторное ревью подтвердило исправления. Полный Linux-набор прошёл
+на составной ветке с зависимостями. Нативная приёмка отдельного PR
+зависит от доставки предшествующих изменений.

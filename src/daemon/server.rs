@@ -318,7 +318,7 @@ impl Shared {
         pool_settings: &Resolved<ReadPoolSettings>,
         dense_settings: &crate::hybrid::dense_settings::DenseSettings,
     ) -> Result<Arc<Self>> {
-        let launch = LaunchSnapshot::capture().legacy(DaemonPatch::default())?;
+        let launch = LaunchSnapshot::capture().library_compatibility(DaemonPatch::default())?;
         Self::open_with_launch_config(cache, settings, pool_settings, dense_settings, launch)
     }
 

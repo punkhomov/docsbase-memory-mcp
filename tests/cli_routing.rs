@@ -22,6 +22,7 @@ impl Env {
     fn new(files: &[(&str, &str)]) -> Self {
         let cache = TempDir::new().expect("cache");
         let root = TempDir::new().expect("root");
+        write_file(cache.path(), "config/config.toml", b"# Legacy peer fixture");
         for (rel, body) in files {
             write_file(root.path(), rel, body.as_bytes());
         }
