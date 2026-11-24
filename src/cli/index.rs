@@ -217,3 +217,23 @@ pub(super) async fn run_with_operation(
     .await;
     Ok(serde_json::json!({"project_id":id,"stats":result?}))
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn project_path_args_rejects_non_utf8() {
+        let path = Path::new(OsStr::from_bytes(b"guide-\xff"));
+        let error = project_path_args(path).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Project { message, .. }
+                if message == "daemon indexing requires a UTF-8 project path"
+        ));
+    }
+}
