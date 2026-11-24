@@ -432,7 +432,7 @@ pub(super) fn for_provided_project(global: &Config, root: &Path) -> Result<Resol
 }
 
 /// Resolves caller-supplied versioned sources for offline review only.
-/// Ordinary file loaders deliberately do not activate the v2 source format.
+/// This preview does not acquire runtime resources or grant migration consent.
 ///
 /// # Errors
 /// Invalid source order, scope, stage settings or unsupported configuration.

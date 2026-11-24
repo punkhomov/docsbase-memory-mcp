@@ -457,6 +457,7 @@ fn caller_transaction_is_refused_without_ending_its_snapshot() {
         cache: &fixture.shared.cache,
         project: &fixture.project,
         window: 1,
+        ann_search: None,
         payload_budget: &fixture.shared.payload_budget,
         operation: crate::search::operation::SearchOperation::new(
             &fixture.shared.global_config.search,
@@ -486,6 +487,7 @@ fn metadata_source_cannot_mix_another_cache_with_the_bound_project() {
         cache: &fixture.shared.cache,
         project: &fixture.project,
         window: 1,
+        ann_search: None,
         payload_budget: &fixture.shared.payload_budget,
         operation: crate::search::operation::SearchOperation::new(
             &fixture.shared.global_config.search,
@@ -515,6 +517,7 @@ fn explain_counts_time_before_search_preparation_without_real_waiting() {
         cache: &fixture.shared.cache,
         project: &fixture.project,
         window: 1,
+        ann_search: None,
         payload_budget: &fixture.shared.payload_budget,
         operation: crate::search::operation::SearchOperation::new(
             &fixture.shared.global_config.search,
