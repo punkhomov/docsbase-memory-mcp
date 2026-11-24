@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::config::schema::SourceId;
 use crate::config::source::SourceLayer;
-use crate::platform::{FileIdentity, fs};
+use crate::platform::{FileIdentity, basic_attributes, fs};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
@@ -40,11 +40,11 @@ pub(super) fn capture(source: SourceId, bytes_left: &mut usize) -> Captured {
     let result = read(&source, bytes_left);
     let (state, layer) = match result {
         Ok(None) => (SourceState::Missing, None),
-        Ok(Some((layer, identity))) => {
+        Ok(Some((layer, evidence))) => {
             let revision = revision(&layer.original);
             (
                 SourceState::Loaded {
-                    precondition: precondition(identity, &revision),
+                    precondition: precondition(&evidence, &revision),
                     revision,
                     version: match layer.version() {
                         crate::config::source::ConfigVersion::V1 => 1,
@@ -64,16 +64,24 @@ pub(super) fn capture(source: SourceId, bytes_left: &mut usize) -> Captured {
 pub(super) fn revision(text: &str) -> String {
     format!("source-bytes-v1:{}", blake3::hash(text.as_bytes()).to_hex())
 }
-fn precondition(identity: FileIdentity, revision: &str) -> String {
-    let mut hash = blake3::Hasher::new_derive_key("docsbase.observed-source.v1");
-    hash.update(std::env::consts::FAMILY.as_bytes());
-    hash.update(&identity.volume.to_le_bytes());
-    hash.update(&identity.object.to_le_bytes());
-    hash.update(revision.as_bytes());
-    format!("observed-source-v1:{}", hash.finalize().to_hex())
+#[derive(PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+struct FileEvidence {
+    identity: FileIdentity,
+    attributes: basic_attributes::Encoded,
 }
 
-fn inspect(file: &std::fs::File) -> Result<(std::fs::Metadata, FileIdentity), SourceFailure> {
+fn precondition(evidence: &FileEvidence, revision: &str) -> String {
+    let mut hash = blake3::Hasher::new_derive_key("docsbase.observed-source.v2");
+    hash.update(basic_attributes::PROFILE.as_bytes());
+    hash.update(&evidence.identity.volume.to_le_bytes());
+    hash.update(&evidence.identity.object.to_le_bytes());
+    hash.update(evidence.attributes.as_flattened());
+    hash.update(revision.as_bytes());
+    format!("observed-source-v2:{}", hash.finalize().to_hex())
+}
+
+fn inspect(file: &std::fs::File) -> Result<(std::fs::Metadata, FileEvidence), SourceFailure> {
     let metadata = file.metadata().map_err(|_| SourceFailure::Io)?;
     if !fs::is_regular_nofollow(&metadata) {
         return Err(SourceFailure::NonRegular);
@@ -81,7 +89,16 @@ fn inspect(file: &std::fs::File) -> Result<(std::fs::Metadata, FileIdentity), So
     let (identity, links) = fs::file_identity_and_links(file, &metadata)
         .map_err(|_| SourceFailure::IdentityUnavailable)?;
     match links {
-        1 => Ok((metadata, identity)),
+        1 => {
+            let attributes = basic_attributes::encode(&metadata);
+            Ok((
+                metadata,
+                FileEvidence {
+                    identity,
+                    attributes,
+                },
+            ))
+        }
         0 => Err(SourceFailure::Changed),
         _ => Err(SourceFailure::MultipleLinks),
     }
@@ -90,7 +107,7 @@ fn inspect(file: &std::fs::File) -> Result<(std::fs::Metadata, FileIdentity), So
 fn read(
     source: &SourceId,
     bytes_left: &mut usize,
-) -> Result<Option<(SourceLayer, FileIdentity)>, SourceFailure> {
+) -> Result<Option<(SourceLayer, FileEvidence)>, SourceFailure> {
     read_with(source, bytes_left, || {}, || {})
 }
 fn read_with(
@@ -98,7 +115,7 @@ fn read_with(
     bytes_left: &mut usize,
     before_open: impl FnOnce(),
     after_read: impl FnOnce(),
-) -> Result<Option<(SourceLayer, FileIdentity)>, SourceFailure> {
+) -> Result<Option<(SourceLayer, FileEvidence)>, SourceFailure> {
     let (SourceId::Global(path) | SourceId::Project(path)) = source else {
         return Err(SourceFailure::Invalid);
     };
@@ -116,7 +133,7 @@ fn read_with(
     let resolved = directory.join(name);
     before_open();
     let file = fs::open_readonly_nofollow(&resolved).map_err(|_| SourceFailure::Io)?;
-    let (before, identity) = inspect(&file)?;
+    let (before, evidence) = inspect(&file)?;
     let cap = crate::limits::MAX_STATE_BYTES.min(*bytes_left as u64);
     if before.len() > cap {
         return Err(SourceFailure::LimitExceeded);
@@ -130,11 +147,11 @@ fn read_with(
     after_read();
     // Pin the first object until comparison so its ID cannot be recycled.
     let current = fs::open_readonly_nofollow(&resolved).map_err(|_| SourceFailure::Changed)?;
-    let (after, current_identity) = inspect(&current).map_err(|failure| match failure {
+    let (after, current_evidence) = inspect(&current).map_err(|failure| match failure {
         SourceFailure::IdentityUnavailable => failure,
         _ => SourceFailure::Changed,
     })?;
-    if identity != current_identity
+    if evidence != current_evidence
         || before.len() != bytes.len() as u64
         || !same_metadata(&before, &after)
         || std::fs::canonicalize(parent).map_err(|_| SourceFailure::Changed)? != directory
@@ -143,7 +160,7 @@ fn read_with(
     }
     let text = std::str::from_utf8(&bytes).map_err(|_| SourceFailure::Invalid)?;
     SourceLayer::parse(source.clone(), text)
-        .map(|layer| Some((layer, identity)))
+        .map(|layer| Some((layer, evidence)))
         .map_err(|_| SourceFailure::Invalid)
 }
 fn same_metadata(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
@@ -185,6 +202,26 @@ mod tests {
                 std::fs::rename(&replacement, &path).unwrap();
             },
         );
+        assert_eq!(result.unwrap_err(), SourceFailure::Changed);
+    }
+
+    #[test]
+    fn basic_attributes_changing_during_read_block_the_observation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        std::fs::write(&path, "auto_index=true").unwrap();
+        let original = std::fs::metadata(&path).unwrap().permissions();
+        let result = read_with(
+            &SourceId::Global(path.clone()),
+            &mut 1024,
+            || {},
+            || {
+                let mut changed = original.clone();
+                changed.set_readonly(true);
+                std::fs::set_permissions(&path, changed).unwrap();
+            },
+        );
+        std::fs::set_permissions(&path, original).unwrap();
         assert_eq!(result.unwrap_err(), SourceFailure::Changed);
     }
 

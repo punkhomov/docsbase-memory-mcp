@@ -72,30 +72,10 @@ fn object(file: &File) -> Vec<u8> {
     [id.volume.to_le_bytes().as_slice(), &id.object.to_le_bytes()].concat()
 }
 
-#[cfg(unix)]
 fn attributes(file: &File) -> (&'static str, Vec<u8>) {
-    use std::os::unix::fs::MetadataExt;
-    let m = file.metadata().unwrap();
-    (
-        "unix-stat-v1",
-        [m.uid(), m.gid(), m.mode() & 0o7777]
-            .iter()
-            .flat_map(|n| n.to_le_bytes())
-            .collect(),
-    )
-}
-
-#[cfg(windows)]
-fn attributes(file: &File) -> (&'static str, Vec<u8>) {
-    use std::os::windows::fs::MetadataExt;
-    (
-        "windows-attributes-v1",
-        file.metadata()
-            .unwrap()
-            .file_attributes()
-            .to_le_bytes()
-            .to_vec(),
-    )
+    use crate::platform::basic_attributes;
+    let encoded = basic_attributes::encode(&file.metadata().unwrap());
+    (basic_attributes::PROFILE, encoded.as_flattened().to_vec())
 }
 
 fn record_images(db: &Connection, ordinal: i64, path: &Path) {

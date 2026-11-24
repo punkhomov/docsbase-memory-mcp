@@ -9,6 +9,7 @@
 //! (`daemon`, `ipc`, `store`, …) so integration tests can exercise the seam
 //! directly; it is not a stable API.
 
+pub(crate) mod basic_attributes;
 pub mod paths;
 pub mod transport;
 
