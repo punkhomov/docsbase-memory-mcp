@@ -1017,3 +1017,30 @@ native RAII unlocks it; error ownership closes Connection before releasing this
 lease, including failed sequence reads. A live successful connection retains its
 existing mode owner. The shared window still bounds contention/retry admission,
 not non-preemptible native completion. No fixture/budget/ignore/dependency change.
+
+## 2026-11-24 — CF8a: ANN search settings at the library boundary
+
+Task CF8a: complete (project settings and explicit search on built and loaded
+graphs). Integrated the isolated 2026-11-13 implementation on main `af0aeab`.
+`search_with_settings` checks the requested fetch before calling HNSW.
+Existing callers keep the historical search behavior above the default beam
+ceiling. The graph and vector identities stay valid when the search beam changes.
+Daemon/CLI source adoption and ANN build settings remain open under #78.
+
+Verification on Rust 1.100.0: the new API test failed to compile against main
+and six cases passed with both lean and cli-full. Removing admission failed on
+a three-hit request to a two-hit policy. Substituting the legacy beam after
+admission changed the returned IDs and failed the fixed-beam comparison.
+Restoring the configured beam passed. Full and lean all-target Clippy, the
+opt-in Linux target lints and fmt passed. Complete local suites: cli-full
+1,723 passed / 19 ignored, lean 1,419 passed / 11 ignored. The frozen
+benchmark also passed with the local default latency budget. The first local
+full run used a symlink into the checkout as its temp root and failed project
+identity tests. Reproduced one failure with that root, then verified the
+same test and both complete suites from a separate, canonical temp root.
+
+Ruling: the fresh task reviewer approved CF8a and requested one minor test
+improvement. The existing recall test now compares configured search with
+the explicit beam on the same graph for 100 queries at five beam widths.
+Re-review confirmed the finding was addressed. No deferred minors.
+Final independent review on af0aeab: converged for CF8a with no findings.

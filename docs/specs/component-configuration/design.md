@@ -828,3 +828,13 @@ generation и crash markers; FullSurvey/errors0 — единственное ini
 evidence. Subset не наследует полноту. DB3 additive migration сохраняет project
 stamp2→3 без rebuild; absent legacy outcome остаётся unknown. Детали и проверка:
 [index-outcome-plan.md](index-outcome-plan.md). Это prerequisite #79, а не CF11.
+
+## Delta 2026-11-24 — CF8a search-only owner and compatibility
+
+[CF8a plan](cf8a-plan.md) records the pinned HNSW beam-promotion/allocation evidence,
+qualified policy domain, private checked settings, project provenance and additive
+built/loaded search API. Existing search resolves owner defaults without per-query
+provenance allocations; its historical high-fetch soft cap is documented. Explicit
+admission prevents dependency promotion above the chosen max, while visited/candidate
+storage and graph residency remain separate resource concerns. No persistence,
+graph recipe, embedding/query cache identity, daemon or source-format change.
