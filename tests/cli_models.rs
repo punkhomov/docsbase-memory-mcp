@@ -559,3 +559,113 @@ fn models_remove_unlocked_succeeds() {
         .success();
     assert!(!model_dir.exists(), "cache dir removed");
 }
+
+#[test]
+fn models_use_v2_preview_preserves_inherited_fields_and_an_unrelated_key() {
+    let env = Env::new();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        env.config.path().join("config.toml"),
+        "config_version=2\nhybrid=true\n",
+    )
+    .unwrap();
+    let target = project.path().join(".docsbase.toml");
+    let before = "config_version=2\nmax_docs_per_project=81\n[hybrid.reranker]\nwindow=19\n";
+    std::fs::write(&target, before).unwrap();
+    let output = env
+        .cmd()
+        .current_dir(project.path())
+        .args([
+            "models",
+            "use",
+            "embed",
+            "fastembed/bge-small-en-v1.5",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert!(stderr_of(&output).contains("embedding pin changed"));
+    let document: toml::Value =
+        toml::from_str(std::str::from_utf8(&output.stdout).unwrap()).unwrap();
+    assert_eq!(document["config_version"].as_integer(), Some(2));
+    assert_eq!(document["max_docs_per_project"].as_integer(), Some(81));
+    let preserved = document["hybrid"]["reranker"].as_table().unwrap();
+    assert_eq!(preserved.len(), 1);
+    assert_eq!(preserved["window"].as_integer(), Some(19));
+    assert_eq!(
+        document["hybrid"]["embedding"]["dimensions"].as_integer(),
+        Some(384)
+    );
+    assert_eq!(std::fs::read_to_string(target).unwrap(), before);
+}
+
+#[test]
+fn models_use_keeps_an_unchanged_inherited_embedding_pin_quiet() {
+    let env = Env::new();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        env.config.path().join("config.toml"),
+        "config_version=2\n[hybrid]\nenabled=true\n[hybrid.embedding]\nprovider='openrouter'\nmodel='test/emb'\ndimensions=128\n",
+    ).unwrap();
+    let target = project.path().join(".docsbase.toml");
+    std::fs::write(&target, "config_version=2\n").unwrap();
+    let output = env
+        .cmd()
+        .current_dir(project.path())
+        .args([
+            "models",
+            "use",
+            "embed",
+            "openrouter/test/emb",
+            "--dims",
+            "128",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stderr = stderr_of(&output);
+    assert!(!stderr.contains("embedding pin"), "{stderr}");
+}
+
+#[test]
+fn models_use_refuses_invalid_project_candidates_under_v2_without_source_text() {
+    let env = Env::new();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(env.config.path().join("config.toml"), "config_version=2\n").unwrap();
+    let target = project.path().join(".docsbase.toml");
+    for (source, reason) in [
+        (
+            "[hybrid.cache]\nmax_bytes=5\n",
+            "v2 uses global vector_cache.max_bytes",
+        ),
+        (
+            "config_version=2\nvalue = [ 'SOURCE_CANARY_904'\n",
+            "invalid versioned configuration TOML",
+        ),
+    ] {
+        std::fs::write(&target, source).unwrap();
+        let output = env
+            .cmd()
+            .current_dir(project.path())
+            .args([
+                "models",
+                "use",
+                "embed",
+                "fastembed/bge-small-en-v1.5",
+                "--dry-run",
+            ])
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains(reason), "{stderr}");
+        assert!(!stderr.contains("SOURCE_CANARY_904"));
+        assert_eq!(output.stdout, []);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), source);
+    }
+}

@@ -203,17 +203,43 @@ impl Resolution<ConfigSpec> {
         };
         let text = read_capped(&path)?;
         let layer = SourceLayer::parse(SourceId::Project(path), &text)?;
+        self.apply_v2_project(&layer, max_bytes)
+    }
+
+    fn apply_v2_project(&mut self, layer: &SourceLayer, max_bytes: u64) -> Result<()> {
         if layer.legacy_vector_override().is_some() {
             return Err(invalid(
                 "remove project hybrid.cache.max_bytes: v2 uses global vector_cache.max_bytes",
             ));
         }
-        self.apply_source(&layer)?;
+        self.apply_source(layer)?;
         // Legacy whole-value patches and explicit v2 bool resets can now change
         // only the project's hybrid stages; the shared budget belongs to the global.
         self.settings.hybrid_cfg.cache.max_bytes = max_bytes;
         Ok(())
     }
+}
+
+/// Resolves a staged v2 file before an editor publishes it.
+pub(crate) fn resolve_v2_edit(layer: &SourceLayer, global: Option<&Config>) -> Result<Config> {
+    let context = DefaultsContext::standalone();
+    let mut resolution = match global {
+        Some(config) => Resolution::<ConfigSpec>::from_provided(&context, config),
+        None => Resolution::new(&context),
+    };
+    if let Some(global) = global {
+        let max_bytes = global
+            .vector_store
+            .as_ref()
+            .map(|policy| policy.max_bytes)
+            .ok_or_else(|| {
+                invalid("v2 project configuration requires global config_version = 2")
+            })?;
+        resolution.apply_v2_project(layer, max_bytes)?;
+    } else {
+        resolution.apply_v2_global(layer)?;
+    }
+    resolution.finish().map(Resolved::into_settings)
 }
 
 /// Loads versioned files while retaining each source’s provenance.

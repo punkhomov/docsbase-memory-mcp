@@ -407,9 +407,11 @@ Remove any project `hybrid.cache.max_bytes` when opting into v2 globally. Use
 Run `docsbase index` with the daemon stopped. With the daemon running, use
 `docsbase sync` for both existing and new projects. Stop and restart the daemon
 after edits to the global config. Use a separate cache root to try v2 alongside
-an existing v1 setup. Edit partial v2 hybrid tables directly. The existing
-`models use` writer expects complete stage tables. The migration command still
-produces a read-only plan.
+an existing v1 setup. `models use` and its dry run resolve a v2 edit against
+the same inherited settings as the runtime. Unedited fields in a table remain
+inherited. When replacing one stage in a boolean reset, the editor keeps the
+effective state of the other stage. The migration command still produces a
+read-only plan.
 
 ## Versioned source planning API (CF3)
 

@@ -327,7 +327,10 @@ fn propose_source(
     if layer.version == ConfigVersion::V1
         && document.get("hybrid").is_some_and(toml::Value::is_table)
     {
-        document.insert("hybrid".into(), hybrid_table(&effective.hybrid_cfg));
+        document.insert(
+            "hybrid".into(),
+            toml::Value::Table(hybrid_table(&effective.hybrid_cfg)),
+        );
         draft
             .warnings
             .push(MigrationWarning::MaterializedHybridDefaults(
@@ -357,7 +360,7 @@ fn propose_source(
     }
     Ok(proposed)
 }
-fn hybrid_table(config: &HybridCfg) -> toml::Value {
+pub(crate) fn hybrid_table(config: &HybridCfg) -> toml::Table {
     let mut table = toml::Table::new();
     table.insert("enabled".into(), config.enabled.into());
     table.insert(
@@ -395,7 +398,7 @@ fn hybrid_table(config: &HybridCfg) -> toml::Value {
                 toml::Value::Table(t)
             }),
     );
-    toml::Value::Table(table)
+    table
 }
 
 impl MigrationDraft {

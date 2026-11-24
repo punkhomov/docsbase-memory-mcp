@@ -9,7 +9,6 @@
 //! single-shot). Unknown models, unsupported widths and unreachable providers
 //! fail here — never later at index time.
 
-#[cfg(feature = "hybrid-local")]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -472,18 +471,37 @@ pub fn run(args: &UseArgs) -> anyhow::Result<()> {
     // preview). The real read-merge-write re-runs under the inter-process
     // lock, so two concurrent `models use` writers cannot lost-update each
     // other's stages (panel round-2 P1).
-    let existing = match &scope {
-        Scope::Project(root) => read_project_toml(&root.join(".docsbase.toml"))?,
-        Scope::Global => read_global_toml()?,
+    let path = match &scope {
+        Scope::Project(root) => root.join(".docsbase.toml"),
+        Scope::Global => global_config_file()?,
     };
-    let table = merge_stage(existing.as_ref(), stage_key, stage.clone())?;
-    if let Some(note) = free_route_note(&table) {
+    let existing = read_config_table(&path)?;
+    let global = project_global(&path)?;
+    let (table, resolved) = merge_stage_for_file(
+        &path,
+        existing.as_ref(),
+        stage_key,
+        stage.clone(),
+        global.as_ref(),
+    )?;
+    let summary = resolved.as_ref().unwrap_or(&table);
+    if let Some(note) = free_route_note(summary) {
         eprintln!("{note}");
     }
-    if stage_key == "embedding"
-        && let Some(note) = repin_embedding_note(existing.as_ref(), &table)
-    {
-        eprintln!("{note}");
+    if stage_key == "embedding" {
+        let old_effective = if resolved.is_some() {
+            match &existing {
+                Some(document) => v2_hybrid_summary(&path, document, global.as_ref()).ok(),
+                None => global.as_ref().map(effective_hybrid_summary),
+            }
+        } else {
+            None
+        };
+        if let Some(note) =
+            repin_embedding_note(old_effective.as_ref().or(existing.as_ref()), summary)
+        {
+            eprintln!("{note}");
+        }
     }
     if args.dry_run {
         // Preview the full merged file exactly as the write would produce it
@@ -499,10 +517,6 @@ pub fn run(args: &UseArgs) -> anyhow::Result<()> {
 
     probe_stage(&probe)?;
 
-    let path = match &scope {
-        Scope::Project(root) => root.join(".docsbase.toml"),
-        Scope::Global => global_config_file()?,
-    };
     // Read-merge-write under `with_config_write_lock` (C13): `stage` is
     // re-merged against the file state observed under the lock, so two
     // concurrent `models use` writers cannot lost-update each other.
@@ -538,9 +552,11 @@ fn apply_stage_locked_with_wait(
                 })?;
             }
             let current = read_config_table(path)?;
-            let table = merge_stage(current.as_ref(), stage_key, stage)?;
+            let global = project_global(path)?;
+            let (table, resolved) =
+                merge_stage_for_file(path, current.as_ref(), stage_key, stage, global.as_ref())?;
             write_project_toml(path, current.as_ref(), &table)?;
-            Ok(table)
+            Ok(resolved.unwrap_or(table))
         },
         wait,
     )
@@ -551,6 +567,11 @@ fn read_config_table(path: &std::path::Path) -> anyhow::Result<Option<toml::Valu
     match std::fs::read_to_string(path) {
         Ok(raw) => {
             let value: toml::Value = toml::from_str(&raw).map_err(|err| {
+                if crate::config::resolve::has_version_header(raw.as_bytes()) {
+                    return Error::Admission {
+                        message: "invalid versioned configuration TOML".into(),
+                    };
+                }
                 Error::internal_with_source(format!("parse {}", path.display()), err)
             })?;
             Ok(Some(value))
@@ -807,6 +828,64 @@ fn resolve_window(window: Option<u32>) -> anyhow::Result<u32> {
     }
 }
 
+fn v2_document(root: Option<&toml::Value>) -> bool {
+    root.and_then(|root| root.get("config_version"))
+        .and_then(toml::Value::as_integer)
+        == Some(2)
+}
+
+fn project_global(path: &Path) -> crate::error::Result<Option<crate::config::Config>> {
+    path.file_name()
+        .is_some_and(|name| name == ".docsbase.toml")
+        .then(crate::config::Config::global)
+        .transpose()
+}
+
+fn merge_stage_for_file(
+    path: &Path,
+    existing: Option<&toml::Value>,
+    stage_key: &str,
+    stage: toml::Table,
+    global: Option<&crate::config::Config>,
+) -> anyhow::Result<(toml::Value, Option<toml::Value>)> {
+    let merged = merge_stage(existing, stage_key, stage)?;
+    let v2 = v2_document(existing) || global.is_some_and(|config| config.vector_store.is_some());
+    let effective = v2
+        .then(|| v2_hybrid_summary(path, &preview_merged(existing, &merged), global))
+        .transpose()?;
+    Ok((merged, effective))
+}
+
+fn v2_hybrid_summary(
+    path: &Path,
+    document: &toml::Value,
+    global: Option<&crate::config::Config>,
+) -> anyhow::Result<toml::Value> {
+    // Both callers use config.toml for global scope and .docsbase.toml
+    // for project scope. Validation runs again inside the write lock.
+    use crate::config::{schema::SourceId, source::SourceLayer};
+    let source = if path
+        .file_name()
+        .is_some_and(|name| name == ".docsbase.toml")
+    {
+        SourceId::Project(path.to_owned())
+    } else {
+        SourceId::Global(path.to_owned())
+    };
+    let rendered = toml::to_string(document)?;
+    let layer = SourceLayer::parse(source, &rendered)?;
+    Ok(effective_hybrid_summary(
+        &crate::config::resolve::resolve_v2_edit(&layer, global)?,
+    ))
+}
+
+fn effective_hybrid_summary(config: &crate::config::Config) -> toml::Value {
+    toml::Value::Table(toml::Table::from_iter([(
+        "hybrid".to_owned(),
+        toml::Value::Table(crate::config::migrate::hybrid_table(&config.hybrid_cfg)),
+    )]))
+}
+
 /// Merges the selected stage into the existing `hybrid` table, preserving
 /// every other stage and key (FR-8). Validates the merged result, so a
 /// stale bad value in the untouched stage fails here with a fix hint.
@@ -817,13 +896,23 @@ fn merge_stage(
 ) -> anyhow::Result<toml::Value> {
     let mut hybrid = match existing.and_then(|root| root.get("hybrid")).cloned() {
         Some(toml::Value::Table(table)) => table,
+        Some(toml::Value::Boolean(enabled)) if v2_document(existing) => {
+            let config = if enabled {
+                crate::hybrid::HybridCfg::enabled_with_defaults()
+            } else {
+                crate::hybrid::HybridCfg::default()
+            };
+            crate::config::migrate::hybrid_table(&config)
+        }
         // Bool shorthand or absent: start from an enabled empty table;
         // ranking falls back to the file default downstream.
         _ => toml::map::Map::new(),
     };
     hybrid.insert("enabled".to_owned(), toml::Value::Boolean(true));
     hybrid.insert(stage_key.to_owned(), toml::Value::Table(stage));
-    validate_hybrid_table(&hybrid)?;
+    if !v2_document(existing) {
+        validate_hybrid_table(&hybrid)?;
+    }
     let mut root = toml::map::Map::new();
     root.insert("hybrid".to_owned(), toml::Value::Table(hybrid));
     Ok(toml::Value::Table(root))
@@ -1588,6 +1677,39 @@ mod tests {
     }
 
     // ---------- writes ----------
+
+    #[test]
+    fn v2_locked_write_preserves_the_other_stage_and_refuses_invalid_inheritance() {
+        let env = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let target = project.path().join(".docsbase.toml");
+        std::fs::write(
+            env.path().join("config.toml"),
+            "config_version=2\nhybrid=true\n",
+        )
+        .unwrap();
+        with_envs(
+            &[
+                ("DOCSBASE_CONFIG_DIR", env.path()),
+                ("DOCSBASE_DATA_DIR", env.path()),
+            ],
+            || {
+                // The explicit false reset must keep the reranker disabled even
+                // though the outer configuration has one.
+                std::fs::write(&target, "config_version=2\nhybrid=false\n").unwrap();
+                let stage = || embedding_stage("openrouter", "new/e", 256);
+                apply_stage_locked(&target, "embedding", stage()).unwrap();
+                let resolved =
+                    crate::config::Config::load_from(env.path(), Some(project.path())).unwrap();
+                assert_eq!(resolved.hybrid_cfg.embedding.unwrap().model, "new/e");
+                assert!(resolved.hybrid_cfg.reranker.is_none());
+                let source = "config_version=2\n[hybrid.reranker]\nwindow=0\n";
+                std::fs::write(&target, source).unwrap();
+                assert!(apply_stage_locked(&target, "embedding", stage()).is_err());
+                assert_eq!(std::fs::read_to_string(&target).unwrap(), source);
+            },
+        );
+    }
 
     #[test]
     fn project_write_roundtrip_keeps_unrelated_keys_and_other_stage() {
