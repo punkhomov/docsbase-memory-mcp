@@ -1188,3 +1188,7 @@ latency factor.
 minor (deferred): separate contention coverage for native local SQLite.
 The observer uses the same native lease implementation as the registry
 contention tests.
+
+Ruling: the Windows contention fixture snapshots the cache outside the
+exclusive byte-range locks. It still observes Busy while each lock is held
+and compares the full cache tree after releasing the locks.

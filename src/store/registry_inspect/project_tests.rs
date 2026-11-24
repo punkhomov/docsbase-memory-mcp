@@ -233,6 +233,9 @@ fn observation_follows_the_head_and_reads_only_the_selected_files() {
 fn incomplete_or_busy_local_generation_never_falls_back_to_legacy() {
     let pairs = Pairs::new();
     pairs.activate_local();
+    // Windows enforces the byte-range lock during file reads, including
+    // reads made by the fixture. Snapshot only while the guards are dropped.
+    let before = snapshot(pairs.cache.path());
     for path in [
         pairs.cache.path().join("projects/1/.writer.lock"),
         pairs.local.join(".read.lock"),
@@ -246,11 +249,18 @@ fn incomplete_or_busy_local_generation_never_falls_back_to_legacy() {
         );
         let _guard = lock.try_write().unwrap();
         assert_eq!(
-            pairs.observe(),
+            inspect_project_index(
+                pairs.cache.path(),
+                1,
+                &settings::standalone().unwrap(),
+                limits(),
+            )
+            .unwrap(),
             ProjectIndexObservation::Unavailable(UnavailableReason::Busy),
             "{path:?}"
         );
     }
+    assert_eq!(snapshot(pairs.cache.path()), before);
     let sidecar = pairs.local.join("metadata.db-wal");
     fs::write(&sidecar, b"unsettled metadata").unwrap();
     assert_eq!(
