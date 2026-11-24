@@ -549,3 +549,13 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   through its native file handle. Test replacement during the read, identical
   replacement of an unchanged project between plans, and hard-linked paths.
 - [ ] Complete the CF5b2b journal, attribute and publication work above.
+
+## Delta 2026-11-24 — CF5b2b: журнал замены
+
+- [x] Реализовать [формат журнала и запрос чтения](stage-journal.md). Проверить
+  четыре выхода процесса: намерение, файл без ID, записанный ID и замена до
+  фиксации прогресса. Проверить неоднозначные файлы, запрет смены фазы и выбор
+  исходного образа при восстановлении.
+- [ ] Подтвердить полноту атрибутов и принадлежность каталога и временных файлов
+  на поддерживаемых хранилищах, связать их с согласием и проверить публикацию
+  и восстановление до включения исполнителя CF5b3.

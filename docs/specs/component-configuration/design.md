@@ -844,3 +844,9 @@ graph recipe, embedding/query cache identity, daemon or source-format change.
 The dry-run retains the first file handle across a second no-follow open. The
 [publication contract](source-publication.md) defines the evidence, its limits,
 and the distinction between the version 2 observation and a durable journal.
+
+## Delta 2026-11-24 — CF5b2b: журнал замены
+
+[Протокол журнала](stage-journal.md) задаёт формат 2 для новой БД, правила хранения
+ID при применении и восстановлении, кодирование базовых атрибутов и запрос чтения.
+Там же указаны границы проверенных атрибутов и условия будущего допуска к записи.

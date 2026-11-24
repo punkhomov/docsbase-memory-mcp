@@ -512,3 +512,11 @@ files, bind its native file identity and exact byte revision to the expected
 state. Refuse the complete proposal when a source has multiple hard links, when
 identity or link count is unavailable, or when the object changes across the
 bounded read. Byte revisions retain their existing meaning for proposed edits.
+
+## Delta 2026-11-24 — CF5b2b: журнал и наблюдение после сбоя
+
+До создания временного файла зафиксировать источник и направление замены.
+Запечатывать только полный набор базовых нативных данных. Во всей операции
+допускается одна незавершённая замена; опубликованные ID нужны для восстановления.
+После перезапуска чтение различает подтверждённое отсутствие, совпадение и
+неоднозначность файлов. [Формат и проверяемые случаи](stage-journal.md).
