@@ -905,3 +905,20 @@ the existing project lease. It leaves the Tantivy metadata lock file alone.
 This carries the legacy content revision through the existing wire and
 cache interfaces. The registry head, installation epoch and generation
 layout enter through this boundary in the next CF11a task.
+
+## Delta 2026-11-24 — persisted generation catalog
+
+Registry schema v4 defines a singleton format and epoch, one active head per
+project and one staging record per project. Deferred foreign keys bind the
+head to the active phase in both directions. The stopped transition installs
+the schema, epoch, and legacy head rows in one transaction. `projects` keeps
+its existing index-format stamp independently of the registry version.
+
+The existing no-write registry inspector can observe a prepared v4 file.
+It retains the project inventory and hashes the epoch, active generation
+IDs, layout and seal digests into `registry-v2`. It scans active rows through
+the format's partial index, bounded by the admitted project count. The head is structural
+state. Metadata content revisions and segment health still require a
+read of the selected generation. Existing v3 observations keep their
+`registry-v1` identity. The operational CLI and daemon continue to open v3
+until local metadata binding, publication and recovery are connected.

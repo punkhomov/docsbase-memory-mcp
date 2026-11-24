@@ -2298,13 +2298,13 @@ fn ensure_indexed(project: &Project) -> Result<()> {
             instruction: Some("run `docsbase index`".to_owned()),
         });
     }
-    if project.schema_version != migrations::SCHEMA_VERSION {
+    if project.schema_version != migrations::PROJECT_SCHEMA_VERSION {
         return Err(Error::Project {
             message: format!(
                 "project '{}' indexes use schema {} while this build expects {}",
                 project.name,
                 project.schema_version,
-                migrations::SCHEMA_VERSION
+                migrations::PROJECT_SCHEMA_VERSION
             ),
             instruction: Some("run `docsbase index` to rebuild".to_owned()),
         });

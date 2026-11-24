@@ -623,3 +623,15 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   bounded no-write observation and explicit legacy registration described in
   [the storage ADR](storage-publication.md). Generation activation requires
   the publication and recovery gates in CF11b–CF11d.
+
+## Delta 2026-11-24 — CF11a, persisted generation catalog
+
+- [x] CF11a-2a: Keep the existing project schema stamp independent of the
+  registry schema. Define the v4 catalog and its deferred head invariants.
+  Extend the no-write registry observer to bind the install epoch and active
+  heads, including a switch between heads at equal content revisions. Keep
+  ordinary v3 opens and v1 observation identities compatible.
+- [ ] CF11a-2b: Resolve the active legacy/local storage binding. Validate the
+  local metadata identity and its content revision under the appropriate
+  leases. Connect explicit legacy registration to the stopped-storage path
+  and keep activation behind CF11b–CF11d.

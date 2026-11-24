@@ -1530,7 +1530,7 @@ pub(crate) fn admit_incremental(db: &Db, project: &Project) -> Result<()> {
         instruction: None,
     })?;
     if current.status != ProjectStatus::Indexed
-        || current.schema_version != crate::store::migrations::SCHEMA_VERSION
+        || current.schema_version != crate::store::migrations::PROJECT_SCHEMA_VERSION
     {
         return Err(Error::Project {
             message: format!(

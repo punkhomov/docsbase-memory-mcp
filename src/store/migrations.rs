@@ -7,6 +7,9 @@ use crate::error::{Error, Result};
 /// Current schema version understood by this build.
 pub const SCHEMA_VERSION: u32 = 3;
 
+/// Persisted project index format stamp, independent of the registry format.
+pub(crate) const PROJECT_SCHEMA_VERSION: u32 = 3;
+
 const SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS projects (
     id             INTEGER PRIMARY KEY,

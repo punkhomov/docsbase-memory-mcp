@@ -237,7 +237,7 @@ impl Snapshot {
         if self.project.status != "indexed" {
             return Some(R::IndexUnavailable);
         }
-        if self.schema_version != i64::from(migrations::SCHEMA_VERSION) {
+        if self.schema_version != i64::from(migrations::PROJECT_SCHEMA_VERSION) {
             return Some(R::RebuildRequired);
         }
         let Some(outcome) = &self.outcome else {

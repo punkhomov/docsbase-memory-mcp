@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
+use super::generation_catalog;
 use super::settings::{DbSettings, DbSpec};
 use crate::config::schema::{Capabilities, Resolved, SettingsSpec};
 use crate::error::{Error, Result};
@@ -175,18 +176,30 @@ fn capture(
         .connection()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(sqlite_failure)?;
-    if version != i64::from(super::migrations::SCHEMA_VERSION) {
+    let version = u32::try_from(version).map_err(|_| UnavailableReason::UnsupportedSchema)?;
+    if !matches!(
+        version,
+        super::migrations::SCHEMA_VERSION | generation_catalog::SCHEMA_VERSION
+    ) {
         return Err(UnavailableReason::UnsupportedSchema);
     }
     let projects = read_rows(locked.connection(), limits, initial_bytes)?;
+    let catalog = if version == generation_catalog::SCHEMA_VERSION {
+        Some(generation_catalog::identity(
+            locked.connection(),
+            &projects,
+        )?)
+    } else {
+        None
+    };
     locked.check_namespace()?;
     sidecars_absent(&directory)?;
     if std::fs::canonicalize(cache).map_err(|_| UnavailableReason::Changed)? != directory {
         return Err(UnavailableReason::Changed);
     }
-    let revision = revision(cache, &projects)?;
+    let revision = revision(cache, version, &projects, catalog)?;
     Ok(RegistryState::Ready {
-        schema_version: super::migrations::SCHEMA_VERSION,
+        schema_version: version,
         revision,
         projects,
     })
@@ -246,7 +259,9 @@ fn read_rows(
 }
 fn revision(
     cache: &Path,
+    version: u32,
     projects: &[RegistryProject],
+    catalog: Option<blake3::Hash>,
 ) -> std::result::Result<String, UnavailableReason> {
     fn path(hash: &mut blake3::Hasher, value: &Path) -> std::result::Result<(), UnavailableReason> {
         let text = value.to_str().ok_or(UnavailableReason::InvalidRegistry)?;
@@ -255,17 +270,26 @@ fn revision(
         hash.update(text.as_bytes());
         Ok(())
     }
-    let mut hash = blake3::Hasher::new_derive_key("docsbase.registry.v1");
+    let (context, prefix) = if catalog.is_some() {
+        ("docsbase.registry.v2", "registry-v2")
+    } else {
+        ("docsbase.registry.v1", "registry-v1")
+    };
+    let mut hash = blake3::Hasher::new_derive_key(context);
     path(&mut hash, cache)?;
-    hash.update(&super::migrations::SCHEMA_VERSION.to_le_bytes());
+    hash.update(&version.to_le_bytes());
+    if let Some(catalog) = catalog {
+        hash.update(catalog.as_bytes());
+    }
     for project in projects {
         hash.update(&project.id.to_le_bytes());
         path(&mut hash, &project.root)?;
     }
-    Ok(format!("registry-v1:{}", hash.finalize().to_hex()))
+    Ok(format!("{prefix}:{}", hash.finalize().to_hex()))
 }
+
 #[allow(clippy::needless_pass_by_value)] // Owned map_err adapter discards raw SQL diagnostics.
-fn sqlite_failure(error: rusqlite::Error) -> UnavailableReason {
+pub(super) fn sqlite_failure(error: rusqlite::Error) -> UnavailableReason {
     if let rusqlite::Error::SqliteFailure(code, _) = error {
         match code.extended_code & 0xff {
             rusqlite::ffi::SQLITE_BUSY | rusqlite::ffi::SQLITE_LOCKED => {
