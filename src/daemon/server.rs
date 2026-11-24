@@ -1211,8 +1211,11 @@ impl Shared {
             self.dense
                 .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
         }
-        let changed = state.config.as_deref() != Some(config.as_ref());
-        if changed && self.website.is_none() {
+        let dense_changed = state
+            .config
+            .as_deref()
+            .is_none_or(|previous| !previous.same_non_watch_settings(&config));
+        if dense_changed && self.website.is_none() {
             self.dense.invalidate_memory(project.id);
         }
         // All fallible preparation steps precede publication: a rejected

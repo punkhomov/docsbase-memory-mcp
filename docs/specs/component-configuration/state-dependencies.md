@@ -260,3 +260,10 @@ conversation/admission. They do not invalidate lexical, vector, query-vector or
 ANN artifacts. Existing search still consumes its captured project/runtime
 configuration. Read evidence carries a content hash; the multi-step harness does
 not promise a single snapshot across filesystem/index changes.
+
+## Delta 2026-11-24 — I41, таймеры очередной пачки watcher
+
+Таймеры входят в конфигурацию производителя и выбираются один раз на пачку.
+Параметры действуют после публикации проектного снимка или загрузки нового
+глобального конфига при запуске. Таймеры не входят в идентичность индекса или
+векторов. Обработчик сохраняет актуальный фильтр при сбросе пачки.

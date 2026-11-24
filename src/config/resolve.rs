@@ -6,6 +6,7 @@ use std::path::Path;
 use super::bootstrap::DefaultsContext;
 use super::schema::{Capabilities, Provenance, Resolved, SettingsSpec, SourceId};
 use crate::error::{Error, Result};
+use crate::watch::settings::WatchSpec;
 
 /// A resolution owns one immutable defaults catalog and stages patches atomically.
 pub struct Resolution<S: SettingsSpec> {
@@ -152,6 +153,15 @@ impl Resolution<ConfigSpec> {
             )
             .map_err(|_| invalid("invalid hybrid stage settings in versioned source"))?;
             self.settings.hybrid = self.settings.hybrid_cfg.enabled;
+        }
+        if let Some(patch) = layer.watch {
+            WatchSpec::overlay(
+                &mut self.settings.watch,
+                patch,
+                &self.defaults.watch,
+                &layer.source,
+                &mut self.origins,
+            )?;
         }
         self.validate()
             .map_err(|_| invalid("invalid effective settings in versioned source"))

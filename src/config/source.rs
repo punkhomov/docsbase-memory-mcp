@@ -23,6 +23,7 @@ pub struct SourceLayer {
     pub(super) base: GlobalFileConfig,
     pub(super) hybrid_merge: Option<HybridMergePatch>,
     pub(super) vector_max_bytes: Option<u64>,
+    pub(super) watch: Option<crate::watch::settings::WatchPatch>,
     pub(super) original: String,
     pub(super) document: toml::Table,
 }
@@ -75,12 +76,20 @@ impl SourceLayer {
         };
         let mut hybrid_merge = None;
         let mut vector_max_bytes = None;
+        let mut watch = None;
         if version == ConfigVersion::V2 {
             if let Some(hybrid) = fields.remove("hybrid") {
                 hybrid_merge = Some(
                     hybrid
                         .try_into()
                         .map_err(|_| invalid("invalid v2 hybrid fields"))?,
+                );
+            }
+            if let Some(value) = fields.remove("watch") {
+                watch = Some(
+                    value
+                        .try_into()
+                        .map_err(|_| invalid("invalid v2 watch fields"))?,
                 );
             }
             if let Some(vector) = fields.remove("vector_cache") {
@@ -112,6 +121,7 @@ impl SourceLayer {
             base,
             hybrid_merge,
             vector_max_bytes,
+            watch,
             original: text.to_owned(),
             document,
         })

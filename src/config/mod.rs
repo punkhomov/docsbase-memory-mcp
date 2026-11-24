@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridCfg, HybridDefaults, HybridPatch, HybridSpec, ProvidersCfg};
 use crate::hybrid::remote_settings::{RemotePatch, RemoteSettings, RemoteSpec};
 use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
+use crate::watch::{WatchSettings, settings::WatchSpec};
 use bootstrap::DefaultsContext;
 use schema::{
     ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Scope, SettingsSpec,
@@ -32,7 +33,7 @@ pub mod view;
 /// Effective configuration after merging all sources.
 ///
 /// Not `Eq`: provider records carry `toml::Table`, which is only `PartialEq`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Config {
     /// Extra ignore patterns, appended to the built-in defaults.
     pub ignores: Vec<String>,
@@ -46,6 +47,8 @@ pub struct Config {
     pub daemon: DaemonSettings,
     /// Complete global-only remote execution policy.
     pub remote: RemoteSettings,
+    /// Project policy for batching native watcher events.
+    pub watch: WatchSettings,
     /// Register and index a project automatically on first connection (ADR-6: off).
     pub auto_index: bool,
     /// Hybrid retrieval feature flag (phase 2; off in v1).
@@ -57,6 +60,43 @@ pub struct Config {
     pub vector_store: Option<crate::vector_cache::settings::VectorStoreSettings>,
     /// Machine-local provider records from the global config (FR-1).
     pub providers: ProvidersCfg,
+}
+
+impl PartialEq for Config {
+    fn eq(&self, other: &Self) -> bool {
+        self.watch == other.watch && self.same_non_watch_settings(other)
+    }
+}
+
+impl Config {
+    // Keep the existing dense-reload comparison while excluding watch timing.
+    pub(crate) fn same_non_watch_settings(&self, other: &Self) -> bool {
+        let Self {
+            ignores,
+            max_file_size,
+            max_docs_per_project,
+            search,
+            daemon,
+            remote,
+            watch: _,
+            auto_index,
+            hybrid,
+            hybrid_cfg,
+            vector_store,
+            providers,
+        } = self;
+        ignores == &other.ignores
+            && *max_file_size == other.max_file_size
+            && *max_docs_per_project == other.max_docs_per_project
+            && search == &other.search
+            && daemon == &other.daemon
+            && remote == &other.remote
+            && *auto_index == other.auto_index
+            && *hybrid == other.hybrid
+            && hybrid_cfg == &other.hybrid_cfg
+            && vector_store == &other.vector_store
+            && providers == &other.providers
+    }
 }
 
 impl Default for Config {
@@ -328,6 +368,7 @@ struct ConfigDefaults {
     search: SearchSettings,
     daemon: DaemonSettings,
     remote: RemoteSettings,
+    watch: WatchSettings,
 }
 struct ConfigSpec;
 impl SettingsSpec for ConfigSpec {
@@ -348,6 +389,7 @@ impl SettingsSpec for ConfigSpec {
         fields.extend_from_slice(SearchSpec::FIELDS);
         fields.extend_from_slice(DaemonSpec::FIELDS);
         fields.extend_from_slice(RemoteSpec::FIELDS);
+        fields.extend_from_slice(WatchSpec::FIELDS);
         fields
     }
     fn defaults(context: &DefaultsContext) -> Self::Defaults {
@@ -355,6 +397,7 @@ impl SettingsSpec for ConfigSpec {
         let search = SearchSpec::defaults(context);
         let daemon = DaemonSpec::defaults(context);
         let remote = RemoteSpec::defaults(context);
+        let watch = WatchSpec::defaults(context);
         let initial = Config {
             ignores: Vec::new(),
             max_file_size: 1_048_576,
@@ -362,6 +405,7 @@ impl SettingsSpec for ConfigSpec {
             search: SearchSpec::initial(&search),
             daemon: DaemonSpec::initial(&daemon),
             remote: RemoteSpec::initial(&remote),
+            watch: WatchSpec::initial(&watch),
             auto_index: false,
             hybrid: false,
             hybrid_cfg: HybridSpec::initial(&hybrid),
@@ -374,6 +418,7 @@ impl SettingsSpec for ConfigSpec {
             search,
             daemon,
             remote,
+            watch,
         }
     }
     fn initial(defaults: &Self::Defaults) -> Config {
@@ -470,7 +515,8 @@ impl ConfigSpec {
         crate::hybrid::config::view::fields(&settings.hybrid_cfg, view)?;
         SearchSpec::view_fields(&settings.search, view)?;
         DaemonSpec::view_fields(&settings.daemon, view)?;
-        RemoteSpec::view_fields(&settings.remote, view)
+        RemoteSpec::view_fields(&settings.remote, view)?;
+        WatchSpec::view_fields(settings.watch, view)
     }
 }
 
