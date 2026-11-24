@@ -58,7 +58,8 @@ impl SourceLayer {
         {
             return Err(invalid("configuration source exceeds the state byte limit"));
         }
-        let document = toml::from_str(text).map_err(|_| invalid("invalid configuration TOML"))?;
+        let document =
+            toml::from_str(text).map_err(|_| invalid("cannot parse configuration TOML"))?;
         Self::from_document(source, text, document)
     }
 
@@ -103,6 +104,9 @@ impl SourceLayer {
                 }
                 vector_max_bytes = Some(budget.max_bytes);
             }
+        }
+        if matches!(source, SourceId::Project(_)) && fields.contains_key("providers") {
+            return Err(invalid("[providers] is only allowed in the global config"));
         }
         let base = if matches!(source, SourceId::Global(_)) {
             toml::Value::Table(fields)

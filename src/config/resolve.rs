@@ -95,13 +95,12 @@ pub fn resolve_component<S: SettingsSpec>(
 }
 
 use super::source::{SourceLayer, invalid};
-use super::{Config, ConfigSpec, read_capped, read_project};
+use super::{Config, ConfigSpec, read_capped, read_capped_if_exists, read_project};
 
 fn global_resolution(config_dir: &Path) -> Result<Resolution<ConfigSpec>> {
     let mut resolution = Resolution::new(&DefaultsContext::standalone());
     let path = config_dir.join("config.toml");
-    if path.exists() {
-        let text = read_capped(&path)?;
+    if let Some(text) = read_capped_if_exists(&path)? {
         let document = super::parse_global_document(&path, &text)?;
         let source = SourceId::Global(path.clone());
         if is_v2(&document) {
@@ -109,6 +108,8 @@ fn global_resolution(config_dir: &Path) -> Result<Resolution<ConfigSpec>> {
         } else {
             resolution.apply(&source, super::decode_global_document(&path, document)?)?;
         }
+    } else {
+        resolution.apply_v2_vector_store(&SourceId::Defaults, None)?;
     }
     // An invalid global is rejected even if a later project could replace it.
     resolution.validate()?;
@@ -158,22 +159,26 @@ impl Resolution<ConfigSpec> {
     }
 
     fn apply_v2_global(&mut self, layer: &SourceLayer) -> Result<()> {
+        self.apply_source(layer)?;
+        self.apply_v2_vector_store(&layer.source, layer.vector_max_bytes)
+    }
+
+    fn apply_v2_vector_store(&mut self, source: &SourceId, max_bytes: Option<u64>) -> Result<()> {
         use crate::vector_cache::settings::{VectorStorePatch, VectorStoreSpec};
 
-        self.apply_source(layer)?;
         let policy = resolve_component::<VectorStoreSpec>(
             &DefaultsContext::standalone(),
             [(
-                layer.source.clone(),
+                source.clone(),
                 VectorStorePatch {
-                    max_bytes: layer.vector_max_bytes,
+                    max_bytes,
                     ..VectorStorePatch::default()
                 },
             )],
         )?
         .into_settings();
-        let origin = if layer.vector_max_bytes.is_some() {
-            &layer.source
+        let origin = if max_bytes.is_some() {
+            source
         } else {
             &SourceId::Defaults
         };
@@ -358,6 +363,10 @@ pub(crate) fn launch_resolution(
                     .map_err(|error| LaunchFailure::classify(error, website))?,
             )
             .map_err(|error| LaunchFailure::classify(error, website))?;
+    } else {
+        resolution
+            .apply_v2_vector_store(&SourceId::Defaults, None)
+            .map_err(LaunchFailure::Versioned)?;
     }
     // Invalid globals never disappear behind a later CLI selector.
     resolution
@@ -400,6 +409,10 @@ impl LaunchFailure {
 // errors, never daemon owner, recognized Website or CLI errors.
 pub(crate) struct LaunchResolution(Resolution<ConfigSpec>);
 impl LaunchResolution {
+    pub(crate) fn legacy_defaults() -> Self {
+        Self(Resolution::new(&DefaultsContext::standalone()))
+    }
+
     pub(crate) fn finish(
         mut self,
         patch: crate::daemon::settings::DaemonPatch,
@@ -432,7 +445,7 @@ pub(super) fn for_provided_project(global: &Config, root: &Path) -> Result<Resol
 }
 
 /// Resolves caller-supplied versioned sources for offline review only.
-/// Ordinary file loaders deliberately do not activate the v2 source format.
+/// A preview confers no permission to publish or apply file changes.
 ///
 /// # Errors
 /// Invalid source order, scope, stage settings or unsupported configuration.

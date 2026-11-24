@@ -829,8 +829,64 @@ fn connected_v2_index_reloads_the_current_project_config() {
 }
 
 #[test]
+fn missing_global_file_uses_v2_in_direct_cli_and_daemon() {
+    let mut env = Env::new(&[("guide.md", "configurationwidget")]);
+    let out = env.cmd().args(["config", "effective"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let view: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(view["fields"].as_array().unwrap().iter().any(|field| {
+        field["key"] == "vector_cache.max_bytes" && field["source"]["kind"] == "defaults"
+    }));
+
+    let search_guide = |env: &Env| {
+        let result = env
+            .cmd()
+            .args(["search", "configurationwidget"])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        let hits: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(hits[0]["path"], "guide.md");
+    };
+    let direct = env.cmd().arg("index").output().unwrap();
+    assert!(direct.status.success(), "{direct:?}");
+    assert!(!env.cache().join("vectors.db").exists());
+
+    search_guide(&env);
+    env.start_daemon();
+    let another = tempfile::tempdir().unwrap();
+    write_file(another.path(), "guide.md", b"connectedconfigurationwidget");
+    let indexed = env.cmd().arg("index").arg(another.path()).output().unwrap();
+    assert!(indexed.status.success(), "{indexed:?}");
+    let indexed: Value = serde_json::from_slice(&indexed.stdout).unwrap();
+    assert_eq!(indexed["stats"]["docs"], 1);
+    let connected_search = env
+        .cmd()
+        .current_dir(another.path())
+        .args(["search", "connectedconfigurationwidget"])
+        .output()
+        .unwrap();
+    assert!(connected_search.status.success(), "{connected_search:?}");
+    let hits: Value = serde_json::from_slice(&connected_search.stdout).unwrap();
+    assert_eq!(hits[0]["path"], "guide.md");
+
+    let out = env.cmd().arg("sync").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let job: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(job["state"], "done");
+    search_guide(&env);
+    assert!(!env.global_config().exists());
+    assert!(!env.cache().join("vectors.db").exists());
+    assert!(matches!(
+        docsbase_memory::vector_cache::VectorCache::open(env.cache()),
+        Err(Error::Admission { .. })
+    ));
+}
+
+#[test]
 fn changed_config_version_refuses_cli_operations_against_stale_daemon() {
     let mut env = Env::new(&[("guide.md", &doc("quasar telemetry calibration"))]);
+    fs::write(env.global_config(), "# Existing unversioned installation").unwrap();
     let out = env.cmd().arg("index").output().unwrap();
     assert!(
         out.status.success(),
@@ -869,7 +925,7 @@ fn changed_config_version_refuses_cli_operations_against_stale_daemon() {
         serde_json::from_slice::<Value>(&out.stdout).unwrap()[0]["path"],
         "guide.md"
     );
-    fs::remove_file(env.global_config()).unwrap();
+    fs::write(env.global_config(), "# Existing unversioned installation").unwrap();
     expect_refusal(&env);
 }
 

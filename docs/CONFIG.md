@@ -248,8 +248,8 @@ window = 50                        # candidate window per search (10..=100)
 
 ```
 
-V1 uses `[hybrid.cache]` with `max_bytes` to bound the content-addressed vector cache.
-V2 uses the global `[vector_cache]` section described below. The default
+The global `vector_cache.max_bytes` bounds the content-addressed vector cache
+in v2. A v1 source uses `hybrid.cache.max_bytes`. The default
 (1 GiB) fits the 75k×2048 ANN target (~586 MiB); lowering it below the project's
 working set keeps `embed_coverage` under 100% and therefore disables ANN
 (ann-index FR-6 / hybrid-providers DELTA-9).
@@ -257,7 +257,7 @@ working set keeps `embed_coverage` under 100% and therefore disables ANN
 ANN admission is separate and **not configurable**: a background build is
 admitted only when `graph + exact rows` fits the resident cap
 `DenseCacheLimits.max_bytes` (1.5 GiB default, which covers the 75k×2048 peak
-of ~1.22 GiB). Raising `hybrid.cache.max_bytes` does not admit a larger corpus;
+of ~1.22 GiB). A larger vector-cache budget leaves the ANN admission cap unchanged;
 past roughly 92k chunks at `d2048` the project stays on the exact path.
 
 Default remote pins are free OpenRouter routes: they may train on prompts and
@@ -385,9 +385,10 @@ docsbase config   # effective values for the current directory (JSON)
 
 ## Configuration v2
 
-The first global settings write through `connect` or `models use --global`
-creates a v2 `config.toml`. When editing the file manually, put the version at
-the top to enable v2:
+A new installation uses v2 when the global `config.toml` is absent. Reading
+settings requires no file creation. The first global write from `connect` or
+`models use --global` records the version explicitly. To set the shared
+cache budget by hand, create a global file like this:
 
 ```toml
 config_version = 2
@@ -396,24 +397,24 @@ config_version = 2
 max_bytes = 536870912
 ```
 
-This works on a new installation without a prior migration. The global vector
-budget applies to all projects in the same cache root. Enable field-wise hybrid
-inheritance in a project by putting `config_version = 2` at the top of its
-`.docsbase.toml` after opting in globally. Runtime v1 global files omit the
-version key. Under v2 global policy, legacy project files retain their whole
-hybrid replacement semantics.
-The runtime reserves the shared policy before serving requests. It opens
-`vectors.db` on the first vector operation. Lexical indexing, sync and search
-can run without creating that database.
+All projects in the same cache root share this budget. SQLite opens the vector
+database on the first vector operation. Lexical indexing and search can run
+without creating it.
 
-Move a legacy project’s `hybrid.cache.max_bytes` into the global
-`[vector_cache]` table before opting into v2. To keep the project-specific
-budget, retain an unversioned global file. Use `docsbase config effective` to verify the shared setting and its origin.
+An existing unversioned global file selects v1. Create an empty unversioned
+global file to retain the project-specific budgets of legacy projects. To use
+v2 with those projects, move `hybrid.cache.max_bytes` to the global
+`vector_cache.max_bytes`. A project can opt into field-wise hybrid inheritance
+by setting `config_version = 2` in its `.docsbase.toml`. An unversioned project
+file keeps the whole-value hybrid replacement rule. Use
+`docsbase config effective` to check the selected values and their origins.
 
 With v2, `docsbase index` and `docsbase sync` use the running Shared daemon
 for both existing and new projects. On a fixed Website daemon, use
-`docsbase sync ABS`. Stop and restart the daemon after edits to the global config. Use a separate cache root to try v2 alongside
-an existing v1 setup. `models use` and its dry run resolve a v2 edit against
+`docsbase sync ABS`. Stop and restart the daemon after edits to the
+global config. Restart any running MCP frontend when the global version changes.
+Use a separate cache root to try v2 alongside an active v1 setup.
+`models use` and its dry run resolve a v2 edit against
 the same inherited settings as the runtime. Unedited fields in a table remain
 inherited. When replacing one stage in a boolean reset, the editor keeps the
 effective state of the other stage. The migration command still produces a

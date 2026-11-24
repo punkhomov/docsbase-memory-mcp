@@ -48,7 +48,7 @@ pub struct EffectiveField {
 pub enum ViewBasis {
     /// Caller-supplied immutable settings/provenance.
     ResolvedSnapshot,
-    /// Fresh v1 source resolution from explicit paths.
+    /// Fresh source resolution from explicit paths.
     SourceResolution,
 }
 /// Read-only presentation contract, independent of the legacy CLI JSON.

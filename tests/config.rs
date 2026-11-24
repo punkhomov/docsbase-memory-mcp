@@ -13,14 +13,12 @@ fn legacy_global_and_project_reads_enforce_the_same_existing_byte_boundary() {
     let global = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let oversize = vec![b' '; 1_048_577];
-    for (path, name) in [
-        (global.path(), "config.toml"),
-        (project.path(), ".docsbase.toml"),
-    ] {
-        fs::write(path.join(name), &oversize).unwrap();
-        assert!(Config::load_from(global.path(), Some(project.path())).is_err());
-        fs::remove_file(path.join(name)).unwrap();
-    }
+    fs::write(global.path().join("config.toml"), &oversize).unwrap();
+    assert!(Config::load_from(global.path(), Some(project.path())).is_err());
+
+    fs::write(global.path().join("config.toml"), "# Legacy global").unwrap();
+    fs::write(project.path().join(".docsbase.toml"), &oversize).unwrap();
+    assert!(Config::load_from(global.path(), Some(project.path())).is_err());
 }
 
 /// Serializes the env-mutating tests in this binary (round-6 deepseek-2):
@@ -45,7 +43,16 @@ fn defaults_when_missing() {
     let config_dir = TempDir::new().expect("tempdir");
     let config = Config::load_from(config_dir.path(), None).expect("load");
 
-    assert_eq!(config, Config::default());
+    let vector_store = docsbase_memory::vector_cache::settings::standalone()
+        .unwrap()
+        .into_settings();
+    assert_eq!(
+        config,
+        Config {
+            vector_store: Some(vector_store),
+            ..Config::default()
+        }
+    );
     assert_eq!(config.max_file_size, 1_048_576);
     assert_eq!(config.max_docs_per_project, 20_000);
     assert!(!config.hybrid);
