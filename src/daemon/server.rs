@@ -1173,12 +1173,38 @@ impl Shared {
         F: FnOnce(&Config) -> Result<HybridStages>,
         O: FnOnce(),
     {
+        self.publish_project_config(project, build, on_publication_contention, false)
+    }
+
+    fn publish_project_config<F, O>(
+        &self,
+        project: &crate::store::models::Project,
+        build: F,
+        on_publication_contention: O,
+        reuse_unchanged: bool,
+    ) -> Result<Arc<Config>>
+    where
+        F: FnOnce(&Config) -> Result<HybridStages>,
+        O: FnOnce(),
+    {
         self.admit_project(project)?;
         let slot = self.project_slot(project.id);
         // Only same-project reloads wait for construction. Existing runtime
         // reads and unrelated projects keep their last coherent state.
         let _reload = slot.reload.lock().unwrap_or_else(PoisonError::into_inner);
-        let config = Arc::new(self.config_for_root(&project.canonical_root)?);
+        let config = self.config_for_root(&project.canonical_root)?;
+        if reuse_unchanged {
+            let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(current) = &state.config
+                && state.search_stages.is_some()
+                && current.as_ref() == &config
+            {
+                // A second Index can prepare before the first job row exists.
+                // Keep the validated snapshot both workers use as their revision.
+                return Ok(Arc::clone(current));
+            }
+        }
+        let config = Arc::new(config);
         let stages = Arc::new(if self.website.is_some() {
             HybridStages::default()
         } else {
@@ -2158,6 +2184,16 @@ fn prepare_index_context(
     registry::ensure_root_present(&project)?;
     if let Some(job) = crate::store::repo::active_sync_job(db.connection(), project.id)? {
         return Ok(Err(tools::sync_status(&db, &json!({"job_id":job.id}))?));
+    }
+    if !detached && shared.global_config.vector_store.is_some() {
+        // Explicit v2 Index can arrive on a registry-only session. Refresh the
+        // project before capturing its index job, as a normal project open does.
+        shared.publish_project_config(
+            &project,
+            |config| shared.async_stages(config),
+            || {},
+            true,
+        )?;
     }
     let singleton = if shared.website.is_some() {
         Some(

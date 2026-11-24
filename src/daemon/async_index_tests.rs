@@ -61,6 +61,61 @@ impl AsyncEmbedder for DocumentGate {
 }
 
 #[test]
+fn two_v2_index_preparations_before_job_creation_keep_the_same_revision() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let cache = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(config.path().join("config.toml"), "config_version = 2\n").unwrap();
+    let shared = Shared::open_with_launch(
+        cache.path(),
+        &crate::store::settings::standalone().unwrap(),
+        &crate::store::settings::standalone_read_pool().unwrap(),
+        crate::hybrid::dense_settings::standalone()
+            .unwrap()
+            .settings(),
+        &LaunchSnapshot::capture_from(config.path()),
+        DaemonPatch::default(),
+    )
+    .unwrap();
+    let jobs = crate::daemon::job_service::JobRoot::new(shared.daemon_settings());
+    shared.activate_jobs(jobs.service()).unwrap();
+
+    let args = json!({"path": project.path()});
+    let first = prepare_index_context(&shared, None, &args, false)
+        .unwrap()
+        .unwrap();
+    let second = prepare_index_context(&shared, None, &args, false)
+        .unwrap()
+        .unwrap();
+    let db = shared.db();
+    assert!(
+        crate::store::repo::active_sync_job(db.connection(), first.project.id)
+            .unwrap()
+            .is_none()
+    );
+    drop(db);
+    let slot = first.revision.as_ref().unwrap();
+    assert!(slot.preparation_lease(&first.config).is_ok());
+    assert!(slot.preparation_lease(&second.config).is_ok());
+    std::fs::write(
+        project.path().join(".docsbase.toml"),
+        "max_docs_per_project = 19\n",
+    )
+    .unwrap();
+    let revised = prepare_index_context(&shared, None, &args, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(revised.config.max_docs_per_project, 19);
+    assert!(slot.preparation_lease(&first.config).is_err());
+    assert!(slot.preparation_lease(&revised.config).is_ok());
+}
+
+#[test]
 fn held_document_embedding_releases_actual_control_dispatch() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
