@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
+use crate::hybrid::ann_settings::{AnnBuildSettings, LEGACY_BUILD_RECIPE};
 
 /// First on-disk format version (design §5).
 pub const ANN_FORMAT_VERSION: u32 = 1;
@@ -19,10 +20,14 @@ pub const ANN_FORMAT_VERSION: u32 = 1;
 pub const HNSW_RS_VERSION: &str = "0.3.5";
 
 /// Default graph fan-out during construction (design §6).
-pub const ANN_DEFAULT_M: usize = 16;
+pub const ANN_DEFAULT_M: usize = AnnBuildSettings::owner_defaults().m();
 
 /// Default construction beam width (design §6).
-pub const ANN_DEFAULT_EF_CONSTRUCTION: usize = 200;
+pub const ANN_DEFAULT_EF_CONSTRUCTION: usize = AnnBuildSettings::owner_defaults().ef_construction();
+
+// Version of the construction recipe in the slot name. The HNSW dump layout
+// and its own on-disk format version are unchanged.
+const ANN_RECIPE_VERSION: u32 = 1;
 
 /// Provisional per-file size ceiling; a bigger graph/data file is treated as
 /// corrupt and rejected (design §6, NFR-6).
@@ -69,6 +74,10 @@ impl AnnMeta {
     /// Metadata for `key` with the pinned defaults (FR-13).
     #[must_use]
     pub fn new(key: &AnnKey) -> Self {
+        Self::for_settings(key, AnnBuildSettings::owner_defaults())
+    }
+
+    fn for_settings(key: &AnnKey, settings: AnnBuildSettings) -> Self {
         Self {
             format: key.format_version,
             hnsw_rs_version: HNSW_RS_VERSION.to_owned(),
@@ -78,8 +87,8 @@ impl AnnMeta {
             dim: key.dim,
             count: key.chunk_count,
             chunk_set_digest: key.chunk_set_digest.clone(),
-            m: ANN_DEFAULT_M,
-            ef_construction: ANN_DEFAULT_EF_CONSTRUCTION,
+            m: settings.m(),
+            ef_construction: settings.ef_construction(),
             created_at: now_secs(),
         }
     }
@@ -164,7 +173,14 @@ impl AnnStore {
     /// Final directory for `key`; unique per key by construction.
     #[must_use]
     pub fn ann_dir(&self, key: &AnnKey) -> PathBuf {
-        self.project_ann_root(key.project_id).join(dir_name(key))
+        self.ann_dir_with_settings(key, AnnBuildSettings::owner_defaults())
+    }
+
+    /// Final directory for a key and checked graph construction recipe.
+    #[must_use]
+    pub fn ann_dir_with_settings(&self, key: &AnnKey, settings: AnnBuildSettings) -> PathBuf {
+        self.project_ann_root(key.project_id)
+            .join(dir_name(key, settings))
     }
 
     /// Loads the index for `key`, if present and valid.
@@ -177,7 +193,20 @@ impl AnnStore {
     /// None for invalid/missing indexes (those are `Ok(None)`); filesystem
     /// failures while scanning the ann root are still reported.
     pub fn load(&self, key: &AnnKey) -> Result<Option<AnnSlot>> {
-        let dir = self.ann_dir(key);
+        self.load_with_settings(key, AnnBuildSettings::owner_defaults())
+    }
+
+    /// Loads an existing slot for the requested graph construction recipe.
+    /// Invalid or incompatible slots return `Ok(None)`.
+    ///
+    /// # Errors
+    /// Unexpected filesystem failures, as in [`Self::load`].
+    pub fn load_with_settings(
+        &self,
+        key: &AnnKey,
+        settings: AnnBuildSettings,
+    ) -> Result<Option<AnnSlot>> {
+        let dir = self.ann_dir_with_settings(key, settings);
         if !dir.is_dir() || !dir.join("READY").is_file() {
             return Ok(None);
         }
@@ -191,6 +220,13 @@ impl AnnStore {
         };
         if !meta.matches_key(key) {
             reject(key, "metadata does not match the requested key");
+            return Ok(None);
+        }
+        if meta.m != settings.m() || meta.ef_construction != settings.ef_construction() {
+            reject(
+                key,
+                "metadata does not match the graph construction settings",
+            );
             return Ok(None);
         }
         if meta.hnsw_rs_version != HNSW_RS_VERSION {
@@ -219,6 +255,15 @@ impl AnnStore {
         key: &AnnKey,
         write: impl FnOnce(&Path) -> Result<String>,
     ) -> Result<AnnSlot> {
+        self.persist_dump_with_settings(key, AnnBuildSettings::owner_defaults(), write)
+    }
+
+    pub(crate) fn persist_dump_with_settings(
+        &self,
+        key: &AnnKey,
+        settings: AnnBuildSettings,
+        write: impl FnOnce(&Path) -> Result<String>,
+    ) -> Result<AnnSlot> {
         let ann_root = self.project_ann_root(key.project_id);
         let tmp = ann_root.join(format!("tmp-{}-{}", std::process::id(), nanos()));
         fs::create_dir_all(&tmp)
@@ -236,7 +281,7 @@ impl AnnStore {
                 "ann dump basename {basename:?}, expected {DUMP_BASENAME:?}"
             )));
         }
-        let meta = AnnMeta::new(key);
+        let meta = AnnMeta::for_settings(key, settings);
         let publish = (|| -> Result<AnnSlot> {
             let meta_json = serde_json::to_string_pretty(&meta)
                 .map_err(|err| Error::internal_with_source("serialize ann meta", err))?;
@@ -245,7 +290,7 @@ impl AnnStore {
             sync_dump_files(&tmp)?;
             fs::write(tmp.join("READY"), "")
                 .map_err(|err| Error::internal_with_source("write ann READY", err))?;
-            let final_dir = self.ann_dir(key);
+            let final_dir = self.ann_dir_with_settings(key, settings);
             if final_dir.exists() {
                 fs::remove_dir_all(&final_dir)
                     .map_err(|err| Error::internal_with_source("replace ann index", err))?;
@@ -333,8 +378,9 @@ impl AnnStore {
         Ok(())
     }
 
-    /// Best-effort cleanup: removes stale `tmp-*` directories and keeps only
-    /// the newest [`ANN_KEEP_GENERATIONS`] generations per project (design §9).
+    /// Best-effort cleanup: removes stale `tmp-*` directories and keeps the
+    /// newest [`ANN_KEEP_GENERATIONS`] distinct generations per model (design §9).
+    /// Each retained generation can contain multiple recipes.
     ///
     /// # Errors
     /// Filesystem failures while scanning the ann root (individual removals
@@ -374,9 +420,13 @@ impl AnnStore {
             let _ = fs::remove_dir_all(dir);
         }
         for generations in by_model.values_mut() {
-            generations.sort_by_key(|(generation, _)| *generation);
-            let remove_count = generations.len().saturating_sub(ANN_KEEP_GENERATIONS);
-            for (_, dir) in generations.drain(..remove_count) {
+            generations.sort_unstable_by_key(|(generation, _)| *generation);
+            let expired = generations
+                .chunk_by(|older, newer| older.0 == newer.0)
+                .rev()
+                .skip(ANN_KEEP_GENERATIONS)
+                .flatten();
+            for (_, dir) in expired {
                 let _ = fs::remove_dir_all(dir);
             }
         }
@@ -411,19 +461,29 @@ fn reject(key: &AnnKey, reason: &str) {
     );
 }
 
-/// Directory name of a key: `<model_hash>-g<generation>-d<dim>-c<count>-<digest8>`
-/// (design §5).
-fn dir_name(key: &AnnKey) -> String {
+/// Default construction uses the original slot name (design §5).
+fn dir_name(key: &AnnKey, settings: AnnBuildSettings) -> String {
+    use std::fmt::Write as _;
+
     let model_hash: String = blake3::hash(key.model_id.as_bytes())
         .to_hex()
         .chars()
         .take(16)
         .collect();
     let digest8: String = key.chunk_set_digest.chars().take(8).collect();
-    format!(
+    let mut name = format!(
         "{model_hash}-g{}-d{}-c{}-{digest8}",
         key.generation, key.dim, key.chunk_count
-    )
+    );
+    if settings != LEGACY_BUILD_RECIPE {
+        let _ = write!(
+            name,
+            "-r{ANN_RECIPE_VERSION}-m{}-ef{}",
+            settings.m(),
+            settings.ef_construction()
+        );
+    }
+    name
 }
 
 /// Parses the model hash prefix of a key directory name.
