@@ -413,6 +413,10 @@ inherited. When replacing one stage in a boolean reset, the editor keeps the
 effective state of the other stage. The migration command still produces a
 read-only plan.
 
+On Shared v2, connected `docsbase index` requires its own job so it uses
+fresh project settings. If a sync for that project is active, wait for it to
+finish and retry `docsbase index`. Ordinary `sync` can join the active job.
+
 ## Versioned source planning API (CF3)
 
 For offline tooling, `config::source::SourceLayer::parse` accepts supplied TOML

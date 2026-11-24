@@ -608,3 +608,9 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - Проверить регистрацию, индекс повторно по относительному пути, поиск и
   прежний отказ при несовпадении версии. Проверить обновление конфига,
   сессию на период опроса и обработку пути вне UTF-8. Website использует sync.
+
+## Delta 2026-11-24 — connected Index contention
+
+- Require an independent job for an explicit CLI Index with current settings.
+- Exercise active work found at discovery, during a configuration change
+  and after preparation. Verify ordinary MCP joins the same original job.

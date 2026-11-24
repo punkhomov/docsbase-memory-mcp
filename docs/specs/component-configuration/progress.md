@@ -1146,3 +1146,18 @@ Ruling: the native Linux boundary scanner recognizes the explicit test
 module marker. The Unix-only fixture now uses a separate `cfg(unix)`
 attribute, preserving the production platform boundary. Both boundary
 tests and the path encoding regression passed locally.
+
+## 2026-11-24 — CF5c, admission for connected Index
+
+Task CF5c connected Index contention: complete (the explicit refresh uses its
+captured settings and stages and requires its own job). A typed refusal asks
+the CLI caller to wait and retry. Ordinary Sync and MCP join existing work.
+The regression exercises discovery, publication under the project lease,
+transactional admission and a superseded revision. The active Sync survives
+with the same row. Before the fix both discovery and the transaction returned
+that older job as successful admission.
+
+Ruling: fresh review required retaining the returned Arc pair and reporting an
+Index retry for a superseded config. The focused suite and re-review passed.
+Rust 1.100.0 ran 764 tests across the library, CLI routing, runtime config and
+MCP frontend. Clippy and fmt passed.
