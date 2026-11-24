@@ -820,26 +820,6 @@ fn connected_v2_index_reloads_the_current_project_config() {
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("hybrid.cache.max_bytes"));
 }
 
-#[cfg(unix)]
-#[test]
-fn connected_v2_index_rejects_non_utf8_project_path_without_panicking() {
-    use std::os::unix::ffi::OsStrExt as _;
-
-    let mut env = Env::new(&[]);
-    fs::write(env.global_config(), "config_version = 2\n").unwrap();
-    let path = env.root().join(std::ffi::OsStr::from_bytes(b"guide-\xff"));
-    fs::create_dir(&path).unwrap();
-    env.start_daemon();
-
-    let out = env.cmd().arg("index").arg(&path).output().unwrap();
-    assert!(!out.status.success());
-    let diagnostic = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        diagnostic.contains("requires a UTF-8 project path"),
-        "{diagnostic}"
-    );
-}
-
 #[test]
 fn changed_config_version_refuses_cli_operations_against_stale_daemon() {
     let mut env = Env::new(&[("guide.md", &doc("quasar telemetry calibration"))]);

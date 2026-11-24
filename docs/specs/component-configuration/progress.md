@@ -1135,3 +1135,9 @@ Ruling: совместный прогон с дефолтным v2 обнару�
 задевало существующий MCP index_project. Явное поле запроса теперь включает
 его для подключённого CLI. Обычный MCP сохраняет снимок открытого проекта.
 Целевой тест отличает оба запроса на одном изменённом источнике.
+
+Ruling: native macOS rejected creation of the malformed UTF-8 path in the
+test fixture. The encoding regression now passes an in-memory path to the
+shared IPC encoder. The connected daemon integration tests still cover
+first index, repeated index, search and config refresh. Focused Linux tests
+and independent review passed.
