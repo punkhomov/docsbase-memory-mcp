@@ -557,3 +557,9 @@ Explicit CLI Index with configuration refresh must run a job with its own
 captured settings. If a project job is already active, the command reports
 admission failure and gives a retry instruction. Ordinary Sync and MCP
 index requests keep their active-job join behavior.
+
+## Delta 2026-11-24 — формат первого глобального файла
+
+Первый глобальный файл, созданный CLI-редактором, фиксирует v2 в самом файле.
+Предпросмотр первой записи показывает этот заголовок. Редактирование
+существующего файла сохраняет его версию.

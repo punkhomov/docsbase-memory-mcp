@@ -614,3 +614,13 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - Require an independent job for an explicit CLI Index with current settings.
 - Exercise active work found at discovery, during a configuration change
   and after preparation. Verify ordinary MCP joins the same original job.
+
+## Delta 2026-11-24 — CF5c, новые глобальные файлы
+
+- Первый global write через connect и models use записывает v2. Предпросмотр
+  models use показывает тот же формат. Существующие файлы сохраняют версию.
+- Проверить фактическую запись и повторное разрешение, сохранение соседа
+  hybrid и provider configuration, и отсутствие записи при dry-run.
+- Переход для отсутствующего файла зависит от лексического запуска без
+  создания vector DB и штатного маршрута CLI index при работающем демоне.
+  Автоматическая конвертация существующих файлов остаётся отдельной задачей.

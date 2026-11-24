@@ -902,3 +902,17 @@ settings and stages returned by its refresh. A superseded revision requests
 a retry before entering the job. Equivalent resolutions can still reuse
 the same immutable settings before either job is admitted.
 The existing wire format carries the typed admission error.
+
+## Delta 2026-11-24 — создание нового явного v2
+
+CLI-редакторы начинают новый глобальный документ с общим заголовком v2.
+Реальная запись повторяет чтение и создание кандидата под действующей
+блокировкой. Существующие документы сохраняют собственную версию.
+Режим при отсутствии файла переключается после проверки лексического
+запуска без создания базы векторов и CLI index с живым демоном.
+
+Для alpha принят простой переход для старого проекта без глобального файла.
+При локальном `hybrid.cache.max_bytes` прежнее поведение сохраняется с явным
+неверсионированным глобальным файлом. При выборе v2 бюджет переносится вручную
+в глобальный `vector_cache.max_bytes`. CLI подсказывает перезапуск после
+первого сохранения v2 поставщиком.

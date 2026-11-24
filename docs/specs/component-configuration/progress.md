@@ -1161,3 +1161,17 @@ Ruling: fresh review required retaining the returned Arc pair and reporting an
 Index retry for a superseded config. The focused suite and re-review passed.
 Rust 1.100.0 ran 764 tests across the library, CLI routing, runtime config and
 MCP frontend. Clippy and fmt passed.
+
+## 2026-11-24 — первый глобальный файл CLI
+
+Task CF5c config writers: complete (общий заголовок v2 при первой записи
+connect и models use --global). Предпросмотр воспроизводит результат записи
+и оставляет путь отсутствующим. Запись с блокировкой проверена через runtime
+resolver. Изменение версии в процессе connect сопровождается подсказкой
+о перезапуске.
+
+Ruling: alpha поддерживает ручной перенос прежнего локального бюджета.
+Пробный v2 без файла выявил создание vector DB в лексической работе и
+отказ CLI index в подключённом режиме. Эти потребители проверяются отдельно
+до изменения дефолтного запуска. Повторное независимое ревью подтвердило
+меры для legacy и результаты проверок.
