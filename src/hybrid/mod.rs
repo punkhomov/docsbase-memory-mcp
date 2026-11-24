@@ -11,6 +11,7 @@
 //! backfill use owned async jobs; synchronous adapters remain for probes/compatibility.
 
 pub mod ann;
+pub mod ann_settings;
 pub mod ann_store;
 pub mod config;
 pub mod dense;

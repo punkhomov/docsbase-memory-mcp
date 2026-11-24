@@ -13,6 +13,7 @@ use std::sync::Arc;
 use hnsw_rs::prelude::*;
 
 use crate::error::{Error, Result};
+use crate::hybrid::ann_settings::AnnSearchSettings;
 use crate::hybrid::ann_store::{ANN_DEFAULT_EF_CONSTRUCTION, AnnKey, AnnSlot, AnnStore};
 
 // FR-5/SC-4 convert `hnsw_rs` panics into `Error::Internal` through
@@ -40,23 +41,14 @@ const M: usize = 16;
 /// Number of layers in the constructed graph (design §6).
 const LAYERS: usize = 16;
 
-/// Minimum beam width during search; the effective beam is
-/// `max(this, fetch * 4)` so high `limit`/window values keep recall.
-const EF_SEARCH_DEFAULT: usize = 64;
-
-/// Upper bound on the dynamic beam to keep a pathological `fetch` bounded.
-const EF_SEARCH_MAX: usize = 4096;
-
 /// Per-point graph overhead estimate used by [`AnnIndex::estimated_bytes`]
 /// (design §8). Measured from the T1 spike dump: ~780 B/vertex at 10k×64;
 /// rounded up to 1024 so the cap estimate never understates resident bytes.
 const GRAPH_OVERHEAD_BYTES: usize = 1024;
 
-/// Beam width for a requested `fetch`: `max(64, fetch * 4)`, capped.
+/// Compatibility beam; `hnsw_rs` may promote it above the cap for large fetch.
 fn ef_for(fetch: usize) -> usize {
-    EF_SEARCH_DEFAULT
-        .max(fetch.saturating_mul(4))
-        .min(EF_SEARCH_MAX)
+    AnnSearchSettings::owner_defaults().legacy_beam_for(fetch)
 }
 
 /// Owning wrapper for a persisted index (spike T1): `HnswIo` owns the mmap
@@ -154,10 +146,29 @@ impl AnnIndex {
     /// index surface as `Err` so callers can fall back to exact search
     /// (FR-5).
     ///
+    /// The historical cap limits the ef argument only: `hnsw_rs` promotes ef
+    /// to fetch internally. Use [`Self::search_with_settings`] for explicit
+    /// bounded-fetch admission. Neither API guarantees total query RSS.
+    ///
     /// # Errors
     /// Empty `query` or a dimension mismatch with the index.
     pub fn search(&self, query: &[f32], fetch: usize) -> Result<Vec<(u64, f32)>> {
         self.search_inner(query, fetch, ef_for(fetch))
+    }
+
+    /// Search using an immutable, checked per-call policy on the same graph.
+    /// Search policy does not change graph identities or persisted data.
+    ///
+    /// # Errors
+    /// Fetch exceeds the policy maximum, the query is empty or its dimension
+    /// differs from the index, or HNSW panics (converted to an internal error).
+    pub fn search_with_settings(
+        &self,
+        query: &[f32],
+        fetch: usize,
+        settings: &AnnSearchSettings,
+    ) -> Result<Vec<(u64, f32)>> {
+        self.search_inner(query, fetch, settings.beam_for(fetch)?)
     }
 
     /// [`Self::search`] with an explicit `ef` beam (recall-vs-ef curve).
@@ -344,11 +355,11 @@ mod tests {
 
     #[test]
     fn ef_scales_with_fetch_and_caps() {
-        assert_eq!(ef_for(0), EF_SEARCH_DEFAULT);
-        assert_eq!(ef_for(10), EF_SEARCH_DEFAULT);
+        assert_eq!(ef_for(0), 64);
+        assert_eq!(ef_for(10), 64);
         assert_eq!(ef_for(50), 200);
         assert_eq!(ef_for(1000), 4_000);
-        assert_eq!(ef_for(usize::MAX), EF_SEARCH_MAX);
+        assert_eq!(ef_for(usize::MAX), 4096);
     }
 
     #[test]
@@ -394,9 +405,16 @@ mod tests {
             .collect();
         let mut observed = Vec::new();
         for ef in [16, 32, 64, 128, 256] {
+            let settings = AnnSearchSettings::new(ef, ef, 1).expect("fixed beam");
             let mut total = 0.0;
             for (query, exact) in queries.iter().zip(&exact) {
-                let hits = ann.search_with_ef(query, 10, ef).expect("search");
+                let hits = ann
+                    .search_with_settings(query, 10, &settings)
+                    .expect("configured search");
+                assert_eq!(
+                    hits,
+                    ann.search_with_ef(query, 10, ef).expect("explicit beam")
+                );
                 let exact_ids: Vec<u64> = exact.iter().map(|(id, _)| *id).collect();
                 let overlap = hits.iter().filter(|(id, _)| exact_ids.contains(id)).count();
                 total += overlap as f64 / hits.len() as f64;

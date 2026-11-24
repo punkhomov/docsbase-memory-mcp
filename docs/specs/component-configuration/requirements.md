@@ -495,3 +495,12 @@ Read-only bounded projection консервативна при absent/corrupt/mi
 Additive schema migration сохраняет совместимые existing lexical indexes, не
 придумывая историческую полноту. План: [index-outcome-plan.md](index-outcome-plan.md).
 Readiness endpoint, server profile и continuous generation publication не входят.
+
+## Delta 2026-11-24 — CF8a bounded ANN search policy
+
+For I33 / FR-3/10/11/15, introduce a project-scoped, pure ANN search owner and an
+explicit immutable library API. Qualified beam domain is 1..=4096, base<=max,
+multiplier>0. Explicit fetch above max is refused before HNSW's internal ef
+promotion. Legacy search preserves its existing high-fetch behavior and soft cap.
+Changing search policy alone never rewrites graph/vector identities or files.
+This is not a total RSS guarantee, source-key activation or full CF8 completion.

@@ -535,3 +535,10 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - [x] IO1: additive schema, bounded read-only outcome и all-core begin/end publication
   для #79 FR-S2. План: [index-outcome-plan.md](index-outcome-plan.md). Scope — A-owned
   index/store плюс существующие wrapper endings; server/readiness/IPC остаются B.
+
+## Delta 2026-11-24 — CF8a search-only library adoption
+
+- [x] **CF8a:** I33 project owner, checked immutable policy, additive built/loaded
+  search API with bounded-fetch admission, legacy compatibility and real graph
+  persistence regressions. Plan: [cf8a-plan.md](cf8a-plan.md). Construction/recipe/
+  estimator and dense/runtime/source composition remain later CF8 slices.
