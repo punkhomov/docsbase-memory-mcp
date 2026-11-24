@@ -37,7 +37,7 @@ mod tests {
     #[test]
     fn journal_layout_preserves_uid_gid_and_special_mode_bits() {
         // Distinct IDs keep a field swap observable even on hosts with uid == gid.
-        let bytes = unix_stat(0x1234_5678, 0x8765_4321, 0o104640);
+        let bytes = unix_stat(0x1234_5678, 0x8765_4321, 0o104_640);
         assert_eq!(PROFILE, "unix-stat-v1");
         assert_eq!(
             bytes.as_flattened(),
