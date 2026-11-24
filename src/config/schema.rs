@@ -59,6 +59,8 @@ pub enum Unit {
     Bytes,
     /// Duration represented in milliseconds when rendered.
     Milliseconds,
+    /// Dimensionless weight multiplier.
+    Multiplier,
     /// Boolean switch.
     Boolean,
     /// Identifier or enum name.

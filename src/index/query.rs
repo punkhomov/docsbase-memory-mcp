@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tantivy::query::{Query, QueryParser};
 use tantivy::query_grammar::{Delimiter, Occur, UserInputAst, UserInputLeaf, UserInputLiteral};
 
+use super::lexical_settings::normalize_boost;
 use crate::error::{Error, Result};
 
 /// Per-request interpretation; its default preserves the existing syntax API.
@@ -69,6 +70,14 @@ pub(super) fn prepare_query(
     mode: QueryMode,
 ) -> Result<Box<dyn Query>> {
     if mode == QueryMode::Syntax {
+        if query.contains('^')
+            && let Ok(ast) = tantivy::query_grammar::parse_query(query)
+            && !finite_boosts(&ast, 1.0)
+        {
+            return Err(Error::Query {
+                message: "query contains a non-finite lexical boost".to_owned(),
+            });
+        }
         return parser.parse_query(query).map_err(|error| Error::Query {
             message: format!("parse query {query:?}: {error}"),
         });
@@ -103,4 +112,21 @@ pub(super) fn prepare_query(
         });
     }
     Ok(parsed)
+}
+
+// Tantivy multiplies outer boosts before applying the field weights. In
+// particular 0.0 * infinity would become NaN and disappear from TopDocs.
+#[allow(clippy::cast_possible_truncation)] // Match Tantivy, then check for overflow.
+fn finite_boosts(ast: &UserInputAst, combined: f32) -> bool {
+    match ast {
+        UserInputAst::Clause(clauses) => {
+            clauses.iter().all(|(_, ast)| finite_boosts(ast, combined))
+        }
+        UserInputAst::Leaf(_) => true,
+        UserInputAst::Boost(ast, boost) => {
+            let boost = normalize_boost(boost.into_inner() as f32);
+            let combined = combined * boost;
+            boost.is_finite() && combined.is_finite() && finite_boosts(ast, combined)
+        }
+    }
 }

@@ -413,6 +413,27 @@ inherited. When replacing one stage in a boolean reset, the editor keeps the
 effective state of the other stage. The migration command still produces a
 read-only plan.
 
+### Lexical weights
+
+Use a `[lexical]` table in the global or project v2 configuration to tune
+the field weights used by BM25. A project can override individual fields.
+
+```toml
+[lexical]
+text_boost = 1.0
+title_boost = 2.0
+heading_boost = 1.5
+identifiers_boost = 2.5
+```
+
+These values are the defaults. The title field indexes the outermost
+heading in a chunk's heading path. Weights must be finite and nonnegative
+as 32-bit floats, with at least one positive weight. Tantivy treats weights
+within one float epsilon of 1.0 as 1.0. A zero weight keeps matches eligible
+and contributes zero score. A query reports an error if its scores or its
+explicit syntax boosts overflow. Reopen the project to apply project settings in a running daemon.
+The stored index and vector identities are independent of these weights.
+
 ## Versioned source planning API (CF3)
 
 For offline tooling, `config::source::SourceLayer::parse` accepts supplied TOML

@@ -714,3 +714,44 @@ fn stricter_typed_snapshot_validation_preserves_plain_config_compatibility() {
         snapshot
     );
 }
+
+#[test]
+fn v2_lexical_weights_reject_invalid_or_silent_scoring() {
+    let global = TempDir::new().expect("global");
+    let project = TempDir::new().expect("project");
+    layer(&global, "config.toml", "config_version = 2\n");
+    for fields in [
+        "text_boost = -1.0",
+        "text_boost = -1e-50",
+        "text_boost = 1e-50",
+        "heading_boost = nan",
+        "identifiers_boost = inf",
+        "text_boost = 0.0\ntitle_boost = 0.0\nheading_boost = 0.0\nidentifiers_boost = 0.0",
+    ] {
+        layer(
+            &project,
+            ".docsbase.toml",
+            &format!("config_version = 2\n[lexical]\n{fields}\n"),
+        );
+        let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+        assert!(error.to_string().contains("lexical boosts"), "{error}");
+    }
+
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2\n[lexical]\ntext_boost = 0.99999994\n",
+    );
+    let view = docsbase_memory::config::view::load_from(global.path(), Some(project.path()))
+        .expect("near-one weight resolves");
+    let field = view
+        .fields
+        .iter()
+        .find(|field| field.key == "lexical.text_boost")
+        .unwrap();
+    assert_eq!(field.value, 1.0);
+    assert_eq!(
+        field.origin.source,
+        SourceId::Project(project.path().join(".docsbase.toml"))
+    );
+}

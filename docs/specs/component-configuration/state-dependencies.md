@@ -260,3 +260,9 @@ conversation/admission. They do not invalidate lexical, vector, query-vector or
 ANN artifacts. Existing search still consumes its captured project/runtime
 configuration. Read evidence carries a content hash; the multi-step harness does
 not promise a single snapshot across filesystem/index changes.
+
+## Delta 2026-11-24 — I09, веса BM25
+
+Веса применяются при создании query parser поверх существующего Tantivy.
+Rerank/diversity refill сохраняет те же веса. Политика меняет порядок
+результатов и не входит в индексацию, cache key embedding или ANN identity.

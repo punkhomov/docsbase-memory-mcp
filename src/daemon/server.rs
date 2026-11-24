@@ -1211,8 +1211,11 @@ impl Shared {
             self.dense
                 .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
         }
-        let changed = state.config.as_deref() != Some(config.as_ref());
-        if changed && self.website.is_none() {
+        let dense_changed = state
+            .config
+            .as_deref()
+            .is_none_or(|previous| !previous.same_non_lexical_settings(&config));
+        if dense_changed && self.website.is_none() {
             self.dense.invalidate_memory(project.id);
         }
         // All fallible preparation steps precede publication: a rejected
@@ -2364,7 +2367,7 @@ fn route_search(
         .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |reranker| {
             reranker.window
         });
-    tools::search_docs_from(
+    tools::search_docs_with_weights(
         &tools::SearchContext {
             stages: &stages,
             dense: &shared.dense,
@@ -2377,6 +2380,7 @@ fn route_search(
         crate::search::metadata::MetadataSource::Prepared(&shared.readers),
         args,
         || slot.preparation_lease(&config),
+        config.lexical,
     )
 }
 

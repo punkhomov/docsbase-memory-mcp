@@ -16,8 +16,17 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_global_config(None)
+    }
+
+    fn with_global_config(global_config: Option<&str>) -> Self {
         let cache = tempfile::TempDir::new().expect("cache");
         let root = tempfile::TempDir::new().expect("root");
+        let config_dir = cache.path().join("test-config");
+        if let Some(text) = global_config {
+            std::fs::create_dir(&config_dir).expect("config dir");
+            std::fs::write(config_dir.join("config.toml"), text).expect("global config");
+        }
         // Other unit tests temporarily redirect process-global configuration.
         // This fixture owns its launch policy and must never inherit their caps.
         let shared = Shared::open_with_launch(
@@ -27,7 +36,7 @@ impl Fixture {
             crate::hybrid::dense_settings::standalone()
                 .unwrap()
                 .settings(),
-            &LaunchSnapshot::capture_from(&cache.path().join("test-config")),
+            &LaunchSnapshot::capture_from(&config_dir),
             DaemonPatch::default(),
         )
         .expect("empty daemon state");
@@ -441,8 +450,8 @@ fn reload_panic_preserves_last_pair_and_allows_later_recovery() {
 }
 
 #[test]
-fn semantic_reload_invalidates_resident_rows_but_unchanged_reload_keeps_them() {
-    let fixture = Fixture::new();
+fn semantic_reload_invalidates_resident_rows_but_lexical_weights_keep_them() {
+    let fixture = Fixture::with_global_config(Some("config_version = 2\n"));
     fixture.write_config("hybrid = false\nmax_docs_per_project = 11\n");
     let before = fixture
         .shared
@@ -472,6 +481,18 @@ fn semantic_reload_invalidates_resident_rows_but_unchanged_reload_keeps_them() {
     assert!(
         Arc::ptr_eq(&rows, &load()),
         "semantic equality preserves resident rows"
+    );
+    fixture.write_config(
+        "config_version = 2\nhybrid = false\nmax_docs_per_project = 11\n[lexical]\ntitle_boost = 6.0\n",
+    );
+    let updated = fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .expect("lexical reload");
+    assert_ne!(same.lexical, updated.lexical);
+    assert!(
+        Arc::ptr_eq(&rows, &load()),
+        "lexical weights leave dense rows resident"
     );
     fixture.write_config("hybrid = false\nmax_docs_per_project = 23\n");
     fixture

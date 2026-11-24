@@ -67,6 +67,17 @@ impl Env {
         command
     }
 
+    fn run_json(&self, args: &[&str]) -> Value {
+        let out = self.cmd().args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
     fn start_daemon(&mut self) {
         let child = self
             .cmd()
@@ -697,22 +708,7 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
         ".docsbase.toml",
         b"config_version=2\nmax_docs_per_project=50\n",
     );
-    let run = |env: &Env, args: &[&str]| {
-        let out = env
-            .cmd()
-            .current_dir(env.root())
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        serde_json::from_slice::<Value>(&out.stdout).unwrap()
-    };
-
-    let report = run(&env, &["config", "effective"]);
+    let report = env.run_json(&["config", "effective"]);
     let fields = report["fields"].as_array().unwrap();
     assert!(
         fields
@@ -724,10 +720,10 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
             .iter()
             .any(|field| field["key"] == "max_docs_per_project" && field["value"] == 50)
     );
-    let indexed = run(&env, &["index"]);
+    let indexed = env.run_json(&["index"]);
     assert!(indexed["project_id"].is_i64());
     assert_eq!(
-        run(&env, &["search", "quasar telemetry"])[0]["path"],
+        env.run_json(&["search", "quasar telemetry"])[0]["path"],
         "guide.md"
     );
     env.start_daemon();
@@ -736,7 +732,7 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
         Err(Error::Admission { .. })
     ));
     assert_eq!(
-        run(&env, &["search", "quasar telemetry"])[0]["path"],
+        env.run_json(&["search", "quasar telemetry"])[0]["path"],
         "guide.md"
     );
     write_file(
@@ -744,19 +740,19 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
         "new.md",
         doc("pulsar orbital measurements").as_bytes(),
     );
-    assert_eq!(run(&env, &["sync"])["state"], "done");
+    assert_eq!(env.run_json(&["sync"])["state"], "done");
     let another = tempfile::tempdir().unwrap();
     write_file(
         another.path(),
         "another.md",
         doc("radio observatory antenna").as_bytes(),
     );
-    let from_daemon = run(&env, &["sync", another.path().to_str().unwrap()]);
+    let from_daemon = env.run_json(&["sync", another.path().to_str().unwrap()]);
     assert_eq!(from_daemon["state"], "done");
     assert_ne!(from_daemon["project_id"], indexed["project_id"]);
     env.restart_daemon();
     assert!(
-        run(&env, &["search", "pulsar orbital"])
+        env.run_json(&["search", "pulsar orbital"])
             .as_array()
             .unwrap()
             .iter()
@@ -837,5 +833,115 @@ fn invalid_v2_global_fails_before_creating_daemon_state() {
         assert!(String::from_utf8_lossy(&out.stderr).contains(error));
         assert!(!env.cache().join("state").exists());
         assert!(!env.cache().join(docsbase_memory::store::DB_FILE).exists());
+    }
+}
+
+#[test]
+fn v2_lexical_weights_change_real_search_without_reindexing() {
+    let title_matches = "# lexicalweightprobe\n\nThis prose has no search term.\n\n".repeat(24);
+    let mut env = Env::new(&[
+        ("manual/title.md", &title_matches),
+        (
+            "manual/body.md",
+            "# Example\n\nThe prose contains lexicalweightprobe.\n",
+        ),
+    ]);
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[lexical]\ntitle_boost = 4.0\ntext_boost = 1.0\nheading_boost = 0.0\nidentifiers_boost = 0.0\n",
+    )
+    .unwrap();
+    assert_eq!(env.run_json(&["index"])["stats"]["docs"], 2);
+    let query = [
+        "search",
+        "lexicalweightprobe",
+        "--explain",
+        "--path-prefix",
+        "manual/",
+    ];
+    let baseline = env.run_json(&query);
+    assert_eq!(baseline["hits"][0]["path"], "manual/title.md");
+    let generation = baseline["meta"]["index_generation"].as_i64().unwrap();
+    let refill = env.run_json(&[
+        "search",
+        "lexicalweightprobe",
+        "--explain",
+        "--limit",
+        "2",
+        "--dedupe",
+        "path",
+        "--n-per-doc",
+        "1",
+    ]);
+    assert!(refill["meta"]["refill"]["rounds"].as_u64().unwrap() > 1);
+    assert_eq!(refill["hits"][0]["path"], "manual/title.md");
+    assert_eq!(refill["hits"][0]["score"], baseline["hits"][0]["score"]);
+    assert_eq!(refill["hits"][1]["path"], "manual/body.md");
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[lexical]\ntitle_boost = 0.0\n",
+    )
+    .unwrap();
+    let direct = env.run_json(&query);
+    assert_eq!(direct["hits"][0]["path"], "manual/body.md");
+    assert_eq!(direct["meta"]["index_generation"], generation);
+
+    env.start_daemon();
+    let from_daemon = env.run_json(&query);
+    assert_eq!(from_daemon["hits"], direct["hits"]);
+    assert_eq!(from_daemon["meta"]["index_generation"], generation);
+
+    let effective = env.run_json(&["config", "effective"]);
+    let fields = effective["fields"].as_array().unwrap();
+    let field = |key| fields.iter().find(|entry| entry["key"] == key).unwrap();
+    assert_eq!(field("lexical.title_boost")["value"], 0.0);
+    assert_eq!(field("lexical.title_boost")["source"]["kind"], "project");
+    assert_eq!(field("lexical.text_boost")["value"], 1.0);
+    assert_eq!(field("lexical.text_boost")["source"]["kind"], "global");
+
+    fs::write(env.project_config(), "config_version = 2\n").unwrap();
+    let reopened = env.run_json(&query);
+    assert_eq!(reopened["hits"], baseline["hits"]);
+    assert_eq!(reopened["meta"]["index_generation"], generation);
+}
+
+#[test]
+fn v2_lexical_weight_overflow_returns_a_query_error() {
+    let env = Env::new(&[("needle.md", "# Guide\n\ninterestingweightword")]);
+    for i in 0..20 {
+        write_file(
+            env.root(),
+            &format!("unrelated{i}.md"),
+            b"# Guide\n\nSome unrelated text.",
+        );
+    }
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[lexical]\ntext_boost = 3.0e38\n",
+    )
+    .unwrap();
+    assert_eq!(env.run_json(&["index"])["stats"]["docs"], 21);
+
+    let out = env
+        .cmd()
+        .args(["search", "interestingweightword"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("non-finite lexical score"));
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[lexical]\ntext_boost = 0.0\n",
+    )
+    .unwrap();
+    for query in [
+        "text:interestingweightword^400000000000000000000000000000000000000",
+        "(text:interestingweightword^100000000000000000000)^100000000000000000000",
+    ] {
+        let out = env.cmd().args(["search", query]).output().unwrap();
+        assert!(!out.status.success(), "{query}: {out:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("non-finite lexical boost"));
     }
 }
