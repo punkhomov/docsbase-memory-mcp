@@ -599,3 +599,13 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - [x] Принимать частичную соседнюю стадию в `models use`, сохранять поведение
   булева сокращения и отклонять несовместимый итог до записи. Проверить
   реальный CLI dry-run и путь записи под блокировкой без сети.
+
+## Delta 2026-11-24 — CF10 и разбиение CF11
+
+- [x] Сопоставить размещения metadata на bounded fixture и определить
+  контракт head, seal, leases и recovery в
+  [storage-publication.md](storage-publication.md).
+- [ ] CF11a — реестр и accessor с legacy совместимостью.
+- [ ] CF11b — изолированный staging и нативная проверка sealing.
+- [ ] CF11c — durable CAS и совместимый snapshot демона и direct CLI.
+- [ ] CF11d — recovery/reclaim, budgets и настоящий согласованный apply.
