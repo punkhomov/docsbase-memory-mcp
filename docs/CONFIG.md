@@ -582,6 +582,27 @@ above `ef_max` use exact streaming without loading or building a graph for that 
 these values keeps the existing graph and vectors. A project without an
 explicit or inherited table retains the existing ANN behavior.
 
+### ANN construction
+
+`[ann.build]` sets the HNSW graph recipe. Global settings supply defaults for
+projects. A project can override either field.
+
+```toml
+[ann.build]
+m = 16
+ef_construction = 200
+```
+
+`m` accepts 8 through 16. `ef_construction` accepts twice `m` through 200.
+The persisted HNSW format uses 16 layers. `docsbase config effective` shows
+the two resolved values and their sources.
+
+After a project config reload, the daemon selects a graph with the new recipe
+or builds one using its saved vectors. It reuses the lexical index and embedding
+keys. Search uses exact results while the matching graph is unavailable.
+Direct CLI search can load a matching graph and otherwise searches the vectors
+directly. Global config edits apply after a daemon restart.
+
 ### ANN lifetime construction policy
 
 The internal typed DenseSpec also owns the existing one-hour backfill-pin and

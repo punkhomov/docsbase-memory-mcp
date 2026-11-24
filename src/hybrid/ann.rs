@@ -14,7 +14,7 @@ use hnsw_rs::prelude::*;
 
 use crate::error::{Error, Result};
 use crate::hybrid::ann_settings::{AnnBuildSettings, AnnSearchSettings, PERSISTED_LAYERS};
-use crate::hybrid::ann_store::{AnnKey, AnnSlot, AnnStore};
+use crate::hybrid::ann_store::{AnnKey, AnnSlot, AnnSlotPin, AnnStore};
 
 // FR-5/SC-4 convert `hnsw_rs` panics into `Error::Internal` through
 // `catch_unwind`, which only works while unwinding is enabled. With
@@ -35,10 +35,10 @@ pub const ANN_MIN_VECTORS: usize = super::dense_settings::DEFAULT_ANN_MIN_VECTOR
 /// benefit at this scale.
 const SEQUENTIAL_BUILD_MAX: usize = 64;
 
-/// Per-point graph overhead estimate used by [`AnnIndex::estimated_bytes`]
-/// (design §8). Measured from the T1 spike dump: ~780 B/vertex at 10k×64;
-/// rounded up to 1024 so the cap estimate never understates resident bytes.
-const GRAPH_OVERHEAD_BYTES: usize = 1024;
+// Allowance for the in-process graph over its vector payload. The CF8 probe
+// measured ~4.5 kB/point including the payload after a 20k×96 reload.
+// The estimate also charges the vector bytes for mmap's potentially warm pages.
+const GRAPH_OVERHEAD_BYTES: usize = 4608;
 
 /// Compatibility beam; `hnsw_rs` may promote it above the cap for large fetch.
 fn ef_for(fetch: usize) -> usize {
@@ -70,6 +70,8 @@ pub struct AnnIndex {
     dim: usize,
     count: usize,
     build_settings: AnnBuildSettings,
+    // Dropped after the mapped graph.
+    _disk_pin: Option<AnnSlotPin>,
 }
 
 impl std::fmt::Debug for AnnIndex {
@@ -145,6 +147,7 @@ impl AnnIndex {
             dim,
             count: rows.len(),
             build_settings: settings,
+            _disk_pin: None,
         })
     }
 
@@ -274,6 +277,7 @@ impl AnnIndex {
             dim: slot.meta.dim,
             count: slot.meta.count,
             build_settings: settings,
+            _disk_pin: None,
         })
     }
 
@@ -281,6 +285,13 @@ impl AnnIndex {
     #[must_use]
     pub fn build_settings(&self) -> AnnBuildSettings {
         self.build_settings
+    }
+
+    pub(crate) fn with_disk_pin(self, pin: AnnSlotPin) -> Self {
+        Self {
+            _disk_pin: Some(pin),
+            ..self
+        }
     }
 
     /// Number of vectors in the graph.
@@ -409,6 +420,7 @@ mod tests {
             dim: TEST_DIM,
             count: TEST_COUNT,
             build_settings: ann.build_settings(),
+            _disk_pin: None,
         };
         let a = mmap.search(query, 10).expect("mmap search");
         let b = heap.search(query, 10).expect("heap search");

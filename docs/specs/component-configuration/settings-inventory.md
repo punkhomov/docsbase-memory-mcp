@@ -515,3 +515,11 @@ checked before owned text copies, and HTTP response reads obey the smaller cap.
 Model address is request-scoped, credentials stay with the existing provider.
 Future configurable generation policy belongs to the ask/model owners in #128;
 this delta does not claim full CF adoption or create another resolution registry.
+
+## Delta 2026-11-24 — I32: рецепт ANN
+
+AnnBuildSpec разрешает project-scoped `ann.build.m` (16) и
+`ann.build.ef_construction` (200). Допуск остаётся в проверенных границах.
+Смена рецепта выбирает отдельный граф (A) поверх прежних векторов и поколения.
+16 слоёв требует формат `hnsw_rs 0.3.5` (X05). Учёт памяти использует измеренный
+запас на вершину. [Модель допуска и замеры](cf8-build-plan.md).

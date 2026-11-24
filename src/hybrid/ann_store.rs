@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
@@ -146,13 +147,58 @@ pub fn chunk_set_digest(chunks: &[(u64, String)]) -> String {
 #[derive(Debug, Clone)]
 pub struct AnnStore {
     root: PathBuf,
+    slot_pins: Arc<Mutex<HashMap<PathBuf, SlotUse>>>,
+}
+
+#[derive(Debug)]
+enum SlotUse {
+    Build,
+    Readers(usize),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AnnSlotAccess {
+    Read,
+    Build,
+}
+
+/// Owns one in-process claim on a persisted slot through load or residency.
+pub(crate) struct AnnSlotPin {
+    path: PathBuf,
+    pins: Arc<Mutex<HashMap<PathBuf, SlotUse>>>,
+}
+
+impl AnnSlotPin {
+    pub(crate) fn finish_build(self) -> Self {
+        self.pins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(self.path.clone(), SlotUse::Readers(1));
+        self
+    }
+}
+
+impl Drop for AnnSlotPin {
+    fn drop(&mut self) {
+        let mut pins = self.pins.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(SlotUse::Readers(count)) = pins.get_mut(&self.path)
+            && *count > 1
+        {
+            *count -= 1;
+        } else {
+            pins.remove(&self.path);
+        }
+    }
 }
 
 impl AnnStore {
     /// Store rooted at `root` (typically the cache root).
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            slot_pins: Arc::default(),
+        }
     }
 
     /// Directory containing all ANN indexes of a project.
@@ -181,6 +227,44 @@ impl AnnStore {
     pub fn ann_dir_with_settings(&self, key: &AnnKey, settings: AnnBuildSettings) -> PathBuf {
         self.project_ann_root(key.project_id)
             .join(dir_name(key, settings))
+    }
+
+    pub(crate) fn pin_slot(
+        &self,
+        key: &AnnKey,
+        settings: AnnBuildSettings,
+        access: AnnSlotAccess,
+    ) -> Option<AnnSlotPin> {
+        let path = self.ann_dir_with_settings(key, settings);
+        let mut pins = self
+            .slot_pins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match pins.get_mut(&path) {
+            Some(SlotUse::Readers(count)) if access == AnnSlotAccess::Read => *count += 1,
+            Some(_) => return None,
+            None => {
+                let slot_use = match access {
+                    AnnSlotAccess::Read => SlotUse::Readers(1),
+                    AnnSlotAccess::Build => SlotUse::Build,
+                };
+                pins.insert(path.clone(), slot_use);
+            }
+        }
+        Some(AnnSlotPin {
+            path,
+            pins: self.slot_pins.clone(),
+        })
+    }
+
+    fn remove_unpinned(&self, path: &Path) -> bool {
+        // Serialize the per-slot check and delete with pin acquisition.
+        // The filesystem scan and graph loading run outside this lock.
+        let pins = self
+            .slot_pins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        !pins.contains_key(path) && fs::remove_dir_all(path).is_ok()
     }
 
     /// Loads the index for `key`, if present and valid.
@@ -370,7 +454,7 @@ impl AnnStore {
             if total <= max_bytes || remaining <= 1 {
                 break;
             }
-            if fs::remove_dir_all(&path).is_ok() {
+            if self.remove_unpinned(&path) {
                 total = total.saturating_sub(size);
                 remaining -= 1;
             }
@@ -427,7 +511,7 @@ impl AnnStore {
                 .skip(ANN_KEEP_GENERATIONS)
                 .flatten();
             for (_, dir) in expired {
-                let _ = fs::remove_dir_all(dir);
+                self.remove_unpinned(dir);
             }
         }
         Ok(())

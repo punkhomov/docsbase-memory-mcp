@@ -20,7 +20,7 @@ pub(super) const LEGACY_BUILD_RECIPE: AnnBuildSettings = AnnBuildSettings {
 };
 
 /// Checked settings that identify the construction recipe of a graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AnnBuildSettings {
     m: usize,
     ef_construction: usize,
@@ -60,10 +60,20 @@ impl AnnBuildSettings {
     pub(crate) const fn owner_defaults() -> Self {
         LEGACY_BUILD_RECIPE
     }
+
+    pub(crate) fn view_fields(self, view: &mut crate::config::view::ViewBuilder<'_>) -> Result<()> {
+        view.push("ann.build.m", serde_json::json!(self.m()), None)?;
+        view.push(
+            "ann.build.ef_construction",
+            serde_json::json!(self.ef_construction()),
+            None,
+        )
+    }
 }
 
 /// Partial construction settings for global and project layers.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnnBuildPatch {
     /// Graph fan-out override.
     pub m: Option<usize>,
@@ -237,7 +247,33 @@ pub struct AnnSearchPatch {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AnnConfigPatch {
-    pub search: AnnSearchPatch,
+    #[serde(default, deserialize_with = "decode_table")]
+    pub search: Option<AnnSearchPatch>,
+    #[serde(default, deserialize_with = "decode_table")]
+    pub build: Option<AnnBuildPatch>,
+}
+
+impl AnnConfigPatch {
+    pub(crate) fn decode(table: toml::Table) -> Result<Self> {
+        let patch: Self = table.try_into().map_err(|_| Error::Admission {
+            message: "invalid ANN settings".to_owned(),
+        })?;
+        if patch.search.is_none() && patch.build.is_none() {
+            return Err(Error::Admission {
+                message: "ann must contain a search or build table".to_owned(),
+            });
+        }
+        Ok(patch)
+    }
+}
+
+fn decode_table<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let table = <toml::Table as serde::Deserialize>::deserialize(deserializer)?;
+    table.try_into().map(Some).map_err(serde::de::Error::custom)
 }
 
 /// Owner of ANN search defaults, scope, validation and local runtime effect.

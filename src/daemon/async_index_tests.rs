@@ -884,6 +884,88 @@ impl Drop for OpenBuildOnDrop {
         self.0.open();
     }
 }
+
+#[test]
+fn async_sync_hands_the_resolved_recipe_to_the_physical_ann_worker() {
+    use crate::hybrid::ann_settings::AnnBuildSettings;
+    use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore, chunk_set_digest};
+    use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits};
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut root = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = root.service();
+    root.run(&runtime, async move {
+        let provider = document_gate();
+        let stages = || HybridStages {
+            embedder: Some(provider.clone()),
+            ranking: Ranking::Rrf,
+            reranker: None,
+        };
+        let mut fixture = search_phase_tests::Fixture::new(stages());
+        let shared = Arc::get_mut(&mut fixture.shared).unwrap();
+        shared.dense = DenseCache::with_policy_limits(
+            AnnPolicy::BuildOrLoad,
+            &shared.cache,
+            DenseCacheLimits {
+                min_vectors: 1,
+                ..DenseCacheLimits::default()
+            },
+        );
+        fixture.shared.activate_jobs(service).unwrap();
+        std::fs::write(
+            fixture.project.canonical_root.join(".docsbase.toml"),
+            "[ann.build]\nm=12\nef_construction=64\n",
+        )
+        .unwrap();
+        let config = fixture
+            .shared
+            .open_project_config_with(&fixture.project, |_| Ok(stages()))
+            .unwrap();
+        assert_eq!(config.ann_build, AnnBuildSettings::new(12, 64).unwrap());
+        provider.release.add_permits(1);
+        let result = call_tool(
+            &fixture.shared,
+            Some(fixture.session),
+            "index_project",
+            json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["state"], "done");
+        let dense = fixture.shared.dense.snapshot();
+        tokio::task::spawn_blocking(move || dense.join_job_builds_for_test())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let project_id = fixture.project.id;
+        let db = fixture.shared.db();
+        let chunks = crate::store::repo::chunk_hashes(db.connection(), project_id).unwrap();
+        let key = AnnKey {
+            project_id,
+            generation: crate::store::repo::index_generation(db.connection(), project_id).unwrap(),
+            model_id: provider.model_id().to_owned(),
+            dim: 3,
+            chunk_count: chunks.len(),
+            chunk_set_digest: chunk_set_digest(&chunks),
+            format_version: ANN_FORMAT_VERSION,
+        };
+        let store = AnnStore::new(fixture.shared.cache.clone());
+        let slot = store
+            .load_with_settings(&key, config.ann_build)
+            .unwrap()
+            .expect("async sync must publish the captured recipe");
+        assert_eq!((slot.meta.m, slot.meta.ef_construction), (12, 64));
+        assert_eq!(provider.synchronous.load(Ordering::SeqCst), 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
 #[test]
 fn captured_ttl_and_exact_ann_handoff_isolate_later_job_from_old_worker_cleanup() {
     let runtime = tokio::runtime::Builder::new_current_thread()
