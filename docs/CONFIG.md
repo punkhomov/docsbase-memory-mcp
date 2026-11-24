@@ -402,6 +402,10 @@ inheritance in a project by putting `config_version = 2` at the top of its
 `.docsbase.toml` after opting in globally. Runtime v1 global files omit the
 version key. Under v2 global policy, legacy project files retain their whole
 hybrid replacement semantics.
+The runtime reserves the shared policy before serving requests. It opens
+`vectors.db` on the first vector operation. Lexical indexing, sync and search
+can run without creating that database.
+
 Move a legacy project’s `hybrid.cache.max_bytes` into the global
 `[vector_cache]` table before opting into v2. To keep the project-specific
 budget, retain an unversioned global file. Use `docsbase config effective` to verify the shared setting and its origin.
