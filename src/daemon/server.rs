@@ -2185,7 +2185,10 @@ fn prepare_index_context(
     if let Some(job) = crate::store::repo::active_sync_job(db.connection(), project.id)? {
         return Ok(Err(tools::sync_status(&db, &json!({"job_id":job.id}))?));
     }
-    if !detached && shared.global_config.vector_store.is_some() {
+    if !detached
+        && shared.global_config.vector_store.is_some()
+        && args.get("refresh_config").and_then(Value::as_bool) == Some(true)
+    {
         // Explicit v2 Index can arrive on a registry-only session. Refresh the
         // project before capturing its index job, as a normal project open does.
         shared.publish_project_config(
