@@ -85,7 +85,7 @@ fn two_v2_index_preparations_before_job_creation_keep_the_same_revision() {
     let jobs = crate::daemon::job_service::JobRoot::new(shared.daemon_settings());
     shared.activate_jobs(jobs.service()).unwrap();
 
-    let args = json!({"path": project.path()});
+    let args = json!({"path": project.path(), "refresh_config": true});
     let first = prepare_index_context(&shared, None, &args, false)
         .unwrap()
         .unwrap();

@@ -102,7 +102,8 @@ async fn index_on_daemon(
     let target = context
         .control(operation, activity, move || canonical_target(path))
         .await?;
-    let args = project_path_args(&target)?;
+    let mut args = project_path_args(&target)?;
+    args["refresh_config"] = serde_json::Value::Bool(true);
     // A registry-only session keeps the daemon alive between job-status polls
     // and avoids auto-indexing as a side effect of registration.
     client.bind_read_only(None).await?;

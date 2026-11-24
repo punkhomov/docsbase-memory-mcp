@@ -812,6 +812,9 @@ fn connected_v2_index_reloads_the_current_project_config() {
     assert!(initial.status.success(), "{initial:?}");
 
     fs::write(env.project_config(), "[hybrid.cache]\nmax_bytes = 4096\n").unwrap();
+    let mut registry = env.client();
+    registry.handshake_registry().unwrap();
+    assert_eq!(index(&mut registry, &env)["state"], "done");
     let rejected = env.cmd().arg("index").output().unwrap();
     assert!(!rejected.status.success(), "{rejected:?}");
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("hybrid.cache.max_bytes"));

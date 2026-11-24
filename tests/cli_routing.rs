@@ -580,9 +580,9 @@ fn connected_v2_index_keeps_a_bound_connection_while_polling() {
             [
                 Request::Hello { .. },
                 Request::BindReadOnly { project_id: None, .. },
-                Request::CallTool { name: start, .. },
+                Request::CallTool { name: start, args: index_args },
                 Request::CallTool { name: status, args },
-            ] if start == "index_project" && status == "sync_status"
+            ] if start == "index_project" && index_args["refresh_config"] == true && status == "sync_status"
                 && args == &serde_json::json!({"job_id": 7})
         ),
         "{trace:?}"
