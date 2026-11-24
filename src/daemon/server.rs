@@ -1096,7 +1096,7 @@ impl Shared {
             before_admission();
             if warm {
                 let result = (|| {
-                    let generation = {
+                    let index = {
                         let reader = readers.try_acquire()?;
                         slot.with_preparation(&config, || {
                             lifecycle::with_project_read_lease(&cache_path, project_id, || {
@@ -1112,11 +1112,11 @@ impl Shared {
                         DenseRequest {
                             cache_root: &cache_path,
                             project_id,
-                            generation,
+                            generation: index.content_revision(),
                             model_id: &model_id,
                         },
                         &crate::hybrid::work::Cancellation::new(),
-                        || tools::capture_dense(source, &project, generation),
+                        || tools::capture_dense(source, &project, index),
                         || slot.preparation_lease(&config),
                     )
                 })();

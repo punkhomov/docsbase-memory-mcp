@@ -889,3 +889,19 @@ lease на свой срок жизни. При работающем демон�
 ресурсы остаются доступными прежним держателям до освобождения leases.
 Схема, идентичность, нативные барьеры и crash matrix описаны в
 [storage-publication.md](storage-publication.md).
+
+## Delta 2026-11-24 — project index binding
+
+The legacy reader binds the registered project and nonnegative content
+revision under its existing project lease. Initial search and refill derive
+the Tantivy directory from the binding and the metadata reader's cache root.
+The SQL transaction and pooled reader end before Tantivy opens. The project
+lease spans both operations. Dense metadata and search payload compare the
+same binding on later leases. Website readiness uses the first observed
+binding for Tantivy health and compares a second fresh observation before
+reporting status. The health probe opens segment and store components under
+the existing project lease. It leaves the Tantivy metadata lock file alone.
+
+This carries the legacy content revision through the existing wire and
+cache interfaces. The registry head, installation epoch and generation
+layout enter through this boundary in the next CF11a task.
