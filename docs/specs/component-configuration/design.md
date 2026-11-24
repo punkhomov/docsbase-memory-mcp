@@ -838,3 +838,9 @@ provenance allocations; its historical high-fetch soft cap is documented. Explic
 admission prevents dependency promotion above the chosen max, while visited/candidate
 storage and graph residency remain separate resource concerns. No persistence,
 graph recipe, embedding/query cache identity, daemon or source-format change.
+
+## Delta 2026-11-24 — CF5b2b read-side identity
+
+The dry-run retains the first file handle across a second no-follow open. The
+[publication contract](source-publication.md) defines the evidence, its limits,
+and the distinction between the version 2 observation and a durable journal.

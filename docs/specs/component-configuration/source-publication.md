@@ -171,3 +171,22 @@ source files не меняются. Code/commands включены для вос
   выбранный adapter обязан запрещать эти flags. Error namespace нужно инспектировать.
 
 CF5b2a закрывает этот bounded research вопрос. CF5b2b/c, CF5b3/5c и #78 не завершены.
+
+## Delta 2026-11-24 — native identity in the read-only planner
+
+The planner checks regular-file type and a single link on both handles. It
+compares Unix device/inode or Windows volume serial and the full 128-bit file
+ID while the original handle stays open. Both opens reject a final symlink or
+reparse point. Length, byte budget, modification time and parent checks still
+apply. Windows obtains the ID and link count through FileIdInfo and
+FileStandardInfo. [Microsoft FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info)
+and [FILE_STANDARD_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_standard_info).
+
+Observation version 2 exposes an opaque precondition for every loaded file.
+Its BLAKE3 input includes the platform family, volume number, object ID and exact
+byte revision. This also binds unchanged inputs to the inner plan. Native IDs
+may be recycled after the last handle closes. In-place writes that restore length
+and mtime, and namespace changes between checks, can evade these observations.
+
+CF5b2b still requires parent/stage ownership, admitted attributes, a versioned
+journal and recovery evidence before publication can mutate a source.

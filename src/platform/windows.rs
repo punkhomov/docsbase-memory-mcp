@@ -239,6 +239,65 @@ fn regular_attributes(attributes: u32) -> bool {
         == 0
 }
 
+/// Query the volume and full 128-bit file ID and hard-link count.
+#[allow(unsafe_code)] // Two fixed-size, typed FILE_INFO_BY_HANDLE_CLASS queries.
+pub(crate) fn file_identity_and_links(
+    file: &File,
+    _metadata: &fs::Metadata,
+) -> io::Result<(super::FileIdentity, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ID_INFO, FILE_STANDARD_INFO, FileIdInfo, FileStandardInfo,
+        GetFileInformationByHandleEx,
+    };
+    let handle = file.as_raw_handle();
+    let mut id = FILE_ID_INFO::default();
+    // SAFETY: file retains the handle. FileIdInfo writes exactly the supplied
+    // FILE_ID_INFO layout into its aligned, writable storage.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&raw mut id).cast(),
+            u32::try_from(size_of::<FILE_ID_INFO>()).map_err(io::Error::other)?,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let object = u128::from_le_bytes(id.FileId.Identifier);
+    if object == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "missing file ID",
+        ));
+    }
+    let mut standard = FILE_STANDARD_INFO::default();
+    // SAFETY: same retained handle. FileStandardInfo matches FILE_STANDARD_INFO
+    // and the byte count covers that exact writable structure.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileStandardInfo,
+            (&raw mut standard).cast(),
+            u32::try_from(size_of::<FILE_STANDARD_INFO>()).map_err(io::Error::other)?,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if standard.DeletePending {
+        return Err(io::Error::other("file pending deletion"));
+    }
+    Ok((
+        super::FileIdentity {
+            volume: id.VolumeSerialNumber,
+            object,
+        },
+        standard.NumberOfLinks.into(),
+    ))
+}
+
 /// Opens an existing path read-only, opening a final reparse point itself.
 /// Does not create or truncate; callers reject symlink/non-regular handles.
 ///

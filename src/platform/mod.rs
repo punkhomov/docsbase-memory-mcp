@@ -59,10 +59,18 @@ pub async fn connect_async(transport: &Transport, endpoint: &Endpoint) -> std::i
     transport.connect_async(endpoint).await
 }
 
+/// Object identity reported by an open file handle. IDs may be reused after deletion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileIdentity {
+    pub volume: u64,
+    pub object: u128,
+}
+
 /// Private directory/file modes and logs (NFR-5); free-space probe for the
 /// fetch/connect preflight (FR-13).
 #[cfg(unix)]
 pub mod fs {
+    pub(crate) use super::unix::file_identity_and_links;
     pub use super::unix::{
         available_space, is_regular_nofollow, open_private_lock, open_private_log,
         open_readonly_nofollow, secure_dir, secure_executable, secure_file,
@@ -72,6 +80,7 @@ pub mod fs {
 /// ACLs; no chmod semantics).
 #[cfg(windows)]
 pub mod fs {
+    pub(crate) use super::windows::file_identity_and_links;
     pub use super::windows::{
         available_space, is_regular_nofollow, native_file_matches_path, open_private_lock,
         open_private_log, open_readonly_nofollow, secure_dir, secure_executable, secure_file,

@@ -542,3 +542,10 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   search API with bounded-fetch admission, legacy compatibility and real graph
   persistence regressions. Plan: [cf8a-plan.md](cf8a-plan.md). Construction/recipe/
   estimator and dense/runtime/source composition remain later CF8 slices.
+
+## Delta 2026-11-24 — CF5b2b read-side identity
+
+- [x] Bind every loaded migration input to the single-linked object observed
+  through its native file handle. Test replacement during the read, identical
+  replacement of an unchanged project between plans, and hard-linked paths.
+- [ ] Complete the CF5b2b journal, attribute and publication work above.

@@ -198,6 +198,57 @@ fn identity_binds_missing_empty_unchanged_sources_context_and_explicit_choice() 
 }
 
 #[test]
+fn identical_replacement_changes_reviewed_plan_but_preserves_byte_revisions() {
+    let root = tempfile::tempdir().unwrap();
+    write_global(root.path(), "auto_index=true");
+    let project = register(root.path(), "project");
+    let path = project.join(".docsbase.toml");
+    let same = "config_version = 2\n";
+    fs::write(&path, same).unwrap();
+    let before = accepted(root.path());
+    assert_eq!(before["summary"]["rewrites"].as_array().unwrap().len(), 1);
+    let replacement = project.join("replacement");
+    fs::write(&replacement, same).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    let after = accepted(root.path());
+    assert_ne!(before["plan"]["plan_id"], after["plan"]["plan_id"]);
+    assert_ne!(before["observation_id"], after["observation_id"]);
+    assert_eq!(after["observation_version"], 2);
+    assert_eq!(before["summary"], after["summary"]);
+    let revision = &after["sources"][1]["state"]["value"]["revision"];
+    assert!(revision.as_str().unwrap().starts_with("source-bytes-v1:"));
+    assert_eq!(
+        before["sources"][1]["state"]["value"]["revision"],
+        *revision
+    );
+    assert_eq!(after, accepted(root.path()));
+}
+
+#[test]
+fn hardlinked_source_blocks_every_rewrite_until_single_link_is_restored() {
+    let root = tempfile::tempdir().unwrap();
+    write_global(root.path(), "auto_index=true");
+    let project = register(root.path(), "project");
+    let alias = project.join(".docsbase.toml");
+    fs::hard_link(root.path().join("config/config.toml"), &alias).unwrap();
+    let blocked = accepted(root.path());
+    for source in blocked["sources"].as_array().unwrap() {
+        assert_eq!(
+            source["state"],
+            json!({"kind":"unavailable", "value":"multiple_links"})
+        );
+    }
+    assert!(has_blocker(&blocked, "observation_unavailable"));
+    assert!(blocked["summary"].is_null());
+    assert_eq!(blocked["plan"]["actions"], json!([]));
+    fs::remove_file(alias).unwrap();
+    assert_eq!(
+        accepted(root.path())["sources"][0]["state"]["kind"],
+        "loaded"
+    );
+}
+
+#[test]
 fn secrets_in_comments_values_and_invalid_sources_never_reach_output() {
     let root = tempfile::tempdir().unwrap();
     let canary = "SENSITIVE_CANARY_834712";

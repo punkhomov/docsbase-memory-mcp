@@ -131,9 +131,9 @@ impl MigrationPlan {
     pub(super) fn identify(mut self, max_bytes: usize) -> Result<Self> {
         // The identity field is empty in the canonical identity payload.
         let bytes = json(&self, max_bytes)?;
-        let mut hash = blake3::Hasher::new_derive_key("docsbase.observed-migration.v1");
+        let mut hash = blake3::Hasher::new_derive_key("docsbase.observed-migration.v2");
         hash.update(bytes.as_bytes());
-        self.observation_id = format!("observed-migration-v1:{}", hash.finalize().to_hex());
+        self.observation_id = format!("observed-migration-v2:{}", hash.finalize().to_hex());
         self.to_json(max_bytes)?;
         Ok(self)
     }

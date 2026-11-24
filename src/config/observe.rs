@@ -119,7 +119,7 @@ fn plan_with(
         },
     )?;
     MigrationPlan {
-        observation_version: 1,
+        observation_version: 2,
         observation_id: String::new(),
         config_root: config_root.to_owned(),
         registry,
@@ -155,7 +155,9 @@ fn admit_path(path: &Path, bytes_left: &mut usize) -> Result<()> {
 fn source_state(state: &SourceState) -> ExpectedState {
     match state {
         SourceState::Missing => ExpectedState::Missing,
-        SourceState::Loaded { revision, .. } => ExpectedState::KnownIdentity(revision.clone()),
+        SourceState::Loaded { precondition, .. } => {
+            ExpectedState::KnownIdentity(precondition.clone())
+        }
         SourceState::Unavailable(_) => ExpectedState::Unknown,
     }
 }
