@@ -132,11 +132,8 @@ impl VectorCache {
     fn open_owned(owner: VectorStore) -> Result<Self> {
         let opened = open_connection(owner.root(), owner.settings().busy_timeout)?;
         let limits = owner.settings().limits();
-        Ok(Self::from_connection(
-            opened.conn,
-            limits,
-            owner::Access::Owned { owner },
-        ))
+        let access = owner.access(&opened.conn)?;
+        Ok(Self::from_connection(opened.conn, limits, access))
     }
 
     fn from_connection(conn: Connection, limits: CacheLimits, access: owner::Access) -> Self {

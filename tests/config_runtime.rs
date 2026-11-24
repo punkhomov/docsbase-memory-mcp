@@ -726,6 +726,10 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
     );
     let indexed = run(&env, &["index"]);
     assert!(indexed["project_id"].is_i64());
+    assert!(
+        !env.cache().join("vectors.db").exists(),
+        "lexical v2 index must leave the vector database absent"
+    );
     assert_eq!(
         run(&env, &["search", "quasar telemetry"])[0]["path"],
         "guide.md"
@@ -755,6 +759,10 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
     assert_eq!(from_daemon["state"], "done");
     assert_ne!(from_daemon["project_id"], indexed["project_id"]);
     env.restart_daemon();
+    assert!(
+        !env.cache().join("vectors.db").exists(),
+        "lexical v2 search and sync must leave the vector database absent"
+    );
     assert!(
         run(&env, &["search", "pulsar orbital"])
             .as_array()
