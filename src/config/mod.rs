@@ -473,3 +473,7 @@ impl ConfigSpec {
         RemoteSpec::view_fields(&settings.remote, view)
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/config_stage_journal.rs"]
+mod stage_journal_tests;
