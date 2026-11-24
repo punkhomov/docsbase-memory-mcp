@@ -101,3 +101,16 @@ endpoints including Inception and bounded ask_docs are still future #128 work.
 The three additional legacy manual live entries are audited separately in
 [maintenance-audit](../maintenance-audit/runtime-callers.md); no live provider
 coverage or new provider support follows from their runtime fix.
+
+## Delta 2026-11-24 — ASK1 vertical generation MVP
+
+The ask_docs change adds Rig Completion::prepare, Chat Completions Wire and reply
+reassembly to the existing OpenRouter client. The same provider registry gains a
+generation capability; FastEmbed keeps its embedding/rerank adapter and explicitly
+rejects generation. Model address is required per request in the MVP. Existing
+async admission/deadline/cancellation owners execute the bounded read loop; no
+second runtime or retry owner is added. Generation sends are single-shot.
+
+Details and validation limitations: [ask-docs](../ask-docs/design.md). This does
+not finish #128's persistent generation profiles, custom endpoints/Inception,
+streaming, or live compatibility verification for other providers/models.

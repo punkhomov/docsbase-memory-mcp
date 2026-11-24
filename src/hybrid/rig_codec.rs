@@ -195,7 +195,7 @@ impl PreparedRerank {
     }
 }
 
-fn encode_request(
+pub(super) fn encode_request(
     encoded: Encoded,
     extend: impl FnOnce(&mut Value),
 ) -> Result<super::remote::WireRequest> {

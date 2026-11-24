@@ -526,6 +526,17 @@ pub fn chunk_window(
     from_seq: i64,
     to_seq: i64,
 ) -> Result<Vec<ChunkWindowRow>> {
+    chunk_window_bounded(conn, project_id, doc_id, from_seq, to_seq, None)
+}
+
+pub(crate) fn chunk_window_bounded(
+    conn: &Connection,
+    project_id: i64,
+    doc_id: i64,
+    from_seq: i64,
+    to_seq: i64,
+    maximum_row_bytes: Option<usize>,
+) -> Result<Vec<ChunkWindowRow>> {
     let mut stmt = conn
         .prepare(
             "SELECT d.rel_path, c.seq, c.heading_path, c.kind, c.line_start, c.line_end, c.text
@@ -536,6 +547,17 @@ pub fn chunk_window(
         .map_err(db_error)?;
     let rows = stmt
         .query_map(params![doc_id, project_id, from_seq, to_seq], |row| {
+            // Inspect SQLite-borrowed bytes before allocating owned strings.
+            if let Some(maximum) = maximum_row_bytes {
+                let mut remaining = maximum;
+                for column in [0, 2, 3, 6] {
+                    if let rusqlite::types::ValueRef::Text(bytes) = row.get_ref(column)? {
+                        remaining = remaining
+                            .checked_sub(bytes.len())
+                            .ok_or(rusqlite::Error::InvalidQuery)?;
+                    }
+                }
+            }
             Ok(ChunkWindowRow {
                 path: row.get(0)?,
                 seq: row.get(1)?,

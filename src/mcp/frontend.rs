@@ -87,6 +87,12 @@ impl Frontend {
                 started,
                 Cancellation::new(),
             )?)
+        } else if name == "ask_docs" {
+            Some(SearchOperation::with_timeout(
+                started,
+                crate::ask::AskLimits::TIMEOUT,
+                Cancellation::new(),
+            )?)
         } else {
             None
         };
@@ -152,7 +158,7 @@ impl Frontend {
             }
             .await;
             match result {
-                Err(error) if is_transport_error(&error) && attempt == 0 => {
+                Err(error) if is_transport_error(&error) && attempt == 0 && name != "ask_docs" => {
                     drop(lease.take());
                     check_operation(operation)?;
                     ensure_using(&self.cache, operation, ensure_daemon).await?;
@@ -337,8 +343,8 @@ async fn call_bound(
         });
     }
     match operation {
-        Some(operation) => conn.client.search(args, operation).await,
-        None => conn.client.call_tool(name, args).await,
+        Some(operation) if name == "search_docs" => conn.client.search(args, operation).await,
+        _ => conn.client.call_tool(name, args).await,
     }
 }
 

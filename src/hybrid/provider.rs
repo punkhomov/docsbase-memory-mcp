@@ -311,6 +311,21 @@ pub trait Provider: Sync {
         self.build_stages(embedding, reranker, providers)
     }
 
+    /// Build the generation capability through this same provider registry.
+    /// # Errors
+    /// Unsupported capability or disabled/unavailable provider.
+    #[cfg(feature = "hybrid-remote")]
+    fn build_generator(
+        &self,
+        _model: &str,
+        _providers: &ProvidersCfg,
+        _execution: Arc<super::remote::RemoteExecution>,
+    ) -> Result<Arc<dyn super::generation::Generator>> {
+        Err(Error::Admission {
+            message: format!("provider {} does not support generation", self.name()),
+        })
+    }
+
     /// The admission raised when a stage needs this provider but the build
     /// lacks its feature. Provider-owned so the corrective action stays exact.
     fn feature_missing(&self) -> Error {
@@ -720,6 +735,27 @@ impl Provider for OpenrouterProvider {
             let _ = cfg;
             Err(self.feature_missing())
         }
+    }
+
+    #[cfg(feature = "hybrid-remote")]
+    fn build_generator(
+        &self,
+        model: &str,
+        providers: &ProvidersCfg,
+        execution: Arc<super::remote::RemoteExecution>,
+    ) -> Result<Arc<dyn super::generation::Generator>> {
+        if providers
+            .get(self.name())
+            .is_some_and(|record| !record.enabled)
+        {
+            return Err(Error::Admission {
+                message: "OpenRouter provider is disabled".into(),
+            });
+        }
+        Ok(
+            Arc::new(super::openrouter::OpenRouterClient::from_env_with_execution(execution)?)
+                .generation(model.to_owned()),
+        )
     }
 
     fn build_stages(

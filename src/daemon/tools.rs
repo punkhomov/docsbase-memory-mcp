@@ -1586,10 +1586,25 @@ pub fn get_doc(project: &Project, config: &Config, args: &Value) -> Result<Value
             ),
         });
     }
-    let content = std::fs::read_to_string(&canonical).map_err(|err| Error::Project {
-        message: format!("cannot read {}: {err}", canonical.display()),
+    let file = std::fs::File::open(&canonical).map_err(|err| Error::Project {
+        message: format!("cannot read {raw:?}: {err}"),
         instruction: None,
     })?;
+    let mut content = String::new();
+    std::io::Read::read_to_string(
+        &mut std::io::Read::take(file, config.max_file_size.saturating_add(1)),
+        &mut content,
+    )
+    .map_err(|err| Error::Project {
+        message: format!("cannot read {raw:?}: {err}"),
+        instruction: None,
+    })?;
+    if content.len() as u64 > config.max_file_size {
+        return Err(Error::Project {
+            message: "document grew beyond max_file_size while reading".into(),
+            instruction: None,
+        });
+    }
     let rel = crate::index::walk::portable_rel(
         canonical
             .strip_prefix(&project.canonical_root)
@@ -1611,6 +1626,15 @@ pub fn get_doc(project: &Project, config: &Config, args: &Value) -> Result<Value
 /// Returns [`Error::Project`] for unknown chunk ids and [`Error::Protocol`]
 /// for malformed arguments.
 pub fn read_neighbors(db: &Db, project: &Project, args: &Value) -> Result<Value> {
+    read_neighbors_bounded(db, project, args, None)
+}
+
+pub(crate) fn read_neighbors_bounded(
+    db: &Db,
+    project: &Project,
+    args: &Value,
+    maximum_row_bytes: Option<usize>,
+) -> Result<Value> {
     ensure_indexed(project)?;
     let raw = args
         .get("chunk_id")
@@ -1639,7 +1663,14 @@ pub fn read_neighbors(db: &Db, project: &Project, args: &Value) -> Result<Value>
     let (doc_id, seq) = chunk_id_parts(raw);
     let from = i64::from(seq).saturating_sub(before);
     let to = i64::from(seq).saturating_add(after);
-    let rows = repo::chunk_window(db.connection(), project.id, doc_id, from, to)?;
+    let rows = repo::chunk_window_bounded(
+        db.connection(),
+        project.id,
+        doc_id,
+        from,
+        to,
+        maximum_row_bytes,
+    )?;
     if !rows.iter().any(|row| row.seq == seq) {
         return Err(Error::Project {
             message: format!("unknown chunk_id {raw} for project '{}'", project.name),

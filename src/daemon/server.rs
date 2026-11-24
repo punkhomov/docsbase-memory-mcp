@@ -62,6 +62,10 @@ mod server_worker_tests;
 #[path = "scoped.rs"]
 mod scoped;
 
+#[cfg(feature = "hybrid-remote")]
+#[path = "ask.rs"]
+mod ask;
+
 #[path = "search_async.rs"]
 pub(crate) mod search_async;
 
@@ -1673,6 +1677,9 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
             if !peer.hello_done {
                 return (hello_required(), true);
             }
+            if name == "ask_docs" {
+                return scoped::call_named(shared, peer, &name, args, scope, reader).await;
+            }
             call_and_respond(shared, peer.session_id, &name, args, scope).await
         }
         Request::Search { args, .. } => {
@@ -1993,6 +2000,14 @@ fn search_operation(
     shared: &Shared,
     name: &str,
 ) -> Result<Option<crate::search::operation::SearchOperation>> {
+    if name == "ask_docs" {
+        return crate::search::operation::SearchOperation::with_timeout(
+            Instant::now(),
+            crate::ask::AskLimits::TIMEOUT,
+            crate::hybrid::work::Cancellation::new(),
+        )
+        .map(Some);
+    }
     if name == "search_docs" {
         crate::search::operation::SearchOperation::new(
             &shared.global_config.search,
@@ -2036,6 +2051,21 @@ async fn call_tool_in(
             .as_ref()
             .map(|operation| operation.cancellation().clone()),
     );
+    if name == "ask_docs" {
+        #[cfg(feature = "hybrid-remote")]
+        {
+            let operation = operation
+                .as_ref()
+                .ok_or_else(|| Error::internal("ask_docs operation missing"))?;
+            let result = ask::run(shared, session_id, args, operation.clone(), activity).await;
+            cancellation.0 = None;
+            return result;
+        }
+        #[cfg(not(feature = "hybrid-remote"))]
+        return Err(Error::Admission {
+            message: "ask_docs requires the hybrid-remote build feature".into(),
+        });
+    }
     if name == "search_docs"
         && let Some(operation) = operation.as_ref()
     {

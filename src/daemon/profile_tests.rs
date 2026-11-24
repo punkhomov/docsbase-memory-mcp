@@ -347,3 +347,19 @@ fn async_website_sync_context_requires_bound_session_for_explicit_fixed_project(
         .unwrap();
     assert_eq!(jobs, 0);
 }
+
+#[tokio::test]
+async fn website_rejects_ask_before_model_or_document_access() {
+    let fixture = Fixture::new();
+    let shared = fixture.open().unwrap();
+    let error = call_tool(
+        &shared,
+        None,
+        "ask_docs",
+        json!({"question":"x","model":"openrouter/x"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, Error::Admission { .. }));
+    fixture.no_activation_effects();
+}

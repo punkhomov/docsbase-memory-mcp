@@ -8,7 +8,13 @@ use serde_json::{Value, json};
 use crate::index::QueryMode;
 
 /// Tools that need a session bound to a registered project (I6).
-pub const PROJECT_TOOLS: &[&str] = &["search_docs", "get_doc", "read_neighbors", "list_docs"];
+pub const PROJECT_TOOLS: &[&str] = &[
+    "search_docs",
+    "get_doc",
+    "read_neighbors",
+    "list_docs",
+    "ask_docs",
+];
 
 /// Tools that may run for the full indexing budget (NFR-1); `sync_start` and
 /// `sync_status` only enqueue/read job rows and stay quick.
@@ -24,6 +30,7 @@ pub const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10)
 #[must_use]
 pub fn catalogue() -> Vec<Tool> {
     vec![
+        ask_tool(),
         tool(
             "search_docs",
             "Search indexed documentation chunks; returns citations (path, heading, lines, score).",
@@ -127,4 +134,16 @@ fn schema_object(value: Value) -> Arc<JsonObject> {
         Value::Object(map) => Arc::new(map),
         _ => Arc::new(JsonObject::new()),
     }
+}
+
+fn ask_tool() -> Tool {
+    tool(
+        "ask_docs",
+        "Ask a model to search and read this project's documentation and return a prepared answer with sources. Explicit opt-in: sends the question and retrieved text to the selected provider. Requires a tool-capable generation model and hybrid-remote build.",
+        json!({"type":"object","additionalProperties":false,"properties":{
+                "question":{"type":"string","description":"Natural-language question."},
+                "model":{"type":"string","description":"Explicit provider/model, e.g. openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free."},
+                "max_turns":{"type":"integer","minimum":1,"maximum":6,"description":"Optional lower model-turn cap (default 6)."}
+            },"required":["question","model"]}),
+    )
 }

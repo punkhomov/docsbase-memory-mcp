@@ -82,6 +82,7 @@ pub const FRAME_OVERHEAD: u64 = 64 * 1024;
 
 /// Tools the frontend may proxy to the daemon (I8, FR-34).
 pub const TOOL_ALLOWLIST: &[&str] = &[
+    "ask_docs",
     "search_docs",
     "get_doc",
     "read_neighbors",

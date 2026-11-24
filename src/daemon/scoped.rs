@@ -65,6 +65,17 @@ pub(super) async fn call<R: AsyncBufRead + Unpin>(
     scope: &Scope,
     reader: &mut FrameReader<R>,
 ) -> (Response, bool) {
+    call_named(shared, peer, "search_docs", args, scope, reader).await
+}
+
+pub(super) async fn call_named<R: AsyncBufRead + Unpin>(
+    shared: &Arc<Shared>,
+    peer: &mut Peer,
+    name: &str,
+    args: Value,
+    scope: &Scope,
+    reader: &mut FrameReader<R>,
+) -> (Response, bool) {
     let Some(operation) = scope.operation.as_ref() else {
         return (
             error_response(&Error::internal(
@@ -79,7 +90,7 @@ pub(super) async fn call<R: AsyncBufRead + Unpin>(
     let work = call_tool_in(
         shared,
         peer.session_id,
-        "search_docs",
+        name,
         args,
         Some(operation.clone()),
         Some(Arc::clone(&scope.activity)),

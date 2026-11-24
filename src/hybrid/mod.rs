@@ -17,6 +17,8 @@ pub mod dense;
 pub mod dense_metadata;
 pub mod dense_settings;
 mod flight;
+#[cfg(feature = "hybrid-remote")]
+pub mod generation;
 pub mod jobs;
 pub mod meta;
 pub mod provider;
