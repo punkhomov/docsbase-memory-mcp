@@ -1,4 +1,4 @@
-//! Pure typed layering, plus explicit-path v1 compatibility composition.
+//! Pure typed layering and file-based operational resolution.
 
 use std::marker::PhantomData;
 use std::path::Path;
@@ -94,38 +94,140 @@ pub fn resolve_component<S: SettingsSpec>(
     resolution.finish()
 }
 
-use super::{Config, ConfigSpec, read_global, read_project};
+use super::source::{SourceLayer, invalid};
+use super::{Config, ConfigSpec, read_capped, read_project};
 
 fn global_resolution(config_dir: &Path) -> Result<Resolution<ConfigSpec>> {
     let mut resolution = Resolution::new(&DefaultsContext::standalone());
     let path = config_dir.join("config.toml");
     if path.exists() {
-        resolution.apply(&SourceId::Global(path.clone()), read_global(&path)?)?;
+        let text = read_capped(&path)?;
+        let document = super::parse_global_document(&path, &text)?;
+        let source = SourceId::Global(path.clone());
+        if is_v2(&document) {
+            resolution.apply_v2_global(&SourceLayer::from_document(source, &text, document)?)?;
+        } else {
+            resolution.apply(&source, super::decode_global_document(&path, document)?)?;
+        }
     }
-    // v1 rejects an invalid global even if a later project could replace it.
+    // An invalid global is rejected even if a later project could replace it.
     resolution.validate()?;
     Ok(resolution)
 }
-fn project_layer(resolution: &mut Resolution<ConfigSpec>, root: &Path) -> Result<()> {
-    let path = root.join(".docsbase.toml");
-    if path.exists() {
-        let project = read_project(&path)?;
-        resolution.apply(&SourceId::Project(path), project.into_global())?;
-    }
-    Ok(())
+
+fn is_v2(document: &toml::Table) -> bool {
+    document.get("config_version") == Some(&toml::Value::Integer(2))
 }
-/// Loads v1 files while retaining path provenance and whole-value replacement.
+
+// A malformed legacy source still has its diagnostic-only daemon adapter.
+// A leading version marker remains recognizable when later TOML is broken.
+pub(crate) fn has_version_header(bytes: &[u8]) -> bool {
+    // Classifying a malformed header never requires decoding the rest of the file.
+    bytes
+        .split(|&byte| byte == b'\n')
+        .map(|line| std::str::from_utf8(line).map(str::trim))
+        .find(|line| {
+            !line
+                .as_ref()
+                .is_ok_and(|line| line.is_empty() || line.starts_with('#'))
+        })
+        .and_then(std::result::Result::ok)
+        .is_some_and(|line| {
+            toml::from_str::<toml::Table>(line)
+                .is_ok_and(|header| header.contains_key("config_version"))
+        })
+}
+
+impl Resolution<ConfigSpec> {
+    fn apply_source(&mut self, layer: &SourceLayer) -> Result<()> {
+        self.apply(&layer.source, layer.base.clone())
+            .map_err(|_| invalid("invalid base configuration in versioned source"))?;
+        if let Some(patch) = &layer.hybrid_merge {
+            crate::hybrid::config::merge::overlay(
+                &mut self.settings.hybrid_cfg,
+                patch.clone(),
+                &self.defaults.hybrid,
+                &layer.source,
+                &mut self.origins,
+            )
+            .map_err(|_| invalid("invalid hybrid stage settings in versioned source"))?;
+            self.settings.hybrid = self.settings.hybrid_cfg.enabled;
+        }
+        self.validate()
+            .map_err(|_| invalid("invalid effective settings in versioned source"))
+    }
+
+    fn apply_v2_global(&mut self, layer: &SourceLayer) -> Result<()> {
+        use crate::vector_cache::settings::{VectorStorePatch, VectorStoreSpec};
+
+        self.apply_source(layer)?;
+        let policy = resolve_component::<VectorStoreSpec>(
+            &DefaultsContext::standalone(),
+            [(
+                layer.source.clone(),
+                VectorStorePatch {
+                    max_bytes: layer.vector_max_bytes,
+                    ..VectorStorePatch::default()
+                },
+            )],
+        )?
+        .into_settings();
+        let origin = if layer.vector_max_bytes.is_some() {
+            &layer.source
+        } else {
+            &SourceId::Defaults
+        };
+        self.origins.rebind(
+            "hybrid.cache.max_bytes",
+            crate::vector_cache::V2_MAX_BYTES_FIELD,
+            origin,
+        )?;
+        self.settings.hybrid_cfg.cache.max_bytes = policy.max_bytes;
+        self.settings.vector_store = Some(policy);
+        Ok(())
+    }
+
+    fn apply_project(&mut self, root: &Path) -> Result<()> {
+        let path = root.join(".docsbase.toml");
+        if !path.exists() {
+            return Ok(());
+        }
+        let Some(max_bytes) = self
+            .settings
+            .vector_store
+            .as_ref()
+            .map(|policy| policy.max_bytes)
+        else {
+            let project = read_project(&path)?;
+            return self.apply(&SourceId::Project(path), project.into_global());
+        };
+        let text = read_capped(&path)?;
+        let layer = SourceLayer::parse(SourceId::Project(path), &text)?;
+        if layer.legacy_vector_override().is_some() {
+            return Err(invalid(
+                "remove project hybrid.cache.max_bytes: v2 uses global vector_cache.max_bytes",
+            ));
+        }
+        self.apply_source(&layer)?;
+        // Legacy whole-value patches and explicit v2 bool resets can now change
+        // only the project's hybrid stages; the shared budget belongs to the global.
+        self.settings.hybrid_cfg.cache.max_bytes = max_bytes;
+        Ok(())
+    }
+}
+
+/// Loads versioned files while retaining each source’s provenance.
 ///
 /// # Errors
 /// File errors, invalid settings or project provider records.
 pub fn load_from(config_dir: &Path, project_root: Option<&Path>) -> Result<Resolved<Config>> {
     let mut resolution = global_resolution(config_dir)?;
     if let Some(root) = project_root {
-        project_layer(&mut resolution, root)?;
+        resolution.apply_project(root)?;
     }
     resolution.finish()
 }
-/// Loads just the global v1 snapshot with real origins.
+/// Loads just the global snapshot with real origins.
 ///
 /// # Errors
 /// File errors or invalid settings.
@@ -133,7 +235,7 @@ pub fn global_from(config_dir: &Path) -> Result<Resolved<Config>> {
     global_resolution(config_dir)?.finish()
 }
 
-/// Resolve a launch's already captured v1 bytes; no filesystem access or v2 activation.
+/// Resolve already captured launch bytes without filesystem access.
 pub(crate) fn launch_resolution(
     path: &Path,
     bytes: Option<&[u8]>,
@@ -142,6 +244,11 @@ pub(crate) fn launch_resolution(
     let mut website = false;
     if let Some(bytes) = bytes {
         let text = std::str::from_utf8(bytes).map_err(|err| {
+            if has_version_header(bytes) {
+                return LaunchFailure::Versioned(invalid(
+                    "invalid UTF-8 in versioned configuration",
+                ));
+            }
             LaunchFailure::Legacy(Error::internal_with_source(
                 format!("read {}: {err}", path.display()),
                 err,
@@ -150,9 +257,27 @@ pub(crate) fn launch_resolution(
         // Parse the canonical document once. Decode/validate the owner section
         // first so neither its errors nor a recognized Website selector can be
         // erased by the legacy Shared source-error adapter.
-        let mut document =
-            super::parse_global_document(path, text).map_err(LaunchFailure::Legacy)?;
+        let mut document = super::parse_global_document(path, text).map_err(|error| {
+            if has_version_header(bytes) {
+                LaunchFailure::Versioned(invalid("invalid versioned configuration TOML"))
+            } else {
+                LaunchFailure::Legacy(error)
+            }
+        })?;
         let source = SourceId::Global(path.to_owned());
+        if is_v2(&document) {
+            let layer = SourceLayer::from_document(source, text, document)
+                .map_err(LaunchFailure::Versioned)?;
+            resolution
+                .apply_v2_global(&layer)
+                .map_err(LaunchFailure::Versioned)?;
+            return Ok(LaunchResolution(resolution));
+        }
+        if document.contains_key("config_version") {
+            return Err(LaunchFailure::Versioned(invalid(
+                "unsupported explicit global configuration version; expected 2",
+            )));
+        }
         // New owner policy errors precede unrelated legacy decoding failures.
         if let Some(remote) = document.remove("remote") {
             let owner_policy = crate::hybrid::remote_settings::RemoteSpec::decode_patch(remote)
@@ -223,6 +348,8 @@ pub(crate) enum LaunchFailure {
     Daemon(Error),
     // A recognized remote policy is never a legacy Shared source fallback.
     Remote(Error),
+    // Versioned sources never use the legacy fallback after version recognition.
+    Versioned(Error),
 }
 impl LaunchFailure {
     fn classify(error: Error, website: bool) -> Self {
@@ -234,7 +361,10 @@ impl LaunchFailure {
     }
     pub(crate) fn into_error(self) -> Error {
         match self {
-            Self::Legacy(error) | Self::Daemon(error) | Self::Remote(error) => error,
+            Self::Legacy(error)
+            | Self::Daemon(error)
+            | Self::Remote(error)
+            | Self::Versioned(error) => error,
         }
     }
 }
@@ -265,13 +395,13 @@ impl LaunchResolution {
 pub fn for_project(global: &Resolved<Config>, root: &Path) -> Result<Resolved<Config>> {
     let mut resolution =
         Resolution::<ConfigSpec>::from_resolved(&DefaultsContext::standalone(), global);
-    project_layer(&mut resolution, root)?;
+    resolution.apply_project(root)?;
     resolution.finish()
 }
-pub(super) fn legacy_for_project(global: &Config, root: &Path) -> Result<Resolved<Config>> {
+pub(super) fn for_provided_project(global: &Config, root: &Path) -> Result<Resolved<Config>> {
     let mut resolution =
         Resolution::<ConfigSpec>::from_provided(&DefaultsContext::standalone(), global);
-    project_layer(&mut resolution, root)?;
+    resolution.apply_project(root)?;
     resolution.finish()
 }
 
@@ -299,23 +429,7 @@ pub fn preview_sources(
             .unwrap_or(resolution.settings.hybrid_cfg.cache.max_bytes)
     });
     for layer in std::iter::once(global).chain(project) {
-        resolution
-            .apply(&layer.source, layer.base.clone())
-            .map_err(|_| invalid("invalid base configuration in source preview"))?;
-        if let Some(patch) = &layer.hybrid_merge {
-            crate::hybrid::config::merge::overlay(
-                &mut resolution.settings.hybrid_cfg,
-                patch.clone(),
-                &resolution.defaults.hybrid,
-                &layer.source,
-                &mut resolution.origins,
-            )
-            .map_err(|_| invalid("invalid hybrid stage settings in source preview"))?;
-            resolution.settings.hybrid = resolution.settings.hybrid_cfg.enabled;
-        }
-        resolution
-            .validate()
-            .map_err(|_| invalid("invalid effective settings in source preview"))?;
+        resolution.apply_source(layer)?;
     }
     let legacy_vector_max_bytes = resolution.settings.hybrid_cfg.cache.max_bytes;
     let mut conflicts = Vec::new();

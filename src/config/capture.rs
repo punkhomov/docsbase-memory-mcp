@@ -15,14 +15,25 @@ pub(crate) enum ReadFailure {
 
 /// Consume at most budget+1 bytes. Metadata never determines buffer sizing.
 pub(crate) fn read_bounded(reader: impl Read, budget: u64) -> Result<Vec<u8>, ReadFailure> {
+    let (bytes, exceeded) = read_prefix(reader, budget)?;
+    if exceeded {
+        return Err(ReadFailure::LimitExceeded);
+    }
+    Ok(bytes)
+}
+
+/// Reads through the limit to classify oversized sources from the same capture.
+/// The extra byte is never passed to the configuration parser.
+pub(crate) fn read_prefix(reader: impl Read, budget: u64) -> Result<(Vec<u8>, bool), ReadFailure> {
     let maximum = budget.checked_add(1).ok_or(ReadFailure::BudgetOverflow)?;
     let _ = usize::try_from(maximum).map_err(|_| ReadFailure::BudgetOverflow)?;
     let mut bytes = Vec::new();
     reader.take(maximum).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > budget {
-        return Err(ReadFailure::LimitExceeded);
+    let exceeded = bytes.len() as u64 > budget;
+    if exceeded {
+        bytes.pop();
     }
-    Ok(bytes)
+    Ok((bytes, exceeded))
 }
 
 /// Legacy/diagnostic adapter: follows paths as before; observer policy is separate.

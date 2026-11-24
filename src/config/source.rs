@@ -1,4 +1,4 @@
-//! Bounded source-only configuration preview. No filesystem or runtime access.
+//! Bounded versioned configuration sources. No filesystem or runtime access.
 use std::fmt;
 use std::path::Path;
 
@@ -7,7 +7,7 @@ use super::{Config, GlobalFileConfig, ProjectFileConfig};
 use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridPatch, merge::HybridMergePatch};
 
-/// File-local configuration semantics used only by the planning API.
+/// File-local configuration merge semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigVersion {
     /// Legacy whole-value hybrid replacement.
@@ -45,16 +45,24 @@ impl SourceLayer {
     /// # Errors
     /// Unknown keys/version, invalid shape, forbidden scope or excessive source size.
     pub fn parse(source: SourceId, text: &str) -> Result<Self> {
-        if !matches!(source, SourceId::Global(_) | SourceId::Project(_)) {
-            return Err(invalid("source must identify a global or project file"));
-        }
         if u64::try_from(text.len()).map_err(|_| invalid("configuration source size overflow"))?
             > crate::limits::MAX_STATE_BYTES
         {
             return Err(invalid("configuration source exceeds the state byte limit"));
         }
-        let document: toml::Table =
-            toml::from_str(text).map_err(|_| invalid("invalid configuration TOML"))?;
+        let document = toml::from_str(text).map_err(|_| invalid("invalid configuration TOML"))?;
+        Self::from_document(source, text, document)
+    }
+
+    // The caller already parsed one byte-bounded capture.
+    pub(super) fn from_document(
+        source: SourceId,
+        text: &str,
+        document: toml::Table,
+    ) -> Result<Self> {
+        if !matches!(source, SourceId::Global(_) | SourceId::Project(_)) {
+            return Err(invalid("source must identify a global or project file"));
+        }
         let mut fields = document.clone();
         let version = match fields.remove("config_version") {
             None | Some(toml::Value::Integer(1)) => ConfigVersion::V1,
@@ -154,7 +162,7 @@ pub struct SourcePreview {
     pub legacy_vector_max_bytes: u64,
     /// Scope conflicts that eventual migration/admission must resolve.
     pub conflicts: Vec<PreviewConflict>,
-    /// False until runtime consent and strict-store adoption are implemented.
+    /// False because supplied previews confer no authority to activate a migration.
     pub runtime_activation_available: bool,
 }
 pub(super) fn invalid(message: &str) -> Error {

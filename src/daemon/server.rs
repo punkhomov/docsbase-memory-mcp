@@ -397,13 +397,19 @@ impl Shared {
             pool_settings.settings(),
             &Capabilities::current(),
         )?;
+        let global_config = launch.config.into_settings();
+        let ann_policy = if website.is_some() {
+            AnnPolicy::Disabled
+        } else {
+            AnnPolicy::BuildOrLoad
+        };
+        let dense = DenseCache::for_config(ann_policy, cache, dense_settings, &global_config)?;
         let db = Db::open_with_settings(cache, settings)?;
         let readers = Arc::new(ReadPool::prepare(cache, settings, pool_settings)?);
         let orphans = crate::store::repo::fail_orphan_sync_jobs(db.connection())?;
         if orphans > 0 {
             eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
         }
-        let global_config = launch.config.into_settings();
         let (activity, activity_events, workers, watchers, jobs) =
             prepare_runtime_owners(owners, &global_config, website.is_none())?;
         #[cfg(feature = "hybrid-remote")]
@@ -412,8 +418,6 @@ impl Shared {
             workers.clone(),
             activity.clone(),
         )?);
-        let mut effective_dense = dense_settings.clone();
-        effective_dense.vector_cache_max_bytes = global_config.hybrid_cfg.cache.max_bytes;
         let payload_budget =
             crate::search::budget::PayloadBudget::new(global_config.search.clone())?;
         let project_states = website.as_ref().map_or_else(HashMap::new, |fixed| {
@@ -429,11 +433,6 @@ impl Shared {
                 }),
             )])
         });
-        let ann_policy = if website.is_some() {
-            AnnPolicy::Disabled
-        } else {
-            AnnPolicy::BuildOrLoad
-        };
         let shared = Arc::new(Self {
             cache: cache.to_path_buf(),
             db: Mutex::new(db),
@@ -458,7 +457,7 @@ impl Shared {
             global_config_stamp: launch.stamp,
             global_config_path: launch.path,
             project_states: Mutex::new(project_states),
-            dense: DenseCache::with_settings(ann_policy, cache, &effective_dense)?,
+            dense,
         });
         if let Some(jobs) = jobs {
             shared.activate_jobs(jobs)?;
@@ -1023,7 +1022,7 @@ impl Shared {
             return Ok(Arc::clone(config));
         }
         let config = Arc::new(self.config_for_root(&project.canonical_root)?);
-        if self.website.is_none() {
+        if self.website.is_none() && self.global_config.vector_store.is_none() {
             self.dense
                 .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
         }
@@ -1208,7 +1207,7 @@ impl Shared {
             }
         };
         let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if self.website.is_none() {
+        if self.website.is_none() && self.global_config.vector_store.is_none() {
             self.dense
                 .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
         }
@@ -1633,6 +1632,9 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                             protocol::LITERAL_QUERY_CAPABILITY.to_owned(),
                             protocol::PANEL_READ_CAPABILITY.to_owned(),
                         ];
+                        if shared.global_config.vector_store.is_some() {
+                            capabilities.push(protocol::ACTIVE_CONFIG_V2_CAPABILITY.to_owned());
+                        }
                         if shared.website.is_some() {
                             capabilities.push(protocol::ACTIVE_WEBSITE_CAPABILITY.to_owned());
                             capabilities.push(protocol::SERVER_STATUS_CAPABILITY.to_owned());

@@ -48,6 +48,15 @@ impl Context {
             crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)
         }
     }
+    pub(super) fn admit_daemon(
+        &self,
+        client: &crate::ipc::async_client::AsyncClient,
+    ) -> Result<()> {
+        crate::ipc::protocol::ensure_config_version(
+            client.capabilities(),
+            self.global.vector_store.is_some(),
+        )
+    }
     pub(super) async fn control<T: Send + 'static>(
         &self,
         operation: &SearchOperation,

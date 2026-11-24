@@ -62,6 +62,7 @@ pub(super) async fn run_in(
         let connected = AsyncClient::connect(&context.transport, &context.cache).await;
         if let Ok(mut client) = connected {
             client.handshake_registry().await?;
+            context.admit_daemon(&client)?;
             let website = client
                 .capabilities()
                 .iter()
@@ -79,26 +80,38 @@ pub(super) async fn run_in(
             } else {
                 client.register_session(&target).await
             };
-            match binding {
-                Ok(()) => {
-                    let mut job = client.call_tool("sync_start", json!({})).await?;
-                    let id = job["job_id"].as_i64().ok_or_else(|| Error::Protocol {
-                        message: "sync_start: missing job_id".into(),
-                    })?;
-                    while matches!(job["state"].as_str(), Some("queued" | "running")) {
-                        operation.check()?;
-                        tokio::time::sleep(Duration::from_millis(
-                            context.global.daemon.poll_interval_ms,
-                        ))
-                        .await;
-                        job = client
-                            .call_tool("sync_status", json!({"job_id":id}))
-                            .await?;
+            let started = match binding {
+                Ok(()) => Some(client.call_tool("sync_start", json!({})).await?),
+                Err(Error::Project { .. }) if !website => {
+                    // A running v2 daemon owns the vector store. Bootstrap the
+                    // new project through its unbound index tool.
+                    if context.global.vector_store.is_some() {
+                        Some(
+                            client
+                                .call_tool("index_project", json!({"path": target}))
+                                .await?,
+                        )
+                    } else {
+                        None
                     }
-                    return Ok(Outcome::Daemon(job));
                 }
-                Err(Error::Project { .. }) if !website => {}
                 Err(error) => return Err(error),
+            };
+            if let Some(mut job) = started {
+                let id = job["job_id"].as_i64().ok_or_else(|| Error::Protocol {
+                    message: "sync job missing job_id".into(),
+                })?;
+                while matches!(job["state"].as_str(), Some("queued" | "running")) {
+                    operation.check()?;
+                    tokio::time::sleep(Duration::from_millis(
+                        context.global.daemon.poll_interval_ms,
+                    ))
+                    .await;
+                    job = client
+                        .call_tool("sync_status", json!({"job_id":id}))
+                        .await?;
+                }
+                return Ok(Outcome::Daemon(job));
             }
             // Semantic unindexed-project binding permits the existing direct
             // bootstrap; connected transport/tool failures above never replay.

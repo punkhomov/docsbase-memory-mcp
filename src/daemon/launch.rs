@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::capture::{ReadFailure, read_file};
-use crate::config::resolve::LaunchFailure;
+use crate::config::capture::{ReadFailure, read_prefix};
+use crate::config::resolve::{LaunchFailure, has_version_header};
 use crate::config::schema::Resolved;
 use crate::config::{Config, paths};
 use crate::daemon::settings::DaemonPatch;
@@ -19,7 +19,7 @@ pub(crate) enum ConfigStamp {
 enum CapturedBytes {
     Missing,
     Loaded(Vec<u8>),
-    Unavailable(String),
+    Unavailable { reason: String, versioned: bool },
 }
 
 /// Immutable bytes captured before launch policy resolution and filesystem writes.
@@ -134,7 +134,10 @@ impl LaunchSnapshot {
             Ok(path) => Self::capture_from(&path),
             Err(error) => Self {
                 path: None,
-                bytes: CapturedBytes::Unavailable(error.to_string()),
+                bytes: CapturedBytes::Unavailable {
+                    reason: error.to_string(),
+                    versioned: false,
+                },
             },
         }
     }
@@ -156,10 +159,13 @@ impl LaunchSnapshot {
         let bytes = match &self.bytes {
             CapturedBytes::Missing => None,
             CapturedBytes::Loaded(bytes) => Some(bytes.as_slice()),
-            CapturedBytes::Unavailable(reason) => {
-                return Err(LaunchFailure::Legacy(Error::internal(format!(
-                    "global config unavailable: {reason}"
-                ))));
+            CapturedBytes::Unavailable { reason, versioned } => {
+                let error = Error::internal(format!("global config unavailable: {reason}"));
+                return Err(if *versioned {
+                    LaunchFailure::Versioned(error)
+                } else {
+                    LaunchFailure::Legacy(error)
+                });
             }
         };
         let path = self.path.as_deref().ok_or_else(|| {
@@ -187,7 +193,11 @@ impl LaunchSnapshot {
                 stamp: self.stamp(),
                 error: None,
             }),
-            Err(LaunchFailure::Daemon(error) | LaunchFailure::Remote(error)) => Err(error),
+            Err(
+                LaunchFailure::Daemon(error)
+                | LaunchFailure::Remote(error)
+                | LaunchFailure::Versioned(error),
+            ) => Err(error),
             Err(LaunchFailure::Legacy(error)) => {
                 // Shared alone retains the source-error compatibility adapter.
                 if matches!(
@@ -217,23 +227,28 @@ impl LaunchSnapshot {
 }
 
 fn capture(path: &Path) -> CapturedBytes {
-    match read_file(path, crate::limits::MAX_STATE_BYTES) {
-        Ok(bytes) => CapturedBytes::Loaded(bytes),
+    let limit = crate::limits::MAX_STATE_BYTES;
+    let unavailable = |error: ReadFailure, versioned| CapturedBytes::Unavailable {
+        reason: format!("read {} ({limit} byte limit): {error}", path.display()),
+        versioned,
+    };
+    let snapshot = std::fs::File::open(path)
+        .map_err(ReadFailure::Io)
+        .and_then(|file| read_prefix(file, limit));
+    match snapshot {
+        Ok((bytes, false)) => CapturedBytes::Loaded(bytes),
+        Ok((prefix, true)) => unavailable(ReadFailure::LimitExceeded, has_version_header(&prefix)),
         Err(ReadFailure::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
             CapturedBytes::Missing
         }
-        Err(error) => CapturedBytes::Unavailable(format!(
-            "read {} ({} byte limit): {error}",
-            path.display(),
-            crate::limits::MAX_STATE_BYTES
-        )),
+        Err(error) => unavailable(error, false),
     }
 }
 fn stamp(bytes: &CapturedBytes) -> ConfigStamp {
     match bytes {
         CapturedBytes::Missing => ConfigStamp::Missing,
         CapturedBytes::Loaded(bytes) => ConfigStamp::Loaded(blake3::hash(bytes)),
-        CapturedBytes::Unavailable(reason) => ConfigStamp::Unavailable(reason.clone()),
+        CapturedBytes::Unavailable { reason, .. } => ConfigStamp::Unavailable(reason.clone()),
     }
 }
 

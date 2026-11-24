@@ -180,6 +180,10 @@ impl Client {
         self.register_session(cwd)
     }
 
+    pub(crate) fn ensure_config_version(&self, requested_v2: bool) -> Result<()> {
+        protocol::ensure_config_version(&self.capabilities, requested_v2)
+    }
+
     pub(crate) fn active_website(&self) -> bool {
         self.capabilities
             .iter()

@@ -93,15 +93,15 @@ pub fn from_resolved(snapshot: &Resolved<Config>) -> Result<EffectiveView> {
     })
 }
 
-/// Resolves the same v1 sources as the runtime loader and displays their origins.
+/// Resolves the same versioned sources as the runtime loader and displays their origins.
 /// Does not create directories, open databases or construct/probe providers.
 /// Errors deliberately omit source text and the legacy parser's error chain.
 ///
 /// # Errors
-/// Unreadable/invalid v1 sources or an invalid effective view.
+/// Unreadable/invalid sources or an invalid effective view.
 pub fn load_from(config_dir: &Path, project_root: Option<&Path>) -> Result<EffectiveView> {
     let snapshot = super::resolve::load_from(config_dir, project_root)
-        .map_err(|_| invalid("cannot resolve v1 configuration for effective view"))?;
+        .map_err(|_| invalid("cannot resolve configuration for effective view"))?;
     let mut view = from_resolved(&snapshot)
         .map_err(|_| invalid("cannot describe resolved configuration for effective view"))?;
     view.basis = ViewBasis::SourceResolution;

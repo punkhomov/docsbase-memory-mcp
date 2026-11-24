@@ -683,3 +683,159 @@ fn oversized_global_config_is_rejected() {
     let notice = status["notice"].as_str().expect("notice");
     assert!(notice.contains("over the"), "notice: {notice}");
 }
+
+#[test]
+fn v2_config_drives_fresh_direct_index_and_daemon_search() {
+    let mut env = Env::new(&[("guide.md", &doc("quasar telemetry calibration"))]);
+    write_file(
+        env.cache(),
+        "config/config.toml",
+        b"config_version=2\nauto_index=false\n[vector_cache]\nmax_bytes=8192\n",
+    );
+    write_file(
+        env.root(),
+        ".docsbase.toml",
+        b"config_version=2\nmax_docs_per_project=50\n",
+    );
+    let run = |env: &Env, args: &[&str]| {
+        let out = env
+            .cmd()
+            .current_dir(env.root())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+
+    let report = run(&env, &["config", "effective"]);
+    let fields = report["fields"].as_array().unwrap();
+    assert!(
+        fields
+            .iter()
+            .any(|field| field["key"] == "vector_cache.max_bytes" && field["value"] == 8192)
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|field| field["key"] == "max_docs_per_project" && field["value"] == 50)
+    );
+    let indexed = run(&env, &["index"]);
+    assert!(indexed["project_id"].is_i64());
+    assert_eq!(
+        run(&env, &["search", "quasar telemetry"])[0]["path"],
+        "guide.md"
+    );
+    env.start_daemon();
+    assert!(matches!(
+        docsbase_memory::vector_cache::VectorCache::open(env.cache()),
+        Err(Error::Admission { .. })
+    ));
+    assert_eq!(
+        run(&env, &["search", "quasar telemetry"])[0]["path"],
+        "guide.md"
+    );
+    write_file(
+        env.root(),
+        "new.md",
+        doc("pulsar orbital measurements").as_bytes(),
+    );
+    assert_eq!(run(&env, &["sync"])["state"], "done");
+    let another = tempfile::tempdir().unwrap();
+    write_file(
+        another.path(),
+        "another.md",
+        doc("radio observatory antenna").as_bytes(),
+    );
+    let from_daemon = run(&env, &["sync", another.path().to_str().unwrap()]);
+    assert_eq!(from_daemon["state"], "done");
+    assert_ne!(from_daemon["project_id"], indexed["project_id"]);
+    env.restart_daemon();
+    assert!(
+        run(&env, &["search", "pulsar orbital"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["path"] == "new.md")
+    );
+}
+
+#[test]
+fn changed_config_version_refuses_cli_operations_against_stale_daemon() {
+    let mut env = Env::new(&[("guide.md", &doc("quasar telemetry calibration"))]);
+    let out = env.cmd().arg("index").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    env.start_daemon();
+    write_file(
+        env.cache(),
+        "config/config.toml",
+        b"config_version=2
+",
+    );
+    let expect_refusal = |env: &Env| {
+        for args in [&["search", "quasar"][..], &["index"], &["list"], &["sync"]] {
+            let out = env.cmd().args(args).output().unwrap();
+            assert!(
+                !out.status.success(),
+                "expected stale daemon refusal for {args:?}"
+            );
+            assert!(
+                String::from_utf8_lossy(&out.stderr)
+                    .contains("daemon is using a different config version")
+            );
+        }
+    };
+    expect_refusal(&env);
+    env.restart_daemon();
+    let out = env.cmd().args(["search", "quasar"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()[0]["path"],
+        "guide.md"
+    );
+    fs::remove_file(env.global_config()).unwrap();
+    expect_refusal(&env);
+}
+
+#[test]
+fn invalid_v2_global_fails_before_creating_daemon_state() {
+    let oversized = format!(
+        "config_version=2\n#{}",
+        " ".repeat(usize::try_from(docsbase_memory::limits::MAX_STATE_BYTES).unwrap()),
+    );
+    for (source, error) in [
+        (
+            "config_version=2\n[vector_cache]\nmax_bytes=0\n",
+            "vector_cache.max_bytes",
+        ),
+        (
+            "# start here\nconfig_version=2\n[vector_cache",
+            "invalid versioned configuration TOML",
+        ),
+        (&oversized, "over the trusted byte limit"),
+    ] {
+        let env = Env::new(&[]);
+        write_file(env.cache(), "config/config.toml", source.as_bytes());
+        let out = env
+            .cmd()
+            .args(["serve", "--detached", "--grace-ms", "1"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(error));
+        assert!(!env.cache().join("state").exists());
+        assert!(!env.cache().join(docsbase_memory::store::DB_FILE).exists());
+    }
+}
