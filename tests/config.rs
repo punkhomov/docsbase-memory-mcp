@@ -58,6 +58,37 @@ fn defaults_when_missing() {
     assert!(!config.hybrid);
 }
 
+#[cfg(unix)]
+#[test]
+fn dangling_global_config_is_unavailable_to_both_resolvers() {
+    use docsbase_memory::daemon::launch::LaunchSnapshot;
+    use docsbase_memory::daemon::settings::DaemonPatch;
+
+    let config = TempDir::new().unwrap();
+    let target = config.path().join("target.toml");
+    std::os::unix::fs::symlink(&target, config.path().join("config.toml")).unwrap();
+
+    let runtime = Config::global_from(config.path());
+    let launch = LaunchSnapshot::capture_from(config.path()).resolve(DaemonPatch::default());
+    assert!(runtime.is_err() && launch.is_err(), "runtime={runtime:?}");
+
+    fs::write(target, "# Unversioned").unwrap();
+    assert!(
+        Config::global_from(config.path())
+            .unwrap()
+            .vector_store
+            .is_none()
+    );
+    assert!(
+        LaunchSnapshot::capture_from(config.path())
+            .resolve(DaemonPatch::default())
+            .unwrap()
+            .settings()
+            .vector_store
+            .is_none()
+    );
+}
+
 #[test]
 fn auto_index_default_false() {
     let config_dir = TempDir::new().expect("tempdir");

@@ -194,10 +194,10 @@ keys yet; changing a live cache's policy is a later configuration task.
 
 Dense resident, count, backoff and disk policy also comes from `DenseSpec`.
 Rust callers can pass complete `DenseSettings` to `DenseCache::with_settings` or
-`Shared::open_with_dense_policy`; snapshots retain immutable limits. At daemon
-and direct CLI composition, the existing `hybrid.cache.max_bytes` still overrides
-the dense-path vector-store fallback. This does not activate strict shared-store
-quotas or live settings updates.
+`Shared::open_with_dense_policy`. Snapshots retain immutable limits. The v1
+daemon and direct CLI use the project `hybrid.cache.max_bytes` fallback for
+the vector store. In v2, the cache root uses the shared `vector_cache.max_bytes`
+budget from the global configuration.
 
 ANN backfill pins use the same static eligibility as construction: chunk-row
 count, minimum/maximum vectors, project capacity, model width and graph plus exact

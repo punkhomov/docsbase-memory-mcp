@@ -315,7 +315,7 @@ fn read_capped(path: &Path) -> Result<String> {
 fn read_capped_if_exists(path: &Path) -> Result<Option<String>> {
     let bytes = match capture::read_file(path, crate::limits::MAX_STATE_BYTES) {
         Ok(bytes) => bytes,
-        Err(capture::ReadFailure::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(capture::ReadFailure::Io(error)) if capture::path_is_absent(path, &error) => {
             return Ok(None);
         }
         Err(error) => {

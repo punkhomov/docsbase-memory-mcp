@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::capture::{ReadFailure, read_prefix};
+use crate::config::capture::{ReadFailure, path_is_absent, read_prefix};
 use crate::config::resolve::{LaunchFailure, has_version_header};
 use crate::config::schema::Resolved;
 use crate::config::{Config, paths};
@@ -252,9 +252,7 @@ fn capture(path: &Path) -> CapturedBytes {
     match snapshot {
         Ok((bytes, false)) => CapturedBytes::Loaded(bytes),
         Ok((prefix, true)) => unavailable(ReadFailure::LimitExceeded, has_version_header(&prefix)),
-        Err(ReadFailure::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            CapturedBytes::Missing
-        }
+        Err(ReadFailure::Io(error)) if path_is_absent(path, &error) => CapturedBytes::Missing,
         Err(error) => unavailable(error, false),
     }
 }

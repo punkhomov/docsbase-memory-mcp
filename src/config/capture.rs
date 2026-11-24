@@ -13,6 +13,14 @@ pub(crate) enum ReadFailure {
     BudgetOverflow,
 }
 
+/// A path that failed to open is absent only if its directory entry is absent.
+/// A dangling symlink can return `NotFound` while the directory entry still exists.
+pub(crate) fn path_is_absent(path: &Path, error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        && std::fs::symlink_metadata(path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// Consume at most budget+1 bytes. Metadata never determines buffer sizing.
 pub(crate) fn read_bounded(reader: impl Read, budget: u64) -> Result<Vec<u8>, ReadFailure> {
     let (bytes, exceeded) = read_prefix(reader, budget)?;
