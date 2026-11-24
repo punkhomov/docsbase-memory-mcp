@@ -738,6 +738,22 @@ impl DenseCache {
         Ok(cache)
     }
 
+    pub(crate) fn for_config(
+        policy: AnnPolicy,
+        cache: &Path,
+        settings: &DenseSettings,
+        config: &crate::config::Config,
+    ) -> Result<Self> {
+        if let Some(vectors) = &config.vector_store {
+            DenseSpec::validate(settings, &crate::config::schema::Capabilities::current())?;
+            let owner = VectorStore::acquire(cache, vectors)?;
+            return Self::with_vector_store(policy, &owner, settings);
+        }
+        let mut effective = settings.clone();
+        effective.vector_cache_max_bytes = config.hybrid_cfg.cache.max_bytes;
+        Self::with_settings(policy, cache, &effective)
+    }
+
     /// Explicit connection policy for jobs, coverage and streaming fallback.
     #[must_use]
     pub fn vector_source(&self, project_id: i64) -> VectorCacheSource {

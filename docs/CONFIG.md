@@ -384,12 +384,34 @@ docsbase config   # effective values for the current directory (JSON)
   `bge-reranker-base` peaks at roughly twice its file size during load.
 
 
-## Versioned source planning API (CF3)
+## Configuration v2
 
-The running CLI/daemon still loads the v1 format documented above. Do not add
-`config_version` or `vector_cache` to active configuration files yet: ordinary
-loaders reject them. The read-only migration command below previews changes;
-there is no write/apply operation in this milestone.
+To opt in, put the version at the top of the global `config.toml`:
+
+```toml
+config_version = 2
+
+[vector_cache]
+max_bytes = 536870912
+```
+
+This works on a new installation without a prior migration. The global vector
+budget applies to all projects in the same cache root. Enable field-wise hybrid
+inheritance in a project by putting `config_version = 2` at the top of its
+`.docsbase.toml` after opting in globally. Runtime v1 global files omit the
+version key. Under v2 global policy, legacy project files retain their whole
+hybrid replacement semantics.
+Remove any project `hybrid.cache.max_bytes` when opting into v2 globally. Use
+`docsbase config effective` to verify the shared setting and its origin.
+
+Run `docsbase index` with the daemon stopped. With the daemon running, use
+`docsbase sync` for both existing and new projects. Stop and restart the daemon
+after edits to the global config. Use a separate cache root to try v2 alongside
+an existing v1 setup. Edit partial v2 hybrid tables directly. The existing
+`models use` writer expects complete stage tables. The migration command still
+produces a read-only plan.
+
+## Versioned source planning API (CF3)
 
 For offline tooling, `config::source::SourceLayer::parse` accepts supplied TOML
 text with an independent version per file (absent/1 or 2), and
@@ -421,8 +443,8 @@ current effective values, while bool shorthand and existing v2 inheritance are
 retained. All proposals are parsed and resolved again to check non-resource
 settings. Observed-missing project files remain missing. Source/edit debug
 output omits file text; explicit before/after views should be treated as source
-files. No files, artifacts or providers are changed. Runtime adoption, consent,
-strict shared-store ownership and recovery are later #78 milestones.
+files. The draft has no side effects. Automatic application and recovery are
+later #78 milestones.
 
 ## Effective values with origins
 
@@ -430,7 +452,7 @@ strict shared-store ownership and recovery are later #78 milestones.
 docsbase config effective --format=json
 ```
 
-This versioned view resolves the current v1 global/project files and shows each
+This versioned view resolves the current global/project files and shows each
 file setting's typed value, unit, scope and source. It does not contact the daemon:
 a running process can still hold its earlier configuration. The output therefore
 identifies its basis as `source_resolution`, sets `live_runtime_observed` to
@@ -461,8 +483,8 @@ Provider records expose only fields selected by their owner. Arbitrary parameter
 are omitted and indicated by `unexposed_parameters`; secrets and raw configuration
 text are not printed. For FastEmbed the public projection includes `runtime` and
 `runtime_path`. Invalid input produces an error without echoing the source text.
-The CLI continues to reject the experimental v2 file format; the library can also
-render an explicitly supplied CF3 preview with its v2 budget key and scope.
+The library can also render an explicitly supplied CF3 preview with its v2
+budget key and scope.
 
 
 ## Observed migration plan (CF4c2)
@@ -478,7 +500,7 @@ project registry. It includes registered roots that no longer exist; current cwd
 and active daemon sessions are not the project inventory. Missing config files
 remain distinct from empty files. It does not create directories, locks, databases
 or sidecars, write configuration, start a daemon, load models or call providers.
-Existing v1 runtime loading is unchanged; v2 is accepted here for planning only.
+The command accepts both source versions for planning.
 
 The version 2 JSON envelope contains `observation_id`, selected roots, registry,
 `registry_stable`, all source states/revisions, the budget decision, a summary and
@@ -494,7 +516,7 @@ Without a budget choice, `vector_budget_decision_required` blocks rewrites.
 capacity; `--vector-max-bytes` selects a positive capacity instead. These flags
 conflict and neither grants permission to apply. Even a complete source proposal
 retains `strict_store_adoption_unavailable` and `executor_unavailable` blockers.
-Do not copy proposed v2 settings into active files before runtime adoption ships.
+For a new v2 installation, configure it directly as described above.
 
 A busy/WAL/recovery-bearing registry is unavailable, not empty. The command never
 stops a daemon or repairs storage. Unavailable registry/source observations block
@@ -588,11 +610,9 @@ resulting eviction, and lease release with resulting eviction, commit atomically
 Leased rows can temporarily exceed eviction limits; vector payload limits are not
 physical database/WAL/disk or RSS quotas. Provider calls hold no SQLite transaction.
 
-This library construction step does not activate file-v2, rewrite configuration,
-change ordinary legacy startup, or implement migration/apply/live policy updates.
-Legacy project budgets and zero-cap semantics remain supported. Migration planning
-still reports strict-store-adoption and executor blockers until the complete
-consumer rollout and consent/recovery protocol are implemented.
+Explicit v2 startup uses this ownership policy. Legacy budgets and zero-cap
+semantics belong to v1. Automatic adoption via a migration plan still reports
+strict-store-adoption and executor blockers.
 
 The experimental Rust consumer APIs can now receive that owner explicitly:
 `DenseCache::with_vector_store` and `VectorCacheSource::Owned` retain its lifetime;
@@ -602,8 +622,8 @@ full/scoped/streaming retrieval all reuse the owner. A different cache root is
 rejected before provider work. `DenseCache::set_vector_cache_max_bytes` now returns
 `Result<()>`: owner-backed caches reject project budgets, including equal values,
 without changing policy or published config. Legacy adapters still accept them.
-This does not yet select strict ownership in daemon startup, sync/status factories
-or CLI configuration; those await the migration and recovery rollout.
+The daemon selects this owner from its v2 global snapshot, and sync and status
+use that snapshot for vector work.
 
 ### Consent policy library foundation
 

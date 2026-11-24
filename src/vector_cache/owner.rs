@@ -18,7 +18,7 @@ const INITIALIZATION_LOCK_FILE: &str = "vectors.init.lock";
 ///
 /// This coordinates cooperating callers only. It is not an access-control or
 /// persisted activation mechanism; older binaries/raw SQL and external file
-/// replacement do not participate. Production startup remains legacy for now.
+/// replacement do not participate.
 #[derive(Clone)]
 pub struct VectorStore(Arc<StoreInner>);
 

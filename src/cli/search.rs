@@ -194,10 +194,11 @@ async fn run_in(
                 &settings,
                 &pool,
             )?);
-            let dense = std::sync::Arc::new(direct_dense_cache(
+            let dense = std::sync::Arc::new(crate::hybrid::dense::DenseCache::for_config(
+                crate::hybrid::dense::AnnPolicy::LoadOnly,
                 &owner.cache,
-                config.hybrid_cfg.cache.max_bytes,
                 &dense_settings,
+                &config,
             )?);
             drop(db); // Native readonly connection never crosses an await.
             let owners = crate::daemon::server::search_async::SearchOwners {
@@ -245,6 +246,7 @@ async fn daemon_in(
             return Ok(None);
         };
         client.handshake_registry().await?;
+        context.admit_daemon(&client)?;
         if client
             .capabilities()
             .iter()
@@ -266,21 +268,6 @@ async fn daemon_in(
         client.search(args, operation).await.map(Some)
     })
     .await
-}
-
-fn direct_dense_cache(
-    cache: &Path,
-    vector_cache_max_bytes: u64,
-    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
-) -> Result<crate::hybrid::dense::DenseCache> {
-    // v1 project/global vector-store policy retains precedence over this fallback.
-    let mut effective = dense_settings.clone();
-    effective.vector_cache_max_bytes = vector_cache_max_bytes;
-    crate::hybrid::dense::DenseCache::with_settings(
-        crate::hybrid::dense::AnnPolicy::LoadOnly,
-        cache,
-        &effective,
-    )
 }
 
 #[cfg(test)]

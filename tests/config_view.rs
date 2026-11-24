@@ -236,7 +236,7 @@ fn effective_cli_errors_do_not_echo_raw_sources() {
     for text in [
         "api_key='credential-sentinel'",
         "max_file_size='credential-sentinel'",
-        "config_version=2",
+        "config_version=3",
         "[hybrid.embedding]\nprovider='credential-sentinel'\n",
     ] {
         fs::write(root.path().join("config/config.toml"), text).unwrap();

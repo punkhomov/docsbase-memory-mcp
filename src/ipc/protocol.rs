@@ -41,6 +41,22 @@ pub(crate) fn ensure_search_query_mode(
 /// Absent for Shared. Additive Hello marker; wire shape and required SDK caps stay unchanged.
 pub const ACTIVE_WEBSITE_CAPABILITY: &str = "active-website-profile-v1";
 
+/// The running daemon resolved an explicit v2 configuration and owns the shared vectors.
+pub(crate) const ACTIVE_CONFIG_V2_CAPABILITY: &str = "active-config-v2";
+
+pub(crate) fn ensure_config_version(capabilities: &[String], requested_v2: bool) -> Result<()> {
+    let active_v2 = capabilities
+        .iter()
+        .any(|value| value == ACTIVE_CONFIG_V2_CAPABILITY);
+    if active_v2 == requested_v2 {
+        Ok(())
+    } else {
+        Err(Error::Admission {
+            message: "daemon is using a different config version; run `docsbase daemon stop` and restart it".into(),
+        })
+    }
+}
+
 /// Versioned fixed-project readiness; advertised only by active Website daemons.
 pub const SERVER_STATUS_CAPABILITY: &str = "server-status-v1";
 

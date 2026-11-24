@@ -1,5 +1,6 @@
 //! Synchronous CLI bridge behavior without host timing assumptions.
 
+use std::path::Path;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -8,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
+use crate::config::Config;
 use crate::error::Error;
 use crate::hybrid::work::Cancellation;
 use crate::search::operation::SearchOperation;
@@ -154,7 +156,7 @@ fn direct_cache_constructor_consumes_supplied_query_policy() {
         .into_settings();
     query.query_cache_max_entries = 1;
     query.query_cache_max_bytes = 16;
-    let dense = super::direct_dense_cache(root.path(), 1024, &query).unwrap();
+    let dense = direct_test_cache(root.path(), &query);
     dense.store_query_vector("model", "a", &[1., 2.]);
     dense.store_query_vector("model", "b", &[3., 4.]);
     assert!(dense.query_vector("model", "a").is_none());
@@ -179,7 +181,7 @@ fn direct_cache_factory_consumes_resident_policy_and_legacy_vector_budget() {
         std::time::Duration::from_secs(30),
     )
     .unwrap();
-    let dense = super::direct_dense_cache(root.path(), 1024, &settings).unwrap();
+    let dense = direct_test_cache(root.path(), &settings);
     let actual = dense.limits();
     assert_eq!(actual.max_vectors, 7);
     assert_eq!(actual.max_bytes, 12_345);
@@ -188,4 +190,45 @@ fn direct_cache_factory_consumes_resident_policy_and_legacy_vector_budget() {
     assert_eq!(actual.vector_cache_max_bytes, 1024);
     assert_eq!(actual.ann_lifetimes, settings.ann_lifetimes);
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+fn direct_test_cache(
+    root: &Path,
+    settings: &crate::hybrid::dense_settings::DenseSettings,
+) -> crate::hybrid::dense::DenseCache {
+    let mut config = Config::default();
+    config.hybrid_cfg.cache.max_bytes = 1024;
+    crate::hybrid::dense::DenseCache::for_config(
+        crate::hybrid::dense::AnnPolicy::LoadOnly,
+        root,
+        settings,
+        &config,
+    )
+    .unwrap()
+}
+
+#[test]
+fn v2_runtime_cache_enforces_one_budget_across_project_sources() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("config.toml"),
+        "config_version=2\n[vector_cache]\nmax_bytes=8\n",
+    )
+    .unwrap();
+    let config = Config::global_from(root.path()).unwrap();
+    let settings = crate::hybrid::dense_settings::standalone().unwrap();
+    let shared = crate::hybrid::dense::DenseCache::for_config(
+        crate::hybrid::dense::AnnPolicy::BuildOrLoad,
+        root.path(),
+        settings.settings(),
+        &config,
+    )
+    .unwrap();
+    let mut first = shared.vector_source(1).connect(root.path()).unwrap();
+    let mut second = shared.vector_source(2).connect(root.path()).unwrap();
+    first.put("model", "first", &[1., 2.]).unwrap();
+    second.put("model", "second", &[3., 4.]).unwrap();
+    assert_eq!(second.len().unwrap(), 1);
+    assert!(first.get("model", "first").unwrap().is_none());
+    assert_eq!(first.get("model", "second").unwrap(), Some(vec![3., 4.]));
 }

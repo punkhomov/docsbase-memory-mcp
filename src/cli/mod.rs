@@ -458,6 +458,7 @@ pub(crate) fn try_daemon(
     };
     client.handshake_registry()?;
     if bind_session {
+        client.ensure_config_version(Config::global()?.vector_store.is_some())?;
         let cwd = std::env::current_dir().context("resolve current directory")?;
         bind_cli_project(&mut client, &cache, &cwd, settings)?;
     }

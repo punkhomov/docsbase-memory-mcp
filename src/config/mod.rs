@@ -52,6 +52,9 @@ pub struct Config {
     pub hybrid: bool,
     /// Hybrid stages resolved from the file forms (bool shorthand or table).
     pub hybrid_cfg: HybridCfg,
+    /// Installation-wide vector policy selected by a v2 global configuration.
+    /// Legacy snapshots use per-project capacity and have no shared owner policy.
+    pub vector_store: Option<crate::vector_cache::settings::VectorStoreSettings>,
     /// Machine-local provider records from the global config (FR-1).
     pub providers: ProvidersCfg,
 }
@@ -178,7 +181,7 @@ impl Config {
     /// Returns [`Error::Internal`] when the project file exists but cannot be
     /// read or parsed, and [`Error::Admission`] when a limit is zero.
     pub fn for_project(global: &Config, root: &Path) -> Result<Self> {
-        resolve::legacy_for_project(global, root).map(schema::Resolved::into_settings)
+        resolve::for_provided_project(global, root).map(schema::Resolved::into_settings)
     }
 
     /// Same as [`Config::load`] but with an explicit config directory (testable).
@@ -214,6 +217,9 @@ impl Config {
             } else {
                 HybridCfg::default()
             };
+            if let Some(policy) = &self.vector_store {
+                self.hybrid_cfg.cache.max_bytes = policy.max_bytes;
+            }
         }
         self
     }
@@ -245,22 +251,15 @@ impl Config {
                 ),
             });
         }
+        if let Some(policy) = &self.vector_store {
+            policy.validate()?;
+        }
         crate::hybrid::config::validate_settings(&self.hybrid_cfg)?;
         SearchSpec::validate(&self.search, &Capabilities::current())?;
         DaemonSpec::validate(&self.daemon, &Capabilities::current())?;
         RemoteSpec::validate(&self.remote, &Capabilities::current())?;
         Ok(())
     }
-}
-
-/// Reads the global config file (contains `[providers.*]`).
-fn read_global(path: &Path) -> Result<GlobalFileConfig> {
-    let text = read_capped(path)?;
-    parse_global(path, &text)
-}
-
-fn parse_global(path: &Path, text: &str) -> Result<GlobalFileConfig> {
-    decode_global_document(path, parse_global_document(path, text)?)
 }
 
 fn parse_global_document(path: &Path, text: &str) -> Result<toml::Table> {
@@ -367,6 +366,7 @@ impl SettingsSpec for ConfigSpec {
             hybrid: false,
             hybrid_cfg: HybridSpec::initial(&hybrid),
             providers: ProvidersCfg::default(),
+            vector_store: None,
         };
         ConfigDefaults {
             initial,

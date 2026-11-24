@@ -6,7 +6,9 @@ use std::path::Path;
 use crate::config::Config;
 use crate::daemon::registry;
 use crate::error::{Error, Result};
+use crate::ipc::async_client::{AsyncClient, within_operation};
 use crate::store::Db;
+use crate::vector_cache::{VectorCacheSource, VectorStore};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -47,6 +49,22 @@ pub(super) async fn run_in(
     )?;
     let mut cancelled =
         crate::daemon::request::CancelOnDrop(Some(operation.cancellation().clone()));
+    within_operation(&operation, async {
+        if let Ok(mut client) = AsyncClient::connect(&context.transport, &context.cache).await {
+            if let Err(error) = client.handshake_registry().await {
+                // A legacy direct index can proceed when there is no negotiated
+                // daemon. A verified version mismatch never enters that path.
+                return if context.global.vector_store.is_none() { Ok(()) } else { Err(error) };
+            }
+            context.admit_daemon(&client)?;
+            if context.global.vector_store.is_some() {
+                return Err(Error::Admission {
+                    message: "the daemon owns the shared vector store; use `docsbase sync` or stop the daemon".into(),
+                });
+            }
+        }
+        Ok(())
+    }).await?;
     let activity = context.activity.track();
     let result = run_with_operation(context, path, settings, operation, activity).await;
     if result.is_ok() {
@@ -77,12 +95,25 @@ pub(super) async fn run_with_operation(
                     "re-create the worktree/directory or run from a valid project root".into(),
                 ),
             })?;
-            let mut db = Db::open_with_settings(&owner.cache, &settings)?;
-            let project = registry::ensure_project(&mut db, &target)?;
-            let config = Arc::new(Config::for_project(&owner.global, &project.canonical_root)?);
+            let (project, config, source) = if let Some(policy) = &owner.global.vector_store {
+                let root = registry::project_root_for(&target, &owner.cache)?;
+                let config = Config::for_project(&owner.global, &root)?;
+                let store = VectorStore::acquire(&owner.cache, policy)?;
+                let mut db = Db::open_with_settings(&owner.cache, &settings)?;
+                (
+                    registry::ensure_project(&mut db, &root)?,
+                    config,
+                    VectorCacheSource::Owned(store),
+                )
+            } else {
+                let mut db = Db::open_with_settings(&owner.cache, &settings)?;
+                let project = registry::ensure_project(&mut db, &target)?;
+                let config = Config::for_project(&owner.global, &project.canonical_root)?;
+                let source = VectorCacheSource::Legacy(config.hybrid_cfg.cache.limits());
+                (project, config, source)
+            };
+            let config = Arc::new(config);
             let stages = Arc::new(owner.stages(&config)?);
-            let source =
-                crate::vector_cache::VectorCacheSource::Legacy(config.hybrid_cfg.cache.limits());
             Ok(crate::index::async_job::JobContext {
                 input: crate::index::async_job::JobInput::Full,
                 singleton: None,

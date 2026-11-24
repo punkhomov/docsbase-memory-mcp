@@ -206,14 +206,52 @@ fn versioned_preview_rejects_unknown_versions_keys_scopes_and_redacts_input() {
 }
 
 #[test]
-fn ordinary_loader_does_not_activate_preview_v2() {
+fn ordinary_loader_resolves_global_v2_with_shared_policy() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(
         root.path().join("config.toml"),
         "config_version=2\nhybrid=true\n",
     )
     .unwrap();
-    assert!(Config::global_from(root.path()).is_err());
+    let config = Config::global_from(root.path()).unwrap();
+    assert!(config.hybrid);
+    assert_eq!(
+        config.vector_store.as_ref().unwrap().max_bytes,
+        config.hybrid_cfg.cache.max_bytes,
+    );
+}
+
+#[test]
+fn operational_v2_applies_partial_stages_but_refuses_a_legacy_project_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let config_dir = root.path().join("config");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "config_version=2\nhybrid=true\n[vector_cache]\nmax_bytes=8192\n",
+    )
+    .unwrap();
+    let path = root.path().join(".docsbase.toml");
+    std::fs::write(&path, "config_version=2\n[hybrid.reranker]\nwindow=20\n").unwrap();
+    let global = Config::global_from(&config_dir).unwrap();
+    let project = Config::for_project(&global, root.path()).unwrap();
+    assert_eq!(project.hybrid_cfg.embedding, global.hybrid_cfg.embedding);
+    assert_eq!(project.hybrid_cfg.reranker.as_ref().unwrap().window, 20);
+    assert_eq!(project.vector_store, global.vector_store);
+    assert_eq!(project.hybrid_cfg.cache.max_bytes, 8192);
+
+    std::fs::write(&path, "hybrid=false\n").unwrap();
+    let project = Config::load_from(&config_dir, Some(root.path())).unwrap();
+    assert!(!project.hybrid);
+    assert_eq!(project.hybrid_cfg.cache.max_bytes, 8192);
+
+    std::fs::write(&path, "[hybrid.cache]\nmax_bytes=2048\n").unwrap();
+    let error = Config::for_project(&global, root.path()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("v2 uses global vector_cache.max_bytes")
+    );
 }
 
 use docsbase_memory::config::migrate::{
