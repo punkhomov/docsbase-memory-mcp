@@ -158,32 +158,34 @@ impl Resolution<ConfigSpec> {
     }
 
     fn apply_v2_global(&mut self, layer: &SourceLayer) -> Result<()> {
-        use crate::vector_cache::settings::{VectorStorePatch, VectorStoreSpec};
-
         self.apply_source(layer)?;
-        let policy = resolve_component::<VectorStoreSpec>(
-            &DefaultsContext::standalone(),
-            [(
-                layer.source.clone(),
-                VectorStorePatch {
-                    max_bytes: layer.vector_max_bytes,
-                    ..VectorStorePatch::default()
-                },
-            )],
-        )?
-        .into_settings();
-        let origin = if layer.vector_max_bytes.is_some() {
-            &layer.source
-        } else {
-            &SourceId::Defaults
-        };
-        self.origins.rebind(
-            "hybrid.cache.max_bytes",
-            crate::vector_cache::V2_MAX_BYTES_FIELD,
-            origin,
-        )?;
-        self.settings.hybrid_cfg.cache.max_bytes = policy.max_bytes;
-        self.settings.vector_store = Some(policy);
+        let policy = layer
+            .vector_store
+            .as_ref()
+            .ok_or_else(|| invalid("v2 global vector policy absent"))?;
+        self.bind_vector_policy(policy)
+    }
+
+    fn bind_vector_policy(
+        &mut self,
+        policy: &Resolved<crate::vector_cache::settings::VectorStoreSettings>,
+    ) -> Result<()> {
+        use crate::vector_cache::settings::{MAX_BYTES_FIELD, VectorStoreSpec};
+
+        for &field in VectorStoreSpec::FIELDS {
+            let origin = policy
+                .provenance()
+                .get(field.key)
+                .ok_or_else(|| invalid("v2 vector policy provenance absent"))?;
+            if field == MAX_BYTES_FIELD {
+                self.origins
+                    .rebind("hybrid.cache.max_bytes", field, &origin.source)?;
+            } else {
+                self.origins.include(field, &origin.source)?;
+            }
+        }
+        self.settings.hybrid_cfg.cache.max_bytes = policy.settings().max_bytes;
+        self.settings.vector_store = Some(policy.settings().clone());
         Ok(())
     }
 
@@ -440,7 +442,7 @@ pub fn preview_sources(
     global: &super::source::SourceLayer,
     project: Option<&super::source::SourceLayer>,
 ) -> Result<super::source::SourcePreview> {
-    use super::source::{ConfigVersion, PreviewConflict, SourcePreview, invalid};
+    use super::source::{PreviewConflict, SourcePreview, invalid};
     if !matches!(global.source, SourceId::Global(_))
         || project.is_some_and(|p| !matches!(p.source, SourceId::Project(_)))
     {
@@ -449,17 +451,12 @@ pub fn preview_sources(
         ));
     }
     let mut resolution = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone());
-    let strict_cap = (global.version == ConfigVersion::V2).then(|| {
-        global
-            .vector_max_bytes
-            .unwrap_or(resolution.settings.hybrid_cfg.cache.max_bytes)
-    });
     for layer in std::iter::once(global).chain(project) {
         resolution.apply_source(layer)?;
     }
     let legacy_vector_max_bytes = resolution.settings.hybrid_cfg.cache.max_bytes;
     let mut conflicts = Vec::new();
-    if let Some(cap) = strict_cap {
+    if let Some(policy) = &global.vector_store {
         if let Some(project) = project
             && let Some(max_bytes) = project.legacy_vector_override()
         {
@@ -468,17 +465,7 @@ pub fn preview_sources(
                 max_bytes,
             });
         }
-        resolution.settings.hybrid_cfg.cache.max_bytes = cap;
-        let origin = if global.vector_max_bytes.is_some() {
-            global.source.clone()
-        } else {
-            SourceId::Defaults
-        };
-        resolution.origins.rebind(
-            "hybrid.cache.max_bytes",
-            crate::vector_cache::V2_MAX_BYTES_FIELD,
-            &origin,
-        )?;
+        resolution.bind_vector_policy(policy)?;
     }
     Ok(SourcePreview {
         effective: resolution.finish()?,

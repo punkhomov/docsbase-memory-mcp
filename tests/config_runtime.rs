@@ -690,7 +690,7 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
     write_file(
         env.cache(),
         "config/config.toml",
-        b"config_version=2\nauto_index=false\n[vector_cache]\nmax_bytes=8192\n",
+        b"config_version=2\nauto_index=false\n[vector_cache]\nmax_bytes=8192\nmax_entries=74\nbusy_timeout=33\n",
     );
     write_file(
         env.root(),
@@ -714,11 +714,15 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
 
     let report = run(&env, &["config", "effective"]);
     let fields = report["fields"].as_array().unwrap();
-    assert!(
-        fields
-            .iter()
-            .any(|field| field["key"] == "vector_cache.max_bytes" && field["value"] == 8192)
-    );
+    for (key, value) in [
+        ("vector_cache.max_bytes", 8192),
+        ("vector_cache.max_entries", 74),
+        ("vector_cache.busy_timeout", 33),
+    ] {
+        assert!(fields.iter().any(|field| {
+            field["key"] == key && field["value"] == value && field["source"]["kind"] == "global"
+        }));
+    }
     assert!(
         fields
             .iter()

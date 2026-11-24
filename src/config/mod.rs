@@ -468,6 +468,19 @@ impl ConfigSpec {
             view.push(key, value, None)?;
         }
         crate::hybrid::config::view::fields(&settings.hybrid_cfg, view)?;
+        if view.has_field(crate::vector_cache::settings::MAX_BYTES_FIELD.key) {
+            let policy = settings
+                .vector_store
+                .as_ref()
+                .ok_or_else(|| Error::internal("missing v2 vector policy for effective view"))?;
+            policy.view_fields(view)?;
+        } else {
+            view.push(
+                "hybrid.cache.max_bytes",
+                serde_json::json!(settings.hybrid_cfg.cache.max_bytes),
+                None,
+            )?;
+        }
         SearchSpec::view_fields(&settings.search, view)?;
         DaemonSpec::view_fields(&settings.daemon, view)?;
         RemoteSpec::view_fields(&settings.remote, view)

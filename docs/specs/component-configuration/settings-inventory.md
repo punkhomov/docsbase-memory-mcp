@@ -515,3 +515,10 @@ checked before owned text copies, and HTTP response reads obey the smaller cap.
 Model address is request-scoped, credentials stay with the existing provider.
 Future configurable generation policy belongs to the ask/model owners in #128;
 this delta does not claim full CF adoption or create another resolution registry.
+
+## Delta 2026-11-24 — I20/I27 в глобальном v2
+
+Один VectorStoreSpec разрешает `vector_cache.max_entries` (1 000 000),
+`max_bytes` (1 ГиБ) и `busy_timeout` (5 000 мс). Эти настройки действуют
+на все соединения одного корня кеша. Изменение применяется при новом запуске
+и относится к допуску и вытеснению (R/E). Ключи и рецепты векторов сохраняются.

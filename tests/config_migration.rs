@@ -360,6 +360,11 @@ fn migration_draft_preserves_actual_v1_settings_and_never_writes_sources() {
             .map(|e| SourceLayer::parse(e.source.clone(), &e.after).unwrap());
         let actual = preview_sources(&proposed_global, proposed.as_ref()).unwrap();
         expected.hybrid_cfg.cache.max_bytes = 16384;
+        let mut settings = docsbase_memory::vector_cache::settings::standalone()
+            .unwrap()
+            .into_settings();
+        settings.max_bytes = 16384;
+        expected.vector_store = Some(settings);
         assert_eq!(actual.effective.settings(), &expected);
         assert_eq!(
             actual.conflicts,
@@ -595,6 +600,75 @@ fn versioned_preview_respects_local_build_capability_without_provisioning() {
     }
     #[cfg(not(feature = "hybrid-local"))]
     assert!(result.is_err());
+}
+
+#[test]
+fn v2_policy_origins_and_non_byte_limits_survive_a_budget_migration_plan() {
+    let source = global("config_version=2\n[vector_cache]\nmax_entries=74\nbusy_timeout=33\n");
+    let resolved = preview_sources(&source, None).unwrap();
+    let report = serde_json::to_value(
+        docsbase_memory::config::view::from_resolved(&resolved.effective).unwrap(),
+    )
+    .unwrap();
+    let field = |key: &str| {
+        report["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["key"] == key)
+            .unwrap()
+    };
+    assert_eq!(field("vector_cache.max_entries")["value"], 74);
+    assert_eq!(
+        field("vector_cache.max_entries")["source"]["kind"],
+        "global"
+    );
+    assert_eq!(field("vector_cache.max_entries")["unit"], "count");
+    assert_eq!(field("vector_cache.busy_timeout")["value"], 33);
+    assert_eq!(field("vector_cache.busy_timeout")["unit"], "milliseconds");
+    assert_eq!(
+        field("vector_cache.max_bytes")["source"]["kind"],
+        "defaults"
+    );
+    let draft = draft_migration(
+        &source,
+        &[],
+        &[],
+        Some(VectorBudgetDecision::UseBytes(8192)),
+    )
+    .unwrap();
+    let edit = &draft.edits[0];
+    let changed = SourceLayer::parse(edit.source.clone(), &edit.after).unwrap();
+    let after = preview_sources(&changed, None).unwrap();
+    let policy = after.effective.settings().vector_store.as_ref().unwrap();
+    assert_eq!(policy.max_entries, 74);
+    assert_eq!(policy.max_bytes, 8192);
+    assert_eq!(policy.busy_timeout.as_millis(), 33);
+    for override_text in ["max_entries=0", "busy_timeout=2147483648", "max_bytes=0"] {
+        assert!(
+            SourceLayer::parse(
+                source.source().clone(),
+                &format!("config_version=2\n[vector_cache]\n{override_text}\n"),
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        SourceLayer::parse(
+            source.source().clone(),
+            "config_version=2\nvector_cache=[74,8192,33]\n",
+        )
+        .is_err()
+    );
+    let defaults = preview_sources(&global("config_version=2\n"), None).unwrap();
+    let policy = defaults.effective.settings().vector_store.as_ref().unwrap();
+    assert_eq!(policy.max_entries, 1_000_000);
+    assert_eq!(policy.busy_timeout.as_millis(), 5_000);
+    for key in ["vector_cache.max_entries", "vector_cache.busy_timeout"] {
+        let origin = defaults.effective.provenance().get(key).unwrap();
+        assert_eq!(origin.source, SourceId::Defaults);
+        assert_eq!(origin.scope, docsbase_memory::config::schema::Scope::Daemon);
+    }
 }
 
 #[test]

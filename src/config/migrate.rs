@@ -309,6 +309,10 @@ pub fn draft_migration(
 fn verify_equivalent(before: &Config, after: &Config, cap: u64) -> Result<()> {
     let mut expected = before.clone();
     expected.hybrid_cfg.cache.max_bytes = cap;
+    expected
+        .vector_store
+        .get_or_insert_with(crate::vector_cache::settings::VectorStoreSettings::owner_defaults)
+        .max_bytes = cap;
     if &expected != after {
         return Err(invalid(
             "proposed source migration changes non-resource effective settings",
@@ -338,14 +342,17 @@ fn propose_source(
             ));
     }
     if let Some(cap) = global_cap {
-        let mut table = toml::Table::new();
+        let table = document
+            .entry("vector_cache")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| invalid("expected validated vector_cache table"))?;
         table.insert(
             "max_bytes".into(),
             toml::Value::Integer(
                 i64::try_from(cap).map_err(|_| invalid("unrepresentable vector capacity"))?,
             ),
         );
-        document.insert("vector_cache".into(), toml::Value::Table(table));
     }
     let after = toml::to_string_pretty(&document)
         .map_err(|_| invalid("cannot serialize proposed configuration"))?;
