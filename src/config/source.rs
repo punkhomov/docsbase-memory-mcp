@@ -1,4 +1,4 @@
-//! Bounded versioned configuration sources. No filesystem or runtime access.
+//! Bounded configuration documents and pure versioned source parsing.
 use std::fmt;
 use std::path::Path;
 
@@ -6,6 +6,34 @@ use super::schema::{Resolved, SourceId};
 use super::{Config, GlobalFileConfig, ProjectFileConfig};
 use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridPatch, merge::HybridMergePatch};
+
+/// Captures the same bounded file that an operational config load would read.
+pub(crate) fn read_edit_document(path: &Path) -> Result<Option<toml::Value>> {
+    let Some(text) = super::read_capped_if_exists(path)? else {
+        return Ok(None);
+    };
+    let value = toml::from_str(&text).map_err(|error| {
+        if super::resolve::has_version_header(text.as_bytes()) {
+            return invalid("invalid versioned configuration TOML");
+        }
+        Error::internal_with_source(format!("parse {}", path.display()), error)
+    })?;
+    Ok(Some(value))
+}
+
+/// Serializes a preview or write candidate within the operational read limit.
+pub(crate) fn render_edit_document(document: &toml::Value) -> Result<String> {
+    let rendered = toml::to_string(document)
+        .map_err(|error| Error::internal_with_source("render config", error))?;
+    let size = u64::try_from(rendered.len())
+        .map_err(|_| invalid("rendered configuration size overflow"))?;
+    if size > crate::limits::MAX_STATE_BYTES {
+        return Err(invalid(
+            "rendered configuration exceeds the trusted byte limit",
+        ));
+    }
+    Ok(rendered)
+}
 
 /// File-local configuration merge semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

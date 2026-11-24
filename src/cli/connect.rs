@@ -6,6 +6,7 @@
 
 use clap::Args;
 
+use crate::config::source::{read_edit_document, render_edit_document};
 use crate::error::{Error, Result};
 use crate::hybrid::config::{
     PROVIDER_FASTEMBED, PROVIDER_OPENROUTER, ProviderState, provider_status,
@@ -441,19 +442,8 @@ fn write_global_provider_locked(
     record: &toml::Table,
     path: &std::path::Path,
 ) -> Result<()> {
-    let mut root: toml::Value = match std::fs::read_to_string(path) {
-        Ok(raw) => toml::from_str(&raw)
-            .map_err(|err| Error::internal_with_source(format!("parse {}", path.display()), err))?,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            toml::Value::Table(toml::map::Map::new())
-        }
-        Err(err) => {
-            return Err(Error::internal_with_source(
-                format!("read {}", path.display()),
-                err,
-            ));
-        }
-    };
+    let mut root =
+        read_edit_document(path)?.unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
 
     let table = root
         .as_table_mut()
@@ -465,8 +455,7 @@ fn write_global_provider_locked(
         .ok_or_else(|| Error::internal("providers is not a table"))?;
     providers.insert(name.to_owned(), toml::Value::Table(record.clone()));
 
-    let rendered =
-        toml::to_string(&root).map_err(|err| Error::internal_with_source("render config", err))?;
+    let rendered = render_edit_document(&root)?;
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, rendered)
         .map_err(|err| Error::internal_with_source(format!("write {}", tmp.display()), err))?;
@@ -479,6 +468,35 @@ fn write_global_provider_locked(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_write_bounds_existing_and_rendered_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let limit = usize::try_from(crate::limits::MAX_STATE_BYTES).unwrap();
+        let record = toml::Table::from_iter([("enabled".into(), true.into())]);
+        let prefix = "config_version=2\n#";
+        let oversized = format!("{prefix}{}", " ".repeat(limit - prefix.len() + 1));
+        let key = "config_version = 2\nignores = [\"";
+        let suffix = "\"]\n";
+        let at_limit = format!(
+            "{key}{}{suffix}",
+            "x".repeat(limit - key.len() - suffix.len())
+        );
+        for (source, reason) in [
+            (&oversized, "source is over the trusted byte limit"),
+            (
+                &at_limit,
+                "rendered configuration exceeds the trusted byte limit",
+            ),
+        ] {
+            std::fs::write(&path, source).unwrap();
+            let error = super::write_global_provider_locked("openrouter", &record, &path)
+                .expect_err("oversized input or candidate must be refused");
+            assert!(error.to_string().contains(reason), "{error}");
+            assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
+            assert!(!path.with_extension("toml.tmp").exists());
+        }
+    }
     #[test]
     fn provider_write_preserves_resolved_remote_policy() {
         let root = tempfile::tempdir().unwrap();
