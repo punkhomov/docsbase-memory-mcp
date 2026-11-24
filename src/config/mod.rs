@@ -10,6 +10,7 @@ use crate::daemon::settings::{DaemonPatch, DaemonSettings, DaemonSpec};
 use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridCfg, HybridDefaults, HybridPatch, HybridSpec, ProvidersCfg};
 use crate::hybrid::remote_settings::{RemotePatch, RemoteSettings, RemoteSpec};
+use crate::index::settings::{ChunkSettings, ChunkSpec, IndexFilePatch};
 use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
 use bootstrap::DefaultsContext;
 use schema::{
@@ -40,6 +41,8 @@ pub struct Config {
     pub max_file_size: u64,
     /// Maximum number of documents per project.
     pub max_docs_per_project: usize,
+    /// Geometry of Markdown chunks written by the indexer.
+    pub chunk: ChunkSettings,
     /// Global-only policy for request deadlines and owned search payload admission.
     pub search: SearchSettings,
     /// Complete global-only daemon launch and resource policy.
@@ -96,6 +99,7 @@ struct GlobalFileConfig {
     daemon: Option<DaemonPatch>,
     remote: Option<RemotePatch>,
     hybrid: Option<HybridPatch>,
+    index: Option<IndexFilePatch>,
     providers: Option<HashMap<String, toml::Table>>,
 }
 
@@ -109,6 +113,7 @@ struct ProjectFileConfig {
     max_docs_per_project: Option<usize>,
     auto_index: Option<bool>,
     hybrid: Option<HybridPatch>,
+    index: Option<IndexFilePatch>,
 }
 
 impl ProjectFileConfig {
@@ -119,6 +124,7 @@ impl ProjectFileConfig {
             max_docs_per_project: self.max_docs_per_project,
             auto_index: self.auto_index,
             hybrid: self.hybrid,
+            index: self.index,
             providers: None,
             search: None,
             daemon: None,
@@ -348,6 +354,7 @@ impl SettingsSpec for ConfigSpec {
         fields.extend_from_slice(SearchSpec::FIELDS);
         fields.extend_from_slice(DaemonSpec::FIELDS);
         fields.extend_from_slice(RemoteSpec::FIELDS);
+        fields.extend_from_slice(ChunkSpec::FIELDS);
         fields
     }
     fn defaults(context: &DefaultsContext) -> Self::Defaults {
@@ -359,6 +366,7 @@ impl SettingsSpec for ConfigSpec {
             ignores: Vec::new(),
             max_file_size: 1_048_576,
             max_docs_per_project: 20_000,
+            chunk: ChunkSpec::initial(&ChunkSpec::defaults(context)),
             search: SearchSpec::initial(&search),
             daemon: DaemonSpec::initial(&daemon),
             remote: RemoteSpec::initial(&remote),
@@ -434,6 +442,15 @@ impl SettingsSpec for ConfigSpec {
                 origins,
             )?;
         }
+        if let Some(index) = patch.index {
+            ChunkSpec::overlay(
+                &mut settings.chunk,
+                index.chunk,
+                &defaults.initial.chunk,
+                source,
+                origins,
+            )?;
+        }
         if let Some(patch) = patch.remote {
             RemoteSpec::overlay(
                 &mut settings.remote,
@@ -470,7 +487,8 @@ impl ConfigSpec {
         crate::hybrid::config::view::fields(&settings.hybrid_cfg, view)?;
         SearchSpec::view_fields(&settings.search, view)?;
         DaemonSpec::view_fields(&settings.daemon, view)?;
-        RemoteSpec::view_fields(&settings.remote, view)
+        RemoteSpec::view_fields(&settings.remote, view)?;
+        settings.chunk.view_fields(view)
     }
 }
 

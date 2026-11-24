@@ -260,3 +260,11 @@ conversation/admission. They do not invalidate lexical, vector, query-vector or
 ANN artifacts. Existing search still consumes its captured project/runtime
 configuration. Read evidence carries a content hash; the multi-step harness does
 not promise a single snapshot across filesystem/index changes.
+
+## Delta 2026-11-24 — CF9a, наблюдаемый рецепт нарезки
+
+C хранит рецепт в каждой строке docs. Готовность Website сравнивает агрегатный
+outcome ID с разрешённым рецептом. Обычный sync обновляет отличающиеся строки
+и индекс по действующему протоколу восстановления. Векторы того же текста
+сохраняют ключ. Изменение поколения заставляет dense/ANN перечитать набор
+chunk ID и хешей. Ключ query cache от нарезки не зависит.
