@@ -1141,3 +1141,8 @@ test fixture. The encoding regression now passes an in-memory path to the
 shared IPC encoder. The connected daemon integration tests still cover
 first index, repeated index, search and config refresh. Focused Linux tests
 and independent review passed.
+
+Ruling: the native Linux boundary scanner recognizes the explicit test
+module marker. The Unix-only fixture now uses a separate `cfg(unix)`
+attribute, preserving the production platform boundary. Both boundary
+tests and the path encoding regression passed locally.

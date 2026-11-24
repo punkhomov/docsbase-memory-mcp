@@ -218,7 +218,8 @@ pub(super) async fn run_with_operation(
     Ok(serde_json::json!({"project_id":id,"stats":result?}))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt as _;
