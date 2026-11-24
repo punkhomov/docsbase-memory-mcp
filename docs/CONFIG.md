@@ -520,12 +520,16 @@ registry is observed again after source reads; a difference blocks proposals.
 absence of intermediate changes. The identity binds context, registry, every input
 source (including unchanged files), choice and output, not future freshness. Future
 apply must revalidate all those facts under its own publication protocol. Source
-byte revisions (`source-bytes-v1`) describe exact TOML bytes. The `precondition`
-of each loaded source binds its byte revision to its native file identity. For
-example, replacing a project config with a new file containing identical bytes
-can keep the proposed edits identical while changing both `plan_id` and
-`observation_id`. Re-run the command to obtain a version 2 observation. Native
-file IDs may be reused after deletion, and observations expire as files change.
+byte revisions (`source-bytes-v1`) describe exact TOML bytes. For every loaded
+source, `precondition` (`observed-source-v2`) also binds the native file ID and
+the journal's basic file attributes. On Unix these are the owner, group and
+permission/special mode bits. On Windows they are the Win32 file attributes.
+For example, changing mode from 0600 to 0640 changes both `plan_id` and
+`observation_id` even when the proposed edits are identical. A change detected
+between the two opens reports `changed` and blocks the proposal. Re-run the
+command to refresh an earlier review. The JSON envelope stays at version 2.
+ACLs, extended attributes and alternate streams are outside these basic profiles.
+File IDs may be reused after deletion, and observations expire as files change.
 
 ## Local Web panel
 

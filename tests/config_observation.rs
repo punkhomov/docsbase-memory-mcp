@@ -225,6 +225,77 @@ fn identical_replacement_changes_reviewed_plan_but_preserves_byte_revisions() {
 }
 
 #[test]
+fn cli_binds_basic_attributes_without_changing_the_migration_edits() {
+    let root = tempfile::tempdir().unwrap();
+    write_global(root.path(), "auto_index=true");
+    let file = root.path().join("config/config.toml");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let original = fs::metadata(&file).unwrap().permissions();
+    let run = || {
+        let output = Command::new(env!("CARGO_BIN_EXE_docsbase"))
+            .args([
+                "config",
+                "migrate",
+                "--to",
+                "2",
+                "--accept-suggested-vector-budget",
+            ])
+            .env("DOCSBASE_CONFIG_DIR", root.path().join("config"))
+            .env("DOCSBASE_CACHE_DIR", root.path().join("cache"))
+            .env("DOCSBASE_DATA_DIR", root.path().join("data"))
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let before = run();
+    let mut changed = original.clone();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        changed.set_mode(0o640);
+    }
+    #[cfg(windows)]
+    changed.set_readonly(true);
+    fs::set_permissions(&file, changed).unwrap();
+    let after = run();
+    fs::set_permissions(&file, original).unwrap();
+    let old = &before["sources"][0]["state"]["value"];
+    let new = &after["sources"][0]["state"]["value"];
+    assert!(
+        old["revision"]
+            .as_str()
+            .unwrap()
+            .starts_with("source-bytes-v1:")
+    );
+    assert_eq!(old["revision"], new["revision"]);
+    assert_eq!(before["summary"], after["summary"]);
+    assert!(
+        new["precondition"]
+            .as_str()
+            .unwrap()
+            .starts_with("observed-source-v2:")
+    );
+    assert_ne!(old["precondition"], new["precondition"]);
+    assert_ne!(before["plan"]["plan_id"], after["plan"]["plan_id"]);
+    assert_ne!(before["observation_id"], after["observation_id"]);
+    assert_eq!(
+        before,
+        run(),
+        "restoring the original attributes restores the review"
+    );
+}
+
+#[test]
 fn hardlinked_source_blocks_every_rewrite_until_single_link_is_restored() {
     let root = tempfile::tempdir().unwrap();
     write_global(root.path(), "auto_index=true");
