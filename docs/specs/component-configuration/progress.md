@@ -1496,3 +1496,23 @@ Ruling: macOS выявила прежнее написание временно�
 канонический путь, что библиотечный вход. Обе ошибки воспроизведены с
 временным каталогом через symlink. После исправления все 28 тестов
 поколений прошли с этой конфигурацией.
+
+## 2026-11-25 — CF13, provisioning FastEmbed
+
+Task CF13 I51/I59–I62: complete (global v2 owns the model and runtime
+size, disk and HTTP policies and the model fetch's exclusive-lock policy).
+Real CLI tests reject a configured undersized allowance before creating
+artifacts or calling a download. The effective view records the exact
+global source. The previous limits are defaults and the original hard
+artifact caps remain enforced. The search gate uses the existing baseline.
+
+Ruling: independent review found that a streaming response could
+temporarily exceed the admitted model total. Each staging writer now
+rejects bytes beyond its pinned size. Repeated connect reuses the
+installed runtime before the download checks. Both HTTP sources enforce
+HTTPS, and model verification requires a successfully acquired read
+lease. The command fixtures and re-review confirmed these changes.
+
+minor (deferred): lock coverage exercises a real contended model lock
+with the standalone policy and provenance for a configured attempt
+count separately.

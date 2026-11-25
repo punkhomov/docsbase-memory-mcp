@@ -56,6 +56,30 @@ fn connect_without_provider_prints_status_table() {
 }
 
 #[test]
+fn connect_fastembed_uses_configured_archive_cap_before_opening_the_runtime_root() {
+    let env = Env::new();
+    let global = env.config.path().join("config.toml");
+    let text = "config_version = 2
+[provisioning.runtime]
+max_archive_bytes = 1
+";
+    std::fs::write(&global, text).unwrap();
+    let output = env
+        .cmd()
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env_remove("NO_PROXY")
+        .args(["connect", "fastembed"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("exceeds the cap of 1 bytes"), "{stderr}");
+    assert!(!env.data.path().join("runtimes").exists());
+    assert_eq!(std::fs::read_to_string(global).unwrap(), text);
+}
+
+#[test]
 fn connect_fastembed_rejects_local_flag_shape() {
     // `--local` is rejected (FR-4): clap has no such flag, so an unknown
     // argument fails.
@@ -149,6 +173,15 @@ fn connect_fastembed_noop_does_not_ask_for_a_restart() {
     std::fs::create_dir_all(&install_dir).expect("install dir");
     std::fs::write(install_dir.join(name), b"fake-runtime").expect("fake library");
 
+    std::fs::write(
+        env.config.path().join("config.toml"),
+        "config_version = 2
+[provisioning.runtime]
+max_archive_bytes = 1
+headroom_bytes = 9223372036854775807
+",
+    )
+    .unwrap();
     let output = env
         .cmd()
         .args(["connect", "fastembed"])

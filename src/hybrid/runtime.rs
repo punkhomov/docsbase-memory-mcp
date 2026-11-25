@@ -22,14 +22,13 @@ use crate::platform;
 /// Installed ORT version (must match the table URLs).
 pub const ORT_VERSION: &str = "1.24.4";
 
-/// Archive size cap (NFR-3).
-pub const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
-
-/// Extracted library size cap (NFR-3).
-pub const MAX_LIBRARY_BYTES: u64 = 512 * 1024 * 1024;
-
-/// Free-space headroom and multiplier for the connect preflight (FR-13).
-pub const PREFLIGHT_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
+pub use super::provisioning::{
+    MIN_HEADROOM_BYTES as PREFLIGHT_HEADROOM_BYTES, RUNTIME_MAX_ARCHIVE_BYTES as MAX_ARCHIVE_BYTES,
+    RUNTIME_MAX_LIBRARY_BYTES as MAX_LIBRARY_BYTES,
+};
+use super::provisioning::{
+    ProvisioningSpec, RuntimeProvisioningSettings, http_agent, required_free_bytes,
+};
 
 /// One row of the ORT release table (OQ-1).
 #[derive(Debug, Clone, Copy)]
@@ -304,22 +303,30 @@ pub trait RuntimeSource {
 /// Production source (blocking HTTPS via `ureq`).
 pub struct HttpRuntimeSource {
     agent: ureq::Agent,
+    max_archive_bytes: u64,
 }
 
 impl HttpRuntimeSource {
-    /// Builds an agent with explicit timeouts.
+    /// Builds an agent with the standalone provisioning policy.
     ///
     /// # Errors
-    /// Never fails today; the signature mirrors the trait-construction
-    /// contract.
+    /// Kept fallible for compatibility with existing callers.
     pub fn new() -> Result<Self> {
-        let agent = ureq::Agent::config_builder()
-            .timeout_connect(Some(std::time::Duration::from_secs(30)))
-            .timeout_recv_response(Some(std::time::Duration::from_mins(2)))
-            .timeout_recv_body(Some(std::time::Duration::from_mins(10)))
-            .build()
-            .new_agent();
-        Ok(Self { agent })
+        Ok(Self::with_policy(ProvisioningSpec::DEFAULTS.runtime))
+    }
+
+    /// Builds an agent with the resolved timeouts and transfer limit.
+    #[must_use]
+    pub fn with_policy(policy: RuntimeProvisioningSettings) -> Self {
+        let agent = http_agent(
+            policy.connect_timeout_ms,
+            policy.response_timeout_ms,
+            policy.body_timeout_ms,
+        );
+        Self {
+            agent,
+            max_archive_bytes: policy.max_archive_bytes,
+        }
     }
 }
 
@@ -334,18 +341,19 @@ impl RuntimeSource for HttpRuntimeSource {
                 message: format!("{detail} downloading {url}: {err}; check the network and retry"),
             }
         })?;
+        let max_archive_bytes = self.max_archive_bytes;
         let mut body = Vec::new();
         response
             .into_body()
             .into_reader()
-            .take(MAX_ARCHIVE_BYTES + 1)
+            .take(max_archive_bytes + 1)
             .read_to_end(&mut body)
             .map_err(|err| Error::Admission {
                 message: format!("failed reading {url}: {err}"),
             })?;
-        if u64::try_from(body.len()).unwrap_or(u64::MAX) > MAX_ARCHIVE_BYTES {
+        if u64::try_from(body.len()).unwrap_or(u64::MAX) > max_archive_bytes {
             return Err(Error::Admission {
-                message: format!("{url} exceeds the archive cap of {MAX_ARCHIVE_BYTES} bytes"),
+                message: format!("{url} exceeds the archive cap of {max_archive_bytes} bytes"),
             });
         }
         Ok(body)
@@ -363,10 +371,14 @@ pub fn runtime_root() -> PathBuf {
 /// Final library path for a target: `<root>/<triple>/<library file name>`.
 #[must_use]
 pub fn library_path(target: &Target) -> PathBuf {
+    library_path_in(&runtime_root(), target)
+}
+
+fn library_path_in(root: &Path, target: &Target) -> PathBuf {
     let name = Path::new(target.library_path)
         .file_name()
         .unwrap_or_default();
-    runtime_root().join(target.triple).join(name)
+    root.join(target.triple).join(name)
 }
 
 /// Expected connect bytes (FR-13): archive + extracted library.
@@ -375,11 +387,10 @@ pub fn expected_bytes(target: &Target) -> u64 {
     target.archive_size.saturating_add(target.library_size)
 }
 
-/// Free-space preflight (FR-13): `1.5x (archive + library) + 256 MiB`.
-fn preflight_free_space(target: &Target, dir: &Path) -> Result<()> {
+/// Free-space preflight uses the pinned artifact sizes and resolved headroom.
+fn preflight_free_space(target: &Target, dir: &Path, headroom: u64) -> Result<()> {
     let expected = expected_bytes(target);
-    let scaled = expected.saturating_mul(3).saturating_div(2);
-    let required = scaled.saturating_add(PREFLIGHT_HEADROOM_BYTES);
+    let required = required_free_bytes(expected, headroom);
     let available = platform::fs::available_space(dir).map_err(|err| {
         Error::internal_with_source(format!("check free space on {}", dir.display()), err)
     })?;
@@ -387,7 +398,7 @@ fn preflight_free_space(target: &Target, dir: &Path) -> Result<()> {
         return Err(Error::Admission {
             message: format!(
                 "connect fastembed needs ~{required} bytes free ({expected} for archive + library plus \
-                 {PREFLIGHT_HEADROOM_BYTES} headroom); {available} are available — free space or \
+                 {headroom} headroom); {available} are available — free space or \
                  point DOCSBASE_DATA_DIR elsewhere"
             ),
         });
@@ -409,10 +420,13 @@ fn extract_library(target: &Target, archive: &[u8], staging_dir: &Path) -> Resul
         .and_then(|name| name.to_str())
         .ok_or_else(|| Error::internal("runtime library path has no file name"))?;
 
+    // The pinned extracted size has already passed the configured cap.
+    // Read one extra byte to distinguish a valid entry from an oversized one.
+    let read_limit = target.library_size + 1;
     let bytes = if target.archive_url.to_ascii_lowercase().ends_with(".zip") {
-        extract_zip_library(archive, target.library_path)?
+        extract_zip_library(archive, target.library_path, read_limit)?
     } else {
-        extract_tar_library(archive, target.library_path)?
+        extract_tar_library(archive, target.library_path, read_limit)?
     };
 
     let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
@@ -424,12 +438,6 @@ fn extract_library(target: &Target, archive: &[u8], staging_dir: &Path) -> Resul
             ),
         });
     }
-    if len > MAX_LIBRARY_BYTES {
-        return Err(Error::Admission {
-            message: format!("runtime library exceeds the cap of {MAX_LIBRARY_BYTES} bytes"),
-        });
-    }
-
     let target_path = staging_dir.join(library_name);
     let mut file = std::fs::File::create(&target_path).map_err(|err| {
         Error::internal_with_source(format!("create {}", target_path.display()), err)
@@ -443,14 +451,14 @@ fn extract_library(target: &Target, archive: &[u8], staging_dir: &Path) -> Resul
     Ok(())
 }
 
-fn extract_tar_library(archive: &[u8], want: &str) -> Result<Vec<u8>> {
+fn extract_tar_library(archive: &[u8], want: &str, read_limit: u64) -> Result<Vec<u8>> {
     let decoder = flate2::read::GzDecoder::new(archive);
     let mut tar = tar::Archive::new(decoder);
     let mut matched: Option<Vec<u8>> = None;
     for entry in tar.entries().map_err(|err| Error::Admission {
         message: format!("corrupt runtime archive: {err}"),
     })? {
-        let mut entry = entry.map_err(|err| Error::Admission {
+        let entry = entry.map_err(|err| Error::Admission {
             message: format!("corrupt runtime archive entry: {err}"),
         })?;
         // The release archives are top-level directories; accept exact match
@@ -458,6 +466,7 @@ fn extract_tar_library(archive: &[u8], want: &str) -> Result<Vec<u8>> {
         if entry.path().is_ok_and(|path| path.ends_with(want)) {
             let mut bytes = Vec::new();
             entry
+                .take(read_limit)
                 .read_to_end(&mut bytes)
                 .map_err(|err| Error::Admission {
                     message: format!("failed reading library entry: {err}"),
@@ -471,13 +480,13 @@ fn extract_tar_library(archive: &[u8], want: &str) -> Result<Vec<u8>> {
     })
 }
 
-fn extract_zip_library(archive: &[u8], want: &str) -> Result<Vec<u8>> {
+fn extract_zip_library(archive: &[u8], want: &str, read_limit: u64) -> Result<Vec<u8>> {
     let mut zip =
         zip::ZipArchive::new(std::io::Cursor::new(archive)).map_err(|err| Error::Admission {
             message: format!("corrupt runtime archive: {err}"),
         })?;
     for index in 0..zip.len() {
-        let mut file = zip.by_index(index).map_err(|err| Error::Admission {
+        let file = zip.by_index(index).map_err(|err| Error::Admission {
             message: format!("corrupt runtime archive entry: {err}"),
         })?;
         let name = file.name().to_owned();
@@ -486,7 +495,8 @@ fn extract_zip_library(archive: &[u8], want: &str) -> Result<Vec<u8>> {
             .ends_with(&want.to_ascii_lowercase())
         {
             let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)
+            file.take(read_limit)
+                .read_to_end(&mut bytes)
                 .map_err(|err| Error::Admission {
                     message: format!("failed reading library entry: {err}"),
                 })?;
@@ -585,27 +595,27 @@ pub fn install(
     source: &dyn RuntimeSource,
     force: bool,
 ) -> Result<(PathBuf, bool)> {
-    // Caps and preflight first (no download before they pass).
-    if target.archive_size > MAX_ARCHIVE_BYTES {
-        return Err(Error::Admission {
-            message: format!(
-                "runtime archive ({}) exceeds the cap of {MAX_ARCHIVE_BYTES} bytes",
-                target.archive_size
-            ),
-        });
-    }
-    if target.library_size > MAX_LIBRARY_BYTES {
-        return Err(Error::Admission {
-            message: format!(
-                "runtime library ({}) exceeds the cap of {MAX_LIBRARY_BYTES} bytes",
-                target.library_size
-            ),
-        });
-    }
+    install_with_policy(target, source, force, ProvisioningSpec::DEFAULTS.runtime)
+}
+
+/// Installs the pinned runtime under a complete provisioning policy.
+///
+/// # Errors
+/// Same as [`install`], with artifact and disk admission from `policy`.
+pub fn install_with_policy(
+    target: &Target,
+    source: &dyn RuntimeSource,
+    force: bool,
+    policy: RuntimeProvisioningSettings,
+) -> Result<(PathBuf, bool)> {
     let root = runtime_root();
+    let installed = library_path_in(&root, target);
+    // A new or forced install can be rejected without opening the runtime root.
+    if force || !installed.exists() {
+        admit_runtime_download(target, policy)?;
+    }
     platform::fs::secure_dir(&root)
         .map_err(|err| Error::internal_with_source(format!("create {}", root.display()), err))?;
-    preflight_free_space(target, &root)?;
 
     // Serialize concurrent connects with the runtime lock.
     let lock_path = root.join(".lock");
@@ -622,13 +632,15 @@ pub fn install(
     let _guard = guard;
 
     let final_dir = root.join(target.triple);
-    let installed = library_path(target);
     if !force && installed.exists() {
         // Nothing was written: the caller must not tell the user to restart
         // the daemon (round-6 mimo/muse/deepseek).
         return Ok((installed, false));
     }
 
+    // Recheck under the lock in case the previously installed file disappeared.
+    admit_runtime_download(target, policy)?;
+    preflight_free_space(target, &root, policy.headroom_bytes)?;
     let archive_bytes = source.download(target.archive_url)?;
     let got = u64::try_from(archive_bytes.len()).unwrap_or(u64::MAX);
     if got != target.archive_size {
@@ -671,6 +683,28 @@ pub fn install(
 
     promote_runtime(&root, target, &staging, &final_dir)?;
     Ok((installed, true))
+}
+
+fn admit_runtime_download(target: &Target, policy: RuntimeProvisioningSettings) -> Result<()> {
+    let cap_archive = policy.max_archive_bytes;
+    let cap_library = policy.max_library_bytes;
+    if target.archive_size > cap_archive {
+        return Err(Error::Admission {
+            message: format!(
+                "runtime archive ({}) exceeds the cap of {cap_archive} bytes",
+                target.archive_size
+            ),
+        });
+    }
+    if target.library_size > cap_library {
+        return Err(Error::Admission {
+            message: format!(
+                "runtime library ({}) exceeds the cap of {cap_library} bytes",
+                target.library_size
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Stashes any previous runtime aside and promotes `staging` into
@@ -1450,7 +1484,7 @@ mod tests {
         // via the same private helper the prod path uses).
         let available = required.saturating_sub(1);
         let dir = tempfile::TempDir::new().expect("tmp");
-        let err = preflight_free_space(&target, dir.path());
+        let err = preflight_free_space(&target, dir.path(), PREFLIGHT_HEADROOM_BYTES);
         // Free space on a fresh temp dir is far above the tiny fake target,
         // so the preflight passes; the formula itself is asserted above.
         assert!(err.is_ok() || matches!(err, Err(Error::Admission { .. })));

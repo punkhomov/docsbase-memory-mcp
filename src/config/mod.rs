@@ -9,6 +9,7 @@ use serde::Deserialize;
 use crate::daemon::settings::{DaemonPatch, DaemonSettings, DaemonSpec};
 use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridCfg, HybridDefaults, HybridPatch, HybridSpec, ProvidersCfg};
+use crate::hybrid::provisioning::{ProvisioningSettings, ProvisioningSpec};
 use crate::hybrid::remote_settings::{RemotePatch, RemoteSettings, RemoteSpec};
 use crate::hybrid::rrf::{RrfSettings, settings::RrfSpec};
 use crate::index::settings::{ChunkSettings, ChunkSpec, IndexFilePatch};
@@ -56,6 +57,8 @@ pub struct Config {
     pub daemon: DaemonSettings,
     /// Complete global-only remote execution policy.
     pub remote: RemoteSettings,
+    /// Installation-wide policy for local model and runtime provisioning.
+    pub provisioning: ProvisioningSettings,
     /// Project policy for batching native watcher events.
     pub watch: WatchSettings,
     /// Project BM25 scoring and candidate collection policy.
@@ -302,6 +305,7 @@ impl Config {
         DaemonSpec::validate(&self.daemon, &Capabilities::current())?;
         RemoteSpec::validate(&self.remote, &Capabilities::current())?;
         LexicalSpec::validate(&self.lexical, &Capabilities::current())?;
+        ProvisioningSpec::validate(&self.provisioning, &Capabilities::current())?;
         RrfSpec::validate(&self.rrf, &Capabilities::current())
     }
 }
@@ -414,6 +418,7 @@ impl SettingsSpec for ConfigSpec {
         fields.extend_from_slice(AnnBuildSpec::FIELDS);
         fields.extend_from_slice(LexicalSpec::FIELDS);
         fields.extend_from_slice(RrfSpec::FIELDS);
+        fields.extend_from_slice(ProvisioningSpec::FIELDS);
         fields
     }
     fn defaults(context: &DefaultsContext) -> Self::Defaults {
@@ -431,6 +436,7 @@ impl SettingsSpec for ConfigSpec {
             search: SearchSpec::initial(&search),
             daemon: DaemonSpec::initial(&daemon),
             remote: RemoteSpec::initial(&remote),
+            provisioning: ProvisioningSpec::defaults(context),
             watch: WatchSpec::initial(&watch),
             lexical: LexicalSpec::defaults(context),
             rrf: RrfSpec::defaults(context),
@@ -587,6 +593,7 @@ impl ConfigSpec {
         settings.chunk.view_fields(view)?;
         DaemonSpec::view_fields(&settings.daemon, view)?;
         RemoteSpec::view_fields(&settings.remote, view)?;
+        ProvisioningSpec::view_fields(&settings.provisioning, view)?;
         settings.ann_build.view_fields(view)?;
         let ann = settings
             .ann_search

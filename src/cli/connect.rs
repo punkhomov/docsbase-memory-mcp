@@ -347,8 +347,10 @@ impl Provisioner for FastembedProvisioner {
         {
             use crate::hybrid::runtime::{self, HttpRuntimeSource, ORT_VERSION};
             let target = runtime::platform_target()?;
-            let source = HttpRuntimeSource::new()?;
-            let (installed, reinstalled) = runtime::install(target, &source, force)?;
+            let policy = crate::config::Config::global()?.provisioning.runtime;
+            let source = HttpRuntimeSource::with_policy(policy);
+            let (installed, reinstalled) =
+                runtime::install_with_policy(target, &source, force, policy)?;
             Ok(InstallOutcome {
                 lines: vec![format!(
                     "fastembed runtime {ORT_VERSION} installed: {} (sha256 {})",

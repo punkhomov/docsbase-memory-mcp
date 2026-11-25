@@ -61,6 +61,34 @@ fn stderr_of(output: &std::process::Output) -> String {
 }
 
 #[test]
+fn models_fetch_uses_configured_file_cap_before_creating_a_cache() {
+    let env = Env::new();
+    std::fs::write(
+        env.config.path().join("config.toml"),
+        "config_version = 2
+[provisioning.models]
+max_file_bytes = 1
+",
+    )
+    .unwrap();
+    let output = env
+        .cmd()
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env_remove("NO_PROXY")
+        .args(["models", "fetch", "fastembed/bge-small-en-v1.5"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("exceeds the per-file cap of 1 bytes"),
+        "{stderr}"
+    );
+    assert!(!env.cache.path().join("models").exists());
+}
+
+#[test]
 fn models_fetch_unknown_name_is_admission() {
     let env = Env::new();
     let output = env
