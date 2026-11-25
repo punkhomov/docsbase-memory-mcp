@@ -455,6 +455,13 @@ Probes/rootless compatibility adapters remain named exceptions, not binary
 operational paths. Full CF13/v2/provisioning remains outside this adoption.
 
 
+## Delta 2026-11-24 — I20/I27 в глобальном v2
+
+Один VectorStoreSpec разрешает `vector_cache.max_entries` (1 000 000),
+`max_bytes` (1 ГиБ) и `busy_timeout` (5 000 мс). Эти настройки действуют
+на все соединения одного корня кеша. Изменение применяется при новом запуске
+и относится к допуску и вытеснению (R/E). Ключи и рецепты векторов сохраняются.
+
 ## MODIFIED 2026-11-15 — #161 vector cold WAL contention
 
 I20/VectorStoreSpec busy_timeout (default5s, zero immediate, signed SQLite-ms
@@ -503,6 +510,14 @@ capacity and defaults are unchanged. Raw/async one-attempt constructors and
 Stop's original15s overall deadline are preserved. This adds no file key,
 invalidation edge, replay policy or private timeout fallback.
 
+## Delta 2026-11-24 — I32: рецепт ANN
+
+AnnBuildSpec разрешает project-scoped `ann.build.m` (16) и
+`ann.build.ef_construction` (200). Допуск остаётся в проверенных границах.
+Смена рецепта выбирает отдельный граф (A) поверх прежних векторов и поколения.
+16 слоёв требует формат `hnsw_rs 0.3.5` (X05). Учёт памяти использует измеренный
+запас на вершину. [Модель допуска и замеры](cf8-build-plan.md).
+
 ## Delta 2026-11-24 — ASK1 request contract
 
 `ask::AskLimits` owns the initial ask_docs protocol caps: 120s total, six turns,
@@ -515,3 +530,13 @@ checked before owned text copies, and HTTP response reads obey the smaller cap.
 Model address is request-scoped, credentials stay with the existing provider.
 Future configurable generation policy belongs to the ask/model owners in #128;
 this delta does not claim full CF adoption or create another resolution registry.
+
+## Delta 2026-11-24 — CF9a, I06
+
+I06 принадлежит `index::settings::ChunkSpec` и поддерживает частичные global
+и project overrides. `index.chunk.max_chars` (1–1500, default 1500) и
+`overlap_chars` (0–150, default 150) измеряются в Unicode-символах.
+Обычный overlap ограничен десятой частью cap. Исторический максимум сохраняет
+границу прозовых чанков для существующего поискового штрафа. Версия и геометрия
+образуют персистентный рецепт C; изменения приводят к L, а V переиспользуется
+по совпавшему выходному тексту.

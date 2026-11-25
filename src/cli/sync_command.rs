@@ -86,9 +86,13 @@ pub(super) async fn run_in(
                     // A running v2 daemon owns the vector store. Bootstrap the
                     // new project through its unbound index tool.
                     if context.global.vector_store.is_some() {
+                        client.bind_read_only(None).await?;
                         Some(
                             client
-                                .call_tool("index_project", json!({"path": target}))
+                                .call_tool(
+                                    "index_project",
+                                    super::index::project_path_args(&target)?,
+                                )
                                 .await?,
                         )
                     } else {
@@ -97,21 +101,11 @@ pub(super) async fn run_in(
                 }
                 Err(error) => return Err(error),
             };
-            if let Some(mut job) = started {
-                let id = job["job_id"].as_i64().ok_or_else(|| Error::Protocol {
-                    message: "sync job missing job_id".into(),
-                })?;
-                while matches!(job["state"].as_str(), Some("queued" | "running")) {
-                    operation.check()?;
-                    tokio::time::sleep(Duration::from_millis(
-                        context.global.daemon.poll_interval_ms,
-                    ))
-                    .await;
-                    job = client
-                        .call_tool("sync_status", json!({"job_id":id}))
-                        .await?;
-                }
-                return Ok(Outcome::Daemon(job));
+            if let Some(job) = started {
+                let poll = Duration::from_millis(context.global.daemon.poll_interval_ms);
+                return await_job(&mut client, &operation, poll, job)
+                    .await
+                    .map(Outcome::Daemon);
             }
             // Semantic unindexed-project binding permits the existing direct
             // bootstrap; connected transport/tool failures above never replay.
@@ -140,6 +134,26 @@ pub(super) async fn run_in(
         cancellation.0 = None;
     }
     outcome
+}
+
+/// Follow an accepted indexing job on the original connection and deadline.
+pub(super) async fn await_job(
+    client: &mut AsyncClient,
+    operation: &SearchOperation,
+    poll: Duration,
+    mut job: Value,
+) -> Result<Value> {
+    let id = job["job_id"].as_i64().ok_or_else(|| Error::Protocol {
+        message: "sync job missing job_id".into(),
+    })?;
+    while matches!(job["state"].as_str(), Some("queued" | "running")) {
+        operation.check()?;
+        tokio::time::sleep(poll).await;
+        job = client
+            .call_tool("sync_status", json!({"job_id":id}))
+            .await?;
+    }
+    Ok(job)
 }
 
 async fn bind_website(client: &mut AsyncClient, project: i64) -> Result<()> {

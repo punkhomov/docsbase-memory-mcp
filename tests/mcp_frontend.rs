@@ -70,7 +70,7 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
     false
 }
 
-/// Minimal daemon recording seen `CallTool` names; stops on drop.
+/// Minimal daemon recording negotiation, binding and tool calls; stops on drop.
 struct FakeDaemon {
     stop: Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -79,6 +79,10 @@ struct FakeDaemon {
 
 impl FakeDaemon {
     fn start(cache: &Path, seen: Arc<Mutex<Vec<String>>>) -> Self {
+        Self::with_config_mode(cache, seen, true)
+    }
+
+    fn with_config_mode(cache: &Path, seen: Arc<Mutex<Vec<String>>>, config_v2: bool) -> Self {
         use std::sync::atomic::Ordering;
 
         let endpoint = platform::daemon_endpoint(cache);
@@ -105,7 +109,7 @@ impl FakeDaemon {
             let _transport = transport;
             while !stop_flag.load(Ordering::SeqCst) {
                 match listener.accept() {
-                    Ok(stream) => serve_fake_connection(stream, &seen, &stop_flag),
+                    Ok(stream) => serve_fake_connection(stream, &seen, &stop_flag, config_v2),
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(10));
                     }
@@ -136,6 +140,7 @@ fn serve_fake_connection(
     stream: platform::BlockingStream,
     seen: &Arc<Mutex<Vec<String>>>,
     stop: &Arc<std::sync::atomic::AtomicBool>,
+    config_v2: bool,
 ) {
     use std::sync::atomic::Ordering;
 
@@ -174,15 +179,24 @@ fn serve_fake_connection(
         }
         let request: Request = serde_json::from_str(line.trim()).expect("parse request");
         let response = match request {
-            Request::Hello { .. } => Response::Hello {
-                protocol_version: PROTOCOL_VERSION,
-                build_id: docsbase_memory::ipc::protocol::build_id(),
-                schema_version: 1,
-                capabilities: vec![SEARCH_CONTEXT_CAPABILITY.to_owned()],
-            },
+            Request::Hello { .. } => {
+                seen.lock().expect("lock").push("hello".to_owned());
+                Response::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    build_id: docsbase_memory::ipc::protocol::build_id(),
+                    schema_version: 1,
+                    capabilities: std::iter::once(SEARCH_CONTEXT_CAPABILITY)
+                        .chain(config_v2.then_some("active-config-v2"))
+                        .map(str::to_owned)
+                        .collect(),
+                }
+            }
             Request::RegisterSession { .. }
             | Request::RegisterUnbound { .. }
-            | Request::BindReadOnly { .. } => Response::ToolResult { value: Value::Null },
+            | Request::BindReadOnly { .. } => {
+                seen.lock().expect("lock").push("bind".to_owned());
+                Response::ToolResult { value: Value::Null }
+            }
             Request::CallTool { name, .. } if name == "search_docs" => Response::Error {
                 code: -32011,
                 message: "fake daemon expects scoped search".to_owned(),
@@ -334,6 +348,62 @@ fn initialize_and_list_tools() {
     ] {
         assert!(names.contains(&expected), "missing {expected}: {names:?}");
     }
+}
+
+#[test]
+fn mcp_refuses_a_legacy_peer_when_missing_config_selects_v2() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let _daemon = FakeDaemon::with_config_mode(env.cache.path(), Arc::clone(&seen), false);
+    let mut mcp = Mcp::start(&env);
+    mcp.initialize();
+    let response = mcp.request(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": { "name": "status", "arguments": {} }
+    }));
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    assert!(
+        response
+            .to_string()
+            .contains("daemon is using a different config version"),
+        "{response}"
+    );
+    assert_eq!(*seen.lock().unwrap(), ["hello"]);
+}
+
+#[test]
+fn mcp_rechecks_the_config_version_after_reconnect() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let daemon = FakeDaemon::start(env.cache.path(), Arc::clone(&seen));
+    let mut mcp = Mcp::start(&env);
+    mcp.initialize();
+    let request = |id| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": "status", "arguments": {} }
+        })
+    };
+    let response = mcp.request(&request(2));
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(*seen.lock().unwrap(), ["hello", "bind", "status"]);
+    drop(daemon);
+
+    let next_seen = Arc::new(Mutex::new(Vec::new()));
+    let _legacy = FakeDaemon::with_config_mode(env.cache.path(), Arc::clone(&next_seen), false);
+    let response = mcp.request(&request(3));
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    assert!(
+        response
+            .to_string()
+            .contains("daemon is using a different config version"),
+        "{response}"
+    );
+    assert_eq!(*next_seen.lock().unwrap(), ["hello"]);
 }
 
 #[test]

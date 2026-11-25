@@ -392,6 +392,45 @@ fn wrong_schema_cli_admission_creates_no_conflict_listener_or_runtime_state() {
 }
 
 #[test]
+fn website_schema_upgrade_through_stopped_direct_index_keeps_search_ready() {
+    let env = ProfileEnv::indexed();
+    let db =
+        rusqlite::Connection::open(env.cache.path().join(docsbase_memory::store::DB_FILE)).unwrap();
+    db.execute_batch(
+        "ALTER TABLE docs DROP COLUMN chunk_recipe;
+         UPDATE projects SET schema_version=3;
+         PRAGMA user_version=3;",
+    )
+    .unwrap();
+    drop(db);
+
+    let indexed = cli(env.cache.path(), env.config.path())
+        .arg("index")
+        .arg(env.root.path())
+        .output()
+        .unwrap();
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
+    let mut daemon = env.start(&[]);
+    let status = cli(env.cache.path(), env.config.path())
+        .args(["status", "--project"])
+        .arg(env.root.path())
+        .output()
+        .unwrap();
+    assert!(status.status.success(), "{status:?}");
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["ready"], true);
+    let mut client = env.connect();
+    client.call(Request::StopDaemon).unwrap();
+    drop(client);
+    assert!(daemon.0.wait().unwrap().success());
+}
+
+#[test]
 fn cli_website_root_overlay_selects_an_independently_indexed_other_project() {
     let env = ProfileEnv::indexed();
     let other = tempfile::tempdir().unwrap();

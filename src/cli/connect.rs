@@ -6,6 +6,7 @@
 
 use clap::Args;
 
+use crate::config::source::{read_edit_document, render_edit_document};
 use crate::error::{Error, Result};
 use crate::hybrid::config::{
     PROVIDER_FASTEMBED, PROVIDER_OPENROUTER, ProviderState, provider_status,
@@ -116,11 +117,13 @@ fn connect_frame(
         return Ok(());
     }
     let outcome = provisioner.install(force)?;
-    write_global_provider(name, &provisioner.record())?;
+    let created_v2 = write_global_provider(name, &provisioner.record())?;
     for line in &outcome.lines {
         println!("{line}");
     }
-    if let Some(note) = restart_note(outcome.reinstalled) {
+    if created_v2 {
+        println!("note: restart a running daemon to load configuration v2");
+    } else if let Some(note) = restart_note(outcome.reinstalled) {
         println!("{note}");
     }
     Ok(())
@@ -422,7 +425,7 @@ fn macos_signature_state(path: &std::path::Path) -> &'static str {
     not(any(feature = "hybrid-local", feature = "hybrid-remote")),
     allow(dead_code)
 )]
-fn write_global_provider(name: &str, record: &toml::Table) -> Result<()> {
+fn write_global_provider(name: &str, record: &toml::Table) -> Result<bool> {
     let config_dir = crate::config::paths::config_dir()?;
     crate::platform::fs::secure_dir(&config_dir).map_err(|err| {
         Error::internal_with_source(format!("create {}", config_dir.display()), err)
@@ -440,19 +443,10 @@ fn write_global_provider_locked(
     name: &str,
     record: &toml::Table,
     path: &std::path::Path,
-) -> Result<()> {
-    let mut root: toml::Value = match std::fs::read_to_string(path) {
-        Ok(raw) => toml::from_str(&raw)
-            .map_err(|err| Error::internal_with_source(format!("parse {}", path.display()), err))?,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            toml::Value::Table(toml::map::Map::new())
-        }
-        Err(err) => {
-            return Err(Error::internal_with_source(
-                format!("read {}", path.display()),
-                err,
-            ));
-        }
+) -> Result<bool> {
+    let (mut root, created_v2) = match read_edit_document(path)? {
+        Some(document) => (document, false),
+        None => (crate::config::source::new_global_document(), true),
     };
 
     let table = root
@@ -465,8 +459,7 @@ fn write_global_provider_locked(
         .ok_or_else(|| Error::internal("providers is not a table"))?;
     providers.insert(name.to_owned(), toml::Value::Table(record.clone()));
 
-    let rendered =
-        toml::to_string(&root).map_err(|err| Error::internal_with_source("render config", err))?;
+    let rendered = render_edit_document(&root)?;
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, rendered)
         .map_err(|err| Error::internal_with_source(format!("write {}", tmp.display()), err))?;
@@ -474,11 +467,40 @@ fn write_global_provider_locked(
         .map_err(|err| Error::internal_with_source(format!("secure {}", tmp.display()), err))?;
     std::fs::rename(&tmp, path)
         .map_err(|err| Error::internal_with_source(format!("publish {}", path.display()), err))?;
-    Ok(())
+    Ok(created_v2)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_write_bounds_existing_and_rendered_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let limit = usize::try_from(crate::limits::MAX_STATE_BYTES).unwrap();
+        let record = toml::Table::from_iter([("enabled".into(), true.into())]);
+        let prefix = "config_version=2\n#";
+        let oversized = format!("{prefix}{}", " ".repeat(limit - prefix.len() + 1));
+        let key = "config_version = 2\nignores = [\"";
+        let suffix = "\"]\n";
+        let at_limit = format!(
+            "{key}{}{suffix}",
+            "x".repeat(limit - key.len() - suffix.len())
+        );
+        for (source, reason) in [
+            (&oversized, "source is over the trusted byte limit"),
+            (
+                &at_limit,
+                "rendered configuration exceeds the trusted byte limit",
+            ),
+        ] {
+            std::fs::write(&path, source).unwrap();
+            let error = super::write_global_provider_locked("openrouter", &record, &path)
+                .expect_err("oversized input or candidate must be refused");
+            assert!(error.to_string().contains(reason), "{error}");
+            assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
+            assert!(!path.with_extension("toml.tmp").exists());
+        }
+    }
     #[test]
     fn provider_write_preserves_resolved_remote_policy() {
         let root = tempfile::tempdir().unwrap();
@@ -491,7 +513,7 @@ mod tests {
         let before = crate::config::Config::global_from(root.path()).unwrap();
         let mut record = toml::Table::new();
         record.insert("enabled".into(), toml::Value::Boolean(true));
-        super::write_global_provider_locked("openrouter", &record, &path).unwrap();
+        assert!(!super::write_global_provider_locked("openrouter", &record, &path).unwrap());
         let after = crate::config::Config::global_from(root.path()).unwrap();
         assert_eq!(after.remote, before.remote);
         assert!(after.providers.iter().any(|(name, _)| name == "openrouter"));
@@ -666,10 +688,13 @@ mod tests {
             !dir.path().join("config.toml").exists(),
             "the probe must not write the config"
         );
-        write_global_provider(PROVIDER_OPENROUTER, &OpenrouterProvisioner.record())
-            .expect("frame write");
+        assert!(
+            write_global_provider(PROVIDER_OPENROUTER, &OpenrouterProvisioner.record())
+                .expect("frame write")
+        );
         let path = dir.path().join("config.toml");
         let text = std::fs::read_to_string(&path).expect("config written");
+        assert!(text.contains("config_version = 2"), "{text}");
         assert!(text.contains("providers"), "{text}");
         assert!(text.contains("openrouter"), "{text}");
         assert!(

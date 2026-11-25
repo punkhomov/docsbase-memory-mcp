@@ -265,6 +265,7 @@ fn generation_change_during_refill_refuses_mixed_state() {
         cache: f.cache.path(),
         project: &f.project,
         window: 40,
+        ann_search: None,
         payload_budget: &budget,
         operation: SearchOperation::new(budget.settings(), Instant::now(), Cancellation::new())
             .expect("operation"),
@@ -312,6 +313,7 @@ fn configured_refill_ceiling_is_explicit_and_never_shrinks_the_base_window() {
             cache: f.cache.path(),
             project: &f.project,
             window: 40,
+            ann_search: None,
             payload_budget: &budget,
             operation: SearchOperation::new(budget.settings(), Instant::now(), Cancellation::new())
                 .expect("operation"),
@@ -410,6 +412,7 @@ fn cancellation_at_refill_admission_releases_scope_without_calling_rerank() {
         cache: f.cache.path(),
         project: &f.project,
         window: 40,
+        ann_search: None,
         payload_budget: &budget,
         operation: SearchOperation::new(budget.settings(), Instant::now(), token.clone())
             .expect("operation"),
@@ -451,6 +454,7 @@ fn expanded_payload_refusal_is_an_error_before_any_rerank_and_releases_admission
         cache: f.cache.path(),
         project: &f.project,
         window: 40,
+        ann_search: None,
         payload_budget: &budget,
         operation: SearchOperation::new(budget.settings(), Instant::now(), Cancellation::new())
             .expect("operation"),

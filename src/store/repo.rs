@@ -21,6 +21,8 @@ pub struct DocState {
     pub content_hash: String,
     /// Serialized frontmatter from the last successful run.
     pub frontmatter_json: Option<String>,
+    /// Chunk recipe recorded by the last pass, if known.
+    pub chunk_recipe: Option<i64>,
 }
 
 /// Fields written when a document is indexed (new or changed).
@@ -70,7 +72,8 @@ pub struct NewChunk<'a> {
 pub fn doc_states(conn: &Connection, project_id: i64) -> Result<Vec<DocState>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, rel_path, content_hash, frontmatter_json FROM docs WHERE project_id = ?1",
+            "SELECT id, rel_path, content_hash, frontmatter_json, chunk_recipe
+             FROM docs WHERE project_id = ?1",
         )
         .map_err(db_error)?;
     let rows = stmt
@@ -80,6 +83,7 @@ pub fn doc_states(conn: &Connection, project_id: i64) -> Result<Vec<DocState>> {
                 rel_path: row.get(1)?,
                 content_hash: row.get(2)?,
                 frontmatter_json: row.get(3)?,
+                chunk_recipe: row.get(4)?,
             })
         })
         .map_err(db_error)?;
@@ -128,10 +132,20 @@ pub fn insert_pending_doc(
 /// # Errors
 /// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn upsert_doc(conn: &Connection, project_id: i64, doc_id: i64, doc: &NewDoc<'_>) -> Result<()> {
+    upsert_indexed_doc(conn, project_id, doc_id, doc, None)
+}
+
+pub(crate) fn upsert_indexed_doc(
+    conn: &Connection,
+    project_id: i64,
+    doc_id: i64,
+    doc: &NewDoc<'_>,
+    chunk_recipe: Option<i64>,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO docs (id, project_id, rel_path, abs_path, title, frontmatter_json,
-                           size, mtime, content_hash, indexed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                           size, mtime, content_hash, indexed_at, chunk_recipe)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(id) DO UPDATE SET
              project_id = excluded.project_id,
              rel_path = excluded.rel_path,
@@ -141,7 +155,8 @@ pub fn upsert_doc(conn: &Connection, project_id: i64, doc_id: i64, doc: &NewDoc<
              size = excluded.size,
              mtime = excluded.mtime,
              content_hash = excluded.content_hash,
-             indexed_at = excluded.indexed_at",
+             indexed_at = excluded.indexed_at,
+             chunk_recipe = excluded.chunk_recipe",
         params![
             doc_id,
             project_id,
@@ -152,7 +167,8 @@ pub fn upsert_doc(conn: &Connection, project_id: i64, doc_id: i64, doc: &NewDoc<
             doc.size,
             doc.mtime,
             doc.content_hash,
-            doc.indexed_at
+            doc.indexed_at,
+            chunk_recipe,
         ],
     )
     .map_err(db_error)?;

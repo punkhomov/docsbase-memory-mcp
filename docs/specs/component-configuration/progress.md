@@ -1018,106 +1018,6 @@ lease, including failed sequence reads. A live successful connection retains its
 existing mode owner. The shared window still bounds contention/retry admission,
 not non-preemptible native completion. No fixture/budget/ignore/dependency change.
 
-## 2026-11-24 — CF8a: ANN search settings at the library boundary
-
-Task CF8a: complete (project settings and explicit search on built and loaded
-graphs). Integrated the isolated 2026-11-13 implementation on main `af0aeab`.
-`search_with_settings` checks the requested fetch before calling HNSW.
-Existing callers keep the historical search behavior above the default beam
-ceiling. The graph and vector identities stay valid when the search beam changes.
-Daemon/CLI source adoption and ANN build settings remain open under #78.
-
-Verification on Rust 1.100.0: the new API test failed to compile against main
-and six cases passed with both lean and cli-full. Removing admission failed on
-a three-hit request to a two-hit policy. Substituting the legacy beam after
-admission changed the returned IDs and failed the fixed-beam comparison.
-Restoring the configured beam passed. Full and lean all-target Clippy, the
-opt-in Linux target lints and fmt passed. Complete local suites: cli-full
-1,723 passed / 19 ignored, lean 1,419 passed / 11 ignored. The frozen
-benchmark also passed with the local default latency budget. The first local
-full run used a symlink into the checkout as its temp root and failed project
-identity tests. Reproduced one failure with that root, then verified the
-same test and both complete suites from a separate, canonical temp root.
-
-Ruling: the fresh task reviewer approved CF8a and requested one minor test
-improvement. The existing recall test now compares configured search with
-the explicit beam on the same graph for 100 queries at five beam widths.
-Re-review confirmed the finding was addressed. No deferred minors.
-Final independent review on af0aeab: converged for CF8a with no findings.
-
-## 2026-11-24 — observed migration source identity
-
-Task CF5b2b read-side identity: complete (single-link admission, retained-handle
-comparison, and object-bound preconditions in the observed plan). Three new
-regressions failed on 3207fa1 and passed with the change. Local Rust 1.100.0
-cli-full library and config observation suites, Linux all-target Clippy and
-Windows GNU cross-target Clippy passed. Source bytes and proposed edits keep
-their original revision scheme. Journal and publication work remain under CF5b2b.
-
-Ruling: the independent task review approved the implementation. Clarified the
-documented reason when a second hard link appears during the read.
-
-## 2026-11-24 — журнал замены файла
-
-Task CF5b2b stage journal: complete (формат 2, базовые нативные данные, одно
-незавершённое намерение, сохранённые ID и запрос чтения). На исходной схеме v1
-регрессия показала, что операция запечатывалась по одним байтам. Проверены реальные
-транзакции SQLite и файлы после четырёх выходов процесса, включая замену до
-фиксации прогресса. Допуск хранилища и исполнитель остаются открытыми.
-
-Ruling: по независимому ревью отметка публикации и прогресс источника теперь
-фиксируются одним SQL-оператором, смена номера через SQLite rowid запрещена.
-Обе регрессии сначала воспроизведены. На пути восстановления проверены разные
-атрибуты исходного и применённого файлов. Повторное ревью подтвердило все
-исправления, отложенных замечаний нет.
-
-## 2026-11-24 — привязка базовых атрибутов к обзору
-
-Task CF5b2b basic attributes: complete (общий профиль метаданных для журнала
-и наблюдателя, версионированное предусловие источника). На исходном main смена
-режима между вызовами CLI сохраняла ID плана, а изменение во время чтения
-оставляло источник загруженным. Обе регрессии воспроизведены до исправления.
-
-Ruling: независимое ревью подтвердило исправление. По замечанию о формате
-добавлены отдельные проверки порядка UID/GID и битов режима Unix, маски Windows
-и версии предусловия CLI. Повторное ревью подтвердило исправление замечания.
-
-## 2026-11-24 — операционный v2 на новой установке
-
-Task CF5c manual startup: complete (явный глобальный v2, полевая композиция
-проекта и общий владелец векторов). Сквозной нативный тест до исправления
-падал на `config effective`. После исправления проверяет прямые index/search,
-daemon search, sync существующего и нового проекта, эксклюзивность владельца
-и сохранение результатов после перезапуска. Отдельно проверены запрет запуска
-при неверной конфигурации, отказ клиента при несовпадении версии и запрет
-проектного переопределения бюджета.
-
-Ruling: независимое ревью обнаружило два обхода проверки версии при живом
-демоне и запуск с повреждённым TOML после явного заголовка v2. Проверка
-добавлена до записи индекса и привязки list. Заголовок v2 запрещает запасной
-путь при последующей ошибке разбора. Тест с реальными векторами подтвердил
-вытеснение по общему бюджету; прежние прямые вызовы v1 сохраняют работу при
-отсутствии согласованной IPC-сессии. minor (deferred): редактор `models use`
-пока требует полных таблиц этапов; ручной ввод частичных v2 таблиц описан.
-
-На итоговом ревью проверено превышение лимита чтения. Для этого случая
-захватывается один ограниченный префикс из того же файла. Сохранённая в нём
-версия запрещает переход к диагностическому запуску v1. Новый случай
-воспроизведён до исправления в нативном тесте запуска.
-
-## 2026-11-24 — редактирование стадий в v2
-
-Task CF5c model editor: complete (предпросмотр и запись используют операционное
-разрешение кандидата). До правки CLI отвергал допустимый унаследованный rerank
-при замене embedding. Проверка под блокировкой отклоняет невалидный результат
-без замены файла и сохраняет отключённую стадию из явного bool reset.
-
-Ruling: по ревью сообщения об изменении пина теперь опираются на разрешённые
-стадии. Редактирование v1-проекта под v2 проверяет ограничения общего бюджета,
-сохраняя семантику v1. Ошибка разбора v2 скрывает исходный текст. Тест записи
-использует временные корни конфигурации и данных. Замечания подтверждены
-повторным ревью.
-
 ## 2026-11-24 — CF10, размещение и публикация поколений
 
 Task CF10: complete (ADR, scratch measurement and fresh review). Отдельная
@@ -1151,3 +1051,310 @@ the existing project lease. A healthy index stays ready with the Tantivy
 metadata lock file absent. A missing store component makes readiness fail.
 The zero-limit explained search also uses the bound revision. Re-review,
 1747 cli-full tests, the quality gate, Clippy and fmt passed locally.
+
+## 2026-11-24 — CF8a: ANN search settings at the library boundary
+
+Task CF8a: complete (project settings and explicit search on built and loaded
+graphs). Integrated the isolated 2026-11-13 implementation on main `af0aeab`.
+`search_with_settings` checks the requested fetch before calling HNSW.
+Existing callers keep the historical search behavior above the default beam
+ceiling. The graph and vector identities stay valid when the search beam changes.
+Daemon/CLI source adoption and ANN build settings remain open under #78.
+
+Verification on Rust 1.100.0: the new API test failed to compile against main
+and six cases passed with both lean and cli-full. Removing admission failed on
+a three-hit request to a two-hit policy. Substituting the legacy beam after
+admission changed the returned IDs and failed the fixed-beam comparison.
+Restoring the configured beam passed. Full and lean all-target Clippy, the
+opt-in Linux target lints and fmt passed. Complete local suites: cli-full
+1,723 passed / 19 ignored, lean 1,419 passed / 11 ignored. The frozen
+benchmark also passed with the local default latency budget. The first local
+full run used a symlink into the checkout as its temp root and failed project
+identity tests. Reproduced one failure with that root, then verified the
+same test and both complete suites from a separate, canonical temp root.
+
+Ruling: the fresh task reviewer approved CF8a and requested one minor test
+improvement. The existing recall test now compares configured search with
+the explicit beam on the same graph for 100 queries at five beam widths.
+Re-review confirmed the finding was addressed. No deferred minors.
+Final independent review on af0aeab: converged for CF8a with no findings.
+
+## 2026-11-24 — CF12a, окно debounce watcher
+
+Task CF12a: complete (типизированное окно v2 с наследованием и provenance,
+ограничение всего интервала, проверка реального цикла производителя).
+Проектная ревизия посреди пачки сохраняет захваченные таймеры, применяется к
+фильтрации на сбросе и задаёт время ожидания следующей пачки. Покрыты неверные
+пределы и совместимость прежних дефолтов.
+
+Ruling: независимое ревью выявило лишнее вытеснение dense-состояния и пробел
+в проверке публикации посреди пачки. Регрессия в v2 демоне воспроизвела
+вытеснение. Сравнение для dense исключает только таймеры watcher. Проверка
+исходной задержки, актуального фильтра и новой задержки использует тот же
+цикл производителя. Повторное ревью подтвердило исправления.
+
+Полные локальные CLI-full и lean наборы, Clippy и fmt прошли. Требуемые
+нативные проверки выполняются при доставке.
+
+## 2026-11-24 — observed migration source identity
+
+Task CF5b2b read-side identity: complete (single-link admission, retained-handle
+comparison, and object-bound preconditions in the observed plan). Three new
+regressions failed on 3207fa1 and passed with the change. Local Rust 1.100.0
+cli-full library and config observation suites, Linux all-target Clippy and
+Windows GNU cross-target Clippy passed. Source bytes and proposed edits keep
+their original revision scheme. Journal and publication work remain under CF5b2b.
+
+Ruling: the independent task review approved the implementation. Clarified the
+documented reason when a second hard link appears during the read.
+
+## 2026-11-24 — настройка обхода ANN в рабочем поиске
+
+Task CF8b traversal: complete (I33 через AnnSearchSpec, происхождение полей
+в config effective и политика в снимке каждого запроса). На исходном main
+`ann.search` отклонялся. Реальный тест поиска показывает точный fallback при
+окне выше лимита, переиспользование резидентного графа при следующем запросе
+и неизменность файлов дампа. Тест демона проверяет сохранение резидентного
+состояния при публикации новой политики. Настройки построения и рецепта
+графа остаются в CF8.
+
+Ruling: после ревью проверка окна перенесена до входа в DenseCache. Холодный
+поиск выше лимита возвращает точные результаты без подготовки графа. Проверки
+зрелого пути требуют ANN Ready без деградации; тест перезагрузки сравнивает Arc
+реального резидентного графа. Замечания подтверждены повторным ревью.
+
+## 2026-11-24 — журнал замены файла
+
+Task CF5b2b stage journal: complete (формат 2, базовые нативные данные, одно
+незавершённое намерение, сохранённые ID и запрос чтения). На исходной схеме v1
+регрессия показала, что операция запечатывалась по одним байтам. Проверены реальные
+транзакции SQLite и файлы после четырёх выходов процесса, включая замену до
+фиксации прогресса. Допуск хранилища и исполнитель остаются открытыми.
+
+Ruling: по независимому ревью отметка публикации и прогресс источника теперь
+фиксируются одним SQL-оператором, смена номера через SQLite rowid запрещена.
+Обе регрессии сначала воспроизведены. На пути восстановления проверены разные
+атрибуты исходного и применённого файлов. Повторное ревью подтвердило все
+исправления, отложенных замечаний нет.
+
+## 2026-11-24 — привязка базовых атрибутов к обзору
+
+Task CF5b2b basic attributes: complete (общий профиль метаданных для журнала
+и наблюдателя, версионированное предусловие источника). На исходном main смена
+режима между вызовами CLI сохраняла ID плана, а изменение во время чтения
+оставляло источник загруженным. Обе регрессии воспроизведены до исправления.
+
+Ruling: независимое ревью подтвердило исправление. По замечанию о формате
+добавлены отдельные проверки порядка UID/GID и битов режима Unix, маски Windows
+и версии предусловия CLI. Повторное ревью подтвердило исправление замечания.
+
+## 2026-11-24 — конфиг и рецепт нарезки Markdown
+
+Task CF9a: complete (I06 global/project, полевая provenance, per-doc
+recipe в SQLite v4, полная и инкрементальная индексация, готовность Website).
+RED показал отказ прежнего конфига, недоучёт длинных строк и заголовков,
+перенос пропущенных пустых строк через overlap и лишнюю зарядку разделов
+при CR без LF. Проверены миграция SQLite, штатный CLI для Website,
+переиспользование векторов и повторный sync.
+
+Ruling: старые артефакты остаются на диске и получают новый рецепт при
+следующей индексации. Для Website проверен один явный `docsbase index`
+при остановленном демоне перед обновлённым запуском. После ревью захват
+использует ту же грамматику, границы и структуру заголовков, что сплиттер.
+Проверка фиксирует прежний поисковый baseline и лимиты. Повторное ревью
+подтвердило исправления.
+
+## 2026-11-24 — операционный v2 на новой установке
+
+Task CF5c manual startup: complete (явный глобальный v2, полевая композиция
+проекта и общий владелец векторов). Сквозной нативный тест до исправления
+падал на `config effective`. После исправления проверяет прямые index/search,
+daemon search, sync существующего и нового проекта, эксклюзивность владельца
+и сохранение результатов после перезапуска. Отдельно проверены запрет запуска
+при неверной конфигурации, отказ клиента при несовпадении версии и запрет
+проектного переопределения бюджета.
+
+Ruling: независимое ревью обнаружило два обхода проверки версии при живом
+демоне и запуск с повреждённым TOML после явного заголовка v2. Проверка
+добавлена до записи индекса и привязки list. Заголовок v2 запрещает запасной
+путь при последующей ошибке разбора. Тест с реальными векторами подтвердил
+вытеснение по общему бюджету; прежние прямые вызовы v1 сохраняют работу при
+отсутствии согласованной IPC-сессии. minor (deferred): редактор `models use`
+пока требует полных таблиц этапов; ручной ввод частичных v2 таблиц описан.
+
+На итоговом ревью проверено превышение лимита чтения. Для этого случая
+захватывается один ограниченный префикс из того же файла. Сохранённая в нём
+версия запрещает переход к диагностическому запуску v1. Новый случай
+воспроизведён до исправления в нативном тесте запуска.
+
+## 2026-11-24 — CF12b, предел конфигурации в редакторах
+
+Task CF12b: complete (общее I52 чтение для models use и connect, проверка
+preview и сериализованного кандидата). Реальный models use --dry-run
+на прежнем коде принял лишний байт. Editor provider переписал oversized
+источник. Проверены допуск точной границы, отказ до временной записи,
+переполнение результата и сохранность исходных байтов.
+
+Ruling: независимое ревью подтвердило общий capture и проверку под
+блокировкой. Дополнительная регрессия сменила источник, пока редактор
+ждал реальную файловую блокировку. Редактор после допуска отказал по
+свежему содержимому. Повторное ревью прошло. Тест provider покрывает
+тело записи без обращения к внешнему провайдеру.
+
+Rust 1.100.0: 1750 cli-full, 1442 lean, 27 отдельных hybrid-local CLI
+тестов. Clippy, fmt и diff checks прошли.
+
+## 2026-11-24 — редактирование стадий в v2
+
+Task CF5c model editor: complete (предпросмотр и запись используют операционное
+разрешение кандидата). До правки CLI отвергал допустимый унаследованный rerank
+при замене embedding. Проверка под блокировкой отклоняет невалидный результат
+без замены файла и сохраняет отключённую стадию из явного bool reset.
+
+Ruling: по ревью сообщения об изменении пина теперь опираются на разрешённые
+стадии. Редактирование v1-проекта под v2 проверяет ограничения общего бюджета,
+сохраняя семантику v1. Ошибка разбора v2 скрывает исходный текст. Тест записи
+использует временные корни конфигурации и данных. Замечания подтверждены
+повторным ревью.
+
+## 2026-11-24 — CLI index через работающий v2
+
+Task CF5c connected index: complete (Shared owner, один IPC сеанс и исходный
+бюджет команды, JSON счётчики index). Проверены создание и повторный проход,
+относительный путь, поиск, ошибка несовпадения версии и fixed Website sync.
+
+Ruling: по ревью добавлены проверка UTF-8 до сериализации, сессия без
+привязки к проекту на период опроса и обновление проектного конфига перед
+захватом работы. Воспроизведена гонка двух подготовок до появления строки
+job. Равный валидный конфиг теперь сохраняет опубликованный снимок, а
+фактическая правка инвалидирует прежнее разрешение. Целевой прогон и
+повторное независимое ревью подтвердили исправления.
+
+Ruling: совместный прогон с дефолтным v2 обнаружил, что перечитывание
+задевало существующий MCP index_project. Явное поле запроса теперь включает
+его для подключённого CLI. Обычный MCP сохраняет снимок открытого проекта.
+Целевой тест отличает оба запроса на одном изменённом источнике.
+
+Ruling: native macOS rejected creation of the malformed UTF-8 path in the
+test fixture. The encoding regression now passes an in-memory path to the
+shared IPC encoder. The connected daemon integration tests still cover
+first index, repeated index, search and config refresh. Focused Linux tests
+and independent review passed.
+
+Ruling: the native Linux boundary scanner recognizes the explicit test
+module marker. The Unix-only fixture now uses a separate `cfg(unix)`
+attribute, preserving the production platform boundary. Both boundary
+tests and the path encoding regression passed locally.
+
+## 2026-11-24 — CF5c, admission for connected Index
+
+Task CF5c connected Index contention: complete (the explicit refresh uses its
+captured settings and stages and requires its own job). A typed refusal asks
+the CLI caller to wait and retry. Ordinary Sync and MCP join existing work.
+The regression exercises discovery, publication under the project lease,
+transactional admission and a superseded revision. The active Sync survives
+with the same row. Before the fix both discovery and the transaction returned
+that older job as successful admission.
+
+Ruling: fresh review required retaining the returned Arc pair and reporting an
+Index retry for a superseded config. The focused suite and re-review passed.
+Rust 1.100.0 ran 764 tests across the library, CLI routing, runtime config and
+MCP frontend. Clippy and fmt passed.
+
+## 2026-11-24 — первый глобальный файл CLI
+
+Task CF5c config writers: complete (общий заголовок v2 при первой записи
+connect и models use --global). Предпросмотр воспроизводит результат записи
+и оставляет путь отсутствующим. Запись с блокировкой проверена через runtime
+resolver. Изменение версии в процессе connect сопровождается подсказкой
+о перезапуске.
+
+Ruling: alpha поддерживает ручной перенос прежнего локального бюджета.
+Пробный v2 без файла выявил создание vector DB в лексической работе и
+отказ CLI index в подключённом режиме. Эти потребители проверяются отдельно
+до изменения дефолтного запуска. Повторное независимое ревью подтвердило
+меры для legacy и результаты проверок.
+
+## 2026-11-24 — политика общего кеша из v2
+
+Task CF7 vector store file policy: complete (I20/I27, дефолты и происхождение
+полей, работающие лимиты на общем SQLite). На исходной версии файл только с
+`max_entries` и `busy_timeout` отклонялся. Теперь два соединения получают
+настроенное ожидание SQLite, а запись через второе вытесняет старую запись,
+видимую через первое. Нативный CLI-тест проверяет вывод effective config
+и поиск до и после запуска демона. План продолжает менять только `max_bytes`.
+
+Ruling: ревью выявило, что Serde принимала позиционный массив вместо таблицы.
+Воспроизведён отказ теста, добавлена явная проверка формы. Проверки effective
+config дополнены единицами и источниками дефолтов. Итоговое независимое
+ревью подтвердило исправления.
+
+## 2026-11-24 — векторное соединение по требованию
+
+Task CF5c lazy vector connection: complete (lexical startup, index, search и
+sync удерживают общий mode lease без vectors.db). RED воспроизведён на
+прямом v2 index. Проверены занятой owner, фактические подключения с общим
+LRU и продолжение сохранённой последовательности из SQLite.
+
+Ruling: по ревью оба первых подключения устанавливаются до записи,
+поэтому независимые счётчики дают повтор recency и проваливают тест.
+Инициализация публикует счётчик под существующим initialization lease.
+Повторное ревью, Clippy и целевой прогон подтвердили исправления.
+
+## 2026-11-24 — CF5c, v2 без глобального файла
+
+Task CF5c implicit v2: complete (операционный CLI, запуск демона и
+effective view используют v2 при отсутствии глобального источника).
+Устаревший демон отклоняется до привязки проекта, в том числе после
+переподключения MCP. Неверсионированный глобальный файл по-прежнему
+выбирает v1. Проверены прямой и подключённый index, поиск, sync, отсутствие
+vectors.db на лексическом маршруте и исключительное владение векторами.
+
+Ruling: по независимому ревью добавлены проверка версии на входе MCP,
+процессный тест со старым демоном и поиск по проекту, созданному через
+работающий демон. Legacy-тест лимита проектного файла явно выбирает v1.
+Повторное ревью подтвердило исправления. Полный Linux-набор прошёл
+на составной ветке с зависимостями. Нативная приёмка отдельного PR
+зависит от доставки предшествующих изменений.
+
+Ruling: существующая ссылка config.toml с недоступной целью даёт ошибку
+чтения в обоих резолверах. Дефолтный v2 выбирается только при отсутствии
+самого источника. Процессный тест MCP фиксирует Hello и регистрацию
+раздельно. Проверен отказ до регистрации и на первом соединении, и после
+переподключения к демону с другой версией.
+
+## 2026-11-24 — библиотечный рецепт построения ANN
+
+Task CF8 construction library: complete (проверяемый AnnBuildSpec, раздельные
+слоты и проверка фактических параметров дампа). Реальные графы на одних
+векторах сохраняются по отдельности. Загрузка отвергает изменённые метаданные,
+а также подмену дампа с другим M или ef_construction. Исходный рецепт
+сохраняет прежний путь. Группировка очистки проверена через три рецепта одного
+поколения, затем второе и третье поколения.
+
+Ruling: на исходном коде load принимал неверный ef в метаданных, а очистка
+удаляла один из слотов единственного поколения. Ревью запросило независимую
+проверку прежнего имени, отдельные подмены M и ef и исправление heap-load
+инициализатора в тесте. Точечный прогон, cross-Clippy Windows и итоговое
+независимое ревью подтвердили исправления.
+
+## 2026-11-24 — рецепт ANN в работающем CLI и демоне
+
+Task CF8 construction runtime: complete (I32, происхождение полей, рецепт
+запросов и фоновых задач, раздельные слоты, измеренная оценка допуска).
+RED покрывает файл с `ann.build`, daemon warm, дисковое давление,
+малый бюджет построения и временное давление от старого worker. Штатный async
+`index_project` передаёт рецепт реальному ANN builder. Отдельные регрессии
+проверяют холодную загрузку и смену рецепта поверх существующих векторов.
+
+Ruling: по ревью временная нехватка места в памяти переводит запрос в потоковый
+режим до освобождения старой сборки. Открытие готового графа резервируется
+перед чтением. Один писатель удерживает слот до загрузки, после чего удержание
+переходит читателям. Удаление проверяет это право в момент операции.
+Регрессии с удерживаемым worker проверили пропуск лишней загрузки и
+переключение A → B → A. Позитивные и негативные фикстуры допуска используют
+новую оценку. Базовые пороги качества сохраняются.
+
+minor (deferred): прогон синтетики 75 000 × 2048 с восемью workers вышел за
+420 секунд. План фиксирует замеры 20 000 × 96 и отдельную проверку формулы
+бюджета для 75 000 × 2048.

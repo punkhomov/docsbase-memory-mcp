@@ -3,12 +3,14 @@
 
 use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use super::settings::VectorStoreSettings;
-use super::{VectorCache, open_connection, read_sequence};
+use rusqlite::Connection;
+
+use super::{VectorCache, read_sequence};
 use crate::error::{Error, Result};
 
 const LOCK_FILE: &str = "vectors.lock";
@@ -25,7 +27,7 @@ pub struct VectorStore(Arc<StoreInner>);
 struct StoreInner {
     root: PathBuf,
     settings: VectorStoreSettings,
-    sequence: AtomicI64,
+    sequence: OnceLock<Arc<AtomicI64>>,
     _lease: ModeLease,
 }
 
@@ -37,18 +39,21 @@ impl VectorStore {
     /// Admission for invalid settings or an existing legacy/strict lease;
     /// internal errors for directory, file-lock or SQLite initialization failures.
     pub fn acquire(cache_root: &Path, settings: &VectorStoreSettings) -> Result<Self> {
+        let owner = Self::reserve(cache_root, settings)?;
+        drop(owner.connect()?);
+        Ok(owner)
+    }
+
+    // Take the mode lease before any request can open SQLite. Lexical users
+    // hold the same exclusive policy without needing the database itself.
+    pub(crate) fn reserve(cache_root: &Path, settings: &VectorStoreSettings) -> Result<Self> {
         settings.validate()?;
         let root = prepare_root(cache_root)?;
         let lease = ModeLease::acquire(&root, true)?;
-        // Initialize under the exclusive lease. No SQLite transaction survives
-        // acquisition; connections have independent short SQL phases.
-        let opened = open_connection(&root, settings.busy_timeout)?;
-        let sequence = read_sequence(&opened.conn)?;
-        drop(opened);
         Ok(Self(Arc::new(StoreInner {
             root,
             settings: settings.clone(),
-            sequence: AtomicI64::new(sequence),
+            sequence: OnceLock::new(),
             _lease: lease,
         })))
     }
@@ -73,18 +78,21 @@ impl VectorStore {
         &self.0.settings
     }
 
-    fn next_use(&self) -> i64 {
-        // Only a recency counter, not a memory-publication fence. SQLite's
-        // immediate write reservation orders the associated database mutations.
-        let previous = self
-            .0
-            .sequence
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                Some(value.saturating_add(1))
-            });
-        match previous {
-            Ok(value) | Err(value) => value.saturating_add(1),
-        }
+    pub(super) fn access(self, conn: &Connection) -> Result<Access> {
+        let sequence = if let Some(current) = self.0.sequence.get() {
+            current
+        } else {
+            // The opened connection still holds the initialization lease.
+            // Publish the persisted counter before a later constructor can read it.
+            let initial = read_sequence(conn)?;
+            self.0
+                .sequence
+                .get_or_init(|| Arc::new(AtomicI64::new(initial)))
+        };
+        Ok(Access::Owned {
+            sequence: Arc::clone(sequence),
+            _owner: self,
+        })
     }
 }
 
@@ -184,8 +192,14 @@ fn initialization_expired() -> Error {
 
 /// Declared after the connection in `VectorCache` so SQLite closes before release.
 pub(super) enum Access {
-    Legacy { sequence: i64, _lease: ModeLease },
-    Owned { owner: VectorStore },
+    Legacy {
+        sequence: i64,
+        _lease: ModeLease,
+    },
+    Owned {
+        sequence: Arc<AtomicI64>,
+        _owner: VectorStore,
+    },
 }
 impl Access {
     pub(super) fn is_owned(&self) -> bool {
@@ -198,7 +212,15 @@ impl Access {
                 *sequence = sequence.saturating_add(1);
                 *sequence
             }
-            Self::Owned { owner } => owner.next_use(),
+            Self::Owned { sequence, .. } => {
+                // SQLite's immediate writer reservation orders the mutations.
+                let previous = sequence.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    Some(value.saturating_add(1))
+                });
+                match previous {
+                    Ok(value) | Err(value) => value.saturating_add(1),
+                }
+            }
         }
     }
 }
@@ -206,6 +228,32 @@ impl Access {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v2_file_limits_live_connections_and_shared_entry_eviction() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("config.toml"),
+            "config_version=2\n[vector_cache]\nmax_entries=1\nbusy_timeout=37\n",
+        )
+        .unwrap();
+        let config = crate::config::Config::global_from(directory.path()).unwrap();
+        let owner = VectorStore::acquire(directory.path(), &config.vector_store.unwrap()).unwrap();
+        let mut first = owner.connect().unwrap();
+        let mut second = owner.connect().unwrap();
+        for cache in [&first, &second] {
+            let busy_ms: i64 = cache
+                .conn
+                .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .unwrap();
+            assert_eq!(busy_ms, 37);
+        }
+        first.put("model", "first", &[1.0, 2.0]).unwrap();
+        second.put("model", "second", &[3.0, 4.0]).unwrap();
+        assert_eq!(first.len().unwrap(), 1);
+        assert!(first.get("model", "first").unwrap().is_none());
+        assert_eq!(first.get("model", "second").unwrap(), Some(vec![3.0, 4.0]));
+    }
 
     #[test]
     fn owned_connections_install_the_policy_busy_timeout() {
@@ -225,6 +273,40 @@ mod tests {
                 assert_eq!(actual, i64::try_from(millis).unwrap());
             }
         }
+    }
+
+    #[test]
+    fn deferred_connections_share_recency_seeded_from_existing_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let mut legacy = VectorCache::open(root.path()).unwrap();
+        legacy.put("model", "old", &[1.0]).unwrap();
+        legacy
+            .conn
+            .execute("UPDATE vector_cache SET used_at = 40", [])
+            .unwrap();
+        drop(legacy);
+
+        let owner =
+            VectorStore::reserve(root.path(), &VectorStoreSettings::owner_defaults()).unwrap();
+        let cloned = owner.clone();
+        std::thread::scope(|scope| {
+            let first = scope.spawn(move || owner.connect());
+            let mut second = cloned.connect().unwrap();
+            let mut first = first.join().unwrap().unwrap();
+            first.put("model", "first", &[1.0]).unwrap();
+            second.put("model", "second", &[1.0]).unwrap();
+        });
+        drop(cloned);
+        let cache = VectorCache::open(root.path()).unwrap();
+        let values: Vec<i64> = cache
+            .conn
+            .prepare("SELECT used_at FROM vector_cache ORDER BY used_at")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(values, [40, 41, 42]);
     }
 
     #[test]

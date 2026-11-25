@@ -13,8 +13,8 @@ use std::sync::Arc;
 use hnsw_rs::prelude::*;
 
 use crate::error::{Error, Result};
-use crate::hybrid::ann_settings::AnnSearchSettings;
-use crate::hybrid::ann_store::{ANN_DEFAULT_EF_CONSTRUCTION, AnnKey, AnnSlot, AnnStore};
+use crate::hybrid::ann_settings::{AnnBuildSettings, AnnSearchSettings, PERSISTED_LAYERS};
+use crate::hybrid::ann_store::{AnnKey, AnnSlot, AnnSlotPin, AnnStore};
 
 // FR-5/SC-4 convert `hnsw_rs` panics into `Error::Internal` through
 // `catch_unwind`, which only works while unwinding is enabled. With
@@ -35,16 +35,10 @@ pub const ANN_MIN_VECTORS: usize = super::dense_settings::DEFAULT_ANN_MIN_VECTOR
 /// benefit at this scale.
 const SEQUENTIAL_BUILD_MAX: usize = 64;
 
-/// Graph fan-out during construction (design §6).
-const M: usize = 16;
-
-/// Number of layers in the constructed graph (design §6).
-const LAYERS: usize = 16;
-
-/// Per-point graph overhead estimate used by [`AnnIndex::estimated_bytes`]
-/// (design §8). Measured from the T1 spike dump: ~780 B/vertex at 10k×64;
-/// rounded up to 1024 so the cap estimate never understates resident bytes.
-const GRAPH_OVERHEAD_BYTES: usize = 1024;
+// Allowance for the in-process graph over its vector payload. The CF8 probe
+// measured ~4.5 kB/point including the payload after a 20k×96 reload.
+// The estimate also charges the vector bytes for mmap's potentially warm pages.
+const GRAPH_OVERHEAD_BYTES: usize = 4608;
 
 /// Compatibility beam; `hnsw_rs` may promote it above the cap for large fetch.
 fn ef_for(fetch: usize) -> usize {
@@ -75,6 +69,9 @@ pub struct AnnIndex {
     kind: Kind,
     dim: usize,
     count: usize,
+    build_settings: AnnBuildSettings,
+    // Dropped after the mapped graph.
+    _disk_pin: Option<AnnSlotPin>,
 }
 
 impl std::fmt::Debug for AnnIndex {
@@ -82,6 +79,7 @@ impl std::fmt::Debug for AnnIndex {
         f.debug_struct("AnnIndex")
             .field("dim", &self.dim)
             .field("count", &self.count)
+            .field("build_settings", &self.build_settings)
             .finish_non_exhaustive()
     }
 }
@@ -97,6 +95,18 @@ impl AnnIndex {
     /// Zero `dim` or empty `rows`, a vector whose length differs from `dim`,
     /// or a `chunk_id` that does not fit into `usize`.
     pub fn build(rows: &[(u64, Arc<[f32]>)], dim: usize) -> Result<Self> {
+        Self::build_with_settings(rows, dim, AnnBuildSettings::owner_defaults())
+    }
+
+    /// Builds a graph from the supplied checked construction recipe.
+    ///
+    /// # Errors
+    /// Empty input, a zero or mismatched dimension, or an unrepresentable ID.
+    pub fn build_with_settings(
+        rows: &[(u64, Arc<[f32]>)],
+        dim: usize,
+        settings: AnnBuildSettings,
+    ) -> Result<Self> {
         if dim == 0 {
             return Err(Error::internal("ann dimension is zero"));
         }
@@ -116,10 +126,10 @@ impl AnnIndex {
             items.push((vector.as_ref(), id_usize));
         }
         let mut hnsw = Hnsw::new(
-            M,
+            settings.m(),
             rows.len(),
-            LAYERS,
-            ANN_DEFAULT_EF_CONSTRUCTION,
+            PERSISTED_LAYERS,
+            settings.ef_construction(),
             DistCosine,
         );
         if items.len() <= SEQUENTIAL_BUILD_MAX {
@@ -136,6 +146,8 @@ impl AnnIndex {
             kind: Kind::Built(hnsw),
             dim,
             count: rows.len(),
+            build_settings: settings,
+            _disk_pin: None,
         })
     }
 
@@ -223,12 +235,17 @@ impl AnnIndex {
     /// the store after the `READY` marker.
     ///
     /// # Errors
-    /// The index is not built, or the dump/publish fails.
+    /// The index is not built, its shape differs from the key, or publication fails.
     pub fn dump(&self, store: &AnnStore, key: &AnnKey) -> Result<AnnSlot> {
         let Kind::Built(hnsw) = &self.kind else {
             return Err(Error::internal("ann dump requires a built index"));
         };
-        store.persist_dump(key, |dir| {
+        if self.dim != key.dim || self.count != key.chunk_count {
+            return Err(Error::internal(
+                "ANN key shape does not match the built graph",
+            ));
+        }
+        store.persist_dump_with_settings(key, self.build_settings, |dir| {
             let basename = run_unwind(|| hnsw.file_dump(dir, "index"))?
                 .map_err(|err| Error::internal(format!("ann file_dump: {err}")))?;
             Ok(basename)
@@ -238,17 +255,43 @@ impl AnnIndex {
     /// Loads a persisted slot: mmap first, heap retry (design §5.2).
     ///
     /// # Errors
-    /// The dump cannot be read even after the heap retry.
+    /// The dump is unreadable or its actual graph differs from its metadata.
     pub fn load(slot: &AnnSlot) -> Result<Self> {
+        let settings = AnnBuildSettings::new(slot.meta.m, slot.meta.ef_construction)?;
         let loaded = match load_loaded(&slot.dir, true) {
             Ok(loaded) => loaded,
             Err(_) => load_loaded(&slot.dir, false)?,
         };
+        let matches_meta = loaded.with_index(|index| {
+            index.get_max_level() == PERSISTED_LAYERS
+                && usize::from(index.get_max_nb_connection()) == settings.m()
+                && index.get_ef_construction() == settings.ef_construction()
+                && index.get_nb_point() == slot.meta.count
+                && index.get_point_indexation().get_data_dimension() == slot.meta.dim
+        });
+        if !matches_meta {
+            return Err(Error::internal("ANN dump does not match its metadata"));
+        }
         Ok(Self {
             kind: Kind::Loaded(loaded),
             dim: slot.meta.dim,
             count: slot.meta.count,
+            build_settings: settings,
+            _disk_pin: None,
         })
+    }
+
+    /// Construction settings of the built or verified loaded graph.
+    #[must_use]
+    pub fn build_settings(&self) -> AnnBuildSettings {
+        self.build_settings
+    }
+
+    pub(crate) fn with_disk_pin(self, pin: AnnSlotPin) -> Self {
+        Self {
+            _disk_pin: Some(pin),
+            ..self
+        }
     }
 
     /// Number of vectors in the graph.
@@ -376,6 +419,8 @@ mod tests {
             kind: Kind::Loaded(load_loaded(&slot.dir, false).expect("heap load")),
             dim: TEST_DIM,
             count: TEST_COUNT,
+            build_settings: ann.build_settings(),
+            _disk_pin: None,
         };
         let a = mmap.search(query, 10).expect("mmap search");
         let b = heap.search(query, 10).expect("heap search");

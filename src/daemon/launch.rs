@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::capture::{ReadFailure, read_prefix};
+use crate::config::capture::{ReadFailure, path_is_absent, read_prefix};
 use crate::config::resolve::{LaunchFailure, has_version_header};
 use crate::config::schema::Resolved;
 use crate::config::{Config, paths};
@@ -183,6 +183,22 @@ impl LaunchSnapshot {
         })
     }
 
+    // The library compatibility constructors retain v1 for an absent
+    // source. Both explicit source versions still use the source resolver.
+    pub(crate) fn library_compatibility(&self, patch: DaemonPatch) -> Result<LaunchConfig> {
+        if matches!(self.bytes, CapturedBytes::Missing) {
+            Ok(LaunchConfig {
+                config: crate::config::resolve::LaunchResolution::legacy_defaults()
+                    .finish(patch)?,
+                path: self.path.clone(),
+                stamp: self.stamp(),
+                error: None,
+            })
+        } else {
+            self.legacy(patch)
+        }
+    }
+
     /// Compatibility launch preserves warning/default behavior and blocks project opens
     /// through the retained global error, just as the old Shared constructor did.
     pub(crate) fn legacy(&self, patch: DaemonPatch) -> Result<LaunchConfig> {
@@ -208,9 +224,7 @@ impl LaunchSnapshot {
                 }
                 eprintln!("warning: global config unavailable: {error}");
                 let config =
-                    crate::config::resolve::launch_resolution(Path::new("config.toml"), None)
-                        .map_err(LaunchFailure::into_error)?
-                        .finish(patch)?;
+                    crate::config::resolve::LaunchResolution::legacy_defaults().finish(patch)?;
                 Ok(LaunchConfig {
                     config,
                     path: self.path.clone(),
@@ -238,9 +252,7 @@ fn capture(path: &Path) -> CapturedBytes {
     match snapshot {
         Ok((bytes, false)) => CapturedBytes::Loaded(bytes),
         Ok((prefix, true)) => unavailable(ReadFailure::LimitExceeded, has_version_header(&prefix)),
-        Err(ReadFailure::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            CapturedBytes::Missing
-        }
+        Err(ReadFailure::Io(error)) if path_is_absent(path, &error) => CapturedBytes::Missing,
         Err(error) => unavailable(error, false),
     }
 }

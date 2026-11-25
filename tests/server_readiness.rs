@@ -197,6 +197,32 @@ fn recipe_change_requires_full_sync() {
 }
 
 #[test]
+fn chunk_recipe_change_requires_sync_and_applies_to_unchanged_files() {
+    let mut env = Env::new();
+    let path = env.root.path().join("guide.md");
+    let body = "readinesswidget extends the body. ".repeat(36);
+    std::fs::write(&path, &body).unwrap();
+    env.sync();
+    let before = env.view();
+    assert_eq!(before["ready"], true);
+    assert_eq!(before["outcome"]["stats"]["chunks"], 1);
+
+    env.config.chunk = docsbase_memory::index::settings::ChunkSettings::new(300, 0).unwrap();
+    env.reason("recipe_changed");
+    env.sync();
+    let after = env.view();
+    assert_eq!(after["ready"], true);
+    assert!(after["outcome"]["stats"]["chunks"].as_u64().unwrap() > 1);
+    assert_ne!(after["index_generation"], before["index_generation"]);
+
+    env.sync();
+    let repeated = env.view();
+    assert_eq!(repeated["ready"], true);
+    assert_eq!(repeated["index_generation"], after["index_generation"]);
+    assert_eq!(repeated["outcome"]["stats"]["skipped"], 1);
+}
+
+#[test]
 fn absent_corrupt_and_rebuild_needed_index_never_repairs() {
     for alteration in ["missing", "corrupt", "segment", "tokenizer"] {
         let env = Env::new();

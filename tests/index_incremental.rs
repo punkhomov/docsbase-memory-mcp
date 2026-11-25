@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use docsbase_memory::config::Config;
+use docsbase_memory::config::{Config, schema::SourceId};
 use docsbase_memory::index::chunk::{Chunk, ChunkKind};
 use docsbase_memory::index::job::{JobStats, run_full, run_incremental_with};
 use docsbase_memory::index::tantivy_index::{Hit, IndexHandle};
@@ -138,6 +138,89 @@ fn unchanged_skipped() {
             errors: 0,
             warnings: Vec::new(),
         }
+    );
+}
+
+#[test]
+fn changing_chunk_recipe_reindexes_unchanged_content_and_then_skips_it() {
+    let body = format!(
+        "# Guide\n\n{}\n",
+        "widgets explain calibration. ".repeat(36)
+    );
+    let mut env = Env::new(&[("guide.md", &body)]);
+    assert_eq!(env.full().chunks, 1);
+    let id = env.count("SELECT id FROM docs");
+    let generation = env.count("SELECT index_generation FROM projects");
+    env.db
+        .connection()
+        .execute_batch(
+            "ALTER TABLE docs DROP COLUMN chunk_recipe;
+             UPDATE projects SET schema_version=3 WHERE id=1;
+             PRAGMA user_version=3;",
+        )
+        .unwrap();
+    env.db = Db::open(env.cache.path()).unwrap();
+    assert_eq!(
+        env.count("SELECT index_generation FROM projects"),
+        generation
+    );
+    assert_eq!(env.count("SELECT COUNT(*) FROM chunks"), 1);
+    let path = env.path("guide.md");
+    assert_eq!(
+        env.count("SELECT COUNT(*) FROM docs WHERE chunk_recipe IS NULL"),
+        1
+    );
+    let config_dir = tempfile::tempdir().unwrap();
+    fs::write(
+        config_dir.path().join("config.toml"),
+        "config_version=2\n[index.chunk]\nmax_chars=250\n",
+    )
+    .unwrap();
+    fs::write(
+        env.path(".docsbase.toml"),
+        "config_version=2\n[index.chunk]\noverlap_chars=0\n",
+    )
+    .unwrap();
+    env.config = Config::load_from(config_dir.path(), Some(env.root.path())).unwrap();
+    let view =
+        docsbase_memory::config::view::load_from(config_dir.path(), Some(env.root.path())).unwrap();
+    let field = |key: &str| view.fields.iter().find(|field| field.key == key).unwrap();
+    assert_eq!(field("index.chunk.max_chars").value, 250);
+    assert!(matches!(
+        field("index.chunk.max_chars").origin.source,
+        SourceId::Global(_)
+    ));
+    assert_eq!(field("index.chunk.overlap_chars").value, 0);
+    assert!(matches!(
+        field("index.chunk.overlap_chars").origin.source,
+        SourceId::Project(_)
+    ));
+
+    let stats = env.incremental(std::slice::from_ref(&path));
+    assert_eq!(stats.docs, 1);
+    assert!(stats.chunks > 1);
+    assert_eq!(
+        env.count("SELECT COUNT(*) FROM docs WHERE chunk_recipe IS NULL"),
+        0
+    );
+    assert!(env.count("SELECT MAX(length(text)) FROM chunks") <= 250);
+    assert_eq!(env.count("SELECT id FROM docs"), id);
+    assert_eq!(fs::read_to_string(&path).unwrap(), body);
+    assert_eq!(
+        env.count("SELECT index_generation FROM projects"),
+        generation + 1
+    );
+    assert_eq!(
+        env.search("calibration").first().map(|hit| hit.doc_id),
+        Some(id)
+    );
+
+    let again = env.incremental(&[path]);
+    assert_eq!(again.docs, 0);
+    assert_eq!(again.skipped, 1);
+    assert_eq!(
+        env.count("SELECT index_generation FROM projects"),
+        generation + 1
     );
 }
 
