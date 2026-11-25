@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -36,6 +37,7 @@ pub const MAX_ANN_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Dump basename enforced by [`AnnStore::persist_dump`] (design §6).
 const DUMP_BASENAME: &str = "index";
+static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Identity of one persisted index (FR-3): changing any field moves the
 /// index to another on-disk key, so stale/corrupt state can never be
@@ -351,9 +353,31 @@ impl AnnStore {
         settings: AnnBuildSettings,
         write: impl FnOnce(&Path) -> Result<String>,
     ) -> Result<AnnSlot> {
+        self.persist_dump_at(key, settings, nanos(), write)
+    }
+
+    fn persist_dump_at(
+        &self,
+        key: &AnnKey,
+        settings: AnnBuildSettings,
+        clock_tick: u128,
+        write: impl FnOnce(&Path) -> Result<String>,
+    ) -> Result<AnnSlot> {
         let ann_root = self.project_ann_root(key.project_id);
-        let tmp = ann_root.join(format!("tmp-{}-{}", std::process::id(), nanos()));
-        fs::create_dir_all(&tmp)
+        fs::create_dir_all(&ann_root)
+            .map_err(|err| Error::internal_with_source("create ann root", err))?;
+        // Recipe builds may overlap under the same project root even when
+        // the clock returns the same tick to both workers.
+        let sequence = STAGING_SEQUENCE
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| Error::internal("ANN staging sequence exhausted"))?;
+        let tmp = ann_root.join(format!(
+            "tmp-{}-{clock_tick:x}-{sequence:x}",
+            std::process::id()
+        ));
+        fs::create_dir(&tmp)
             .map_err(|err| Error::internal_with_source("create ann temp dir", err))?;
         let basename = match write(&tmp) {
             Ok(basename) => basename,
@@ -624,9 +648,57 @@ fn now_secs() -> i64 {
         .map_or(0, |duration| i64::try_from(duration.as_secs()).unwrap_or(0))
 }
 
-/// Nanosecond tick for unique temporary directory names.
+/// Clock component of a temporary directory name, in nanoseconds.
 fn nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlapping_recipes_with_the_same_clock_tick_have_private_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let store = AnnStore::new(root.path().to_path_buf());
+        let key = AnnKey {
+            project_id: 1,
+            generation: 1,
+            model_id: "model@d8".into(),
+            dim: 8,
+            chunk_count: 1,
+            chunk_set_digest: "digest".into(),
+            format_version: ANN_FORMAT_VERSION,
+        };
+        let first = AnnBuildSettings::new(12, 64).unwrap();
+        let second = AnnBuildSettings::new(16, 98).unwrap();
+        let write = |dir: &Path, payload| {
+            fs::write(dir.join("index.hnsw.graph"), payload).unwrap();
+            fs::write(dir.join("index.hnsw.data"), payload).unwrap();
+            Ok(DUMP_BASENAME.to_owned())
+        };
+        let published_first = store
+            .persist_dump_at(&key, first, 123, |staging_first| {
+                let basename = write(staging_first, b"recipe a")?;
+                let published_second =
+                    store.persist_dump_at(&key, second, 123, |staging_second| {
+                        assert_ne!(staging_first, staging_second);
+                        write(staging_second, b"recipe b")
+                    })?;
+                assert_eq!(
+                    fs::read(published_second.dir.join("index.hnsw.graph")).unwrap(),
+                    b"recipe b"
+                );
+                Ok(basename)
+            })
+            .unwrap();
+        assert_eq!(
+            fs::read(published_first.dir.join("index.hnsw.graph")).unwrap(),
+            b"recipe a"
+        );
+        assert!(store.load_with_settings(&key, first).unwrap().is_some());
+        assert!(store.load_with_settings(&key, second).unwrap().is_some());
+    }
 }

@@ -1569,3 +1569,9 @@ streaming. Captured launch checks real query-cache eviction. TOML-driven tests
 check backfill renewal and stale status. Real ANN files and a held slot pin
 exercise retention. Full Rust 1.100.0 cli-full tests, Clippy, fmt and offline
 checks passed locally with the existing search baseline.
+
+Ruling: the Windows job on #198 failed in the existing ANN recipe-toggle
+test. A fixed-clock regression reproduced a shared temporary directory
+between overlapping recipes. ANN publishers now reserve their own directory
+with an atomic sequence and exclusive creation. Targeted persistence and
+real graph tests passed, and independent review approved the ownership fix.
