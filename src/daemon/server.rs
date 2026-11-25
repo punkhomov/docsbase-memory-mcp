@@ -2427,7 +2427,7 @@ fn route_search(
         .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |reranker| {
             reranker.window
         });
-    tools::search_docs_from(
+    tools::search_docs_with_weights(
         &tools::SearchContext {
             stages: &stages,
             dense: &shared.dense,
@@ -2441,6 +2441,7 @@ fn route_search(
         crate::search::metadata::MetadataSource::Prepared(&shared.readers),
         args,
         || slot.preparation_lease(&config),
+        config.lexical,
     )
 }
 

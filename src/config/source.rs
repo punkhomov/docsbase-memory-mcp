@@ -62,6 +62,7 @@ pub struct SourceLayer {
     pub(super) original: String,
     pub(super) document: toml::Table,
     pub(super) watch: Option<crate::watch::settings::WatchPatch>,
+    pub(super) lexical: Option<crate::index::lexical_settings::LexicalPatch>,
 }
 impl fmt::Debug for SourceLayer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -107,6 +108,7 @@ impl SourceLayer {
             }
         };
         let mut watch = None;
+        let mut lexical = None;
         let mut hybrid_merge = None;
         let mut vector_store = None;
         if version == ConfigVersion::V2 {
@@ -122,6 +124,13 @@ impl SourceLayer {
                     hybrid
                         .try_into()
                         .map_err(|_| invalid("invalid v2 hybrid fields"))?,
+                );
+            }
+            if let Some(value) = fields.remove("lexical") {
+                lexical = Some(
+                    value
+                        .try_into()
+                        .map_err(|_| invalid("invalid v2 lexical fields"))?,
                 );
             }
             let vector = fields.remove("vector_cache");
@@ -155,6 +164,7 @@ impl SourceLayer {
             original: text.to_owned(),
             document,
             watch,
+            lexical,
         })
     }
     /// Exact source identity supplied by the caller; no canonicalization or I/O.

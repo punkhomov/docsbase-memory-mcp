@@ -21,9 +21,9 @@ use crate::hybrid::meta::{
 };
 use crate::hybrid::rrf::rrf_merge;
 use crate::hybrid::work::Cancellation;
-use crate::index::QueryMode;
 use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
+use crate::index::{LexicalWeights, QueryMode};
 use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
 use crate::search::budget::PayloadBudget;
 use crate::search::metadata::{MetadataReader, MetadataSource};
@@ -473,7 +473,17 @@ pub fn search_docs_from<Guard>(
     args: &Value,
     admit: impl Fn() -> Result<Guard>,
 ) -> Result<Value> {
-    match start_search(context, source, args, &admit)? {
+    search_docs_with_weights(context, source, args, admit, LexicalWeights::DEFAULTS)
+}
+
+pub(super) fn search_docs_with_weights<Guard>(
+    context: &SearchContext<'_>,
+    source: MetadataSource<'_>,
+    args: &Value,
+    admit: impl Fn() -> Result<Guard>,
+    weights: LexicalWeights,
+) -> Result<Value> {
+    match start_search(context, source, args, &admit, weights)? {
         SearchStart::Complete(value) => Ok(value),
         SearchStart::Prepared(start) => {
             prepare_with_query_vector(context, source, &admit, start, None)?.finish(context.stages)
@@ -513,6 +523,7 @@ pub(super) fn start_search<Guard>(
     source: MetadataSource<'_>,
     args: &Value,
     admit: impl Fn() -> Result<Guard>,
+    weights: LexicalWeights,
 ) -> Result<SearchStart> {
     context.operation.check()?;
     if source.cache_root() != context.cache {
@@ -546,7 +557,7 @@ pub(super) fn start_search<Guard>(
         .map(SearchStart::Complete);
     }
     let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
-    let lexical = lexical_snapshot(context, source, &admit, &arguments, fetch)?;
+    let lexical = lexical_snapshot(context, source, &admit, &arguments, fetch, weights)?;
     Ok(SearchStart::Prepared(StartedSearch {
         arguments,
         active,
@@ -800,6 +811,7 @@ pub(super) fn capture_dense(
 
 struct LexicalSnapshot {
     index: ProjectIndex,
+    weights: LexicalWeights,
     hits: Vec<(u64, f32)>,
     elapsed_ms: u64,
     scope: Option<DocumentScope>,
@@ -811,6 +823,7 @@ fn lexical_snapshot<Guard>(
     admit: &impl Fn() -> Result<Guard>,
     arguments: &SearchArgs,
     fetch: usize,
+    weights: LexicalWeights,
 ) -> Result<LexicalSnapshot> {
     in_read_phase(context, source, admit, |reader| {
         let started = std::time::Instant::now();
@@ -837,9 +850,10 @@ fn lexical_snapshot<Guard>(
         transaction.commit().map_err(repo::db_error)?;
         let dir = index.tantivy_dir(reader.cache_root());
         drop(reader);
-        let hits = lexical_hits(context, &dir, arguments, fetch, scope.as_ref())?;
+        let hits = lexical_hits(context, &dir, arguments, fetch, scope.as_ref(), weights)?;
         Ok(LexicalSnapshot {
             index,
+            weights,
             hits,
             elapsed_ms: elapsed_ms(started),
             scope,
@@ -853,8 +867,9 @@ fn lexical_hits(
     arguments: &SearchArgs,
     fetch: usize,
     scope: Option<&DocumentScope>,
+    weights: LexicalWeights,
 ) -> Result<Vec<(u64, f32)>> {
-    let index = ReadIndex::open(dir)?;
+    let index = ReadIndex::open_with_weights(dir, weights)?;
     let hits = if let Some(scope) = scope {
         index.search_scoped(
             &arguments.query,
@@ -884,7 +899,14 @@ fn lexical_refill<Guard>(
         let index = snapshot_info(&reader, context.project, Some(snapshot.index))?;
         let dir = index.tantivy_dir(reader.cache_root());
         drop(reader);
-        lexical_hits(context, &dir, arguments, fetch, snapshot.scope.as_ref())
+        lexical_hits(
+            context,
+            &dir,
+            arguments,
+            fetch,
+            snapshot.scope.as_ref(),
+            snapshot.weights,
+        )
     })
 }
 
@@ -911,7 +933,14 @@ fn prepare_search<Guard>(
     arguments: SearchArgs,
 ) -> Result<PreparedSearch> {
     let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
-    let lexical = lexical_snapshot(context, source, admit, &arguments, fetch)?;
+    let lexical = lexical_snapshot(
+        context,
+        source,
+        admit,
+        &arguments,
+        fetch,
+        LexicalWeights::DEFAULTS,
+    )?;
     prepare_with_query_vector(
         context,
         source,

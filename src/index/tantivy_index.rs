@@ -1,5 +1,6 @@
 //! Tantivy schema and per-project index handle (FR-19, FR-21; NFR-1).
 
+use super::lexical_settings::LexicalWeights;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
@@ -244,7 +245,7 @@ impl IndexHandle {
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .map_err(tantivy_error)?;
-        let parser = build_parser(&index, &fields);
+        let parser = build_parser(&index, &fields, LexicalWeights::DEFAULTS);
 
         Ok(Self {
             writer: Some(writer),
@@ -431,13 +432,17 @@ impl ReadIndex {
     /// # Errors
     /// Returns [`Error::Internal`] when the index is missing or unreadable.
     pub fn open(dir: &Path) -> Result<Self> {
+        Self::open_with_weights(dir, LexicalWeights::DEFAULTS)
+    }
+
+    pub(crate) fn open_with_weights(dir: &Path, weights: LexicalWeights) -> Result<Self> {
         let (index, fields) = open_readable_index(dir)?;
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .map_err(tantivy_error)?;
-        let parser = build_parser(&index, &fields);
+        let parser = build_parser(&index, &fields, weights);
         Ok(Self {
             reader,
             parser,
@@ -575,6 +580,11 @@ fn search_reader(
         let min_raw = top.last().map_or(0.0, |(score, _)| *score);
         let mut hits = Vec::with_capacity(top.len());
         for (score, address) in top {
+            if !score.is_finite() {
+                return Err(Error::Query {
+                    message: "query produced a non-finite lexical score".into(),
+                });
+            }
             let document: TantivyDocument = searcher.doc(address).map_err(tantivy_error)?;
             let chunk = document
                 .get_first(fields.chunk_id)
@@ -809,7 +819,7 @@ fn register_tokenizer(index: &Index) {
 /// pending SQ10/SQ11), so the least-biased values are kept and guarded by
 /// `tests/search_bench.rs::metrics_match_baseline` (successor of the retired
 /// search-quality gate).
-fn build_parser(index: &Index, fields: &Fields) -> QueryParser {
+fn build_parser(index: &Index, fields: &Fields, weights: LexicalWeights) -> QueryParser {
     let mut parser = QueryParser::for_index(
         index,
         vec![
@@ -819,10 +829,10 @@ fn build_parser(index: &Index, fields: &Fields) -> QueryParser {
             fields.identifiers,
         ],
     );
-    parser.set_field_boost(fields.text, 1.0);
-    parser.set_field_boost(fields.title, 2.0);
-    parser.set_field_boost(fields.heading_path, 1.5);
-    parser.set_field_boost(fields.identifiers, 2.5);
+    parser.set_field_boost(fields.text, weights.text);
+    parser.set_field_boost(fields.title, weights.title);
+    parser.set_field_boost(fields.heading_path, weights.heading);
+    parser.set_field_boost(fields.identifiers, weights.identifiers);
     parser
 }
 

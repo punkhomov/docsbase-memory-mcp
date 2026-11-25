@@ -451,7 +451,7 @@ fn reload_panic_preserves_last_pair_and_allows_later_recovery() {
 }
 
 #[test]
-fn semantic_reload_invalidates_resident_rows_but_watch_timing_keeps_them() {
+fn semantic_reload_preserves_dense_rows_for_watch_and_lexical_settings() {
     let fixture = Fixture::with_global_config(Some("config_version = 2\n"));
     fixture.write_config("hybrid = false\nmax_docs_per_project = 11\n");
     let before = fixture
@@ -494,6 +494,18 @@ fn semantic_reload_invalidates_resident_rows_but_watch_timing_keeps_them() {
     assert!(
         Arc::ptr_eq(&rows, &load()),
         "timing is independent of dense data"
+    );
+    fixture.write_config(
+        "config_version = 2\nhybrid = false\nmax_docs_per_project = 11\n[lexical]\ntitle_boost = 6.0\n",
+    );
+    let lexical = fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .expect("lexical reload");
+    assert_ne!(same.lexical, lexical.lexical);
+    assert!(
+        Arc::ptr_eq(&rows, &load()),
+        "lexical weights leave dense rows resident"
     );
     fixture.write_config("hybrid = false\nmax_docs_per_project = 23\n");
     fixture

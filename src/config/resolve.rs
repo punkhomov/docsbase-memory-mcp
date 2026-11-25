@@ -6,6 +6,7 @@ use std::path::Path;
 use super::bootstrap::DefaultsContext;
 use super::schema::{Capabilities, Provenance, Resolved, SettingsSpec, SourceId};
 use crate::error::{Error, Result};
+use crate::index::lexical_settings::LexicalSpec;
 use crate::watch::settings::WatchSpec;
 
 /// A resolution owns one immutable defaults catalog and stages patches atomically.
@@ -160,6 +161,15 @@ impl Resolution<ConfigSpec> {
                 &mut self.settings.watch,
                 patch,
                 &self.defaults.watch,
+                &layer.source,
+                &mut self.origins,
+            )?;
+        }
+        if let Some(patch) = layer.lexical {
+            LexicalSpec::overlay(
+                &mut self.settings.lexical,
+                patch,
+                &self.defaults.initial.lexical,
                 &layer.source,
                 &mut self.origins,
             )?;

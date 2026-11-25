@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridCfg, HybridDefaults, HybridPatch, HybridSpec, ProvidersCfg};
 use crate::hybrid::remote_settings::{RemotePatch, RemoteSettings, RemoteSpec};
 use crate::index::settings::{ChunkSettings, ChunkSpec, IndexFilePatch};
+use crate::index::{LexicalWeights, lexical_settings::LexicalSpec};
 use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
 use crate::watch::{WatchSettings, settings::WatchSpec};
 use bootstrap::DefaultsContext;
@@ -56,6 +57,8 @@ pub struct Config {
     pub remote: RemoteSettings,
     /// Project policy for batching native watcher events.
     pub watch: WatchSettings,
+    /// Project BM25 field weights for lexical queries.
+    pub lexical: LexicalWeights,
     /// Register and index a project automatically on first connection (ADR-6: off).
     pub auto_index: bool,
     /// Hybrid retrieval feature flag (phase 2; off in v1).
@@ -245,12 +248,16 @@ impl Config {
     }
 
     pub(crate) fn changes_dense_state(&self, previous: &Self) -> bool {
-        if self.ann_search == previous.ann_search && self.watch == previous.watch {
+        if self.ann_search == previous.ann_search
+            && self.watch == previous.watch
+            && self.lexical == previous.lexical
+        {
             self != previous
         } else {
             let mut previous = previous.clone();
             previous.ann_search = self.ann_search;
             previous.watch = self.watch;
+            previous.lexical = self.lexical;
             self != &previous
         }
     }
@@ -399,6 +406,7 @@ impl SettingsSpec for ConfigSpec {
         fields.extend_from_slice(RemoteSpec::FIELDS);
         fields.extend_from_slice(AnnSearchSpec::FIELDS);
         fields.extend_from_slice(AnnBuildSpec::FIELDS);
+        fields.extend_from_slice(LexicalSpec::FIELDS);
         fields
     }
     fn defaults(context: &DefaultsContext) -> Self::Defaults {
@@ -417,6 +425,7 @@ impl SettingsSpec for ConfigSpec {
             daemon: DaemonSpec::initial(&daemon),
             remote: RemoteSpec::initial(&remote),
             watch: WatchSpec::initial(&watch),
+            lexical: LexicalSpec::defaults(context),
             auto_index: false,
             hybrid: false,
             hybrid_cfg: HybridSpec::initial(&hybrid),
@@ -581,7 +590,8 @@ impl ConfigSpec {
         ] {
             view.push(key, serde_json::json!(value), None)?;
         }
-        WatchSpec::view_fields(settings.watch, view)
+        WatchSpec::view_fields(settings.watch, view)?;
+        LexicalSpec::view_fields(settings.lexical, view)
     }
 }
 
