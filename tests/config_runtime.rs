@@ -1031,6 +1031,72 @@ fn v2_lexical_weights_change_real_search_without_reindexing() {
 }
 
 #[test]
+fn v2_lexical_collection_applies_a_query_only_penalty() {
+    let long = format!(
+        "# Example\n\n```text\nlexicalcollectionprobe lexicalcollectionprobe {}\n```\n",
+        "x".repeat(3_000)
+    );
+    let mut env = Env::new(&[
+        ("long.md", &long),
+        (
+            "short.md",
+            "# Example\n\nlexicalcollectionprobe filler1 filler2.\n",
+        ),
+    ]);
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[lexical]\nidentifiers_boost = 0.0\nlong_chunk_penalty = 1.0\ninitial_fetch_multiplier = 1\ninitial_fetch_additive = 0\nwidening_multiplier = 2\n",
+    )
+    .unwrap();
+    assert_eq!(env.run_json(&["index"])["stats"]["docs"], 2);
+    let query = [
+        "search",
+        "lexicalcollectionprobe",
+        "--limit",
+        "1",
+        "--explain",
+    ];
+    let unpenalized = env.run_json(&query);
+    assert_eq!(unpenalized["hits"][0]["path"], "long.md");
+    let generation = &unpenalized["meta"]["index_generation"];
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[lexical]\nlong_chunk_penalty = 0.125\n",
+    )
+    .unwrap();
+    let direct = env.run_json(&query);
+    assert_eq!(direct["hits"][0]["path"], "short.md");
+    assert_eq!(&direct["meta"]["index_generation"], generation);
+
+    env.start_daemon();
+    let daemon = env.run_json(&query);
+    assert_eq!(daemon["hits"], direct["hits"]);
+    assert_eq!(&daemon["meta"]["index_generation"], generation);
+
+    let effective = env.run_json(&["config", "effective"]);
+    let fields = effective["fields"].as_array().unwrap();
+    let field = |key| fields.iter().find(|entry| entry["key"] == key).unwrap();
+    assert_eq!(field("lexical.long_chunk_penalty")["value"], 0.125);
+    assert_eq!(
+        field("lexical.long_chunk_penalty")["source"]["kind"],
+        "project"
+    );
+    assert_eq!(field("lexical.initial_fetch_multiplier")["value"], 1);
+    assert_eq!(field("lexical.initial_fetch_additive")["value"], 0);
+    assert_eq!(field("lexical.widening_multiplier")["value"], 2);
+    assert_eq!(
+        field("lexical.widening_multiplier")["source"]["kind"],
+        "global"
+    );
+
+    fs::write(env.project_config(), "config_version = 2\n").unwrap();
+    let reopened = env.run_json(&query);
+    assert_eq!(reopened["hits"], unpenalized["hits"]);
+    assert_eq!(&reopened["meta"]["index_generation"], generation);
+}
+
+#[test]
 fn v2_lexical_weight_overflow_returns_a_query_error() {
     let env = Env::new(&[("needle.md", "# Guide\n\ninterestingweightword")]);
     for i in 0..20 {

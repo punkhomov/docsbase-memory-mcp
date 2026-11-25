@@ -23,7 +23,7 @@ use crate::hybrid::rrf::rrf_merge;
 use crate::hybrid::work::Cancellation;
 use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
-use crate::index::{LexicalWeights, QueryMode};
+use crate::index::{LexicalSettings, QueryMode, lexical_settings};
 use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
 use crate::search::budget::PayloadBudget;
 use crate::search::metadata::{MetadataReader, MetadataSource};
@@ -473,17 +473,18 @@ pub fn search_docs_from<Guard>(
     args: &Value,
     admit: impl Fn() -> Result<Guard>,
 ) -> Result<Value> {
-    search_docs_with_weights(context, source, args, admit, LexicalWeights::DEFAULTS)
+    let settings = lexical_settings::standalone()?;
+    search_docs_with_lexical_settings(context, source, args, admit, settings)
 }
 
-pub(super) fn search_docs_with_weights<Guard>(
+pub(super) fn search_docs_with_lexical_settings<Guard>(
     context: &SearchContext<'_>,
     source: MetadataSource<'_>,
     args: &Value,
     admit: impl Fn() -> Result<Guard>,
-    weights: LexicalWeights,
+    settings: LexicalSettings,
 ) -> Result<Value> {
-    match start_search(context, source, args, &admit, weights)? {
+    match start_search(context, source, args, &admit, settings)? {
         SearchStart::Complete(value) => Ok(value),
         SearchStart::Prepared(start) => {
             prepare_with_query_vector(context, source, &admit, start, None)?.finish(context.stages)
@@ -523,7 +524,7 @@ pub(super) fn start_search<Guard>(
     source: MetadataSource<'_>,
     args: &Value,
     admit: impl Fn() -> Result<Guard>,
-    weights: LexicalWeights,
+    settings: LexicalSettings,
 ) -> Result<SearchStart> {
     context.operation.check()?;
     if source.cache_root() != context.cache {
@@ -557,7 +558,7 @@ pub(super) fn start_search<Guard>(
         .map(SearchStart::Complete);
     }
     let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
-    let lexical = lexical_snapshot(context, source, &admit, &arguments, fetch, weights)?;
+    let lexical = lexical_snapshot(context, source, &admit, &arguments, fetch, settings)?;
     Ok(SearchStart::Prepared(StartedSearch {
         arguments,
         active,
@@ -811,7 +812,7 @@ pub(super) fn capture_dense(
 
 struct LexicalSnapshot {
     index: ProjectIndex,
-    weights: LexicalWeights,
+    settings: LexicalSettings,
     hits: Vec<(u64, f32)>,
     elapsed_ms: u64,
     scope: Option<DocumentScope>,
@@ -823,7 +824,7 @@ fn lexical_snapshot<Guard>(
     admit: &impl Fn() -> Result<Guard>,
     arguments: &SearchArgs,
     fetch: usize,
-    weights: LexicalWeights,
+    settings: LexicalSettings,
 ) -> Result<LexicalSnapshot> {
     in_read_phase(context, source, admit, |reader| {
         let started = std::time::Instant::now();
@@ -850,10 +851,10 @@ fn lexical_snapshot<Guard>(
         transaction.commit().map_err(repo::db_error)?;
         let dir = index.tantivy_dir(reader.cache_root());
         drop(reader);
-        let hits = lexical_hits(context, &dir, arguments, fetch, scope.as_ref(), weights)?;
+        let hits = lexical_hits(context, &dir, arguments, fetch, scope.as_ref(), settings)?;
         Ok(LexicalSnapshot {
             index,
-            weights,
+            settings,
             hits,
             elapsed_ms: elapsed_ms(started),
             scope,
@@ -867,9 +868,9 @@ fn lexical_hits(
     arguments: &SearchArgs,
     fetch: usize,
     scope: Option<&DocumentScope>,
-    weights: LexicalWeights,
+    settings: LexicalSettings,
 ) -> Result<Vec<(u64, f32)>> {
-    let index = ReadIndex::open_with_weights(dir, weights)?;
+    let index = ReadIndex::open_with_settings(dir, settings)?;
     let hits = if let Some(scope) = scope {
         index.search_scoped(
             &arguments.query,
@@ -905,7 +906,7 @@ fn lexical_refill<Guard>(
             arguments,
             fetch,
             snapshot.scope.as_ref(),
-            snapshot.weights,
+            snapshot.settings,
         )
     })
 }
@@ -939,7 +940,7 @@ fn prepare_search<Guard>(
         admit,
         &arguments,
         fetch,
-        LexicalWeights::DEFAULTS,
+        lexical_settings::standalone()?,
     )?;
     prepare_with_query_vector(
         context,

@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridCfg, HybridDefaults, HybridPatch, HybridSpec, ProvidersCfg};
 use crate::hybrid::remote_settings::{RemotePatch, RemoteSettings, RemoteSpec};
 use crate::index::settings::{ChunkSettings, ChunkSpec, IndexFilePatch};
-use crate::index::{LexicalWeights, lexical_settings::LexicalSpec};
+use crate::index::{LexicalSettings, lexical_settings::LexicalSpec};
 use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
 use crate::watch::{WatchSettings, settings::WatchSpec};
 use bootstrap::DefaultsContext;
@@ -57,8 +57,8 @@ pub struct Config {
     pub remote: RemoteSettings,
     /// Project policy for batching native watcher events.
     pub watch: WatchSettings,
-    /// Project BM25 field weights for lexical queries.
-    pub lexical: LexicalWeights,
+    /// Project BM25 scoring and candidate collection policy.
+    pub lexical: LexicalSettings,
     /// Register and index a project automatically on first connection (ADR-6: off).
     pub auto_index: bool,
     /// Hybrid retrieval feature flag (phase 2; off in v1).
@@ -296,7 +296,7 @@ impl Config {
         SearchSpec::validate(&self.search, &Capabilities::current())?;
         DaemonSpec::validate(&self.daemon, &Capabilities::current())?;
         RemoteSpec::validate(&self.remote, &Capabilities::current())?;
-        Ok(())
+        LexicalSpec::validate(&self.lexical, &Capabilities::current())
     }
 }
 

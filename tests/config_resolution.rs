@@ -807,3 +807,26 @@ fn v2_lexical_weights_reject_invalid_or_silent_scoring() {
         SourceId::Project(project.path().join(".docsbase.toml"))
     );
 }
+
+#[test]
+fn v2_lexical_collection_rejects_unsafe_score_or_growth() {
+    let global = TempDir::new().expect("global");
+    let project = TempDir::new().expect("project");
+    layer(&global, "config.toml", "config_version = 2\n");
+    for (key, value) in [
+        ("long_chunk_penalty", "0.0"),
+        ("long_chunk_penalty", "1e-50"),
+        ("long_chunk_penalty", "nan"),
+        ("long_chunk_penalty", "1.0000000000000002"),
+        ("initial_fetch_multiplier", "0"),
+        ("widening_multiplier", "1"),
+    ] {
+        layer(
+            &project,
+            ".docsbase.toml",
+            &format!("config_version = 2\n[lexical]\n{key} = {value}\n"),
+        );
+        let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+        assert!(error.to_string().contains(key), "{key} = {value}: {error}");
+    }
+}

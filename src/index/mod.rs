@@ -13,5 +13,7 @@ pub mod tokenizer;
 pub mod walk;
 
 mod query;
-pub use lexical_settings::LexicalWeights;
+pub use lexical_settings::LexicalSettings;
+/// Compatibility name for the resolved lexical search settings.
+pub use lexical_settings::LexicalSettings as LexicalWeights;
 pub use query::QueryMode;
