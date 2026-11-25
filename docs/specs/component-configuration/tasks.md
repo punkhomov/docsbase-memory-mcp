@@ -536,6 +536,16 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   для #79 FR-S2. План: [index-outcome-plan.md](index-outcome-plan.md). Scope — A-owned
   index/store плюс существующие wrapper endings; server/readiness/IPC остаются B.
 
+## Delta 2026-11-24 — CF10 и разбиение CF11
+
+- [x] Сопоставить размещения metadata на bounded fixture и определить
+  контракт head, seal, leases и recovery в
+  [storage-publication.md](storage-publication.md).
+- [ ] CF11a — реестр и accessor с legacy совместимостью.
+- [ ] CF11b — изолированный staging и нативная проверка sealing.
+- [ ] CF11c — durable CAS и совместимый snapshot демона и direct CLI.
+- [ ] CF11d — recovery/reclaim, budgets и настоящий согласованный apply.
+
 ## Delta 2026-11-24 — CF8a search-only library adoption
 
 - [x] **CF8a:** I33 project owner, checked immutable policy, additive built/loaded
@@ -600,12 +610,12 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   булева сокращения и отклонять несовместимый итог до записи. Проверить
   реальный CLI dry-run и путь записи под блокировкой без сети.
 
-## Delta 2026-11-24 — CF10 и разбиение CF11
+## Delta 2026-11-24 — CF5c, новые глобальные файлы
 
-- [x] Сопоставить размещения metadata на bounded fixture и определить
-  контракт head, seal, leases и recovery в
-  [storage-publication.md](storage-publication.md).
-- [ ] CF11a — реестр и accessor с legacy совместимостью.
-- [ ] CF11b — изолированный staging и нативная проверка sealing.
-- [ ] CF11c — durable CAS и совместимый snapshot демона и direct CLI.
-- [ ] CF11d — recovery/reclaim, budgets и настоящий согласованный apply.
+- Первый global write через connect и models use записывает v2. Предпросмотр
+  models use показывает тот же формат. Существующие файлы сохраняют версию.
+- Проверить фактическую запись и повторное разрешение, сохранение соседа
+  hybrid и provider configuration, и отсутствие записи при dry-run.
+- Переход для отсутствующего файла зависит от лексического запуска без
+  создания vector DB и штатного маршрута CLI index при работающем демоне.
+  Автоматическая конвертация существующих файлов остаётся отдельной задачей.
