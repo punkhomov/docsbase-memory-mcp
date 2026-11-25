@@ -320,6 +320,35 @@ until the backfill completes. `rerank = false` disables only the rerank
 stage - the order is then whatever `ranking` selects (`"lexical"` = strict
 BM25). [RRF settings](#reciprocal-rank-fusion)
 
+## Local model and runtime provisioning
+
+Use `[provisioning.models]` for `docsbase models fetch` and
+`[provisioning.runtime]` for `docsbase connect fastembed` in a global v2 file.
+Both commands resolve the policy before download. The values affect
+installation work and leave the identity and validity of installed artifacts intact.
+
+| Field | Models default | Runtime default |
+|---|---:|---:|
+| `max_file_bytes` | 2 GiB | |
+| `max_total_bytes` | 3 GiB | |
+| `max_archive_bytes` | | 256 MiB |
+| `max_library_bytes` | | 512 MiB |
+| `headroom_bytes` | 256 MiB | 256 MiB |
+| `connect_timeout_ms` | 30000 | 30000 |
+| `response_timeout_ms` | 120000 | 120000 |
+| `body_timeout_ms` | 300000 | 600000 |
+| `lock_attempts` | 50 | |
+| `lock_retry_delay_ms` | 20 | |
+
+Set size limits in bytes up to the defaults shown. The model total must
+cover its per-file limit. Free-space admission requires 1.5 times the
+pinned download size for models or the archive plus library sizes for
+the runtime, then adds the configured headroom. Set headroom to at least
+268435456 bytes. HTTP timeouts are positive and downloads stay on HTTPS.
+The model installer allows one or more exclusive lock attempts and zero
+delay between attempts. Use
+`docsbase config effective` to see the source of each value.
+
 ## Example
 
 Global `config.toml`:

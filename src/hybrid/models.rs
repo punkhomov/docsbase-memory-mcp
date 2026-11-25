@@ -24,46 +24,36 @@ use sha2::Digest;
 use crate::error::{Error, Result};
 use crate::platform;
 
-/// Per-file size cap (NFR-3): a single model file over 2 GiB is refused.
-pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub use super::provisioning::{
+    MIN_HEADROOM_BYTES as PREFLIGHT_HEADROOM_BYTES, MODEL_MAX_FILE_BYTES as MAX_FILE_BYTES,
+    MODEL_MAX_TOTAL_BYTES as MAX_TOTAL_BYTES,
+};
+use super::provisioning::{
+    ModelProvisioningSettings, ProvisioningSpec, http_agent, required_free_bytes,
+};
 
-/// Whole-model size cap (NFR-3): a model over 3 GiB in total is refused.
-pub const MAX_TOTAL_BYTES: u64 = 3 * 1024 * 1024 * 1024;
-
-/// Free-space headroom added to the fetch preflight (FR-13).
-pub const PREFLIGHT_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
-
-/// Bounded retries for the exclusive install lock (round-2 P1b): an
-/// embedder/reranker holds the revision `.lock` shared for its process
-/// lifetime, so a plain blocking `write()` would hang the admin CLI
-/// forever; mirror `with_config_write_lock`'s bounded try-retry.
-const EXCLUSIVE_LOCK_RETRIES: u32 = 50;
-const EXCLUSIVE_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
-
-/// Acquires the exclusive install lock with bounded try-retries. Returns
-/// `None` when the budget is exhausted (a loaded instance holds the lock
-/// shared for its lifetime). The lock file is opened and leaked exactly
-/// once per call — retries re-attempt `try_write` on the SAME lock, so
-/// contention leaks one fd+Box at most (round-4 C2; same `'static` leak
-/// pattern as `take_shared_lock`/`remove_cmd`).
-/// Runs `body` under the exclusive install lock with bounded try-retries
-/// (round-2 P1b): an embedder/reranker holds the lock shared for its
-/// process lifetime, so a blocking `write()` would hang the admin CLI
-/// forever. The lock file is opened and leaked exactly once per call, and
-/// the retry loop holds the guard only inside the success arm (it never
-/// escapes the loop, so the borrow checker can shrink its region — a
-/// returned `'static` guard cannot be reborrowed across iterations).
-///
-/// Returns `None` when the budget is exhausted (a loaded instance holds
-/// the lock shared).
-fn with_exclusive_lock<T>(dir: &Path, body: impl FnOnce() -> Result<T>) -> Result<Option<T>> {
-    let file = open_lock(dir)?;
-    let lock: &'static mut RwLock<std::fs::File> = Box::leak(Box::new(RwLock::new(file)));
-    for _ in 0..EXCLUSIVE_LOCK_RETRIES {
-        if let Ok(_guard) = lock.try_write() {
-            return Ok(Some(body()?));
+/// Runs the install with the model-root lock held exclusively. A loaded
+/// instance may hold a shared lock indefinitely, so contention uses the
+/// resolved attempt and wait limits instead of an unbounded write lock.
+fn with_exclusive_lock<T>(
+    dir: &Path,
+    policy: ModelProvisioningSettings,
+    body: impl FnOnce() -> Result<T>,
+) -> Result<Option<T>> {
+    let mut lock = RwLock::new(open_lock(dir)?);
+    let delay = std::time::Duration::from_millis(policy.lock_retry_delay_ms);
+    for attempt in 1..=policy.lock_attempts {
+        match lock.try_write() {
+            Ok(_guard) => return body().map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if attempt < policy.lock_attempts {
+                    std::thread::sleep(delay);
+                }
+            }
+            Err(error) => {
+                return Err(Error::internal_with_source("lock model for fetch", error));
+            }
         }
-        std::thread::sleep(EXCLUSIVE_LOCK_RETRY_DELAY);
     }
     Ok(None)
 }
@@ -407,52 +397,38 @@ pub trait ModelSource {
 /// `docsbase models fetch`; search/index never touch it (FR-12).
 pub struct HttpModelSource {
     agent: ureq::Agent,
+    max_file_bytes: u64,
 }
 
 impl HttpModelSource {
-    /// Builds an agent with explicit timeouts.
+    /// Builds an agent with the standalone provisioning policy.
     ///
     /// # Errors
-    /// Never fails today; the signature mirrors the trait-construction
-    /// contract.
+    /// Kept fallible for compatibility with existing callers.
     pub fn new() -> Result<Self> {
-        let agent = ureq::Agent::config_builder()
-            .timeout_connect(Some(std::time::Duration::from_secs(30)))
-            .timeout_recv_response(Some(std::time::Duration::from_mins(2)))
-            .timeout_recv_body(Some(std::time::Duration::from_mins(5)))
-            .build()
-            .new_agent();
-        Ok(Self { agent })
+        Ok(Self::with_policy(ProvisioningSpec::DEFAULTS.models))
+    }
+
+    /// Builds an agent with the resolved timeouts and transfer limit.
+    #[must_use]
+    pub fn with_policy(policy: ModelProvisioningSettings) -> Self {
+        let agent = http_agent(
+            policy.connect_timeout_ms,
+            policy.response_timeout_ms,
+            policy.body_timeout_ms,
+        );
+        Self {
+            agent,
+            max_file_bytes: policy.max_file_bytes,
+        }
     }
 }
 
 impl ModelSource for HttpModelSource {
     fn fetch(&self, repo: &str, revision: &str, path: &str) -> Result<Vec<u8>> {
-        let url = format!("https://huggingface.co/{repo}/resolve/{revision}/{path}");
-        let response = self.agent.get(&url).call().map_err(|err| {
-            let detail = match &err {
-                ureq::Error::StatusCode(code) => format!("HTTP {code}"),
-                _ => "transport error".to_owned(),
-            };
-            Error::Admission {
-                message: format!("{detail} fetching {url}: {err}; check the network and retry"),
-            }
-        })?;
-        let mut body = Vec::new();
-        response
-            .into_body()
-            .into_reader()
-            .take(MAX_FILE_BYTES + 1)
-            .read_to_end(&mut body)
-            .map_err(|err| Error::Admission {
-                message: format!("failed reading {url}: {err}"),
-            })?;
-        if u64::try_from(body.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
-            return Err(Error::Admission {
-                message: format!("{url} exceeds the per-file cap of {MAX_FILE_BYTES} bytes"),
-            });
-        }
-        Ok(body)
+        let mut bytes = Vec::new();
+        self.fetch_to(repo, revision, path, &mut bytes)?;
+        Ok(bytes)
     }
 
     fn fetch_to(
@@ -472,7 +448,8 @@ impl ModelSource for HttpModelSource {
                 message: format!("{detail} fetching {url}: {err}; check the network and retry"),
             }
         })?;
-        let mut reader = response.into_body().into_reader().take(MAX_FILE_BYTES + 1);
+        let max_file_bytes = self.max_file_bytes;
+        let mut reader = response.into_body().into_reader().take(max_file_bytes + 1);
         let mut buffer = vec![0_u8; 64 * 1024];
         let mut total: u64 = 0;
         loop {
@@ -483,9 +460,9 @@ impl ModelSource for HttpModelSource {
                 break;
             }
             total += read as u64;
-            if total > MAX_FILE_BYTES {
+            if total > max_file_bytes {
                 return Err(Error::Admission {
-                    message: format!("{url} exceeds the per-file cap of {MAX_FILE_BYTES} bytes"),
+                    message: format!("{url} exceeds the per-file cap of {max_file_bytes} bytes"),
                 });
             }
             sink.write_all(&buffer[..read])
@@ -689,20 +666,14 @@ pub fn expected_bytes(entry: &ModelEntry<'_>) -> u64 {
     entry.total_size()
 }
 
-/// Pure preflight arithmetic: `available` bytes free versus the required
-/// `1.5x expected + 256 MiB` (FR-13). Exposed separately so the error
-/// wording and the threshold are unit-tested without a filesystem.
-fn preflight_check(expected: u64, available: u64) -> Result<()> {
-    // 1.5x expected, in integer arithmetic (floor equals the float truncation
-    // for non-negative values).
-    let scaled =
-        expected.saturating_mul(PREFLIGHT_MULTIPLIER_NUMERATOR) / PREFLIGHT_MULTIPLIER_DENOMINATOR;
-    let required = scaled.saturating_add(PREFLIGHT_HEADROOM_BYTES);
+/// Tests the free-space requirement without opening the filesystem.
+fn preflight_check(expected: u64, available: u64, headroom: u64) -> Result<()> {
+    let required = required_free_bytes(expected, headroom);
     if available < required {
         return Err(Error::Admission {
             message: format!(
                 "needs ~{required} bytes free ({expected} for the files plus \
-                 {PREFLIGHT_HEADROOM_BYTES} headroom); {available} are available — \
+                 {headroom} headroom); {available} are available — \
                  free space or point DOCSBASE_CACHE_DIR elsewhere"
             ),
         });
@@ -712,11 +683,11 @@ fn preflight_check(expected: u64, available: u64) -> Result<()> {
 
 /// Free-space preflight for a directory (FR-13): `available` comes from the
 /// platform seam.
-fn preflight_free_space(entry: &ModelEntry<'_>, dir: &Path) -> Result<()> {
+fn preflight_free_space(entry: &ModelEntry<'_>, dir: &Path, headroom: u64) -> Result<()> {
     let available = platform::fs::available_space(dir).map_err(|err| {
         Error::internal_with_source(format!("check free space on {}", dir.display()), err)
     })?;
-    preflight_check(expected_bytes(entry), available)
+    preflight_check(expected_bytes(entry), available, headroom)
 }
 
 /// Installs one file: stream the download to `*.part` while counting bytes
@@ -751,6 +722,7 @@ fn fetch_one(
             file: &mut file,
             hasher: &mut hasher,
             count: &mut byte_len,
+            limit: spec.size,
         };
         source.fetch_to(entry.repo, entry.revision, spec.path, &mut sink)?;
     }
@@ -787,10 +759,17 @@ struct HashCountSink<'a> {
     file: &'a mut std::fs::File,
     hasher: &'a mut sha2::Sha256,
     count: &'a mut u64,
+    limit: u64,
 }
 
 impl std::io::Write for HashCountSink<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.len() as u64 > self.limit - *self.count {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "download exceeds the pinned size",
+            ));
+        }
         self.file.write(buf).inspect(|&written| {
             self.hasher.update(&buf[..written]);
             *self.count += written as u64;
@@ -822,28 +801,37 @@ fn write_complete(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The full install path: caps, preflight, per-file fetch, `.complete` last.
-/// On any failure the revision directory is removed so nothing usable remains
-/// (FR-6, P2).
-fn install_all(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) -> Result<()> {
-    if let Some(spec) = entry.files.iter().find(|spec| spec.size > MAX_FILE_BYTES) {
+fn admit_download(entry: &ModelEntry<'_>, policy: ModelProvisioningSettings) -> Result<()> {
+    let max_file = policy.max_file_bytes;
+    let max_total = policy.max_total_bytes;
+    if let Some(spec) = entry.files.iter().find(|spec| spec.size > max_file) {
         return Err(Error::Admission {
             message: format!(
-                "{}: file {} ({}) exceeds the per-file cap of {MAX_FILE_BYTES} bytes",
+                "{}: file {} ({}) exceeds the per-file cap of {max_file} bytes",
                 entry.name, spec.path, spec.size
             ),
         });
     }
-    if entry.total_size() > MAX_TOTAL_BYTES {
+    if entry.total_size() > max_total {
         return Err(Error::Admission {
             message: format!(
-                "{}: total {} bytes exceeds the model cap of {MAX_TOTAL_BYTES} bytes",
+                "{}: total {} bytes exceeds the model cap of {max_total} bytes",
                 entry.name,
                 entry.total_size()
             ),
         });
     }
-    preflight_free_space(entry, dir)?;
+    Ok(())
+}
+
+/// Transfers into the admitted staging directory and writes `.complete` last.
+fn install_all(
+    entry: &ModelEntry<'_>,
+    source: &dyn ModelSource,
+    dir: &Path,
+    policy: ModelProvisioningSettings,
+) -> Result<()> {
+    preflight_free_space(entry, dir, policy.headroom_bytes)?;
     platform::fs::secure_dir(dir).map_err(|err| {
         Error::internal_with_source(format!("create cache dir {}", dir.display()), err)
     })?;
@@ -863,21 +851,25 @@ fn install_all(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) -> 
 /// rename only after every file verified. A failed fetch (including a failed
 /// `--force` refetch) therefore never destroys a pre-existing verified
 /// cache — the reviewer finding C6 fix.
-pub(crate) fn fetch_into(
+fn fetch_into_with_policy(
     entry: &ModelEntry<'_>,
     source: &dyn ModelSource,
     force: bool,
     dir: &Path,
+    policy: ModelProvisioningSettings,
 ) -> Result<bool> {
     let complete = dir.join(".complete");
     if !force && complete.exists() {
         let file = open_lock(dir)?;
         let lock = RwLock::new(file);
-        let _guard = lock.read();
+        let _guard = lock.read().map_err(|error| {
+            Error::internal_with_source("lock cached model for verification", error)
+        })?;
         if verify_hashes(entry, dir)? {
             return Ok(false);
         }
     }
+    admit_download(entry, policy)?;
     // The exclusive install path: make sure the model root exists before
     // the lock (the lock file lives at the root, stable across promotes).
     // Only secure a root we create ourselves; an existing root (e.g. a
@@ -890,16 +882,16 @@ pub(crate) fn fetch_into(
             Error::internal_with_source(format!("create model root {}", root.display()), err)
         })?;
     }
-    // Bounded try-retry (see `EXCLUSIVE_LOCK_RETRIES`): never block
+    // Bounded try-retry: never block
     // silently on a process-lifetime shared holder (round-2 P1b); the lock
     // file is opened once and the guard never escapes the retry loop
     // (round-4 C2). The body returns whether an install actually ran
     // (staging → promote) vs. a verified-complete fast path.
-    let Some(installed) = with_exclusive_lock(dir, || {
+    let Some(installed) = with_exclusive_lock(dir, policy, || {
         if !force && complete.exists() && verify_hashes(entry, dir)? {
             return Ok(false);
         }
-        install_staged(entry, source, dir)?;
+        install_staged(entry, source, dir, policy)?;
         Ok(true)
     })?
     else {
@@ -961,7 +953,12 @@ fn sweep_backup_container_except(container: &Path, keep_tag: &str) {
 /// Performs the exclusive install: stage into a sibling dir, verify every
 /// file, then promote by rename. On failure the previous verified cache is
 /// preserved (round-1 C6). Runs only under the exclusive lock.
-fn install_staged(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) -> Result<()> {
+fn install_staged(
+    entry: &ModelEntry<'_>,
+    source: &dyn ModelSource,
+    dir: &Path,
+    policy: ModelProvisioningSettings,
+) -> Result<()> {
     // Staging/backup live as SIBLINGS of the model root (under
     // `<cache>/models`), not inside it (round-3 deepseek-4): a concurrent
     // `models remove` deletes the root subtree; a staging dir inside it
@@ -1014,7 +1011,7 @@ fn install_staged(entry: &ModelEntry<'_>, source: &dyn ModelSource, dir: &Path) 
         ));
     }
 
-    let result = install_all(entry, source, &staging);
+    let result = install_all(entry, source, &staging, policy);
     match result {
         Ok(()) => {
             // Promote the staging dir; move the previous dir aside first.
@@ -1092,9 +1089,32 @@ pub fn fetch(
     source: &dyn ModelSource,
     force: bool,
 ) -> Result<(PathBuf, bool)> {
+    fetch_with_policy(entry, source, force, ProvisioningSpec::DEFAULTS.models)
+}
+
+/// Fetches under the supplied complete provisioning policy.
+///
+/// # Errors
+/// Same as [`fetch`], with size, space and lock admission from `policy`.
+pub fn fetch_with_policy(
+    entry: &ModelEntry<'_>,
+    source: &dyn ModelSource,
+    force: bool,
+    policy: ModelProvisioningSettings,
+) -> Result<(PathBuf, bool)> {
     let dir = cache_dir(entry.name, entry.revision);
-    let installed = fetch_into(entry, source, force, &dir)?;
+    let installed = fetch_into_with_policy(entry, source, force, &dir, policy)?;
     Ok((dir, installed))
+}
+
+#[cfg(test)]
+pub(crate) fn fetch_into(
+    entry: &ModelEntry<'_>,
+    source: &dyn ModelSource,
+    force: bool,
+    dir: &Path,
+) -> Result<bool> {
+    fetch_into_with_policy(entry, source, force, dir, ProvisioningSpec::DEFAULTS.models)
 }
 
 /// Whether a revision is cached and fully verified. `false` covers both a
@@ -1385,7 +1405,7 @@ mod tests {
         let scaled = expected.saturating_mul(PREFLIGHT_MULTIPLIER_NUMERATOR)
             / PREFLIGHT_MULTIPLIER_DENOMINATOR;
         let required = scaled.saturating_add(PREFLIGHT_HEADROOM_BYTES);
-        let err = preflight_check(expected, 1000).expect_err("preflight");
+        let err = preflight_check(expected, 1000, PREFLIGHT_HEADROOM_BYTES).expect_err("preflight");
         match &err {
             Error::Admission { message } => {
                 assert!(
@@ -1397,7 +1417,7 @@ mod tests {
             other => panic!("expected admission, got {other:?}"),
         }
         assert!(
-            preflight_check(expected, required).is_ok(),
+            preflight_check(expected, required, PREFLIGHT_HEADROOM_BYTES).is_ok(),
             "exactly required passes"
         );
     }
@@ -1464,6 +1484,28 @@ mod tests {
         assert!(matches!(err, Error::Admission { .. }));
         assert!(!dir2.join(".complete").exists());
         assert_clean_failure_dir(&dir2);
+    }
+
+    #[test]
+    fn streaming_fetch_refuses_bytes_beyond_the_pinned_size() {
+        let tmp = TempDir::new().unwrap();
+        let dir = fake_cache_dir(tmp.path());
+        let entry = fake_entry();
+        let mut source = FakeSource::new(&entry);
+        source
+            .overrides
+            .insert("tokenizer.json".to_owned(), vec![0_u8; 513]);
+        let policy = ModelProvisioningSettings {
+            max_file_bytes: 4096,
+            max_total_bytes: 4096 + 512,
+            ..ProvisioningSpec::DEFAULTS.models
+        };
+        let error = fetch_into_with_policy(&entry, &source, false, &dir, policy).unwrap_err();
+        assert!(
+            error.to_string().contains("exceeds the pinned size"),
+            "{error}"
+        );
+        assert_clean_failure_dir(&dir);
     }
 
     #[test]
@@ -1710,6 +1752,30 @@ mod tests {
     }
 
     #[test]
+    fn reduced_file_budget_does_not_replace_an_existing_model() {
+        let tmp = TempDir::new().unwrap();
+        let dir = fake_cache_dir(tmp.path());
+        let entry = fake_entry();
+        let source = FakeSource::new(&entry);
+        assert!(fetch_into(&entry, &source, false, &dir).unwrap());
+        let calls = source.calls();
+
+        let policy = ModelProvisioningSettings {
+            max_file_bytes: 1,
+            ..ProvisioningSpec::DEFAULTS.models
+        };
+        let error = fetch_into_with_policy(&entry, &source, true, &dir, policy).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the per-file cap of 1 bytes")
+        );
+        assert_eq!(source.calls(), calls);
+        assert!(verify_hashes(&entry, &dir).unwrap());
+        assert!(!fetch_into_with_policy(&entry, &source, false, &dir, policy).unwrap());
+    }
+
+    #[test]
     fn fetch_force_refuses_boundedly_when_shared_lock_held() {
         // Round-2 P1b: the exclusive install lock must never block silently
         // on a loaded instance's process-lifetime shared guard — bounded
@@ -1730,7 +1796,10 @@ mod tests {
         // 2x (CI run 40895556715). 10x the nominal budget still catches a
         // retry loop that grew into a real backoff; a blocking lock would
         // hang outright, since the holder lives for the whole test.
-        let nominal = EXCLUSIVE_LOCK_RETRY_DELAY * EXCLUSIVE_LOCK_RETRIES;
+        let policy = ProvisioningSpec::DEFAULTS.models;
+        let nominal = std::time::Duration::from_millis(
+            policy.lock_retry_delay_ms * u64::from(policy.lock_attempts),
+        );
         assert!(
             started.elapsed() < nominal * 10,
             "refused promptly, not hung: took {:?}, nominal budget {nominal:?}",

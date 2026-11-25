@@ -23,6 +23,7 @@ pub mod generation;
 pub mod jobs;
 pub mod meta;
 pub mod provider;
+pub mod provisioning;
 #[cfg(feature = "hybrid-remote")]
 pub mod remote;
 pub mod remote_settings;

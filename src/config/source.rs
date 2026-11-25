@@ -63,6 +63,7 @@ pub struct SourceLayer {
     pub(super) document: toml::Table,
     pub(super) watch: Option<crate::watch::settings::WatchPatch>,
     pub(super) lexical: Option<crate::index::lexical_settings::LexicalPatch>,
+    pub(super) provisioning: Option<crate::hybrid::provisioning::ProvisioningPatch>,
     pub(super) rrf: Option<crate::hybrid::rrf::settings::RrfPatch>,
 }
 impl fmt::Debug for SourceLayer {
@@ -111,6 +112,7 @@ impl SourceLayer {
         let mut watch = None;
         let mut lexical = None;
         let mut rrf = None;
+        let mut provisioning = None;
         let mut hybrid_merge = None;
         let mut vector_store = None;
         if version == ConfigVersion::V2 {
@@ -143,6 +145,16 @@ impl SourceLayer {
                     value
                         .try_into()
                         .map_err(|_| invalid("invalid v2 rrf fields"))?,
+                );
+            }
+            if let Some(value) = fields.remove("provisioning") {
+                if matches!(source, SourceId::Project(_)) {
+                    return Err(invalid("provisioning is global-only"));
+                }
+                provisioning = Some(
+                    value
+                        .try_into()
+                        .map_err(|_| invalid("invalid v2 provisioning fields"))?,
                 );
             }
             let vector = fields.remove("vector_cache");
@@ -178,6 +190,7 @@ impl SourceLayer {
             watch,
             lexical,
             rrf,
+            provisioning,
         })
     }
     /// Exact source identity supplied by the caller; no canonicalization or I/O.

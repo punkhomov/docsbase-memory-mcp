@@ -108,6 +108,60 @@ fn view_defaults_and_v2_budget_do_not_invent_provenance() {
 }
 
 #[test]
+fn local_provisioning_policy_reports_global_overrides_and_rejects_project_scope() {
+    let root = tempfile::tempdir().unwrap();
+    let global = root.path().join("config.toml");
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(
+        &global,
+        "config_version = 2
+[provisioning.models]
+max_file_bytes = 12345
+lock_attempts = 1
+         [provisioning.runtime]
+response_timeout_ms = 15000
+",
+    )
+    .unwrap();
+    let output =
+        serde_json::to_value(view::load_from(root.path(), Some(&project)).unwrap()).unwrap();
+    let file_bytes = row(&output, "provisioning.models.max_file_bytes");
+    assert_eq!(file_bytes["value"], 12345);
+    assert_eq!(file_bytes["scope"], "machine");
+    assert_eq!(
+        file_bytes["source"],
+        json!({"kind":"global","value":global})
+    );
+    assert_eq!(
+        row(&output, "provisioning.models.lock_attempts")["value"],
+        1
+    );
+    assert_eq!(
+        row(&output, "provisioning.runtime.response_timeout_ms")["value"],
+        15000,
+    );
+    assert_eq!(
+        row(&output, "provisioning.runtime.body_timeout_ms")["source"],
+        json!({"kind":"defaults"}),
+    );
+
+    fs::write(
+        project.join(".docsbase.toml"),
+        "config_version = 2
+[provisioning.models]
+lock_attempts = 2
+",
+    )
+    .unwrap();
+    let error = resolve::load_from(root.path(), Some(&project)).unwrap_err();
+    assert!(
+        error.to_string().contains("provisioning is global-only"),
+        "{error}"
+    );
+}
+
+#[test]
 fn provider_projection_never_serializes_arbitrary_record_parameters() {
     use docsbase_memory::hybrid::provider::providers;
     let mut record = ProviderRecord::new(true);

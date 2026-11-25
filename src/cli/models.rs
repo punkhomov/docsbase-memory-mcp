@@ -145,8 +145,9 @@ fn local_model_name(raw: &str) -> anyhow::Result<&str> {
 pub fn fetch_cmd(args: &FetchArgs) -> anyhow::Result<()> {
     use crate::hybrid::models;
     let entry = models::entry(local_model_name(&args.name)?)?;
-    let source = models::HttpModelSource::new()?;
-    let (dir, installed) = models::fetch(entry, &source, args.force)?;
+    let policy = crate::config::Config::global()?.provisioning.models;
+    let source = models::HttpModelSource::with_policy(policy);
+    let (dir, installed) = models::fetch_with_policy(entry, &source, args.force, policy)?;
     println!(
         "fetched {} (revision {}) -> {}",
         entry.name,

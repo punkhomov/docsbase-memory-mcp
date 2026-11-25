@@ -811,3 +811,13 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - [ ] Подключение обычных CLI/daemon writers, контроль пикового объёма записи
   и поддержка namespace durability на Windows остаются условиями
   рабочего применения через пользовательские команды.
+
+## Delta 2026-11-25 — CF13, provisioning FastEmbed (I51, I59–I62)
+
+- Resolve the model-fetch and runtime-install policies from global v2.
+  Use one accepted snapshot for network, size, disk and model lock admission.
+- Preserve hard artifact bounds, pinned sizes and hashes, and the free-space
+  floor. Configured working caps may be lower and free-space headroom higher.
+  Testing uses real CLI refusal before network and local fixture sources.
+- Provisioning settings have runtime-only impact on these commands.
+  Existing model IDs, cached vectors, ANN recipes and inference are independent.
