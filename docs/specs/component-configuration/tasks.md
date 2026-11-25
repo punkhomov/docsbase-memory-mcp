@@ -856,3 +856,12 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   early invalid-policy refusal and separation from shared vector-store limits.
   Exercise exact streaming through the direct CLI and retain an expired slot
   while the cache still holds its slot pin.
+
+## Delta 2026-11-25 — CF9 I08, Tantivy writer policy
+
+- Resolve global v2 `index.writer` independently of project chunking.
+  Validate arena bytes per worker and explicit worker and merge counts.
+- Use the captured settings in direct/daemon indexing, sync, watcher and
+  isolated generation builds. Keep typed compatibility defaults.
+- Exercise a non-default native writer, invalid preflight and no rebuild on
+  a writer-only change. Preserve the default search benchmark.

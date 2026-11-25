@@ -11,6 +11,7 @@ pub mod tantivy_index;
 pub mod textnorm;
 pub mod tokenizer;
 pub mod walk;
+pub mod writer_settings;
 
 mod query;
 pub use lexical_settings::LexicalSettings;

@@ -565,3 +565,13 @@ The I28/I29 source rules preserve the CF6b typed zero semantics. A zero
 resident cap disables retention within that cap, and a zero minimum admits
 nonempty corpora subject to the other ANN checks. Query cache capacities and
 the generation-retention count must be positive.
+
+## Delta 2026-11-25 — I08, lexical writer
+
+`index.writer.heap_bytes` (20,000,000), `worker_threads` (1) and
+`merge_threads` (4) are global v2 policy. The default heap always selected
+one indexing worker in pinned Tantivy. Threads are limited to the existing
+eight-worker automatic envelope and the heap split obeys the per-worker arena
+limits of Tantivy 0.26.2. Merge threads also use an explicit deployment
+limit. Heap policy guides index segment creation and is independent of RSS
+or persisted recipes.

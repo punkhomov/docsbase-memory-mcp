@@ -22,10 +22,6 @@ use crate::index::chunk::{CHUNK_OVERLAP, Chunk};
 use crate::index::job::MAX_CHUNK_CHARS;
 use crate::index::tokenizer::{self, IdentifierTokenizer};
 
-/// Writer heap: tantivy's minimum is 15 MB; 20 MB keeps a single indexing
-/// thread without growing the RSS of short-lived CLI runs much.
-const WRITER_HEAP_BYTES: usize = 20_000_000;
-
 /// In-process commit-fault budget, scoped by index-dir prefix (test seam:
 /// the watcher arms it to model a commit that died mid-way; see
 /// `tests/mcp_registry.rs::watcher_recovers_from_a_commit_failure`).
@@ -185,6 +181,19 @@ impl IndexHandle {
     /// # Errors
     /// Returns [`Error::Internal`] on IO/tantivy failures or a schema mismatch.
     pub fn open_or_create(dir: &Path) -> Result<Self> {
+        Self::open_or_create_with_settings(
+            dir,
+            super::writer_settings::IndexWriterSettings::owner_defaults(),
+        )
+    }
+
+    /// Opens an index writer using the captured worker and arena policy.
+    /// # Errors
+    /// Returns the same I/O and Tantivy failures as [`Self::open_or_create`].
+    pub fn open_or_create_with_settings(
+        dir: &Path,
+        writer_settings: super::writer_settings::IndexWriterSettings,
+    ) -> Result<Self> {
         let search_settings = lexical_settings::standalone()?;
         std::fs::create_dir_all(dir).map_err(|err| {
             Error::internal_with_source(format!("create index dir {}: {err}", dir.display()), err)
@@ -237,7 +246,9 @@ impl IndexHandle {
             index
         };
         let fields = fields_from(&index.schema())?;
-        let writer: IndexWriter = index.writer(WRITER_HEAP_BYTES).map_err(tantivy_error)?;
+        let writer: IndexWriter = index
+            .writer_with_options(writer_settings.options())
+            .map_err(tantivy_error)?;
         let search = ReadIndex::from_index(&index, fields, search_settings)?;
 
         Ok(Self {
@@ -911,6 +922,78 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
 
+    #[test]
+    fn captured_writer_policy_starts_two_real_indexing_workers() {
+        use std::sync::{Arc, Condvar, Mutex, mpsc};
+        use std::thread;
+        use tantivy::tokenizer::Tokenizer;
+
+        use crate::config::Config;
+
+        #[derive(Clone)]
+        struct WorkerProbe {
+            entered: mpsc::Sender<thread::ThreadId>,
+            release: Arc<(Mutex<bool>, Condvar)>,
+            tokenizer: IdentifierTokenizer,
+        }
+
+        impl Tokenizer for WorkerProbe {
+            type TokenStream<'a> = tokenizer::IdentifierTokenStream;
+
+            fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+                self.entered.send(thread::current().id()).unwrap();
+                let (released, ready) = &*self.release;
+                let guarded = released.lock().unwrap();
+                drop(
+                    ready
+                        .wait_timeout_while(guarded, Duration::from_secs(10), |value| !*value)
+                        .unwrap(),
+                );
+                self.tokenizer.token_stream(text)
+            }
+        }
+
+        let global = tempfile::tempdir().unwrap();
+        let default = Config::global_from(global.path()).unwrap();
+        std::fs::write(
+            global.path().join("config.toml"),
+            "config_version = 2\n[index.writer]\nheap_bytes = 30000000\nworker_threads = 2\nmerge_threads = 1\n",
+        )
+        .unwrap();
+        let policy = Config::global_from(global.path()).unwrap();
+        assert_ne!(policy.index_writer, default.index_writer);
+        assert!(!policy.changes_dense_state(&default));
+
+        let mut index = IndexHandle::open_or_create_with_settings(
+            &global.path().join("tantivy"),
+            policy.index_writer,
+        )
+        .unwrap();
+        let (entered, workers) = mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let writer = index.writer.as_ref().unwrap();
+        writer.index().tokenizers().register(
+            tokenizer::NAME,
+            WorkerProbe {
+                entered,
+                release: release.clone(),
+                tokenizer: IdentifierTokenizer::default(),
+            },
+        );
+        let text = index.search.fields.text;
+        writer
+            .add_document(tantivy::doc!(text => "first probe"))
+            .unwrap();
+        writer
+            .add_document(tantivy::doc!(text => "second probe"))
+            .unwrap();
+        let first = workers.recv_timeout(Duration::from_secs(5));
+        let second = workers.recv_timeout(Duration::from_secs(5));
+        *release.0.lock().unwrap() = true;
+        release.1.notify_all();
+        assert_ne!(first.unwrap(), second.unwrap());
+        index.commit().unwrap();
+    }
     /// Scripted removal backend: replays queued outcomes, counts calls.
     struct Script {
         outcomes: RefCell<VecDeque<std::io::Result<()>>>,

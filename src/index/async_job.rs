@@ -246,10 +246,10 @@ impl IndexState {
             registry::set_status(db, context.project.id, ProjectStatus::Indexing)?;
         }
         self.attempt = Some(outcome::begin(db, &context.project)?);
-        self.index = Some(IndexHandle::open_or_create(&lifecycle::index_dir(
-            &context.cache,
-            context.project.id,
-        ))?);
+        self.index = Some(IndexHandle::open_or_create_with_settings(
+            &lifecycle::index_dir(&context.cache, context.project.id),
+            context.config.index_writer,
+        )?);
         self.plan
             .as_mut()
             .ok_or_else(|| Error::internal("job plan absent"))?

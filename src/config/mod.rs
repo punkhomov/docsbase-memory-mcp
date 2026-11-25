@@ -14,6 +14,7 @@ use crate::hybrid::provisioning::{ProvisioningSettings, ProvisioningSpec};
 use crate::hybrid::remote_settings::{RemotePatch, RemoteSettings, RemoteSpec};
 use crate::hybrid::rrf::{RrfSettings, settings::RrfSpec};
 use crate::index::settings::{ChunkSettings, ChunkSpec, IndexFilePatch};
+use crate::index::writer_settings::{IndexWriterSettings, WriterSpec};
 use crate::index::{LexicalSettings, lexical_settings::LexicalSpec};
 use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
 use crate::store::settings::{DbSettings, DbSpec, ReadPoolSettings, ReadPoolSpec};
@@ -53,6 +54,8 @@ pub struct Config {
     pub max_docs_per_project: usize,
     /// Geometry of Markdown chunks written by the indexer.
     pub chunk: ChunkSettings,
+    /// Resource policy for each lexical index writer.
+    pub index_writer: IndexWriterSettings,
     /// Global-only policy for request deadlines and owned search payload admission.
     pub search: SearchSettings,
     /// Installation-wide SQLite connection policy.
@@ -270,6 +273,7 @@ impl Config {
             && self.watch == previous.watch
             && self.lexical == previous.lexical
             && self.rrf == previous.rrf
+            && self.index_writer == previous.index_writer
         {
             self != previous
         } else {
@@ -278,6 +282,7 @@ impl Config {
             previous.watch = self.watch;
             previous.lexical = self.lexical;
             previous.rrf = self.rrf;
+            previous.index_writer = self.index_writer;
             self != &previous
         }
     }
@@ -430,6 +435,7 @@ impl SettingsSpec for ConfigSpec {
         fields.extend_from_slice(ReadPoolSpec::FIELDS);
         fields.extend(DenseSpec::file_fields());
         fields.extend_from_slice(ChunkSpec::FIELDS);
+        fields.extend_from_slice(WriterSpec::FIELDS);
         fields.extend_from_slice(DaemonSpec::FIELDS);
         fields.extend_from_slice(RemoteSpec::FIELDS);
         fields.extend_from_slice(AnnSearchSpec::FIELDS);
@@ -451,6 +457,7 @@ impl SettingsSpec for ConfigSpec {
             max_file_size: 1_048_576,
             max_docs_per_project: 20_000,
             chunk: ChunkSpec::initial(&ChunkSpec::defaults(context)),
+            index_writer: WriterSpec::defaults(context),
             search: SearchSpec::initial(&search),
             store: DbSpec::defaults(context),
             read_pool: ReadPoolSpec::defaults(context),
@@ -619,6 +626,7 @@ impl ConfigSpec {
         )?;
         settings.dense.view_fields(view)?;
         settings.chunk.view_fields(view)?;
+        settings.index_writer.view_fields(view)?;
         DaemonSpec::view_fields(&settings.daemon, view)?;
         RemoteSpec::view_fields(&settings.remote, view)?;
         ProvisioningSpec::view_fields(&settings.provisioning, view)?;

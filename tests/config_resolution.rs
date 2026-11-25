@@ -993,6 +993,84 @@ max_bytes = 8192
 }
 
 #[test]
+fn v2_index_writer_policy_is_global_and_keeps_chunk_overrides_independent() {
+    let global = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    layer(
+        &global,
+        "config.toml",
+        "config_version = 2\n[index.writer]\nheap_bytes = 30000000\nworker_threads = 2\n[index.chunk]\noverlap_chars = 90\n",
+    );
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2\n[index.chunk]\nmax_chars = 1000\n",
+    );
+    let view =
+        docsbase_memory::config::view::load_from(global.path(), Some(project.path())).unwrap();
+    let field = |key| view.fields.iter().find(|field| field.key == key).unwrap();
+    assert_eq!(field("index.writer.worker_threads").value, 2);
+    assert_eq!(field("index.writer.heap_bytes").value, 30_000_000);
+    assert_eq!(field("index.writer.merge_threads").value, 4);
+    assert_eq!(field("index.chunk.max_chars").value, 1000);
+    assert_eq!(field("index.chunk.overlap_chars").value, 90);
+    assert_eq!(
+        field("index.writer.merge_threads").origin.source,
+        SourceId::Defaults
+    );
+    assert_eq!(
+        field("index.writer.heap_bytes").origin.source,
+        SourceId::Global(global.path().join("config.toml"))
+    );
+    assert_eq!(
+        field("index.chunk.max_chars").origin.source,
+        SourceId::Project(project.path().join(".docsbase.toml"))
+    );
+
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2\n[index.writer]\nworker_threads = 2\n",
+    );
+    let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+    assert!(
+        error.to_string().contains("index.writer is global-only"),
+        "{error}"
+    );
+
+    for (value, expected) in [
+        (
+            "[index]\nwriter = []",
+            "index.writer settings require a table",
+        ),
+        (
+            "[index.writer]\nworker_threads = 0",
+            "index.writer thread counts",
+        ),
+        (
+            "[index.writer]\nmerge_threads = 9",
+            "index.writer thread counts",
+        ),
+        (
+            "[index.writer]\nworker_threads = 2\nheap_bytes = 29999999",
+            "index.writer.heap_bytes",
+        ),
+        (
+            "[index.writer]\nheap_bytes = 4293967295",
+            "index.writer.heap_bytes",
+        ),
+    ] {
+        layer(
+            &global,
+            "config.toml",
+            &format!("config_version = 2\n{value}\n"),
+        );
+        let error = Config::global_from(global.path()).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
 fn v2_lexical_weights_reject_invalid_or_silent_scoring() {
     let global = TempDir::new().expect("global");
     let project = TempDir::new().expect("project");

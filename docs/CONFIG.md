@@ -945,3 +945,26 @@ recomputes chunks. Existing index files are retained until the index job
 updates them. For an existing Website deployment, stop the daemon and run
 `docsbase index ABS` once before restarting `docsbase serve --project ABS`.
 Website launch checks the schema before opening the index for writes.
+
+## Lexical index writer settings
+
+Set `[index.writer]` in global v2 `config.toml`. Omitted fields keep the
+defaults shown here.
+
+```toml
+[index.writer]
+heap_bytes = 20000000
+worker_threads = 1
+merge_threads = 4
+```
+
+The heap is divided evenly among indexing workers. Each worker must receive
+at least 15,000,000 bytes and fewer than 4,293,967,295 bytes. Both thread
+counts are between 1 and 8. The heap is Tantivy's per-writer indexing arena
+target. Search buffers, merge memory and the rest of the process have their
+own resource use.
+
+Direct index and sync commands apply the current global settings. Restart
+the daemon to apply them to daemon jobs and watcher updates. These settings
+leave chunk recipes and existing indexes intact. `docsbase config effective`
+reports each value and its source.

@@ -1575,3 +1575,17 @@ test. A fixed-clock regression reproduced a shared temporary directory
 between overlapping recipes. ANN publishers now reserve their own directory
 with an atomic sequence and exclusive creation. Targeted persistence and
 real graph tests passed, and independent review approved the ownership fix.
+
+## 2026-11-25 — CF9 I08, настройки писателя Tantivy
+
+Task CF9 I08: complete (explicit heap, indexing worker and merge worker
+policy from global v2 reaches direct and daemon jobs, watcher and generation
+staging). The effective view retains the individual defaults and overrides.
+Tantivy 0.26.2 accepts the tested lower bound of 15 MB per indexing worker.
+
+Ruling: review found that generic equality could invalidate dense state on
+a writer-only change. Dense state comparison now excludes writer policy.
+The v2 test observes two distinct indexing workers inside Tantivy and a
+real restarted-daemon test verifies that the unchanged file is skipped
+with the same index generation. Full cli-full, Clippy, fmt and offline
+checks passed on Rust 1.100.0 against the existing search baseline.

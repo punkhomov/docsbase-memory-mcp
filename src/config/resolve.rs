@@ -10,6 +10,7 @@ use crate::hybrid::dense_settings::DenseSpec;
 use crate::hybrid::provisioning::ProvisioningSpec;
 use crate::hybrid::rrf::settings::RrfSpec;
 use crate::index::lexical_settings::LexicalSpec;
+use crate::index::writer_settings::WriterSpec;
 use crate::store::settings::{DbSpec, ReadPoolSpec};
 use crate::watch::settings::WatchSpec;
 
@@ -225,6 +226,15 @@ impl Resolution<ConfigSpec> {
                 &mut self.origins,
             )?;
             DenseSpec::validate(&self.settings.dense, &self.capabilities)?;
+        }
+        if let Some(patch) = layer.index_writer {
+            WriterSpec::overlay(
+                &mut self.settings.index_writer,
+                patch,
+                &self.defaults.initial.index_writer,
+                &layer.source,
+                &mut self.origins,
+            )?;
         }
         self.validate()
             .map_err(|_| invalid("invalid effective settings in versioned source"))
