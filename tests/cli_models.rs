@@ -690,7 +690,67 @@ fn models_use_refuses_invalid_project_candidates_under_v2_without_source_text() 
         let stderr = stderr_of(&output);
         assert!(stderr.contains(reason), "{stderr}");
         assert!(!stderr.contains("SOURCE_CANARY_904"));
-        assert_eq!(output.stdout, []);
+        assert_eq!(output.stdout.as_slice(), b"");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), source);
     }
+}
+
+#[test]
+fn models_use_v2_preview_obeys_the_project_source_byte_limit() {
+    let env = Env::new();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(env.config.path().join("config.toml"), "config_version=2\n").unwrap();
+    let path = project.path().join(".docsbase.toml");
+    let limit = usize::try_from(docsbase_memory::limits::MAX_STATE_BYTES).unwrap();
+    let prefix = "config_version=2\n#";
+    let at_limit = format!("{prefix}{}", " ".repeat(limit - prefix.len()));
+    let preview = || {
+        env.cmd()
+            .current_dir(project.path())
+            .args([
+                "models",
+                "use",
+                "embed",
+                "fastembed/bge-small-en-v1.5",
+                "--dry-run",
+            ])
+            .output()
+            .unwrap()
+    };
+
+    std::fs::write(&path, &at_limit).unwrap();
+    let accepted = preview();
+    assert!(accepted.status.success(), "{}", stderr_of(&accepted));
+    assert_eq!(std::fs::read(&path).unwrap(), at_limit.as_bytes());
+
+    let oversized = format!("{at_limit} ");
+    std::fs::write(&path, &oversized).unwrap();
+    let refused = preview();
+    assert!(
+        !refused.status.success(),
+        "oversized project source was accepted"
+    );
+    assert!(
+        stderr_of(&refused).contains("trusted byte limit"),
+        "{refused:?}"
+    );
+    assert_eq!(refused.stdout.as_slice(), b"");
+    assert_eq!(std::fs::read(&path).unwrap(), oversized.as_bytes());
+    assert!(!path.with_extension("toml.tmp").exists());
+
+    // Keep the original input within budget but preserve a long value in
+    // the serialized candidate. Adding the model stage must overflow.
+    let key = "config_version = 2\nignores = [\"";
+    let suffix = "\"]\n";
+    let at_limit = format!(
+        "{key}{}{suffix}",
+        "x".repeat(limit - key.len() - suffix.len())
+    );
+    std::fs::write(&path, &at_limit).unwrap();
+    let refused = preview();
+    assert!(!refused.status.success(), "rendered candidate was accepted");
+    assert!(stderr_of(&refused).contains("rendered configuration exceeds"));
+    assert_eq!(refused.stdout.as_slice(), b"");
+    assert_eq!(std::fs::read(&path).unwrap(), at_limit.as_bytes());
+    assert!(!path.with_extension("toml.tmp").exists());
 }

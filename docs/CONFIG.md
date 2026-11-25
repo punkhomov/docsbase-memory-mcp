@@ -16,6 +16,11 @@ Environment overrides (highest-priority directory resolution, used by tests):
 - `DOCSBASE_DATA_DIR` — installed binary + `install.json`
 - `DOCSBASE_CONFIG_DIR` — global `config.toml` location
 
+Global and project TOML sources have a 1 MiB limit. `models use` and
+`connect` apply the same limit before parsing the current file and before
+publishing a replacement. The `models use --dry-run` preview also applies
+the limit. A refused edit leaves the source intact.
+
 ## Reloading configuration
 
 The daemon reads global configuration at startup; changing it requires a daemon

@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 
+use crate::config::source::{read_edit_document, render_edit_document};
 use crate::error::Error;
 use crate::hybrid::config::{
     DEFAULT_RERANK_WINDOW, MAX_RERANK_WINDOW, MIN_RERANK_WINDOW, PROVIDER_OPENROUTER,
@@ -397,11 +398,13 @@ fn selected_pins() -> (Option<String>, Option<String>) {
             rerank = Some(format!("{provider}/{model}@w{window}"));
         }
     };
-    if let Ok(Some(root)) = read_global_toml() {
+    if let Ok(path) = global_config_file()
+        && let Ok(Some(root)) = read_edit_document(&path)
+    {
         collect(&root);
     }
     if let Ok(cwd) = std::env::current_dir()
-        && let Ok(Some(root)) = read_project_toml(&cwd.join(".docsbase.toml"))
+        && let Ok(Some(root)) = read_edit_document(&cwd.join(".docsbase.toml"))
     {
         collect(&root);
     }
@@ -507,12 +510,12 @@ pub fn run(args: &UseArgs) -> anyhow::Result<()> {
         // Preview the full merged file exactly as the write would produce it
         // (unrelated keys preserved; panel C12).
         let preview = preview_merged(existing.as_ref(), &table);
-        println!(
-            "{}",
-            toml::to_string(&preview)
-                .map_err(|err| Error::internal_with_source("render hybrid config", err))?
-        );
+        print!("{}", render_edit_document(&preview)?);
         return Ok(());
+    }
+    if resolved.is_none() {
+        // The v2 merge already checked its serialized candidate.
+        render_edit_document(&preview_merged(existing.as_ref(), &table))?;
     }
 
     probe_stage(&probe)?;
@@ -562,45 +565,11 @@ fn apply_stage_locked_with_wait(
     )
 }
 
-/// Reads the editable TOML and seeds v2 when creating a global file.
+/// Reads a bounded source and seeds v2 when creating a global file.
 fn read_edit_base(path: &std::path::Path) -> anyhow::Result<Option<toml::Value>> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => {
-            let value: toml::Value = toml::from_str(&raw).map_err(|err| {
-                if crate::config::resolve::has_version_header(raw.as_bytes()) {
-                    return Error::Admission {
-                        message: "invalid versioned configuration TOML".into(),
-                    };
-                }
-                Error::internal_with_source(format!("parse {}", path.display()), err)
-            })?;
-            Ok(Some(value))
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let global = path.file_name().is_some_and(|name| name == "config.toml");
-            Ok(global.then(crate::config::source::new_global_document))
-        }
-        Err(err) => {
-            Err(Error::internal_with_source(format!("read {}", path.display()), err).into())
-        }
-    }
-}
-
-/// Reads the project file as an untyped table; missing file means "no
-/// local overrides yet". Comments are not preserved on rewrite.
-fn read_project_toml(path: &std::path::Path) -> anyhow::Result<Option<toml::Value>> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => {
-            let value: toml::Value = toml::from_str(&raw).map_err(|err| {
-                Error::internal_with_source(format!("parse {}", path.display()), err)
-            })?;
-            Ok(Some(value))
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => {
-            Err(Error::internal_with_source(format!("read {}", path.display()), err).into())
-        }
-    }
+    let document = read_edit_document(path)?;
+    let global = path.file_name().is_some_and(|name| name == "config.toml");
+    Ok(document.or_else(|| global.then(crate::config::source::new_global_document)))
 }
 
 /// Where `models use` writes: the project `.docsbase.toml` or the machine
@@ -875,7 +844,7 @@ fn v2_hybrid_summary(
     } else {
         SourceId::Global(path.to_owned())
     };
-    let rendered = toml::to_string(document)?;
+    let rendered = render_edit_document(document)?;
     let layer = SourceLayer::parse(source, &rendered)?;
     Ok(effective_hybrid_summary(
         &crate::config::resolve::resolve_v2_edit(&layer, global)?,
@@ -1164,17 +1133,6 @@ fn probe_stage(probe: &StageProbe) -> anyhow::Result<()> {
     }
 }
 
-/// Reads the global config file; a missing file means "no global overrides
-/// yet" (same semantics as the project reader).
-fn read_global_toml() -> anyhow::Result<Option<toml::Value>> {
-    let path = global_config_file()?;
-    if path.exists() {
-        read_project_toml(&path)
-    } else {
-        Ok(None)
-    }
-}
-
 /// Global config file (`DOCSBASE_CONFIG_DIR` override honored).
 ///
 /// # Errors
@@ -1222,8 +1180,7 @@ fn write_project_toml(
         ))
     })?;
     map.insert("hybrid".to_owned(), hybrid.clone());
-    let rendered =
-        toml::to_string(&root).map_err(|err| Error::internal_with_source("render config", err))?;
+    let rendered = render_edit_document(&root)?;
     let tmp = path.with_extension("toml.tmp");
     // Temp + fsync + rename, like every other atomic publish in the feature
     // (round-5 deepseek: a plain `write` can leave a truncated config after
@@ -1833,6 +1790,53 @@ mod tests {
     }
 
     #[test]
+    fn contended_model_write_refuses_a_new_oversized_source() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let initial = "config_version=2\n";
+        std::fs::write(&path, initial).unwrap();
+        let padding = usize::try_from(crate::limits::MAX_STATE_BYTES).unwrap();
+        let oversized = format!("{initial}#{}", " ".repeat(padding));
+        let watchdog = Duration::from_mins(1);
+        with_env("DOCSBASE_DATA_DIR", dir.path(), || {
+            let (contended, observe_contention) = mpsc::channel();
+            let (resume, proceed) = mpsc::channel();
+            let writer = crate::config::paths::with_config_write_lock(&path, || {
+                let path = path.clone();
+                let worker_path = path.clone();
+                let writer = std::thread::spawn(move || {
+                    apply_stage_locked_with_wait(
+                        &worker_path,
+                        "embedding",
+                        embedding_stage("openrouter", "new/e", 256),
+                        |_| {
+                            contended.send(()).expect("ack contention");
+                            proceed.recv_timeout(watchdog).expect("resume writer");
+                        },
+                    )
+                });
+                observe_contention
+                    .recv_timeout(watchdog)
+                    .expect("writer waits");
+                std::fs::write(path, &oversized)?;
+                Ok(writer)
+            })
+            .expect("replace config under lock");
+            resume.send(()).expect("source replaced");
+            let error = writer.join().unwrap().expect_err("refuse latest source");
+            assert!(
+                error.to_string().contains("over the trusted byte limit"),
+                "{error}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), oversized.as_bytes());
+            assert!(!path.with_extension("toml.tmp").exists());
+        });
+    }
+
+    #[test]
     fn global_write_preserves_providers_and_unrelated_sections() {
         let dir = tempfile::TempDir::new().expect("tmp");
         let config = dir.path().join("config.toml");
@@ -1841,7 +1845,7 @@ mod tests {
             "max_file_size = 1\n[providers.fastembed]\nenabled = true\n",
         )
         .expect("seed");
-        let existing = read_project_toml(&config).expect("read").expect("some");
+        let existing = read_edit_document(&config).expect("read").expect("some");
         let table = merge_stage(None, "embedding", embedding_stage("fastembed", "bge", 384))
             .expect("merge");
         with_env("DOCSBASE_CONFIG_DIR", dir.path(), || {
