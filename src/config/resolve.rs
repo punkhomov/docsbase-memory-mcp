@@ -95,13 +95,12 @@ pub fn resolve_component<S: SettingsSpec>(
 }
 
 use super::source::{SourceLayer, invalid};
-use super::{Config, ConfigSpec, read_capped, read_project};
+use super::{Config, ConfigSpec, read_capped, read_capped_if_exists, read_project};
 
 fn global_resolution(config_dir: &Path) -> Result<Resolution<ConfigSpec>> {
     let mut resolution = Resolution::new(&DefaultsContext::standalone());
     let path = config_dir.join("config.toml");
-    if path.exists() {
-        let text = read_capped(&path)?;
+    if let Some(text) = read_capped_if_exists(&path)? {
         let document = super::parse_global_document(&path, &text)?;
         let source = SourceId::Global(path.clone());
         if is_v2(&document) {
@@ -109,6 +108,8 @@ fn global_resolution(config_dir: &Path) -> Result<Resolution<ConfigSpec>> {
         } else {
             resolution.apply(&source, super::decode_global_document(&path, document)?)?;
         }
+    } else {
+        resolution.bind_vector_policy(&crate::vector_cache::settings::standalone()?)?;
     }
     // An invalid global is rejected even if a later project could replace it.
     resolution.validate()?;
@@ -360,6 +361,12 @@ pub(crate) fn launch_resolution(
                     .map_err(|error| LaunchFailure::classify(error, website))?,
             )
             .map_err(|error| LaunchFailure::classify(error, website))?;
+    } else {
+        let policy =
+            crate::vector_cache::settings::standalone().map_err(LaunchFailure::Versioned)?;
+        resolution
+            .bind_vector_policy(&policy)
+            .map_err(LaunchFailure::Versioned)?;
     }
     // Invalid globals never disappear behind a later CLI selector.
     resolution
@@ -402,6 +409,10 @@ impl LaunchFailure {
 // errors, never daemon owner, recognized Website or CLI errors.
 pub(crate) struct LaunchResolution(Resolution<ConfigSpec>);
 impl LaunchResolution {
+    pub(crate) fn legacy_defaults() -> Self {
+        Self(Resolution::new(&DefaultsContext::standalone()))
+    }
+
     pub(crate) fn finish(
         mut self,
         patch: crate::daemon::settings::DaemonPatch,
@@ -434,7 +445,7 @@ pub(super) fn for_provided_project(global: &Config, root: &Path) -> Result<Resol
 }
 
 /// Resolves caller-supplied versioned sources for offline review only.
-/// Ordinary file loaders deliberately do not activate the v2 source format.
+/// A preview confers no permission to publish or apply file changes.
 ///
 /// # Errors
 /// Invalid source order, scope, stage settings or unsupported configuration.

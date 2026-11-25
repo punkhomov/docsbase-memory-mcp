@@ -20,6 +20,8 @@ impl Fixture {
         let root = tempfile::TempDir::new().expect("root");
         // Other unit tests temporarily redirect process-global configuration.
         // This fixture owns its launch policy and must never inherit their caps.
+        let config = tempfile::TempDir::new().expect("global config");
+        std::fs::write(config.path().join("config.toml"), "# Legacy launch").unwrap();
         let shared = Shared::open_with_launch(
             cache.path(),
             &crate::store::settings::standalone().unwrap(),
@@ -27,7 +29,7 @@ impl Fixture {
             crate::hybrid::dense_settings::standalone()
                 .unwrap()
                 .settings(),
-            &LaunchSnapshot::capture_from(&cache.path().join("test-config")),
+            &LaunchSnapshot::capture_from(config.path()),
             DaemonPatch::default(),
         )
         .expect("empty daemon state");

@@ -559,3 +559,102 @@ fn cleanup_removes_a_generation_after_the_loaded_index_is_dropped() {
     );
     assert!(dirs[2].exists(), "the newest generation is kept");
 }
+
+#[test]
+fn configured_ann_fetch_falls_back_without_replacing_the_graph() {
+    use docsbase_memory::daemon::tools::{SearchContext, search_docs_in};
+    use docsbase_memory::hybrid::{HybridStages, Ranking, work::Cancellation};
+    use docsbase_memory::search::{budget::PayloadBudget, operation::SearchOperation};
+    use serde_json::json;
+
+    let cache = TempDir::new().unwrap();
+    let config = TempDir::new().unwrap();
+    let (db, project_id) = project_with_files(cache.path(), &["a.md", "b.md", "c.md"]);
+    embed_project_chunks_with(&db, &FakeEmbedder, project_id).unwrap();
+    let dense = DenseCache::with_policy_limits(
+        AnnPolicy::BuildOrLoad,
+        cache.path(),
+        limits_with_min_vectors(2),
+    );
+    let project = registry::project_by_id(&db, project_id).unwrap().unwrap();
+    let stages = HybridStages {
+        embedder: Some(Arc::new(FakeEmbedder)),
+        reranker: None,
+        ranking: Ranking::Rrf,
+    };
+    let policy = docsbase_memory::search::settings::standalone().unwrap();
+    let budget = PayloadBudget::new(policy.settings().clone()).unwrap();
+    let search = |max: usize| {
+        fs::write(
+            config.path().join("config.toml"),
+            format!("config_version=2\n[ann.search]\nef_base=1\nef_max={max}\n"),
+        )
+        .unwrap();
+        let cfg = Config::global_from(config.path()).unwrap();
+        search_docs_in(
+            &SearchContext {
+                stages: &stages,
+                dense: &dense,
+                cache: cache.path(),
+                project: &project,
+                window: 2,
+                ann_search: cfg.ann_search,
+                payload_budget: &budget,
+                operation: SearchOperation::new(
+                    policy.settings(),
+                    Instant::now(),
+                    Cancellation::new(),
+                )
+                .unwrap(),
+            },
+            &db,
+            &json!({"query":"widgets","limit":2,"explain":true}),
+        )
+        .unwrap()
+    };
+    let cold = search(1);
+    assert_eq!(cold["meta"]["degraded"], json!(["exact-fallback"]));
+    assert_eq!(
+        dense.outcome(project_id).unwrap().state,
+        docsbase_memory::hybrid::meta::AnnState::Fallback
+    );
+    assert!(
+        !AnnStore::new(cache.path().to_path_buf())
+            .project_ann_root(project_id)
+            .exists()
+    );
+    let original = wait_for_ann(&dense, &db, project_id, FakeEmbedder.model_id());
+    let key = ann_key(cache.path(), &db, project_id, FakeEmbedder.model_id());
+    let slot = AnnStore::new(cache.path().to_path_buf())
+        .load(&key)
+        .unwrap()
+        .unwrap();
+    let read_graph = || {
+        fs::read_dir(&slot.dir)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                (
+                    path.file_name().unwrap().to_owned(),
+                    fs::read(&path).unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let persisted = read_graph();
+    let exact = search(1);
+    assert_eq!(exact["hits"].as_array().unwrap().len(), 2);
+    assert_eq!(exact["meta"]["degraded"], json!(["exact-fallback"]));
+    let ann = search(8);
+    assert_eq!(ann["hits"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        dense.outcome(project_id).unwrap().state,
+        docsbase_memory::hybrid::meta::AnnState::Ready
+    );
+    assert_eq!(ann["meta"]["degraded"], json!([]));
+    assert_eq!(read_graph(), persisted);
+    assert!(matches!(
+        dense.get(&db, project_id, FakeEmbedder.model_id()).unwrap(),
+        DenseRows::Ann(ref reused) if Arc::ptr_eq(reused, &original)
+    ));
+}

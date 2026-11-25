@@ -149,6 +149,23 @@ fn dense_candidates<Guard>(
         &fresh
     };
     operation.check()?;
+    if context
+        .ann_search
+        .is_some_and(|settings| query.fetch > settings.ef_max())
+    {
+        let metadata = in_read_phase(context, source, admit, |reader| {
+            snapshot_info(&reader, project, Some(query.generation))?;
+            DenseMetadata::capture(&reader, project.id)
+        })?;
+        operation.check()?;
+        degrade(degraded, Degraded::ExactFallback);
+        dense.record_outcome(
+            project.id,
+            AnnState::Fallback,
+            Some("ANN window exceeds the configured ef_max"),
+        );
+        return stream_hashes(context, model_id, metadata.chunks(), vector, query.fetch);
+    }
     let rows = dense.get_with_metadata_admitted(
         DenseRequest {
             cache_root: context.cache,
@@ -167,35 +184,9 @@ fn dense_candidates<Guard>(
             dense.record_outcome(project.id, AnnState::Ready, None);
             dense::top_k(vector, index.rows(), fetch)
         }
-        DenseRows::Ann(ann) => match ann.search(vector, fetch) {
-            Ok(hits) if hits.len() >= fetch => {
-                #[cfg(debug_assertions)]
-                ANN_SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                dense.record_outcome(project.id, AnnState::Ready, None);
-                Ok(hits)
-            }
-            Ok(hits) => {
-                eprintln!(
-                    "warning: ann returned {} candidates for fetch {fetch}; falling back to exact",
-                    hits.len()
-                );
-                degrade(degraded, Degraded::AnnInsufficient);
-                dense.record_outcome(
-                    project.id,
-                    AnnState::Fallback,
-                    Some("ann returned fewer candidates than the window"),
-                );
-                operation.check()?;
-                stream_exact(context, source, query.generation, model_id, vector, fetch)
-            }
-            Err(err) => {
-                eprintln!("warning: ann search failed: {err}; falling back to exact");
-                degrade(degraded, Degraded::AnnError);
-                dense.record_outcome(project.id, AnnState::Fallback, Some("ann search failed"));
-                operation.check()?;
-                stream_exact(context, source, query.generation, model_id, vector, fetch)
-            }
-        },
+        DenseRows::Ann(ann) => {
+            search_graph(context, source, query, model_id, vector, &ann, degraded)
+        }
         DenseRows::TooLarge(hashes) => {
             // Above the resident cap by design: exact streaming is the answer,
             // not an error.
@@ -224,6 +215,57 @@ fn dense_candidates<Guard>(
                 Some("the last build failed"),
             );
             stream_hashes(context, model_id, &failed.hashes, vector, fetch)
+        }
+    }
+}
+
+fn search_graph(
+    context: &SearchContext<'_>,
+    source: MetadataSource<'_>,
+    query: DenseQuery<'_>,
+    model_id: &str,
+    vector: &[f32],
+    ann: &crate::hybrid::ann::AnnIndex,
+    degraded: &mut Vec<Degraded>,
+) -> Result<Vec<(u64, f32)>> {
+    let SearchContext {
+        dense,
+        project,
+        operation,
+        ..
+    } = context;
+    let fetch = query.fetch;
+    let hits = match context.ann_search {
+        Some(settings) => ann.search_with_settings(vector, fetch, &settings),
+        None => ann.search(vector, fetch),
+    };
+    match hits {
+        Ok(hits) if hits.len() >= fetch => {
+            #[cfg(debug_assertions)]
+            ANN_SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            dense.record_outcome(project.id, AnnState::Ready, None);
+            Ok(hits)
+        }
+        Ok(hits) => {
+            eprintln!(
+                "warning: ann returned {} candidates for fetch {fetch}; falling back to exact",
+                hits.len()
+            );
+            degrade(degraded, Degraded::AnnInsufficient);
+            dense.record_outcome(
+                project.id,
+                AnnState::Fallback,
+                Some("ann returned fewer candidates than the window"),
+            );
+            operation.check()?;
+            stream_exact(context, source, query.generation, model_id, vector, fetch)
+        }
+        Err(err) => {
+            eprintln!("warning: ann search failed: {err}; falling back to exact");
+            degrade(degraded, Degraded::AnnError);
+            dense.record_outcome(project.id, AnnState::Fallback, Some("ann search failed"));
+            operation.check()?;
+            stream_exact(context, source, query.generation, model_id, vector, fetch)
         }
     }
 }
@@ -380,6 +422,7 @@ pub fn search_docs_with(
             cache,
             project,
             window,
+            ann_search: None,
             payload_budget: &budget,
             operation,
         },
@@ -400,6 +443,8 @@ pub struct SearchContext<'a> {
     pub project: &'a Project,
     /// Complete resolved candidate window.
     pub window: u32,
+    /// Traversal policy of the captured project configuration.
+    pub ann_search: Option<crate::hybrid::ann_settings::AnnSearchSettings>,
     /// Daemon-shared or direct invocation payload allowance.
     pub payload_budget: &'a PayloadBudget,
     /// Original deadline and cooperative cancellation for this invocation.
@@ -2426,6 +2471,7 @@ mod tests {
             cache: db.cache_root(),
             project: &project,
             window: 10,
+            ann_search: None,
             payload_budget: &budget,
             operation: SearchOperation::new(
                 policy.settings(),

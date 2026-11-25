@@ -10,7 +10,9 @@ use docsbase_memory::config::schema::{
 };
 use docsbase_memory::error::Error;
 use docsbase_memory::hybrid::ann::AnnIndex;
-use docsbase_memory::hybrid::ann_settings::{AnnSearchPatch, AnnSearchSettings, AnnSearchSpec};
+use docsbase_memory::hybrid::ann_settings::{
+    AnnBuildPatch, AnnBuildSettings, AnnBuildSpec, AnnSearchPatch, AnnSearchSettings, AnnSearchSpec,
+};
 use docsbase_memory::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore};
 
 #[test]
@@ -167,6 +169,18 @@ fn rows() -> Vec<(u64, Arc<[f32]>)> {
         (9, Arc::from([-1.0, 0.0])),
     ]
 }
+fn graph_key(count: usize) -> AnnKey {
+    AnnKey {
+        project_id: 1,
+        generation: 2,
+        model_id: "test@d2".into(),
+        dim: 2,
+        chunk_count: count,
+        chunk_set_digest: "cf8-build".into(),
+        format_version: ANN_FORMAT_VERSION,
+    }
+}
+
 fn persisted_files(dir: &Path) -> BTreeMap<std::ffi::OsString, Vec<u8>> {
     std::fs::read_dir(dir)
         .unwrap()
@@ -179,20 +193,124 @@ fn persisted_files(dir: &Path) -> BTreeMap<std::ffi::OsString, Vec<u8>> {
 }
 
 #[test]
+fn default_graph_slot_rejects_a_different_construction_recipe() {
+    let data = rows();
+    let graph = AnnIndex::build(&data, 2).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let store = AnnStore::new(temp.path().to_path_buf());
+    let key = graph_key(data.len());
+    let slot = graph.dump(&store, &key).unwrap();
+    assert!(store.load(&key).unwrap().is_some());
+    let metadata = slot.dir.join("meta.json");
+    let mut wrong_recipe = slot.meta;
+    wrong_recipe.ef_construction = 64;
+    std::fs::write(metadata, serde_json::to_vec(&wrong_recipe).unwrap()).unwrap();
+    assert!(store.load(&key).unwrap().is_none());
+}
+
+#[test]
+fn construction_recipes_keep_distinct_graphs_and_verify_the_dump_header() {
+    let data = rows();
+    let key = graph_key(data.len());
+    let temp = tempfile::tempdir().unwrap();
+    let store = AnnStore::new(temp.path().to_path_buf());
+    let recipes = [(16, 200), (16, 80), (12, 80)];
+    let slots = recipes.map(|(m, ef)| {
+        let settings = AnnBuildSettings::new(m, ef).unwrap();
+        let graph = AnnIndex::build_with_settings(&data, 2, settings).unwrap();
+        graph.dump(&store, &key).unwrap()
+    });
+    assert_eq!(slots[0].dir, store.ann_dir(&key));
+    let model_hash = blake3::hash(key.model_id.as_bytes()).to_hex();
+    assert_eq!(
+        slots[0].dir.file_name().unwrap().to_str().unwrap(),
+        format!("{}-g2-d2-c3-cf8-buil", &model_hash[..16])
+    );
+    assert_ne!(slots[0].dir, slots[1].dir);
+    assert_ne!(slots[1].dir, slots[2].dir);
+    store.cleanup(key.project_id).unwrap();
+    for ((m, ef), slot) in recipes.into_iter().zip(&slots) {
+        let settings = AnnBuildSettings::new(m, ef).unwrap();
+        let found = store.load_with_settings(&key, settings).unwrap().unwrap();
+        assert_eq!(found.dir, slot.dir);
+        assert_eq!(found.meta.m, m);
+        assert_eq!(found.meta.ef_construction, ef);
+        let loaded = AnnIndex::load(&found).unwrap();
+        assert_eq!(loaded.build_settings(), settings);
+        assert_eq!(loaded.search(&[1.0, 0.0], 1).unwrap(), vec![(3, 1.0)]);
+    }
+    let missing = AnnBuildSettings::new(8, 80).unwrap();
+    assert!(store.load_with_settings(&key, missing).unwrap().is_none());
+    for incompatible in [&slots[0], &slots[2]] {
+        for file in ["index.hnsw.graph", "index.hnsw.data"] {
+            std::fs::copy(incompatible.dir.join(file), slots[1].dir.join(file)).unwrap();
+        }
+        assert!(AnnIndex::load(&slots[1]).is_err());
+    }
+    let graph = AnnIndex::build(&data, 2).unwrap();
+    let mut newer = key.clone();
+    newer.generation += 1;
+    graph.dump(&store, &newer).unwrap();
+    store.cleanup(key.project_id).unwrap();
+    assert!(slots.iter().all(|slot| slot.dir.is_dir()));
+    newer.generation += 1;
+    graph.dump(&store, &newer).unwrap();
+    store.cleanup(key.project_id).unwrap();
+    assert!(slots.iter().all(|slot| !slot.dir.exists()));
+}
+
+#[test]
+fn construction_owner_layers_fields_and_rejects_unqualified_recipes() {
+    let global = SourceId::Global("config.toml".into());
+    let project = SourceId::Project(".docsbase.toml".into());
+    let resolved = resolve_component::<AnnBuildSpec>(
+        &DefaultsContext::standalone(),
+        [
+            (
+                global.clone(),
+                AnnBuildPatch {
+                    m: Some(12),
+                    ef_construction: None,
+                },
+            ),
+            (
+                project.clone(),
+                AnnBuildPatch {
+                    m: None,
+                    ef_construction: Some(64),
+                },
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(*resolved.settings(), AnnBuildSettings::new(12, 64).unwrap());
+    assert_eq!(
+        resolved.provenance().get("ann.build.m").unwrap().source,
+        global
+    );
+    assert_eq!(
+        resolved
+            .provenance()
+            .get("ann.build.ef_construction")
+            .unwrap()
+            .source,
+        project
+    );
+    for (m, ef) in [(7, 200), (17, 200), (16, 31), (16, 201), (usize::MAX, 99)] {
+        assert!(matches!(
+            AnnBuildSettings::new(m, ef),
+            Err(Error::Admission { .. })
+        ));
+    }
+}
+
+#[test]
 fn built_and_loaded_search_apply_policy_without_rewriting_graph() {
     let data = rows();
     let built = AnnIndex::build(&data, 2).unwrap();
     let temp = tempfile::tempdir().unwrap();
     let store = AnnStore::new(temp.path().to_path_buf());
-    let key = AnnKey {
-        project_id: 1,
-        generation: 2,
-        model_id: "test@d2".into(),
-        dim: 2,
-        chunk_count: data.len(),
-        chunk_set_digest: "cf8a".into(),
-        format_version: ANN_FORMAT_VERSION,
-    };
+    let key = graph_key(data.len());
     let slot = built.dump(&store, &key).unwrap();
     let before = persisted_files(&slot.dir);
     let loaded = AnnIndex::load(&slot).unwrap();

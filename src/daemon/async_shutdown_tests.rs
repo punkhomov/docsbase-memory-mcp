@@ -140,7 +140,10 @@ fn invalidated_ann_worker_unwind_retires_the_original_activity_after_physical_da
         let gate = shared.dense.pause_job_builds_for_test();
         let _release = OpenBuildOnDrop(gate.clone());
         fixture.shared.activate_jobs(service.clone()).unwrap();
-        let context = lexical_context(&fixture, crate::index::async_job::JobInput::Sync);
+        let context = lexical_context(
+            &fixture,
+            crate::index::async_job::JobInput::Sync { join_active: true },
+        );
         let operation = fixture.shared.watch_operation().unwrap();
         let activity = fixture.shared.activity.track();
         let original = Arc::downgrade(&activity);

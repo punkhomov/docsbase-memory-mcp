@@ -712,3 +712,72 @@ fn preview_vector_budget_provenance_matches_source_version_and_scope() {
         assert!(origins.get("hybrid.cache.max_bytes").is_none());
     }
 }
+
+#[test]
+fn ann_search_file_policy_inherits_global_fields_and_reports_project_origin() {
+    let root = tempfile::tempdir().unwrap();
+    let config_dir = root.path().join("config");
+    let project = root.path().join("project");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "config_version=2\n[ann.search]\nef_base=32\nef_max=128\nfetch_multiplier=2\n",
+    )
+    .unwrap();
+    let file = project.join(".docsbase.toml");
+    std::fs::write(&file, "config_version=2\n[ann.search]\nef_base=12\n").unwrap();
+    let view = docsbase_memory::config::view::load_from(&config_dir, Some(&project)).unwrap();
+    let fields = serde_json::to_value(view).unwrap();
+    let field = |key: &str| {
+        fields["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["key"] == key)
+            .unwrap()
+    };
+    assert_eq!(field("ann.search.ef_base")["value"], 12);
+    assert_eq!(field("ann.search.ef_base")["source"]["kind"], "project");
+    assert_eq!(field("ann.search.ef_max")["value"], 128);
+    assert_eq!(field("ann.search.ef_max")["source"]["kind"], "global");
+    assert_eq!(field("ann.search.fetch_multiplier")["value"], 2);
+    std::fs::write(&file, "config_version=2\n[ann.search]\nef_max=8\n").unwrap();
+    assert!(Config::load_from(&config_dir, Some(&project)).is_err());
+}
+
+#[test]
+fn ann_build_file_policy_resolves_a_project_recipe_before_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let config_dir = root.path().join("config");
+    let project = root.path().join("project");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "config_version=2\n[ann.build]\nm=12\nef_construction=120\n",
+    )
+    .unwrap();
+    let file = project.join(".docsbase.toml");
+    std::fs::write(&file, "config_version=2\n[ann.build]\nef_construction=64\n").unwrap();
+    let view = docsbase_memory::config::view::load_from(&config_dir, Some(&project)).unwrap();
+    for (key, value, source) in [
+        ("ann.build.m", 12, "global"),
+        ("ann.build.ef_construction", 64, "project"),
+    ] {
+        let field = view.fields.iter().find(|field| field.key == key).unwrap();
+        assert_eq!(field.value, value);
+        assert_eq!(
+            serde_json::to_value(&field.origin.source).unwrap()["kind"],
+            source
+        );
+    }
+    for invalid in [
+        "[ann.build]\nef_construction=20\n",
+        "[ann]\nbuild=[12,64]\n",
+        "ann=[{build={m=12}}]\n",
+    ] {
+        std::fs::write(&file, format!("config_version=2\n{invalid}")).unwrap();
+        assert!(Config::load_from(&config_dir, Some(&project)).is_err());
+    }
+}
