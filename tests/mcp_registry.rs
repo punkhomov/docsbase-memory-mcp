@@ -775,6 +775,17 @@ fn watcher_recovers_from_a_commit_failure() {
 #[test]
 fn dropped_watcher_batch_is_visible_in_status() {
     let mut env = Env::new(&[("README.md", "# Guide\n\ninstaller prose about gizmos.\n")]);
+    write_file(
+        env.cache(),
+        "config/config.toml",
+        b"config_version = 2
+[watch]
+native_queue_capacity = 4
+batch_queue_capacity = 2
+transient_retries = 1
+transient_backoff_ms = 1
+",
+    );
     let root = env.root().canonicalize().expect("canonical root");
     let root_path = env.root().to_path_buf();
     env.start_daemon_with_env(
@@ -806,6 +817,14 @@ fn dropped_watcher_batch_is_visible_in_status() {
             let error = entry["last_error"].as_str().expect("error");
             assert!(error.contains("injected"), "last_error: {entry}");
             let warnings = entry["warnings"].as_array().expect("warnings");
+            assert!(
+                warnings.iter().any(|warning| {
+                    warning["message"].as_str().is_some_and(|message| {
+                        message.contains("dropped after 1 transient retries")
+                    })
+                }),
+                "{warnings:?}"
+            );
             let paths: Vec<&str> = warnings
                 .iter()
                 .map(|warning| warning["path"].as_str().expect("path"))

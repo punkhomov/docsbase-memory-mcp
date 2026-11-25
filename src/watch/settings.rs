@@ -1,6 +1,8 @@
-//! Project-owned timing for the watcher event batch.
+//! Watcher queue capacity and per-batch timing policy.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use super::{BatchRetryPolicy, transient_delay};
 
 use crate::config::bootstrap::DefaultsContext;
 use crate::config::schema::{
@@ -13,17 +15,25 @@ use crate::error::{Error, Result};
 const DEFAULT_DEBOUNCE_MS: u64 = 1_500;
 // FR-15 caps elapsed time from the first event to the end of debounce.
 const MAX_DEBOUNCE_MS: u64 = 2_000;
+// Preserve the per-watcher capacity bound from T46.
+const MAX_QUEUE_CAPACITY: usize = 4096;
+const MAX_TRANSIENT_RETRIES: u32 = u32::MAX.ilog(3) + 1;
 
 /// Default quiet window after the last event.
 pub const DEBOUNCE: Duration = Duration::from_millis(DEFAULT_DEBOUNCE_MS);
 /// Default and maximum batching window from the first event.
 pub const MAX_DEBOUNCE: Duration = Duration::from_millis(MAX_DEBOUNCE_MS);
 
-/// The validated quiet and maximum windows for one watch batch.
+/// Validated watcher capacities and batch timing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WatchSettings {
     debounce_ms: u64,
     max_debounce_ms: u64,
+    pub(super) native_queue_capacity: usize,
+    pub(super) batch_queue_capacity: usize,
+    transient_retries: u32,
+    transient_backoff_ms: u64,
+    lease_retry_ms: u64,
 }
 
 impl WatchSettings {
@@ -39,6 +49,14 @@ impl WatchSettings {
         Duration::from_millis(self.max_debounce_ms)
     }
 
+    pub(super) const fn retry_policy(self) -> BatchRetryPolicy {
+        BatchRetryPolicy {
+            max_transient_attempts: self.transient_retries,
+            lease_retry: Duration::from_millis(self.lease_retry_ms),
+            transient_backoff: Duration::from_millis(self.transient_backoff_ms),
+        }
+    }
+
     pub(super) fn next_event_timeout(self, elapsed: Duration) -> Option<Duration> {
         let remaining = self.max_debounce().saturating_sub(elapsed);
         (!remaining.is_zero()).then(|| self.debounce().min(remaining))
@@ -50,18 +68,48 @@ impl WatchSettings {
 pub(crate) struct WatchPatch {
     debounce_ms: Option<u64>,
     max_debounce_ms: Option<u64>,
+    native_queue_capacity: Option<usize>,
+    batch_queue_capacity: Option<usize>,
+    transient_retries: Option<u32>,
+    transient_backoff_ms: Option<u64>,
+    lease_retry_ms: Option<u64>,
 }
 
 pub(crate) struct WatchSpec;
 
 impl WatchSpec {
+    pub(super) const DEFAULTS: WatchSettings = WatchSettings {
+        debounce_ms: DEFAULT_DEBOUNCE_MS,
+        max_debounce_ms: MAX_DEBOUNCE_MS,
+        native_queue_capacity: MAX_QUEUE_CAPACITY,
+        batch_queue_capacity: MAX_QUEUE_CAPACITY,
+        transient_retries: 3,
+        transient_backoff_ms: 100,
+        lease_retry_ms: 250,
+    };
+
     pub(crate) fn view_fields(settings: WatchSettings, view: &mut ViewBuilder<'_>) -> Result<()> {
-        view.push("watch.debounce_ms", settings.debounce_ms.into(), None)?;
-        view.push(
-            "watch.max_debounce_ms",
-            settings.max_debounce_ms.into(),
-            None,
-        )
+        for (key, value) in [
+            ("watch.debounce_ms", settings.debounce_ms.into()),
+            ("watch.max_debounce_ms", settings.max_debounce_ms.into()),
+            (
+                "watch.native_queue_capacity",
+                settings.native_queue_capacity.into(),
+            ),
+            (
+                "watch.batch_queue_capacity",
+                settings.batch_queue_capacity.into(),
+            ),
+            ("watch.transient_retries", settings.transient_retries.into()),
+            (
+                "watch.transient_backoff_ms",
+                settings.transient_backoff_ms.into(),
+            ),
+            ("watch.lease_retry_ms", settings.lease_retry_ms.into()),
+        ] {
+            view.push(key, value, None)?;
+        }
+        Ok(())
     }
 }
 
@@ -73,13 +121,19 @@ impl SettingsSpec for WatchSpec {
     const FIELDS: &'static [FieldSpec] = &[
         FieldSpec::new("watch.debounce_ms", Scope::Project, Unit::Milliseconds),
         FieldSpec::new("watch.max_debounce_ms", Scope::Project, Unit::Milliseconds),
+        FieldSpec::new("watch.native_queue_capacity", Scope::Daemon, Unit::Count),
+        FieldSpec::new("watch.batch_queue_capacity", Scope::Daemon, Unit::Count),
+        FieldSpec::new("watch.transient_retries", Scope::Project, Unit::Count),
+        FieldSpec::new(
+            "watch.transient_backoff_ms",
+            Scope::Project,
+            Unit::Milliseconds,
+        ),
+        FieldSpec::new("watch.lease_retry_ms", Scope::Project, Unit::Milliseconds),
     ];
 
     fn defaults(_: &DefaultsContext) -> WatchSettings {
-        WatchSettings {
-            debounce_ms: DEFAULT_DEBOUNCE_MS,
-            max_debounce_ms: MAX_DEBOUNCE_MS,
-        }
+        Self::DEFAULTS
     }
 
     fn initial(defaults: &WatchSettings) -> WatchSettings {
@@ -93,18 +147,33 @@ impl SettingsSpec for WatchSpec {
         source: &SourceId,
         origins: &mut Provenance,
     ) -> Result<()> {
-        let candidate = WatchSettings {
-            debounce_ms: patch.debounce_ms.unwrap_or(settings.debounce_ms),
-            max_debounce_ms: patch.max_debounce_ms.unwrap_or(settings.max_debounce_ms),
-        };
-        Self::validate(&candidate, &Capabilities::current())?;
+        if !source.permits(Scope::Daemon)
+            && (patch.native_queue_capacity.is_some() || patch.batch_queue_capacity.is_some())
+        {
+            return Err(Error::Admission {
+                message: "watch queue capacities are global-only".to_owned(),
+            });
+        }
+        let mut candidate = *settings;
         let mut candidate_origins = origins.clone();
-        if patch.debounce_ms.is_some() {
-            candidate_origins.set("watch.debounce_ms", source)?;
+        macro_rules! apply {
+            ($($field:ident),+ $(,)?) => {
+                $(if let Some(value) = patch.$field {
+                    candidate.$field = value;
+                    candidate_origins.set(concat!("watch.", stringify!($field)), source)?;
+                })+
+            };
         }
-        if patch.max_debounce_ms.is_some() {
-            candidate_origins.set("watch.max_debounce_ms", source)?;
-        }
+        apply!(
+            debounce_ms,
+            max_debounce_ms,
+            native_queue_capacity,
+            batch_queue_capacity,
+            transient_retries,
+            transient_backoff_ms,
+            lease_retry_ms,
+        );
+        Self::validate(&candidate, &Capabilities::current())?;
         *settings = candidate;
         *origins = candidate_origins;
         Ok(())
@@ -118,6 +187,30 @@ impl SettingsSpec for WatchSpec {
             return Err(Error::Admission {
                 message: format!(
                     "watch requires 1 <= watch.debounce_ms <= watch.max_debounce_ms <= {MAX_DEBOUNCE_MS}"
+                ),
+            });
+        }
+        if !(1..=MAX_QUEUE_CAPACITY).contains(&settings.native_queue_capacity)
+            || !(1..=MAX_QUEUE_CAPACITY).contains(&settings.batch_queue_capacity)
+        {
+            return Err(Error::Admission {
+                message: format!(
+                    "watch queue capacities must be between 1 and {MAX_QUEUE_CAPACITY}"
+                ),
+            });
+        }
+        let policy = settings.retry_policy();
+        let now = Instant::now();
+        if settings.transient_retries > MAX_TRANSIENT_RETRIES
+            || policy.lease_retry.is_zero()
+            || now.checked_add(policy.lease_retry).is_none()
+            || now
+                .checked_add(transient_delay(&policy, settings.transient_retries))
+                .is_none()
+        {
+            return Err(Error::Admission {
+                message: format!(
+                    "watch retry durations must fit the platform clock with positive lease_retry_ms and at most {MAX_TRANSIENT_RETRIES} transient retries"
                 ),
             });
         }

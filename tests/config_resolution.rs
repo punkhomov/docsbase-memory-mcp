@@ -768,6 +768,63 @@ fn v2_watcher_window_layers_and_reports_provenance() {
 }
 
 #[test]
+fn v2_watcher_resource_policy_separates_project_retries_from_daemon_queues() {
+    let global = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    layer(
+        &global,
+        "config.toml",
+        "config_version = 2
+[watch]
+native_queue_capacity = 11
+batch_queue_capacity = 7
+lease_retry_ms = 54
+",
+    );
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2
+[watch]
+transient_retries = 0
+transient_backoff_ms = 15
+",
+    );
+    let view =
+        docsbase_memory::config::view::load_from(global.path(), Some(project.path())).unwrap();
+    let field = |key| view.fields.iter().find(|field| field.key == key).unwrap();
+    assert_eq!(field("watch.native_queue_capacity").value, 11);
+    assert_eq!(field("watch.batch_queue_capacity").value, 7);
+    assert_eq!(field("watch.lease_retry_ms").value, 54);
+    assert_eq!(field("watch.transient_retries").value, 0);
+    assert_eq!(field("watch.transient_backoff_ms").value, 15);
+    assert_eq!(
+        field("watch.native_queue_capacity").origin.source,
+        SourceId::Global(global.path().join("config.toml")),
+    );
+    assert_eq!(
+        field("watch.transient_retries").origin.source,
+        SourceId::Project(project.path().join(".docsbase.toml")),
+    );
+
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2
+[watch]
+native_queue_capacity = 3
+",
+    );
+    let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("watch queue capacities are global-only"),
+        "{error}"
+    );
+}
+
+#[test]
 fn v2_lexical_weights_reject_invalid_or_silent_scoring() {
     let global = TempDir::new().expect("global");
     let project = TempDir::new().expect("project");

@@ -1,8 +1,8 @@
 //! Daemon watcher coordination; provider waits use the owning runtime, never a worker.
 use super::{
     Arc, BatchEvent, BatchRetryPolicy, Duration, Error, HashSet, Mutex, PathBuf, PoisonError,
-    Project, Result, WatchContext, Watchers, Weak, lifecycle, transient_batch_error,
-    transient_delay,
+    Project, Result, WatchContext, Watchers, Weak, captured_retry_policy, lifecycle,
+    transient_batch_error, transient_delay,
 };
 use crate::daemon::server::Shared;
 use crate::search::budget::{PayloadBudget, PayloadPermit};
@@ -87,6 +87,7 @@ impl Drop for Exit {
         }
     }
 }
+#[allow(clippy::too_many_lines)] // Keep receiver and pending ownership together across cancellation.
 pub(super) async fn consume(
     shared: Weak<Shared>,
     project: Project,
@@ -110,11 +111,7 @@ pub(super) async fn consume(
         let Ok(operation) = shared.watch_operation() else {
             break;
         };
-        let mut retry = RetryState {
-            policy: BatchRetryPolicy::default(),
-            transient: 0,
-            leases: 0,
-        };
+        let mut retry = RetryState::new(captured_retry_policy(&context));
         let mut pending = None;
         let mut first = Some(batch);
         loop {
@@ -126,35 +123,33 @@ pub(super) async fn consume(
             };
             let Ok(prepared) = prepared else { return };
             rx = prepared.rx;
-            pending = match prepared.payload {
-                Ok(Some(pending)) => Some(pending),
-                Ok(None) => {
+            let input = match prepared.payload {
+                Ok(Some(input)) => input,
+                unavailable => {
+                    let event = match unavailable {
+                        Err(error) => BatchEvent::DroppedPermanent {
+                            error: error.to_string(),
+                        },
+                        Ok(_) => BatchEvent::RootMissing,
+                    };
+                    let stop = matches!(event, BatchEvent::RootMissing);
                     let _ = shared
                         .report_watch_event(
                             &project,
-                            BatchEvent::RootMissing,
+                            event,
+                            retry.policy,
                             None,
                             &operation,
                             &activity,
                         )
                         .await;
-                    return;
-                }
-                Err(error) => {
-                    let _ = shared
-                        .report_watch_event(
-                            &project,
-                            BatchEvent::DroppedPermanent {
-                                error: error.to_string(),
-                            },
-                            None,
-                            &operation,
-                            &activity,
-                        )
-                        .await;
+                    if stop {
+                        return;
+                    }
                     break;
                 }
             };
+            pending = Some(input.clone());
             let snapshot = context
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -162,12 +157,10 @@ pub(super) async fn consume(
             let WatchContext::Prepared(runtime) = snapshot else {
                 break;
             };
-            let Some(input) = pending.as_ref() else { break };
-            let cancellation = operation.cancellation().clone();
             let result = tokio::select! { biased;
                 () = close.cancelled() => { cancellation.cancel(); return; },
                 () = cancel.cancelled() => { cancellation.cancel(); return; },
-                result = shared.run_watch_batch(project.clone(), runtime.clone(), input.clone(), operation.clone(), activity.clone()) => result,
+                result = shared.run_watch_batch(project.clone(), runtime.clone(), input, operation.clone(), activity.clone()) => result,
             };
             match result {
                 Ok(stats) => {
@@ -181,10 +174,27 @@ pub(super) async fn consume(
                     let error = revision_error(error, runtime, &context);
                     let (event, pause) = retry.failure(&error);
                     let _ = shared
-                        .report_watch_event(&project, event, pending.clone(), &operation, &activity)
+                        .report_watch_event(
+                            &project,
+                            event,
+                            retry.policy,
+                            pending.clone(),
+                            &operation,
+                            &activity,
+                        )
                         .await;
                     let Some(pause) = pause else { break };
-                    if !delay(&operation, &close, &cancel, pause).await {
+                    if let Err(error) = delay(&operation, &close, &cancel, pause).await {
+                        report_retry_expiry(
+                            &shared,
+                            &project,
+                            &retry,
+                            pending.take(),
+                            &activity,
+                            (&close, &cancel),
+                            error,
+                        )
+                        .await;
                         break;
                     }
                 }
@@ -192,18 +202,66 @@ pub(super) async fn consume(
         }
     }
 }
+// The original deadline continues to govern indexing. Only the terminal
+// diagnostic receives a new background admission.
+async fn report_retry_expiry(
+    shared: &Arc<Shared>,
+    project: &Project,
+    retry: &RetryState,
+    pending: Option<Arc<WatchPayload>>,
+    activity: &Arc<crate::daemon::request::Activity>,
+    (close, cancel): (
+        &crate::hybrid::work::Cancellation,
+        &crate::hybrid::work::Cancellation,
+    ),
+    error: Error,
+) {
+    if close.is_cancelled() || cancel.is_cancelled() {
+        return;
+    }
+    let reason = error.to_string();
+    let result = match shared.watch_operation() {
+        Ok(report) => {
+            let event = BatchEvent::DroppedTransient {
+                attempts: retry.transient,
+                error: reason.clone(),
+            };
+            tokio::select! { biased;
+                () = close.cancelled() => {
+                    report.cancellation().cancel();
+                    return;
+                }
+                () = cancel.cancelled() => {
+                    report.cancellation().cancel();
+                    return;
+                }
+                result = shared.report_watch_event(
+                    project, event, retry.policy, pending, &report, activity,
+                ) => result
+            }
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        eprintln!(
+            "warning: watcher batch for project {} stopped: {reason}. Cannot record it in status: {error}",
+            project.id
+        );
+    }
+}
+
 async fn delay(
     operation: &SearchOperation,
     close: &crate::hybrid::work::Cancellation,
     cancel: &crate::hybrid::work::Cancellation,
     duration: Duration,
-) -> bool {
+) -> Result<()> {
     crate::hybrid::work::RemoteCall::new(operation.clone()).wait(close, async {
         tokio::select! { biased;
             () = cancel.cancelled() => Err(Error::Admission { message: "watcher stopped".into() }),
             () = tokio::time::sleep(duration) => Ok(()),
         }
-    }).await.is_ok()
+    }).await
 }
 
 struct RetryState {
@@ -212,6 +270,14 @@ struct RetryState {
     leases: u32,
 }
 impl RetryState {
+    fn new(policy: BatchRetryPolicy) -> Self {
+        Self {
+            policy,
+            transient: 0,
+            leases: 0,
+        }
+    }
+
     fn failure(&mut self, error: &Error) -> (BatchEvent, Option<Duration>) {
         if lifecycle::is_lease_conflict(error) {
             self.leases = self.leases.saturating_add(1);

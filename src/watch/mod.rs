@@ -53,17 +53,11 @@ fn canonicalize_allow_missing(path: &Path) -> PathBuf {
     }
 }
 
-/// Bound for the notify and batch channels of one watcher (T46).
-const MAX_WATCH_EVENTS: usize = 4096;
-
-/// Delay between writer-lease retries of a pending batch.
-const LEASE_RETRY: Duration = Duration::from_millis(250);
-
 /// Stops the underlying watcher when dropped.
 pub struct WatcherGuard {
-    _watcher: Option<RecommendedWatcher>,
+    _caller_native: Option<RecommendedWatcher>,
     forwarder: Option<std::thread::JoinHandle<()>>,
-    retirement: Option<ProducerRetirement>,
+    retirement: ProducerRetirement,
 }
 struct ProducerRetirement {
     cancel: crate::hybrid::work::Cancellation,
@@ -83,9 +77,7 @@ impl ProducerRetirement {
 }
 impl WatcherGuard {
     fn retiring(&self) -> bool {
-        self.retirement
-            .as_ref()
-            .is_some_and(|value| value.ticket.is_none())
+        self.retirement.cancel.is_cancelled()
     }
     fn finished(&self) -> bool {
         self.forwarder
@@ -93,26 +85,28 @@ impl WatcherGuard {
             .is_none_or(std::thread::JoinHandle::is_finished)
     }
     fn begin_retirement(&mut self) {
-        if let Some(value) = &mut self.retirement {
-            value.begin();
+        self.retirement.begin();
+        if let Some(forwarder) = &self.forwarder {
+            forwarder.thread().unpark();
         }
     }
 }
 impl Drop for WatcherGuard {
     fn drop(&mut self) {
-        if let Some(retirement) = &mut self.retirement {
-            retirement.begin();
-        }
+        self.begin_retirement();
     }
 }
-struct ProducerOwner {
-    cancel: crate::hybrid::work::Cancellation,
-    source: crate::daemon::request::ActivitySource,
-    #[cfg(test)]
-    before_native_drop: Option<Arc<dyn Fn() + Send + Sync>>,
+enum ProducerOwner {
+    Caller,
+    Managed,
+    Daemon {
+        source: crate::daemon::request::ActivitySource,
+        #[cfg(test)]
+        before_native_drop: Option<Arc<dyn Fn() + Send + Sync>>,
+    },
 }
 struct ProducerNative {
-    watcher: Option<RecommendedWatcher>,
+    _watcher: RecommendedWatcher,
     #[cfg(test)]
     before_drop: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -122,14 +116,23 @@ impl Drop for ProducerNative {
         if let Some(observer) = &self.before_drop {
             observer();
         }
-        drop(self.watcher.take());
     }
+}
+
+// Field drop order also applies when thread creation fails. Drop the
+// receiver before dropping the native owner, then release the activity.
+struct ProducerResources {
+    events: Receiver<Option<PathBuf>>,
+    _native: Option<ProducerNative>,
+    _retired: Option<tokio::sync::oneshot::Receiver<Arc<crate::daemon::request::Activity>>>,
 }
 
 /// Watches `project.canonical_root` and sends deduplicated batches of
 /// changed paths through `tx` (FR-15). `config` is a swappable open-time
 /// configuration slot: reopens replace it without restarting the watcher
-/// (OQ-6).
+/// (OQ-6). A caller-supplied rendezvous channel retains blocking send
+/// semantics. Dropping the guard stops native notifications. A batch already
+/// waiting in that channel can still be received or released by the caller.
 ///
 /// # Errors
 /// Returns [`Error::Internal`] when the notify backend cannot be created or
@@ -140,7 +143,7 @@ pub fn spawn_watcher(
     config: Arc<Mutex<Arc<Config>>>,
     tx: std::sync::mpsc::SyncSender<Vec<PathBuf>>,
 ) -> Result<WatcherGuard> {
-    spawn_watcher_using(
+    spawn_watcher_sink_owned(
         project,
         cache,
         move || {
@@ -149,7 +152,9 @@ pub fn spawn_watcher(
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
         },
-        tx,
+        move |batch| tx.send(batch).map_err(|error| error.0),
+        ProducerOwner::Caller,
+        crate::hybrid::work::Cancellation::new(),
     )
 }
 
@@ -159,24 +164,46 @@ fn spawn_watcher_using(
     current_config: impl Fn() -> Arc<Config> + Send + 'static,
     tx: std::sync::mpsc::SyncSender<Vec<PathBuf>>,
 ) -> Result<WatcherGuard> {
-    spawn_watcher_sink(project, cache, current_config, move |batch| {
-        tx.send(batch).map_err(|error| error.0)
-    })
+    let cancel = crate::hybrid::work::Cancellation::new();
+    let sender_cancel = cancel.clone();
+    spawn_watcher_sink_owned(
+        project,
+        cache,
+        current_config,
+        move |batch| send_cancellable(&tx, batch, &sender_cancel),
+        ProducerOwner::Managed,
+        cancel,
+    )
 }
 
-fn spawn_watcher_sink(
-    project: &Project,
-    cache: &Path,
-    current_config: impl Fn() -> Arc<Config> + Send + 'static,
-    send: impl Fn(Vec<PathBuf>) -> std::result::Result<(), Vec<PathBuf>> + Send + 'static,
-) -> Result<WatcherGuard> {
-    spawn_watcher_sink_owned(project, cache, current_config, send, None)
+// std::sync::mpsc has no cancellable blocking send. Park only while a
+// consumer's queue is full. The guard wakes this park immediately on stop.
+const BLOCKING_SEND_POLL: Duration = Duration::from_millis(10);
+
+fn send_cancellable<T>(
+    tx: &std::sync::mpsc::SyncSender<T>,
+    mut item: T,
+    cancel: &crate::hybrid::work::Cancellation,
+) -> std::result::Result<(), T> {
+    use std::sync::mpsc::TrySendError;
+    while !cancel.is_cancelled() {
+        match tx.try_send(item) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Disconnected(item)) => return Err(item),
+            Err(TrySendError::Full(pending)) => {
+                item = pending;
+                std::thread::park_timeout(BLOCKING_SEND_POLL);
+            }
+        }
+    }
+    Err(item)
 }
 
 fn native_watcher(
     root: &Path,
     cache: &Path,
     event_tx: std::sync::mpsc::SyncSender<Option<PathBuf>>,
+    stop: Option<crate::hybrid::work::Cancellation>,
 ) -> Result<RecommendedWatcher> {
     let watch_cache = cache.to_path_buf();
     let watch_root = root.to_path_buf();
@@ -197,18 +224,19 @@ fn native_watcher(
             {
                 continue;
             }
-            match std::fs::symlink_metadata(&path) {
-                // Never follow symlinks out of the root (FR-32).
-                Ok(meta) if meta.file_type().is_symlink() => {}
-                Ok(meta) => {
-                    if meta.is_dir() || walk::is_markdown(&path) {
-                        let _ = event_tx.send(Some(path));
-                    }
-                }
-                // Deleted: `.md` files purge, other paths may be directories
-                // whose subtree must be purged (FR-16).
-                Err(_) => {
-                    let _ = event_tx.send(Some(path));
+            let relevant = match std::fs::symlink_metadata(&path) {
+                Ok(meta) if meta.file_type().is_symlink() => false,
+                Ok(meta) => meta.is_dir() || walk::is_markdown(&path),
+                // Deleted paths may need exact or subtree purges (FR-16).
+                Err(_) => true,
+            };
+            if relevant {
+                let sent = match &stop {
+                    Some(stop) => send_cancellable(&event_tx, Some(path), stop).is_ok(),
+                    None => event_tx.send(Some(path)).is_ok(),
+                };
+                if !sent {
+                    return;
                 }
             }
         }
@@ -228,7 +256,8 @@ fn spawn_watcher_sink_owned(
     cache: &Path,
     current_config: impl Fn() -> Arc<Config> + Send + 'static,
     send: impl Fn(Vec<PathBuf>) -> std::result::Result<(), Vec<PathBuf>> + Send + 'static,
-    owner: Option<ProducerOwner>,
+    owner: ProducerOwner,
+    cancel: crate::hybrid::work::Cancellation,
 ) -> Result<WatcherGuard> {
     let root = project.canonical_root.clone();
     // Canonicalize once: notify reports verbatim paths on Windows, while the
@@ -237,72 +266,78 @@ fn spawn_watcher_sink_owned(
     let cache = canonicalize_allow_missing(cache);
     // Bounded with blocking send: the notify callback applies backpressure
     // instead of growing without bound; no path is dropped (T46).
-    let (event_tx, event_rx) = std::sync::mpsc::sync_channel(MAX_WATCH_EVENTS);
+    let initial = current_config();
+    let (event_tx, event_rx) = std::sync::mpsc::sync_channel(initial.watch.native_queue_capacity);
     let wake = event_tx.clone();
-    let watcher = native_watcher(&root, &cache, event_tx)?;
+    let caller = matches!(owner, ProducerOwner::Caller);
+    let watcher = native_watcher(&root, &cache, event_tx, caller.then(|| cancel.clone()))?;
 
-    // Cells exist before native ownership is transferred to the producer.
+    // A caller-owned sender can still be rendezvousing after stop. Its native
+    // watcher stays with the guard and has a separately cancellable event send.
+    let (caller_native, native) = if caller {
+        (Some(watcher), None)
+    } else {
+        (None, Some(watcher))
+    };
     #[cfg(test)]
-    let before_native_drop = owner
-        .as_ref()
-        .and_then(|owner| owner.before_native_drop.clone());
-    let (retirement, retired) = if let Some(owner) = owner {
+    let before_native_drop = match &owner {
+        ProducerOwner::Daemon {
+            before_native_drop, ..
+        } => before_native_drop.clone(),
+        ProducerOwner::Caller | ProducerOwner::Managed => None,
+    };
+    let (activity, ticket, retired) = if let ProducerOwner::Daemon { source, .. } = owner {
         let (ticket, receiver) = tokio::sync::oneshot::channel();
         (
-            Some(ProducerRetirement {
-                cancel: owner.cancel,
-                wake,
-                activity: Some(crate::daemon::request::Activity::dormant(&owner.source)),
-                ticket: Some(ticket),
-            }),
+            Some(crate::daemon::request::Activity::dormant(&source)),
+            Some(ticket),
             Some(receiver),
         )
     } else {
-        (None, None)
+        (None, None, None)
     };
-    let cancel = retirement
-        .as_ref()
-        .map(|retirement| retirement.cancel.clone());
-    let mut watcher = Some(watcher);
-    let native = if retirement.is_some() {
-        watcher.take()
-    } else {
-        None
+    let retirement = ProducerRetirement {
+        cancel: cancel.clone(),
+        wake,
+        activity,
+        ticket,
     };
     let project_id = project.id;
     let filter_root = root;
     let filter_cache = cache;
-    let initial = current_config();
+    let resources = ProducerResources {
+        events: event_rx,
+        _native: native.map(|watcher| ProducerNative {
+            _watcher: watcher,
+            #[cfg(test)]
+            before_drop: before_native_drop,
+        }),
+        _retired: retired,
+    };
     let forwarder = std::thread::Builder::new()
         .name(format!("docsbase-debounce-{project_id}"))
         .spawn(move || {
-            // Reverse drop order on normal return AND unwind: event receiver
-            // unblocks notify callbacks; native watcher joins them; terminal
-            // cell releases the original physical Activity last.
-            let _retired = retired;
-            let _native = ProducerNative {
-                watcher: native,
-                #[cfg(test)]
-                before_drop: before_native_drop,
-            };
-            let event_rx = event_rx;
             let filter = IndexFilter::new(filter_root, filter_cache, &initial);
             drop(initial);
             forward_batches(
                 filter,
                 current_config,
                 |timeout| match timeout {
-                    Some(timeout) => event_rx.recv_timeout(timeout),
-                    None => event_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                    Some(timeout) => resources.events.recv_timeout(timeout),
+                    None => resources
+                        .events
+                        .recv()
+                        .map_err(|_| RecvTimeoutError::Disconnected),
                 },
                 send,
-                cancel.as_ref(),
+                Some(&cancel),
                 Instant::now,
             );
+            drop(resources);
         })
         .map_err(|err| Error::internal_with_source("spawn debounce thread", err))?;
     Ok(WatcherGuard {
-        _watcher: watcher,
+        _caller_native: caller_native,
         forwarder: Some(forwarder),
         retirement,
     })
@@ -378,14 +413,8 @@ impl Batch {
     }
 }
 
-/// Bounded transient retries per batch (flake #28: tantivy merge thread races
-/// the next commit on `.managed.json`; see tantivy issue #2847).
-const BATCH_MAX_TRANSIENT_ATTEMPTS: u32 = 3;
-
-/// First transient backoff; multiplied by 3 per attempt (100/300/900 ms).
-const BATCH_TRANSIENT_BACKOFF: Duration = Duration::from_millis(100);
-
 /// Retry policy for one pending watcher batch.
+#[derive(Debug, Clone, Copy)]
 pub struct BatchRetryPolicy {
     /// Bounded retries for transient (internal) batch failures.
     pub max_transient_attempts: u32,
@@ -399,11 +428,7 @@ pub struct BatchRetryPolicy {
 
 impl Default for BatchRetryPolicy {
     fn default() -> Self {
-        Self {
-            max_transient_attempts: BATCH_MAX_TRANSIENT_ATTEMPTS,
-            lease_retry: LEASE_RETRY,
-            transient_backoff: BATCH_TRANSIENT_BACKOFF,
-        }
+        settings::WatchSpec::DEFAULTS.retry_policy()
     }
 }
 
@@ -474,7 +499,7 @@ where
         match run(pending.paths()) {
             Ok(stats) => return BatchOutcome::Done(stats),
             Err(err) if lifecycle::is_lease_conflict(&err) => {
-                lease_attempts += 1;
+                lease_attempts = lease_attempts.saturating_add(1);
                 report(BatchEvent::LeaseRetry {
                     attempt: lease_attempts,
                 });
@@ -686,6 +711,7 @@ pub(crate) fn report_async_event(
     cache: &Path,
     project: &Project,
     event: BatchEvent,
+    policy: BatchRetryPolicy,
     pending: Option<&WatchPayload>,
     db_settings: &Resolved<DbSettings>,
 ) -> Result<()> {
@@ -717,7 +743,7 @@ pub(crate) fn report_async_event(
     }
     report_batch_event(
         project.id,
-        &BatchRetryPolicy::default(),
+        &policy,
         &lifecycle::index_dir(cache, project.id),
         event,
     );
@@ -976,6 +1002,15 @@ impl WatchRuntime {
             source,
         }
     }
+}
+
+fn captured_retry_policy(context: &Mutex<WatchContext>) -> BatchRetryPolicy {
+    context
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .config()
+        .watch
+        .retry_policy()
 }
 
 #[derive(Clone)]
@@ -1278,6 +1313,7 @@ impl Watchers {
         }
         // Native setup runs outside the registry lock; same-project publication
         // is still serialized by the daemon's existing project reload authority.
+        let batch_queue_capacity = context.config().watch.batch_queue_capacity;
         let slot = Arc::new(Mutex::new(context));
         let producer_slot = Arc::clone(&slot);
         let current = move || {
@@ -1288,7 +1324,7 @@ impl Watchers {
                 .clone()
         };
         let (guard, consumer) = if let Some(owner) = self.async_owner.get() {
-            let (tx, rx) = tokio::sync::mpsc::channel(MAX_WATCH_EVENTS);
+            let (tx, rx) = tokio::sync::mpsc::channel(batch_queue_capacity);
             let shared = owner
                 .shared
                 .upgrade()
@@ -1299,12 +1335,12 @@ impl Watchers {
                 cache,
                 current,
                 move |batch| tx.blocking_send(batch).map_err(|error| error.0),
-                Some(ProducerOwner {
-                    cancel: cancel.clone(),
+                ProducerOwner::Daemon {
                     source: shared.watch_activity_source(),
                     #[cfg(test)]
                     before_native_drop: self.producer_retirement.lock().unwrap().clone(),
-                }),
+                },
+                cancel.clone(),
             )?;
             let consumer = owner.runtime.spawn(async_runtime::consume(
                 owner.shared.clone(),
@@ -1317,7 +1353,7 @@ impl Watchers {
             ));
             (guard, ConsumerHandle::Async { _join: consumer })
         } else {
-            let (tx, rx) = std::sync::mpsc::sync_channel(MAX_WATCH_EVENTS);
+            let (tx, rx) = std::sync::mpsc::sync_channel(batch_queue_capacity);
             let guard = spawn_watcher_using(project, cache, current, tx)?;
             let consumer = spawn_consumer(
                 cache.to_path_buf(),
@@ -1458,7 +1494,7 @@ fn spawn_consumer(
                 for path in batch {
                     pending.push(path);
                 }
-                let policy = BatchRetryPolicy::default();
+                let policy = captured_retry_policy(&context);
                 let index_dir = lifecycle::index_dir(&cache, project_id);
                 let mut report =
                     |event: BatchEvent| report_batch_event(project_id, &policy, &index_dir, event);
@@ -1736,6 +1772,72 @@ mod tests {
             ignores: vec!["bbb/**".to_owned()],
             ..Config::default()
         })
+    }
+
+    #[test]
+    fn public_watcher_preserves_rendezvous_for_a_polling_receiver() {
+        let cache = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut db = Db::open(cache.path()).unwrap();
+        let project = crate::daemon::registry::ensure_project(&mut db, root.path()).unwrap();
+        let config = Arc::new(Mutex::new(Arc::new(Config::default())));
+        let (tx, rx) = std::sync::mpsc::sync_channel(0);
+        let _watcher = spawn_watcher(&project, cache.path(), config, tx).unwrap();
+        let changed = project.canonical_root.join("changed.md");
+        fs::write(&changed, "# Change").unwrap();
+
+        let until = Instant::now() + Duration::from_secs(8);
+        loop {
+            if let Ok(batch) = rx.try_recv() {
+                assert!(batch.contains(&changed), "{batch:?}");
+                break;
+            }
+            assert!(
+                Instant::now() < until,
+                "polling receiver never received the batch"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn blocking_watcher_retires_while_batch_receiver_stays_full() {
+        let cache = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut db = Db::open(cache.path()).unwrap();
+        let project = crate::daemon::registry::ensure_project(&mut db, root.path()).unwrap();
+        let config = Arc::new(Config::default());
+        let cancel = crate::hybrid::work::Cancellation::new();
+        let sender_cancel = cancel.clone();
+        let (attempted, attempt) = std::sync::mpsc::sync_channel(1);
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        let queued = vec![root.path().join("already-queued.md")];
+        send.send(queued.clone()).unwrap();
+        let mut guard = spawn_watcher_sink_owned(
+            &project,
+            cache.path(),
+            move || config.clone(),
+            move |batch| {
+                let _ = attempted.try_send(());
+                send_cancellable(&send, batch, &sender_cancel)
+            },
+            ProducerOwner::Managed,
+            cancel,
+        )
+        .unwrap();
+        fs::write(root.path().join("changed.md"), "# Change").unwrap();
+        attempt.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        guard.begin_retirement();
+        let until = Instant::now() + Duration::from_secs(5);
+        while !guard.finished() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            guard.finished(),
+            "full batch queue prevented producer retirement"
+        );
+        assert_eq!(receive.try_recv().unwrap(), queued);
     }
 
     #[test]
