@@ -2427,7 +2427,7 @@ fn route_search(
         .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |reranker| {
             reranker.window
         });
-    tools::search_docs_with_weights(
+    tools::search_docs_with_lexical_settings(
         &tools::SearchContext {
             stages: &stages,
             dense: &shared.dense,

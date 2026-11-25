@@ -1417,3 +1417,20 @@ contention tests.
 Ruling: the Windows contention fixture snapshots the cache outside the
 exclusive byte-range locks. It still observes Busy while each lock is held
 and compares the full cache tree after releasing the locks.
+
+## 2026-11-25 — CF9, штраф и окно lexical collector
+
+Task CF9 I10/I68: complete (штраф и параметры расширения окна входят в
+эффективный `[lexical]` v2, используются в CLI и демоне и сохраняются
+при refill). RED отклонил новый блок полей. После исправления начальное
+окно из одного кандидата выбирает компактный чанк при включении штрафа.
+Изменение конфигурации оставляет номер поколения и резидентные dense-строки.
+
+Ruling: независимое ревью потребовало применять валидацию владельца и в
+библиотечных точках входа по умолчанию. Общий резолвер теперь валидирует
+standalone policy до открытия индекса. Конфигурация без lexical-таблицы
+тоже проходит проверку. Повторное ревью не выявило Critical или Important.
+
+minor (deferred): тест расчёта проверяет точные размеры окна, а тест через
+CLI и демон проверяет результат. Детальный подсчёт раундов в runtime-ответ
+не добавлялся.

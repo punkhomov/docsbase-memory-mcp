@@ -496,7 +496,7 @@ fn semantic_reload_preserves_dense_rows_for_watch_and_lexical_settings() {
         "timing is independent of dense data"
     );
     fixture.write_config(
-        "config_version = 2\nhybrid = false\nmax_docs_per_project = 11\n[lexical]\ntitle_boost = 6.0\n",
+        "config_version = 2\nhybrid = false\nmax_docs_per_project = 11\n[lexical]\nlong_chunk_penalty = 0.25\ninitial_fetch_multiplier = 2\n",
     );
     let lexical = fixture
         .shared
@@ -505,7 +505,7 @@ fn semantic_reload_preserves_dense_rows_for_watch_and_lexical_settings() {
     assert_ne!(same.lexical, lexical.lexical);
     assert!(
         Arc::ptr_eq(&rows, &load()),
-        "lexical weights leave dense rows resident"
+        "lexical candidate policy leaves dense rows resident"
     );
     fixture.write_config("hybrid = false\nmax_docs_per_project = 23\n");
     fixture

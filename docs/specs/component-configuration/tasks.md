@@ -761,3 +761,15 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - [ ] CF11a-2b2: Add the stopped, explicitly authorized transition that
   registers existing legacy pairs. The publisher and live reader pool
   remain CF11b–CF11d work.
+
+## Delta 2026-11-25 — CF9, штраф и окно lexical collector
+
+- [x] Подключить множитель штрафа I10 и параметры I68 к `[lexical]` v2,
+  effective view и захваченным настройкам direct/daemon поиска. Сохранять
+  принятые значения при refill. Ограничить окно размером индекса и сохранить
+  условие остановки по итоговому score. Меняется политика запроса на текущем
+  индексе, включая переоткрытие проекта.
+- Проверить реальное ранжирование при начальном окне 1, отказ на
+  недопустимых значениях, верхнюю границу роста и golden gate без правки
+  baseline. Порог штрафа остаётся равным сумме дефолтных размеров chunk
+  и overlap, в том числе при чтении индекса с несколькими рецептами.

@@ -1,6 +1,5 @@
 //! Tantivy schema and per-project index handle (FR-19, FR-21; NFR-1).
 
-use super::lexical_settings::LexicalWeights;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
@@ -15,6 +14,7 @@ use tantivy::{
     Index, IndexReader, IndexWriter, ReloadPolicy, SegmentReader, TantivyDocument, Term,
 };
 
+use super::lexical_settings::{self, LexicalCollection, LexicalSettings};
 use super::query::{QueryMode, prepare_query};
 
 use crate::error::{Error, Result};
@@ -80,18 +80,6 @@ fn injected_commit_fault(dir: &Path) -> Option<Error> {
     ))
 }
 
-/// Score multiplier for chunks above [`MAX_CHUNK_CHARS`] + [`CHUNK_OVERLAP`]
-/// (the penalty threshold): oversized sections (giant tables or fences) must
-/// not outrank compact answers (FR-20, T27).
-///
-/// SQ8 sweep (FR-11): the golden corpus cannot exercise the penalty (its
-/// largest document is far below `MAX_CHUNK_CHARS + CHUNK_OVERLAP`), so
-/// `0.25` vs `0.5` are indistinguishable there; `0.5` is kept as the less
-/// aggressive value.
-const LONG_CHUNK_PENALTY: f32 = 0.5;
-// SQ17 widening is sound only if the penalty never raises a score.
-const _: () = assert!(LONG_CHUNK_PENALTY <= 1.0);
-
 /// Upper bound for a single search's `limit`. Tantivy's top-k collector
 /// allocates proportional to the requested limit, so an unbounded
 /// client-supplied value would abort the shared daemon (final review C1).
@@ -151,9 +139,7 @@ struct Fields {
 pub struct IndexHandle {
     /// Taken (set to `None`) when [`Drop`] settles background merges.
     writer: Option<IndexWriter>,
-    reader: IndexReader,
-    parser: QueryParser,
-    fields: Fields,
+    search: ReadIndex,
     dir: PathBuf,
     recreated: bool,
 }
@@ -188,6 +174,7 @@ impl IndexHandle {
     /// # Errors
     /// Returns [`Error::Internal`] on IO/tantivy failures or a schema mismatch.
     pub fn open_or_create(dir: &Path) -> Result<Self> {
+        let search_settings = lexical_settings::standalone()?;
         std::fs::create_dir_all(dir).map_err(|err| {
             Error::internal_with_source(format!("create index dir {}: {err}", dir.display()), err)
         })?;
@@ -240,18 +227,11 @@ impl IndexHandle {
         };
         let fields = fields_from(&index.schema())?;
         let writer: IndexWriter = index.writer(WRITER_HEAP_BYTES).map_err(tantivy_error)?;
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .map_err(tantivy_error)?;
-        let parser = build_parser(&index, &fields, LexicalWeights::DEFAULTS);
+        let search = ReadIndex::from_index(&index, fields, search_settings)?;
 
         Ok(Self {
             writer: Some(writer),
-            reader,
-            parser,
-            fields,
+            search,
             dir: dir.to_path_buf(),
             recreated,
         })
@@ -300,7 +280,7 @@ impl IndexHandle {
     /// Reader for the current index generation (used by read-only CLI paths).
     #[must_use]
     pub fn reader(&self) -> &IndexReader {
-        &self.reader
+        &self.search.reader
     }
 
     /// Adds chunks to the pending segment (visible after [`Self::commit`]).
@@ -310,19 +290,28 @@ impl IndexHandle {
     pub fn add_chunks(&mut self, chunks: &[Chunk]) -> Result<()> {
         for chunk in chunks {
             let mut document = TantivyDocument::new();
-            document.add_u64(self.fields.chunk_id, chunk_id(chunk.doc_id, chunk.seq));
-            document.add_i64(self.fields.doc_id, chunk.doc_id);
-            document.add_text(self.fields.text, &chunk.text);
+            document.add_u64(
+                self.search.fields.chunk_id,
+                chunk_id(chunk.doc_id, chunk.seq),
+            );
+            document.add_i64(self.search.fields.doc_id, chunk.doc_id);
+            document.add_text(self.search.fields.text, &chunk.text);
             // The title field carries the document-level heading (outermost
             // breadcrumb entry), not the deepest one (T10 minor, T27).
             document.add_text(
-                self.fields.title,
+                self.search.fields.title,
                 chunk.heading_path.first().map_or("", String::as_str),
             );
-            document.add_text(self.fields.heading_path, chunk.heading_path.join(" > "));
-            document.add_text(self.fields.identifiers, extract_identifiers(&chunk.text));
+            document.add_text(
+                self.search.fields.heading_path,
+                chunk.heading_path.join(" > "),
+            );
+            document.add_text(
+                self.search.fields.identifiers,
+                extract_identifiers(&chunk.text),
+            );
             document.add_u64(
-                self.fields.text_len,
+                self.search.fields.text_len,
                 u64::try_from(chunk.text.chars().count()).unwrap_or(u64::MAX),
             );
             self.writer_mut()?
@@ -343,7 +332,7 @@ impl IndexHandle {
     /// Deletes every chunk of `doc_id` (visible after [`Self::commit`]).
     pub fn delete_doc(&self, doc_id: i64) {
         if let Some(writer) = &self.writer {
-            writer.delete_term(Term::from_field_i64(self.fields.doc_id, doc_id));
+            writer.delete_term(Term::from_field_i64(self.search.fields.doc_id, doc_id));
         }
     }
 
@@ -368,7 +357,7 @@ impl IndexHandle {
         };
         match outcome {
             Ok(_) => {
-                self.reader.reload().map_err(tantivy_error)?;
+                self.search.reader.reload().map_err(tantivy_error)?;
                 Ok(())
             }
             Err(err) => {
@@ -407,15 +396,7 @@ impl IndexHandle {
     /// Returns [`Error::Query`] for invalid syntax or literal input without
     /// searchable terms, and [`Error::Internal`] for index/search failures.
     pub fn search_with_mode(&self, query: &str, limit: usize, mode: QueryMode) -> Result<Vec<Hit>> {
-        search_reader(
-            &self.reader,
-            &self.parser,
-            &self.fields,
-            query,
-            limit,
-            mode,
-            None,
-        )
+        self.search.search_with_mode(query, limit, mode)
     }
 }
 
@@ -424,6 +405,7 @@ pub struct ReadIndex {
     reader: IndexReader,
     parser: QueryParser,
     fields: Fields,
+    collection: LexicalCollection,
 }
 
 impl ReadIndex {
@@ -432,21 +414,26 @@ impl ReadIndex {
     /// # Errors
     /// Returns [`Error::Internal`] when the index is missing or unreadable.
     pub fn open(dir: &Path) -> Result<Self> {
-        Self::open_with_weights(dir, LexicalWeights::DEFAULTS)
+        Self::open_with_settings(dir, lexical_settings::standalone()?)
     }
 
-    pub(crate) fn open_with_weights(dir: &Path, weights: LexicalWeights) -> Result<Self> {
+    pub(crate) fn open_with_settings(dir: &Path, settings: LexicalSettings) -> Result<Self> {
         let (index, fields) = open_readable_index(dir)?;
+        Self::from_index(&index, fields, settings)
+    }
+
+    fn from_index(index: &Index, fields: Fields, settings: LexicalSettings) -> Result<Self> {
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .map_err(tantivy_error)?;
-        let parser = build_parser(&index, &fields, weights);
+        let parser = build_parser(index, &fields, settings);
         Ok(Self {
             reader,
             parser,
             fields,
+            collection: settings.collection,
         })
     }
 
@@ -482,15 +469,7 @@ impl ReadIndex {
         mode: QueryMode,
         documents: &[i64],
     ) -> Result<Vec<Hit>> {
-        search_reader(
-            &self.reader,
-            &self.parser,
-            &self.fields,
-            query,
-            limit,
-            mode,
-            Some(documents),
-        )
+        search_reader(self, query, limit, mode, Some(documents))
     }
 
     /// Reader for the snapshot.
@@ -514,22 +493,12 @@ impl ReadIndex {
     /// Returns [`Error::Query`] for invalid syntax or literal input without
     /// searchable terms, and [`Error::Internal`] for index/search failures.
     pub fn search_with_mode(&self, query: &str, limit: usize, mode: QueryMode) -> Result<Vec<Hit>> {
-        search_reader(
-            &self.reader,
-            &self.parser,
-            &self.fields,
-            query,
-            limit,
-            mode,
-            None,
-        )
+        search_reader(self, query, limit, mode, None)
     }
 }
 
 fn search_reader(
-    reader: &IndexReader,
-    parser: &QueryParser,
-    fields: &Fields,
+    index: &ReadIndex,
     query: &str,
     limit: usize,
     mode: QueryMode,
@@ -544,7 +513,8 @@ fn search_reader(
         return Ok(Vec::new());
     }
     let limit = limit.min(MAX_HITS);
-    let parsed = prepare_query(parser, query, mode)?;
+    let fields = &index.fields;
+    let parsed = prepare_query(&index.parser, query, mode)?;
     let parsed = if let Some(documents) = documents {
         let terms = documents
             .iter()
@@ -564,14 +534,14 @@ fn search_reader(
     } else {
         parsed
     };
-    let searcher = reader.searcher();
+    let searcher = index.reader.searcher();
     // Over-fetch so the long-chunk penalty can reorder before truncation, and
     // widen while an unseen document could still beat the k-th final score
     // (SQ17): an unseen raw score is at most `min_raw_fetched`, and the
-    // penalty never raises a score (`LONG_CHUNK_PENALTY <= 1`), so once the
+    // validated penalty never raises a raw score, so once the
     // k-th final score is >= it, the top-k is settled.
     let total = usize::try_from(searcher.num_docs()).unwrap_or(usize::MAX);
-    let mut fetch = limit.saturating_mul(4).max(limit.saturating_add(16));
+    let mut fetch = index.collection.initial_fetch(limit, total);
     let mut hits = loop {
         let top = searcher
             .search(&parsed, &TopDocs::with_limit(fetch).order_by_score())
@@ -603,7 +573,7 @@ fn search_reader(
                     Error::internal(format!("index doc {address:?}: missing text_len"))
                 })?;
             let score = if text_len > (MAX_CHUNK_CHARS + CHUNK_OVERLAP) as u64 {
-                score * LONG_CHUNK_PENALTY
+                score * index.collection.long_chunk_penalty
             } else {
                 score
             };
@@ -623,7 +593,7 @@ fn search_reader(
         if settled {
             break hits;
         }
-        let next = fetch.saturating_mul(4).min(total);
+        let next = index.collection.widen(fetch, total);
         if next == fetch {
             break hits;
         }
@@ -819,7 +789,7 @@ fn register_tokenizer(index: &Index) {
 /// pending SQ10/SQ11), so the least-biased values are kept and guarded by
 /// `tests/search_bench.rs::metrics_match_baseline` (successor of the retired
 /// search-quality gate).
-fn build_parser(index: &Index, fields: &Fields, weights: LexicalWeights) -> QueryParser {
+fn build_parser(index: &Index, fields: &Fields, weights: LexicalSettings) -> QueryParser {
     let mut parser = QueryParser::for_index(
         index,
         vec![

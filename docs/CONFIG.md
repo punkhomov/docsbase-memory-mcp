@@ -457,10 +457,11 @@ Indexing still depends on the downstream queue and writer. Both fields must be a
 and the quiet window must fit within the maximum of 2000 milliseconds.
 When the project config is reopened, the next batch uses the updated windows.
 
-### Lexical weights
+### Lexical search
 
-Use a `[lexical]` table in the global or project v2 configuration to tune
-the field weights used by BM25. A project can override individual fields.
+Use `[lexical]` in the global or project v2 configuration to tune BM25
+scoring and how it collects candidates. A project can override individual
+fields.
 
 ```toml
 [lexical]
@@ -468,6 +469,10 @@ text_boost = 1.0
 title_boost = 2.0
 heading_boost = 1.5
 identifiers_boost = 2.5
+long_chunk_penalty = 0.5
+initial_fetch_multiplier = 4
+initial_fetch_additive = 16
+widening_multiplier = 4
 ```
 
 These values are the defaults. The title field indexes the outermost
@@ -475,8 +480,22 @@ heading in a chunk's heading path. Weights must be finite and nonnegative
 as 32-bit floats, with at least one positive weight. Tantivy treats weights
 within one float epsilon of 1.0 as 1.0. A zero weight keeps matches eligible
 and contributes zero score. A query reports an error if its scores or its
-explicit syntax boosts overflow. Reopen the project to apply project settings in a running daemon.
-The stored index and vector identities are independent of these weights.
+explicit syntax boosts overflow.
+
+The long-chunk penalty multiplies BM25 scores for chunks longer than 1650
+Unicode characters, the default chunk cap plus overlap. Its value must be
+greater than zero and at most one. Use `1.0` to disable the penalty.
+
+The initial lexical collection window is the larger of the requested
+candidate count times `initial_fetch_multiplier` and the count plus
+`initial_fetch_additive`, capped by the number of indexed chunks. If an unseen
+candidate can still beat the lowest final score in the requested window,
+the collector grows it by `widening_multiplier` and tries again. The initial
+multiplier must be at least 1, the additive count must be nonnegative,
+and the widening multiplier must be at least 2.
+
+Reopen the project to apply project settings in a running daemon. These
+settings apply to queries on the existing indexes and vector cache.
 
 ## Versioned source planning API (CF3)
 

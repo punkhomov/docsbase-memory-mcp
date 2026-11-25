@@ -1091,3 +1091,15 @@ writers during the observation.
 This is the shared storage boundary for the stopped path. Staging verifies
 complete seal contents separately. Live search and generation publication
 require the later reader pool and publication steps.
+
+## Delta 2026-11-25 — CF9, настройки лексического коллектора
+
+`LexicalSpec` разрешает веса полей, множитель штрафа и размеры окна одним
+снимком. Настройки попадают в read handle прямого поиска, демона и
+контекст refill. Начальное окно сохраняет формулу
+`max(limit * multiplier, limit + additive)`. Рост окна ограничен числом
+документов Tantivy и выполняется только пока невидимый raw score может
+побить текущий итоговый top-k. Множитель штрафа в диапазоне (0, 1] сохраняет
+эту верхнюю границу. Политика поиска применяется к сохранённой длине чанка
+и использует совместимый порог 1650 символов. Начальные значения и
+идентичности артефактов сохраняются.
