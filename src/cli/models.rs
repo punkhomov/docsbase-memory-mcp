@@ -475,7 +475,7 @@ pub fn run(args: &UseArgs) -> anyhow::Result<()> {
         Scope::Project(root) => root.join(".docsbase.toml"),
         Scope::Global => global_config_file()?,
     };
-    let existing = read_config_table(&path)?;
+    let existing = read_edit_base(&path)?;
     let global = project_global(&path)?;
     let (table, resolved) = merge_stage_for_file(
         &path,
@@ -551,7 +551,7 @@ fn apply_stage_locked_with_wait(
                     Error::internal_with_source(format!("create {}", parent.display()), err)
                 })?;
             }
-            let current = read_config_table(path)?;
+            let current = read_edit_base(path)?;
             let global = project_global(path)?;
             let (table, resolved) =
                 merge_stage_for_file(path, current.as_ref(), stage_key, stage, global.as_ref())?;
@@ -562,8 +562,8 @@ fn apply_stage_locked_with_wait(
     )
 }
 
-/// Reads a config file as an untyped table by path (project or global).
-fn read_config_table(path: &std::path::Path) -> anyhow::Result<Option<toml::Value>> {
+/// Reads the editable TOML and seeds v2 when creating a global file.
+fn read_edit_base(path: &std::path::Path) -> anyhow::Result<Option<toml::Value>> {
     match std::fs::read_to_string(path) {
         Ok(raw) => {
             let value: toml::Value = toml::from_str(&raw).map_err(|err| {
@@ -576,7 +576,10 @@ fn read_config_table(path: &std::path::Path) -> anyhow::Result<Option<toml::Valu
             })?;
             Ok(Some(value))
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let global = path.file_name().is_some_and(|name| name == "config.toml");
+            Ok(global.then(crate::config::source::new_global_document))
+        }
         Err(err) => {
             Err(Error::internal_with_source(format!("read {}", path.display()), err).into())
         }
@@ -1780,7 +1783,7 @@ mod tests {
 
         // A owns the real lock but cannot publish until B has tried it.
         let writer_b = crate::config::paths::with_config_write_lock(&path, || {
-            let current = read_config_table(&path)?;
+            let current = read_edit_base(&path)?;
             let table = merge_stage(
                 current.as_ref(),
                 "embedding",
@@ -1807,7 +1810,7 @@ mod tests {
             observe_contention
                 .recv_timeout(watchdog)
                 .expect("B must contend before A publishes");
-            assert_eq!(read_config_table(&path)?, Some(parse(seed)));
+            assert_eq!(read_edit_base(&path)?, Some(parse(seed)));
             write_project_toml(&path, current.as_ref(), &table)?;
             Ok(writer_b)
         })
@@ -1822,7 +1825,7 @@ mod tests {
             "max_file_size = 1\n[providers.fastembed]\nenabled = true\n[hybrid]\nenabled = true\nranking = \"rrf\"\n[hybrid.embedding]\nprovider = \"fastembed\"\nmodel = \"bge\"\ndimensions = 384\nnormalize = true\n[hybrid.reranker]\nprovider = \"fastembed\"\nmodel = \"jina\"\nwindow = 50\n",
         );
         assert_eq!(
-            read_config_table(&path).expect("read back"),
+            read_edit_base(&path).expect("read back"),
             Some(expected.clone()),
             "both complete stages and unrelated config must survive contention"
         );
@@ -1873,14 +1876,23 @@ mod tests {
     }
 
     #[test]
-    fn global_write_creates_config_dir() {
-        let dir = tempfile::TempDir::new().expect("tmp");
+    fn first_global_stage_write_creates_v2_runtime_config() {
+        let dir = tempfile::tempdir().unwrap();
         let config_dir = dir.path().join("nested").join("config");
-        let table =
-            merge_stage(None, "reranker", rerank_stage("fastembed", "jina", 50)).expect("merge");
-        with_env("DOCSBASE_CONFIG_DIR", &config_dir, || {
-            write_global_toml(None, &table).expect("write");
-            assert!(config_dir.join("config.toml").exists(), "created");
+        let target = config_dir.join("config.toml");
+        with_env("DOCSBASE_DATA_DIR", dir.path(), || {
+            apply_stage_locked(
+                &target,
+                "embedding",
+                embedding_stage("openrouter", "new/e", 256),
+            )
+            .unwrap();
+            let text = std::fs::read_to_string(&target).unwrap();
+            let document: toml::Table = toml::from_str(&text).unwrap();
+            assert_eq!(document["config_version"].as_integer(), Some(2));
+            let resolved = crate::config::Config::global_from(&config_dir).unwrap();
+            assert!(resolved.vector_store.is_some());
+            assert_eq!(resolved.hybrid_cfg.embedding.unwrap().model, "new/e");
         });
     }
 
