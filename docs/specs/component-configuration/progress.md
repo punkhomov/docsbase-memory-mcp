@@ -1063,6 +1063,23 @@ the explicit beam on the same graph for 100 queries at five beam widths.
 Re-review confirmed the finding was addressed. No deferred minors.
 Final independent review on af0aeab: converged for CF8a with no findings.
 
+## 2026-11-24 — CF12a, окно debounce watcher
+
+Task CF12a: complete (типизированное окно v2 с наследованием и provenance,
+ограничение всего интервала, проверка реального цикла производителя).
+Проектная ревизия посреди пачки сохраняет захваченные таймеры, применяется к
+фильтрации на сбросе и задаёт время ожидания следующей пачки. Покрыты неверные
+пределы и совместимость прежних дефолтов.
+
+Ruling: независимое ревью выявило лишнее вытеснение dense-состояния и пробел
+в проверке публикации посреди пачки. Регрессия в v2 демоне воспроизвела
+вытеснение. Сравнение для dense исключает только таймеры watcher. Проверка
+исходной задержки, актуального фильтра и новой задержки использует тот же
+цикл производителя. Повторное ревью подтвердило исправления.
+
+Полные локальные CLI-full и lean наборы, Clippy и fmt прошли. Требуемые
+нативные проверки выполняются при доставке.
+
 ## 2026-11-24 — observed migration source identity
 
 Task CF5b2b read-side identity: complete (single-link admission, retained-handle

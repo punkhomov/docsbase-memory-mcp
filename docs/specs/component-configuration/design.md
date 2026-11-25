@@ -848,6 +848,14 @@ admission prevents dependency promotion above the chosen max, while visited/cand
 storage and graph residency remain separate resource concerns. No persistence,
 graph recipe, embedding/query cache identity, daemon or source-format change.
 
+## Delta 2026-11-24 — CF12a, владение окном debounce
+
+`WatchSpec` разрешает таймеры из глобального файла и файла проекта v2.
+Producer фиксирует разрешённые таймеры на первом событии пачки и ограничивает
+каждое ожидание её остатком. Следующая пачка читает новый снимок.
+При сбросе используется актуальный фильтр проекта согласно OQ-6. Смена окна
+не пересоздаёт watcher и сохраняет постановку событий в очередь.
+
 ## Delta 2026-11-24 — CF5b2b read-side identity
 
 The dry-run retains the first file handle across a second no-follow open. The

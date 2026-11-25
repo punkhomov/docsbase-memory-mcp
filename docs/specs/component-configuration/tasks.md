@@ -553,6 +553,18 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   persistence regressions. Plan: [cf8a-plan.md](cf8a-plan.md). Construction/recipe/
   estimator and dense/runtime/source composition remain later CF8 slices.
 
+## Delta 2026-11-24 — CF12a, окно debounce watcher
+
+- Разрешить `watch.debounce_ms` и `watch.max_debounce_ms` в глобальном и
+  проектном файлах v2. Проверить независимое наследование полей и отображение
+  источников в effective config. Окна по умолчанию 1500 и 2000 мс.
+- Проверять `1 <= debounce_ms <= max_debounce_ms <= 2000`. Политика берётся
+  из снимка при приёме первого события. Следующее окно увидит новую ревизию.
+  Фильтрация перед отправкой использует свежий снимок, как требует OQ-6.
+- Проверить настоящий источниковый резолвер и пакетную обработку watcher.
+  Изменение таймеров не меняет артефакты; управлять очередями и повторами
+  предстоит отдельным этапом. Новых crates нет.
+
 ## Delta 2026-11-24 — CF5b2b read-side identity
 
 - [x] Bind every loaded migration input to the single-linked object observed

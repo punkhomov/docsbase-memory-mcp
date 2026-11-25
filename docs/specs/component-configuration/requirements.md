@@ -505,6 +505,12 @@ promotion. Legacy search preserves its existing high-fetch behavior and soft cap
 Changing search policy alone never rewrites graph/vector identities or files.
 This is not a total RSS guarantee, source-key activation or full CF8 completion.
 
+## Delta 2026-11-24 — настраиваемое окно debounce
+
+V2 позволяет переопределять `watch.debounce_ms` и `watch.max_debounce_ms`,
+сохраняя предел FR-15 в 2000 мс. Смена проектных таймеров применяется с первой
+новой пачки. Она не требует инвалидации документов, векторов или ANN.
+
 ## Delta 2026-11-24 — CF5b2b migration source identity
 
 For every loaded input to the observed migration plan, including unchanged v2

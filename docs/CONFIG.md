@@ -440,6 +440,23 @@ On Shared v2, connected `docsbase index` requires its own job so it uses
 fresh project settings. If a sync for that project is active, wait for it to
 finish and retry `docsbase index`. Ordinary `sync` can join the active job.
 
+### Watcher debounce
+
+Set these fields in a v2 global or project file. Each project field can
+override its global value independently.
+
+```toml
+[watch]
+debounce_ms = 1500
+max_debounce_ms = 2000
+```
+
+The watcher waits up to `debounce_ms` after the last event. It starts
+flushing once `max_debounce_ms` elapses from the first received event.
+Indexing still depends on the downstream queue and writer. Both fields must be at least 1 millisecond,
+and the quiet window must fit within the maximum of 2000 milliseconds.
+When the project config is reopened, the next batch uses the updated windows.
+
 ## Versioned source planning API (CF3)
 
 For offline tooling, `config::source::SourceLayer::parse` accepts supplied TOML

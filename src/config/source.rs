@@ -61,6 +61,7 @@ pub struct SourceLayer {
     pub(super) vector_store: Option<Resolved<crate::vector_cache::settings::VectorStoreSettings>>,
     pub(super) original: String,
     pub(super) document: toml::Table,
+    pub(super) watch: Option<crate::watch::settings::WatchPatch>,
 }
 impl fmt::Debug for SourceLayer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -105,9 +106,17 @@ impl SourceLayer {
                 ));
             }
         };
+        let mut watch = None;
         let mut hybrid_merge = None;
         let mut vector_store = None;
         if version == ConfigVersion::V2 {
+            if let Some(value) = fields.remove("watch") {
+                watch = Some(
+                    value
+                        .try_into()
+                        .map_err(|_| invalid("invalid v2 watch fields"))?,
+                );
+            }
             if let Some(hybrid) = fields.remove("hybrid") {
                 hybrid_merge = Some(
                     hybrid
@@ -145,6 +154,7 @@ impl SourceLayer {
             vector_store,
             original: text.to_owned(),
             document,
+            watch,
         })
     }
     /// Exact source identity supplied by the caller; no canonicalization or I/O.

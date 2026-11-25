@@ -12,6 +12,7 @@ use crate::hybrid::config::{HybridCfg, HybridDefaults, HybridPatch, HybridSpec, 
 use crate::hybrid::remote_settings::{RemotePatch, RemoteSettings, RemoteSpec};
 use crate::index::settings::{ChunkSettings, ChunkSpec, IndexFilePatch};
 use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
+use crate::watch::{WatchSettings, settings::WatchSpec};
 use bootstrap::DefaultsContext;
 use schema::{
     ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Scope, SettingsSpec,
@@ -53,6 +54,8 @@ pub struct Config {
     pub daemon: DaemonSettings,
     /// Complete global-only remote execution policy.
     pub remote: RemoteSettings,
+    /// Project policy for batching native watcher events.
+    pub watch: WatchSettings,
     /// Register and index a project automatically on first connection (ADR-6: off).
     pub auto_index: bool,
     /// Hybrid retrieval feature flag (phase 2; off in v1).
@@ -242,11 +245,12 @@ impl Config {
     }
 
     pub(crate) fn changes_dense_state(&self, previous: &Self) -> bool {
-        if self.ann_search == previous.ann_search {
+        if self.ann_search == previous.ann_search && self.watch == previous.watch {
             self != previous
         } else {
             let mut previous = previous.clone();
             previous.ann_search = self.ann_search;
+            previous.watch = self.watch;
             self != &previous
         }
     }
@@ -370,6 +374,7 @@ struct ConfigDefaults {
     daemon: DaemonSettings,
     remote: RemoteSettings,
     ann_search: AnnSearchSettings,
+    watch: WatchSettings,
 }
 struct ConfigSpec;
 impl SettingsSpec for ConfigSpec {
@@ -386,6 +391,7 @@ impl SettingsSpec for ConfigSpec {
     ];
     fn fields() -> Vec<FieldSpec> {
         let mut fields = Self::FIELDS.to_vec();
+        fields.extend_from_slice(WatchSpec::FIELDS);
         fields.extend_from_slice(HybridSpec::FIELDS);
         fields.extend_from_slice(SearchSpec::FIELDS);
         fields.extend_from_slice(ChunkSpec::FIELDS);
@@ -401,6 +407,7 @@ impl SettingsSpec for ConfigSpec {
         let daemon = DaemonSpec::defaults(context);
         let remote = RemoteSpec::defaults(context);
         let ann_search = AnnSearchSpec::defaults(context);
+        let watch = WatchSpec::defaults(context);
         let initial = Config {
             ignores: Vec::new(),
             max_file_size: 1_048_576,
@@ -409,6 +416,7 @@ impl SettingsSpec for ConfigSpec {
             search: SearchSpec::initial(&search),
             daemon: DaemonSpec::initial(&daemon),
             remote: RemoteSpec::initial(&remote),
+            watch: WatchSpec::initial(&watch),
             auto_index: false,
             hybrid: false,
             hybrid_cfg: HybridSpec::initial(&hybrid),
@@ -424,6 +432,7 @@ impl SettingsSpec for ConfigSpec {
             daemon,
             remote,
             ann_search,
+            watch,
         }
     }
     fn initial(defaults: &Self::Defaults) -> Config {
@@ -572,7 +581,7 @@ impl ConfigSpec {
         ] {
             view.push(key, serde_json::json!(value), None)?;
         }
-        Ok(())
+        WatchSpec::view_fields(settings.watch, view)
     }
 }
 

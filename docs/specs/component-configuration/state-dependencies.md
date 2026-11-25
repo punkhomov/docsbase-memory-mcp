@@ -253,6 +253,13 @@ Completed pure query cache entries survive reload; obsolete active results remai
 revision-fenced. Direct read-only Search retains LoadOnly ANN and never bootstraps
 Shared metadata. Numeric operation/status projection adds no artifact/rebuild edge.
 
+## Delta 2026-11-24 — I41, таймеры очередной пачки watcher
+
+Таймеры входят в конфигурацию производителя и выбираются один раз на пачку.
+Параметры действуют после публикации проектного снимка или загрузки нового
+глобального конфига при запуске. Таймеры не входят в идентичность индекса или
+векторов. Обработчик сохраняет актуальный фильтр при сбросе пачки.
+
 ## Delta 2026-11-24 — ASK1 generation
 
 A request-scoped generation model and AskLimits affect only that request's
