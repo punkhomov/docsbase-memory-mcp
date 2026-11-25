@@ -526,7 +526,15 @@ fn explicit_missing_paths_are_not_created_during_resolution() {
     let project = root.path().join("absent-project");
     let resolved = docsbase_memory::config::resolve::load_from(&global, Some(&project))
         .expect("defaults without I/O writes");
-    assert_eq!(resolved.settings(), &Config::default());
+    assert!(resolved.settings().vector_store.is_some());
+    assert_eq!(
+        resolved
+            .provenance()
+            .get("vector_cache.max_bytes")
+            .unwrap()
+            .source,
+        SourceId::Defaults
+    );
     assert!(
         std::fs::read_dir(root.path())
             .expect("directory")

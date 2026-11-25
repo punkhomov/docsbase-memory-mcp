@@ -13,14 +13,12 @@ fn legacy_global_and_project_reads_enforce_the_same_existing_byte_boundary() {
     let global = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let oversize = vec![b' '; 1_048_577];
-    for (path, name) in [
-        (global.path(), "config.toml"),
-        (project.path(), ".docsbase.toml"),
-    ] {
-        fs::write(path.join(name), &oversize).unwrap();
-        assert!(Config::load_from(global.path(), Some(project.path())).is_err());
-        fs::remove_file(path.join(name)).unwrap();
-    }
+    fs::write(global.path().join("config.toml"), &oversize).unwrap();
+    assert!(Config::load_from(global.path(), Some(project.path())).is_err());
+
+    fs::write(global.path().join("config.toml"), "# Legacy global").unwrap();
+    fs::write(project.path().join(".docsbase.toml"), &oversize).unwrap();
+    assert!(Config::load_from(global.path(), Some(project.path())).is_err());
 }
 
 /// Serializes the env-mutating tests in this binary (round-6 deepseek-2):
@@ -45,10 +43,50 @@ fn defaults_when_missing() {
     let config_dir = TempDir::new().expect("tempdir");
     let config = Config::load_from(config_dir.path(), None).expect("load");
 
-    assert_eq!(config, Config::default());
+    let vector_store = docsbase_memory::vector_cache::settings::standalone()
+        .unwrap()
+        .into_settings();
+    assert_eq!(
+        config,
+        Config {
+            vector_store: Some(vector_store),
+            ..Config::default()
+        }
+    );
     assert_eq!(config.max_file_size, 1_048_576);
     assert_eq!(config.max_docs_per_project, 20_000);
     assert!(!config.hybrid);
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_global_config_is_unavailable_to_both_resolvers() {
+    use docsbase_memory::daemon::launch::LaunchSnapshot;
+    use docsbase_memory::daemon::settings::DaemonPatch;
+
+    let config = TempDir::new().unwrap();
+    let target = config.path().join("target.toml");
+    std::os::unix::fs::symlink(&target, config.path().join("config.toml")).unwrap();
+
+    let runtime = Config::global_from(config.path());
+    let launch = LaunchSnapshot::capture_from(config.path()).resolve(DaemonPatch::default());
+    assert!(runtime.is_err() && launch.is_err(), "runtime={runtime:?}");
+
+    fs::write(target, "# Unversioned").unwrap();
+    assert!(
+        Config::global_from(config.path())
+            .unwrap()
+            .vector_store
+            .is_none()
+    );
+    assert!(
+        LaunchSnapshot::capture_from(config.path())
+            .resolve(DaemonPatch::default())
+            .unwrap()
+            .settings()
+            .vector_store
+            .is_none()
+    );
 }
 
 #[test]
