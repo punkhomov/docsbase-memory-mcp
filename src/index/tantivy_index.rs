@@ -11,7 +11,7 @@ use tantivy::schema::{
     Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, Value,
 };
 use tantivy::{
-    Index, IndexReader, IndexWriter, ReloadPolicy, SegmentReader, TantivyDocument, Term,
+    Index, IndexReader, IndexWriter, ReloadPolicy, Segment, SegmentReader, TantivyDocument, Term,
 };
 
 use super::lexical_settings::{self, LexicalCollection, LexicalSettings};
@@ -151,15 +151,26 @@ impl Drop for IndexHandle {
     /// registrations elsewhere (tantivy issue #2847). Waiting serializes
     /// every `.managed.json` update within the process.
     fn drop(&mut self) {
-        if let Some(writer) = self.writer.take()
-            && let Err(err) = writer.wait_merging_threads()
-        {
+        if let Err(err) = self.settle_writer() {
             eprintln!("warning: waiting for index merges failed: {err}");
         }
     }
 }
 
 impl IndexHandle {
+    /// Consumes the writer, reporting background merge failure before a
+    /// caller treats the committed files as complete.
+    pub(crate) fn finish(mut self) -> Result<()> {
+        self.settle_writer()
+    }
+
+    fn settle_writer(&mut self) -> Result<()> {
+        if let Some(writer) = self.writer.take() {
+            writer.wait_merging_threads().map_err(tantivy_error)?;
+        }
+        Ok(())
+    }
+
     /// Read-only recreation decision, before any writer or marker effects.
     pub(crate) fn needs_rebuild(dir: &Path) -> bool {
         !dir.join("meta.json").exists()
@@ -444,15 +455,45 @@ impl ReadIndex {
     pub(crate) fn check_health_with_project_lease(dir: &Path) -> Result<()> {
         let (index, _) = open_readable_index(dir)?;
         for segment in index.searchable_segments().map_err(tantivy_error)? {
-            // SegmentReader treats positions as optional. Our text fields
-            // require them for phrase queries.
-            let _positions = segment
-                .open_read(SegmentComponent::Positions)
-                .map_err(|error| tantivy_error(error.into()))?;
-            SegmentReader::open(&segment)
-                .map_err(tantivy_error)?
+            open_searchable_segment(&segment)?
                 .get_store_reader(0)
                 .map_err(|error| tantivy_error(error.into()))?;
+        }
+        Ok(())
+    }
+
+    /// Compares stored IDs with sorted SQLite IDs under exclusive staging ownership.
+    pub(crate) fn verify_chunk_ids(dir: &Path, expected: &[u64]) -> Result<()> {
+        let (index, fields) = open_readable_index(dir)?;
+        let mut seen = Vec::new();
+        seen.try_reserve_exact(expected.len()).map_err(|error| {
+            Error::internal_with_source("allocate staged chunk verification", error)
+        })?;
+        seen.resize(expected.len(), false);
+        let mismatch = || Error::internal("staged SQLite and Tantivy chunk IDs do not match");
+        for segment in index.searchable_segments().map_err(tantivy_error)? {
+            let segment = open_searchable_segment(&segment)?;
+            let store = segment
+                .get_store_reader(0)
+                .map_err(|error| tantivy_error(error.into()))?;
+            for document in store.iter::<TantivyDocument>(segment.alive_bitset()) {
+                let document = document.map_err(tantivy_error)?;
+                let id = document
+                    .get_first(fields.chunk_id)
+                    .and_then(|value| value.as_u64())
+                    .ok_or_else(mismatch)?;
+                let doc = document
+                    .get_first(fields.doc_id)
+                    .and_then(|value| value.as_i64())
+                    .ok_or_else(mismatch)?;
+                let position = expected.binary_search(&id).map_err(|_| mismatch())?;
+                if chunk_id_parts(id).0 != doc || std::mem::replace(&mut seen[position], true) {
+                    return Err(mismatch());
+                }
+            }
+        }
+        if seen.contains(&false) {
+            return Err(mismatch());
         }
         Ok(())
     }
@@ -495,6 +536,15 @@ impl ReadIndex {
     pub fn search_with_mode(&self, query: &str, limit: usize, mode: QueryMode) -> Result<Vec<Hit>> {
         search_reader(self, query, limit, mode, None)
     }
+}
+
+fn open_searchable_segment(segment: &Segment) -> Result<SegmentReader> {
+    // SegmentReader treats positions as optional. Our text fields
+    // require them for phrase queries.
+    let _positions = segment
+        .open_read(SegmentComponent::Positions)
+        .map_err(|error| tantivy_error(error.into()))?;
+    SegmentReader::open(segment).map_err(tantivy_error)
 }
 
 fn search_reader(

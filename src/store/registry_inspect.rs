@@ -141,7 +141,7 @@ fn presence(cache: &Path) -> std::result::Result<bool, UnavailableReason> {
     }
 }
 
-fn validate(cache: &Path, limits: InspectionLimits) -> Result<usize> {
+pub(super) fn validate(cache: &Path, limits: InspectionLimits) -> Result<usize> {
     let invalid = || Error::Admission {
         message: "invalid registry inspection limits or cache context".into(),
     };
@@ -192,7 +192,7 @@ fn capture(
     })
 }
 
-fn with_registry<T>(
+pub(super) fn with_registry<T>(
     cache: &Path,
     limits: InspectionLimits,
     before_lock: impl FnOnce(),
@@ -237,7 +237,7 @@ fn schema_version(connection: &Connection) -> std::result::Result<u32, Unavailab
     u32::try_from(version).map_err(|_| UnavailableReason::UnsupportedSchema)
 }
 
-fn sidecars_absent(path: &Path) -> std::result::Result<(), UnavailableReason> {
+pub(super) fn sidecars_absent(path: &Path) -> std::result::Result<(), UnavailableReason> {
     for suffix in ["-wal", "-shm", "-journal"] {
         let mut sidecar = path.as_os_str().to_owned();
         sidecar.push(suffix);

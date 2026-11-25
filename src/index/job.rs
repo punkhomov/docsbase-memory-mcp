@@ -201,8 +201,13 @@ pub fn run_full(
         project,
         config,
         || Ok(()),
-        |root, texts| {
-            crate::hybrid::jobs::embed_texts(root, &config.hybrid_cfg, &config.providers, texts)
+        |root, plan| {
+            crate::hybrid::jobs::embed_texts(
+                root,
+                &config.hybrid_cfg,
+                &config.providers,
+                &plan.texts(),
+            )
         },
     )
 }
@@ -230,8 +235,18 @@ pub fn run_full_with_embedding(
         project,
         config,
         || Ok(()),
-        |root, texts| embedding.embed(root, texts),
+        |root, plan| embedding.embed(root, &plan.texts()),
     )
+}
+
+/// Full lexical rebuild into an isolated pair without constructing provider inputs.
+pub(crate) fn run_full_lexical(
+    db: &mut Db,
+    index: &mut IndexHandle,
+    project: &Project,
+    config: &Config,
+) -> Result<JobStats> {
+    run_full_using(db, index, project, config, || Ok(()), |_, _| Ok(0))
 }
 
 fn run_full_using(
@@ -240,7 +255,7 @@ fn run_full_using(
     project: &Project,
     config: &Config,
     before_apply: impl FnOnce() -> Result<()>,
-    embed: impl FnOnce(&Path, &[String]) -> Result<u64>,
+    embed: impl FnOnce(&Path, &PreparedPlan) -> Result<u64>,
 ) -> Result<JobStats> {
     super::outcome::run(
         db,
@@ -257,13 +272,12 @@ fn run_full_core(
     project: &Project,
     config: &Config,
     before_apply: impl FnOnce() -> Result<()>,
-    embed: impl FnOnce(&Path, &[String]) -> Result<u64>,
+    embed: impl FnOnce(&Path, &PreparedPlan) -> Result<u64>,
 ) -> Result<JobStats> {
     let mut prepared = capture_full(db, project, config, index.was_recreated())?;
     before_apply()?;
     prepared.begin(db, index, project.id)?;
-    let texts = prepared.texts();
-    embed(db.cache_root(), &texts)?;
+    embed(db.cache_root(), &prepared)?;
     prepared.commit(db, index, project.id)?;
     Ok(prepared.stats)
 }
@@ -384,7 +398,9 @@ fn run_incremental_using(
     if index.was_recreated() {
         // Incremental batches cannot repopulate a freshly recreated index;
         // rebuild everything under the same writer lease instead (T27).
-        return run_full_using(db, index, project, config, before_apply, embed);
+        return run_full_using(db, index, project, config, before_apply, |root, plan| {
+            embed(root, &plan.texts())
+        });
     }
     super::outcome::run(
         db,

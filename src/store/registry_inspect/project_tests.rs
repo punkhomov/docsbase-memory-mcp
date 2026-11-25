@@ -134,7 +134,8 @@ impl Pairs {
         fs::copy(other.path().join(DB_FILE), local.join("metadata.db")).unwrap();
         let mut metadata = Connection::open(local.join("metadata.db")).unwrap();
         let tx = metadata.transaction().unwrap();
-        tx.execute_batch(super::project::LOCAL_SCHEMA_SQL).unwrap();
+        tx.execute_batch(crate::store::project_index::LOCAL_SCHEMA_SQL)
+            .unwrap();
         tx.execute("INSERT INTO generation_state VALUES (1,1,2,?1)", [revision])
             .unwrap();
         tx.pragma_update(None, "user_version", 1).unwrap();

@@ -496,6 +496,11 @@ pub fn secure_dir(dir: &Path) -> io::Result<()> {
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
+/// Creates a new private child directory, refusing an existing entry.
+pub(crate) fn create_private_directory(path: &Path) -> io::Result<()> {
+    fs::DirBuilder::new().mode(0o700).create(path)
+}
+
 /// Whether no-follow metadata identifies an ordinary file.
 #[must_use]
 pub fn is_regular_nofollow(metadata: &fs::Metadata) -> bool {
