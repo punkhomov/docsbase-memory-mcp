@@ -181,6 +181,21 @@ impl Provenance {
         Ok(())
     }
 
+    pub(super) fn include(&mut self, field: FieldSpec, source: &SourceId) -> Result<()> {
+        if self.fields.contains_key(field.key) || !source.permits(field.scope) {
+            return Err(Error::internal("invalid additional configuration field"));
+        }
+        self.fields.insert(
+            field.key,
+            FieldOrigin {
+                source: source.clone(),
+                scope: field.scope,
+                unit: field.unit,
+            },
+        );
+        Ok(())
+    }
+
     pub(crate) fn replace_group(&mut self, prefix: &str, source: &SourceId) -> Result<()> {
         let keys: Vec<_> = self
             .fields

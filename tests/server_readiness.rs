@@ -197,8 +197,34 @@ fn recipe_change_requires_full_sync() {
 }
 
 #[test]
+fn chunk_recipe_change_requires_sync_and_applies_to_unchanged_files() {
+    let mut env = Env::new();
+    let path = env.root.path().join("guide.md");
+    let body = "readinesswidget extends the body. ".repeat(36);
+    std::fs::write(&path, &body).unwrap();
+    env.sync();
+    let before = env.view();
+    assert_eq!(before["ready"], true);
+    assert_eq!(before["outcome"]["stats"]["chunks"], 1);
+
+    env.config.chunk = docsbase_memory::index::settings::ChunkSettings::new(300, 0).unwrap();
+    env.reason("recipe_changed");
+    env.sync();
+    let after = env.view();
+    assert_eq!(after["ready"], true);
+    assert!(after["outcome"]["stats"]["chunks"].as_u64().unwrap() > 1);
+    assert_ne!(after["index_generation"], before["index_generation"]);
+
+    env.sync();
+    let repeated = env.view();
+    assert_eq!(repeated["ready"], true);
+    assert_eq!(repeated["index_generation"], after["index_generation"]);
+    assert_eq!(repeated["outcome"]["stats"]["skipped"], 1);
+}
+
+#[test]
 fn absent_corrupt_and_rebuild_needed_index_never_repairs() {
-    for alteration in ["missing", "corrupt", "tokenizer"] {
+    for alteration in ["missing", "corrupt", "segment", "tokenizer"] {
         let env = Env::new();
         let dir = env
             .cache
@@ -209,6 +235,17 @@ fn absent_corrupt_and_rebuild_needed_index_never_repairs() {
         match alteration {
             "missing" => std::fs::remove_file(dir.join("meta.json")).unwrap(),
             "corrupt" => std::fs::write(dir.join("meta.json"), "invalid-json").unwrap(),
+            "segment" => {
+                let store = std::fs::read_dir(&dir)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| {
+                        path.extension()
+                            .is_some_and(|extension| extension == "store")
+                    })
+                    .expect("real Tantivy store component");
+                std::fs::remove_file(store).unwrap();
+            }
             _ => std::fs::remove_file(
                 dir.join(docsbase_memory::index::tantivy_index::TOKENIZER_VERSION_FILE),
             )
@@ -259,6 +296,25 @@ fn nonindexed_and_inflight_project_status_never_promote_old_proof() {
         env.sql(&format!("UPDATE projects SET status='{status}'"));
         env.reason(reason);
     }
+}
+
+#[test]
+fn readiness_checks_healthy_segments_without_creating_a_tantivy_lock() {
+    let env = Env::new();
+    let dir = env
+        .cache
+        .path()
+        .join("projects")
+        .join(env.project.id.to_string())
+        .join("tantivy");
+    let lock = dir.join(&tantivy::directory::META_LOCK.filepath);
+    if lock.exists() {
+        std::fs::remove_file(&lock).unwrap();
+    }
+
+    let view = env.view();
+    assert_eq!(view["ready"], true, "{view}");
+    assert!(!lock.exists(), "readiness created {}", lock.display());
 }
 
 #[test]

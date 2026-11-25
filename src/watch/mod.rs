@@ -1,7 +1,7 @@
 //! Debounced per-project watcher (FR-15, FR-16, NFR-4; R4, SC-6).
 //!
-//! [`spawn_watcher`] watches a project root, coalesces bursts with a 1.5 s
-//! quiet window (flushing at most 2 s after the first event) and forwards
+//! [`spawn_watcher`] watches a project root, coalesces bursts using the
+//! project policy (by default a 1.5 s quiet window and 2 s maximum) and forwards
 //! batches of changed markdown paths over a channel; [`Watchers`] owns one
 //! watcher plus an async consumer per project inside the daemon. Events below
 //! the cache root (tantivy index state) are ignored so indexing cannot feed
@@ -30,13 +30,8 @@ use crate::store::models::{Project, ProjectStatus};
 use crate::store::settings::{DbSettings, DbSpec};
 use serde_json::json;
 
-/// Quiet window after the last event; extends while events keep coming, so a
-/// git-checkout-like burst becomes one incremental job (FR-15, NFR-4).
-pub const DEBOUNCE: Duration = Duration::from_millis(1_500);
-
-/// Hard upper bound from the first event of a batch to its flush, so
-/// continuous churn cannot starve indexing (NFR-4).
-pub const MAX_DEBOUNCE: Duration = Duration::from_secs(2);
+pub(crate) mod settings;
+pub use settings::{DEBOUNCE, MAX_DEBOUNCE, WatchSettings};
 
 /// Watcher tracing: set `DOCSBASE_WATCH_DEBUG=1` to log raw events and
 /// batches to stderr (diagnostics; no behavior change).
@@ -291,44 +286,19 @@ fn spawn_watcher_sink_owned(
                 before_drop: before_native_drop,
             };
             let event_rx = event_rx;
-            let mut filter = IndexFilter::new(filter_root, filter_cache, &initial);
+            let filter = IndexFilter::new(filter_root, filter_cache, &initial);
             drop(initial);
-            while let Ok(Some(first)) = event_rx.recv() {
-                if cancel
-                    .as_ref()
-                    .is_some_and(crate::hybrid::work::Cancellation::is_cancelled)
-                {
-                    return;
-                }
-                let deadline = Instant::now() + MAX_DEBOUNCE;
-                let mut raw = Batch::new();
-                raw.push(first);
-                loop {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        break;
-                    }
-                    match event_rx.recv_timeout(DEBOUNCE.min(remaining)) {
-                        Ok(Some(path)) => raw.push(path),
-                        Ok(None) => return,
-                        Err(RecvTimeoutError::Timeout) => break,
-                        Err(RecvTimeoutError::Disconnected) => {
-                            let _ = send(finalize(&mut filter, raw));
-                            return;
-                        }
-                    }
-                }
-                // Apply the config as of the END of the debounce window: a
-                // reopen that lands while events are still arriving must
-                // govern this batch (OQ-6; Windows CI showed the old
-                // start-of-window capture losing freshly written ignores).
-                let batch_config = current_config();
-                filter.set_config(&batch_config);
-                let batch = finalize(&mut filter, raw);
-                if !batch.is_empty() && send(batch).is_err() {
-                    return;
-                }
-            }
+            forward_batches(
+                filter,
+                current_config,
+                |timeout| match timeout {
+                    Some(timeout) => event_rx.recv_timeout(timeout),
+                    None => event_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                },
+                send,
+                cancel.as_ref(),
+                Instant::now,
+            );
         })
         .map_err(|err| Error::internal_with_source("spawn debounce thread", err))?;
     Ok(WatcherGuard {
@@ -336,6 +306,44 @@ fn spawn_watcher_sink_owned(
         forwarder: Some(forwarder),
         retirement,
     })
+}
+
+fn forward_batches(
+    mut filter: IndexFilter,
+    current_config: impl Fn() -> Arc<Config>,
+    mut receive: impl FnMut(Option<Duration>) -> std::result::Result<Option<PathBuf>, RecvTimeoutError>,
+    send: impl Fn(Vec<PathBuf>) -> std::result::Result<(), Vec<PathBuf>>,
+    cancel: Option<&crate::hybrid::work::Cancellation>,
+    now: impl Fn() -> Instant,
+) {
+    while let Ok(Some(first)) = receive(None) {
+        if cancel.is_some_and(crate::hybrid::work::Cancellation::is_cancelled) {
+            return;
+        }
+        let started = now();
+        let timing = current_config().watch;
+        let mut raw = Batch::new();
+        raw.push(first);
+        let mut disconnected = false;
+        while let Some(timeout) = timing.next_event_timeout(now().duration_since(started)) {
+            match receive(Some(timeout)) {
+                Ok(Some(path)) => raw.push(path),
+                Ok(None) => return,
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+        // A reopen while events were still arriving governs this batch's
+        // filtering even though its timing was captured at the start (OQ-6).
+        filter.set_config(&current_config());
+        let batch = finalize(&mut filter, raw);
+        if (!batch.is_empty() && send(batch).is_err()) || disconnected {
+            return;
+        }
+    }
 }
 
 /// Deduplicated batch under construction.
@@ -1530,7 +1538,7 @@ pub(crate) fn admit_incremental(db: &Db, project: &Project) -> Result<()> {
         instruction: None,
     })?;
     if current.status != ProjectStatus::Indexed
-        || current.schema_version != crate::store::migrations::SCHEMA_VERSION
+        || current.schema_version != crate::store::migrations::PROJECT_SCHEMA_VERSION
     {
         return Err(Error::Project {
             message: format!(
@@ -1796,6 +1804,71 @@ mod tests {
             .expect_err("reject before watcher creation");
         assert!(matches!(error, Error::Admission { .. }));
         assert_eq!(watchers.count(), 0);
+    }
+
+    #[test]
+    fn pending_batch_keeps_its_timers_and_uses_the_reopened_filter() {
+        let env = Env::new();
+        let root = &env.project.canonical_root;
+        let global = TempDir::new().expect("global config");
+        fs::write(global.path().join("config.toml"), "config_version = 2\n").unwrap();
+        let project_file = root.join(".docsbase.toml");
+        fs::write(
+            &project_file,
+            "config_version = 2\n[watch]\ndebounce_ms = 80\nmax_debounce_ms = 100\n",
+        )
+        .unwrap();
+        fs::write(root.join("a.md"), "first event").unwrap();
+        fs::write(root.join("c.md"), "next batch").unwrap();
+        let resolved = Config::load_from(global.path(), Some(root)).unwrap();
+        let filter = IndexFilter::new(
+            root.clone(),
+            env.cache.path().canonicalize().unwrap(),
+            &resolved,
+        );
+        let current = std::cell::RefCell::new(Arc::new(resolved));
+        let clock = Cell::new(Instant::now());
+        let results = std::cell::RefCell::new(Vec::new());
+        let ms = Duration::from_millis;
+        let mut events = [
+            (None, Ok(Some(root.join("a.md")))),
+            (Some(ms(80)), Ok(Some(root.join("bbb/b.md")))),
+            (Some(ms(25)), Err(RecvTimeoutError::Timeout)),
+            (None, Ok(Some(root.join("c.md")))),
+            (Some(ms(10)), Err(RecvTimeoutError::Timeout)),
+            (None, Err(RecvTimeoutError::Disconnected)),
+        ]
+        .into_iter();
+
+        forward_batches(
+            filter,
+            || current.borrow().clone(),
+            |timeout| {
+                let (expected_timeout, event) = events.next().expect("next watcher read");
+                assert_eq!(timeout, expected_timeout);
+                if timeout == Some(ms(80)) {
+                    fs::write(
+                        &project_file,
+                        "config_version = 2\nignores = ['bbb/**']\n[watch]\ndebounce_ms = 10\nmax_debounce_ms = 20\n",
+                    )
+                    .unwrap();
+                    let reopened = Config::load_from(global.path(), Some(root)).unwrap();
+                    *current.borrow_mut() = Arc::new(reopened);
+                    clock.set(clock.get() + ms(75));
+                }
+                event
+            },
+            |batch| {
+                results.borrow_mut().push(batch);
+                Ok(())
+            },
+            None,
+            || clock.get(),
+        );
+        assert_eq!(
+            results.into_inner(),
+            vec![vec![root.join("a.md")], vec![root.join("c.md")]]
+        );
     }
 
     #[test]

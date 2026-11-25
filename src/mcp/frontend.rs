@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 use crate::hybrid::work::Cancellation;
 use crate::ipc::async_client::{AsyncClient, within_operation};
 use crate::ipc::client::is_transport_error;
-use crate::ipc::protocol::{MAX_FRAME_BYTES, TOOL_ALLOWLIST};
+use crate::ipc::protocol::{MAX_FRAME_BYTES, TOOL_ALLOWLIST, ensure_config_version};
 use crate::mcp::tools;
 use crate::search::operation::SearchOperation;
 use crate::search::settings::{SearchSettings, SearchSpec};
@@ -32,6 +32,7 @@ use crate::search::settings::{SearchSettings, SearchSpec};
 struct Conn {
     client: AsyncClient,
     cwd: PathBuf,
+    config_v2: Option<bool>,
     project_hint: Option<(String, Option<String>)>,
 }
 
@@ -42,11 +43,12 @@ pub struct Frontend {
     transport: crate::platform::transport::Transport,
     conn: Arc<Mutex<Option<Conn>>>,
     search_policy: SearchSettings,
+    config_v2: Option<bool>,
 }
 
 impl Frontend {
     /// Compatibility constructor using the search owner's explicit defaults.
-    /// Normal startup passes its parsed global policy to `with_search_policy`.
+    /// Normal startup passes the resolved global configuration.
     #[must_use]
     pub fn new(transport: crate::platform::transport::Transport, cache: PathBuf) -> Self {
         let defaults = SearchSpec::defaults(&DefaultsContext::standalone());
@@ -65,6 +67,18 @@ impl Frontend {
             transport,
             conn: Arc::new(Mutex::new(None)),
             search_policy,
+            config_v2: None,
+        }
+    }
+
+    fn for_config(
+        transport: crate::platform::transport::Transport,
+        cache: PathBuf,
+        config: Config,
+    ) -> Self {
+        Self {
+            config_v2: Some(config.vector_store.is_some()),
+            ..Self::with_search_policy(transport, cache, config.search)
         }
     }
 
@@ -133,7 +147,7 @@ impl Frontend {
             check_operation(operation)?;
             let result = async {
                 if lease.is_none() {
-                    let open = open_conn(&self.transport, &self.cache);
+                    let open = open_conn(&self.transport, &self.cache, self.config_v2);
                     lease = Some(if let Some(operation) = operation {
                         open_for_search(operation, open).await?
                     } else {
@@ -290,6 +304,7 @@ async fn open_before<T>(
 async fn open_conn(
     transport: &crate::platform::transport::Transport,
     cache: &Path,
+    config_v2: Option<bool>,
 ) -> Result<Conn> {
     #[cfg(windows)]
     let client = AsyncClient::connect_with_capacity(transport, cache).await;
@@ -299,13 +314,13 @@ async fn open_conn(
         .map_err(|error| Error::transport_with_source("connect daemon after startup", error))?;
     let cwd = std::env::current_dir()
         .map_err(|error| Error::internal_with_source("resolve cwd", error))?;
-    let project_hint = match client.handshake(&cwd).await {
+    let project_hint = match bind_project(&mut client, &cwd, config_v2).await {
         Ok(()) => None,
         Err(Error::Project {
             message,
             instruction,
         }) => {
-            client.handshake_registry().await?;
+            negotiate_config(&mut client, config_v2).await?;
             client.register_unbound(&cwd).await?;
             Some((message, instruction))
         }
@@ -314,8 +329,22 @@ async fn open_conn(
     Ok(Conn {
         client,
         cwd,
+        config_v2,
         project_hint,
     })
+}
+
+async fn negotiate_config(client: &mut AsyncClient, config_v2: Option<bool>) -> Result<()> {
+    client.handshake_registry().await?;
+    if let Some(expected) = config_v2 {
+        ensure_config_version(client.capabilities(), expected)?;
+    }
+    Ok(())
+}
+
+async fn bind_project(client: &mut AsyncClient, cwd: &Path, config_v2: Option<bool>) -> Result<()> {
+    negotiate_config(client, config_v2).await?;
+    client.register_session(cwd).await
 }
 
 async fn call_bound(
@@ -325,7 +354,7 @@ async fn call_bound(
     operation: Option<&SearchOperation>,
 ) -> Result<Value> {
     if tools::PROJECT_TOOLS.contains(&name) && conn.project_hint.is_some() {
-        match conn.client.handshake(&conn.cwd).await {
+        match bind_project(&mut conn.client, &conn.cwd, conn.config_v2).await {
             Ok(()) => conn.project_hint = None,
             Err(Error::Project {
                 message,
@@ -350,7 +379,7 @@ async fn call_bound(
 
 async fn rebind_after_index(conn: &mut Conn) -> Result<()> {
     if conn.project_hint.is_some() {
-        match conn.client.handshake(&conn.cwd).await {
+        match bind_project(&mut conn.client, &conn.cwd, conn.config_v2).await {
             Ok(()) => conn.project_hint = None,
             Err(
                 error
@@ -483,12 +512,7 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for CappedRead<R> {
 /// Returns an error when the runtime or MCP transport fails.
 pub async fn run(transport: crate::platform::transport::Transport) -> anyhow::Result<()> {
     let cache = paths::cache_dir()?;
-    serve_stdio(Frontend::with_search_policy(
-        transport,
-        cache,
-        Config::global()?.search,
-    ))
-    .await
+    serve_stdio(Frontend::for_config(transport, cache, Config::global()?)).await
 }
 
 async fn serve_stdio(service: Frontend) -> anyhow::Result<()> {
@@ -519,8 +543,7 @@ pub fn run_blocking() -> anyhow::Result<()> {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            let service =
-                Frontend::with_search_policy(transport, paths::cache_dir()?, config.search);
+            let service = Frontend::for_config(transport, paths::cache_dir()?, config);
             runtime.block_on(serve_stdio(service))
         })();
         Ok(result)

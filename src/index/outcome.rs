@@ -12,7 +12,7 @@ use crate::store::models::Project;
 use crate::store::repo::{self, db_error};
 use crate::store::{Db, migrations};
 
-use super::job::{JobStats, MAX_CHUNK_CHARS, MAX_WARNINGS};
+use super::job::{JobStats, MAX_WARNINGS};
 
 /// Maximum serialized outcome/root size accepted by the outcome format.
 /// Corrupt larger values are never loaded into Rust strings by the observer.
@@ -71,7 +71,7 @@ pub fn recipe_id(config: &Config) -> String {
     hash.update(b"docsbase-index-outcome-recipe\0");
     hash.update(&RECIPE_VERSION.to_le_bytes());
     hash.update(&super::tokenizer::TOKENIZER_VERSION.to_le_bytes());
-    hash.update(&(MAX_CHUNK_CHARS as u64).to_le_bytes());
+    hash.update(&config.chunk.recipe_id().to_le_bytes());
     hash.update(&config.max_file_size.to_le_bytes());
     hash.update(&(config.max_docs_per_project as u64).to_le_bytes());
     for pattern in &config.ignores {
@@ -133,7 +133,7 @@ pub fn read(db: &Db, project_id: i64) -> Result<Option<IndexOutcome>> {
     let recipe = outcome.recipe_id.strip_prefix(RECIPE_PREFIX);
     if !indexed
         || pending
-        || stamp != i64::from(migrations::SCHEMA_VERSION)
+        || stamp != i64::from(migrations::PROJECT_SCHEMA_VERSION)
         || attempt <= 0
         || generation < 0
         || outcome.schema_version != OUTCOME_VERSION
@@ -231,7 +231,7 @@ pub(crate) fn publish(
                 json,
                 super::job::unix_now(),
                 scope == SurveyScope::FullSurvey,
-                migrations::SCHEMA_VERSION,
+                migrations::PROJECT_SCHEMA_VERSION,
                 project.id,
                 attempt,
                 outcome.canonical_root,

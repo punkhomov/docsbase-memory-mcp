@@ -5,7 +5,10 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version understood by this build.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
+
+/// Persisted project index format stamp, independent of the registry format.
+pub(crate) const PROJECT_SCHEMA_VERSION: u32 = 4;
 
 const SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS projects (
@@ -118,6 +121,14 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         // format. Keep compatible indexes usable, without inventing a result.
         // Older stale stamps still require their existing rebuild path.
         script += "UPDATE projects SET schema_version = 3 WHERE schema_version = 2;";
+    }
+    if version < 4 {
+        if !has_column(conn, "docs", "chunk_recipe")? {
+            script += "ALTER TABLE docs ADD COLUMN chunk_recipe INTEGER;";
+        }
+        // A missing stamp requires rechunking on the next index run. This
+        // additive migration retains the existing chunks and search index.
+        script += "UPDATE projects SET schema_version = 4 WHERE schema_version = 3;";
     }
     script.push_str("PRAGMA user_version = ");
     script.push_str(&SCHEMA_VERSION.to_string());

@@ -1,9 +1,11 @@
 //! Metadata store: project registry and index state (FR-10, FR-16; NFR-3, NFR-7).
 
+mod generation_catalog;
 mod inspect;
 pub mod migrations;
 pub mod models;
 mod plan;
+pub(crate) mod project_index;
 pub mod read_pool;
 pub mod registry_inspect;
 /// Document and chunk repository helpers (part of the public core surface).

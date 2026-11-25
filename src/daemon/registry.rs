@@ -38,7 +38,7 @@ pub fn ensure_project(db: &mut Db, path: &Path) -> Result<Project> {
             canonical_root.to_string_lossy(),
             name,
             ProjectStatus::NotIndexed.as_str(),
-            migrations::SCHEMA_VERSION,
+            migrations::PROJECT_SCHEMA_VERSION,
             unix_now()
         ],
     )
@@ -103,7 +103,7 @@ pub fn mark_indexed(db: &Db, id: i64) -> Result<()> {
             params![
                 ProjectStatus::Indexed.as_str(),
                 unix_now(),
-                migrations::SCHEMA_VERSION,
+                migrations::PROJECT_SCHEMA_VERSION,
                 id
             ],
         )

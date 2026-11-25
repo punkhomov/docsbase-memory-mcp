@@ -829,6 +829,31 @@ evidence. Subset не наследует полноту. DB3 additive migration 
 stamp2→3 без rebuild; absent legacy outcome остаётся unknown. Детали и проверка:
 [index-outcome-plan.md](index-outcome-plan.md). Это prerequisite #79, а не CF11.
 
+## Delta 2026-11-24 — CF10, смена поколения индекса
+
+Полная замена строит отдельную пару SQLite/Tantivy проекта. Реестр
+публикует её одним обновлением head после seal. Обычный инкремент
+продолжает использовать короткую границу чтения текущей пары. Вытесненные
+ресурсы остаются доступными прежним держателям до освобождения leases.
+Схема, идентичность, нативные барьеры и crash matrix описаны в
+[storage-publication.md](storage-publication.md).
+
+## Delta 2026-11-24 — project index binding
+
+The legacy reader binds the registered project and nonnegative content
+revision under its existing project lease. Initial search and refill derive
+the Tantivy directory from the binding and the metadata reader's cache root.
+The SQL transaction and pooled reader end before Tantivy opens. The project
+lease spans both operations. Dense metadata and search payload compare the
+same binding on later leases. Website readiness uses the first observed
+binding for Tantivy health and compares a second fresh observation before
+reporting status. The health probe opens segment and store components under
+the existing project lease. It leaves the Tantivy metadata lock file alone.
+
+This carries the legacy content revision through the existing wire and
+cache interfaces. The registry head, installation epoch and generation
+layout enter through this boundary in the next CF11a task.
+
 ## Delta 2026-11-24 — CF8a search-only owner and compatibility
 
 [CF8a plan](cf8a-plan.md) records the pinned HNSW beam-promotion/allocation evidence,
@@ -839,17 +864,52 @@ admission prevents dependency promotion above the chosen max, while visited/cand
 storage and graph residency remain separate resource concerns. No persistence,
 graph recipe, embedding/query cache identity, daemon or source-format change.
 
+## Delta 2026-11-24 — CF12a, владение окном debounce
+
+`WatchSpec` разрешает таймеры из глобального файла и файла проекта v2.
+Producer фиксирует разрешённые таймеры на первом событии пачки и ограничивает
+каждое ожидание её остатком. Следующая пачка читает новый снимок.
+При сбросе используется актуальный фильтр проекта согласно OQ-6. Смена окна
+не пересоздаёт watcher и сохраняет постановку событий в очередь.
+
 ## Delta 2026-11-24 — CF5b2b read-side identity
 
 The dry-run retains the first file handle across a second no-follow open. The
 [publication contract](source-publication.md) defines the evidence, its limits,
 and the distinction between the version 2 observation and a durable journal.
 
+## Delta 2026-11-24 — CF8b: политика обхода в снимке поиска
+
+`ann.search` накладывается через AnnSearchSpec. При явно заданной таблице
+согласованный снимок проекта передаёт политику и стадийные дескрипторы одному
+запросу. Прямой CLI и демон используют общий путь выбора кандидатов. Размер
+окна выше `ef_max` направляется на существующий потоковый точный поиск и
+отображается как `exact-fallback`. Смена одной политики обхода сохраняет
+резидентный граф и ключи дампов; модификации остальных настроек сохраняют
+прежние условия сброса. При отсутствующей таблице остаётся прежнее поведение.
+
 ## Delta 2026-11-24 — CF5b2b: журнал замены
 
 [Протокол журнала](stage-journal.md) задаёт формат 2 для новой БД, правила хранения
 ID при применении и восстановлении, кодирование базовых атрибутов и запрос чтения.
 Там же указаны границы проверенных атрибутов и условия будущего допуска к записи.
+
+## Delta 2026-11-24 — persisted generation catalog
+
+Registry schema v5 defines a singleton format and epoch, one active head per
+project and one staging record per project. Deferred foreign keys bind the
+head to the active phase in both directions. The stopped transition installs
+the schema, epoch, and legacy head rows in one transaction. `projects` keeps
+its existing index-format stamp independently of the registry version.
+
+The existing no-write registry inspector can observe a prepared v5 file.
+It retains the project inventory and hashes the epoch, active generation
+IDs, layout and seal digests into `registry-v2`. It scans active rows through
+the format's partial index, bounded by the admitted project count. The head is structural
+state. Metadata content revisions and segment health still require a
+read of the selected generation. Existing v4 observations keep their
+`registry-v1` identity. The operational CLI and daemon continue to open v4
+until local metadata binding, publication and recovery are connected.
 
 ## Delta 2026-11-24 — общий профиль метаданных конфига
 
@@ -859,6 +919,23 @@ ID при применении и восстановлении, кодирова
 атрибутов и ревизия TOML. Формы JSON, графа действий и контрольной БД сохраняются.
 Сравнение двух открытий проверяет атрибуты вместе с ID; ограничения независимого
 наблюдения файлов остаются в силе.
+
+## Delta 2026-11-24 — принадлежность и публикация рецепта нарезки
+
+`ChunkSpec` разрешает `index.chunk.max_chars` и `overlap_chars` отдельно.
+Проверенная геометрия передаётся в подготовку полного и инкрементального
+индекса. Обе операции проверяют рецепт вместе с хешем и frontmatter. SQLite
+записывает рецепт в той же транзакции, что и документ, чанки и поколение, под
+существующим протоколом writer/recovery. Рецепт включает версию сплиттера,
+предел и overlap. Схема 4 оставляет прежние чанки на месте. Отсутствие рецепта требует
+пересчёта при следующей индексации. Новый сплиттер сохраняет дефолты
+1500/150 и обрезает overlap на границе пропущенного диапазона.
+
+После изменения настроек явный полный sync приводит весь индекс к новому
+рецепту. Watcher обновляет только обработанные документы. Готовность Website
+требует полного прохода текущего рецепта. Для поискового штрафа сохраняется исторический порог 1650. Он покрывает
+всю поддерживаемую геометрию прозы и одинаково оценивает атомарные блоки
+при любом рецепте.
 
 ## Delta 2026-11-24 — запуск из вручную заданного v2
 
@@ -872,6 +949,15 @@ lease на свой срок жизни. При работающем демон�
 Переход между версиями требует перезапуска. Текущий v2 в файле не даёт
 разрешения на автоматическую перезапись других конфигов. Журнал остаётся
 основой для будущей команды переноса при остановленных потребителях.
+
+## Delta 2026-11-24 — CF7: разрешённая политика общего кеша
+
+VectorStoreSpec проверяет поля файла v2. Операционная загрузка и предпросмотр
+включают одно типизированное значение и его происхождение. При прямом запуске
+и старте демона существующий владелец принимает указанное ограничение записей
+и окно ожидания SQLite для всех своих соединений. Глобальные правки вступают в
+силу после перезапуска. Планировщик вносит изменение в одну запись таблицы,
+затем перепроверяет целую политику.
 
 ## Delta 2026-11-24 — проверка кандидата редактора v2
 
@@ -893,3 +979,115 @@ Tantivy использует 32-битную арифметику score. Исх�
 сужения, а значения, которые parser округляет к единице, отображаются
 как 1.0. Для syntax с `^` проверяется конечность вложенного множителя
 до поиска. Сборщик дополнительно проверяет возвращённые scores.
+
+## Delta 2026-11-24 — подключённая индексация CLI
+
+Обработка активной задачи уточнена в разделе connected Index admission ниже.
+
+CLI ведёт `index_project` на том же соединении, где согласован v2. Сессия
+без привязки к проекту удерживает демон между опросами. Перед новой задачей
+CLI передаёт явный запрос на перечитывание проектного конфига. При равной валидной конфигурации
+оба запроса сохраняют один снимок и могут ждать один job. Если задача уже выполняется, CLI
+ждёт её терминального результата в исходном бюджете.
+Ошибки подключённого пути запрещают повтор через второй локальный writer.
+Shared возвращает CLI счётчики индекса, Website фиксирует обновление через sync.
+
+## Delta 2026-11-24 — connected Index admission
+
+The explicit refresh route checks active work at discovery, under the
+configuration publication lease and in the transaction that admits the
+new job. A refusal preserves the existing job row. The command holds the
+settings and stages returned by its refresh. A superseded revision requests
+a retry before entering the job. Equivalent resolutions can still reuse
+the same immutable settings before either job is admitted.
+The existing wire format carries the typed admission error.
+
+## Delta 2026-11-24 — создание нового явного v2
+
+CLI-редакторы начинают новый глобальный документ с общим заголовком v2.
+Реальная запись повторяет чтение и создание кандидата под действующей
+блокировкой. Существующие документы сохраняют собственную версию.
+Режим при отсутствии файла переключается после проверки лексического
+запуска без создания базы векторов и CLI index с живым демоном.
+
+Для alpha принят простой переход для старого проекта без глобального файла.
+При локальном `hybrid.cache.max_bytes` прежнее поведение сохраняется с явным
+неверсионированным глобальным файлом. При выборе v2 бюджет переносится вручную
+в глобальный `vector_cache.max_bytes`. CLI подсказывает перезапуск после
+первого сохранения v2 поставщиком.
+
+## Delta 2026-11-24 — владение до открытия базы
+
+Операционная композиция v2 удерживает mode lease до завершения потребителей.
+Первое векторное соединение инициализирует SQLite и общий LRU счётчик из
+сохранённых строк. Конкурирующие соединения публикуют один счётчик и получают
+его до доступа к строкам. Лексическому CLI и демону достаточно права владения,
+поэтому они открывают только индекс документов.
+
+## Delta 2026-11-24 — дефолты v2 для запуска CLI
+
+Отсутствие глобального файла разрешает политику через VectorStoreSpec с
+происхождением Defaults. CLI и launch выбирают ее только после наблюдения
+отсутствия источника. Существующий файл с ошибкой сохраняет диагностический
+контракт соответствующего запуска. Совместимые библиотечные конструкторы
+используют v1 по умолчанию для отсутствующего файла. Загрузчики файлов
+Config используют операционный выбор версии. Запущенные через CLI фронтенды
+сверяют версию демона до открытия проекта.
+
+## Delta 2026-11-24 — CF8: идентичность построения графа
+
+AnnBuildSpec владеет проверяемыми настройками. Каждый построенный или загруженный
+граф хранит свой рецепт. Формат HNSW остаётся прежним. Имя слота альтернативного
+рецепта включает версию и два параметра. Для исходного рецепта применяется
+историческое имя. Проверяемые поля метаданных и загруженный граф должны совпасть.
+Число слоёв определяется форматом дампа. [Границы и этапы](cf8-build-plan.md).
+
+## Delta 2026-11-24 — CF8: рецепт графа в рабочем снимке
+
+Снимки DenseCache для поиска, sync, watch и фонового построения используют
+значение AnnBuildSpec из согласованного конфига. Файловые слоты, резидентная
+запись и объединение холодных запросов сверяют рецепт отдельно от
+embedding-модели. После перезагрузки старая сборка остаётся в общем счётчике
+до освобождения данных. Результат публикуется в памяти только через прежнюю
+проверку совпадения объекта текущей сборки, дополненную рецептом.
+Диск учитывается по всем вариантам. В процессе один AnnStore защищает
+каждый слот с начала публикации или чтения до освобождения загруженного
+графа. Очистка проверяет удержание под общей блокировкой для конкретного
+удаления. Перебор файлов проходит вне блокировки. Защищённые слоты могут
+занимать больше дискового лимита. Согласованная публикация поколений SQLite
+и Tantivy и их восстановление относятся к CF11. [Измерения допуска](cf8-build-plan.md).
+
+Один слот допускает либо одного builder, либо читателей. Builder удерживает
+слот до загрузки дампа, затем передаёт право чтения загруженному графу. При
+переключении рецептов A → B → A повторный запрос дождётся прежнего слота через
+временный точный поиск. Перед mmap и heap загрузка резервирует оценку вместе
+с активными сборками и удерживаемыми исходными строками. Публикация переводит
+резерв в учёт резидентного графа.
+
+## Delta 2026-11-24 — inspect the selected project index
+
+The quiescent storage inspector resolves one project from the protected
+registry, then takes the existing project read lease. A v5 selection also
+holds the selected generation's existing read lease. Observation requires
+both leases during the metadata and Tantivy reads. All admissions refuse
+contention immediately, including the native SQLite file leases.
+
+A legacy selection reads `projects.index_generation` in the registry. A local
+selection derives `metadata.db` and `tantivy/` from the registered project and
+active generation IDs. It checks the bounded `seal.json` against the active
+head's BLAKE3 digest of the persisted bytes. Local SQLite uses metadata schema
+v1 with a singleton `generation_state` row. Project ID, generation ID and
+nonnegative revision must agree with the selection. Pending metadata, recovery
+sidecars, missing components or a mismatched seal make the observation
+unavailable. The result carries the epoch, generation ID and revision after
+checking Tantivy's readable segment and store components, including term
+positions required by phrase search. Under the existing leases, the stopped
+observer requires ordinary single-link files for coordination, the seal,
+local metadata and the flat Tantivy directory. It applies the existing state
+byte limit to each buffered Tantivy manifest and tokenizer stamp. Segment
+contents keep Tantivy's mmap behavior. These checks assume cooperating
+writers during the observation.
+
+This is the shared storage boundary for the stopped path. Staging verifies
+complete seal contents separately. Live search and generation publication
+require the later reader pool and publication steps.

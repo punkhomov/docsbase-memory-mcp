@@ -536,6 +536,30 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   для #79 FR-S2. План: [index-outcome-plan.md](index-outcome-plan.md). Scope — A-owned
   index/store плюс существующие wrapper endings; server/readiness/IPC остаются B.
 
+## Delta 2026-11-24 — CF10 и разбиение CF11
+
+- [x] Сопоставить размещения metadata на bounded fixture и определить
+  контракт head, seal, leases и recovery в
+  [storage-publication.md](storage-publication.md).
+- [ ] CF11a — реестр и accessor с legacy совместимостью.
+- [ ] CF11b — изолированный staging и нативная проверка sealing.
+- [ ] CF11c — durable CAS и совместимый snapshot демона и direct CLI.
+- [ ] CF11d — recovery/reclaim, budgets и настоящий согласованный apply.
+
+## Delta 2026-11-24 — CF11a, project storage binding
+
+- [x] CF11a-1: Capture the validated project and content revision together
+  while holding the project read lease. Resolve the Tantivy location from
+  that same binding before returning the SQL reader to the pool. Initial
+  search, refill, dense metadata, payload and Website readiness consume the
+  binding. Keep current wire values and writer layout. Test real SQLite and
+  Tantivy with an invalid revision and keep the quality gate intact.
+- [ ] CF11a-2: Separate the registry schema version from the existing project
+  format stamp. Implement the versioned head and local metadata binding,
+  bounded no-write observation and explicit legacy registration described in
+  [the storage ADR](storage-publication.md). Generation activation requires
+  the publication and recovery gates in CF11b–CF11d.
+
 ## Delta 2026-11-24 — CF8a search-only library adoption
 
 - [x] **CF8a:** I33 project owner, checked immutable policy, additive built/loaded
@@ -543,12 +567,36 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   persistence regressions. Plan: [cf8a-plan.md](cf8a-plan.md). Construction/recipe/
   estimator and dense/runtime/source composition remain later CF8 slices.
 
+## Delta 2026-11-24 — CF12a, окно debounce watcher
+
+- Разрешить `watch.debounce_ms` и `watch.max_debounce_ms` в глобальном и
+  проектном файлах v2. Проверить независимое наследование полей и отображение
+  источников в effective config. Окна по умолчанию 1500 и 2000 мс.
+- Проверять `1 <= debounce_ms <= max_debounce_ms <= 2000`. Политика берётся
+  из снимка при приёме первого события. Следующее окно увидит новую ревизию.
+  Фильтрация перед отправкой использует свежий снимок, как требует OQ-6.
+- Проверить настоящий источниковый резолвер и пакетную обработку watcher.
+  Изменение таймеров не меняет артефакты; управлять очередями и повторами
+  предстоит отдельным этапом. Новых crates нет.
+
 ## Delta 2026-11-24 — CF5b2b read-side identity
 
 - [x] Bind every loaded migration input to the single-linked object observed
   through its native file handle. Test replacement during the read, identical
   replacement of an unchanged project between plans, and hard-linked paths.
 - [ ] Complete the CF5b2b journal, attribute and publication work above.
+
+## Delta 2026-11-24 — CF8b: настройки обхода ANN в работающем поиске
+
+1. Принять `ann.search` в конфиге и наложить разрешённые проектные поля через
+   существующий AnnSearchSpec. Проверить источники значений через config effective.
+2. Передавать разрешённую политику вместе со снимком поиска. При превышении
+   `ef_max` сохранить запрошенное окно точным поиском; поиски внутри окна
+   используют настроенный обход существующего ANN.
+3. Смена поисковой политики без других изменений должна сохранить текущий
+   граф, векторы и идентичность артефактов. Проверить загруженный граф и
+   отсутствие изменения ключа/дампа. Незаданные политики сохраняют прежний
+   маршрут, ограниченный только исторической семантикой ef.
 
 ## Delta 2026-11-24 — CF5b2b: журнал замены
 
@@ -559,6 +607,18 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - [ ] Подтвердить полноту атрибутов и принадлежность каталога и временных файлов
   на поддерживаемых хранилищах, связать их с согласием и проверить публикацию
   и восстановление до включения исполнителя CF5b3.
+
+## Delta 2026-11-24 — CF11a, persisted generation catalog
+
+- [x] CF11a-2a: Keep the existing project schema stamp independent of the
+  registry schema. Define the v5 catalog and its deferred head invariants.
+  Extend the no-write registry observer to bind the install epoch and active
+  heads, including a switch between heads at equal content revisions. Keep
+  ordinary v4 opens and v1 observation identities compatible.
+- [ ] CF11a-2b: Resolve the active legacy/local storage binding. Validate the
+  local metadata identity and its content revision under the appropriate
+  leases. Connect explicit legacy registration to the stopped-storage path
+  and keep activation behind CF11b–CF11d.
 
 ## Delta 2026-11-24 — базовые атрибуты и путь к работающему v2
 
@@ -582,6 +642,20 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 публикация изменений и поколений при работающем сервере и итоговый аудит CF14.
 Снятие поддержки старого формата потребовало бы отдельного решения о совместимости.
 
+## Delta 2026-11-24 — CF9a, рецепт нарезки Markdown
+
+- Подключить I06 через owner `ChunkSpec` к глобальному и проектному файлам,
+  индексации и просмотру effective config. Разрешать поля независимо.
+- Сохранять версионированный рецепт рядом с хешем документа. Схема 4 добавляет
+  колонку и сохраняет артефакты. Первый полный sync заполняет рецепт и
+  пересчитывает чанки со старым или отсутствующим рецептом даже при прежних байтах.
+- Проверить прежний индекс, готовность до и после полного sync, повторный skip,
+  выдачу Tantivy, переиспользование векторов одинакового текста и ограничение
+  памяти на длинных строках и сложных заголовках. Дефолты сохраняют golden gate.
+  Исправить overlap через промежутки отброшенных пустых строк.
+- Лексическая настройка, отдельный planner/apply и дальнейшие consumers
+  остаются последующими задачами CF9–CF14. Новых crates нет.
+
 ## Delta 2026-11-24 — сначала работающий v2
 
 - [x] Операционный v2 со вручную заданным глобальным файлом и одной политикой
@@ -593,6 +667,14 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - [ ] Автоматическая замена файлов и восстановление переноса (CF5b2–CF5c)
   могут идти отдельно. Текущий приоритет — потребители новой модели, поскольку
   внешних установок, требующих автоматического переноса, пока нет.
+
+## Delta 2026-11-24 — CF12b, предел чтения в редакторах
+
+- Использовать имеющееся bounded capture в `models use` и `connect`. При
+  чтении под блокировкой повторно проверять текущий файл.
+- Проверять размер отрендеренного документа перед публикацией. Подтвердить
+  настоящий CLI на границе и refusal без изменения файла после добавления
+  provider record.
 
 ## Delta 2026-11-24 — редактор стадий в v2
 
@@ -610,3 +692,72 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   и reopen на одном поколении. Проверить сохранение resident dense rows
   и прежние defaults с неизменённым golden gate.
 - I10/I68 и прочие владельцы CF9 идут отдельными slices. Новых crates нет.
+
+## Delta 2026-11-24 — CF5c, CLI index при работающем v2
+
+- Передать `docsbase index` существующему Shared daemon с v2. Использовать
+  один дедлайн, существующий job protocol и формат счётчиков прямого index.
+  При отсутствии демона остаётся обычная прямая индексация.
+- Проверить регистрацию, индекс повторно по относительному пути, поиск и
+  прежний отказ при несовпадении версии. Проверить обновление конфига,
+  сессию на период опроса и обработку пути вне UTF-8. Website использует sync.
+
+## Delta 2026-11-24 — connected Index contention
+
+- Require an independent job for an explicit CLI Index with current settings.
+- Exercise active work found at discovery, during a configuration change
+  and after preparation. Verify ordinary MCP joins the same original job.
+
+## Delta 2026-11-24 — CF5c, новые глобальные файлы
+
+- Первый global write через connect и models use записывает v2. Предпросмотр
+  models use показывает тот же формат. Существующие файлы сохраняют версию.
+- Проверить фактическую запись и повторное разрешение, сохранение соседа
+  hybrid и provider configuration, и отсутствие записи при dry-run.
+- Переход для отсутствующего файла зависит от лексического запуска без
+  создания vector DB и штатного маршрута CLI index при работающем демоне.
+  Автоматическая конвертация существующих файлов остаётся отдельной задачей.
+
+## Delta 2026-11-24 — CF7: оставшиеся поля общего кеша в файле v2
+
+- [x] Подключить I20/I27 к существующему владельцу. Проверить происхождение
+  полей, отказ при выходе за область и диапазон, вытеснение по числу записей
+  и busy_timeout двух соединений. План изменения max_bytes сохраняет остальные
+  поля исходной таблицы v2.
+
+## Delta 2026-11-24 — CF5c, отложенное открытие векторной базы
+
+- Запуск v2, прямой lexical index/search и sync сохраняют эксклюзивного
+  владельца политики, открывая SQLite только во время работы с векторами.
+- Проверить настоящий CLI и daemon без vectors.db, отказ при legacy lease и
+  продолжение сохранённой LRU последовательности при конкурентном первом
+  подключении. Публичный eager constructor сохраняет контракт.
+
+## Delta 2026-11-24 — CF5c, v2 при отсутствии глобального файла
+
+- CLI, launch и effective view разрешают v2 при отсутствии config.toml.
+  Существующий неверсионированный глобальный файл выбирает v1.
+- Проверить чистую установку через прямой index, подсоединённый index в
+  Shared daemon, sync, эксклюзивное владение и отсутствие vectors.db.
+  MCP сверяет версию при Hello до привязки и повторяет проверку при reconnect.
+- Совместимые библиотечные конструкторы сохраняют контракт отсутствующего
+  источника. Показать переход на существующем проекте через явный файл.
+
+## Delta 2026-11-24 — CF8: рецепт построения ANN
+
+[Рецепт построения](cf8-build-plan.md) фиксирует проверяемый диапазон
+параметров и границу между библиотечным графом и его использованием в рантайме.
+Доказательство потребления включает чтение настоящих дампов разных рецептов
+поверх одинаковых выходных векторов.
+
+## Delta 2026-11-24 — CF11a, inspect the selected storage pair
+
+- [x] CF11a-2b1: Resolve one registered project from a quiescent v4/v5
+  registry. Hold the existing project lease and the v5 generation read
+  lease while validating the selected SQLite metadata and Tantivy files.
+  Check the local metadata format, project/generation identity, revision
+  and pending state. Never use another layout on failure. Test real pairs
+  and the absence of filesystem writes through the library inspector.
+- [ ] CF11a-2b2: Add the stopped, explicitly authorized transition that
+  registers existing legacy pairs. The publisher and live reader pool
+  remain CF11b–CF11d work.

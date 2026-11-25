@@ -10,12 +10,18 @@ use crate::daemon::settings::{DaemonPatch, DaemonSettings, DaemonSpec};
 use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridCfg, HybridDefaults, HybridPatch, HybridSpec, ProvidersCfg};
 use crate::hybrid::remote_settings::{RemotePatch, RemoteSettings, RemoteSpec};
+use crate::index::settings::{ChunkSettings, ChunkSpec, IndexFilePatch};
 use crate::index::{LexicalWeights, lexical_settings::LexicalSpec};
 use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
+use crate::watch::{WatchSettings, settings::WatchSpec};
 use bootstrap::DefaultsContext;
 use schema::{
     ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Scope, SettingsSpec,
     SourceId, Unit,
+};
+
+use crate::hybrid::ann_settings::{
+    AnnBuildSettings, AnnBuildSpec, AnnConfigPatch, AnnSearchSettings, AnnSearchSpec,
 };
 
 pub mod bootstrap;
@@ -33,7 +39,7 @@ pub mod view;
 /// Effective configuration after merging all sources.
 ///
 /// Not `Eq`: provider records carry `toml::Table`, which is only `PartialEq`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// Extra ignore patterns, appended to the built-in defaults.
     pub ignores: Vec<String>,
@@ -41,12 +47,16 @@ pub struct Config {
     pub max_file_size: u64,
     /// Maximum number of documents per project.
     pub max_docs_per_project: usize,
+    /// Geometry of Markdown chunks written by the indexer.
+    pub chunk: ChunkSettings,
     /// Global-only policy for request deadlines and owned search payload admission.
     pub search: SearchSettings,
     /// Complete global-only daemon launch and resource policy.
     pub daemon: DaemonSettings,
     /// Complete global-only remote execution policy.
     pub remote: RemoteSettings,
+    /// Project policy for batching native watcher events.
+    pub watch: WatchSettings,
     /// Project BM25 field weights for lexical queries.
     pub lexical: LexicalWeights,
     /// Register and index a project automatically on first connection (ADR-6: off).
@@ -55,48 +65,15 @@ pub struct Config {
     pub hybrid: bool,
     /// Hybrid stages resolved from the file forms (bool shorthand or table).
     pub hybrid_cfg: HybridCfg,
+    /// Explicit per-query ANN traversal policy. Unconfigured search uses the legacy adapter.
+    pub ann_search: Option<AnnSearchSettings>,
+    /// Validated ANN construction recipe captured with the project.
+    pub ann_build: AnnBuildSettings,
     /// Installation-wide vector policy selected by a v2 global configuration.
     /// Legacy snapshots use per-project capacity and have no shared owner policy.
     pub vector_store: Option<crate::vector_cache::settings::VectorStoreSettings>,
     /// Machine-local provider records from the global config (FR-1).
     pub providers: ProvidersCfg,
-}
-
-impl PartialEq for Config {
-    fn eq(&self, other: &Self) -> bool {
-        self.lexical == other.lexical && self.same_non_lexical_settings(other)
-    }
-}
-
-impl Config {
-    // Lexical scores do not enter the cached vector/ANN identity.
-    pub(crate) fn same_non_lexical_settings(&self, other: &Self) -> bool {
-        let Self {
-            ignores,
-            max_file_size,
-            max_docs_per_project,
-            search,
-            daemon,
-            remote,
-            lexical: _,
-            auto_index,
-            hybrid,
-            hybrid_cfg,
-            vector_store,
-            providers,
-        } = self;
-        ignores == &other.ignores
-            && *max_file_size == other.max_file_size
-            && *max_docs_per_project == other.max_docs_per_project
-            && search == &other.search
-            && daemon == &other.daemon
-            && remote == &other.remote
-            && *auto_index == other.auto_index
-            && *hybrid == other.hybrid
-            && hybrid_cfg == &other.hybrid_cfg
-            && vector_store == &other.vector_store
-            && providers == &other.providers
-    }
 }
 
 impl Default for Config {
@@ -129,6 +106,7 @@ pub struct ConfigOverrides {
 #[serde(deny_unknown_fields)]
 struct GlobalFileConfig {
     ignores: Option<Vec<String>>,
+    index: Option<IndexFilePatch>,
     max_file_size: Option<u64>,
     max_docs_per_project: Option<usize>,
     auto_index: Option<bool>,
@@ -136,6 +114,7 @@ struct GlobalFileConfig {
     daemon: Option<DaemonPatch>,
     remote: Option<RemotePatch>,
     hybrid: Option<HybridPatch>,
+    ann: Option<toml::Table>,
     providers: Option<HashMap<String, toml::Table>>,
 }
 
@@ -145,20 +124,24 @@ struct GlobalFileConfig {
 #[serde(deny_unknown_fields)]
 struct ProjectFileConfig {
     ignores: Option<Vec<String>>,
+    index: Option<IndexFilePatch>,
     max_file_size: Option<u64>,
     max_docs_per_project: Option<usize>,
     auto_index: Option<bool>,
     hybrid: Option<HybridPatch>,
+    ann: Option<toml::Table>,
 }
 
 impl ProjectFileConfig {
     fn into_global(self) -> GlobalFileConfig {
         GlobalFileConfig {
             ignores: self.ignores,
+            index: self.index,
             max_file_size: self.max_file_size,
             max_docs_per_project: self.max_docs_per_project,
             auto_index: self.auto_index,
             hybrid: self.hybrid,
+            ann: self.ann,
             providers: None,
             search: None,
             daemon: None,
@@ -264,6 +247,21 @@ impl Config {
         self
     }
 
+    pub(crate) fn changes_dense_state(&self, previous: &Self) -> bool {
+        if self.ann_search == previous.ann_search
+            && self.watch == previous.watch
+            && self.lexical == previous.lexical
+        {
+            self != previous
+        } else {
+            let mut previous = previous.clone();
+            previous.ann_search = self.ann_search;
+            previous.watch = self.watch;
+            previous.lexical = self.lexical;
+            self != &previous
+        }
+    }
+
     /// Rejects values that would silently disable indexing.
     ///
     /// Callers that apply [`Config::with_overrides`] must validate again.
@@ -346,17 +344,31 @@ fn read_project(path: &Path) -> Result<ProjectFileConfig> {
 
 /// Reads and caps a config file (repo-controlled, T48).
 fn read_capped(path: &Path) -> Result<String> {
-    let bytes = capture::read_file(path, crate::limits::MAX_STATE_BYTES).map_err(|err| {
-        Error::internal_with_source(
-            format!(
-                "read {} ({} byte limit): {err}",
-                path.display(),
-                crate::limits::MAX_STATE_BYTES
-            ),
-            err,
-        )
-    })?;
+    read_capped_if_exists(path)?.ok_or_else(|| {
+        let error = std::io::Error::from(std::io::ErrorKind::NotFound);
+        Error::internal_with_source(format!("read {}: {error}", path.display()), error)
+    })
+}
+
+fn read_capped_if_exists(path: &Path) -> Result<Option<String>> {
+    let bytes = match capture::read_file(path, crate::limits::MAX_STATE_BYTES) {
+        Ok(bytes) => bytes,
+        Err(capture::ReadFailure::Io(error)) if capture::path_is_absent(path, &error) => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(Error::internal_with_source(
+                format!(
+                    "read {} ({} byte limit): {error}",
+                    path.display(),
+                    crate::limits::MAX_STATE_BYTES
+                ),
+                error,
+            ));
+        }
+    };
     String::from_utf8(bytes)
+        .map(Some)
         .map_err(|err| Error::internal_with_source(format!("read {}: {err}", path.display()), err))
 }
 
@@ -368,6 +380,8 @@ struct ConfigDefaults {
     search: SearchSettings,
     daemon: DaemonSettings,
     remote: RemoteSettings,
+    ann_search: AnnSearchSettings,
+    watch: WatchSettings,
 }
 struct ConfigSpec;
 impl SettingsSpec for ConfigSpec {
@@ -384,10 +398,14 @@ impl SettingsSpec for ConfigSpec {
     ];
     fn fields() -> Vec<FieldSpec> {
         let mut fields = Self::FIELDS.to_vec();
+        fields.extend_from_slice(WatchSpec::FIELDS);
         fields.extend_from_slice(HybridSpec::FIELDS);
         fields.extend_from_slice(SearchSpec::FIELDS);
+        fields.extend_from_slice(ChunkSpec::FIELDS);
         fields.extend_from_slice(DaemonSpec::FIELDS);
         fields.extend_from_slice(RemoteSpec::FIELDS);
+        fields.extend_from_slice(AnnSearchSpec::FIELDS);
+        fields.extend_from_slice(AnnBuildSpec::FIELDS);
         fields.extend_from_slice(LexicalSpec::FIELDS);
         fields
     }
@@ -396,17 +414,23 @@ impl SettingsSpec for ConfigSpec {
         let search = SearchSpec::defaults(context);
         let daemon = DaemonSpec::defaults(context);
         let remote = RemoteSpec::defaults(context);
+        let ann_search = AnnSearchSpec::defaults(context);
+        let watch = WatchSpec::defaults(context);
         let initial = Config {
             ignores: Vec::new(),
             max_file_size: 1_048_576,
             max_docs_per_project: 20_000,
+            chunk: ChunkSpec::initial(&ChunkSpec::defaults(context)),
             search: SearchSpec::initial(&search),
             daemon: DaemonSpec::initial(&daemon),
             remote: RemoteSpec::initial(&remote),
+            watch: WatchSpec::initial(&watch),
             lexical: LexicalSpec::defaults(context),
             auto_index: false,
             hybrid: false,
             hybrid_cfg: HybridSpec::initial(&hybrid),
+            ann_search: None,
+            ann_build: AnnBuildSpec::initial(&AnnBuildSpec::defaults(context)),
             providers: ProvidersCfg::default(),
             vector_store: None,
         };
@@ -416,6 +440,8 @@ impl SettingsSpec for ConfigSpec {
             search,
             daemon,
             remote,
+            ann_search,
+            watch,
         }
     }
     fn initial(defaults: &Self::Defaults) -> Config {
@@ -467,6 +493,15 @@ impl SettingsSpec for ConfigSpec {
                 origins,
             )?;
         }
+        if let Some(index) = patch.index {
+            ChunkSpec::overlay(
+                &mut settings.chunk,
+                index.chunk,
+                &defaults.initial.chunk,
+                source,
+                origins,
+            )?;
+        }
         if let Some(patch) = patch.daemon {
             DaemonSpec::overlay(
                 &mut settings.daemon,
@@ -475,6 +510,23 @@ impl SettingsSpec for ConfigSpec {
                 source,
                 origins,
             )?;
+        }
+        if let Some(table) = patch.ann {
+            let ann = AnnConfigPatch::decode(table)?;
+            if let Some(search) = ann.search {
+                let mut policy = settings.ann_search.unwrap_or(defaults.ann_search);
+                AnnSearchSpec::overlay(&mut policy, search, &defaults.ann_search, source, origins)?;
+                settings.ann_search = Some(policy);
+            }
+            if let Some(build) = ann.build {
+                AnnBuildSpec::overlay(
+                    &mut settings.ann_build,
+                    build,
+                    &defaults.initial.ann_build,
+                    source,
+                    origins,
+                )?;
+            }
         }
         if let Some(patch) = patch.remote {
             RemoteSpec::overlay(
@@ -510,9 +562,35 @@ impl ConfigSpec {
             view.push(key, value, None)?;
         }
         crate::hybrid::config::view::fields(&settings.hybrid_cfg, view)?;
+        if view.has_field(crate::vector_cache::settings::MAX_BYTES_FIELD.key) {
+            let policy = settings
+                .vector_store
+                .as_ref()
+                .ok_or_else(|| Error::internal("missing v2 vector policy for effective view"))?;
+            policy.view_fields(view)?;
+        } else {
+            view.push(
+                "hybrid.cache.max_bytes",
+                serde_json::json!(settings.hybrid_cfg.cache.max_bytes),
+                None,
+            )?;
+        }
         SearchSpec::view_fields(&settings.search, view)?;
+        settings.chunk.view_fields(view)?;
         DaemonSpec::view_fields(&settings.daemon, view)?;
         RemoteSpec::view_fields(&settings.remote, view)?;
+        settings.ann_build.view_fields(view)?;
+        let ann = settings
+            .ann_search
+            .unwrap_or_else(AnnSearchSettings::owner_defaults);
+        for (key, value) in [
+            ("ann.search.ef_base", ann.ef_base()),
+            ("ann.search.ef_max", ann.ef_max()),
+            ("ann.search.fetch_multiplier", ann.fetch_multiplier()),
+        ] {
+            view.push(key, serde_json::json!(value), None)?;
+        }
+        WatchSpec::view_fields(settings.watch, view)?;
         LexicalSpec::view_fields(settings.lexical, view)
     }
 }

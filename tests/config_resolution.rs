@@ -526,7 +526,15 @@ fn explicit_missing_paths_are_not_created_during_resolution() {
     let project = root.path().join("absent-project");
     let resolved = docsbase_memory::config::resolve::load_from(&global, Some(&project))
         .expect("defaults without I/O writes");
-    assert_eq!(resolved.settings(), &Config::default());
+    assert!(resolved.settings().vector_store.is_some());
+    assert_eq!(
+        resolved
+            .provenance()
+            .get("vector_cache.max_bytes")
+            .unwrap()
+            .source,
+        SourceId::Defaults
+    );
     assert!(
         std::fs::read_dir(root.path())
             .expect("directory")
@@ -713,6 +721,50 @@ fn stricter_typed_snapshot_validation_preserves_plain_config_compatibility() {
             .expect("plain legacy snapshot adapter preserves prior acceptance"),
         snapshot
     );
+}
+
+#[test]
+fn v2_watcher_window_layers_and_reports_provenance() {
+    let global = TempDir::new().expect("global");
+    let project = TempDir::new().expect("project");
+    layer(
+        &global,
+        "config.toml",
+        "config_version = 2\n[watch]\ndebounce_ms = 400\nmax_debounce_ms = 900\n",
+    );
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2\n[watch]\ndebounce_ms = 250\n",
+    );
+
+    let view = docsbase_memory::config::view::load_from(global.path(), Some(project.path()))
+        .expect("watch policy resolves");
+    let field = |key| view.fields.iter().find(|field| field.key == key).unwrap();
+    assert_eq!(field("watch.debounce_ms").value, 250);
+    assert_eq!(
+        field("watch.debounce_ms").origin.source,
+        SourceId::Project(project.path().join(".docsbase.toml"))
+    );
+    assert_eq!(field("watch.max_debounce_ms").value, 900);
+    assert_eq!(
+        field("watch.max_debounce_ms").origin.source,
+        SourceId::Global(global.path().join("config.toml"))
+    );
+
+    for invalid in [
+        "debounce_ms = 0",
+        "debounce_ms = 901",
+        "max_debounce_ms = 2001",
+    ] {
+        layer(
+            &project,
+            ".docsbase.toml",
+            &format!("config_version = 2\n[watch]\n{invalid}\n"),
+        );
+        let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+        assert!(error.to_string().contains("watch.debounce_ms"), "{error}");
+    }
 }
 
 #[test]

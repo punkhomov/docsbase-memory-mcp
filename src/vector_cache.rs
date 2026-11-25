@@ -33,9 +33,6 @@ mod batch_tests;
 /// Separate `SQLite` file in the cache root; one cache per machine user.
 pub const VECTOR_DB_FILE: &str = "vectors.db";
 
-/// Strict source-preview identity. Runtime adoption remains a separate migration.
-pub(crate) const V2_MAX_BYTES_FIELD: crate::config::schema::FieldSpec = settings::MAX_BYTES_FIELD;
-
 /// Cache size bounds; eviction drops the least recently used rows first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheLimits {
@@ -132,11 +129,8 @@ impl VectorCache {
     fn open_owned(owner: VectorStore) -> Result<Self> {
         let opened = open_connection(owner.root(), owner.settings().busy_timeout)?;
         let limits = owner.settings().limits();
-        Ok(Self::from_connection(
-            opened.conn,
-            limits,
-            owner::Access::Owned { owner },
-        ))
+        let access = owner.access(&opened.conn)?;
+        Ok(Self::from_connection(opened.conn, limits, access))
     }
 
     fn from_connection(conn: Connection, limits: CacheLimits, access: owner::Access) -> Self {

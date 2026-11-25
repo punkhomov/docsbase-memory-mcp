@@ -6,11 +6,14 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use tantivy::collector::TopDocs;
+use tantivy::index::SegmentComponent;
 use tantivy::query::{BooleanQuery, ConstScoreQuery, Occur, QueryParser, TermSetQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, Value,
 };
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
+use tantivy::{
+    Index, IndexReader, IndexWriter, ReloadPolicy, SegmentReader, TantivyDocument, Term,
+};
 
 use super::query::{QueryMode, prepare_query};
 
@@ -433,36 +436,7 @@ impl ReadIndex {
     }
 
     pub(crate) fn open_with_weights(dir: &Path, weights: LexicalWeights) -> Result<Self> {
-        if healing_marker_present(dir) {
-            return Err(Error::Project {
-                message: format!("index {} needs to be rebuilt", dir.display()),
-                instruction: Some("run `docsbase index` to rebuild".to_owned()),
-            });
-        }
-        if !dir.join("meta.json").exists() {
-            // SQ19 (SQ5 burn-down): report the absence instead of a
-            // confusing "pipeline unknown" mismatch.
-            return Err(Error::Project {
-                message: format!("index {} is missing", dir.display()),
-                instruction: Some("run `docsbase index` to rebuild".to_owned()),
-            });
-        }
-        if !tokenizer_version_matches(dir) {
-            let found = tokenizer_version(dir).unwrap_or_else(|| "unknown".to_owned());
-            return Err(Error::Project {
-                message: format!(
-                    "index {} was built by tokenizer pipeline {found}, current is {}",
-                    dir.display(),
-                    tokenizer::TOKENIZER_VERSION
-                ),
-                instruction: Some("run `docsbase index` to rebuild".to_owned()),
-            });
-        }
-        let index = open_index(dir)?;
-        let fields = fields_from(&index.schema()).map_err(|err| Error::Project {
-            message: format!("index {} uses an outdated schema: {err}", dir.display()),
-            instruction: Some("run `docsbase index` to rebuild".to_owned()),
-        })?;
+        let (index, fields) = open_readable_index(dir)?;
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
@@ -474,6 +448,26 @@ impl ReadIndex {
             parser,
             fields,
         })
+    }
+
+    /// Checks readable segments while the caller holds the project read lease.
+    /// The lease excludes the index writer and its merge/GC work. Observers
+    /// open the same segment components as a searcher without creating a
+    /// Tantivy metadata lock file or allocating a store-block cache.
+    pub(crate) fn check_health_with_project_lease(dir: &Path) -> Result<()> {
+        let (index, _) = open_readable_index(dir)?;
+        for segment in index.searchable_segments().map_err(tantivy_error)? {
+            // SegmentReader treats positions as optional. Our text fields
+            // require them for phrase queries.
+            let _positions = segment
+                .open_read(SegmentComponent::Positions)
+                .map_err(|error| tantivy_error(error.into()))?;
+            SegmentReader::open(&segment)
+                .map_err(tantivy_error)?
+                .get_store_reader(0)
+                .map_err(|error| tantivy_error(error.into()))?;
+        }
+        Ok(())
     }
 
     /// Searches within an explicit document set before top-k collection.
@@ -771,6 +765,40 @@ fn write_rebuild_marker(dir: &Path, marker: &Path) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn open_readable_index(dir: &Path) -> Result<(Index, Fields)> {
+    if healing_marker_present(dir) {
+        return Err(Error::Project {
+            message: format!("index {} needs to be rebuilt", dir.display()),
+            instruction: Some("run `docsbase index` to rebuild".to_owned()),
+        });
+    }
+    if !dir.join("meta.json").exists() {
+        // SQ19 (SQ5 burn-down): report the absence instead of a
+        // confusing "pipeline unknown" mismatch.
+        return Err(Error::Project {
+            message: format!("index {} is missing", dir.display()),
+            instruction: Some("run `docsbase index` to rebuild".to_owned()),
+        });
+    }
+    if !tokenizer_version_matches(dir) {
+        let found = tokenizer_version(dir).unwrap_or_else(|| "unknown".to_owned());
+        return Err(Error::Project {
+            message: format!(
+                "index {} was built by tokenizer pipeline {found}, current is {}",
+                dir.display(),
+                tokenizer::TOKENIZER_VERSION
+            ),
+            instruction: Some("run `docsbase index` to rebuild".to_owned()),
+        });
+    }
+    let index = open_index(dir)?;
+    let fields = fields_from(&index.schema()).map_err(|err| Error::Project {
+        message: format!("index {} uses an outdated schema: {err}", dir.display()),
+        instruction: Some("run `docsbase index` to rebuild".to_owned()),
+    })?;
+    Ok((index, fields))
 }
 
 fn open_index(dir: &Path) -> Result<Index> {

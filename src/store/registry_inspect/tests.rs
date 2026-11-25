@@ -364,3 +364,134 @@ mod windows_namespace {
         );
     }
 }
+
+fn open_catalog_writer(cache: &Path) -> Connection {
+    let writer = Connection::open(cache.join(DB_FILE)).unwrap();
+    writer.pragma_update(None, "foreign_keys", "ON").unwrap();
+    writer
+}
+
+fn catalog_fixture() -> (tempfile::TempDir, tempfile::TempDir) {
+    let (cache, project) = fixture();
+    let mut writer = open_catalog_writer(cache.path());
+    let tx = writer.transaction().unwrap();
+    tx.execute_batch(generation_catalog::SCHEMA_SQL).unwrap();
+    tx.execute_batch(
+        "INSERT INTO generation_store VALUES (1,1,zeroblob(16));
+         INSERT INTO project_generations (id,project_id,layout,phase,base_revision,seal_digest,reserved_disk_bytes)
+            VALUES (1,1,'legacy','active',0,NULL,0),(2,1,'local','sealed',0,zeroblob(32),16);
+         INSERT INTO project_generation_head (project_id,active_id) VALUES (1,1);",
+    ).unwrap();
+    tx.pragma_update(None, "user_version", generation_catalog::SCHEMA_VERSION)
+        .unwrap();
+    tx.commit().unwrap();
+    (cache, project)
+}
+
+#[test]
+fn catalog_observation_binds_epoch_and_active_head_at_equal_content_revision() {
+    let (cache, _project) = catalog_fixture();
+    let capture = || {
+        let before = files(cache.path());
+        let report =
+            inspect_registry(cache.path(), &settings::standalone().unwrap(), limits()).unwrap();
+        assert_eq!(files(cache.path()), before);
+        let RegistryState::Ready {
+            schema_version,
+            revision,
+            ..
+        } = report.state
+        else {
+            panic!("prepared catalog must be observable, got {report:?}");
+        };
+        assert_eq!(schema_version, 5);
+        assert!(revision.starts_with("registry-v2:"), "{revision}");
+        revision
+    };
+    let original = capture();
+    let mut writer = open_catalog_writer(cache.path());
+    let tx = writer.transaction().unwrap();
+    tx.execute_batch(
+        "UPDATE project_generations SET phase='retired' WHERE id=1;
+        UPDATE project_generations SET phase='active' WHERE id=2;
+        UPDATE project_generation_head SET active_id=2;",
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let revision: i64 = writer
+        .query_row("SELECT index_generation FROM projects", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(revision, 0);
+    drop(writer);
+    let replaced = capture();
+    assert_ne!(replaced, original);
+    let writer = open_catalog_writer(cache.path());
+    writer
+        .execute(
+            "UPDATE generation_store SET epoch=x'00000000000000000000000000000001'",
+            [],
+        )
+        .unwrap();
+    drop(writer);
+    assert_ne!(capture(), replaced);
+}
+
+#[test]
+fn catalog_rejects_incomplete_cross_project_and_unsealed_heads() {
+    let (cache, _project) = catalog_fixture();
+    let other = tempfile::tempdir().unwrap();
+    let mut writer = open_catalog_writer(cache.path());
+    let tx = writer.transaction().unwrap();
+    tx.execute(
+        "INSERT INTO projects (id,canonical_root,name,status,schema_version,created_at)
+         VALUES (2,?1,'other','indexed',?2,0)",
+        rusqlite::params![
+            other.path().to_str().unwrap(),
+            crate::store::migrations::PROJECT_SCHEMA_VERSION
+        ],
+    )
+    .unwrap();
+    tx.execute_batch("INSERT INTO project_generations (id,project_id,layout,phase,base_revision,reserved_disk_bytes)
+        VALUES (3,2,'legacy','active',0,0);
+        INSERT INTO project_generation_head (project_id,active_id) VALUES (2,3);").unwrap();
+    tx.commit().unwrap();
+    for illegal in [
+        "UPDATE project_generation_head SET active_id=2 WHERE project_id=1",
+        "UPDATE project_generation_head SET active_id=3 WHERE project_id=1",
+        "UPDATE project_generations SET phase='retired' WHERE id=1",
+        "DELETE FROM project_generation_head WHERE project_id=1",
+        "INSERT INTO project_generations (project_id,layout,phase,base_revision,reserved_disk_bytes)
+         VALUES (1,'local','building',0,16)",
+    ] {
+        let error = writer.execute(illegal, []).unwrap_err();
+        assert!(matches!(error, rusqlite::Error::SqliteFailure(code, _)
+            if code.code == rusqlite::ErrorCode::ConstraintViolation), "{illegal}: {error}");
+    }
+    drop(writer);
+    for invalid in [
+        "UPDATE project_generation_head SET active_phase='sealed' WHERE project_id=1",
+        "DELETE FROM project_generation_head WHERE project_id=1",
+        "DROP INDEX one_active_generation",
+    ] {
+        // Reuse a pristine schema for each failure so an earlier rejected row
+        // cannot mask a later one.
+        let (cache, _project) = catalog_fixture();
+        let writer = open_catalog_writer(cache.path());
+        writer.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        writer
+            .pragma_update(None, "ignore_check_constraints", "ON")
+            .unwrap();
+        writer.execute(invalid, []).unwrap();
+        drop(writer);
+        let files_before = files(cache.path());
+        let report =
+            inspect_registry(cache.path(), &settings::standalone().unwrap(), limits()).unwrap();
+        assert!(
+            matches!(report.state, RegistryState::Unavailable(_)),
+            "{invalid}: {report:?}"
+        );
+        assert_eq!(files(cache.path()), files_before);
+    }
+}

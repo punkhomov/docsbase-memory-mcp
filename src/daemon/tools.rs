@@ -32,6 +32,7 @@ use crate::search::payload::{OwnedPayload, PayloadRequest};
 use crate::search::scope::{DocumentScope, ScopeRequest, has_tags};
 use crate::store::migrations;
 use crate::store::models::{Project, ProjectStatus, SyncJob, SyncState};
+use crate::store::project_index::ProjectIndex;
 use crate::store::{Db, repo};
 
 #[path = "search_refill.rs"]
@@ -113,7 +114,7 @@ fn reorder_rerank(ordered: &mut Vec<(u64, f32)>, ranked: Vec<(usize, f32)>) {
 #[derive(Clone, Copy)]
 struct DenseQuery<'a> {
     text: &'a str,
-    generation: i64,
+    index: ProjectIndex,
     fetch: usize,
     vector: Option<&'a [f32]>,
 }
@@ -149,15 +150,32 @@ fn dense_candidates<Guard>(
         &fresh
     };
     operation.check()?;
+    if context
+        .ann_search
+        .is_some_and(|settings| query.fetch > settings.ef_max())
+    {
+        let metadata = in_read_phase(context, source, admit, |reader| {
+            snapshot_info(&reader, project, Some(query.index))?;
+            DenseMetadata::capture(&reader, project.id)
+        })?;
+        operation.check()?;
+        degrade(degraded, Degraded::ExactFallback);
+        dense.record_outcome(
+            project.id,
+            AnnState::Fallback,
+            Some("ANN window exceeds the configured ef_max"),
+        );
+        return stream_hashes(context, model_id, metadata.chunks(), vector, query.fetch);
+    }
     let rows = dense.get_with_metadata_admitted(
         DenseRequest {
             cache_root: context.cache,
             project_id: project.id,
-            generation: query.generation,
+            generation: query.index.content_revision(),
             model_id,
         },
         operation.cancellation(),
-        || capture_dense(source, project, query.generation),
+        || capture_dense(source, project, query.index),
         admit,
     )?;
     operation.check()?;
@@ -167,35 +185,9 @@ fn dense_candidates<Guard>(
             dense.record_outcome(project.id, AnnState::Ready, None);
             dense::top_k(vector, index.rows(), fetch)
         }
-        DenseRows::Ann(ann) => match ann.search(vector, fetch) {
-            Ok(hits) if hits.len() >= fetch => {
-                #[cfg(debug_assertions)]
-                ANN_SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                dense.record_outcome(project.id, AnnState::Ready, None);
-                Ok(hits)
-            }
-            Ok(hits) => {
-                eprintln!(
-                    "warning: ann returned {} candidates for fetch {fetch}; falling back to exact",
-                    hits.len()
-                );
-                degrade(degraded, Degraded::AnnInsufficient);
-                dense.record_outcome(
-                    project.id,
-                    AnnState::Fallback,
-                    Some("ann returned fewer candidates than the window"),
-                );
-                operation.check()?;
-                stream_exact(context, source, query.generation, model_id, vector, fetch)
-            }
-            Err(err) => {
-                eprintln!("warning: ann search failed: {err}; falling back to exact");
-                degrade(degraded, Degraded::AnnError);
-                dense.record_outcome(project.id, AnnState::Fallback, Some("ann search failed"));
-                operation.check()?;
-                stream_exact(context, source, query.generation, model_id, vector, fetch)
-            }
-        },
+        DenseRows::Ann(ann) => {
+            search_graph(context, source, query, model_id, vector, &ann, degraded)
+        }
         DenseRows::TooLarge(hashes) => {
             // Above the resident cap by design: exact streaming is the answer,
             // not an error.
@@ -224,6 +216,57 @@ fn dense_candidates<Guard>(
                 Some("the last build failed"),
             );
             stream_hashes(context, model_id, &failed.hashes, vector, fetch)
+        }
+    }
+}
+
+fn search_graph(
+    context: &SearchContext<'_>,
+    source: MetadataSource<'_>,
+    query: DenseQuery<'_>,
+    model_id: &str,
+    vector: &[f32],
+    ann: &crate::hybrid::ann::AnnIndex,
+    degraded: &mut Vec<Degraded>,
+) -> Result<Vec<(u64, f32)>> {
+    let SearchContext {
+        dense,
+        project,
+        operation,
+        ..
+    } = context;
+    let fetch = query.fetch;
+    let hits = match context.ann_search {
+        Some(settings) => ann.search_with_settings(vector, fetch, &settings),
+        None => ann.search(vector, fetch),
+    };
+    match hits {
+        Ok(hits) if hits.len() >= fetch => {
+            #[cfg(debug_assertions)]
+            ANN_SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            dense.record_outcome(project.id, AnnState::Ready, None);
+            Ok(hits)
+        }
+        Ok(hits) => {
+            eprintln!(
+                "warning: ann returned {} candidates for fetch {fetch}; falling back to exact",
+                hits.len()
+            );
+            degrade(degraded, Degraded::AnnInsufficient);
+            dense.record_outcome(
+                project.id,
+                AnnState::Fallback,
+                Some("ann returned fewer candidates than the window"),
+            );
+            operation.check()?;
+            stream_exact(context, source, query.index, model_id, vector, fetch)
+        }
+        Err(err) => {
+            eprintln!("warning: ann search failed: {err}; falling back to exact");
+            degrade(degraded, Degraded::AnnError);
+            dense.record_outcome(project.id, AnnState::Fallback, Some("ann search failed"));
+            operation.check()?;
+            stream_exact(context, source, query.index, model_id, vector, fetch)
         }
     }
 }
@@ -285,7 +328,7 @@ fn scoped_dense<Guard>(
                     .connection()
                     .unchecked_transaction()
                     .map_err(repo::db_error)?;
-                snapshot_info(&reader, context.project, Some(query.generation))?;
+                snapshot_info(&reader, context.project, Some(query.index))?;
                 let hashes = crate::search::scope::hash_page(
                     &transaction,
                     context.project.id,
@@ -317,12 +360,12 @@ fn scoped_dense<Guard>(
 fn stream_exact(
     context: &SearchContext<'_>,
     source: MetadataSource<'_>,
-    generation: i64,
+    index: ProjectIndex,
     model_id: &str,
     vector: &[f32],
     fetch: usize,
 ) -> Result<Vec<(u64, f32)>> {
-    let metadata = capture_dense(source, context.project, generation)?;
+    let metadata = capture_dense(source, context.project, index)?;
     stream_hashes(context, model_id, metadata.chunks(), vector, fetch)
 }
 
@@ -380,6 +423,7 @@ pub fn search_docs_with(
             cache,
             project,
             window,
+            ann_search: None,
             payload_budget: &budget,
             operation,
         },
@@ -400,6 +444,8 @@ pub struct SearchContext<'a> {
     pub project: &'a Project,
     /// Complete resolved candidate window.
     pub window: u32,
+    /// Traversal policy of the captured project configuration.
+    pub ann_search: Option<crate::hybrid::ann_settings::AnnSearchSettings>,
     /// Daemon-shared or direct invocation payload allowance.
     pub payload_budget: &'a PayloadBudget,
     /// Original deadline and cooperative cancellation for this invocation.
@@ -496,10 +542,9 @@ pub(super) fn start_search<Guard>(
             return Ok(SearchStart::Complete(Value::Array(Vec::new())));
         }
         return in_read_phase(context, source, &admit, |reader| {
-            snapshot_info(&reader, context.project, None)?;
+            let index = snapshot_info(&reader, context.project, None)?;
             empty_response(
-                &reader,
-                context.project,
+                index,
                 filters_of(
                     arguments.dedupe,
                     arguments.n_per_doc,
@@ -696,7 +741,11 @@ fn search_plan(
     ))
 }
 
-pub(super) fn snapshot_info(db: &Db, project: &Project, expected: Option<i64>) -> Result<i64> {
+pub(super) fn snapshot_info(
+    db: &Db,
+    project: &Project,
+    expected: Option<ProjectIndex>,
+) -> Result<ProjectIndex> {
     let current = registry::project_by_id(db, project.id)?.ok_or_else(|| Error::Project {
         message: format!("project {} disappeared from the registry", project.id),
         instruction: Some("retry search".to_owned()),
@@ -708,8 +757,11 @@ pub(super) fn snapshot_info(db: &Db, project: &Project, expected: Option<i64>) -
             instruction: Some("register the session again".to_owned()),
         });
     }
-    let generation = repo::index_generation(db.connection(), project.id)?;
-    if expected.is_some_and(|expected| expected != generation) {
+    let index = ProjectIndex::legacy(
+        current.id,
+        repo::index_generation(db.connection(), current.id)?,
+    )?;
+    if expected.is_some_and(|expected| expected != index) {
         return Err(Error::Project {
             message: "project generation changed during search preparation".to_owned(),
             instruction: Some("retry search".to_owned()),
@@ -723,7 +775,7 @@ pub(super) fn snapshot_info(db: &Db, project: &Project, expected: Option<i64>) -
             ),
         });
     }
-    Ok(generation)
+    Ok(index)
 }
 
 fn in_read_phase<'a, T, Guard>(
@@ -748,17 +800,17 @@ fn in_read_phase<'a, T, Guard>(
 pub(super) fn capture_dense(
     source: MetadataSource<'_>,
     project: &Project,
-    generation: i64,
+    index: ProjectIndex,
 ) -> Result<DenseMetadata> {
     let reader = source.try_acquire()?;
     lifecycle::with_project_read_lease(source.cache_root(), project.id, || {
-        snapshot_info(&reader, project, Some(generation))?;
+        snapshot_info(&reader, project, Some(index))?;
         DenseMetadata::capture(&reader, project.id)
     })
 }
 
 struct LexicalSnapshot {
-    generation: i64,
+    index: ProjectIndex,
     weights: LexicalWeights,
     hits: Vec<(u64, f32)>,
     elapsed_ms: u64,
@@ -779,7 +831,7 @@ fn lexical_snapshot<Guard>(
             .connection()
             .unchecked_transaction()
             .map_err(repo::db_error)?;
-        let generation = snapshot_info(&reader, context.project, None)?;
+        let index = snapshot_info(&reader, context.project, None)?;
         let scope = if arguments.path_prefix.is_some() || !arguments.tags.is_empty() {
             Some(DocumentScope::capture(
                 &transaction,
@@ -796,10 +848,11 @@ fn lexical_snapshot<Guard>(
             None
         };
         transaction.commit().map_err(repo::db_error)?;
+        let dir = index.tantivy_dir(reader.cache_root());
         drop(reader);
-        let hits = lexical_hits(context, arguments, fetch, scope.as_ref(), weights)?;
+        let hits = lexical_hits(context, &dir, arguments, fetch, scope.as_ref(), weights)?;
         Ok(LexicalSnapshot {
-            generation,
+            index,
             weights,
             hits,
             elapsed_ms: elapsed_ms(started),
@@ -810,15 +863,13 @@ fn lexical_snapshot<Guard>(
 
 fn lexical_hits(
     context: &SearchContext<'_>,
+    dir: &Path,
     arguments: &SearchArgs,
     fetch: usize,
     scope: Option<&DocumentScope>,
     weights: LexicalWeights,
 ) -> Result<Vec<(u64, f32)>> {
-    let index = ReadIndex::open_with_weights(
-        &lifecycle::index_dir(context.cache, context.project.id),
-        weights,
-    )?;
+    let index = ReadIndex::open_with_weights(dir, weights)?;
     let hits = if let Some(scope) = scope {
         index.search_scoped(
             &arguments.query,
@@ -845,10 +896,12 @@ fn lexical_refill<Guard>(
     snapshot: &LexicalSnapshot,
 ) -> Result<Vec<(u64, f32)>> {
     in_read_phase(context, source, admit, |reader| {
-        snapshot_info(&reader, context.project, Some(snapshot.generation))?;
+        let index = snapshot_info(&reader, context.project, Some(snapshot.index))?;
+        let dir = index.tantivy_dir(reader.cache_root());
         drop(reader);
         lexical_hits(
             context,
+            &dir,
             arguments,
             fetch,
             snapshot.scope.as_ref(),
@@ -935,7 +988,7 @@ pub(super) fn prepare_with_query_vector<Guard>(
         let query = DenseQuery {
             text: &arguments.query,
             vector,
-            generation: lexical.generation,
+            index: lexical.index,
             // One frozen source: no repeated full-vector scans or changing ANN
             // membership as lexical/fusion prefixes grow.
             fetch: refill.as_ref().map_or(fetch, Refill::ceiling),
@@ -990,7 +1043,7 @@ pub(super) fn prepare_with_query_vector<Guard>(
         context,
         source,
         admit,
-        lexical.generation,
+        lexical.index,
         &ordered,
         active,
         &arguments,
@@ -1013,20 +1066,20 @@ fn capture_search_payload<Guard>(
     context: &SearchContext<'_>,
     source: MetadataSource<'_>,
     admit: &impl Fn() -> Result<Guard>,
-    generation: i64,
+    index: ProjectIndex,
     ordered: &[(u64, f32)],
     active: ActiveStages,
     arguments: &SearchArgs,
 ) -> Result<OwnedPayload> {
     let ids: Vec<_> = ordered.iter().map(|(id, _)| *id).collect();
     in_read_phase(context, source, admit, |reader| {
-        snapshot_info(&reader, context.project, Some(generation))?;
+        snapshot_info(&reader, context.project, Some(index))?;
         OwnedPayload::capture(
             &reader,
             PayloadRequest {
                 cache_root: context.cache,
                 project_id: context.project.id,
-                generation,
+                generation: index.content_revision(),
                 chunk_ids: &ids,
                 include_text: active.rerank_active || arguments.snippet,
                 include_filter_metadata: arguments.path_prefix.is_some()
@@ -1406,12 +1459,10 @@ fn parse_search_args(args: &Value) -> Result<SearchArgs> {
 /// `limit = 0` answers without searching (FR-8): `[]`, or an envelope whose
 /// `window` is `0` when telemetry was requested.
 fn empty_response(
-    db: &Db,
-    project: &Project,
+    index: ProjectIndex,
     filters: FiltersMeta,
     operation: &SearchOperation,
 ) -> Result<Value> {
-    let generation = repo::index_generation(db.connection(), project.id)?;
     operation.check()?;
     let meta = SearchMeta {
         score_scale: ScoreScale::Bm25,
@@ -1419,7 +1470,7 @@ fn empty_response(
         total_ms: elapsed_ms(operation.started_at()),
         stage_ms: Vec::new(),
         window: 0,
-        index_generation: generation,
+        index_generation: index.content_revision(),
         degraded: Vec::new(),
         filters: Some(filters),
         trimmed: Some(TrimmedMeta::default()),
@@ -2321,13 +2372,13 @@ fn ensure_indexed(project: &Project) -> Result<()> {
             instruction: Some("run `docsbase index`".to_owned()),
         });
     }
-    if project.schema_version != migrations::SCHEMA_VERSION {
+    if project.schema_version != migrations::PROJECT_SCHEMA_VERSION {
         return Err(Error::Project {
             message: format!(
                 "project '{}' indexes use schema {} while this build expects {}",
                 project.name,
                 project.schema_version,
-                migrations::SCHEMA_VERSION
+                migrations::PROJECT_SCHEMA_VERSION
             ),
             instruction: Some("run `docsbase index` to rebuild".to_owned()),
         });
@@ -2439,6 +2490,47 @@ mod tests {
     }
 
     #[test]
+    fn search_rejects_an_invalid_persisted_content_revision() {
+        let (cache, db, project) = env();
+        let args = json!({"query":"widgets","limit":1});
+        let revision = repo::index_generation(db.connection(), project.id).unwrap();
+        assert!(search_docs(&db, cache.path(), &project, &args).is_ok());
+        db.connection()
+            .execute(
+                "UPDATE projects SET index_generation = -1 WHERE id = ?1",
+                [project.id],
+            )
+            .unwrap();
+        let pool = crate::store::read_pool::ReadPool::prepare(
+            cache.path(),
+            db.settings(),
+            &crate::store::settings::standalone_read_pool().unwrap(),
+        )
+        .unwrap();
+        let config = Config::default();
+        let readiness = crate::daemon::readiness::observe(&pool, &project, &config, None);
+        assert!(
+            matches!(readiness, Err(Error::Project { message, .. }) if message.contains("invalid index generation"))
+        );
+        let result = search_docs(&db, cache.path(), &project, &args);
+        assert!(
+            matches!(result, Err(Error::Project { message, .. }) if message.contains("invalid index generation"))
+        );
+        assert_eq!(
+            repo::index_generation(db.connection(), project.id).unwrap(),
+            -1
+        );
+        db.connection()
+            .execute(
+                "UPDATE projects SET index_generation = ?1 WHERE id = ?2",
+                [revision, project.id],
+            )
+            .unwrap();
+        let restored = search_docs(&db, cache.path(), &project, &args).unwrap();
+        assert_eq!(restored.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
     fn dense_search_path_uses_embed_query() {
         let (_cache, db, project) = env();
         let spy = Arc::new(SpyEmbedder::default());
@@ -2457,6 +2549,7 @@ mod tests {
             cache: db.cache_root(),
             project: &project,
             window: 10,
+            ann_search: None,
             payload_budget: &budget,
             operation: SearchOperation::new(
                 policy.settings(),
@@ -2472,8 +2565,7 @@ mod tests {
             DenseQuery {
                 text: "widgets",
                 vector: None,
-                generation: repo::index_generation(db.connection(), project.id)
-                    .expect("generation"),
+                index: snapshot_info(&db, &project, None).expect("index binding"),
                 fetch: 10,
             },
             &mut degraded,

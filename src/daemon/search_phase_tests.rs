@@ -41,6 +41,8 @@ impl Fixture {
         .expect("one prepared reader");
         // Parallel CLI tests redirect the process-global config path. Keep this
         // fixture's launch policy independent, including later project reloads.
+        let config = tempfile::tempdir().expect("global config");
+        std::fs::write(config.path().join("config.toml"), "# Legacy test runtime").unwrap();
         let shared = Shared::open_with_launch(
             cache.path(),
             &crate::store::settings::standalone().expect("DB policy"),
@@ -48,7 +50,7 @@ impl Fixture {
             crate::hybrid::dense_settings::standalone()
                 .expect("dense policy")
                 .settings(),
-            &LaunchSnapshot::capture_from(&cache.path().join("test-config")),
+            &LaunchSnapshot::capture_from(config.path()),
             DaemonPatch::default(),
         )
         .expect("shared");
@@ -457,6 +459,7 @@ fn caller_transaction_is_refused_without_ending_its_snapshot() {
         cache: &fixture.shared.cache,
         project: &fixture.project,
         window: 1,
+        ann_search: None,
         payload_budget: &fixture.shared.payload_budget,
         operation: crate::search::operation::SearchOperation::new(
             &fixture.shared.global_config.search,
@@ -486,6 +489,7 @@ fn metadata_source_cannot_mix_another_cache_with_the_bound_project() {
         cache: &fixture.shared.cache,
         project: &fixture.project,
         window: 1,
+        ann_search: None,
         payload_budget: &fixture.shared.payload_budget,
         operation: crate::search::operation::SearchOperation::new(
             &fixture.shared.global_config.search,
@@ -515,6 +519,7 @@ fn explain_counts_time_before_search_preparation_without_real_waiting() {
         cache: &fixture.shared.cache,
         project: &fixture.project,
         window: 1,
+        ann_search: None,
         payload_budget: &fixture.shared.payload_budget,
         operation: crate::search::operation::SearchOperation::new(
             &fixture.shared.global_config.search,

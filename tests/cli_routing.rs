@@ -22,6 +22,7 @@ impl Env {
     fn new(files: &[(&str, &str)]) -> Self {
         let cache = TempDir::new().expect("cache");
         let root = TempDir::new().expect("root");
+        write_file(cache.path(), "config/config.toml", b"# Legacy peer fixture");
         for (rel, body) in files {
             write_file(root.path(), rel, body.as_bytes());
         }
@@ -251,6 +252,7 @@ enum SyncRefusal {
 #[derive(Clone, Copy, Default)]
 struct SyncPolicy {
     website: bool,
+    config_v2: bool,
     refusal: SyncRefusal,
     disconnect_after: Option<usize>,
 }
@@ -377,7 +379,9 @@ async fn serve_sync_stream(
                 protocol_version: PROTOCOL_VERSION,
                 build_id: "test-daemon".to_owned(),
                 schema_version: 1,
-                capabilities: if policy.website {
+                capabilities: if policy.config_v2 {
+                    vec!["active-config-v2".to_owned(), "panel-read-v1".to_owned()]
+                } else if policy.website {
                     vec!["active-website-profile-v1".to_owned()]
                 } else {
                     Vec::new()
@@ -404,6 +408,20 @@ async fn serve_sync_stream(
             Request::RegisterSession { .. } | Request::BindReadOnly { .. } => {
                 Response::ToolResult {
                     value: serde_json::Value::Null,
+                }
+            }
+            Request::CallTool { name, .. } if name == "index_project" => Response::ToolResult {
+                value: serde_json::json!({ "job_id": 7, "state": "running", "stats": null }),
+            },
+            Request::CallTool { name, .. } if name == "sync_status" && policy.config_v2 => {
+                Response::ToolResult {
+                    value: serde_json::json!({
+                        "job_id": 7, "project_id": 3, "state": "done",
+                        "stats": {
+                            "docs": 1, "chunks": 2, "removed": 0, "skipped": 0,
+                            "errors": 0, "warnings": []
+                        }
+                    }),
                 }
             }
             Request::CallTool { name, .. } if name == "sync_start" => Response::ToolResult {
@@ -534,6 +552,45 @@ fn sync_peer_watchdog_bounds_accept_without_cancellation() {
     let trace = SyncPeer::with_watchdog(env.cache.path(), Duration::ZERO).join();
     assert_eq!(trace.exit, SyncPeerExit::Watchdog);
     assert_eq!(trace.requests, Vec::<Request>::new());
+}
+
+#[test]
+fn connected_v2_index_keeps_a_bound_connection_while_polling() {
+    let env = Env::new(&[("docs/a.md", DOC)]);
+    write_file(
+        env.cache.path(),
+        "config/config.toml",
+        b"config_version = 2\n",
+    );
+    let peer = SyncPeer::with_policy(
+        env.cache.path(),
+        SYNC_PEER_WATCHDOG,
+        SyncPolicy {
+            config_v2: true,
+            ..SyncPolicy::default()
+        },
+    );
+    let result = env.cmd().arg("index").timeout(SYNC_PEER_WATCHDOG).output();
+    let trace = peer.finish();
+    let output = result.unwrap();
+    assert!(output.status.success(), "{output:?} {trace:?}");
+    assert_eq!(trace.exit, SyncPeerExit::Complete, "{trace:?}");
+    assert!(
+        matches!(
+            trace.requests.as_slice(),
+            [
+                Request::Hello { .. },
+                Request::BindReadOnly { project_id: None, .. },
+                Request::CallTool { name: start, args: index_args },
+                Request::CallTool { name: status, args },
+            ] if start == "index_project" && index_args["refresh_config"] == true && status == "sync_status"
+                && args == &serde_json::json!({"job_id": 7})
+        ),
+        "{trace:?}"
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["project_id"], 3);
+    assert_eq!(result["stats"]["chunks"], 2);
 }
 
 #[test]

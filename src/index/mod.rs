@@ -6,6 +6,7 @@ pub mod frontmatter;
 pub mod job;
 pub(crate) mod lexical_settings;
 pub mod outcome;
+pub mod settings;
 pub mod tantivy_index;
 pub mod textnorm;
 pub mod tokenizer;

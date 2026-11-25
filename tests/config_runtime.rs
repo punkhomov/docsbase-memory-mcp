@@ -701,7 +701,7 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
     write_file(
         env.cache(),
         "config/config.toml",
-        b"config_version=2\nauto_index=false\n[vector_cache]\nmax_bytes=8192\n",
+        b"config_version=2\nauto_index=false\n[vector_cache]\nmax_bytes=8192\nmax_entries=74\nbusy_timeout=33\n",
     );
     write_file(
         env.root(),
@@ -710,11 +710,15 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
     );
     let report = env.run_json(&["config", "effective"]);
     let fields = report["fields"].as_array().unwrap();
-    assert!(
-        fields
-            .iter()
-            .any(|field| field["key"] == "vector_cache.max_bytes" && field["value"] == 8192)
-    );
+    for (key, value) in [
+        ("vector_cache.max_bytes", 8192),
+        ("vector_cache.max_entries", 74),
+        ("vector_cache.busy_timeout", 33),
+    ] {
+        assert!(fields.iter().any(|field| {
+            field["key"] == key && field["value"] == value && field["source"]["kind"] == "global"
+        }));
+    }
     assert!(
         fields
             .iter()
@@ -722,6 +726,10 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
     );
     let indexed = env.run_json(&["index"]);
     assert!(indexed["project_id"].is_i64());
+    assert!(
+        !env.cache().join("vectors.db").exists(),
+        "lexical v2 index must leave the vector database absent"
+    );
     assert_eq!(
         env.run_json(&["search", "quasar telemetry"])[0]["path"],
         "guide.md"
@@ -752,6 +760,10 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
     assert_ne!(from_daemon["project_id"], indexed["project_id"]);
     env.restart_daemon();
     assert!(
+        !env.cache().join("vectors.db").exists(),
+        "lexical v2 search and sync must leave the vector database absent"
+    );
+    assert!(
         env.run_json(&["search", "pulsar orbital"])
             .as_array()
             .unwrap()
@@ -761,8 +773,120 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
 }
 
 #[test]
+fn v2_cli_index_uses_the_live_owner_and_returns_index_counters() {
+    let mut env = Env::new(&[
+        ("guide.md", "connectedindexwidget"),
+        ("guide/other.md", "connectedindexnewpage"),
+    ]);
+    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    env.start_daemon();
+
+    let first = env.cmd().arg("index").output().unwrap();
+    assert!(first.status.success(), "{first:?}");
+    let first: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first["stats"]["docs"], 2);
+    assert!(first["project_id"].is_i64());
+
+    let nested = env.root().join("guide");
+    let repeated = env
+        .cmd()
+        .current_dir(&nested)
+        .args(["index", ".."])
+        .output()
+        .unwrap();
+    assert!(repeated.status.success(), "{repeated:?}");
+    let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(repeated["project_id"], first["project_id"]);
+    assert_eq!(repeated["stats"]["docs"], 0);
+    assert_eq!(repeated["stats"]["skipped"], 2);
+    assert!(repeated.get("job_id").is_none());
+
+    let search = env
+        .cmd()
+        .args(["search", "connectedindexnewpage"])
+        .output()
+        .unwrap();
+    assert!(search.status.success(), "{search:?}");
+    let hits: Value = serde_json::from_slice(&search.stdout).unwrap();
+    assert_eq!(hits[0]["path"], "guide/other.md");
+}
+
+#[test]
+fn connected_v2_index_reloads_the_current_project_config() {
+    let mut env = Env::new(&[("guide.md", "connectedindexwidget")]);
+    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    env.start_daemon();
+    let initial = env.cmd().arg("index").output().unwrap();
+    assert!(initial.status.success(), "{initial:?}");
+
+    fs::write(env.project_config(), "[hybrid.cache]\nmax_bytes = 4096\n").unwrap();
+    let mut registry = env.client();
+    registry.handshake_registry().unwrap();
+    assert_eq!(index(&mut registry, &env)["state"], "done");
+    let rejected = env.cmd().arg("index").output().unwrap();
+    assert!(!rejected.status.success(), "{rejected:?}");
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("hybrid.cache.max_bytes"));
+}
+
+#[test]
+fn missing_global_file_uses_v2_in_direct_cli_and_daemon() {
+    let mut env = Env::new(&[("guide.md", "configurationwidget")]);
+    let out = env.cmd().args(["config", "effective"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let view: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(view["fields"].as_array().unwrap().iter().any(|field| {
+        field["key"] == "vector_cache.max_bytes" && field["source"]["kind"] == "defaults"
+    }));
+
+    let search_guide = |env: &Env| {
+        let result = env
+            .cmd()
+            .args(["search", "configurationwidget"])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        let hits: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(hits[0]["path"], "guide.md");
+    };
+    let direct = env.cmd().arg("index").output().unwrap();
+    assert!(direct.status.success(), "{direct:?}");
+    assert!(!env.cache().join("vectors.db").exists());
+
+    search_guide(&env);
+    env.start_daemon();
+    let another = tempfile::tempdir().unwrap();
+    write_file(another.path(), "guide.md", b"connectedconfigurationwidget");
+    let indexed = env.cmd().arg("index").arg(another.path()).output().unwrap();
+    assert!(indexed.status.success(), "{indexed:?}");
+    let indexed: Value = serde_json::from_slice(&indexed.stdout).unwrap();
+    assert_eq!(indexed["stats"]["docs"], 1);
+    let connected_search = env
+        .cmd()
+        .current_dir(another.path())
+        .args(["search", "connectedconfigurationwidget"])
+        .output()
+        .unwrap();
+    assert!(connected_search.status.success(), "{connected_search:?}");
+    let hits: Value = serde_json::from_slice(&connected_search.stdout).unwrap();
+    assert_eq!(hits[0]["path"], "guide.md");
+
+    let out = env.cmd().arg("sync").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let job: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(job["state"], "done");
+    search_guide(&env);
+    assert!(!env.global_config().exists());
+    assert!(!env.cache().join("vectors.db").exists());
+    assert!(matches!(
+        docsbase_memory::vector_cache::VectorCache::open(env.cache()),
+        Err(Error::Admission { .. })
+    ));
+}
+
+#[test]
 fn changed_config_version_refuses_cli_operations_against_stale_daemon() {
     let mut env = Env::new(&[("guide.md", &doc("quasar telemetry calibration"))]);
+    fs::write(env.global_config(), "# Existing unversioned installation").unwrap();
     let out = env.cmd().arg("index").output().unwrap();
     assert!(
         out.status.success(),
@@ -801,7 +925,7 @@ fn changed_config_version_refuses_cli_operations_against_stale_daemon() {
         serde_json::from_slice::<Value>(&out.stdout).unwrap()[0]["path"],
         "guide.md"
     );
-    fs::remove_file(env.global_config()).unwrap();
+    fs::write(env.global_config(), "# Existing unversioned installation").unwrap();
     expect_refusal(&env);
 }
 
