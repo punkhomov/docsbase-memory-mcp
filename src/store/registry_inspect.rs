@@ -14,6 +14,9 @@ mod project;
 pub use project::{
     ObservedProjectIndex, ProjectIndexLayout, ProjectIndexObservation, inspect_project_index,
 };
+pub(super) use project::{
+    check_identity_budget, check_tantivy_files, local_revision, observe_project,
+};
 
 /// Caller-owned limits; no runtime fallback/default is chosen by the observer.
 #[derive(Debug, Clone, Copy)]
@@ -198,6 +201,17 @@ pub(super) fn with_registry<T>(
     before_lock: impl FnOnce(),
     read: impl FnOnce(&Connection, &Path) -> std::result::Result<T, UnavailableReason>,
 ) -> std::result::Result<T, UnavailableReason> {
+    with_registry_lease(cache, limits, before_lock, |locked, directory| {
+        read(locked.connection(), directory)
+    })
+}
+
+pub(super) fn with_registry_lease<T>(
+    cache: &Path,
+    limits: InspectionLimits,
+    before_lock: impl FnOnce(),
+    read: impl FnOnce(&lease::LockedConnection, &Path) -> std::result::Result<T, UnavailableReason>,
+) -> std::result::Result<T, UnavailableReason> {
     // Resolve only the cache directory. SQLite NOFOLLOW must still check the DB entry.
     let directory = std::fs::canonicalize(cache).map_err(|_| UnavailableReason::Io)?;
     with_locked_db(
@@ -218,16 +232,27 @@ fn with_locked_db<T>(
     path: &Path,
     limits: InspectionLimits,
     before_lock: impl FnOnce(),
-    read: impl FnOnce(&Connection) -> std::result::Result<T, UnavailableReason>,
+    read: impl FnOnce(&lease::LockedConnection) -> std::result::Result<T, UnavailableReason>,
 ) -> std::result::Result<T, UnavailableReason> {
     sidecars_absent(path)?;
     let locked = lease::LockedConnection::open(path, before_lock)?;
     sidecars_absent(path)?;
-    locked.configure(limits.max_sqlite_value_bytes, limits.sqlite_cache_kib)?;
-    let value = read(locked.connection())?;
+    configure_connection(locked.connection(), limits).map_err(sqlite_failure)?;
+    let value = read(&locked)?;
     locked.check_namespace()?;
     sidecars_absent(path)?;
     Ok(value)
+}
+
+pub(super) fn configure_connection(
+    connection: &Connection,
+    limits: InspectionLimits,
+) -> rusqlite::Result<()> {
+    lease::configure_connection(
+        connection,
+        limits.max_sqlite_value_bytes,
+        limits.sqlite_cache_kib,
+    )
 }
 
 fn schema_version(connection: &Connection) -> std::result::Result<u32, UnavailableReason> {

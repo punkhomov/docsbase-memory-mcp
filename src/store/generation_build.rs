@@ -29,6 +29,9 @@ use super::{
     repo,
 };
 
+mod publication;
+pub use publication::publish_lexical_generation;
+
 mod recovery;
 pub use recovery::{discard_lexical_generation, find_lexical_build_to_discard};
 
@@ -447,6 +450,9 @@ fn verify_chunk_pair(
     tantivy: &Path,
     limits: InspectionLimits,
 ) -> Result<()> {
+    registry_inspect::check_tantivy_files(tantivy).map_err(|reason| {
+        admission(format!("generation Tantivy files unavailable ({reason:?})"))
+    })?;
     let chunk_count: i64 = metadata
         .query_row(
             "SELECT count(*) FROM chunks c JOIN docs d ON d.id = c.doc_id WHERE d.project_id = ?1",

@@ -1029,6 +1029,14 @@ pub(crate) fn with_writer_lease<T>(
         .map_err(|err| {
             Error::internal_with_source(format!("open {}: {err}", path.display()), err)
         })?;
+    with_writer_lock(file, &path, f)
+}
+
+pub(crate) fn with_writer_lock<T>(
+    file: File,
+    path: &Path,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let mut lock = RwLock::new(file);
     let guard = match lock.try_write() {
         Ok(guard) => guard,
