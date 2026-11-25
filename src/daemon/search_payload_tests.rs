@@ -68,6 +68,7 @@ impl Fixture {
             cache: self.cache.path(),
             project: &self.project,
             window: 3,
+            ann_search: None,
             payload_budget: budget,
             operation: SearchOperation::new(
                 budget.settings(),
@@ -307,6 +308,7 @@ fn aggregate_budget_stays_charged_through_provider_then_allows_retry() {
                     cache: &cache,
                     project: &project,
                     window: 3,
+                    ann_search: None,
                     payload_budget: policy_ref,
                     operation: SearchOperation::new(
                         policy_ref.settings(),

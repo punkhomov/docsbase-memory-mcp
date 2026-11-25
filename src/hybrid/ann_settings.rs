@@ -102,8 +102,9 @@ impl AnnSearchSettings {
     }
 }
 
-/// Typed owner overrides; these are not accepted TOML keys yet.
-#[derive(Debug, Clone, Default)]
+/// Optional global or project overrides for the ANN search owner.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnnSearchPatch {
     /// Minimum beam width.
     pub ef_base: Option<usize>,
@@ -111,6 +112,12 @@ pub struct AnnSearchPatch {
     pub ef_max: Option<usize>,
     /// Positive multiplier applied to fetch.
     pub fetch_multiplier: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AnnConfigPatch {
+    pub search: AnnSearchPatch,
 }
 
 /// Owner of ANN search defaults, scope, validation and local runtime effect.

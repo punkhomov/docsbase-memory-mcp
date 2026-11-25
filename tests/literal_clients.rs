@@ -277,6 +277,9 @@ async fn cli_refuses_an_old_scoped_peer_even_with_a_valid_direct_index() {
         let cache = tempfile::tempdir().expect("cache");
         let root = tempfile::tempdir().expect("root");
         std::fs::write(root.path().join("guide.md"), "# Guide\n\nwidgets\n").expect("guide");
+        let config = cache.path().join("config");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::write(config.join("config.toml"), "# Legacy peer fixture").unwrap();
         let cache_path = cache.path().to_path_buf();
         let root_path = root.path().to_path_buf();
         let run = move |args: &[&str]| {

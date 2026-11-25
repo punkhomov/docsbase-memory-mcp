@@ -709,7 +709,7 @@ impl PreparedPlan {
 
 pub(crate) enum JobInput<'a> {
     Full,
-    Sync,
+    Sync { join_active: bool },
     Incremental(std::borrow::Cow<'a, [PathBuf]>),
     Watch(std::sync::Arc<crate::watch::WatchPayload>),
 }
