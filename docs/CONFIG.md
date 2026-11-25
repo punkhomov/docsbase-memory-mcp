@@ -311,14 +311,14 @@ same size); `rerank=false` per request skips the rerank stage (the MCP
 
 `ranking = "rrf"` (opt-in) fuses the BM25 window with a dense candidate list
 (cosine over the cached vectors of the current revision, Reciprocal Rank
-Fusion `k = 60`) before the rerank stage runs on top of the fused order. It
+Fusion with a rank constant of 60 by default) before the rerank stage runs on top of the fused order. It
 requires the embedding stage and stays `"lexical"` by default: switching the
 ranking is a measured, deliberate change (NFR-6). Without an active rerank
 stage the exposed `score` is the RRF score (rank-based scale, not comparable
 to BM25 values); chunks without vectors are simply absent from the dense list
 until the backfill completes. `rerank = false` disables only the rerank
 stage - the order is then whatever `ranking` selects (`"lexical"` = strict
-BM25).
+BM25). [RRF settings](#reciprocal-rank-fusion)
 
 ## Example
 
@@ -496,6 +496,29 @@ and the widening multiplier must be at least 2.
 
 Reopen the project to apply project settings in a running daemon. These
 settings apply to queries on the existing indexes and vector cache.
+
+### Reciprocal rank fusion
+
+Projects using `ranking = "rrf"` under `[hybrid]` can tune fusion with
+`[rrf]` in a global or project v2 source. Each project field can override
+its corresponding global value.
+
+```toml
+[rrf]
+rank_constant = 60
+lexical_weight = 1.0
+dense_weight = 1.0
+```
+
+The defaults weight both lists equally. A candidate contributes
+`weight / (rank_constant + rank)` for each list where it appears.
+Rank starts at one. A smaller constant gives the first few ranks more
+influence. Both weights must be finite positive 32-bit floats. The rank
+constant must be a positive integer. The weights are independent
+multipliers and do not need to sum to one.
+
+Reopen the project to apply the settings in a running daemon. The new
+scoring uses the existing lexical index, vectors, and ANN graph.
 
 ## Versioned source planning API (CF3)
 

@@ -63,6 +63,7 @@ pub struct SourceLayer {
     pub(super) document: toml::Table,
     pub(super) watch: Option<crate::watch::settings::WatchPatch>,
     pub(super) lexical: Option<crate::index::lexical_settings::LexicalPatch>,
+    pub(super) rrf: Option<crate::hybrid::rrf::settings::RrfPatch>,
 }
 impl fmt::Debug for SourceLayer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -109,6 +110,7 @@ impl SourceLayer {
         };
         let mut watch = None;
         let mut lexical = None;
+        let mut rrf = None;
         let mut hybrid_merge = None;
         let mut vector_store = None;
         if version == ConfigVersion::V2 {
@@ -131,6 +133,16 @@ impl SourceLayer {
                     value
                         .try_into()
                         .map_err(|_| invalid("invalid v2 lexical fields"))?,
+                );
+            }
+            if let Some(value) = fields.remove("rrf") {
+                let toml::Value::Table(_) = &value else {
+                    return Err(invalid("v2 rrf settings require a table"));
+                };
+                rrf = Some(
+                    value
+                        .try_into()
+                        .map_err(|_| invalid("invalid v2 rrf fields"))?,
                 );
             }
             let vector = fields.remove("vector_cache");
@@ -165,6 +177,7 @@ impl SourceLayer {
             document,
             watch,
             lexical,
+            rrf,
         })
     }
     /// Exact source identity supplied by the caller; no canonicalization or I/O.

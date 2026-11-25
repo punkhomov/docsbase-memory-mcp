@@ -6,6 +6,7 @@ use std::path::Path;
 use super::bootstrap::DefaultsContext;
 use super::schema::{Capabilities, Provenance, Resolved, SettingsSpec, SourceId};
 use crate::error::{Error, Result};
+use crate::hybrid::rrf::settings::RrfSpec;
 use crate::index::lexical_settings::LexicalSpec;
 use crate::watch::settings::WatchSpec;
 
@@ -170,6 +171,15 @@ impl Resolution<ConfigSpec> {
                 &mut self.settings.lexical,
                 patch,
                 &self.defaults.initial.lexical,
+                &layer.source,
+                &mut self.origins,
+            )?;
+        }
+        if let Some(patch) = layer.rrf {
+            RrfSpec::overlay(
+                &mut self.settings.rrf,
+                patch,
+                &self.defaults.initial.rrf,
                 &layer.source,
                 &mut self.origins,
             )?;

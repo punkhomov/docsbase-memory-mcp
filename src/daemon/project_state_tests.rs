@@ -507,6 +507,19 @@ fn semantic_reload_preserves_dense_rows_for_watch_and_lexical_settings() {
         Arc::ptr_eq(&rows, &load()),
         "lexical candidate policy leaves dense rows resident"
     );
+    fixture.write_config(
+        "config_version = 2\nhybrid = false\nmax_docs_per_project = 11\n[lexical]\nlong_chunk_penalty = 0.25\ninitial_fetch_multiplier = 2\n[rrf]\nrank_constant = 11\ndense_weight = 3.0\n",
+    );
+    let fusion = fixture
+        .shared
+        .open_project_config(&fixture.project)
+        .expect("fusion reload");
+    assert_ne!(lexical.rrf, fusion.rrf);
+    assert_eq!(lexical.ann_build, fusion.ann_build);
+    assert!(
+        Arc::ptr_eq(&rows, &load()),
+        "fusion reload preserves resident dense rows"
+    );
     fixture.write_config("hybrid = false\nmax_docs_per_project = 23\n");
     fixture
         .shared
