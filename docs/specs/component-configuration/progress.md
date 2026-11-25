@@ -1551,3 +1551,21 @@ sections now require tables. Stopped Shared status/list keep their standalone
 SQLite policy and Website still requires the daemon. MCP and Web autostart
 use normal launch validation before creating state. Real CLI and MCP
 regressions and independent re-review cover these boundaries.
+
+## 2026-11-25 — CF6, настройка dense, query cache и ANN
+
+Task CF6 I28–I31/I35: complete (global v2 config drives dense/query resources
+and ANN retention in the daemon and direct search). Global settings expose
+individual provenance and retain the owner defaults. File policy does not
+override shared vector storage or change persisted ANN recipes.
+
+Ruling: keep the existing zero-value semantics for resident caps and ANN
+eligibility. A failed ANN build records its failure time and measures elapsed
+backoff. Disk cleanup retains the existing minimum-slot rule. Configured
+generation retention uses the existing pin check during removal.
+
+Review and re-review passed. The operational CLI fixture observes exact
+streaming. Captured launch checks real query-cache eviction. TOML-driven tests
+check backfill renewal and stale status. Real ANN files and a held slot pin
+exercise retention. Full Rust 1.100.0 cli-full tests, Clippy, fmt and offline
+checks passed locally with the existing search baseline.

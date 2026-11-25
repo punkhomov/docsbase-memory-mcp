@@ -183,7 +183,25 @@ cancellation/refusal totals and retained payload bytes. Timings can overlap and
 are not a wall-clock partition. Metrics contain no query, document, body, model
 or credential labels. Physical CPU/helper occupancy lasts through finish/unwind.
 
-## Query-vector cache policy
+## Dense and query-vector cache policy
+
+Set any of these values in the global v2 file. Unspecified fields keep the
+defaults shown here. Time values use milliseconds.
+
+```toml
+[dense]
+max_vectors = 1000000
+max_bytes = 1610612736
+max_projects = 8
+min_vectors = 4096
+build_backoff = 30000
+max_ann_disk_bytes = 4294967296
+ann_keep_generations = 2
+query_cache_max_entries = 256
+query_cache_max_bytes = 4194304
+backfill_pin_ttl = 3600000
+ann_outcome_ttl = 3600000
+```
 
 The query cache retains up to 256 vectors and 4 MiB of vector payload by default.
 Both limits apply to the same shared cache; hits refresh recency and insertion
@@ -191,11 +209,22 @@ evicts the least recent entries. Larger vectors can serve a request without
 being retained. This byte count excludes keys, allocator overhead, externally
 held vector references and in-flight requests.
 
-Rust callers can project `DenseSettings::query_cache_settings()` and pass a
-validated `QueryCacheSettings` to the explicit cache or daemon constructors.
-Both capacities must be positive. CLI search and daemon startup receive the
-owner's defaults at their composition boundary. These settings have no TOML
-keys yet; changing a live cache's policy is a later configuration task.
+Both query cache capacities must be positive. Daemon startup and direct CLI
+search use one resolved policy. Restart the daemon after editing it. Rust
+callers can still supply explicit policies to the cache or daemon constructors.
+
+`max_vectors` limits resident rows per project. `max_bytes` covers resident
+entries and live build reservations across projects. `max_projects` limits
+resident projects, and `min_vectors` controls eligibility for ANN. A zero
+resident capacity permits exact streaming without retaining those rows.
+`min_vectors = 0` permits ANN for any nonempty corpus that fits the other caps.
+`build_backoff = 0` permits retry on the next eligible lookup.
+
+`ann_keep_generations` must be positive. Retention cleanup keeps the newest
+generations for each project and model, including their different ANN recipes.
+`max_ann_disk_bytes` is a best-effort cleanup target. Disk cleanup skips
+locally pinned slots and keeps at least one candidate even when the target
+is zero. These settings leave the graph recipe and cache keys intact.
 
 Dense resident, count, backoff and disk policy also comes from `DenseSpec`.
 Rust callers can pass complete `DenseSettings` to `DenseCache::with_settings` or
@@ -791,17 +820,13 @@ keys. Search uses exact results while the matching graph is unavailable.
 Direct CLI search can load a matching graph and otherwise searches the vectors
 directly. Global config edits apply after a daemon restart.
 
-### ANN lifetime construction policy
+### ANN lifetimes
 
-The internal typed DenseSpec also owns the existing one-hour backfill-pin and
-ANN-status windows. AnnLifetimes validates positive whole signed seconds for pins
-and a positive Duration for status before construction; partial typed overrides
-preserve the other value. The policy follows actual dense cache/sync ownership,
-with no new file keys or live mutation. Both initial backfill pins and successful
-renewal use it. Existing leases keep their expiry/ownership; this does not revoke
-leases or invalidate vectors, query caches or ANN graphs. Status uses the cache's
-monotonic authority window and describes stale observations as older than the
-configured TTL. Compatibility helpers retain their one-hour defaults.
+`dense.backfill_pin_ttl` must be a positive multiple of 1000 ms. The daemon
+uses it for new backfill pins and successful renewal. Existing leases keep
+their expiry until renewal. `dense.ann_outcome_ttl` must be positive and controls
+how long the daemon reports an ANN outcome as current. Status measures its age
+using a monotonic clock. Both fields default to one hour.
 
 
 ### Shared vector-store construction policy

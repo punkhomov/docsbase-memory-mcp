@@ -550,3 +550,18 @@ The capture boundary validates these policies before startup and shows
 their origins in the effective view. The pool eagerly opens its configured
 connections. These settings affect new handles and admission after restart,
 without changing persisted generations or artifacts.
+
+## Delta 2026-11-25 — I28–I31/I35, dense resources in global v2
+
+`DenseSpec` supplies capture-time policy for resident vectors, project and
+byte caps, ANN eligibility and backoff, query-vector retention, best-effort
+ANN disk cleanup and both ANN TTLs. `dense.ann_keep_generations` is a positive
+count (default two). Durations are milliseconds. A pin duration is a positive
+whole number of seconds. These deployment settings have runtime impact and
+can evict disposable entries through existing policies. Persisted vector and
+ANN recipe identities are independent of the policy.
+
+The I28/I29 source rules preserve the CF6b typed zero semantics. A zero
+resident cap disables retention within that cap, and a zero minimum admits
+nonempty corpora subject to the other ANN checks. Query cache capacities and
+the generation-retention count must be positive.

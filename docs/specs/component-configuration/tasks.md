@@ -845,3 +845,14 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   Reject positional arrays as owner sections. Verify stopped diagnostic
   reads with invalid SQLite policy and continued Website refusal.
   Verify MCP autostart rejects a newly invalid policy before creating state.
+
+## Delta 2026-11-25 — CF6 I28–I31/I35, dense policy consumption
+
+- Use global v2 for the existing dense, query-cache, ANN eligibility and
+  lifetime owner. Route one snapshot into the daemon and direct search.
+- Configure ANN generation retention through the same owner and existing
+  cleanup path. Preserve slot-pin exclusion and default retention of two.
+- Check real query-cache eviction, expiry policy, native ANN dumps,
+  early invalid-policy refusal and separation from shared vector-store limits.
+  Exercise exact streaming through the direct CLI and retain an expired slot
+  while the cache still holds its slot pin.

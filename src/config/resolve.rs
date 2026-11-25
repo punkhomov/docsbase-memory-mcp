@@ -6,6 +6,7 @@ use std::path::Path;
 use super::bootstrap::DefaultsContext;
 use super::schema::{Capabilities, Provenance, Resolved, SettingsSpec, SourceId};
 use crate::error::{Error, Result};
+use crate::hybrid::dense_settings::DenseSpec;
 use crate::hybrid::provisioning::ProvisioningSpec;
 use crate::hybrid::rrf::settings::RrfSpec;
 use crate::index::lexical_settings::LexicalSpec;
@@ -214,6 +215,16 @@ impl Resolution<ConfigSpec> {
                 &mut self.origins,
             )?;
             ReadPoolSpec::validate(&self.settings.read_pool, &self.capabilities)?;
+        }
+        if let Some(patch) = layer.dense {
+            DenseSpec::overlay(
+                &mut self.settings.dense,
+                patch.into(),
+                &self.defaults.initial.dense,
+                &layer.source,
+                &mut self.origins,
+            )?;
+            DenseSpec::validate(&self.settings.dense, &self.capabilities)?;
         }
         self.validate()
             .map_err(|_| invalid("invalid effective settings in versioned source"))

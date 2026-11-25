@@ -65,6 +65,7 @@ pub struct SourceLayer {
     pub(super) lexical: Option<crate::index::lexical_settings::LexicalPatch>,
     pub(super) store: Option<crate::store::settings::DbFilePatch>,
     pub(super) read_pool: Option<crate::store::settings::ReadPoolPatch>,
+    pub(super) dense: Option<crate::hybrid::dense_settings::DenseFilePatch>,
     pub(super) provisioning: Option<crate::hybrid::provisioning::ProvisioningPatch>,
     pub(super) rrf: Option<crate::hybrid::rrf::settings::RrfPatch>,
 }
@@ -116,6 +117,7 @@ impl SourceLayer {
         let mut rrf = None;
         let mut store = None;
         let mut read_pool = None;
+        let mut dense = None;
         let mut provisioning = None;
         let mut hybrid_merge = None;
         let mut vector_store = None;
@@ -154,6 +156,7 @@ impl SourceLayer {
             provisioning = take_global_table(&mut fields, &source, "provisioning")?;
             store = take_global_table(&mut fields, &source, "store")?;
             read_pool = take_global_table(&mut fields, &source, "read_pool")?;
+            dense = take_global_table(&mut fields, &source, "dense")?;
             let vector = fields.remove("vector_cache");
             if matches!(source, SourceId::Global(_)) {
                 vector_store = Some(crate::vector_cache::settings::resolve_file(
@@ -190,6 +193,7 @@ impl SourceLayer {
             provisioning,
             store,
             read_pool,
+            dense,
         })
     }
     /// Exact source identity supplied by the caller; no canonicalization or I/O.

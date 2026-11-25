@@ -9,6 +9,7 @@ use serde::Deserialize;
 use crate::daemon::settings::{DaemonPatch, DaemonSettings, DaemonSpec};
 use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridCfg, HybridDefaults, HybridPatch, HybridSpec, ProvidersCfg};
+use crate::hybrid::dense_settings::{DenseSettings, DenseSpec};
 use crate::hybrid::provisioning::{ProvisioningSettings, ProvisioningSpec};
 use crate::hybrid::remote_settings::{RemotePatch, RemoteSettings, RemoteSpec};
 use crate::hybrid::rrf::{RrfSettings, settings::RrfSpec};
@@ -58,6 +59,8 @@ pub struct Config {
     pub store: DbSettings,
     /// Global prepared metadata reader capacity.
     pub read_pool: ReadPoolSettings,
+    /// Global dense, query-cache and ANN resource policy.
+    pub dense: DenseSettings,
     /// Complete global-only daemon launch and resource policy.
     pub daemon: DaemonSettings,
     /// Complete global-only remote execution policy.
@@ -313,6 +316,7 @@ impl Config {
         SearchSpec::validate(&self.search, &Capabilities::current())?;
         DbSpec::validate(&self.store, &Capabilities::current())?;
         ReadPoolSpec::validate(&self.read_pool, &Capabilities::current())?;
+        DenseSpec::validate(&self.dense, &Capabilities::current())?;
         DaemonSpec::validate(&self.daemon, &Capabilities::current())?;
         RemoteSpec::validate(&self.remote, &Capabilities::current())?;
         LexicalSpec::validate(&self.lexical, &Capabilities::current())?;
@@ -424,6 +428,7 @@ impl SettingsSpec for ConfigSpec {
         fields.extend_from_slice(SearchSpec::FIELDS);
         fields.extend_from_slice(DbSpec::FIELDS);
         fields.extend_from_slice(ReadPoolSpec::FIELDS);
+        fields.extend(DenseSpec::file_fields());
         fields.extend_from_slice(ChunkSpec::FIELDS);
         fields.extend_from_slice(DaemonSpec::FIELDS);
         fields.extend_from_slice(RemoteSpec::FIELDS);
@@ -449,6 +454,7 @@ impl SettingsSpec for ConfigSpec {
             search: SearchSpec::initial(&search),
             store: DbSpec::defaults(context),
             read_pool: ReadPoolSpec::defaults(context),
+            dense: DenseSpec::defaults(context),
             daemon: DaemonSpec::initial(&daemon),
             remote: RemoteSpec::initial(&remote),
             provisioning: ProvisioningSpec::defaults(context),
@@ -611,6 +617,7 @@ impl ConfigSpec {
             settings.read_pool.max_connections.into(),
             None,
         )?;
+        settings.dense.view_fields(view)?;
         settings.chunk.view_fields(view)?;
         DaemonSpec::view_fields(&settings.daemon, view)?;
         RemoteSpec::view_fields(&settings.remote, view)?;

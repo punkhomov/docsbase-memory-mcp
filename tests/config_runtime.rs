@@ -1007,6 +1007,10 @@ max_connections=0
 ",
             "read_pool.max_connections must be > 0",
         ),
+        (
+            "config_version=2\n[dense]\nquery_cache_max_entries=0\n",
+            "query-cache entry and byte limits must be positive",
+        ),
         (&oversized, "over the trusted byte limit"),
     ] {
         let env = Env::new(&[]);

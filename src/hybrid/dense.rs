@@ -306,11 +306,11 @@ pub struct BuildingAnn {
 }
 
 /// Failed ANN build: search streams exact from the cached hashes until
-/// `retry_at`, then a new background build starts (FR-5/FR-12).
+/// the configured backoff expires, then a new background build starts (FR-5/FR-12).
 #[derive(Debug, Clone)]
 pub struct FailedAnn {
     pub(crate) hashes: Arc<Vec<(u64, String)>>,
-    pub(crate) retry_at: Instant,
+    pub(crate) failed_at: Instant,
 }
 
 /// Outcome of a dense-cache lookup.
@@ -325,7 +325,7 @@ pub enum DenseRows {
     TooLarge(Arc<Vec<(u64, String)>>),
     /// An ANN build is running in the background; search streams exact.
     Building(Arc<BuildingAnn>),
-    /// The last ANN build failed; stream exact, retry after `retry_at`.
+    /// The last ANN build failed; stream exact during the configured backoff.
     Failed(Arc<FailedAnn>),
 }
 
@@ -719,19 +719,23 @@ impl DenseCache {
     /// Construct a cache using the complete component-owned dense/query policy.
     ///
     /// # Errors
-    /// Invalid query capacities are rejected before resource construction.
+    /// Invalid query capacities or retention are rejected before construction.
     pub fn with_settings(
         policy: AnnPolicy,
         cache_root: &Path,
         settings: &DenseSettings,
     ) -> Result<Self> {
         DenseSpec::validate(settings, &crate::config::schema::Capabilities::current())?;
-        Self::with_policy_limits_and_query_settings(
+        let store = (policy != AnnPolicy::Disabled).then(|| {
+            AnnStore::with_retention(cache_root.to_path_buf(), settings.ann_keep_generations)
+        });
+        Ok(Self::with_explicit_query_settings(
             policy,
-            cache_root,
+            store,
             DenseCacheLimits::from(settings),
-            &settings.query_cache_settings(),
-        )
+            Some(cache_root),
+            settings.query_cache_settings(),
+        ))
     }
 
     /// Construct dense/query state bound to an existing vector-store owner.
@@ -1293,7 +1297,7 @@ impl DenseCache {
         }
         let ready = match &entry.state {
             DenseRows::Ann(_) | DenseRows::Building(_) => true,
-            DenseRows::Failed(failed) => failed.retry_at > Instant::now(),
+            DenseRows::Failed(failed) => failed.failed_at.elapsed() < self.limits.build_backoff,
             DenseRows::Ready(_) | DenseRows::TooLarge(_) => matches!(lookup, Lookup::Get),
         };
         ready.then(|| entry.state.clone())
@@ -1592,7 +1596,7 @@ impl DenseCache {
                 if entry.generation == generation
                     && entry.model_id == model_id
                     && entry.ann_build == self.ann_build
-                    && matches!(&entry.state, DenseRows::Failed(failed) if failed.retry_at > Instant::now()));
+                    && matches!(&entry.state, DenseRows::Failed(failed) if failed.failed_at.elapsed() < self.limits.build_backoff));
             // A build reservation must fit next to the projects already
             // resident, otherwise two admitted corpora would double the cap.
             (
@@ -2385,7 +2389,7 @@ fn build_in_background(
                 entry.bytes = hashes.len() as u64 * 64;
                 entry.state = DenseRows::Failed(Arc::new(FailedAnn {
                     hashes,
-                    retry_at: Instant::now() + cache.limits.build_backoff,
+                    failed_at: Instant::now(),
                 }));
                 reservation.release();
             }
@@ -2402,6 +2406,44 @@ fn build_in_background(
 mod tests {
     use super::*;
     use crate::vector_cache::{Embedder, VectorCache};
+
+    #[test]
+    fn configured_retention_waits_for_the_slot_pin_to_drop() {
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::write(
+            cache.path().join("config.toml"),
+            "config_version = 2\n[dense]\nann_keep_generations = 1\n",
+        )
+        .unwrap();
+        let config = crate::config::Config::global_from(cache.path()).unwrap();
+        let dense =
+            DenseCache::with_settings(AnnPolicy::BuildOrLoad, cache.path(), &config.dense).unwrap();
+        let store = dense.store.as_ref().unwrap();
+        let mut key = AnnKey {
+            project_id: 1,
+            generation: 1,
+            model_id: "model@d8".into(),
+            dim: 8,
+            chunk_count: 1,
+            chunk_set_digest: "digest".into(),
+            format_version: ANN_FORMAT_VERSION,
+        };
+        let old_dir = store.ann_dir(&key);
+        std::fs::create_dir_all(&old_dir).unwrap();
+        let pin = store
+            .pin_slot(&key, dense.ann_build, AnnSlotAccess::Read)
+            .unwrap();
+        key.generation = 2;
+        let new_dir = store.ann_dir(&key);
+        std::fs::create_dir_all(&new_dir).unwrap();
+
+        dense.cleanup(key.project_id).unwrap();
+        assert!(old_dir.is_dir());
+        drop(pin);
+        dense.cleanup(key.project_id).unwrap();
+        assert!(!old_dir.exists());
+        assert!(new_dir.is_dir());
+    }
 
     fn dense_input(rows: Vec<(u64, Arc<[f32]>)>, dim: usize) -> DenseInput {
         let chunks = rows.iter().map(|(id, _)| (*id, format!("h{id}"))).collect();

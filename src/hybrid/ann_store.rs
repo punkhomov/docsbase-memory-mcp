@@ -37,9 +37,6 @@ pub const MAX_ANN_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Dump basename enforced by [`AnnStore::persist_dump`] (design §6).
 const DUMP_BASENAME: &str = "index";
 
-/// Generations kept by [`AnnStore::cleanup`] (design §9).
-const ANN_KEEP_GENERATIONS: usize = 2;
-
 /// Identity of one persisted index (FR-3): changing any field moves the
 /// index to another on-disk key, so stale/corrupt state can never be
 /// mistaken for the current one.
@@ -147,6 +144,7 @@ pub fn chunk_set_digest(chunks: &[(u64, String)]) -> String {
 #[derive(Debug, Clone)]
 pub struct AnnStore {
     root: PathBuf,
+    keep_generations: usize,
     slot_pins: Arc<Mutex<HashMap<PathBuf, SlotUse>>>,
 }
 
@@ -195,8 +193,13 @@ impl AnnStore {
     /// Store rooted at `root` (typically the cache root).
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
+        Self::with_retention(root, super::dense_settings::DEFAULT_ANN_KEEP_GENERATIONS)
+    }
+
+    pub(crate) fn with_retention(root: PathBuf, keep_generations: usize) -> Self {
         Self {
             root,
+            keep_generations,
             slot_pins: Arc::default(),
         }
     }
@@ -463,7 +466,7 @@ impl AnnStore {
     }
 
     /// Best-effort cleanup: removes stale `tmp-*` directories and keeps the
-    /// newest [`ANN_KEEP_GENERATIONS`] distinct generations per model (design §9).
+    /// configured number of newest distinct generations per model (design §9).
     /// Each retained generation can contain multiple recipes.
     ///
     /// # Errors
@@ -508,7 +511,7 @@ impl AnnStore {
             let expired = generations
                 .chunk_by(|older, newer| older.0 == newer.0)
                 .rev()
-                .skip(ANN_KEEP_GENERATIONS)
+                .skip(self.keep_generations)
                 .flatten();
             for (_, dir) in expired {
                 self.remove_unpinned(dir);

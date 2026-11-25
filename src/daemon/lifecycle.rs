@@ -275,7 +275,6 @@ pub fn run_daemon_with_launch_and_bootstrap(
 // The existing CLI retains its documented warning/default startup adapter.
 pub(crate) fn run_daemon_from_launch(
     cache: &Path,
-    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
     snapshot: &LaunchSnapshot,
     patch: DaemonPatch,
     detached: bool,
@@ -291,11 +290,12 @@ pub(crate) fn run_daemon_from_launch(
     }
     let settings = crate::store::settings::db_from_config(&launch.config)?;
     let pool = crate::store::settings::pool_from_config(&launch.config)?;
+    let dense = launch.config.settings().dense.clone();
     run_with_launch(
         cache,
         &settings,
         &pool,
-        dense_settings,
+        &dense,
         launch,
         &runtime_bootstrap()?,
     )
