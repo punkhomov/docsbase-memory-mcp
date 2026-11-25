@@ -175,7 +175,7 @@ pub(super) async fn run_with_operation(
             let (project, config, source) = if let Some(policy) = &owner.global.vector_store {
                 let root = registry::project_root_for(&target, &owner.cache)?;
                 let config = Config::for_project(&owner.global, &root)?;
-                let store = VectorStore::acquire(&owner.cache, policy)?;
+                let store = VectorStore::reserve(&owner.cache, policy)?;
                 let mut db = Db::open_with_settings(&owner.cache, &settings)?;
                 (
                     registry::ensure_project(&mut db, &root)?,

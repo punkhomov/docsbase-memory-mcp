@@ -15,6 +15,14 @@ pub enum ConfigVersion {
     /// Field-wise hybrid merge and one global vector-store budget.
     V2,
 }
+/// Initial source for CLI editors creating a global configuration.
+pub(crate) fn new_global_document() -> toml::Value {
+    toml::Value::Table(toml::Table::from_iter([(
+        "config_version".to_owned(),
+        toml::Value::Integer(2),
+    )]))
+}
+
 /// Supplied source text, parsed without touching paths or credentials.
 #[derive(Clone)]
 pub struct SourceLayer {

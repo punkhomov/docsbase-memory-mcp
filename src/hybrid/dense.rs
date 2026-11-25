@@ -746,7 +746,7 @@ impl DenseCache {
     ) -> Result<Self> {
         if let Some(vectors) = &config.vector_store {
             DenseSpec::validate(settings, &crate::config::schema::Capabilities::current())?;
-            let owner = VectorStore::acquire(cache, vectors)?;
+            let owner = VectorStore::reserve(cache, vectors)?;
             return Self::with_vector_store(policy, &owner, settings);
         }
         let mut effective = settings.clone();

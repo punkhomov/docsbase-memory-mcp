@@ -246,11 +246,10 @@ provider = "openrouter"            # or "fastembed"
 model = "nvidia/llama-nemotron-rerank-vl-1b-v2:free"  # openrouter default; registry name for fastembed
 window = 50                        # candidate window per search (10..=100)
 
-[hybrid.cache]
-max_bytes = 1073741824             # vector-cache budget; ANN needs full coverage
 ```
 
-`hybrid.cache.max_bytes` bounds the content-addressed vector cache. The default
+V1 uses `[hybrid.cache]` with `max_bytes` to bound the content-addressed vector cache.
+V2 uses the global `[vector_cache]` section described below. The default
 (1 GiB) fits the 75k×2048 ANN target (~586 MiB); lowering it below the project's
 working set keeps `embed_coverage` under 100% and therefore disables ANN
 (ann-index FR-6 / hybrid-providers DELTA-9).
@@ -386,7 +385,9 @@ docsbase config   # effective values for the current directory (JSON)
 
 ## Configuration v2
 
-To opt in, put the version at the top of the global `config.toml`:
+The first global settings write through `connect` or `models use --global`
+creates a v2 `config.toml`. When editing the file manually, put the version at
+the top to enable v2:
 
 ```toml
 config_version = 2
@@ -401,8 +402,14 @@ inheritance in a project by putting `config_version = 2` at the top of its
 `.docsbase.toml` after opting in globally. Runtime v1 global files omit the
 version key. Under v2 global policy, legacy project files retain their whole
 hybrid replacement semantics.
-Remove any project `hybrid.cache.max_bytes` when opting into v2 globally. Use
-`docsbase config effective` to verify the shared setting and its origin.
+The runtime reserves the shared policy before serving requests. It opens
+`vectors.db` on the first vector operation. Lexical indexing, sync and search
+can run without creating that database.
+
+Move a legacy project’s `hybrid.cache.max_bytes` into the global
+`[vector_cache]` table before opting into v2. To keep the project-specific
+budget, retain an unversioned global file. Use `docsbase config effective` to verify the shared setting and
+its origin.
 
 With v2, `docsbase index` and `docsbase sync` use the running Shared daemon
 for both existing and new projects. On a fixed Website daemon, use

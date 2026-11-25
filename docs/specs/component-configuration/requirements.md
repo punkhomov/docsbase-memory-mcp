@@ -557,3 +557,15 @@ Explicit CLI Index with configuration refresh must run a job with its own
 captured settings. If a project job is already active, the command reports
 admission failure and gives a retry instruction. Ordinary Sync and MCP
 index requests keep their active-job join behavior.
+
+## Delta 2026-11-24 — формат первого глобального файла
+
+Первый глобальный файл, созданный CLI-редактором, фиксирует v2 в самом файле.
+Предпросмотр первой записи показывает этот заголовок. Редактирование
+существующего файла сохраняет его версию.
+
+## Delta 2026-11-24 — запуск v2 без векторной базы для lexical
+
+Чисто лексический запуск v2, индексация, sync и поиск оставляют vectors.db
+отсутствующей. При первом фактическом векторном доступе соединения разделяют
+одну политику и один счётчик вытеснения, включая существующие строки SQLite.
