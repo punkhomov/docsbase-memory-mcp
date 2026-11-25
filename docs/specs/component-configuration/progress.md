@@ -1516,3 +1516,23 @@ lease. The command fixtures and re-review confirmed these changes.
 minor (deferred): lock coverage exercises a real contended model lock
 with the standalone policy and provenance for a configured attempt
 count separately.
+
+
+## 2026-11-25 — CF12 I42, ёмкость очередей и повторы watcher
+
+Task CF12 I42: complete (глобальный v2 управляет очередями, проектный
+слой может менять retry policy. Все consumer paths используют принятые
+значения). Проверены provenance, настройки реального демона, статус
+при исчерпании повторов и продолжение захваченного пакета после reload.
+
+Ruling: при заполненной управляемой очереди stop пробуждает producer.
+Закрытие освобождает получателя событий до Drop нативного владельца.
+Публичный SyncSender сохраняет rendezvous, включая sync_channel(0)
+с try_recv. Его guard завершает нативный watcher, даже когда у
+вызывающего кода ещё ожидает отправка принятого пакета.
+
+Ruling: срок исходного пакета завершает индексацию. Если он прерывает
+ожидание повтора, служебная запись сохраняет пути и причину в status.
+При отказе записи причина видна в логе. Регрессии воспроизвели
+зависание полного канала, потерянную диагностику и silent rendezvous.
+Повторное ревью не выявило Critical или Important.

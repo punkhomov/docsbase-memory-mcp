@@ -821,3 +821,13 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   Testing uses real CLI refusal before network and local fixture sources.
 - Provisioning settings have runtime-only impact on these commands.
   Existing model IDs, cached vectors, ANN recipes and inference are independent.
+
+## Delta 2026-11-25 — CF12 I42, watcher queues and retries
+
+- Resolve v2 queue capacities at global scope and per-batch retry policy
+  at project scope. Pass both capacities to actual channel constructors.
+- Capture one retry policy per accepted batch on both consumer paths.
+  Reopen may refresh filters and stages during the same batch.
+- Verify a configured retry limit through a detached daemon and a held
+  batch across project reload. Index and search artifacts are independent
+  of these settings. The traversal limits of I43 remain a separate concern.

@@ -564,6 +564,7 @@ impl Shared {
         self: &Arc<Self>,
         project: &crate::store::models::Project,
         event: crate::watch::BatchEvent,
+        policy: crate::watch::BatchRetryPolicy,
         pending: Option<Arc<crate::watch::WatchPayload>>,
         operation: &crate::search::operation::SearchOperation,
         activity: &Arc<Activity>,
@@ -578,6 +579,7 @@ impl Shared {
                 &shared.cache,
                 &project,
                 event.clone(),
+                policy,
                 pending.as_deref(),
                 &shared.db_settings,
             )?;

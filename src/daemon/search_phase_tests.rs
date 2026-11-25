@@ -22,6 +22,10 @@ pub(super) struct Fixture {
 
 impl Fixture {
     pub(super) fn new(stages: HybridStages) -> Self {
+        Self::with_global(stages, "# Legacy test runtime")
+    }
+
+    pub(super) fn with_global(stages: HybridStages, global: &str) -> Self {
         let cache = tempfile::tempdir().expect("cache");
         let root = tempfile::tempdir().expect("project");
         std::fs::write(
@@ -42,7 +46,7 @@ impl Fixture {
         // Parallel CLI tests redirect the process-global config path. Keep this
         // fixture's launch policy independent, including later project reloads.
         let config = tempfile::tempdir().expect("global config");
-        std::fs::write(config.path().join("config.toml"), "# Legacy test runtime").unwrap();
+        std::fs::write(config.path().join("config.toml"), global).unwrap();
         let shared = Shared::open_with_launch(
             cache.path(),
             &crate::store::settings::standalone().expect("DB policy"),
@@ -67,7 +71,7 @@ impl Fixture {
         let slot = shared.project_slot(project.id);
         {
             let mut state = slot.state.lock().expect("state");
-            state.config = Some(Arc::new(Config::default()));
+            state.config = Some(Arc::new(shared.global_config.clone()));
             state.stages = Some(Arc::new(stages));
         }
         let (session, _cancel) = shared

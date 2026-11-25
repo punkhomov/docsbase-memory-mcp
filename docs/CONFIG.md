@@ -486,6 +486,28 @@ Indexing still depends on the downstream queue and writer. Both fields must be a
 and the quiet window must fit within the maximum of 2000 milliseconds.
 When the project config is reopened, the next batch uses the updated windows.
 
+Watcher queues and retries are also configurable in v2.
+
+| Field | Default | Scope |
+|---|---:|---|
+| `native_queue_capacity` | 4096 | Global |
+| `batch_queue_capacity` | 4096 | Global |
+| `transient_retries` | 3 | Global or project |
+| `transient_backoff_ms` | 100 | Global or project |
+| `lease_retry_ms` | 250 | Global or project |
+
+Queue capacities count pending path notifications and debounced batches,
+respectively. Each accepts 1–4096 and applies when the watcher starts.
+Restart the daemon to apply global file changes. Lower counts apply
+backpressure sooner. They leave the native filesystem's event buffer and
+search payload budgets independent.
+
+A batch keeps the retry policy it accepted at the start. Transient retries
+accept 0–21, with zero surfacing the first transient failure in status. The
+delay triples after each transient retry and must fit the platform clock.
+A busy writer lease uses a separate positive delay and leaves the transient
+count intact.
+
 ### Lexical search
 
 Use `[lexical]` in the global or project v2 configuration to tune BM25
