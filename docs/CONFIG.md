@@ -16,6 +16,11 @@ Environment overrides (highest-priority directory resolution, used by tests):
 - `DOCSBASE_DATA_DIR` — installed binary + `install.json`
 - `DOCSBASE_CONFIG_DIR` — global `config.toml` location
 
+Global and project TOML sources have a 1 MiB limit. `models use` and
+`connect` apply the same limit before parsing the current file and before
+publishing a replacement. The `models use --dry-run` preview also applies
+the limit. A refused edit leaves the source intact.
+
 ## Reloading configuration
 
 The daemon reads global configuration at startup; changing it requires a daemon
@@ -194,10 +199,10 @@ keys yet; changing a live cache's policy is a later configuration task.
 
 Dense resident, count, backoff and disk policy also comes from `DenseSpec`.
 Rust callers can pass complete `DenseSettings` to `DenseCache::with_settings` or
-`Shared::open_with_dense_policy`; snapshots retain immutable limits. At daemon
-and direct CLI composition, the existing `hybrid.cache.max_bytes` still overrides
-the dense-path vector-store fallback. This does not activate strict shared-store
-quotas or live settings updates.
+`Shared::open_with_dense_policy`. Snapshots retain immutable limits. The v1
+daemon and direct CLI use the project `hybrid.cache.max_bytes` fallback for
+the vector store. In v2, the cache root uses the shared `vector_cache.max_bytes`
+budget from the global configuration.
 
 ANN backfill pins use the same static eligibility as construction: chunk-row
 count, minimum/maximum vectors, project capacity, model width and graph plus exact
@@ -246,11 +251,10 @@ provider = "openrouter"            # or "fastembed"
 model = "nvidia/llama-nemotron-rerank-vl-1b-v2:free"  # openrouter default; registry name for fastembed
 window = 50                        # candidate window per search (10..=100)
 
-[hybrid.cache]
-max_bytes = 1073741824             # vector-cache budget; ANN needs full coverage
 ```
 
-`hybrid.cache.max_bytes` bounds the content-addressed vector cache. The default
+The global `vector_cache.max_bytes` bounds the content-addressed vector cache
+in v2. A v1 source uses `hybrid.cache.max_bytes`. The default
 (1 GiB) fits the 75k×2048 ANN target (~586 MiB); lowering it below the project's
 working set keeps `embed_coverage` under 100% and therefore disables ANN
 (ann-index FR-6 / hybrid-providers DELTA-9).
@@ -258,7 +262,7 @@ working set keeps `embed_coverage` under 100% and therefore disables ANN
 ANN admission is separate and **not configurable**: a background build is
 admitted only when `graph + exact rows` fits the resident cap
 `DenseCacheLimits.max_bytes` (1.5 GiB default, which covers the 75k×2048 peak
-of ~1.22 GiB). Raising `hybrid.cache.max_bytes` does not admit a larger corpus;
+of ~1.22 GiB). A larger vector-cache budget leaves the ANN admission cap unchanged;
 past roughly 92k chunks at `d2048` the project stays on the exact path.
 
 Default remote pins are free OpenRouter routes: they may train on prompts and
@@ -386,7 +390,10 @@ docsbase config   # effective values for the current directory (JSON)
 
 ## Configuration v2
 
-To opt in, put the version at the top of the global `config.toml`:
+A new installation uses v2 when the global `config.toml` is absent. Reading
+settings requires no file creation. The first global write from `connect` or
+`models use --global` records the version explicitly. To set the shared
+cache budget by hand, create a global file like this:
 
 ```toml
 config_version = 2
@@ -395,23 +402,32 @@ config_version = 2
 max_bytes = 536870912
 ```
 
-This works on a new installation without a prior migration. The global vector
-budget applies to all projects in the same cache root. Enable field-wise hybrid
-inheritance in a project by putting `config_version = 2` at the top of its
-`.docsbase.toml` after opting in globally. Runtime v1 global files omit the
-version key. Under v2 global policy, legacy project files retain their whole
-hybrid replacement semantics.
-Remove any project `hybrid.cache.max_bytes` when opting into v2 globally. Use
-`docsbase config effective` to verify the shared setting and its origin.
+All projects in the same cache root share this budget. SQLite opens the vector
+database on the first vector operation. Lexical indexing and search can run
+without creating it.
 
-Run `docsbase index` with the daemon stopped. With the daemon running, use
-`docsbase sync` for both existing and new projects. Stop and restart the daemon
-after edits to the global config. Use a separate cache root to try v2 alongside
-an existing v1 setup. `models use` and its dry run resolve a v2 edit against
+An existing unversioned global file selects v1. Create an empty unversioned
+global file to retain the project-specific budgets of legacy projects. To use
+v2 with those projects, move `hybrid.cache.max_bytes` to the global
+`vector_cache.max_bytes`. A project can opt into field-wise hybrid inheritance
+by setting `config_version = 2` in its `.docsbase.toml`. An unversioned project
+file keeps the whole-value hybrid replacement rule. Use
+`docsbase config effective` to check the selected values and their origins.
+
+With v2, `docsbase index` and `docsbase sync` use the running Shared daemon
+for both existing and new projects. On a fixed Website daemon, use
+`docsbase sync ABS`. Stop and restart the daemon after edits to the
+global config. Restart any running MCP frontend when the global version changes.
+Use a separate cache root to try v2 alongside an active v1 setup.
+`models use` and its dry run resolve a v2 edit against
 the same inherited settings as the runtime. Unedited fields in a table remain
 inherited. When replacing one stage in a boolean reset, the editor keeps the
 effective state of the other stage. The migration command still produces a
 read-only plan.
+
+On Shared v2, connected `docsbase index` requires its own job so it uses
+fresh project settings. If a sync for that project is active, wait for it to
+finish and retry `docsbase index`. Ordinary `sync` can join the active job.
 
 ## Versioned source planning API (CF3)
 
@@ -704,3 +720,31 @@ SDK's immutable fixed-project client once, with no fallback operational values.
 This does not activate v2 configuration or change index/vector/ANN invalidation.
 Use explicit `docsbase sync ABS` and read-only `docsbase status --project ABS` for
 updates/readiness; watcher-off filesystem freshness is not inferred.
+
+## Markdown chunk settings
+
+Set `[index.chunk]` in global `config.toml` or project `.docsbase.toml`.
+The project can override one setting and inherit the other. Both settings
+count Unicode characters.
+
+```toml
+[index.chunk]
+max_chars = 1000      # 1–1500, default 1500
+overlap_chars = 100   # 0–150, default 150
+```
+
+The prose overlap is capped at one tenth of `max_chars`. A heading merged
+with its prose can use the full overlap allowance. Fenced code and tables
+remain atomic. `docsbase config effective` reports both values and their sources.
+
+After changing the recipe, run `docsbase sync ABS` to update the entire project.
+A watcher batch applies the recipe to the files it processes. Website readiness
+requires a full sync at the current recipe and reports `recipe_changed` when
+the last full sync used a different one. Embeddings for identical chunk text
+and the same embedding model remain reusable.
+
+On upgrade from index schema 3, the next full sync records the recipe and
+recomputes chunks. Existing index files are retained until the index job
+updates them. For an existing Website deployment, stop the daemon and run
+`docsbase index ABS` once before restarting `docsbase serve --project ABS`.
+Website launch checks the schema before opening the index for writes.

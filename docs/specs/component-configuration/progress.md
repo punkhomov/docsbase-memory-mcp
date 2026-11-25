@@ -1018,6 +1018,24 @@ lease, including failed sequence reads. A live successful connection retains its
 existing mode owner. The shared window still bounds contention/retry admission,
 not non-preemptible native completion. No fixture/budget/ignore/dependency change.
 
+## 2026-11-24 — CF10, размещение и публикация поколений
+
+Task CF10: complete (ADR, scratch measurement and fresh review). Отдельная
+metadata SQLite выбрана для полной замены. На 20 000 документах и 80 000
+чанках медианы копии составили 253 мс для строк общей базы и 132 мс для
+изолированной копии. В Linux-пробе остановка до и после commit указателя
+выбрала ожидаемую пару реальной metadata/Tantivy. Старая read-транзакция
+сохранила свои данные.
+
+Ruling: отдельная запись legacy поколения закрывает reclaim первой смены.
+Schema fence требует остановленного перехода и резервной копии. Pending
+проверяется при подготовке и CAS. Определены single daemon owner, source
+leases, durable bindings, удаление под нативным барьером и старение ссылок
+по snapshot token. Существующий числовой маршрут сохранён. Inventory
+stage seal становится историей после публикации независимо от content
+revision. Повторное ревью не выявило Critical/Important.
+CF11a–d сохраняют runtime и native proof gates.
+
 ## 2026-11-24 — CF8a: ANN search settings at the library boundary
 
 Task CF8a: complete (project settings and explicit search on built and loaded
@@ -1057,6 +1075,21 @@ their original revision scheme. Journal and publication work remain under CF5b2b
 Ruling: the independent task review approved the implementation. Clarified the
 documented reason when a second hard link appears during the read.
 
+## 2026-11-24 — настройка обхода ANN в рабочем поиске
+
+Task CF8b traversal: complete (I33 через AnnSearchSpec, происхождение полей
+в config effective и политика в снимке каждого запроса). На исходном main
+`ann.search` отклонялся. Реальный тест поиска показывает точный fallback при
+окне выше лимита, переиспользование резидентного графа при следующем запросе
+и неизменность файлов дампа. Тест демона проверяет сохранение резидентного
+состояния при публикации новой политики. Настройки построения и рецепта
+графа остаются в CF8.
+
+Ruling: после ревью проверка окна перенесена до входа в DenseCache. Холодный
+поиск выше лимита возвращает точные результаты без подготовки графа. Проверки
+зрелого пути требуют ANN Ready без деградации; тест перезагрузки сравнивает Arc
+реального резидентного графа. Замечания подтверждены повторным ревью.
+
 ## 2026-11-24 — журнал замены файла
 
 Task CF5b2b stage journal: complete (формат 2, базовые нативные данные, одно
@@ -1082,6 +1115,22 @@ Ruling: независимое ревью подтвердило исправл�
 добавлены отдельные проверки порядка UID/GID и битов режима Unix, маски Windows
 и версии предусловия CLI. Повторное ревью подтвердило исправление замечания.
 
+## 2026-11-24 — конфиг и рецепт нарезки Markdown
+
+Task CF9a: complete (I06 global/project, полевая provenance, per-doc
+recipe в SQLite v4, полная и инкрементальная индексация, готовность Website).
+RED показал отказ прежнего конфига, недоучёт длинных строк и заголовков,
+перенос пропущенных пустых строк через overlap и лишнюю зарядку разделов
+при CR без LF. Проверены миграция SQLite, штатный CLI для Website,
+переиспользование векторов и повторный sync.
+
+Ruling: старые артефакты остаются на диске и получают новый рецепт при
+следующей индексации. Для Website проверен один явный `docsbase index`
+при остановленном демоне перед обновлённым запуском. После ревью захват
+использует ту же грамматику, границы и структуру заголовков, что сплиттер.
+Проверка фиксирует прежний поисковый baseline и лимиты. Повторное ревью
+подтвердило исправления.
+
 ## 2026-11-24 — операционный v2 на новой установке
 
 Task CF5c manual startup: complete (явный глобальный v2, полевая композиция
@@ -1105,6 +1154,23 @@ Ruling: независимое ревью обнаружило два обход
 версия запрещает переход к диагностическому запуску v1. Новый случай
 воспроизведён до исправления в нативном тесте запуска.
 
+## 2026-11-24 — CF12b, предел конфигурации в редакторах
+
+Task CF12b: complete (общее I52 чтение для models use и connect, проверка
+preview и сериализованного кандидата). Реальный models use --dry-run
+на прежнем коде принял лишний байт. Editor provider переписал oversized
+источник. Проверены допуск точной границы, отказ до временной записи,
+переполнение результата и сохранность исходных байтов.
+
+Ruling: независимое ревью подтвердило общий capture и проверку под
+блокировкой. Дополнительная регрессия сменила источник, пока редактор
+ждал реальную файловую блокировку. Редактор после допуска отказал по
+свежему содержимому. Повторное ревью прошло. Тест provider покрывает
+тело записи без обращения к внешнему провайдеру.
+
+Rust 1.100.0: 1750 cli-full, 1442 lean, 27 отдельных hybrid-local CLI
+тестов. Clippy, fmt и diff checks прошли.
+
 ## 2026-11-24 — редактирование стадий в v2
 
 Task CF5c model editor: complete (предпросмотр и запись используют операционное
@@ -1118,20 +1184,97 @@ Ruling: по ревью сообщения об изменении пина те
 использует временные корни конфигурации и данных. Замечания подтверждены
 повторным ревью.
 
-## 2026-11-24 — настройка обхода ANN в рабочем поиске
+## 2026-11-24 — CLI index через работающий v2
 
-Task CF8b traversal: complete (I33 через AnnSearchSpec, происхождение полей
-в config effective и политика в снимке каждого запроса). На исходном main
-`ann.search` отклонялся. Реальный тест поиска показывает точный fallback при
-окне выше лимита, переиспользование резидентного графа при следующем запросе
-и неизменность файлов дампа. Тест демона проверяет сохранение резидентного
-состояния при публикации новой политики. Настройки построения и рецепта
-графа остаются в CF8.
+Task CF5c connected index: complete (Shared owner, один IPC сеанс и исходный
+бюджет команды, JSON счётчики index). Проверены создание и повторный проход,
+относительный путь, поиск, ошибка несовпадения версии и fixed Website sync.
 
-Ruling: после ревью проверка окна перенесена до входа в DenseCache. Холодный
-поиск выше лимита возвращает точные результаты без подготовки графа. Проверки
-зрелого пути требуют ANN Ready без деградации; тест перезагрузки сравнивает Arc
-реального резидентного графа. Замечания подтверждены повторным ревью.
+Ruling: по ревью добавлены проверка UTF-8 до сериализации, сессия без
+привязки к проекту на период опроса и обновление проектного конфига перед
+захватом работы. Воспроизведена гонка двух подготовок до появления строки
+job. Равный валидный конфиг теперь сохраняет опубликованный снимок, а
+фактическая правка инвалидирует прежнее разрешение. Целевой прогон и
+повторное независимое ревью подтвердили исправления.
+
+Ruling: совместный прогон с дефолтным v2 обнаружил, что перечитывание
+задевало существующий MCP index_project. Явное поле запроса теперь включает
+его для подключённого CLI. Обычный MCP сохраняет снимок открытого проекта.
+Целевой тест отличает оба запроса на одном изменённом источнике.
+
+Ruling: native macOS rejected creation of the malformed UTF-8 path in the
+test fixture. The encoding regression now passes an in-memory path to the
+shared IPC encoder. The connected daemon integration tests still cover
+first index, repeated index, search and config refresh. Focused Linux tests
+and independent review passed.
+
+Ruling: the native Linux boundary scanner recognizes the explicit test
+module marker. The Unix-only fixture now uses a separate `cfg(unix)`
+attribute, preserving the production platform boundary. Both boundary
+tests and the path encoding regression passed locally.
+
+## 2026-11-24 — CF5c, admission for connected Index
+
+Task CF5c connected Index contention: complete (the explicit refresh uses its
+captured settings and stages and requires its own job). A typed refusal asks
+the CLI caller to wait and retry. Ordinary Sync and MCP join existing work.
+The regression exercises discovery, publication under the project lease,
+transactional admission and a superseded revision. The active Sync survives
+with the same row. Before the fix both discovery and the transaction returned
+that older job as successful admission.
+
+Ruling: fresh review required retaining the returned Arc pair and reporting an
+Index retry for a superseded config. The focused suite and re-review passed.
+Rust 1.100.0 ran 764 tests across the library, CLI routing, runtime config and
+MCP frontend. Clippy and fmt passed.
+
+## 2026-11-24 — первый глобальный файл CLI
+
+Task CF5c config writers: complete (общий заголовок v2 при первой записи
+connect и models use --global). Предпросмотр воспроизводит результат записи
+и оставляет путь отсутствующим. Запись с блокировкой проверена через runtime
+resolver. Изменение версии в процессе connect сопровождается подсказкой
+о перезапуске.
+
+Ruling: alpha поддерживает ручной перенос прежнего локального бюджета.
+Пробный v2 без файла выявил создание vector DB в лексической работе и
+отказ CLI index в подключённом режиме. Эти потребители проверяются отдельно
+до изменения дефолтного запуска. Повторное независимое ревью подтвердило
+меры для legacy и результаты проверок.
+
+## 2026-11-24 — векторное соединение по требованию
+
+Task CF5c lazy vector connection: complete (lexical startup, index, search и
+sync удерживают общий mode lease без vectors.db). RED воспроизведён на
+прямом v2 index. Проверены занятой owner, фактические подключения с общим
+LRU и продолжение сохранённой последовательности из SQLite.
+
+Ruling: по ревью оба первых подключения устанавливаются до записи,
+поэтому независимые счётчики дают повтор recency и проваливают тест.
+Инициализация публикует счётчик под существующим initialization lease.
+Повторное ревью, Clippy и целевой прогон подтвердили исправления.
+
+## 2026-11-24 — CF5c, v2 без глобального файла
+
+Task CF5c implicit v2: complete (операционный CLI, запуск демона и
+effective view используют v2 при отсутствии глобального источника).
+Устаревший демон отклоняется до привязки проекта, в том числе после
+переподключения MCP. Неверсионированный глобальный файл по-прежнему
+выбирает v1. Проверены прямой и подключённый index, поиск, sync, отсутствие
+vectors.db на лексическом маршруте и исключительное владение векторами.
+
+Ruling: по независимому ревью добавлены проверка версии на входе MCP,
+процессный тест со старым демоном и поиск по проекту, созданному через
+работающий демон. Legacy-тест лимита проектного файла явно выбирает v1.
+Повторное ревью подтвердило исправления. Полный Linux-набор прошёл
+на составной ветке с зависимостями. Нативная приёмка отдельного PR
+зависит от доставки предшествующих изменений.
+
+Ruling: существующая ссылка config.toml с недоступной целью даёт ошибку
+чтения в обоих резолверах. Дефолтный v2 выбирается только при отсутствии
+самого источника. Процессный тест MCP фиксирует Hello и регистрацию
+раздельно. Проверен отказ до регистрации и на первом соединении, и после
+переподключения к демону с другой версией.
 
 ## 2026-11-24 — библиотечный рецепт построения ANN
 

@@ -41,6 +41,8 @@ impl Fixture {
         .expect("one prepared reader");
         // Parallel CLI tests redirect the process-global config path. Keep this
         // fixture's launch policy independent, including later project reloads.
+        let config = tempfile::tempdir().expect("global config");
+        std::fs::write(config.path().join("config.toml"), "# Legacy test runtime").unwrap();
         let shared = Shared::open_with_launch(
             cache.path(),
             &crate::store::settings::standalone().expect("DB policy"),
@@ -48,7 +50,7 @@ impl Fixture {
             crate::hybrid::dense_settings::standalone()
                 .expect("dense policy")
                 .settings(),
-            &LaunchSnapshot::capture_from(&cache.path().join("test-config")),
+            &LaunchSnapshot::capture_from(config.path()),
             DaemonPatch::default(),
         )
         .expect("shared");

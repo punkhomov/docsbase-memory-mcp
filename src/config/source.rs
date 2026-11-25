@@ -1,4 +1,4 @@
-//! Bounded versioned configuration sources. No filesystem or runtime access.
+//! Bounded configuration documents and pure versioned source parsing.
 use std::fmt;
 use std::path::Path;
 
@@ -6,6 +6,34 @@ use super::schema::{Resolved, SourceId};
 use super::{Config, GlobalFileConfig, ProjectFileConfig};
 use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridPatch, merge::HybridMergePatch};
+
+/// Captures the same bounded file that an operational config load would read.
+pub(crate) fn read_edit_document(path: &Path) -> Result<Option<toml::Value>> {
+    let Some(text) = super::read_capped_if_exists(path)? else {
+        return Ok(None);
+    };
+    let value = toml::from_str(&text).map_err(|error| {
+        if super::resolve::has_version_header(text.as_bytes()) {
+            return invalid("invalid versioned configuration TOML");
+        }
+        Error::internal_with_source(format!("parse {}", path.display()), error)
+    })?;
+    Ok(Some(value))
+}
+
+/// Serializes a preview or write candidate within the operational read limit.
+pub(crate) fn render_edit_document(document: &toml::Value) -> Result<String> {
+    let rendered = toml::to_string(document)
+        .map_err(|error| Error::internal_with_source("render config", error))?;
+    let size = u64::try_from(rendered.len())
+        .map_err(|_| invalid("rendered configuration size overflow"))?;
+    if size > crate::limits::MAX_STATE_BYTES {
+        return Err(invalid(
+            "rendered configuration exceeds the trusted byte limit",
+        ));
+    }
+    Ok(rendered)
+}
 
 /// File-local configuration merge semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +43,14 @@ pub enum ConfigVersion {
     /// Field-wise hybrid merge and one global vector-store budget.
     V2,
 }
+/// Initial source for CLI editors creating a global configuration.
+pub(crate) fn new_global_document() -> toml::Value {
+    toml::Value::Table(toml::Table::from_iter([(
+        "config_version".to_owned(),
+        toml::Value::Integer(2),
+    )]))
+}
+
 /// Supplied source text, parsed without touching paths or credentials.
 #[derive(Clone)]
 pub struct SourceLayer {
@@ -50,7 +86,8 @@ impl SourceLayer {
         {
             return Err(invalid("configuration source exceeds the state byte limit"));
         }
-        let document = toml::from_str(text).map_err(|_| invalid("invalid configuration TOML"))?;
+        let document =
+            toml::from_str(text).map_err(|_| invalid("cannot parse configuration TOML"))?;
         Self::from_document(source, text, document)
     }
 
@@ -95,6 +132,9 @@ impl SourceLayer {
                 }
                 vector_max_bytes = Some(budget.max_bytes);
             }
+        }
+        if matches!(source, SourceId::Project(_)) && fields.contains_key("providers") {
+            return Err(invalid("[providers] is only allowed in the global config"));
         }
         let base = if matches!(source, SourceId::Global(_)) {
             toml::Value::Table(fields)
