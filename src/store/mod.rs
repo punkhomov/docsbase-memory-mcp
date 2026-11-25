@@ -1,5 +1,6 @@
 //! Metadata store: project registry and index state (FR-10, FR-16; NFR-3, NFR-7).
 
+mod generation_catalog;
 mod inspect;
 pub mod migrations;
 pub mod models;

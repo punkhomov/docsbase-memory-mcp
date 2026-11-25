@@ -133,7 +133,7 @@ pub fn read(db: &Db, project_id: i64) -> Result<Option<IndexOutcome>> {
     let recipe = outcome.recipe_id.strip_prefix(RECIPE_PREFIX);
     if !indexed
         || pending
-        || stamp != i64::from(migrations::SCHEMA_VERSION)
+        || stamp != i64::from(migrations::PROJECT_SCHEMA_VERSION)
         || attempt <= 0
         || generation < 0
         || outcome.schema_version != OUTCOME_VERSION
@@ -231,7 +231,7 @@ pub(crate) fn publish(
                 json,
                 super::job::unix_now(),
                 scope == SurveyScope::FullSurvey,
-                migrations::SCHEMA_VERSION,
+                migrations::PROJECT_SCHEMA_VERSION,
                 project.id,
                 attempt,
                 outcome.canonical_root,

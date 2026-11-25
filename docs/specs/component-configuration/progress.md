@@ -1137,6 +1137,20 @@ Ruling: по независимому ревью отметка публикац
 атрибуты исходного и применённого файлов. Повторное ревью подтвердило все
 исправления, отложенных замечаний нет.
 
+## 2026-11-24 — CF11a-2a, persisted generation catalog
+
+Task CF11a-2a: complete (v5 schema, independent project format stamp and
+no-write registry observation). Real SQLite tests reject cross-project,
+unsealed and missing heads. Matching pointer and phase change in one
+transaction. Switching the active head while the legacy revision stays
+fixed changes the observation digest. Changing the installation epoch
+does so as well. The observer leaves database bytes and sidecars intact.
+
+Ruling: the v5 observer verifies the phase stored on the head and requires
+the format's active partial index. Wrong phases, orphaned active rows and
+a missing active index fail the no-write observation. Re-review, 1749
+cli-full tests, the quality gate, Clippy and fmt passed locally.
+
 ## 2026-11-24 — привязка базовых атрибутов к обзору
 
 Task CF5b2b basic attributes: complete (общий профиль метаданных для журнала

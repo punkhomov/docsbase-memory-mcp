@@ -894,6 +894,23 @@ and the distinction between the version 2 observation and a durable journal.
 ID при применении и восстановлении, кодирование базовых атрибутов и запрос чтения.
 Там же указаны границы проверенных атрибутов и условия будущего допуска к записи.
 
+## Delta 2026-11-24 — persisted generation catalog
+
+Registry schema v5 defines a singleton format and epoch, one active head per
+project and one staging record per project. Deferred foreign keys bind the
+head to the active phase in both directions. The stopped transition installs
+the schema, epoch, and legacy head rows in one transaction. `projects` keeps
+its existing index-format stamp independently of the registry version.
+
+The existing no-write registry inspector can observe a prepared v5 file.
+It retains the project inventory and hashes the epoch, active generation
+IDs, layout and seal digests into `registry-v2`. It scans active rows through
+the format's partial index, bounded by the admitted project count. The head is structural
+state. Metadata content revisions and segment health still require a
+read of the selected generation. Existing v4 observations keep their
+`registry-v1` identity. The operational CLI and daemon continue to open v4
+until local metadata binding, publication and recovery are connected.
+
 ## Delta 2026-11-24 — общий профиль метаданных конфига
 
 Наблюдатель и проверка журнала используют один кодировщик в платформенном модуле.
