@@ -33,7 +33,9 @@ mod publication;
 pub use publication::publish_lexical_generation;
 
 mod recovery;
-pub use recovery::{discard_lexical_generation, find_lexical_build_to_discard};
+pub use recovery::{
+    discard_lexical_generation, find_lexical_build_to_discard, reclaim_retired_lexical_generation,
+};
 
 /// Accepted inputs to one lexical generation build.
 #[derive(Debug, Clone, Copy)]
@@ -76,6 +78,24 @@ pub fn prepare_lexical_generation(
     limits: InspectionLimits,
     config: &Config,
 ) -> Result<PreparedLexicalGeneration> {
+    prepare_lexical_generation_with_space(
+        cache,
+        request,
+        settings,
+        limits,
+        config,
+        native_fs::available_space,
+    )
+}
+
+fn prepare_lexical_generation_with_space(
+    cache: &Path,
+    request: LexicalBuildRequest,
+    settings: &Resolved<DbSettings>,
+    limits: InspectionLimits,
+    config: &Config,
+    available_space: impl FnOnce(&Path) -> io::Result<u64>,
+) -> Result<PreparedLexicalGeneration> {
     let reservation = i64::try_from(request.reserved_disk_bytes)
         .ok()
         .filter(|bytes| *bytes > 0)
@@ -107,16 +127,6 @@ pub fn prepare_lexical_generation(
         for directory in [&project_dir, &cache.join("projects"), &cache] {
             recovery::sync_directory(directory)?;
         }
-        if filesystem(
-            &cache,
-            "inspect free space",
-            native_fs::available_space(&cache),
-        )? < request.reserved_disk_bytes
-        {
-            return Err(admission(
-                "insufficient free space for generation reservation",
-            ));
-        }
         let generations = project_dir.join("generations");
         ensure_directory(&generations)?;
         let base_lease = lifecycle::lease_path(&cache, project.id);
@@ -132,6 +142,7 @@ pub fn prepare_lexical_generation(
                     settings,
                     reservation,
                     &generations,
+                    available_space,
                 )
             },
         )?;
@@ -271,6 +282,7 @@ fn reserve(
     settings: &Resolved<DbSettings>,
     reservation: i64,
     generations: &Path,
+    available_space: impl FnOnce(&Path) -> io::Result<u64>,
 ) -> Result<i64> {
     let mut registry = open_registry(cache, settings)?;
     // Project registration and the head comparison are bound to the same
@@ -303,6 +315,20 @@ fn reserve(
         return Err(admission(
             "a staged generation or pending discard already exists for this project",
         ));
+    }
+    // Compare all unfinished reservations and the new request under the
+    // transaction that records the claim. Retired/active bytes are already
+    // reflected in free space, while incomplete discard keeps its charge.
+    let total = reserved_disk_bytes(&tx, request.reserved_disk_bytes)?;
+    let free = filesystem(
+        generations,
+        "inspect free space",
+        available_space(generations),
+    )?;
+    if total > free {
+        return Err(admission(format!(
+            "insufficient free space for all generation reservations ({total} bytes required, {free} available)"
+        )));
     }
     let generation: i64 = tx
         .query_row(
@@ -339,6 +365,24 @@ fn reserve(
     }
     tx.commit().map_err(repo::db_error)?;
     Ok(generation)
+}
+
+fn reserved_disk_bytes(registry: &rusqlite::Transaction<'_>, requested: u64) -> Result<u64> {
+    let mut statement = registry
+        .prepare(
+            "SELECT reserved_disk_bytes FROM project_generations
+             WHERE layout = 'local' AND phase IN ('building', 'sealed', 'reclaiming')",
+        )
+        .map_err(repo::db_error)?;
+    let mut reserved = statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(repo::db_error)?;
+    reserved.try_fold(requested, |total, bytes| {
+        u64::try_from(bytes.map_err(repo::db_error)?)
+            .ok()
+            .and_then(|bytes| total.checked_add(bytes))
+            .ok_or_else(|| admission("generation reservations exceed the size range"))
+    })
 }
 
 fn entry_exists(path: &Path) -> Result<bool> {

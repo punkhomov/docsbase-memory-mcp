@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::config::schema::{Capabilities, Resolved, SettingsSpec};
@@ -486,8 +486,8 @@ fn verify_sources(metadata: &Db, project: &Project, config: &Config) -> Result<(
     Ok(())
 }
 
-#[derive(Serialize)]
-struct Seal {
+#[derive(Deserialize, Serialize)]
+pub(super) struct Seal {
     format: u32,
     installation_epoch: [u8; 16],
     project_id: i64,
@@ -498,7 +498,7 @@ struct Seal {
     base_revision: i64,
     plan: String,
     index_recipe: String,
-    files: Vec<(String, u64)>,
+    pub(super) files: Vec<(String, u64)>,
 }
 
 fn flush_generation_files(
