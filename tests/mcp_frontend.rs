@@ -748,6 +748,26 @@ fn literal_mcp_refuses_an_old_scoped_daemon_without_replaying_search() {
 }
 
 #[test]
+fn autostart_rejects_new_invalid_store_policy_before_creating_state() {
+    let env = Env::new(&[]);
+    let mut mcp = Mcp::start(&env);
+    mcp.initialize();
+    write_file(
+        env.cache.path(),
+        "config/config.toml",
+        b"config_version = 2\n[read_pool]\nmax_connections = 0\n",
+    );
+    let response = mcp.request(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"status","arguments":{}}}));
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    assert!(!env.cache.path().join("state").exists(), "{response}");
+    let message = response["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        message.contains("read_pool.max_connections must be > 0"),
+        "{message}"
+    );
+}
+
+#[test]
 fn global_website_refuses_reader_autostart_before_cache_resources() {
     let env = Env::new(&[("docs/a.md", DOC)]);
     let config = env.cache.path().join("config");

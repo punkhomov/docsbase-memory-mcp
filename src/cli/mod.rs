@@ -222,12 +222,11 @@ pub enum DaemonCommand {
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let db_settings = crate::store::settings::standalone()?;
-    let pool_settings = crate::store::settings::standalone_read_pool()?;
     let dense_settings = crate::hybrid::dense_settings::standalone()?;
     match cli.command {
         #[cfg(feature = "web")]
         Command::Web { open, port } => crate::web::run(port, open),
-        Command::Index { path } => index::run_with_settings(path.as_deref(), &db_settings),
+        Command::Index { path } => index::run(path.as_deref()),
         Command::Search {
             query,
             query_mode,
@@ -251,14 +250,14 @@ pub fn run() -> anyhow::Result<()> {
                     path_prefix,
                     tags,
                 },
-                &db_settings,
+                None,
                 query_mode,
                 dense_settings.settings(),
                 started,
             )
         }
         Command::List => status::list_with_settings(&db_settings),
-        Command::Sync { path } => sync(path.as_deref(), &db_settings),
+        Command::Sync { path } => sync_command::run(path.as_deref()),
         Command::Config { command: None } => show_config(),
         Command::Config {
             command: Some(command),
@@ -277,8 +276,6 @@ pub fn run() -> anyhow::Result<()> {
             grace_ms,
             profile,
             project,
-            &db_settings,
-            &pool_settings,
             dense_settings.settings(),
         ),
         Command::Mcp => crate::mcp::frontend::run_blocking(),
@@ -334,8 +331,6 @@ fn serve(
     grace_ms: Option<u64>,
     profile: Option<ServeProfile>,
     project: Option<PathBuf>,
-    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
-    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
 ) -> anyhow::Result<()> {
     let selected_profile = match (profile, project) {
@@ -345,10 +340,8 @@ fn serve(
         _ => return Err(Error::Admission { message: "serve --profile website requires its own --project ABS; --profile shared cannot have --project".to_owned() }.into()),
     };
     let cache = paths::cache_dir()?;
-    crate::daemon::lifecycle::run_daemon_with_legacy_launch(
+    crate::daemon::lifecycle::run_daemon_from_launch(
         &cache,
-        settings,
-        pool_settings,
         dense_settings,
         &crate::daemon::launch::LaunchSnapshot::capture(),
         crate::daemon::settings::DaemonPatch {
@@ -359,19 +352,6 @@ fn serve(
         detached,
     )?;
     Ok(())
-}
-
-/// Runs `docsbase sync`: a daemon sync job when one is reachable (FR-17),
-/// otherwise a direct full index (FR-30).
-///
-/// The sync job is started and polled over one bound connection: an idle
-/// daemon arms its grace deadline when no session is live, so a long job
-/// would otherwise outlive the accept loop mid-poll (final review N1).
-fn sync(
-    path: Option<&std::path::Path>,
-    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
-) -> anyhow::Result<()> {
-    sync_command::run(path, settings)
 }
 
 /// Runs `docsbase config`: effective values for the current directory
@@ -453,7 +433,9 @@ pub(crate) fn try_daemon(
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let cache = paths::cache_dir()?;
     let Some(mut client) = Client::try_connect(transport, &cache)? else {
-        crate::daemon::launch::require_shared_without_daemon()?;
+        crate::daemon::launch::require_shared_without_daemon(
+            crate::config::resolve::LaunchUse::StandaloneDiagnostic,
+        )?;
         return Ok(None);
     };
     client.handshake_registry()?;

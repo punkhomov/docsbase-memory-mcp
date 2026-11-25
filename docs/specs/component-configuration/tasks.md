@@ -831,3 +831,17 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - Verify a configured retry limit through a detached daemon and a held
   batch across project reload. Index and search artifacts are independent
   of these settings. The traversal limits of I43 remain a separate concern.
+
+## Delta 2026-11-25 — CF2 I19/I65, storage policy consumption
+
+- Resolve v2 store and read_pool fields at global scope. Preserve owner
+  defaults and provenance in the effective view. Validate SQLite duration
+  and representable pool size before opening files.
+- Use those policies for the CLI daemon, direct index/search/sync and
+  prepared readers. Preserve explicit library inputs and standalone
+  diagnostic/bootstrap access.
+- Exercise genuine SQLite lock contention, PRAGMA values and prepared
+  pool capacity. Reject invalid launch policy before creating cache state.
+  Reject positional arrays as owner sections. Verify stopped diagnostic
+  reads with invalid SQLite policy and continued Website refusal.
+  Verify MCP autostart rejects a newly invalid policy before creating state.

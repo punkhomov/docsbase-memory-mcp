@@ -1536,3 +1536,18 @@ Ruling: срок исходного пакета завершает индекс
 При отказе записи причина видна в логе. Регрессии воспроизвели
 зависание полного канала, потерянную диагностику и silent rendezvous.
 Повторное ревью не выявило Critical или Important.
+
+## 2026-11-25 — CF2 I19/I65, настройка SQLite и пула чтения
+
+Task CF2 I19/I65: complete (global v2 wiring through one captured
+configuration to daemon startup and direct index/search/sync). The effective
+view records the SQLite and pool settings and their sources. Tests exercise
+real writer lock contention, configured PRAGMAs and two prepared read
+connections after the file used for launch changes.
+
+Ruling: review found that positional arrays could deserialize as owner
+sections and invalid SQLite policy blocked stopped diagnostics. Owner
+sections now require tables. Stopped Shared status/list keep their standalone
+SQLite policy and Website still requires the daemon. MCP and Web autostart
+use normal launch validation before creating state. Real CLI and MCP
+regressions and independent re-review cover these boundaries.

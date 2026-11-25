@@ -83,7 +83,9 @@ pub fn ensure_daemon_with(cache: &Path, exe: Option<&Path>) -> Result<()> {
     if is_running(cache) {
         return Ok(());
     }
-    crate::daemon::launch::require_shared_without_daemon()?;
+    crate::daemon::launch::require_shared_without_daemon(
+        crate::config::resolve::LaunchUse::Runtime,
+    )?;
     create_state_dir(cache)?;
     let lock_file = open_lock_file(&start_lock_path(cache))?;
     let mut lock = RwLock::new(lock_file);
@@ -271,11 +273,8 @@ pub fn run_daemon_with_launch_and_bootstrap(
 }
 
 // The existing CLI retains its documented warning/default startup adapter.
-// S1b will add explicit profile activation at that controlling boundary.
-pub(crate) fn run_daemon_with_legacy_launch(
+pub(crate) fn run_daemon_from_launch(
     cache: &Path,
-    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
-    pool_settings: &crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
     snapshot: &LaunchSnapshot,
     patch: DaemonPatch,
@@ -290,10 +289,12 @@ pub(crate) fn run_daemon_with_legacy_launch(
     {
         return Err(Error::Admission { message: "website profile requires explicit foreground `docsbase serve`; --detached is inapplicable".to_owned() });
     }
+    let settings = crate::store::settings::db_from_config(&launch.config)?;
+    let pool = crate::store::settings::pool_from_config(&launch.config)?;
     run_with_launch(
         cache,
-        settings,
-        pool_settings,
+        &settings,
+        &pool,
         dense_settings,
         launch,
         &runtime_bootstrap()?,

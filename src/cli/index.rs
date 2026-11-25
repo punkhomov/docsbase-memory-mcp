@@ -18,17 +18,28 @@ use std::time::{Duration, Instant};
 /// Returns an error when the path/config/database cannot be opened, another
 /// writer holds the project lease (I5), or indexing fails.
 pub fn run(path: Option<&Path>) -> anyhow::Result<()> {
-    run_with_settings(path, &crate::store::settings::standalone()?)
+    let started = Instant::now();
+    let config = Config::global_resolved()?;
+    let settings = crate::store::settings::db_from_config(&config)?;
+    run_captured(path, config.into_settings(), settings, started)
 }
 
+#[cfg(test)]
 pub(crate) fn run_with_settings(
     path: Option<&Path>,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
     let started = Instant::now();
-    let global = Config::global()?;
+    run_captured(path, Config::global()?, settings.clone(), started)
+}
+
+fn run_captured(
+    path: Option<&Path>,
+    global: Config,
+    settings: crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    started: Instant,
+) -> anyhow::Result<()> {
     let path = path.map(Path::to_path_buf);
-    let settings = settings.clone();
     let payload = super::command::run(global, move |context| {
         run_in(context, path, settings, started)
     })?;
