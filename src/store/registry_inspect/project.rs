@@ -19,12 +19,11 @@ use crate::platform::fs::{
 };
 use crate::store::generation_catalog::{self, Head, Layout};
 use crate::store::models::ProjectStatus;
-use crate::store::project_index::{ProjectIndex, project_directory};
+use crate::store::project_index::{LOCAL_SCHEMA_VERSION, ProjectIndex, project_directory};
 use crate::store::settings::{DbSettings, DbSpec};
 use crate::store::{migrations, repo};
 
 type Observed<T> = std::result::Result<T, Why>;
-const LOCAL_SCHEMA_VERSION: u32 = 1;
 
 /// Physical layout selected by the observed project generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,6 +321,3 @@ fn with_read_lease<T>(path: &Path, read: impl FnOnce() -> Observed<T>) -> Observ
         }
     })?
 }
-
-#[cfg(test)]
-pub(super) const LOCAL_SCHEMA_SQL: &str = include_str!("project_schema.sql");

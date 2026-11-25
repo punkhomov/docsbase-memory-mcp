@@ -176,8 +176,11 @@ pub fn resolve_by_cwd(db: &Db, cwd: &Path) -> Result<Project> {
 /// # Errors
 /// Returns [`Error::Internal`] on `SQLite` failures or a corrupt status value.
 pub fn project_by_id(db: &Db, id: i64) -> Result<Option<Project>> {
-    let row = db
-        .connection()
+    project_by_id_in(db.connection(), id)
+}
+
+pub(crate) fn project_by_id_in(conn: &Connection, id: i64) -> Result<Option<Project>> {
+    let row = conn
         .query_row(
             "SELECT id, canonical_root, name, status, schema_version, created_at, last_indexed_at
              FROM projects WHERE id = ?1",

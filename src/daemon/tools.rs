@@ -492,6 +492,7 @@ pub(super) fn search_docs_with_lexical_settings<Guard>(
     }
 }
 
+#[allow(clippy::large_enum_variant)] // Keep successful search preparation allocation-free here.
 pub(super) enum SearchStart {
     Complete(Value),
     Prepared(StartedSearch),

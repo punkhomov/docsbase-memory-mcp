@@ -160,6 +160,11 @@ pub fn secure_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 
+/// Creates a new directory with inherited ACLs, refusing an existing entry.
+pub(crate) fn create_private_directory(path: &Path) -> io::Result<()> {
+    fs::create_dir(path)
+}
+
 /// No chmod equivalent on Windows (ADR-10): best-effort no-op.
 ///
 /// # Errors

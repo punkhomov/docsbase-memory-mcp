@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
+pub(super) const LOCAL_SCHEMA_VERSION: u32 = 1;
+pub(super) const LOCAL_SCHEMA_SQL: &str = include_str!("registry_inspect/project_schema.sql");
+
 /// Identifies one revision of a project's existing SQLite/Tantivy pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ProjectIndex {
