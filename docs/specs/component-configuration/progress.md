@@ -1075,6 +1075,21 @@ their original revision scheme. Journal and publication work remain under CF5b2b
 Ruling: the independent task review approved the implementation. Clarified the
 documented reason when a second hard link appears during the read.
 
+## 2026-11-24 — настройка обхода ANN в рабочем поиске
+
+Task CF8b traversal: complete (I33 через AnnSearchSpec, происхождение полей
+в config effective и политика в снимке каждого запроса). На исходном main
+`ann.search` отклонялся. Реальный тест поиска показывает точный fallback при
+окне выше лимита, переиспользование резидентного графа при следующем запросе
+и неизменность файлов дампа. Тест демона проверяет сохранение резидентного
+состояния при публикации новой политики. Настройки построения и рецепта
+графа остаются в CF8.
+
+Ruling: после ревью проверка окна перенесена до входа в DenseCache. Холодный
+поиск выше лимита возвращает точные результаты без подготовки графа. Проверки
+зрелого пути требуют ANN Ready без деградации; тест перезагрузки сравнивает Arc
+реального резидентного графа. Замечания подтверждены повторным ревью.
+
 ## 2026-11-24 — журнал замены файла
 
 Task CF5b2b stage journal: complete (формат 2, базовые нативные данные, одно

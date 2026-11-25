@@ -1245,8 +1245,11 @@ impl Shared {
             self.dense
                 .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
         }
-        let changed = state.config.as_deref() != Some(config.as_ref());
-        if changed && self.website.is_none() {
+        let dense_changed = state
+            .config
+            .as_deref()
+            .is_none_or(|previous| config.changes_dense_state(previous));
+        if dense_changed && self.website.is_none() {
             self.dense.invalidate_memory(project.id);
         }
         // All fallible preparation steps precede publication: a rejected
@@ -2424,6 +2427,7 @@ fn route_search(
             cache: &shared.cache,
             project: &project,
             window,
+            ann_search: config.ann_search,
             payload_budget: &shared.payload_budget,
             operation,
         },
@@ -3595,6 +3599,45 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn changing_only_ann_traversal_keeps_the_daemons_resident_dense_state() {
+        let fixture = RefreshFixture::new(true, Some("rrf"), crate::hybrid::ann::ANN_MIN_VECTORS);
+        let current = || {
+            fixture
+                .shared
+                .open_project_config_with(&fixture.project, |_| Ok(HybridStages::default()))
+                .unwrap()
+        };
+        let original = current();
+        finish_refresh(fixture.shared.refresh_ann_after_sync(&fixture.project));
+        let resident = || {
+            fixture
+                .shared
+                .dense
+                .get(&fixture.db, fixture.project.id, FakeEmbedder.model_id())
+                .unwrap()
+        };
+        let deadline = Instant::now() + REFRESH_WATCHDOG;
+        let graph = loop {
+            if let DenseRows::Ann(graph) = resident() {
+                break graph;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "refresh did not publish the ANN graph"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let path = fixture.root.path().join(".docsbase.toml");
+        let mut text = fs::read_to_string(&path).unwrap();
+        text.push_str("\n[ann.search]\nef_base=16\nef_max=32\n");
+        fs::write(&path, text).unwrap();
+        let refreshed = current();
+        assert!(original.ann_search.is_none());
+        assert_eq!(refreshed.ann_search.unwrap().ef_max(), 32);
+        assert!(matches!(resident(), DenseRows::Ann(reused) if Arc::ptr_eq(&graph, &reused)));
     }
 
     #[test]

@@ -854,6 +854,16 @@ The dry-run retains the first file handle across a second no-follow open. The
 [publication contract](source-publication.md) defines the evidence, its limits,
 and the distinction between the version 2 observation and a durable journal.
 
+## Delta 2026-11-24 — CF8b: политика обхода в снимке поиска
+
+`ann.search` накладывается через AnnSearchSpec. При явно заданной таблице
+согласованный снимок проекта передаёт политику и стадийные дескрипторы одному
+запросу. Прямой CLI и демон используют общий путь выбора кандидатов. Размер
+окна выше `ef_max` направляется на существующий потоковый точный поиск и
+отображается как `exact-fallback`. Смена одной политики обхода сохраняет
+резидентный граф и ключи дампов; модификации остальных настроек сохраняют
+прежние условия сброса. При отсутствующей таблице остаётся прежнее поведение.
+
 ## Delta 2026-11-24 — CF5b2b: журнал замены
 
 [Протокол журнала](stage-journal.md) задаёт формат 2 для новой БД, правила хранения

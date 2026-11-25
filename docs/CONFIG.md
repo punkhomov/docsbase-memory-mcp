@@ -573,6 +573,26 @@ source-build frontend preparation and diagnostics. Official cli-full includes
 Web; Cargo default stays lean.
 
 
+### ANN traversal policy
+
+Use `[ann.search]` in the global config or a project file. Omitted project fields
+inherit the global values. Each field and its origin appear in
+`docsbase config effective`.
+
+```toml
+[ann.search]
+ef_base = 64
+ef_max = 4096
+fetch_multiplier = 4
+```
+
+With an explicit table, the ANN traversal uses the larger of `ef_base` and
+`fetch × fetch_multiplier`, capped by `ef_max`. The domain is
+`1 <= ef_base <= ef_max <= 4096` with a positive multiplier. Candidate windows
+above `ef_max` use exact streaming without loading or building a graph for that request. Changing
+these values keeps the existing graph and vectors. A project without an
+explicit or inherited table retains the existing ANN behavior.
+
 ### ANN lifetime construction policy
 
 The internal typed DenseSpec also owns the existing one-hour backfill-pin and

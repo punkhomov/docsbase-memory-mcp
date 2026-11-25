@@ -513,6 +513,14 @@ state. Refuse the complete proposal when a source has multiple hard links, when
 identity or link count is unavailable, or when the object changes across the
 bounded read. Byte revisions retain their existing meaning for proposed edits.
 
+## Delta 2026-11-24 — CF8b: параметры обхода ANN в файле
+
+Глобальный `ann.search` задаёт параметры по умолчанию для проектов.
+Проект может изменить отдельные поля. Все значения проверяет AnnSearchSpec;
+`config effective` показывает владельца и источник каждого поля. Настройки
+относятся к обходу: они сохраняют граф, векторы и ключи дисковых артефактов.
+Если размер окна выше принятого `ef_max`, сохранить окно через точный поиск.
+
 ## Delta 2026-11-24 — CF5b2b: журнал и наблюдение после сбоя
 
 До создания временного файла зафиксировать источник и направление замены.

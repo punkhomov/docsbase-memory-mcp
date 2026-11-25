@@ -17,6 +17,8 @@ use schema::{
     SourceId, Unit,
 };
 
+use crate::hybrid::ann_settings::{AnnConfigPatch, AnnSearchSettings, AnnSearchSpec};
+
 pub mod bootstrap;
 pub(crate) mod capture;
 pub mod change;
@@ -52,6 +54,8 @@ pub struct Config {
     pub hybrid: bool,
     /// Hybrid stages resolved from the file forms (bool shorthand or table).
     pub hybrid_cfg: HybridCfg,
+    /// Explicit per-query ANN traversal policy. Unconfigured search uses the legacy adapter.
+    pub ann_search: Option<AnnSearchSettings>,
     /// Installation-wide vector policy selected by a v2 global configuration.
     /// Legacy snapshots use per-project capacity and have no shared owner policy.
     pub vector_store: Option<crate::vector_cache::settings::VectorStoreSettings>,
@@ -96,6 +100,7 @@ struct GlobalFileConfig {
     daemon: Option<DaemonPatch>,
     remote: Option<RemotePatch>,
     hybrid: Option<HybridPatch>,
+    ann: Option<AnnConfigPatch>,
     providers: Option<HashMap<String, toml::Table>>,
 }
 
@@ -109,6 +114,7 @@ struct ProjectFileConfig {
     max_docs_per_project: Option<usize>,
     auto_index: Option<bool>,
     hybrid: Option<HybridPatch>,
+    ann: Option<AnnConfigPatch>,
 }
 
 impl ProjectFileConfig {
@@ -119,6 +125,7 @@ impl ProjectFileConfig {
             max_docs_per_project: self.max_docs_per_project,
             auto_index: self.auto_index,
             hybrid: self.hybrid,
+            ann: self.ann,
             providers: None,
             search: None,
             daemon: None,
@@ -222,6 +229,16 @@ impl Config {
             }
         }
         self
+    }
+
+    pub(crate) fn changes_dense_state(&self, previous: &Self) -> bool {
+        if self.ann_search == previous.ann_search {
+            self != previous
+        } else {
+            let mut previous = previous.clone();
+            previous.ann_search = self.ann_search;
+            self != &previous
+        }
     }
 
     /// Rejects values that would silently disable indexing.
@@ -342,6 +359,7 @@ struct ConfigDefaults {
     search: SearchSettings,
     daemon: DaemonSettings,
     remote: RemoteSettings,
+    ann_search: AnnSearchSettings,
 }
 struct ConfigSpec;
 impl SettingsSpec for ConfigSpec {
@@ -362,6 +380,7 @@ impl SettingsSpec for ConfigSpec {
         fields.extend_from_slice(SearchSpec::FIELDS);
         fields.extend_from_slice(DaemonSpec::FIELDS);
         fields.extend_from_slice(RemoteSpec::FIELDS);
+        fields.extend_from_slice(AnnSearchSpec::FIELDS);
         fields
     }
     fn defaults(context: &DefaultsContext) -> Self::Defaults {
@@ -369,6 +388,7 @@ impl SettingsSpec for ConfigSpec {
         let search = SearchSpec::defaults(context);
         let daemon = DaemonSpec::defaults(context);
         let remote = RemoteSpec::defaults(context);
+        let ann_search = AnnSearchSpec::defaults(context);
         let initial = Config {
             ignores: Vec::new(),
             max_file_size: 1_048_576,
@@ -379,6 +399,7 @@ impl SettingsSpec for ConfigSpec {
             auto_index: false,
             hybrid: false,
             hybrid_cfg: HybridSpec::initial(&hybrid),
+            ann_search: None,
             providers: ProvidersCfg::default(),
             vector_store: None,
         };
@@ -388,6 +409,7 @@ impl SettingsSpec for ConfigSpec {
             search,
             daemon,
             remote,
+            ann_search,
         }
     }
     fn initial(defaults: &Self::Defaults) -> Config {
@@ -448,6 +470,17 @@ impl SettingsSpec for ConfigSpec {
                 origins,
             )?;
         }
+        if let Some(ann) = patch.ann {
+            let mut policy = settings.ann_search.unwrap_or(defaults.ann_search);
+            AnnSearchSpec::overlay(
+                &mut policy,
+                ann.search,
+                &defaults.ann_search,
+                source,
+                origins,
+            )?;
+            settings.ann_search = Some(policy);
+        }
         if let Some(patch) = patch.remote {
             RemoteSpec::overlay(
                 &mut settings.remote,
@@ -484,7 +517,18 @@ impl ConfigSpec {
         crate::hybrid::config::view::fields(&settings.hybrid_cfg, view)?;
         SearchSpec::view_fields(&settings.search, view)?;
         DaemonSpec::view_fields(&settings.daemon, view)?;
-        RemoteSpec::view_fields(&settings.remote, view)
+        RemoteSpec::view_fields(&settings.remote, view)?;
+        let ann = settings
+            .ann_search
+            .unwrap_or_else(AnnSearchSettings::owner_defaults);
+        for (key, value) in [
+            ("ann.search.ef_base", ann.ef_base()),
+            ("ann.search.ef_max", ann.ef_max()),
+            ("ann.search.fetch_multiplier", ann.fetch_multiplier()),
+        ] {
+            view.push(key, serde_json::json!(value), None)?;
+        }
+        Ok(())
     }
 }
 
