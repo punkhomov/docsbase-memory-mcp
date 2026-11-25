@@ -1,12 +1,13 @@
 //! Component-owned storage settings and explicit compatibility resolution.
 
+use crate::config::Config;
 use crate::config::bootstrap::DefaultsContext;
 use crate::config::schema::{
     ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Resolved, Scope,
     SettingsSpec, SourceId, Unit,
 };
 use crate::error::{Error, Result};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Resolves the deterministic legacy/bootstrap policy through its sole owner.
 /// Runtime consumers receive the result explicitly; they never fill fields.
@@ -25,6 +26,32 @@ pub fn standalone_read_pool() -> Result<Resolved<ReadPoolSettings>> {
     crate::config::resolve::resolve_component::<ReadPoolSpec>(&DefaultsContext::standalone(), [])
 }
 
+pub(crate) fn db_from_config(config: &Resolved<Config>) -> Result<Resolved<DbSettings>> {
+    Ok(Resolved::new(
+        config.settings().store.clone(),
+        component_origins(config, DbSpec::FIELDS)?,
+    ))
+}
+
+pub(crate) fn pool_from_config(config: &Resolved<Config>) -> Result<Resolved<ReadPoolSettings>> {
+    Ok(Resolved::new(
+        config.settings().read_pool.clone(),
+        component_origins(config, ReadPoolSpec::FIELDS)?,
+    ))
+}
+
+fn component_origins(config: &Resolved<Config>, fields: &[FieldSpec]) -> Result<Provenance> {
+    let mut origins = Provenance::initial(fields, &SourceId::Defaults);
+    for field in fields {
+        let origin = config
+            .provenance()
+            .get(field.key)
+            .ok_or_else(|| Error::internal(format!("missing effective field {}", field.key)))?;
+        origins.set(field.key, &origin.source)?;
+    }
+    Ok(origins)
+}
+
 /// Complete metadata DB policy, passed explicitly to connection constructors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbSettings {
@@ -37,7 +64,7 @@ pub struct DbSettings {
     /// Delay between WAL negotiation attempts; zero is permitted.
     pub wal_retry_delay: Duration,
 }
-/// Explicit typed overrides; these are not accepted TOML keys yet.
+/// Explicit typed overrides for the metadata DB.
 #[derive(Debug, Clone, Default)]
 pub struct DbPatch {
     /// Busy timeout for write-capable connections; zero means immediate failure.
@@ -49,6 +76,44 @@ pub struct DbPatch {
     /// Delay between WAL negotiation attempts; zero is permitted.
     pub wal_retry_delay: Option<Duration>,
 }
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DbFilePatch {
+    write_busy_timeout: Option<u64>,
+    read_busy_timeout: Option<u64>,
+    wal_attempts: Option<u32>,
+    wal_retry_delay: Option<u64>,
+}
+
+impl From<DbFilePatch> for DbPatch {
+    fn from(patch: DbFilePatch) -> Self {
+        Self {
+            write_busy_timeout: patch.write_busy_timeout.map(Duration::from_millis),
+            read_busy_timeout: patch.read_busy_timeout.map(Duration::from_millis),
+            wal_attempts: patch.wal_attempts,
+            wal_retry_delay: patch.wal_retry_delay.map(Duration::from_millis),
+        }
+    }
+}
+
+impl DbSettings {
+    pub(crate) fn view_fields(
+        &self,
+        view: &mut crate::config::view::ViewBuilder<'_>,
+    ) -> Result<()> {
+        for (key, value) in [
+            ("store.write_busy_timeout", self.write_busy_timeout),
+            ("store.read_busy_timeout", self.read_busy_timeout),
+            ("store.wal_retry_delay", self.wal_retry_delay),
+        ] {
+            let millis = u64::try_from(value.as_millis())
+                .map_err(|_| Error::internal("cannot display DB setting milliseconds"))?;
+            view.push(key, millis.into(), None)?;
+        }
+        view.push("store.wal_attempts", self.wal_attempts.into(), None)
+    }
+}
+
 /// Component owner of defaults, scope and admission.
 pub struct DbSpec;
 impl SettingsSpec for DbSpec {
@@ -120,6 +185,17 @@ impl SettingsSpec for DbSpec {
                 message: "store.wal_attempts must be > 0".to_owned(),
             });
         }
+        if settings.wal_retry_delay.as_millis() > u128::from(u64::MAX)
+            || settings
+                .wal_retry_delay
+                .checked_mul(settings.wal_attempts - 1)
+                .and_then(|delay| Instant::now().checked_add(delay))
+                .is_none()
+        {
+            return Err(Error::Admission {
+                message: "store WAL retry duration exceeds the platform clock".to_owned(),
+            });
+        }
         Ok(())
     }
     fn impact(
@@ -137,8 +213,9 @@ pub struct ReadPoolSettings {
     /// Maximum prepared connections in the #66 bounded read pool.
     pub max_connections: usize,
 }
-/// Explicit typed overrides; these are not accepted TOML keys yet.
-#[derive(Debug, Clone, Default)]
+/// Explicit overrides for the prepared metadata reader capacity.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReadPoolPatch {
     /// Maximum prepared connections in the #66 bounded read pool.
     pub max_connections: Option<usize>,
@@ -178,6 +255,13 @@ impl SettingsSpec for ReadPoolSpec {
         if settings.max_connections == 0 {
             return Err(Error::Admission {
                 message: "read_pool.max_connections must be > 0".to_owned(),
+            });
+        }
+        if std::alloc::Layout::array::<std::sync::Mutex<super::Db>>(settings.max_connections)
+            .is_err()
+        {
+            return Err(Error::Admission {
+                message: "read_pool.max_connections exceeds the allocation range".to_owned(),
             });
         }
         Ok(())

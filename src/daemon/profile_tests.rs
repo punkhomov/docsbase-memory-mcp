@@ -83,6 +83,68 @@ impl Fixture {
 }
 
 #[test]
+fn captured_store_policy_reaches_the_writer_and_prepared_readers() {
+    use crate::store::settings::{db_from_config, pool_from_config};
+
+    let global = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let path = global.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "config_version=2
+[store]
+write_busy_timeout=41
+read_busy_timeout=83
+[read_pool]
+max_connections=2
+",
+    )
+    .unwrap();
+    let launch = LaunchSnapshot::capture_from(global.path())
+        .strict(DaemonPatch::default())
+        .unwrap();
+    std::fs::write(
+        &path,
+        "config_version=2
+[read_pool]
+max_connections=1
+",
+    )
+    .unwrap();
+    let db = db_from_config(&launch.config).unwrap();
+    let pool = pool_from_config(&launch.config).unwrap();
+    let shared = Shared::open_with_launch_config(
+        cache.path(),
+        &db,
+        &pool,
+        crate::hybrid::dense_settings::standalone()
+            .unwrap()
+            .settings(),
+        launch,
+    )
+    .unwrap();
+
+    let writer_timeout: i64 = shared
+        .db()
+        .connection()
+        .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+        .unwrap();
+    assert_eq!(writer_timeout, 41);
+    let readers = shared.read_pool();
+    let first = readers.try_acquire().unwrap();
+    let second = readers.try_acquire().unwrap();
+    let reader_timeout: i64 = first
+        .connection()
+        .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+        .unwrap();
+    assert_eq!(reader_timeout, 83);
+    assert!(readers.try_acquire().is_err());
+    drop(first);
+    assert!(readers.try_acquire().is_ok());
+    drop(second);
+}
+
+#[test]
 fn fixed_runtime_skips_factories_and_every_background_hook() {
     let f = Fixture::new();
     let shared = f.open().unwrap();

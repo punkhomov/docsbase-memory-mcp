@@ -540,3 +540,13 @@ I06 принадлежит `index::settings::ChunkSpec` и поддержива�
 границу прозовых чанков для существующего поискового штрафа. Версия и геометрия
 образуют персистентный рецепт C; изменения приводят к L, а V переиспользуется
 по совпавшему выходному тексту.
+
+## Delta 2026-11-25 — I19/I65, storage policy in global v2
+
+`DbSpec` owns `store.write_busy_timeout` (30000 ms), `read_busy_timeout`
+(5000 ms), `wal_attempts` (3) and `wal_retry_delay` (100 ms).
+`ReadPoolSpec` owns the positive `read_pool.max_connections` (4).
+The capture boundary validates these policies before startup and shows
+their origins in the effective view. The pool eagerly opens its configured
+connections. These settings affect new handles and admission after restart,
+without changing persisted generations or artifacts.

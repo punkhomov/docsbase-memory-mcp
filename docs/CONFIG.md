@@ -469,6 +469,36 @@ On Shared v2, connected `docsbase index` requires its own job so it uses
 fresh project settings. If a sync for that project is active, wait for it to
 finish and retry `docsbase index`. Ordinary `sync` can join the active job.
 
+### SQLite connections and metadata readers
+
+Set these global values in a v2 file. Busy timeouts and WAL retry delay
+use milliseconds.
+
+```toml
+[store]
+write_busy_timeout = 30000
+read_busy_timeout = 5000
+wal_attempts = 3
+wal_retry_delay = 100
+
+[read_pool]
+max_connections = 4
+```
+
+The daemon and direct index, search and sync commands capture the
+connection policy at startup. The daemon and direct search prepare the
+configured number of read connections. Zero busy timeout requests
+immediate SQLite busy errors. WAL negotiation requires at least one
+attempt and accepts zero delay. The read pool requires at least one
+connection. The pool opens every connection during construction, so choose
+a size within the process's file descriptor and memory limits. Exhausting
+these resources can fail startup even when the count is representable.
+
+Restart the daemon to apply a global change. Connection policy is
+independent of persisted index formats. With the Shared daemon stopped,
+`status` and `list` use their standalone SQLite policy even if `[store]`
+or `[read_pool]` is invalid. The Website profile still requires the daemon.
+
 ### Watcher debounce
 
 Set these fields in a v2 global or project file. Each project field can

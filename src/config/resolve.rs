@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::hybrid::provisioning::ProvisioningSpec;
 use crate::hybrid::rrf::settings::RrfSpec;
 use crate::index::lexical_settings::LexicalSpec;
+use crate::store::settings::{DbSpec, ReadPoolSpec};
 use crate::watch::settings::WatchSpec;
 
 /// A resolution owns one immutable defaults catalog and stages patches atomically.
@@ -194,6 +195,26 @@ impl Resolution<ConfigSpec> {
                 &mut self.origins,
             )?;
         }
+        if let Some(patch) = &layer.store {
+            DbSpec::overlay(
+                &mut self.settings.store,
+                patch.clone().into(),
+                &self.defaults.initial.store,
+                &layer.source,
+                &mut self.origins,
+            )?;
+            DbSpec::validate(&self.settings.store, &self.capabilities)?;
+        }
+        if let Some(patch) = &layer.read_pool {
+            ReadPoolSpec::overlay(
+                &mut self.settings.read_pool,
+                patch.clone(),
+                &self.defaults.initial.read_pool,
+                &layer.source,
+                &mut self.origins,
+            )?;
+            ReadPoolSpec::validate(&self.settings.read_pool, &self.capabilities)?;
+        }
         self.validate()
             .map_err(|_| invalid("invalid effective settings in versioned source"))
     }
@@ -304,10 +325,27 @@ pub fn global_from(config_dir: &Path) -> Result<Resolved<Config>> {
     global_resolution(config_dir)?.finish()
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum LaunchUse {
+    Runtime,
+    StandaloneDiagnostic,
+}
+impl LaunchUse {
+    fn keep_consumed_v2_fields(self, document: &mut toml::Table) {
+        if matches!(self, Self::StandaloneDiagnostic) {
+            // Direct diagnostic readers use standalone SQLite settings.
+            // Keep validating the daemon profile that controls fallback.
+            document.remove("store");
+            document.remove("read_pool");
+        }
+    }
+}
+
 /// Resolve already captured launch bytes without filesystem access.
 pub(crate) fn launch_resolution(
     path: &Path,
     bytes: Option<&[u8]>,
+    launch_use: LaunchUse,
 ) -> std::result::Result<LaunchResolution, LaunchFailure> {
     let mut resolution = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone());
     let mut website = false;
@@ -335,6 +373,7 @@ pub(crate) fn launch_resolution(
         })?;
         let source = SourceId::Global(path.to_owned());
         if is_v2(&document) {
+            launch_use.keep_consumed_v2_fields(&mut document);
             let layer = SourceLayer::from_document(source, text, document)
                 .map_err(LaunchFailure::Versioned)?;
             resolution

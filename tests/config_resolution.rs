@@ -825,6 +825,80 @@ native_queue_capacity = 3
 }
 
 #[test]
+fn v2_store_connection_policy_is_global_and_retains_file_provenance() {
+    let global = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    layer(
+        &global,
+        "config.toml",
+        "config_version = 2
+[store]
+write_busy_timeout = 0
+wal_attempts = 1
+[read_pool]
+max_connections = 2
+",
+    );
+    let view =
+        docsbase_memory::config::view::load_from(global.path(), Some(project.path())).unwrap();
+    let field = |key| view.fields.iter().find(|field| field.key == key).unwrap();
+    assert_eq!(field("store.write_busy_timeout").value, 0);
+    assert_eq!(field("store.read_busy_timeout").value, 5000);
+    assert_eq!(field("store.wal_attempts").value, 1);
+    assert_eq!(field("read_pool.max_connections").value, 2);
+    assert_eq!(
+        field("store.write_busy_timeout").origin.source,
+        SourceId::Global(global.path().join("config.toml")),
+    );
+    assert_eq!(
+        field("store.read_busy_timeout").origin.source,
+        SourceId::Defaults
+    );
+
+    for table in [
+        "[store]
+wal_attempts = 2",
+        "[read_pool]
+max_connections = 1",
+    ] {
+        layer(
+            &project,
+            ".docsbase.toml",
+            &format!(
+                "config_version = 2
+{table}
+"
+            ),
+        );
+        let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+        assert!(error.to_string().contains("is global-only"), "{error}");
+    }
+}
+
+#[test]
+fn v2_global_owner_settings_require_tables() {
+    let global = TempDir::new().unwrap();
+    for (key, value) in [
+        ("store", "[0, 5000, 1, 100]"),
+        ("read_pool", "[2]"),
+        ("provisioning", "[{}, {}]"),
+    ] {
+        layer(
+            &global,
+            "config.toml",
+            &format!("config_version = 2\n{key} = {value}\n"),
+        );
+        let error = Config::global_from(global.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("{key} settings require a table")),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn v2_lexical_weights_reject_invalid_or_silent_scoring() {
     let global = TempDir::new().expect("global");
     let project = TempDir::new().expect("project");

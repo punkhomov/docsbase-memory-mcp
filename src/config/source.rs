@@ -63,6 +63,8 @@ pub struct SourceLayer {
     pub(super) document: toml::Table,
     pub(super) watch: Option<crate::watch::settings::WatchPatch>,
     pub(super) lexical: Option<crate::index::lexical_settings::LexicalPatch>,
+    pub(super) store: Option<crate::store::settings::DbFilePatch>,
+    pub(super) read_pool: Option<crate::store::settings::ReadPoolPatch>,
     pub(super) provisioning: Option<crate::hybrid::provisioning::ProvisioningPatch>,
     pub(super) rrf: Option<crate::hybrid::rrf::settings::RrfPatch>,
 }
@@ -112,6 +114,8 @@ impl SourceLayer {
         let mut watch = None;
         let mut lexical = None;
         let mut rrf = None;
+        let mut store = None;
+        let mut read_pool = None;
         let mut provisioning = None;
         let mut hybrid_merge = None;
         let mut vector_store = None;
@@ -147,16 +151,9 @@ impl SourceLayer {
                         .map_err(|_| invalid("invalid v2 rrf fields"))?,
                 );
             }
-            if let Some(value) = fields.remove("provisioning") {
-                if matches!(source, SourceId::Project(_)) {
-                    return Err(invalid("provisioning is global-only"));
-                }
-                provisioning = Some(
-                    value
-                        .try_into()
-                        .map_err(|_| invalid("invalid v2 provisioning fields"))?,
-                );
-            }
+            provisioning = take_global_table(&mut fields, &source, "provisioning")?;
+            store = take_global_table(&mut fields, &source, "store")?;
+            read_pool = take_global_table(&mut fields, &source, "read_pool")?;
             let vector = fields.remove("vector_cache");
             if matches!(source, SourceId::Global(_)) {
                 vector_store = Some(crate::vector_cache::settings::resolve_file(
@@ -191,6 +188,8 @@ impl SourceLayer {
             lexical,
             rrf,
             provisioning,
+            store,
+            read_pool,
         })
     }
     /// Exact source identity supplied by the caller; no canonicalization or I/O.
@@ -217,6 +216,26 @@ impl SourceLayer {
         }
     }
 }
+fn take_global_table<P: serde::de::DeserializeOwned>(
+    fields: &mut toml::Table,
+    source: &SourceId,
+    key: &str,
+) -> Result<Option<P>> {
+    let Some(value) = fields.remove(key) else {
+        return Ok(None);
+    };
+    if matches!(source, SourceId::Project(_)) {
+        return Err(invalid(&format!("{key} is global-only")));
+    }
+    if !value.is_table() {
+        return Err(invalid(&format!("v2 {key} settings require a table")));
+    }
+    value
+        .try_into()
+        .map(Some)
+        .map_err(|_| invalid(&format!("invalid v2 {key} fields")))
+}
+
 /// A source-level conflict; preview is never permission to operate a v2 store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreviewConflict {

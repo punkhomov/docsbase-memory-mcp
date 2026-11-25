@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::capture::{ReadFailure, path_is_absent, read_prefix};
-use crate::config::resolve::{LaunchFailure, has_version_header};
+use crate::config::resolve::{LaunchFailure, LaunchUse, has_version_header};
 use crate::config::schema::Resolved;
 use crate::config::{Config, paths};
 use crate::daemon::settings::DaemonPatch;
@@ -148,13 +148,14 @@ impl LaunchSnapshot {
     /// # Errors
     /// Unavailable/invalid global source or invalid daemon patch.
     pub fn resolve(&self, patch: DaemonPatch) -> Result<Resolved<Config>> {
-        self.resolution()
+        self.resolution(LaunchUse::Runtime)
             .map_err(LaunchFailure::into_error)?
             .finish(patch)
     }
 
     fn resolution(
         &self,
+        launch_use: LaunchUse,
     ) -> std::result::Result<crate::config::resolve::LaunchResolution, LaunchFailure> {
         let bytes = match &self.bytes {
             CapturedBytes::Missing => None,
@@ -171,7 +172,7 @@ impl LaunchSnapshot {
         let path = self.path.as_deref().ok_or_else(|| {
             LaunchFailure::Legacy(Error::internal("global config path unavailable"))
         })?;
-        crate::config::resolve::launch_resolution(path, bytes)
+        crate::config::resolve::launch_resolution(path, bytes, launch_use)
     }
 
     pub(crate) fn strict(&self, patch: DaemonPatch) -> Result<LaunchConfig> {
@@ -202,7 +203,11 @@ impl LaunchSnapshot {
     /// Compatibility launch preserves warning/default behavior and blocks project opens
     /// through the retained global error, just as the old Shared constructor did.
     pub(crate) fn legacy(&self, patch: DaemonPatch) -> Result<LaunchConfig> {
-        match self.resolution() {
+        self.legacy_for(patch, LaunchUse::Runtime)
+    }
+
+    fn legacy_for(&self, patch: DaemonPatch, launch_use: LaunchUse) -> Result<LaunchConfig> {
+        match self.resolution(launch_use) {
             Ok(resolution) => Ok(LaunchConfig {
                 config: resolution.finish(patch)?,
                 path: self.path.clone(),
@@ -268,10 +273,8 @@ pub(crate) fn website_unavailable() -> Error {
     Error::Admission { message: "website daemon unavailable; start it in the foreground with `docsbase serve` (or `docsbase serve --project ABS`)".to_owned() }
 }
 
-pub(crate) fn require_shared_without_daemon() -> Result<()> {
-    // Preserve the intentional malformed-Shared warning/default adapter. Valid
-    // recognized Website and owner errors never enter that fallback.
-    let launch = LaunchSnapshot::capture().legacy(DaemonPatch::default())?;
+pub(crate) fn require_shared_without_daemon(launch_use: LaunchUse) -> Result<()> {
+    let launch = LaunchSnapshot::capture().legacy_for(DaemonPatch::default(), launch_use)?;
     if matches!(
         launch.config.settings().daemon.profile,
         crate::daemon::settings::DaemonProfile::Website { .. }

@@ -15,6 +15,7 @@ use crate::hybrid::rrf::{RrfSettings, settings::RrfSpec};
 use crate::index::settings::{ChunkSettings, ChunkSpec, IndexFilePatch};
 use crate::index::{LexicalSettings, lexical_settings::LexicalSpec};
 use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
+use crate::store::settings::{DbSettings, DbSpec, ReadPoolSettings, ReadPoolSpec};
 use crate::watch::{WatchSettings, settings::WatchSpec};
 use bootstrap::DefaultsContext;
 use schema::{
@@ -53,6 +54,10 @@ pub struct Config {
     pub chunk: ChunkSettings,
     /// Global-only policy for request deadlines and owned search payload admission.
     pub search: SearchSettings,
+    /// Installation-wide SQLite connection policy.
+    pub store: DbSettings,
+    /// Global prepared metadata reader capacity.
+    pub read_pool: ReadPoolSettings,
     /// Complete global-only daemon launch and resource policy.
     pub daemon: DaemonSettings,
     /// Complete global-only remote execution policy.
@@ -191,7 +196,11 @@ impl Config {
     /// determined or the file exists but cannot be read or parsed, and
     /// [`Error::Admission`] when a limit is zero.
     pub fn global() -> Result<Self> {
-        Self::global_from(&paths::config_dir()?)
+        Self::global_resolved().map(schema::Resolved::into_settings)
+    }
+
+    pub(crate) fn global_resolved() -> Result<schema::Resolved<Self>> {
+        resolve::global_from(&paths::config_dir()?)
     }
 
     /// Same as [`Config::global`] but with an explicit config directory.
@@ -302,6 +311,8 @@ impl Config {
         }
         crate::hybrid::config::validate_settings(&self.hybrid_cfg)?;
         SearchSpec::validate(&self.search, &Capabilities::current())?;
+        DbSpec::validate(&self.store, &Capabilities::current())?;
+        ReadPoolSpec::validate(&self.read_pool, &Capabilities::current())?;
         DaemonSpec::validate(&self.daemon, &Capabilities::current())?;
         RemoteSpec::validate(&self.remote, &Capabilities::current())?;
         LexicalSpec::validate(&self.lexical, &Capabilities::current())?;
@@ -411,6 +422,8 @@ impl SettingsSpec for ConfigSpec {
         fields.extend_from_slice(WatchSpec::FIELDS);
         fields.extend_from_slice(HybridSpec::FIELDS);
         fields.extend_from_slice(SearchSpec::FIELDS);
+        fields.extend_from_slice(DbSpec::FIELDS);
+        fields.extend_from_slice(ReadPoolSpec::FIELDS);
         fields.extend_from_slice(ChunkSpec::FIELDS);
         fields.extend_from_slice(DaemonSpec::FIELDS);
         fields.extend_from_slice(RemoteSpec::FIELDS);
@@ -434,6 +447,8 @@ impl SettingsSpec for ConfigSpec {
             max_docs_per_project: 20_000,
             chunk: ChunkSpec::initial(&ChunkSpec::defaults(context)),
             search: SearchSpec::initial(&search),
+            store: DbSpec::defaults(context),
+            read_pool: ReadPoolSpec::defaults(context),
             daemon: DaemonSpec::initial(&daemon),
             remote: RemoteSpec::initial(&remote),
             provisioning: ProvisioningSpec::defaults(context),
@@ -590,6 +605,12 @@ impl ConfigSpec {
             )?;
         }
         SearchSpec::view_fields(&settings.search, view)?;
+        settings.store.view_fields(view)?;
+        view.push(
+            "read_pool.max_connections",
+            settings.read_pool.max_connections.into(),
+            None,
+        )?;
         settings.chunk.view_fields(view)?;
         DaemonSpec::view_fields(&settings.daemon, view)?;
         RemoteSpec::view_fields(&settings.remote, view)?;

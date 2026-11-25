@@ -12,14 +12,12 @@ pub(super) enum Outcome {
     Daemon(Value),
     Direct(Value),
 }
-pub(super) fn run(
-    path: Option<&Path>,
-    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
-) -> anyhow::Result<()> {
+pub(super) fn run(path: Option<&Path>) -> anyhow::Result<()> {
     let started = Instant::now();
-    let global = Config::global()?;
+    let config = Config::global_resolved()?;
+    let settings = crate::store::settings::db_from_config(&config)?;
+    let global = config.into_settings();
     let path = path.map(Path::to_path_buf);
-    let settings = settings.clone();
     let outcome = super::command::run(global, move |context| {
         run_in(context, path, settings, started)
     })?;

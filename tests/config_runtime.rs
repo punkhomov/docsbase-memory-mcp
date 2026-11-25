@@ -214,6 +214,55 @@ fn search_response_before(
 }
 
 #[test]
+fn direct_index_obeys_configured_sqlite_busy_timeout() {
+    let env = Env::new(&[(
+        "readme.md",
+        "# Guide
+
+Storage contention fixture.
+",
+    )]);
+    fs::write(
+        env.global_config(),
+        "config_version = 2
+[store]
+write_busy_timeout = 0
+wal_attempts = 1
+",
+    )
+    .unwrap();
+    assert_eq!(env.run_json(&["index"])["project_id"], 1);
+
+    let registry = env.cache().join(docsbase_memory::store::DB_FILE);
+    let conn = rusqlite::Connection::open(registry).unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut child = env
+        .cmd()
+        .args(["index"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let exited = wait_until(Duration::from_secs(12), || {
+        child.try_wait().unwrap().is_some()
+    });
+    if !exited {
+        child.kill().unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        exited,
+        "the direct writer waited despite its zero busy timeout"
+    );
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("database is locked"), "{error}");
+
+    conn.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(env.run_json(&["index"])["project_id"], 1);
+}
+
+#[test]
 fn search_readiness_rejects_success_at_or_after_deadline() {
     use std::cell::Cell;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -944,6 +993,20 @@ fn invalid_v2_global_fails_before_creating_daemon_state() {
             "# start here\nconfig_version=2\n[vector_cache",
             "invalid versioned configuration TOML",
         ),
+        (
+            "config_version=2
+[store]
+write_busy_timeout=2147483648
+",
+            "store.write_busy_timeout exceeds SQLite busy_timeout",
+        ),
+        (
+            "config_version=2
+[read_pool]
+max_connections=0
+",
+            "read_pool.max_connections must be > 0",
+        ),
         (&oversized, "over the trusted byte limit"),
     ] {
         let env = Env::new(&[]);
@@ -957,6 +1020,44 @@ fn invalid_v2_global_fails_before_creating_daemon_state() {
         assert!(String::from_utf8_lossy(&out.stderr).contains(error));
         assert!(!env.cache().join("state").exists());
         assert!(!env.cache().join(docsbase_memory::store::DB_FILE).exists());
+    }
+}
+
+#[test]
+fn stopped_diagnostics_keep_standalone_store_policy_and_website_routing() {
+    let env = Env::new(&[("guide.md", &doc("quasar telemetry calibration"))]);
+    assert_eq!(env.run_json(&["index"])["stats"]["docs"], 1);
+
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[store]\nwrite_busy_timeout = -1\n[read_pool]\nmax_connections = 0\n",
+    )
+    .unwrap();
+    assert_eq!(
+        env.run_json(&["status"])["projects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(env.run_json(&["list"])["docs"][0]["path"], "guide.md");
+
+    let root = toml::Value::String(
+        env.root()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    );
+    fs::write(
+        env.global_config(),
+        format!("config_version = 2\n[daemon]\nprofile = {{ mode = 'website', project_root = {root} }}\n[read_pool]\nmax_connections = 0\n"),
+    )
+    .unwrap();
+    for command in ["status", "list"] {
+        let output = env.cmd().arg(command).output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("website daemon unavailable"));
     }
 }
 

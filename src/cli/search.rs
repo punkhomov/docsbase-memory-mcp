@@ -71,7 +71,7 @@ impl Options {
 /// transport failure, an unregistered/unindexed project, an unavailable snapshot,
 /// or synchronous invocation from a current-thread Tokio runtime.
 pub fn run(query: &str, options: &Options) -> anyhow::Result<()> {
-    run_with_settings(query, options, &crate::store::settings::standalone()?)
+    run_with_mode(query, options, QueryMode::Syntax)
 }
 
 /// Runs search with explicit query interpretation using the original request budget.
@@ -79,45 +79,28 @@ pub fn run(query: &str, options: &Options) -> anyhow::Result<()> {
 /// # Errors
 /// As [`run`], including refusal when a connected daemon lacks literal support.
 pub fn run_with_mode(query: &str, options: &Options, mode: QueryMode) -> anyhow::Result<()> {
-    run_with_settings_and_mode(query, options, &crate::store::settings::standalone()?, mode)
+    run_with_policies_started(
+        query,
+        options,
+        None,
+        mode,
+        crate::hybrid::dense_settings::standalone()?.settings(),
+        std::time::Instant::now(),
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn run_with_settings(
     query: &str,
     options: &Options,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
-    run_with_settings_and_mode(query, options, settings, QueryMode::Syntax)
-}
-
-pub(crate) fn run_with_settings_and_mode(
-    query: &str,
-    options: &Options,
-    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
-    mode: QueryMode,
-) -> anyhow::Result<()> {
-    run_with_policies(
-        query,
-        options,
-        settings,
-        mode,
-        crate::hybrid::dense_settings::standalone()?.settings(),
-    )
-}
-
-pub(crate) fn run_with_policies(
-    query: &str,
-    options: &Options,
-    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
-    mode: QueryMode,
-    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
-) -> anyhow::Result<()> {
     run_with_policies_started(
         query,
         options,
-        settings,
-        mode,
-        dense_settings,
+        Some(settings),
+        QueryMode::Syntax,
+        crate::hybrid::dense_settings::standalone()?.settings(),
         std::time::Instant::now(),
     )
 }
@@ -125,17 +108,24 @@ pub(crate) fn run_with_policies(
 pub(crate) fn run_with_policies_started(
     query: &str,
     options: &Options,
-    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    supplied_db: Option<&crate::config::schema::Resolved<crate::store::settings::DbSettings>>,
     mode: QueryMode,
     dense_settings: &crate::hybrid::dense_settings::DenseSettings,
     started: std::time::Instant,
 ) -> anyhow::Result<()> {
+    use crate::store::settings;
     dense_settings.query_cache_settings().validate()?;
-    let global = Config::global()?;
+    let config = Config::global_resolved()?;
+    let (settings, pool) = match supplied_db {
+        Some(db) => (db.clone(), settings::standalone_read_pool()?),
+        None => (
+            settings::db_from_config(&config)?,
+            settings::pool_from_config(&config)?,
+        ),
+    };
+    let global = config.into_settings();
     let args = options.args(query, mode);
-    let settings = settings.clone();
     let dense_settings = dense_settings.clone();
-    let pool = crate::store::settings::standalone_read_pool()?;
     let value = super::command::run(global, move |context| {
         run_in(context, args, settings, pool, dense_settings, started)
     })?;
