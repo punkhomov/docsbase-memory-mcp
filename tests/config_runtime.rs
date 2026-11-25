@@ -773,6 +773,62 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
 }
 
 #[test]
+fn v2_cli_index_uses_the_live_owner_and_returns_index_counters() {
+    let mut env = Env::new(&[
+        ("guide.md", "connectedindexwidget"),
+        ("guide/other.md", "connectedindexnewpage"),
+    ]);
+    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    env.start_daemon();
+
+    let first = env.cmd().arg("index").output().unwrap();
+    assert!(first.status.success(), "{first:?}");
+    let first: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first["stats"]["docs"], 2);
+    assert!(first["project_id"].is_i64());
+
+    let nested = env.root().join("guide");
+    let repeated = env
+        .cmd()
+        .current_dir(&nested)
+        .args(["index", ".."])
+        .output()
+        .unwrap();
+    assert!(repeated.status.success(), "{repeated:?}");
+    let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(repeated["project_id"], first["project_id"]);
+    assert_eq!(repeated["stats"]["docs"], 0);
+    assert_eq!(repeated["stats"]["skipped"], 2);
+    assert!(repeated.get("job_id").is_none());
+
+    let search = env
+        .cmd()
+        .args(["search", "connectedindexnewpage"])
+        .output()
+        .unwrap();
+    assert!(search.status.success(), "{search:?}");
+    let hits: Value = serde_json::from_slice(&search.stdout).unwrap();
+    assert_eq!(hits[0]["path"], "guide/other.md");
+}
+
+#[test]
+fn connected_v2_index_reloads_the_current_project_config() {
+    let mut env = Env::new(&[("guide.md", "connectedindexwidget")]);
+    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    env.start_daemon();
+    let initial = env.cmd().arg("index").output().unwrap();
+    assert!(initial.status.success(), "{initial:?}");
+
+    fs::write(env.project_config(), "[hybrid.cache]\nmax_bytes = 4096\n").unwrap();
+    let mut registry = env.client();
+    registry.handshake_registry().unwrap();
+    assert_eq!(index(&mut registry, &env)["state"], "done");
+    let rejected = env.cmd().arg("index").output().unwrap();
+    assert!(!rejected.status.success(), "{rejected:?}");
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("hybrid.cache.max_bytes"));
+}
+
+#[test]
 fn changed_config_version_refuses_cli_operations_against_stale_daemon() {
     let mut env = Env::new(&[("guide.md", &doc("quasar telemetry calibration"))]);
     let out = env.cmd().arg("index").output().unwrap();

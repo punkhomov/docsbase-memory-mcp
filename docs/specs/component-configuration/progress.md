@@ -1118,6 +1118,50 @@ Ruling: по ревью сообщения об изменении пина те
 использует временные корни конфигурации и данных. Замечания подтверждены
 повторным ревью.
 
+## 2026-11-24 — CLI index через работающий v2
+
+Task CF5c connected index: complete (Shared owner, один IPC сеанс и исходный
+бюджет команды, JSON счётчики index). Проверены создание и повторный проход,
+относительный путь, поиск, ошибка несовпадения версии и fixed Website sync.
+
+Ruling: по ревью добавлены проверка UTF-8 до сериализации, сессия без
+привязки к проекту на период опроса и обновление проектного конфига перед
+захватом работы. Воспроизведена гонка двух подготовок до появления строки
+job. Равный валидный конфиг теперь сохраняет опубликованный снимок, а
+фактическая правка инвалидирует прежнее разрешение. Целевой прогон и
+повторное независимое ревью подтвердили исправления.
+
+Ruling: совместный прогон с дефолтным v2 обнаружил, что перечитывание
+задевало существующий MCP index_project. Явное поле запроса теперь включает
+его для подключённого CLI. Обычный MCP сохраняет снимок открытого проекта.
+Целевой тест отличает оба запроса на одном изменённом источнике.
+
+Ruling: native macOS rejected creation of the malformed UTF-8 path in the
+test fixture. The encoding regression now passes an in-memory path to the
+shared IPC encoder. The connected daemon integration tests still cover
+first index, repeated index, search and config refresh. Focused Linux tests
+and independent review passed.
+
+Ruling: the native Linux boundary scanner recognizes the explicit test
+module marker. The Unix-only fixture now uses a separate `cfg(unix)`
+attribute, preserving the production platform boundary. Both boundary
+tests and the path encoding regression passed locally.
+
+## 2026-11-24 — CF5c, admission for connected Index
+
+Task CF5c connected Index contention: complete (the explicit refresh uses its
+captured settings and stages and requires its own job). A typed refusal asks
+the CLI caller to wait and retry. Ordinary Sync and MCP join existing work.
+The regression exercises discovery, publication under the project lease,
+transactional admission and a superseded revision. The active Sync survives
+with the same row. Before the fix both discovery and the transaction returned
+that older job as successful admission.
+
+Ruling: fresh review required retaining the returned Arc pair and reporting an
+Index retry for a superseded config. The focused suite and re-review passed.
+Rust 1.100.0 ran 764 tests across the library, CLI routing, runtime config and
+MCP frontend. Clippy and fmt passed.
+
 ## 2026-11-24 — первый глобальный файл CLI
 
 Task CF5c config writers: complete (общий заголовок v2 при первой записи

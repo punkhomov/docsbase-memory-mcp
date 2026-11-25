@@ -600,6 +600,21 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   булева сокращения и отклонять несовместимый итог до записи. Проверить
   реальный CLI dry-run и путь записи под блокировкой без сети.
 
+## Delta 2026-11-24 — CF5c, CLI index при работающем v2
+
+- Передать `docsbase index` существующему Shared daemon с v2. Использовать
+  один дедлайн, существующий job protocol и формат счётчиков прямого index.
+  При отсутствии демона остаётся обычная прямая индексация.
+- Проверить регистрацию, индекс повторно по относительному пути, поиск и
+  прежний отказ при несовпадении версии. Проверить обновление конфига,
+  сессию на период опроса и обработку пути вне UTF-8. Website использует sync.
+
+## Delta 2026-11-24 — connected Index contention
+
+- Require an independent job for an explicit CLI Index with current settings.
+- Exercise active work found at discovery, during a configuration change
+  and after preparation. Verify ordinary MCP joins the same original job.
+
 ## Delta 2026-11-24 — CF5c, новые глобальные файлы
 
 - Первый global write через connect и models use записывает v2. Предпросмотр

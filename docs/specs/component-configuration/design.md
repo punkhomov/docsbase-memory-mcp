@@ -881,6 +881,28 @@ lease на свой срок жизни. При работающем демон�
 стадий. При записи слияние и разрешение повторяются с актуальным файлом под
 существующей блокировкой.
 
+## Delta 2026-11-24 — подключённая индексация CLI
+
+Обработка активной задачи уточнена в разделе connected Index admission ниже.
+
+CLI ведёт `index_project` на том же соединении, где согласован v2. Сессия
+без привязки к проекту удерживает демон между опросами. Перед новой задачей
+CLI передаёт явный запрос на перечитывание проектного конфига. При равной валидной конфигурации
+оба запроса сохраняют один снимок и могут ждать один job. Если задача уже выполняется, CLI
+ждёт её терминального результата в исходном бюджете.
+Ошибки подключённого пути запрещают повтор через второй локальный writer.
+Shared возвращает CLI счётчики индекса, Website фиксирует обновление через sync.
+
+## Delta 2026-11-24 — connected Index admission
+
+The explicit refresh route checks active work at discovery, under the
+configuration publication lease and in the transaction that admits the
+new job. A refusal preserves the existing job row. The command holds the
+settings and stages returned by its refresh. A superseded revision requests
+a retry before entering the job. Equivalent resolutions can still reuse
+the same immutable settings before either job is admitted.
+The existing wire format carries the typed admission error.
+
 ## Delta 2026-11-24 — создание нового явного v2
 
 CLI-редакторы начинают новый глобальный документ с общим заголовком v2.

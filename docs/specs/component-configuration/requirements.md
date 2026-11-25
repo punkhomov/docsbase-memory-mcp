@@ -545,6 +545,19 @@ bounded read. Byte revisions retain their existing meaning for proposed edits.
 и её состояние при преобразовании булева сокращения. Проверка выполняется
 для предпросмотра и повторно перед записью под блокировкой.
 
+## Delta 2026-11-24 — CLI index с владельцем v2
+
+При запущенном Shared daemon с v2 команда index регистрирует или обновляет
+проект через этого владельца и возвращает стандартные счётчики индекса.
+Дедлайн включает согласование протокола и ожидание завершения.
+
+## Delta 2026-11-24 — connected Index during active Sync
+
+Explicit CLI Index with configuration refresh must run a job with its own
+captured settings. If a project job is already active, the command reports
+admission failure and gives a retry instruction. Ordinary Sync and MCP
+index requests keep their active-job join behavior.
+
 ## Delta 2026-11-24 — формат первого глобального файла
 
 Первый глобальный файл, созданный CLI-редактором, фиксирует v2 в самом файле.
