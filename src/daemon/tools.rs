@@ -19,7 +19,7 @@ use crate::hybrid::jobs::{self as hybrid_jobs, Coverage};
 use crate::hybrid::meta::{
     self, AnnState, Degraded, FiltersMeta, ScoreScale, SearchMeta, Stage, TrimmedMeta,
 };
-use crate::hybrid::rrf::rrf_merge;
+use crate::hybrid::rrf::{RrfSettings, rrf_merge_with_settings};
 use crate::hybrid::work::Cancellation;
 use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
@@ -473,16 +473,40 @@ pub fn search_docs_from<Guard>(
     args: &Value,
     admit: impl Fn() -> Result<Guard>,
 ) -> Result<Value> {
-    let settings = lexical_settings::standalone()?;
-    search_docs_with_lexical_settings(context, source, args, admit, settings)
+    let settings = SearchRankingSettings::standalone()?;
+    search_docs_with_ranking_settings(context, source, args, admit, settings)
 }
 
-pub(super) fn search_docs_with_lexical_settings<Guard>(
+#[derive(Clone, Copy)]
+pub(super) struct SearchRankingSettings {
+    lexical: LexicalSettings,
+    rrf: RrfSettings,
+}
+
+impl SearchRankingSettings {
+    fn standalone() -> Result<Self> {
+        Ok(Self {
+            lexical: lexical_settings::standalone()?,
+            rrf: crate::hybrid::rrf::settings::standalone()?,
+        })
+    }
+}
+
+impl From<&Config> for SearchRankingSettings {
+    fn from(config: &Config) -> Self {
+        Self {
+            lexical: config.lexical,
+            rrf: config.rrf,
+        }
+    }
+}
+
+pub(super) fn search_docs_with_ranking_settings<Guard>(
     context: &SearchContext<'_>,
     source: MetadataSource<'_>,
     args: &Value,
     admit: impl Fn() -> Result<Guard>,
-    settings: LexicalSettings,
+    settings: SearchRankingSettings,
 ) -> Result<Value> {
     match start_search(context, source, args, &admit, settings)? {
         SearchStart::Complete(value) => Ok(value),
@@ -502,6 +526,7 @@ pub(super) struct StartedSearch {
     active: ActiveStages,
     fetch: usize,
     lexical: LexicalSnapshot,
+    rrf: RrfSettings,
     dense_started: std::time::Instant,
 }
 impl StartedSearch {
@@ -525,7 +550,7 @@ pub(super) fn start_search<Guard>(
     source: MetadataSource<'_>,
     args: &Value,
     admit: impl Fn() -> Result<Guard>,
-    settings: LexicalSettings,
+    settings: SearchRankingSettings,
 ) -> Result<SearchStart> {
     context.operation.check()?;
     if source.cache_root() != context.cache {
@@ -559,12 +584,13 @@ pub(super) fn start_search<Guard>(
         .map(SearchStart::Complete);
     }
     let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
-    let lexical = lexical_snapshot(context, source, &admit, &arguments, fetch, settings)?;
+    let lexical = lexical_snapshot(context, source, &admit, &arguments, fetch, settings.lexical)?;
     Ok(SearchStart::Prepared(StartedSearch {
         arguments,
         active,
         fetch,
         lexical,
+        rrf: settings.rrf,
         dense_started: std::time::Instant::now(),
     }))
 }
@@ -935,14 +961,8 @@ fn prepare_search<Guard>(
     arguments: SearchArgs,
 ) -> Result<PreparedSearch> {
     let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
-    let lexical = lexical_snapshot(
-        context,
-        source,
-        admit,
-        &arguments,
-        fetch,
-        lexical_settings::standalone()?,
-    )?;
+    let settings = SearchRankingSettings::standalone()?;
+    let lexical = lexical_snapshot(context, source, admit, &arguments, fetch, settings.lexical)?;
     prepare_with_query_vector(
         context,
         source,
@@ -952,6 +972,7 @@ fn prepare_search<Guard>(
             active,
             fetch,
             lexical,
+            rrf: settings.rrf,
             dense_started: std::time::Instant::now(),
         },
         None,
@@ -971,6 +992,7 @@ pub(super) fn prepare_with_query_vector<Guard>(
         active,
         mut fetch,
         mut lexical,
+        rrf,
         dense_started,
     } = start;
     let mut refill = Refill::new(
@@ -1013,7 +1035,11 @@ pub(super) fn prepare_with_query_vector<Guard>(
         context.operation.check()?;
         let mut ordered = if active.rrf_active {
             let started = std::time::Instant::now();
-            let fused = rrf_merge(&lexical.hits, &dense_hits[..fetch.min(dense_hits.len())]);
+            let fused = rrf_merge_with_settings(
+                &lexical.hits,
+                &dense_hits[..fetch.min(dense_hits.len())],
+                rrf,
+            );
             fusion_ms = fusion_ms.saturating_add(elapsed_ms(started));
             fused
         } else {
@@ -2435,9 +2461,13 @@ mod tests {
     ];
 
     fn env() -> (TempDir, Db, crate::store::models::Project) {
+        env_with_docs(DOCS)
+    }
+
+    fn env_with_docs(docs: &[(&str, &str)]) -> (TempDir, Db, crate::store::models::Project) {
         let cache = TempDir::new().expect("cache");
         let root = TempDir::new().expect("root");
-        for (rel, body) in DOCS {
+        for (rel, body) in docs {
             fs::write(root.path().join(rel), body).expect("write doc");
         }
         let mut db = Db::open(cache.path()).expect("db");
@@ -2580,6 +2610,113 @@ mod tests {
         // With an empty cache and exact-only dense, no hits are expected but
         // the call must succeed.
         assert!(hits.len() <= 10);
+    }
+
+    struct BetaEmbedder;
+
+    impl Embedder for BetaEmbedder {
+        fn model_id(&self) -> &'static str {
+            "test/fusion@d2@l2"
+        }
+
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    if text.contains("beta") {
+                        vec![1.0, 0.0]
+                    } else if text.contains("gamma") {
+                        vec![0.6, 0.8]
+                    } else {
+                        vec![0.0, 1.0]
+                    }
+                })
+                .collect())
+        }
+
+        fn embed_query(&self, _text: &str) -> Result<Vec<f32>> {
+            Ok(vec![1.0, 0.0])
+        }
+    }
+
+    #[test]
+    fn v2_fusion_weights_change_rank_and_reach_refill() {
+        let gamma_paragraph = format!("gamma gamma {}\n\n", "x".repeat(1000));
+        let gamma = format!("# Gamma\n\n{}", gamma_paragraph.repeat(4));
+        let (cache, db, project) =
+            env_with_docs(&[("a.md", "unrelated"), ("b.md", "beta"), ("c.md", &gamma)]);
+        crate::hybrid::jobs::embed_project_chunks_with(&db, &BetaEmbedder, project.id).unwrap();
+        let stages = HybridStages {
+            embedder: Some(Arc::new(BetaEmbedder)),
+            reranker: None,
+            ranking: Ranking::Rrf,
+        };
+        let dense = DenseCache::new();
+        let policy = crate::search::settings::standalone().unwrap();
+        let budget = PayloadBudget::new(policy.settings().clone()).unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let config_file = config_dir.path().join("config.toml");
+
+        let search = |rrf_table: &str, args: &Value| {
+            fs::write(&config_file, format!("config_version = 2\n{rrf_table}")).unwrap();
+            let config = Config::load_from(config_dir.path(), None).unwrap();
+            search_docs_with_ranking_settings(
+                &SearchContext {
+                    stages: &stages,
+                    dense: &dense,
+                    cache: cache.path(),
+                    project: &project,
+                    window: 2,
+                    ann_search: None,
+                    payload_budget: &budget,
+                    operation: SearchOperation::new(
+                        policy.settings(),
+                        std::time::Instant::now(),
+                        Cancellation::new(),
+                    )
+                    .unwrap(),
+                },
+                MetadataSource::Borrowed(&db),
+                args,
+                || Ok(()),
+                SearchRankingSettings::from(&config),
+            )
+            .unwrap()
+        };
+
+        let plain = json!({"query": "gamma", "limit": 2, "explain": true});
+        let before = search("", &plain);
+        assert_eq!(before["hits"][0]["path"], "c.md");
+        let after = search(
+            "[rrf]\nrank_constant = 1\nlexical_weight = 0.25\ndense_weight = 4.0\n",
+            &plain,
+        );
+        assert_eq!(after["hits"][0]["path"], "b.md");
+        assert_eq!(after["hits"][0]["score"], 2.0);
+        assert_eq!(
+            after["meta"]["index_generation"],
+            before["meta"]["index_generation"]
+        );
+
+        let dedupe = json!({
+            "query": "gamma", "limit": 2, "explain": true, "dedupe": "path", "n_per_doc": 1
+        });
+        let refilled = search(
+            "[rrf]\nrank_constant = 1\nlexical_weight = 4.0\ndense_weight = 0.25\n",
+            &dedupe,
+        );
+        assert!(
+            refilled["meta"]["refill"]["rounds"].as_u64().unwrap() > 1,
+            "{refilled}"
+        );
+        assert_eq!(refilled["hits"][0]["path"], "c.md");
+        assert!(refilled["hits"][0]["score"].as_f64().unwrap() >= 2.0);
+        assert_eq!(refilled["hits"][1]["path"], "b.md");
+        assert_eq!(refilled["hits"][1]["score"], 0.125);
+        assert_eq!(
+            refilled["meta"]["index_generation"],
+            before["meta"]["index_generation"]
+        );
     }
 
     #[test]

@@ -103,7 +103,7 @@ impl SearchSession {
             MetadataSource::Prepared(&self.owners.readers),
             args,
             || self.preparation(),
-            self.config.lexical,
+            self.config.as_ref().into(),
         )
     }
     async fn query_vector(

@@ -830,3 +830,55 @@ fn v2_lexical_collection_rejects_unsafe_score_or_growth() {
         assert!(error.to_string().contains(key), "{key} = {value}: {error}");
     }
 }
+
+#[test]
+fn v2_rrf_inherits_individual_fields_and_refuses_invalid_scoring() {
+    let global = TempDir::new().expect("global");
+    let project = TempDir::new().expect("project");
+    layer(
+        &global,
+        "config.toml",
+        "config_version = 2\n[rrf]\nrank_constant = 25\ndense_weight = 2.0\n",
+    );
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2\n[rrf]\ndense_weight = 0.5\n",
+    );
+    let view = docsbase_memory::config::view::load_from(global.path(), Some(project.path()))
+        .expect("rrf settings resolve");
+    let field = |key| view.fields.iter().find(|field| field.key == key).unwrap();
+    let rank = field("rrf.rank_constant");
+    assert_eq!(rank.value, 25);
+    assert_eq!(
+        rank.origin.source,
+        SourceId::Global(global.path().join("config.toml"))
+    );
+    let dense = field("rrf.dense_weight");
+    assert_eq!(dense.value, 0.5);
+    assert_eq!(
+        dense.origin.source,
+        SourceId::Project(project.path().join(".docsbase.toml"))
+    );
+    let lexical = field("rrf.lexical_weight");
+    assert_eq!(lexical.value, 1.0);
+    assert_eq!(lexical.origin.source, SourceId::Defaults);
+
+    for (text, message) in [
+        ("[rrf]\nrank_constant = 0", "rrf.rank_constant"),
+        ("[rrf]\ndense_weight = 0.0", "rrf.dense_weight"),
+        ("[rrf]\nlexical_weight = -1.0", "rrf.lexical_weight"),
+        ("[rrf]\ndense_weight = nan", "rrf.dense_weight"),
+        ("[rrf]\nlexical_weight = 1e80", "rrf.lexical_weight"),
+        ("[rrf]\ndense_weight = 1e-80", "rrf.dense_weight"),
+        ("rrf = [10, 1.0, 2.0]", "require a table"),
+    ] {
+        layer(
+            &project,
+            ".docsbase.toml",
+            &format!("config_version = 2\n{text}\n"),
+        );
+        let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+        assert!(error.to_string().contains(message), "{text}: {error}");
+    }
+}

@@ -1137,3 +1137,14 @@ sidecar-файлы перед чтением последней зафиксир
 `FlushFileBuffers` на handle файла подтверждает буферы файла. Windows
 документирует flush всего тома для процесса с правами администратора.
 [Microsoft FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
+
+## Delta 2026-11-25 — I11, конфигурация слияния рангов
+
+`[rrf]` разрешается независимо от включения hybrid и передаётся запросу в
+том же снимке, что lexical settings. Вес умножает вклад своего списка.
+Сумма весов с дефолтами равна двум для сохранения исходной шкалы
+выдачи. При минимальном допустимом знаменателе два
+вклада даже для максимальных конечных весов не переполняют f32.
+Исторический tie-break при равных итоговых score сохраняется. Скопированное
+значение повторно используется при refill. BM25, векторы и ANN от этих
+настроек не зависят. [OpenSearch RRF](https://docs.opensearch.org/latest/vector-search/ai-search/hybrid-search/rrf/)

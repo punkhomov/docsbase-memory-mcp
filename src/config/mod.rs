@@ -10,6 +10,7 @@ use crate::daemon::settings::{DaemonPatch, DaemonSettings, DaemonSpec};
 use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridCfg, HybridDefaults, HybridPatch, HybridSpec, ProvidersCfg};
 use crate::hybrid::remote_settings::{RemotePatch, RemoteSettings, RemoteSpec};
+use crate::hybrid::rrf::{RrfSettings, settings::RrfSpec};
 use crate::index::settings::{ChunkSettings, ChunkSpec, IndexFilePatch};
 use crate::index::{LexicalSettings, lexical_settings::LexicalSpec};
 use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
@@ -59,6 +60,8 @@ pub struct Config {
     pub watch: WatchSettings,
     /// Project BM25 scoring and candidate collection policy.
     pub lexical: LexicalSettings,
+    /// Project scoring policy for reciprocal rank fusion.
+    pub rrf: RrfSettings,
     /// Register and index a project automatically on first connection (ADR-6: off).
     pub auto_index: bool,
     /// Hybrid retrieval feature flag (phase 2; off in v1).
@@ -251,6 +254,7 @@ impl Config {
         if self.ann_search == previous.ann_search
             && self.watch == previous.watch
             && self.lexical == previous.lexical
+            && self.rrf == previous.rrf
         {
             self != previous
         } else {
@@ -258,6 +262,7 @@ impl Config {
             previous.ann_search = self.ann_search;
             previous.watch = self.watch;
             previous.lexical = self.lexical;
+            previous.rrf = self.rrf;
             self != &previous
         }
     }
@@ -296,7 +301,8 @@ impl Config {
         SearchSpec::validate(&self.search, &Capabilities::current())?;
         DaemonSpec::validate(&self.daemon, &Capabilities::current())?;
         RemoteSpec::validate(&self.remote, &Capabilities::current())?;
-        LexicalSpec::validate(&self.lexical, &Capabilities::current())
+        LexicalSpec::validate(&self.lexical, &Capabilities::current())?;
+        RrfSpec::validate(&self.rrf, &Capabilities::current())
     }
 }
 
@@ -407,6 +413,7 @@ impl SettingsSpec for ConfigSpec {
         fields.extend_from_slice(AnnSearchSpec::FIELDS);
         fields.extend_from_slice(AnnBuildSpec::FIELDS);
         fields.extend_from_slice(LexicalSpec::FIELDS);
+        fields.extend_from_slice(RrfSpec::FIELDS);
         fields
     }
     fn defaults(context: &DefaultsContext) -> Self::Defaults {
@@ -426,6 +433,7 @@ impl SettingsSpec for ConfigSpec {
             remote: RemoteSpec::initial(&remote),
             watch: WatchSpec::initial(&watch),
             lexical: LexicalSpec::defaults(context),
+            rrf: RrfSpec::defaults(context),
             auto_index: false,
             hybrid: false,
             hybrid_cfg: HybridSpec::initial(&hybrid),
@@ -591,7 +599,8 @@ impl ConfigSpec {
             view.push(key, serde_json::json!(value), None)?;
         }
         WatchSpec::view_fields(settings.watch, view)?;
-        LexicalSpec::view_fields(settings.lexical, view)
+        LexicalSpec::view_fields(settings.lexical, view)?;
+        RrfSpec::view_fields(settings.rrf, view)
     }
 }
 

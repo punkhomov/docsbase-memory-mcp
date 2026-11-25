@@ -2,6 +2,9 @@
 
 use std::collections::HashMap;
 
+pub(crate) mod settings;
+pub use settings::RrfSettings;
+
 /// `k` of the RRF formula (FR-16; Elasticsearch default).
 pub const RRF_K: u32 = 60;
 
@@ -14,6 +17,14 @@ pub const RRF_K: u32 = 60;
 /// only its best rank.
 #[must_use]
 pub fn rrf_merge(bm25: &[(u64, f32)], dense: &[(u64, f32)]) -> Vec<(u64, f32)> {
+    rrf_merge_with_settings(bm25, dense, RrfSettings::DEFAULTS)
+}
+
+pub(crate) fn rrf_merge_with_settings(
+    bm25: &[(u64, f32)],
+    dense: &[(u64, f32)],
+    settings: RrfSettings,
+) -> Vec<(u64, f32)> {
     #[derive(Default)]
     struct Acc {
         score: f32,
@@ -22,10 +33,20 @@ pub fn rrf_merge(bm25: &[(u64, f32)], dense: &[(u64, f32)]) -> Vec<(u64, f32)> {
         bm25: f32,
     }
 
-    fn add_list(acc: &mut HashMap<u64, Acc>, list: &[(u64, f32)], is_bm25: bool) {
+    fn add_list(
+        acc: &mut HashMap<u64, Acc>,
+        list: &[(u64, f32)],
+        is_bm25: bool,
+        settings: RrfSettings,
+    ) {
+        let weight = if is_bm25 {
+            settings.lexical_weight
+        } else {
+            settings.dense_weight
+        };
         let mut first_seen: HashMap<u64, (u32, f32)> = HashMap::new();
         for (index, (id, value)) in list.iter().enumerate() {
-            let rank = u32::try_from(index).map_or(u32::MAX, |i| i + 1);
+            let rank = u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1);
             first_seen.entry(*id).or_insert((rank, *value));
         }
         for (id, (rank, value)) in first_seen {
@@ -36,7 +57,7 @@ pub fn rrf_merge(bm25: &[(u64, f32)], dense: &[(u64, f32)]) -> Vec<(u64, f32)> {
                 bm25: f32::NEG_INFINITY,
             });
             #[allow(clippy::cast_precision_loss)]
-            let term = 1.0 / RRF_K.saturating_add(rank) as f32;
+            let term = weight / (u64::from(settings.rank_constant) + u64::from(rank)) as f32;
             entry.score += term;
             entry.lists += 1;
             entry.best_rank = entry.best_rank.min(rank);
@@ -47,8 +68,8 @@ pub fn rrf_merge(bm25: &[(u64, f32)], dense: &[(u64, f32)]) -> Vec<(u64, f32)> {
     }
 
     let mut acc: HashMap<u64, Acc> = HashMap::new();
-    add_list(&mut acc, bm25, true);
-    add_list(&mut acc, dense, false);
+    add_list(&mut acc, bm25, true, settings);
+    add_list(&mut acc, dense, false, settings);
     let mut fused: Vec<(u64, f32, u8, u32, f32)> = acc
         .into_iter()
         .map(|(id, entry)| (id, entry.score, entry.lists, entry.best_rank, entry.bm25))
