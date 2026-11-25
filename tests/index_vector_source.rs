@@ -155,6 +155,30 @@ fn full_and_incremental_use_one_owner_and_skip_unchanged_chunks() {
 }
 
 #[test]
+fn identical_chunk_text_reuses_vectors_after_recipe_change() {
+    let mut env = Fixture::new();
+    assert_eq!(env.full().unwrap().docs, 2);
+    assert_eq!(env.coverage(), (2, 2));
+    let config = Config {
+        chunk: docsbase_memory::index::settings::ChunkSettings::new(250, 0).unwrap(),
+        ..Config::default()
+    };
+    env.probe.fail.store(true, Ordering::SeqCst);
+    let stats = run_full_with_embedding(
+        &mut env.db,
+        &mut env.index,
+        &env.project,
+        &config,
+        &IndexEmbedding::new(&env.source, Some(&env.probe)),
+    )
+    .unwrap();
+    assert_eq!(stats.docs, 2);
+    assert_eq!(stats.chunks, 2);
+    assert_eq!(env.coverage(), (2, 2));
+    assert_eq!(env.probe.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn failed_full_embedding_preserves_markers_for_same_content_retry() {
     let mut env = Fixture::new();
     env.probe.fail.store(true, Ordering::SeqCst);

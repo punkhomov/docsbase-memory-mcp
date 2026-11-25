@@ -53,12 +53,12 @@ fn inspect(cache: &Path) -> ProjectIndexObservation {
 }
 
 #[test]
-fn v3_observation_uses_the_real_legacy_pair() {
+fn v4_observation_uses_the_real_legacy_pair() {
     let cache = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     let revision = index(cache.path(), root.path(), "# Cherry\n\ncherry orchard\n");
     let ProjectIndexObservation::Present(binding) = inspect(cache.path()) else {
-        panic!("existing v3 pair must be observable");
+        panic!("existing v4 pair must be observable");
     };
     assert_eq!(binding.layout, ProjectIndexLayout::Legacy);
     assert_eq!(binding.content_revision, revision);

@@ -6,6 +6,7 @@ use std::path::Path;
 use super::bootstrap::DefaultsContext;
 use super::schema::{Capabilities, Provenance, Resolved, SettingsSpec, SourceId};
 use crate::error::{Error, Result};
+use crate::watch::settings::WatchSpec;
 
 /// A resolution owns one immutable defaults catalog and stages patches atomically.
 pub struct Resolution<S: SettingsSpec> {
@@ -95,13 +96,12 @@ pub fn resolve_component<S: SettingsSpec>(
 }
 
 use super::source::{SourceLayer, invalid};
-use super::{Config, ConfigSpec, read_capped, read_project};
+use super::{Config, ConfigSpec, read_capped, read_capped_if_exists, read_project};
 
 fn global_resolution(config_dir: &Path) -> Result<Resolution<ConfigSpec>> {
     let mut resolution = Resolution::new(&DefaultsContext::standalone());
     let path = config_dir.join("config.toml");
-    if path.exists() {
-        let text = read_capped(&path)?;
+    if let Some(text) = read_capped_if_exists(&path)? {
         let document = super::parse_global_document(&path, &text)?;
         let source = SourceId::Global(path.clone());
         if is_v2(&document) {
@@ -109,6 +109,8 @@ fn global_resolution(config_dir: &Path) -> Result<Resolution<ConfigSpec>> {
         } else {
             resolution.apply(&source, super::decode_global_document(&path, document)?)?;
         }
+    } else {
+        resolution.bind_vector_policy(&crate::vector_cache::settings::standalone()?)?;
     }
     // An invalid global is rejected even if a later project could replace it.
     resolution.validate()?;
@@ -153,37 +155,48 @@ impl Resolution<ConfigSpec> {
             .map_err(|_| invalid("invalid hybrid stage settings in versioned source"))?;
             self.settings.hybrid = self.settings.hybrid_cfg.enabled;
         }
+        if let Some(patch) = layer.watch {
+            WatchSpec::overlay(
+                &mut self.settings.watch,
+                patch,
+                &self.defaults.watch,
+                &layer.source,
+                &mut self.origins,
+            )?;
+        }
         self.validate()
             .map_err(|_| invalid("invalid effective settings in versioned source"))
     }
 
     fn apply_v2_global(&mut self, layer: &SourceLayer) -> Result<()> {
-        use crate::vector_cache::settings::{VectorStorePatch, VectorStoreSpec};
-
         self.apply_source(layer)?;
-        let policy = resolve_component::<VectorStoreSpec>(
-            &DefaultsContext::standalone(),
-            [(
-                layer.source.clone(),
-                VectorStorePatch {
-                    max_bytes: layer.vector_max_bytes,
-                    ..VectorStorePatch::default()
-                },
-            )],
-        )?
-        .into_settings();
-        let origin = if layer.vector_max_bytes.is_some() {
-            &layer.source
-        } else {
-            &SourceId::Defaults
-        };
-        self.origins.rebind(
-            "hybrid.cache.max_bytes",
-            crate::vector_cache::V2_MAX_BYTES_FIELD,
-            origin,
-        )?;
-        self.settings.hybrid_cfg.cache.max_bytes = policy.max_bytes;
-        self.settings.vector_store = Some(policy);
+        let policy = layer
+            .vector_store
+            .as_ref()
+            .ok_or_else(|| invalid("v2 global vector policy absent"))?;
+        self.bind_vector_policy(policy)
+    }
+
+    fn bind_vector_policy(
+        &mut self,
+        policy: &Resolved<crate::vector_cache::settings::VectorStoreSettings>,
+    ) -> Result<()> {
+        use crate::vector_cache::settings::{MAX_BYTES_FIELD, VectorStoreSpec};
+
+        for &field in VectorStoreSpec::FIELDS {
+            let origin = policy
+                .provenance()
+                .get(field.key)
+                .ok_or_else(|| invalid("v2 vector policy provenance absent"))?;
+            if field == MAX_BYTES_FIELD {
+                self.origins
+                    .rebind("hybrid.cache.max_bytes", field, &origin.source)?;
+            } else {
+                self.origins.include(field, &origin.source)?;
+            }
+        }
+        self.settings.hybrid_cfg.cache.max_bytes = policy.settings().max_bytes;
+        self.settings.vector_store = Some(policy.settings().clone());
         Ok(())
     }
 
@@ -358,6 +371,12 @@ pub(crate) fn launch_resolution(
                     .map_err(|error| LaunchFailure::classify(error, website))?,
             )
             .map_err(|error| LaunchFailure::classify(error, website))?;
+    } else {
+        let policy =
+            crate::vector_cache::settings::standalone().map_err(LaunchFailure::Versioned)?;
+        resolution
+            .bind_vector_policy(&policy)
+            .map_err(LaunchFailure::Versioned)?;
     }
     // Invalid globals never disappear behind a later CLI selector.
     resolution
@@ -400,6 +419,10 @@ impl LaunchFailure {
 // errors, never daemon owner, recognized Website or CLI errors.
 pub(crate) struct LaunchResolution(Resolution<ConfigSpec>);
 impl LaunchResolution {
+    pub(crate) fn legacy_defaults() -> Self {
+        Self(Resolution::new(&DefaultsContext::standalone()))
+    }
+
     pub(crate) fn finish(
         mut self,
         patch: crate::daemon::settings::DaemonPatch,
@@ -432,7 +455,7 @@ pub(super) fn for_provided_project(global: &Config, root: &Path) -> Result<Resol
 }
 
 /// Resolves caller-supplied versioned sources for offline review only.
-/// Ordinary file loaders deliberately do not activate the v2 source format.
+/// A preview confers no permission to publish or apply file changes.
 ///
 /// # Errors
 /// Invalid source order, scope, stage settings or unsupported configuration.
@@ -440,7 +463,7 @@ pub fn preview_sources(
     global: &super::source::SourceLayer,
     project: Option<&super::source::SourceLayer>,
 ) -> Result<super::source::SourcePreview> {
-    use super::source::{ConfigVersion, PreviewConflict, SourcePreview, invalid};
+    use super::source::{PreviewConflict, SourcePreview, invalid};
     if !matches!(global.source, SourceId::Global(_))
         || project.is_some_and(|p| !matches!(p.source, SourceId::Project(_)))
     {
@@ -449,17 +472,12 @@ pub fn preview_sources(
         ));
     }
     let mut resolution = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone());
-    let strict_cap = (global.version == ConfigVersion::V2).then(|| {
-        global
-            .vector_max_bytes
-            .unwrap_or(resolution.settings.hybrid_cfg.cache.max_bytes)
-    });
     for layer in std::iter::once(global).chain(project) {
         resolution.apply_source(layer)?;
     }
     let legacy_vector_max_bytes = resolution.settings.hybrid_cfg.cache.max_bytes;
     let mut conflicts = Vec::new();
-    if let Some(cap) = strict_cap {
+    if let Some(policy) = &global.vector_store {
         if let Some(project) = project
             && let Some(max_bytes) = project.legacy_vector_override()
         {
@@ -468,17 +486,7 @@ pub fn preview_sources(
                 max_bytes,
             });
         }
-        resolution.settings.hybrid_cfg.cache.max_bytes = cap;
-        let origin = if global.vector_max_bytes.is_some() {
-            global.source.clone()
-        } else {
-            SourceId::Defaults
-        };
-        resolution.origins.rebind(
-            "hybrid.cache.max_bytes",
-            crate::vector_cache::V2_MAX_BYTES_FIELD,
-            &origin,
-        )?;
+        resolution.bind_vector_policy(policy)?;
     }
     Ok(SourcePreview {
         effective: resolution.finish()?,

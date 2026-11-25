@@ -232,6 +232,9 @@ fn recipe_changes_only_with_index_inputs_and_algorithm_identity() {
     changed = config.clone();
     changed.ignores.push("private/**".to_owned());
     assert_ne!(outcome::recipe_id(&changed), recipe);
+    changed = config.clone();
+    changed.chunk = docsbase_memory::index::settings::ChunkSettings::new(1500, 0).unwrap();
+    assert_ne!(outcome::recipe_id(&changed), recipe);
     let mut irrelevant = config.clone();
     irrelevant.auto_index = !irrelevant.auto_index;
     irrelevant.hybrid = !irrelevant.hybrid;
@@ -326,7 +329,14 @@ fn v2_upgrade_preserves_lexical_data_without_inventing_historical_completeness()
     let before = env.read().index_generation;
     let conn = env.db().connection();
     conn.execute("INSERT INTO projects (canonical_root,name,status,schema_version,created_at) VALUES (?1,'stale','indexed',1,0)", [env.project.canonical_root.join("stale").to_string_lossy()]).unwrap();
-    conn.execute_batch("ALTER TABLE projects DROP COLUMN index_attempt; ALTER TABLE projects DROP COLUMN index_outcome_json; UPDATE projects SET schema_version=2 WHERE id=1; PRAGMA user_version=2;").unwrap();
+    conn.execute_batch(
+        "ALTER TABLE projects DROP COLUMN index_attempt;
+         ALTER TABLE projects DROP COLUMN index_outcome_json;
+         ALTER TABLE docs DROP COLUMN chunk_recipe;
+         UPDATE projects SET schema_version=2 WHERE id=1;
+         PRAGMA user_version=2;",
+    )
+    .unwrap();
     drop(env.db.take());
     env.db = Some(Db::open(env.cache.path()).unwrap());
     let project = registry::project_by_id(env.db(), 1).unwrap().unwrap();
@@ -358,8 +368,9 @@ fn v2_upgrade_preserves_lexical_data_without_inventing_historical_completeness()
         1
     );
     let stats = env.full(&Config::default());
-    assert_eq!(stats.skipped, 1);
+    assert_eq!(stats.docs, 1);
     assert!(env.read().is_complete());
+    assert_eq!(env.full(&Config::default()).skipped, 1);
 }
 
 #[test]

@@ -20,9 +20,10 @@ use std::time::{Duration, Instant};
 use crate::config::schema::SettingsSpec;
 use crate::error::{Error, Result};
 use crate::hybrid::ann::{self, AnnIndex};
+use crate::hybrid::ann_settings::AnnBuildSettings;
 #[cfg(test)]
 use crate::hybrid::ann_store;
-use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore};
+use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnSlotAccess, AnnSlotPin, AnnStore};
 use crate::hybrid::dense_metadata::DenseMetadata;
 use crate::hybrid::dense_settings::{DenseSettings, DenseSpec, QueryCacheSettings};
 use crate::hybrid::flight::{Flights, WorkResult};
@@ -61,21 +62,17 @@ pub const QUERY_CACHE_MAX_BYTES: u64 = super::dense_settings::DEFAULT_QUERY_CACH
 /// alive. Mirrors the admission check in [`DenseCache::resolve_rows_checked`].
 #[must_use]
 pub fn ann_build_admitted(count: usize, dim: usize, max_bytes: u64) -> bool {
-    let Some(exact) = count
-        .checked_mul(dim)
-        .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
-        .and_then(|bytes| u64::try_from(bytes).ok())
-    else {
-        return false;
-    };
-    let Some(estimated) =
-        ann::checked_ann_estimated_bytes(count, dim).and_then(|bytes| u64::try_from(bytes).ok())
-    else {
-        return false;
-    };
-    estimated
-        .checked_add(exact)
-        .is_some_and(|peak| peak <= max_bytes)
+    ann_build_peak_bytes(count, dim).is_some_and(|peak| peak <= max_bytes)
+}
+
+fn ann_build_peak_bytes(count: usize, dim: usize) -> Option<u64> {
+    let exact = count
+        .checked_mul(dim)?
+        .checked_mul(std::mem::size_of::<f32>())?;
+    let estimated = ann::checked_ann_estimated_bytes(count, dim)?;
+    u64::try_from(estimated)
+        .ok()?
+        .checked_add(u64::try_from(exact).ok()?)
 }
 
 /// [`ann_build_admitted`] for a cache model id that encodes the width
@@ -416,6 +413,7 @@ struct Entry {
     state: DenseRows,
     generation: i64,
     model_id: String,
+    ann_build: AnnBuildSettings,
     last_used: u64,
     bytes: u64,
 }
@@ -427,9 +425,9 @@ struct CachedDigest {
 
 type DigestCache = HashMap<(i64, i64), CachedDigest>;
 
-/// Charged until the worker drops its working set, independently of LRU or
-/// generation replacement. Reservations are acquired under the entries lock;
-/// dropping one can only reduce the charge and needs no entries lock.
+/// Charge for a build or cold ANN load until the working set is dropped or
+/// transfers to a resident entry. Acquired under the entries lock and released
+/// independently of LRU or generation replacement.
 struct BuildReservation {
     bytes: u64,
     total: Arc<AtomicU64>,
@@ -465,7 +463,6 @@ struct BuildJob {
     /// (Delta 0.3; FR-7/NFR-4 count the whole resident working set).
     building_bytes: u64,
     dim: usize,
-    store_root: Option<PathBuf>,
     job_pin: Option<crate::vector_cache::JobPinAuthority>,
     activity: Option<Arc<crate::daemon::request::Activity>>,
 }
@@ -648,6 +645,7 @@ struct ColdKey {
     project_id: i64,
     generation: i64,
     model_id: String,
+    ann_build: AnnBuildSettings,
 }
 
 #[derive(Clone, Copy)]
@@ -656,15 +654,28 @@ enum Lookup {
     Warm,
 }
 
+#[derive(PartialEq, Eq)]
+enum BuildAdmission {
+    Allowed,
+    WorkerPressure,
+    ResidentLimit,
+}
+
+enum AnnLoad {
+    Missing,
+    Deferred,
+    Retained(DenseRows),
+}
+
 #[cfg(test)]
 type AnnLoadObserver = Arc<dyn Fn(&ann_store::AnnSlot, bool) + Send + Sync>;
 
-/// Per-project dense cache keyed by `(index generation, model_id)` with an
-/// optional ANN tier (spec ann-index): a new generation or embedding model
-/// replaces the entry, a no-op sync keeps it.
+/// Per-project dense cache keyed by generation, model and ANN build settings.
+/// A no-op sync keeps the current entry.
 pub struct DenseCache {
     limits: DenseCacheLimits,
     policy: AnnPolicy,
+    ann_build: AnnBuildSettings,
     store: Option<AnnStore>,
     bound_root: Arc<Mutex<Option<PathBuf>>>,
     cold_flights: Arc<Flights<ColdKey, DenseRows>>,
@@ -744,14 +755,17 @@ impl DenseCache {
         settings: &DenseSettings,
         config: &crate::config::Config,
     ) -> Result<Self> {
-        if let Some(vectors) = &config.vector_store {
+        let mut dense = if let Some(vectors) = &config.vector_store {
             DenseSpec::validate(settings, &crate::config::schema::Capabilities::current())?;
-            let owner = VectorStore::acquire(cache, vectors)?;
-            return Self::with_vector_store(policy, &owner, settings);
-        }
-        let mut effective = settings.clone();
-        effective.vector_cache_max_bytes = config.hybrid_cfg.cache.max_bytes;
-        Self::with_settings(policy, cache, &effective)
+            let owner = VectorStore::reserve(cache, vectors)?;
+            Self::with_vector_store(policy, &owner, settings)?
+        } else {
+            let mut effective = settings.clone();
+            effective.vector_cache_max_bytes = config.hybrid_cfg.cache.max_bytes;
+            Self::with_settings(policy, cache, &effective)?
+        };
+        dense.ann_build = config.ann_build;
+        Ok(dense)
     }
 
     /// Explicit connection policy for jobs, coverage and streaming fallback.
@@ -871,6 +885,7 @@ impl DenseCache {
         Self {
             limits,
             policy,
+            ann_build: AnnBuildSettings::owner_defaults(),
             store,
             bound_root: Arc::new(Mutex::new(root.map(Path::to_path_buf))),
             cold_flights: Arc::new(Flights::default()),
@@ -1101,6 +1116,7 @@ impl DenseCache {
         Self {
             limits: self.limits,
             policy: self.policy,
+            ann_build: self.ann_build,
             store: self.store.clone(),
             bound_root: Arc::new(Mutex::new(
                 self.bound_root
@@ -1266,7 +1282,10 @@ impl DenseCache {
     fn cached_rows(&self, request: DenseRequest<'_>, lookup: Lookup) -> Option<DenseRows> {
         let mut entries = self.lock_entries();
         let entry = entries.get_mut(&request.project_id)?;
-        if entry.generation != request.generation || entry.model_id != request.model_id {
+        if entry.generation != request.generation
+            || entry.model_id != request.model_id
+            || entry.ann_build != self.ann_build
+        {
             return None;
         }
         if matches!(lookup, Lookup::Get) {
@@ -1303,6 +1322,7 @@ impl DenseCache {
             project_id: request.project_id,
             generation: request.generation,
             model_id: request.model_id.to_owned(),
+            ann_build: self.ann_build,
         };
         let rows = self.cold_flights.run_checked(
             &key,
@@ -1359,10 +1379,11 @@ impl DenseCache {
         if chunks.len() > self.limits.max_vectors {
             return Ok(self.stash_too_large(project_id, generation, model_id, chunks));
         }
+        let dim_hint = model_dim(model_id);
         // Refuse to materialise exact rows we already know exceed the byte
         // cap. The model id carries the width (`...@d2048@l2`), so this check
         // usually happens before any vector is decoded (FR-7/NFR-4).
-        if let Some(dim) = model_dim(model_id)
+        if let Some(dim) = dim_hint
             && let Some(exact_bytes) = chunks
                 .len()
                 .checked_mul(dim)
@@ -1389,7 +1410,7 @@ impl DenseCache {
         if self.policy != AnnPolicy::Disabled
             && self.store.is_some()
             && chunks.len() >= self.limits.min_vectors
-            && let Some(dim) = model_dim(model_id)
+            && let Some(dim) = dim_hint
             && ann::checked_ann_estimated_bytes(chunks.len(), dim)
                 .and_then(|bytes| u64::try_from(bytes).ok())
                 .is_some_and(|bytes| bytes <= self.limits.max_bytes)
@@ -1403,37 +1424,40 @@ impl DenseCache {
                 digest.clone(),
             );
             check()?;
-            if let Some(store) = &self.store
-                && let Ok(Some(slot)) = store.load(&key)
-            {
-                check()?;
-                let loaded = AnnIndex::load(&slot);
-                #[cfg(test)]
-                self.observe_ann_load(&slot, loaded.is_ok());
-                match loaded {
-                    Ok(ann) => {
-                        check()?;
-                        let state = DenseRows::Ann(Arc::new(ann));
-                        if let Some(retained) =
-                            self.stash(project_id, generation, model_id, state.clone())
-                        {
-                            return Ok(retained);
-                        }
-                        drop(state);
-                        return Ok(self.stream_transient(
-                            project_id,
-                            generation,
-                            model_id,
-                            Arc::new(chunks),
-                        ));
-                    }
-                    Err(err) => {
-                        eprintln!("warning: ann load failed: {err}; falling back to exact");
-                    }
+            match self.load_ann(&key, 0, check, || {})? {
+                AnnLoad::Missing => {}
+                AnnLoad::Retained(state) => return Ok(state),
+                AnnLoad::Deferred => {
+                    return Ok(self.stream_transient(
+                        project_id,
+                        generation,
+                        model_id,
+                        Arc::new(chunks),
+                    ));
                 }
             }
         }
         check()?;
+        // Under build pressure a miss will stream. Skip materializing the
+        // exact view first when the model identity already gives its width.
+        if self.policy == AnnPolicy::BuildOrLoad
+            && self.active_build_bytes.load(AtomicOrdering::Acquire) > 0
+            && chunks.len() >= self.limits.min_vectors
+            && let Some(peak) = dim_hint.and_then(|dim| ann_build_peak_bytes(chunks.len(), dim))
+        {
+            let busy = {
+                let entries = self.lock_entries();
+                self.build_admission(&entries, project_id, peak) == BuildAdmission::WorkerPressure
+            };
+            if busy {
+                return Ok(self.stream_transient(
+                    project_id,
+                    generation,
+                    model_id,
+                    Arc::new(chunks),
+                ));
+            }
+        }
         let input = self.load_rows(request, chunks, digest)?;
         check()?;
         self.resolve_rows_checked(project_id, generation, model_id, input, check, job_pin)
@@ -1475,6 +1499,69 @@ impl DenseCache {
         }
     }
 
+    fn load_ann(
+        &self,
+        key: &AnnKey,
+        exact_bytes: u64,
+        check: &impl Fn() -> WorkResult<()>,
+        before_publish: impl FnOnce(),
+    ) -> WorkResult<AnnLoad> {
+        let Some(store) = &self.store else {
+            return Ok(AnnLoad::Missing);
+        };
+        let Some(pin) = store.pin_slot(key, self.ann_build, AnnSlotAccess::Read) else {
+            return Ok(AnnLoad::Deferred);
+        };
+        let Ok(Some(slot)) = store.load_with_settings(key, self.ann_build) else {
+            return Ok(AnnLoad::Missing);
+        };
+        check()?;
+        let Some(bytes) = ann::checked_ann_estimated_bytes(key.chunk_count, key.dim)
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .and_then(|bytes| bytes.checked_add(exact_bytes))
+        else {
+            return Ok(AnnLoad::Deferred);
+        };
+        let mut reservation = {
+            // A load competes with every live build and cold load. Serialize
+            // reservation with build admission and release the entries lock
+            // before reading the graph from disk.
+            let _entries = self.lock_entries();
+            let active = self.active_build_bytes.load(AtomicOrdering::Acquire);
+            if self.limits.max_projects == 0
+                || bytes
+                    .checked_add(active)
+                    .is_none_or(|peak| peak > self.limits.max_bytes)
+            {
+                return Ok(AnnLoad::Deferred);
+            }
+            BuildReservation::new(self.active_build_bytes.clone(), bytes)
+        };
+        let loaded = AnnIndex::load(&slot);
+        #[cfg(test)]
+        self.observe_ann_load(&slot, loaded.is_ok());
+        check()?;
+        match loaded {
+            Ok(ann) => {
+                before_publish();
+                let state = DenseRows::Ann(Arc::new(ann.with_disk_pin(pin)));
+                Ok(self
+                    .stash_with_reservation(
+                        key.project_id,
+                        key.generation,
+                        &key.model_id,
+                        state,
+                        Some(&mut reservation),
+                    )
+                    .map_or(AnnLoad::Deferred, AnnLoad::Retained))
+            }
+            Err(err) => {
+                eprintln!("warning: ann load failed: {err}; falling back to exact");
+                Ok(AnnLoad::Missing)
+            }
+        }
+    }
+
     /// ANN/exact decision for already-loaded rows.
     fn resolve_rows_checked(
         &self,
@@ -1488,7 +1575,7 @@ impl DenseCache {
         let DenseInput {
             chunks,
             digest,
-            rows,
+            mut rows,
             dim,
             full_coverage,
         } = input;
@@ -1498,28 +1585,27 @@ impl DenseCache {
             .and_then(|bytes| bytes.checked_mul(4))
             .and_then(|bytes| u64::try_from(bytes).ok())
             .unwrap_or(u64::MAX);
-        let estimated = ann::ann_estimated_bytes(rows.len(), dim);
-        let (in_backoff, other_resident) = {
+        let building_bytes = ann_build_peak_bytes(rows.len(), dim).unwrap_or(u64::MAX);
+        let (in_backoff, admission) = {
             let entries = self.lock_entries();
             let in_backoff = matches!(entries.get(&project_id), Some(entry)
                 if entry.generation == generation
                     && entry.model_id == model_id
+                    && entry.ann_build == self.ann_build
                     && matches!(&entry.state, DenseRows::Failed(failed) if failed.retry_at > Instant::now()));
             // A build reservation must fit next to the projects already
             // resident, otherwise two admitted corpora would double the cap.
-            let other = self.charged_bytes(&entries, Some(project_id));
-            (in_backoff, other)
+            (
+                in_backoff,
+                self.build_admission(&entries, project_id, building_bytes),
+            )
         };
-        let building_bytes = u64::try_from(estimated)
-            .unwrap_or(u64::MAX)
-            .saturating_add(exact_bytes);
         let seek_ann = self.policy != AnnPolicy::Disabled
             && self.store.is_some()
             && self.limits.ann_build_eligible(chunks.len(), dim)
             && full_coverage
             && !in_backoff
-            && building_bytes <= self.limits.max_bytes
-            && building_bytes.saturating_add(other_resident) <= self.limits.max_bytes;
+            && admission != BuildAdmission::ResidentLimit;
         check()?;
         if !seek_ann {
             if exact_bytes > self.limits.max_bytes {
@@ -1527,41 +1613,26 @@ impl DenseCache {
             }
             return Ok(self.stash_ready(project_id, generation, model_id, rows, Arc::new(chunks)));
         }
+        if admission == BuildAdmission::WorkerPressure {
+            // Keep the fallback transient so lookup retries after the worker retires.
+            return Ok(self.stream_transient(project_id, generation, model_id, Arc::new(chunks)));
+        }
         let key = ann_key(project_id, generation, model_id, dim, chunks.len(), digest);
-        if let Some(store) = &self.store
-            && let Ok(Some(slot)) = store.load(&key)
-        {
-            check()?;
-            let loaded = AnnIndex::load(&slot);
-            #[cfg(test)]
-            self.observe_ann_load(&slot, loaded.is_ok());
-            check()?;
-            match loaded {
-                Ok(ann) => {
-                    let state = DenseRows::Ann(Arc::new(ann));
-                    drop(rows);
-                    if let Some(retained) =
-                        self.stash(project_id, generation, model_id, state.clone())
-                    {
-                        return Ok(retained);
-                    }
-                    drop(state);
-                    return Ok(self.stream_transient(
-                        project_id,
-                        generation,
-                        model_id,
-                        Arc::new(chunks),
-                    ));
-                }
-                Err(err) => {
-                    eprintln!("warning: ann load failed: {err}; falling back to exact");
-                }
+        match self.load_ann(&key, exact_bytes, check, || drop(std::mem::take(&mut rows)))? {
+            AnnLoad::Missing => {}
+            AnnLoad::Retained(state) => return Ok(state),
+            AnnLoad::Deferred => {
+                return Ok(self.stream_transient(
+                    project_id,
+                    generation,
+                    model_id,
+                    Arc::new(chunks),
+                ));
             }
         }
         check()?;
         if self.policy == AnnPolicy::BuildOrLoad {
             let hashes = Arc::new(chunks);
-            let store_root = self.store.as_ref().map(|store| store.root().to_path_buf());
             Ok(self.start_build(BuildJob {
                 project_id,
                 generation,
@@ -1571,7 +1642,6 @@ impl DenseCache {
                 key,
                 building_bytes,
                 dim,
-                store_root,
                 job_pin,
                 activity: self.origin_activity.clone(),
             }))
@@ -1670,6 +1740,7 @@ impl DenseCache {
             if let Some(entry) = entries.get(&job.project_id)
                 && entry.generation == job.generation
                 && entry.model_id == job.model_id
+                && entry.ann_build == self.ann_build
                 && matches!(entry.state, DenseRows::Building(_) | DenseRows::Ann(_))
             {
                 return entry.state.clone();
@@ -1678,19 +1749,41 @@ impl DenseCache {
             // two concurrent lookups must not both insert a reservation from a
             // stale snapshot (Delta 0.3.2; the resolve_rows check is a fast
             // path only). Falling back to exact keeps the cap honest.
-            let others = self.charged_bytes(&entries, Some(job.project_id));
-            if self.limits.max_projects == 0
-                || job.building_bytes.saturating_add(others) > self.limits.max_bytes
-            {
+            match self.build_admission(&entries, job.project_id, job.building_bytes) {
+                BuildAdmission::Allowed => {}
+                BuildAdmission::WorkerPressure => {
+                    drop(entries);
+                    return self.stream_transient(
+                        job.project_id,
+                        job.generation,
+                        &job.model_id,
+                        job.hashes,
+                    );
+                }
+                BuildAdmission::ResidentLimit => {
+                    drop(entries);
+                    return self.stash_ready(
+                        job.project_id,
+                        job.generation,
+                        &job.model_id,
+                        job.rows,
+                        job.hashes,
+                    );
+                }
+            }
+            let Some(pin) = self
+                .store
+                .as_ref()
+                .and_then(|store| store.pin_slot(&job.key, self.ann_build, AnnSlotAccess::Build))
+            else {
                 drop(entries);
-                return self.stash_ready(
+                return self.stream_transient(
                     job.project_id,
                     job.generation,
                     &job.model_id,
-                    job.rows,
                     job.hashes,
                 );
-            }
+            };
             let reservation =
                 BuildReservation::new(Arc::clone(&self.active_build_bytes), job.building_bytes);
             let cache = Arc::new(self.snapshot());
@@ -1698,6 +1791,7 @@ impl DenseCache {
                 state: DenseRows::Building(Arc::clone(&building)),
                 generation: job.generation,
                 model_id: job.model_id.clone(),
+                ann_build: self.ann_build,
                 last_used: self.tick(),
                 bytes: building.bytes,
             };
@@ -1707,7 +1801,7 @@ impl DenseCache {
             entries.insert(job.project_id, entry);
             self.enforce_byte_cap(&mut entries, job.project_id);
             let build_state = Arc::clone(&building);
-            let spawn = move || build_in_background(cache, job, build_state, reservation);
+            let spawn = move || build_in_background(cache, job, build_state, reservation, pin);
             let worker = std::thread::spawn(spawn);
             #[cfg(test)]
             self.test_workers
@@ -1882,12 +1976,30 @@ impl DenseCache {
         Ok(())
     }
 
+    pub(crate) fn cleanup_ann_disk(&self) -> Result<()> {
+        if let Some(store) = &self.store {
+            store.cleanup_disk(self.limits.max_ann_disk_bytes, None)?;
+        }
+        Ok(())
+    }
+
     fn stash(
         &self,
         project_id: i64,
         generation: i64,
         model_id: &str,
         state: DenseRows,
+    ) -> Option<DenseRows> {
+        self.stash_with_reservation(project_id, generation, model_id, state, None)
+    }
+
+    fn stash_with_reservation(
+        &self,
+        project_id: i64,
+        generation: i64,
+        model_id: &str,
+        state: DenseRows,
+        reservation: Option<&mut BuildReservation>,
     ) -> Option<DenseRows> {
         if self.limits.max_projects == 0 {
             return None;
@@ -1909,7 +2021,14 @@ impl DenseCache {
         if let Some(existing) = self.existing_ann(&mut entries, project_id, generation, model_id) {
             return Some(existing);
         }
-        let active = self.active_build_bytes.load(AtomicOrdering::Acquire);
+        let active = self
+            .active_build_bytes
+            .load(AtomicOrdering::Acquire)
+            .saturating_sub(
+                reservation
+                    .as_ref()
+                    .map_or(0, |reservation| reservation.bytes),
+            );
         if bytes.saturating_add(active) > self.limits.max_bytes {
             // Reservation pressure is temporary. Leave this fallback uncached
             // so get retries once a worker finishes. Evicting Building entries
@@ -1923,12 +2042,13 @@ impl DenseCache {
             // Preserve the caller's coherent generation without publishing it
             // over newer state. Existing memory/disabled-cache refusal above
             // still takes priority over keeping these caller-owned rows.
-            return Some(state);
+            return reservation.is_none().then_some(state);
         }
         let entry = Entry {
             state,
             generation,
             model_id: model_id.to_owned(),
+            ann_build: self.ann_build,
             last_used: self.tick(),
             bytes,
         };
@@ -1936,6 +2056,9 @@ impl DenseCache {
             self.evict_oldest(&mut entries, Some(project_id));
         }
         entries.insert(project_id, entry);
+        if let Some(reservation) = reservation {
+            reservation.release();
+        }
         self.enforce_byte_cap(&mut entries, project_id);
         entries.get(&project_id).map(|entry| entry.state.clone())
     }
@@ -1950,6 +2073,7 @@ impl DenseCache {
         let entry = entries.get_mut(&project_id)?;
         if entry.generation != generation
             || entry.model_id != model_id
+            || entry.ann_build != self.ann_build
             || !matches!(entry.state, DenseRows::Building(_) | DenseRows::Ann(_))
         {
             return None;
@@ -1961,15 +2085,35 @@ impl DenseCache {
     /// Building entries are views of a separately charged worker, not an
     /// additional copy of its working set. Include retired/evicted workers.
     fn charged_bytes(&self, entries: &HashMap<i64, Entry>, replacing: Option<i64>) -> u64 {
+        self.active_build_bytes
+            .load(AtomicOrdering::Acquire)
+            .saturating_add(Self::resident_bytes(entries, replacing))
+    }
+
+    fn resident_bytes(entries: &HashMap<i64, Entry>, replacing: Option<i64>) -> u64 {
         entries
             .iter()
             .filter(|(id, entry)| {
                 Some(**id) != replacing && !matches!(entry.state, DenseRows::Building(_))
             })
-            .fold(
-                self.active_build_bytes.load(AtomicOrdering::Acquire),
-                |total, (_, entry)| total.saturating_add(entry.bytes),
-            )
+            .fold(0, |total, (_, entry)| total.saturating_add(entry.bytes))
+    }
+
+    fn build_admission(
+        &self,
+        entries: &HashMap<i64, Entry>,
+        project_id: i64,
+        build_bytes: u64,
+    ) -> BuildAdmission {
+        let needed = build_bytes.saturating_add(Self::resident_bytes(entries, Some(project_id)));
+        if self.limits.max_projects == 0 || needed > self.limits.max_bytes {
+            return BuildAdmission::ResidentLimit;
+        }
+        let active = self.active_build_bytes.load(AtomicOrdering::Acquire);
+        if needed.saturating_add(active) > self.limits.max_bytes {
+            return BuildAdmission::WorkerPressure;
+        }
+        BuildAdmission::Allowed
     }
 
     /// Drops the least-recently-used entry (optionally skipping `keep`).
@@ -2016,9 +2160,16 @@ impl DenseCache {
     pub(crate) fn snapshot_with_activity(
         &self,
         activity: Arc<crate::daemon::request::Activity>,
+        ann_build: AnnBuildSettings,
     ) -> Self {
-        let mut snapshot = self.snapshot();
+        let mut snapshot = self.snapshot_with_build_settings(ann_build);
         snapshot.origin_activity = Some(activity);
+        snapshot
+    }
+
+    pub(crate) fn snapshot_with_build_settings(&self, ann_build: AnnBuildSettings) -> Self {
+        let mut snapshot = self.snapshot();
+        snapshot.ann_build = ann_build;
         snapshot
     }
 
@@ -2026,6 +2177,7 @@ impl DenseCache {
         Self {
             limits: self.limits,
             policy: self.policy,
+            ann_build: self.ann_build,
             store: self.store.clone(),
             bound_root: Arc::clone(&self.bound_root),
             cold_flights: Arc::clone(&self.cold_flights),
@@ -2133,6 +2285,7 @@ fn build_in_background(
     mut job_input: BuildJob,
     building_input: Arc<BuildingAnn>,
     reservation: BuildReservation,
+    pin: AnnSlotPin,
 ) {
     // Same originating Activity retires last, after data, publication and the
     // existing physical byte reservation, including stale completion/unwind.
@@ -2155,11 +2308,10 @@ fn build_in_background(
         rows,
         hashes,
         dim,
-        store_root,
         mut job_pin,
         ..
     } = job;
-    let Some(store_root) = store_root else {
+    let Some(store) = &cache.store else {
         return;
     };
     #[cfg(test)]
@@ -2167,7 +2319,7 @@ fn build_in_background(
         gate.wait();
     }
     test_build_delay();
-    let vector_root = store_root.clone();
+    let vector_root = store.root();
     let unpin_hashes = Arc::clone(&hashes);
     // The build returns the loaded index instead of publishing it: the lease
     // must be released *before* the ANN becomes visible. Publishing first left
@@ -2176,16 +2328,15 @@ fn build_in_background(
     // build hit a Windows sharing violation on `vectors.db` (CI run
     // 41043371926, `cold_start_loads_persisted_ann_without_vectors_db`).
     let result: Result<(Arc<AnnIndex>, u64)> = catch_unwind(AssertUnwindSafe(|| {
-        let ann = AnnIndex::build(&rows, dim)?;
-        let store = AnnStore::new(store_root);
-        let slot = ann.dump(&store, &key)?;
+        let ann = AnnIndex::build_with_settings(&rows, dim, cache.ann_build)?;
+        let slot = ann.dump(store, &key)?;
         // Loading must not hold the source rows, the built graph and the loaded
         // copy at once: on the heap-reload path that would add a third full
         // copy (~1.86 GiB at 75k x 2048) on top of the admitted peak.
         let published_bytes = ann.estimated_bytes() as u64;
         drop(ann);
         drop(rows);
-        let loaded = AnnIndex::load(&slot)?;
+        let loaded = AnnIndex::load(&slot)?.with_disk_pin(pin.finish_build());
         Ok((Arc::new(loaded), published_bytes))
     }))
     .unwrap_or_else(|payload| Err(Error::internal(format!("ann build panic: {payload:?}"))));
@@ -2196,7 +2347,7 @@ fn build_in_background(
         // The dump is READY: release the backfill lease. On failure the pins
         // stay until their TTL so the retry still sees full coverage. Do this
         // without holding the entries lock (the vector DB may be busy).
-        if let Ok(mut vectors) = cache.vector_source(project_id).connect(&vector_root) {
+        if let Ok(mut vectors) = cache.vector_source(project_id).connect(vector_root) {
             let hashes: Vec<String> = unpin_hashes.iter().map(|(_, hash)| hash.clone()).collect();
             if let Err(err) = vectors.unpin(project_id, &key.model_id, &hashes) {
                 eprintln!("warning: cannot release ann vector lease: {err}");
@@ -2205,12 +2356,14 @@ fn build_in_background(
     }
     // Publish last: once `Ann` is visible the build thread holds no
     // `vectors.db` handle, so a purge can delete it immediately.
+    let dump_completed = result.is_ok();
     let mut entries = cache.lock_entries();
     match result {
         Ok((loaded, published_bytes)) => {
             if let Some(entry) = entries.get_mut(&project_id)
                 && entry.generation == key.generation
                 && entry.model_id == key.model_id
+                && entry.ann_build == cache.ann_build
                 && matches!(&entry.state, DenseRows::Building(current) if Arc::ptr_eq(current, &building))
             {
                 entry.state = DenseRows::Ann(loaded);
@@ -2226,6 +2379,7 @@ fn build_in_background(
             if let Some(entry) = entries.get_mut(&project_id)
                 && entry.generation == key.generation
                 && entry.model_id == key.model_id
+                && entry.ann_build == cache.ann_build
                 && matches!(&entry.state, DenseRows::Building(current) if Arc::ptr_eq(current, &building))
             {
                 entry.bytes = hashes.len() as u64 * 64;
@@ -2238,6 +2392,10 @@ fn build_in_background(
         }
     }
     cache.enforce_byte_cap(&mut entries, project_id);
+    drop(entries);
+    if dump_completed && let Err(err) = cache.cleanup_ann_disk() {
+        eprintln!("warning: ann disk cleanup after build failed: {err}");
+    }
 }
 
 #[cfg(test)]
@@ -2536,6 +2694,184 @@ mod tests {
     }
 
     #[test]
+    fn ann_recipe_reload_keeps_the_old_worker_charged_until_it_finishes() {
+        let root = tempfile::tempdir().unwrap();
+        let graph_bytes = u64::try_from(ann::ann_estimated_bytes(4, 128)).unwrap();
+        let exact_bytes = 4 * 128 * 4;
+        // The old build and a set of exact rows fit, but both builds do not.
+        let paused = PausedBuilds::from_limits(
+            root.path(),
+            DenseCacheLimits {
+                min_vectors: 1,
+                max_bytes: graph_bytes + 2 * exact_bytes,
+                ..DenseCacheLimits::default()
+            },
+        );
+        let old = paused
+            .cache
+            .snapshot_with_build_settings(AnnBuildSettings::new(12, 64).unwrap());
+        let next_recipe = AnnBuildSettings::new(16, 98).unwrap();
+        let next = paused.cache.snapshot_with_build_settings(next_recipe);
+        assert!(matches!(
+            old.resolve_rows(1, 1, "m@d128", small_input()),
+            DenseRows::Building(_)
+        ));
+        next.invalidate_memory(1);
+        assert!(matches!(
+            next.resolve_rows(1, 1, "m@d128", small_input()),
+            DenseRows::TooLarge(_)
+        ));
+        paused.finish();
+        assert!(next.ann_snapshot(1).is_none());
+
+        assert!(matches!(
+            next.resolve_rows(1, 1, "m@d128", small_input()),
+            DenseRows::Building(_)
+        ));
+        paused.finish();
+        let entries = next.lock_entries();
+        assert!(matches!(
+            &entries[&1].state,
+            DenseRows::Ann(graph) if graph.build_settings() == next_recipe
+        ));
+    }
+
+    #[test]
+    fn ann_disk_cleanup_waits_for_a_retired_graph_reader() {
+        let root = tempfile::tempdir().unwrap();
+        let paused = PausedBuilds::from_limits(
+            root.path(),
+            DenseCacheLimits {
+                min_vectors: 1,
+                max_ann_disk_bytes: 1,
+                ..DenseCacheLimits::default()
+            },
+        );
+        let old_recipe = AnnBuildSettings::new(12, 64).unwrap();
+        let next_recipe = AnnBuildSettings::new(16, 98).unwrap();
+        let old = paused.cache.snapshot_with_build_settings(old_recipe);
+        let next = paused.cache.snapshot_with_build_settings(next_recipe);
+        let input = small_input();
+        let key = ann_key(
+            1,
+            1,
+            "m@d128",
+            input.dim,
+            input.rows.len(),
+            input.digest.clone(),
+        );
+        assert!(matches!(
+            old.resolve_rows(1, 1, "m@d128", input),
+            DenseRows::Building(_)
+        ));
+        paused.finish();
+        let reader = old.lock_entries()[&1].state.clone();
+        assert!(matches!(reader, DenseRows::Ann(_)));
+        let store = old.store.as_ref().unwrap();
+        let old_slot = store.ann_dir_with_settings(&key, old_recipe);
+        let active_slot = store.ann_dir_with_settings(&key, next_recipe);
+        next.invalidate_memory(1);
+
+        assert!(matches!(
+            next.resolve_rows(1, 1, "m@d128", small_input()),
+            DenseRows::Building(_)
+        ));
+        paused.finish();
+        assert!(old_slot.is_dir());
+        assert!(active_slot.is_dir());
+        drop(reader);
+        next.cleanup_ann_disk().unwrap();
+        assert!(!old_slot.exists());
+        assert!(active_slot.is_dir());
+    }
+
+    #[test]
+    fn ann_recipe_toggle_does_not_start_a_second_writer_for_the_same_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let paused = PausedBuilds::new(root.path(), 2, 3);
+        let a_recipe = AnnBuildSettings::new(12, 64).unwrap();
+        let a = paused.cache.snapshot_with_build_settings(a_recipe);
+        let b = paused
+            .cache
+            .snapshot_with_build_settings(AnnBuildSettings::new(16, 98).unwrap());
+        assert!(matches!(
+            a.resolve_rows(1, 1, "m@d128", small_input()),
+            DenseRows::Building(_)
+        ));
+        b.invalidate_memory(1);
+        assert!(matches!(
+            b.resolve_rows(1, 1, "m@d128", small_input()),
+            DenseRows::Building(_)
+        ));
+        a.invalidate_memory(1);
+        assert!(matches!(
+            a.resolve_rows(1, 1, "m@d128", small_input()),
+            DenseRows::TooLarge(_)
+        ));
+        paused.finish();
+        assert!(matches!(
+            a.resolve_rows(1, 1, "m@d128", small_input()),
+            DenseRows::Ann(graph) if graph.build_settings() == a_recipe
+        ));
+    }
+
+    #[test]
+    fn ann_cold_load_reserves_bytes_before_allocating_while_a_build_is_live() {
+        let (root, db, project_id) = indexed_project();
+        let chunks = repo::chunk_hashes(db.connection(), project_id).unwrap();
+        let generation = repo::index_generation(db.connection(), project_id).unwrap();
+        let exact_bytes = u64::try_from(chunks.len() * 128 * 4).unwrap();
+        let paused = PausedBuilds::from_limits(
+            root.path(),
+            DenseCacheLimits {
+                min_vectors: 1,
+                max_bytes: ann_build_peak_bytes(4, 128).unwrap() + exact_bytes,
+                ..DenseCacheLimits::default()
+            },
+        );
+        let recipe = AnnBuildSettings::new(12, 64).unwrap();
+        let mut next = paused.cache.snapshot_with_build_settings(recipe);
+        let key = ann_key(
+            project_id,
+            generation,
+            "m@d128",
+            128,
+            chunks.len(),
+            crate::hybrid::ann_store::chunk_set_digest(&chunks),
+        );
+        let rows: Vec<(u64, Arc<[f32]>)> = chunks
+            .iter()
+            .map(|(id, _)| (*id, Arc::from([0.5; 128])))
+            .collect();
+        AnnIndex::build_with_settings(&rows, 128, recipe)
+            .unwrap()
+            .dump(next.store.as_ref().unwrap(), &key)
+            .unwrap();
+        let loaded = Arc::new(AtomicU64::new(0));
+        let observations = loaded.clone();
+        next.test_ann_load = Some(Arc::new(move |_, _| {
+            observations.fetch_add(1, AtomicOrdering::Relaxed);
+        }));
+        assert!(matches!(
+            paused
+                .cache
+                .resolve_rows(project_id + 1, 1, "m@d128", small_input()),
+            DenseRows::Building(_)
+        ));
+        assert!(matches!(
+            next.get(&db, project_id, "m@d128").unwrap(),
+            DenseRows::TooLarge(_)
+        ));
+        assert_eq!(loaded.load(AtomicOrdering::Relaxed), 0);
+        paused.finish();
+        assert!(matches!(
+            next.get(&db, project_id, "m@d128").unwrap(),
+            DenseRows::Ann(graph) if graph.build_settings() == recipe
+        ));
+        assert_eq!(loaded.load(AtomicOrdering::Relaxed), 1);
+    }
+
+    #[test]
     fn build_lifetime_full_budget_streams_before_opening_vector_cache() {
         let (root, db, project_id) = indexed_project();
         let paused = PausedBuilds::new(root.path(), 2, 1);
@@ -2567,6 +2903,33 @@ mod tests {
             ),
             "temporary pressure must not remain cached after the build finishes"
         );
+    }
+
+    #[test]
+    fn ann_build_pressure_streams_before_materializing_a_second_exact_view() {
+        let (root, db, project_id) = indexed_project();
+        let hashes = repo::chunk_hashes(db.connection(), project_id).unwrap();
+        let graph_bytes = u64::try_from(ann::ann_estimated_bytes(4, 128)).unwrap();
+        let exact = u64::try_from(hashes.len() * 128 * 4).unwrap();
+        let paused = PausedBuilds::from_limits(
+            root.path(),
+            DenseCacheLimits {
+                min_vectors: 1,
+                max_bytes: graph_bytes + 4 * 128 * 4 + exact,
+                ..DenseCacheLimits::default()
+            },
+        );
+        let dense = &paused.cache;
+        assert!(matches!(
+            dense.resolve_rows(project_id + 1, 1, "m@d128", small_input()),
+            DenseRows::Building(_)
+        ));
+        assert!(!root.path().join("vectors.db").exists());
+        assert!(matches!(
+            dense.get(&db, project_id, "m@d128").unwrap(),
+            DenseRows::TooLarge(actual) if *actual == hashes
+        ));
+        assert!(!root.path().join("vectors.db").exists());
     }
 
     #[test]
@@ -2726,7 +3089,6 @@ mod tests {
             rows,
             hashes: Arc::new(chunks),
             dim,
-            store_root: Some(root.path().to_path_buf()),
             job_pin: None,
             activity: None,
         };
@@ -2833,6 +3195,13 @@ mod tests {
             steady <= 1024 * 1024 * 1024,
             "steady ANN must stay within the 1 GiB model, got {steady}"
         );
+    }
+
+    #[test]
+    fn ann_build_admission_includes_the_graph_working_set() {
+        // A 20k x 96 m=16 build added about 80 MiB of peak RSS on the
+        // 32-worker probe, with its input vectors already resident.
+        assert!(!ann_build_admitted(20_000, 96, 80 * 1024 * 1024));
     }
 
     #[test]

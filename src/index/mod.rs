@@ -5,6 +5,7 @@ pub mod chunk;
 pub mod frontmatter;
 pub mod job;
 pub mod outcome;
+pub mod settings;
 pub mod tantivy_index;
 pub mod textnorm;
 pub mod tokenizer;
