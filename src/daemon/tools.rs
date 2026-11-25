@@ -2127,9 +2127,14 @@ pub fn run_sync_job_in_with_dense_policy(
         // After the index pass, a full embedding sweep over every project chunk
         // completes the coverage a previous offline period left behind (FR-15);
         // cached chunks cost nothing, so this is a no-op once covered.
-        run_project_index_using(db, cache, project, Some(job_id), |db, index| {
-            run_full(db, index, project, config)
-        })
+        run_project_index_using(
+            db,
+            cache,
+            project,
+            Some(job_id),
+            config.index_writer,
+            |db, index| run_full(db, index, project, config),
+        )
         .and_then(|stats| {
             hybrid_jobs::embed_project_chunks_with_policy(
                 db,
@@ -2163,9 +2168,16 @@ pub fn run_sync_job_in_with_vectors(
     source.validate_root(db.cache_root())?;
     run_sync_job_using(db, job_id, |db| {
         let embedding = crate::index::job::IndexEmbedding::new(source, stages.embedder.as_deref());
-        let stats = run_project_index_using(db, cache, project, Some(job_id), |db, index| {
-            crate::index::job::run_full_with_embedding(db, index, project, config, &embedding)
-        })?;
+        let stats = run_project_index_using(
+            db,
+            cache,
+            project,
+            Some(job_id),
+            config.index_writer,
+            |db, index| {
+                crate::index::job::run_full_with_embedding(db, index, project, config, &embedding)
+            },
+        )?;
         if let Some(embedder) = &stages.embedder {
             hybrid_jobs::embed_project_chunks_from(
                 db,
@@ -2327,9 +2339,14 @@ pub fn run_project_index(
     project: &Project,
     config: &Config,
 ) -> Result<JobStats> {
-    run_project_index_using(db, cache, project, None, |db, index| {
-        run_full(db, index, project, config)
-    })
+    run_project_index_using(
+        db,
+        cache,
+        project,
+        None,
+        config.index_writer,
+        |db, index| run_full(db, index, project, config),
+    )
 }
 
 /// Index with the composition root's prepared provider and vector owner.
@@ -2348,9 +2365,16 @@ pub fn run_project_index_with_vectors(
     source.validate_root(cache)?;
     source.validate_root(db.cache_root())?;
     let embedding = crate::index::job::IndexEmbedding::new(source, stages.embedder.as_deref());
-    run_project_index_using(db, cache, project, None, |db, index| {
-        crate::index::job::run_full_with_embedding(db, index, project, config, &embedding)
-    })
+    run_project_index_using(
+        db,
+        cache,
+        project,
+        None,
+        config.index_writer,
+        |db, index| {
+            crate::index::job::run_full_with_embedding(db, index, project, config, &embedding)
+        },
+    )
 }
 
 fn run_project_index_using(
@@ -2358,13 +2382,15 @@ fn run_project_index_using(
     cache: &Path,
     project: &Project,
     sync_job_id: Option<i64>,
+    writer_settings: crate::index::writer_settings::IndexWriterSettings,
     run: impl FnOnce(&mut Db, &mut crate::index::tantivy_index::IndexHandle) -> Result<JobStats>,
 ) -> Result<JobStats> {
     lifecycle::with_writer_lease(cache, project.id, || {
         registry::set_status(db, project.id, ProjectStatus::Indexing)?;
         let outcome = (|| -> Result<JobStats> {
-            let mut index = crate::index::tantivy_index::IndexHandle::open_or_create(
+            let mut index = crate::index::tantivy_index::IndexHandle::open_or_create_with_settings(
                 &lifecycle::index_dir(cache, project.id),
+                writer_settings,
             )?;
             run(db, &mut index)
         })();

@@ -83,7 +83,7 @@ impl Fixture {
 }
 
 #[test]
-fn captured_store_policy_reaches_the_writer_and_prepared_readers() {
+fn captured_resource_policies_reach_the_store_readers_and_dense_cache() {
     use crate::store::settings::{db_from_config, pool_from_config};
 
     let global = tempfile::tempdir().unwrap();
@@ -97,6 +97,10 @@ write_busy_timeout=41
 read_busy_timeout=83
 [read_pool]
 max_connections=2
+[dense]
+max_vectors=7
+query_cache_max_entries=1
+backfill_pin_ttl=120000
 ",
     )
     .unwrap();
@@ -108,21 +112,16 @@ max_connections=2
         "config_version=2
 [read_pool]
 max_connections=1
+[dense]
+max_vectors=999
+query_cache_max_entries=2
 ",
     )
     .unwrap();
     let db = db_from_config(&launch.config).unwrap();
     let pool = pool_from_config(&launch.config).unwrap();
-    let shared = Shared::open_with_launch_config(
-        cache.path(),
-        &db,
-        &pool,
-        crate::hybrid::dense_settings::standalone()
-            .unwrap()
-            .settings(),
-        launch,
-    )
-    .unwrap();
+    let dense = launch.config.settings().dense.clone();
+    let shared = Shared::open_with_launch_config(cache.path(), &db, &pool, &dense, launch).unwrap();
 
     let writer_timeout: i64 = shared
         .db()
@@ -142,6 +141,21 @@ max_connections=1
     drop(first);
     assert!(readers.try_acquire().is_ok());
     drop(second);
+
+    assert_eq!(shared.dense.limits().max_vectors, 7);
+    assert_eq!(
+        shared
+            .dense
+            .limits()
+            .ann_lifetimes
+            .backfill_pin_ttl()
+            .as_secs(),
+        120
+    );
+    shared.dense.store_query_vector("model", "first", &[1.0]);
+    shared.dense.store_query_vector("model", "second", &[2.0]);
+    assert!(shared.dense.query_vector("model", "first").is_none());
+    assert!(shared.dense.query_vector("model", "second").is_some());
 }
 
 #[test]

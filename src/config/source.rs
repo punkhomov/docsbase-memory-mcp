@@ -65,6 +65,8 @@ pub struct SourceLayer {
     pub(super) lexical: Option<crate::index::lexical_settings::LexicalPatch>,
     pub(super) store: Option<crate::store::settings::DbFilePatch>,
     pub(super) read_pool: Option<crate::store::settings::ReadPoolPatch>,
+    pub(super) dense: Option<crate::hybrid::dense_settings::DenseFilePatch>,
+    pub(super) index_writer: Option<crate::index::writer_settings::WriterPatch>,
     pub(super) provisioning: Option<crate::hybrid::provisioning::ProvisioningPatch>,
     pub(super) rrf: Option<crate::hybrid::rrf::settings::RrfPatch>,
 }
@@ -116,6 +118,8 @@ impl SourceLayer {
         let mut rrf = None;
         let mut store = None;
         let mut read_pool = None;
+        let mut dense = None;
+        let mut index_writer = None;
         let mut provisioning = None;
         let mut hybrid_merge = None;
         let mut vector_store = None;
@@ -154,6 +158,8 @@ impl SourceLayer {
             provisioning = take_global_table(&mut fields, &source, "provisioning")?;
             store = take_global_table(&mut fields, &source, "store")?;
             read_pool = take_global_table(&mut fields, &source, "read_pool")?;
+            dense = take_global_table(&mut fields, &source, "dense")?;
+            index_writer = take_index_writer(&mut fields, &source)?;
             let vector = fields.remove("vector_cache");
             if matches!(source, SourceId::Global(_)) {
                 vector_store = Some(crate::vector_cache::settings::resolve_file(
@@ -190,6 +196,8 @@ impl SourceLayer {
             provisioning,
             store,
             read_pool,
+            dense,
+            index_writer,
         })
     }
     /// Exact source identity supplied by the caller; no canonicalization or I/O.
@@ -221,9 +229,33 @@ fn take_global_table<P: serde::de::DeserializeOwned>(
     source: &SourceId,
     key: &str,
 ) -> Result<Option<P>> {
-    let Some(value) = fields.remove(key) else {
+    fields
+        .remove(key)
+        .map(|value| global_table(value, source, key))
+        .transpose()
+}
+
+fn take_index_writer(
+    fields: &mut toml::Table,
+    source: &SourceId,
+) -> Result<Option<crate::index::writer_settings::WriterPatch>> {
+    let Some(index) = fields.get_mut("index").and_then(toml::Value::as_table_mut) else {
         return Ok(None);
     };
+    let Some(writer) = index.remove("writer") else {
+        return Ok(None);
+    };
+    if index.is_empty() {
+        fields.remove("index");
+    }
+    global_table(writer, source, "index.writer").map(Some)
+}
+
+fn global_table<P: serde::de::DeserializeOwned>(
+    value: toml::Value,
+    source: &SourceId,
+    key: &str,
+) -> Result<P> {
     if matches!(source, SourceId::Project(_)) {
         return Err(invalid(&format!("{key} is global-only")));
     }
@@ -232,7 +264,6 @@ fn take_global_table<P: serde::de::DeserializeOwned>(
     }
     value
         .try_into()
-        .map(Some)
         .map_err(|_| invalid(&format!("invalid v2 {key} fields")))
 }
 

@@ -414,7 +414,8 @@ fn build_pair(
         cache_root: path.to_owned(),
         settings: settings.clone(),
     };
-    let mut index = IndexHandle::open_or_create(&path.join("tantivy"))?;
+    let mut index =
+        IndexHandle::open_or_create_with_settings(&path.join("tantivy"), config.index_writer)?;
     let stats = job::run_full_lexical(&mut db, &mut index, project, config)?;
     index.finish()?;
     if stats.errors != 0 || repo::has_pending_docs(db.connection(), project.id)? {

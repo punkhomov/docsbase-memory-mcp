@@ -899,6 +899,178 @@ fn v2_global_owner_settings_require_tables() {
 }
 
 #[test]
+fn v2_dense_policy_is_global_and_separate_from_vector_store() {
+    let global = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    layer(
+        &global,
+        "config.toml",
+        "config_version = 2
+[dense]
+max_vectors = 10000
+max_projects = 0
+build_backoff = 0
+max_ann_disk_bytes = 0
+ann_keep_generations = 1
+query_cache_max_entries = 2
+backfill_pin_ttl = 60000
+ann_outcome_ttl = 100
+[vector_cache]
+max_bytes = 8192
+",
+    );
+    let view =
+        docsbase_memory::config::view::load_from(global.path(), Some(project.path())).unwrap();
+    for (key, expected) in [
+        ("dense.max_vectors", 10000),
+        ("dense.max_projects", 0),
+        ("dense.build_backoff", 0),
+        ("dense.max_ann_disk_bytes", 0),
+        ("dense.ann_keep_generations", 1),
+        ("dense.query_cache_max_entries", 2),
+        ("dense.backfill_pin_ttl", 60000),
+        ("dense.ann_outcome_ttl", 100),
+        ("vector_cache.max_bytes", 8192),
+    ] {
+        let field = view.fields.iter().find(|field| field.key == key).unwrap();
+        assert_eq!(field.value, expected);
+        assert_eq!(
+            field.origin.source,
+            SourceId::Global(global.path().join("config.toml"))
+        );
+    }
+    let default = view
+        .fields
+        .iter()
+        .find(|field| field.key == "dense.query_cache_max_bytes")
+        .unwrap();
+    assert_eq!(default.value, 4_194_304);
+    assert_eq!(default.origin.source, SourceId::Defaults);
+    assert!(
+        view.fields
+            .iter()
+            .all(|field| field.key != "dense.vector_cache_max_bytes")
+    );
+
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2\n[dense]\nmax_projects = 1\n",
+    );
+    let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+    assert!(
+        error.to_string().contains("dense is global-only"),
+        "{error}"
+    );
+
+    for (patch, expected) in [
+        ("dense = []", "dense settings require a table"),
+        (
+            "[dense]\nvector_cache_max_bytes = 8192",
+            "invalid v2 dense fields",
+        ),
+        (
+            "[dense]\nquery_cache_max_bytes = 0",
+            "query-cache entry and byte limits must be positive",
+        ),
+        (
+            "[dense]\nann_keep_generations = 0",
+            "dense.ann_keep_generations must be positive",
+        ),
+        (
+            "[dense]\nbackfill_pin_ttl = 999",
+            "ANN pin TTL must be positive whole signed seconds",
+        ),
+    ] {
+        layer(
+            &global,
+            "config.toml",
+            &format!("config_version = 2\n{patch}\n"),
+        );
+        let error = Config::global_from(global.path()).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn v2_index_writer_policy_is_global_and_keeps_chunk_overrides_independent() {
+    let global = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    layer(
+        &global,
+        "config.toml",
+        "config_version = 2\n[index.writer]\nheap_bytes = 30000000\nworker_threads = 2\n[index.chunk]\noverlap_chars = 90\n",
+    );
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2\n[index.chunk]\nmax_chars = 1000\n",
+    );
+    let view =
+        docsbase_memory::config::view::load_from(global.path(), Some(project.path())).unwrap();
+    let field = |key| view.fields.iter().find(|field| field.key == key).unwrap();
+    assert_eq!(field("index.writer.worker_threads").value, 2);
+    assert_eq!(field("index.writer.heap_bytes").value, 30_000_000);
+    assert_eq!(field("index.writer.merge_threads").value, 4);
+    assert_eq!(field("index.chunk.max_chars").value, 1000);
+    assert_eq!(field("index.chunk.overlap_chars").value, 90);
+    assert_eq!(
+        field("index.writer.merge_threads").origin.source,
+        SourceId::Defaults
+    );
+    assert_eq!(
+        field("index.writer.heap_bytes").origin.source,
+        SourceId::Global(global.path().join("config.toml"))
+    );
+    assert_eq!(
+        field("index.chunk.max_chars").origin.source,
+        SourceId::Project(project.path().join(".docsbase.toml"))
+    );
+
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2\n[index.writer]\nworker_threads = 2\n",
+    );
+    let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+    assert!(
+        error.to_string().contains("index.writer is global-only"),
+        "{error}"
+    );
+
+    for (value, expected) in [
+        (
+            "[index]\nwriter = []",
+            "index.writer settings require a table",
+        ),
+        (
+            "[index.writer]\nworker_threads = 0",
+            "index.writer thread counts",
+        ),
+        (
+            "[index.writer]\nmerge_threads = 9",
+            "index.writer thread counts",
+        ),
+        (
+            "[index.writer]\nworker_threads = 2\nheap_bytes = 29999999",
+            "index.writer.heap_bytes",
+        ),
+        (
+            "[index.writer]\nheap_bytes = 4293967295",
+            "index.writer.heap_bytes",
+        ),
+    ] {
+        layer(
+            &global,
+            "config.toml",
+            &format!("config_version = 2\n{value}\n"),
+        );
+        let error = Config::global_from(global.path()).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
 fn v2_lexical_weights_reject_invalid_or_silent_scoring() {
     let global = TempDir::new().expect("global");
     let project = TempDir::new().expect("project");

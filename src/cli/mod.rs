@@ -222,7 +222,6 @@ pub enum DaemonCommand {
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let db_settings = crate::store::settings::standalone()?;
-    let dense_settings = crate::hybrid::dense_settings::standalone()?;
     match cli.command {
         #[cfg(feature = "web")]
         Command::Web { open, port } => crate::web::run(port, open),
@@ -239,7 +238,7 @@ pub fn run() -> anyhow::Result<()> {
             tags,
         } => {
             let started = std::time::Instant::now();
-            search::run_with_policies_started(
+            search::run_started(
                 &query,
                 &search::Options {
                     limit,
@@ -252,7 +251,6 @@ pub fn run() -> anyhow::Result<()> {
                 },
                 None,
                 query_mode,
-                dense_settings.settings(),
                 started,
             )
         }
@@ -271,13 +269,7 @@ pub fn run() -> anyhow::Result<()> {
             grace_ms,
             profile,
             project,
-        } => serve(
-            detached,
-            grace_ms,
-            profile,
-            project,
-            dense_settings.settings(),
-        ),
+        } => serve(detached, grace_ms, profile, project),
         Command::Mcp => crate::mcp::frontend::run_blocking(),
         Command::Daemon { command } => match command {
             DaemonCommand::Stop => daemon_stop(),
@@ -331,7 +323,6 @@ fn serve(
     grace_ms: Option<u64>,
     profile: Option<ServeProfile>,
     project: Option<PathBuf>,
-    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
 ) -> anyhow::Result<()> {
     let selected_profile = match (profile, project) {
         (None, None) => None,
@@ -342,7 +333,6 @@ fn serve(
     let cache = paths::cache_dir()?;
     crate::daemon::lifecycle::run_daemon_from_launch(
         &cache,
-        dense_settings,
         &crate::daemon::launch::LaunchSnapshot::capture(),
         crate::daemon::settings::DaemonPatch {
             profile: selected_profile,

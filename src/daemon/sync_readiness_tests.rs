@@ -48,10 +48,15 @@ fn interleaved_direct(partial: bool) {
     let (id, _) = enqueue_sync(&env.db, &env.project).unwrap();
     let mut captured = None;
     run_sync_job_using(&mut env.db, id, |db| {
-        let stats =
-            run_project_index_using(db, env.cache.path(), &env.project, Some(id), |db, index| {
-                run_full(db, index, &env.project, &Config::default())
-            })?;
+        let config = Config::default();
+        let stats = run_project_index_using(
+            db,
+            env.cache.path(),
+            &env.project,
+            Some(id),
+            config.index_writer,
+            |db, index| run_full(db, index, &env.project, &config),
+        )?;
         captured = outcome::read(db, env.project.id)?;
         // The lexical writer lease has ended, but this Sync is not terminal.
         // A direct full/no-op/partial attempt now runs before Sync persistence.
@@ -89,9 +94,15 @@ fn backfill_failure_preserves_exact_lexical_attribution_but_stays_not_ready() {
     let mut env = Env::new();
     let (id, _) = enqueue_sync(&env.db, &env.project).unwrap();
     let error = run_sync_job_using(&mut env.db, id, |db| {
-        run_project_index_using(db, env.cache.path(), &env.project, Some(id), |db, index| {
-            run_full(db, index, &env.project, &Config::default())
-        })?;
+        let config = Config::default();
+        run_project_index_using(
+            db,
+            env.cache.path(),
+            &env.project,
+            Some(id),
+            config.index_writer,
+            |db, index| run_full(db, index, &env.project, &config),
+        )?;
         Err(Error::internal(
             "deterministic post-lexical backfill failure",
         ))

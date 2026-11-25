@@ -79,14 +79,7 @@ pub fn run(query: &str, options: &Options) -> anyhow::Result<()> {
 /// # Errors
 /// As [`run`], including refusal when a connected daemon lacks literal support.
 pub fn run_with_mode(query: &str, options: &Options, mode: QueryMode) -> anyhow::Result<()> {
-    run_with_policies_started(
-        query,
-        options,
-        None,
-        mode,
-        crate::hybrid::dense_settings::standalone()?.settings(),
-        std::time::Instant::now(),
-    )
+    run_started(query, options, None, mode, std::time::Instant::now())
 }
 
 #[cfg(test)]
@@ -95,26 +88,23 @@ pub(crate) fn run_with_settings(
     options: &Options,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
-    run_with_policies_started(
+    run_started(
         query,
         options,
         Some(settings),
         QueryMode::Syntax,
-        crate::hybrid::dense_settings::standalone()?.settings(),
         std::time::Instant::now(),
     )
 }
 
-pub(crate) fn run_with_policies_started(
+pub(crate) fn run_started(
     query: &str,
     options: &Options,
     supplied_db: Option<&crate::config::schema::Resolved<crate::store::settings::DbSettings>>,
     mode: QueryMode,
-    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
     started: std::time::Instant,
 ) -> anyhow::Result<()> {
     use crate::store::settings;
-    dense_settings.query_cache_settings().validate()?;
     let config = Config::global_resolved()?;
     let (settings, pool) = match supplied_db {
         Some(db) => (db.clone(), settings::standalone_read_pool()?),
@@ -125,9 +115,8 @@ pub(crate) fn run_with_policies_started(
     };
     let global = config.into_settings();
     let args = options.args(query, mode);
-    let dense_settings = dense_settings.clone();
     let value = super::command::run(global, move |context| {
-        run_in(context, args, settings, pool, dense_settings, started)
+        run_in(context, args, settings, pool, started)
     })?;
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
@@ -138,7 +127,6 @@ async fn run_in(
     args: Value,
     settings: crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     pool: crate::config::schema::Resolved<crate::store::settings::ReadPoolSettings>,
-    dense_settings: crate::hybrid::dense_settings::DenseSettings,
     started: std::time::Instant,
 ) -> Result<Value> {
     let operation = SearchOperation::new(&context.global.search, started, Cancellation::new())?;
@@ -187,7 +175,7 @@ async fn run_in(
             let dense = std::sync::Arc::new(crate::hybrid::dense::DenseCache::for_config(
                 crate::hybrid::dense::AnnPolicy::LoadOnly,
                 &owner.cache,
-                &dense_settings,
+                &owner.global.dense,
                 &config,
             )?);
             drop(db); // Native readonly connection never crosses an await.

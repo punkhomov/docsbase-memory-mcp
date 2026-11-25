@@ -552,12 +552,24 @@ fn cleanup_removes_a_generation_after_the_loaded_index_is_dropped() {
     let loaded = AnnIndex::load(&slot).expect("load index");
     drop(loaded);
 
-    store.cleanup(1).expect("cleanup");
+    fs::write(
+        cache.path().join("config.toml"),
+        "config_version = 2\n[dense]\nann_keep_generations = 1\n",
+    )
+    .unwrap();
+    let config = Config::global_from(cache.path()).expect("resolve retention policy");
+    let cleanup = DenseCache::with_settings(AnnPolicy::BuildOrLoad, cache.path(), &config.dense)
+        .expect("dense policy");
+    cleanup.cleanup(1).expect("cleanup");
     assert!(
         !dirs[0].exists(),
         "the oldest generation must be removable after the loaded index is dropped"
     );
     assert!(dirs[2].exists(), "the newest generation is kept");
+    assert!(
+        !dirs[1].exists(),
+        "the configured retention keeps one generation"
+    );
 }
 
 #[test]

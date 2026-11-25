@@ -13,7 +13,7 @@ use docsbase_memory::config::schema::SourceId;
 use docsbase_memory::daemon::{registry, session::Stats, tools};
 use docsbase_memory::error::{Error, Result};
 use docsbase_memory::hybrid::dense::{AnnPolicy, DenseCache};
-use docsbase_memory::hybrid::dense_settings::{AnnLifetimes, DensePatch, DenseSpec, standalone};
+use docsbase_memory::hybrid::dense_settings::{AnnLifetimes, DensePatch, DenseSpec};
 use docsbase_memory::hybrid::jobs::embed_project_chunks_with_dense_policy;
 use docsbase_memory::hybrid::meta::AnnState;
 use docsbase_memory::store::Db;
@@ -169,13 +169,18 @@ impl Embedder for LeaseProbe {
 fn backfill(fail: bool, pin_ttl: Option<Duration>) {
     let cache = tempfile::tempdir().unwrap();
     let (_root, db, id) = indexed(cache.path());
-    let mut settings = standalone().unwrap().into_settings();
-    settings.min_vectors = 1;
-    if let Some(pin_ttl) = pin_ttl {
-        settings.ann_lifetimes = AnnLifetimes::new(pin_ttl, Duration::from_secs(30)).unwrap();
-    }
+    let lifetime = pin_ttl.map_or_else(String::new, |ttl| {
+        format!("backfill_pin_ttl = {}\n", ttl.as_millis())
+    });
+    std::fs::write(
+        cache.path().join("config.toml"),
+        format!("config_version = 2\n[dense]\nmin_vectors = 1\n{lifetime}"),
+    )
+    .unwrap();
+    let config = Config::global_from(cache.path()).unwrap();
     let expected_ttl = pin_ttl.map_or(3600, |ttl| i64::try_from(ttl.as_secs()).unwrap());
-    let dense = DenseCache::with_settings(AnnPolicy::BuildOrLoad, cache.path(), &settings).unwrap();
+    let dense =
+        DenseCache::with_settings(AnnPolicy::BuildOrLoad, cache.path(), &config.dense).unwrap();
     let mut vectors = VectorCache::open(cache.path()).unwrap();
     vectors
         .pin(
@@ -250,15 +255,19 @@ fn omitted_lifetimes_preserve_hourly_backfill_leases() {
 fn actual_status_uses_cache_lifetime_without_changing_default_control() {
     let cache = tempfile::tempdir().unwrap();
     let (_root, db, id) = indexed(cache.path());
-    let mut settings = standalone().unwrap().into_settings();
-    settings.ann_lifetimes =
-        AnnLifetimes::new(Duration::from_secs(600), Duration::from_nanos(1)).unwrap();
-    let dense = DenseCache::with_settings(AnnPolicy::Disabled, cache.path(), &settings).unwrap();
+    std::fs::write(
+        cache.path().join("config.toml"),
+        "config_version = 2\n[dense]\nann_outcome_ttl = 1\n",
+    )
+    .unwrap();
+    let config = Config::global_from(cache.path()).unwrap();
+    let dense =
+        DenseCache::with_settings(AnnPolicy::Disabled, cache.path(), &config.dense).unwrap();
     let control = DenseCache::with_policy(AnnPolicy::Disabled, cache.path());
     dense.record_outcome(id, AnnState::Ready, None);
     control.record_outcome(id, AnnState::Ready, None);
     let at = dense.outcome(id).unwrap().at;
-    while at.elapsed() <= Duration::from_nanos(1) {
+    while at.elapsed() <= Duration::from_millis(1) {
         std::thread::yield_now();
     }
     for (cache, expected) in [(&dense, "stale"), (&control, "ready")] {

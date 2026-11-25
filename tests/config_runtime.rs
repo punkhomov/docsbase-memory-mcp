@@ -822,6 +822,33 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
 }
 
 #[test]
+fn writer_policy_change_preserves_existing_index_and_applies_to_connected_jobs() {
+    let mut env = Env::new(&[("guide.md", &doc("writerconfigurationwidget"))]);
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[index.writer]\nheap_bytes = 30000000\nworker_threads = 2\nmerge_threads = 1\n",
+    )
+    .unwrap();
+    assert_eq!(env.run_json(&["index"])["stats"]["docs"], 1);
+    let query = ["search", "writerconfigurationwidget", "--explain"];
+    let initial = env.run_json(&query);
+    let generation = initial["meta"]["index_generation"].as_i64().unwrap();
+
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[index.writer]\nheap_bytes = 16000000\nmerge_threads = 2\n",
+    )
+    .unwrap();
+    env.start_daemon();
+    let repeated = env.run_json(&["index"]);
+    assert_eq!(repeated["stats"]["docs"], 0);
+    assert_eq!(repeated["stats"]["skipped"], 1);
+    let after = env.run_json(&query);
+    assert_eq!(after["hits"], initial["hits"]);
+    assert_eq!(after["meta"]["index_generation"], generation);
+}
+
+#[test]
 fn v2_cli_index_uses_the_live_owner_and_returns_index_counters() {
     let mut env = Env::new(&[
         ("guide.md", "connectedindexwidget"),
@@ -1006,6 +1033,14 @@ write_busy_timeout=2147483648
 max_connections=0
 ",
             "read_pool.max_connections must be > 0",
+        ),
+        (
+            "config_version=2\n[dense]\nquery_cache_max_entries=0\n",
+            "query-cache entry and byte limits must be positive",
+        ),
+        (
+            "config_version=2\n[index.writer]\nheap_bytes=14999999\n",
+            "index.writer.heap_bytes",
         ),
         (&oversized, "over the trusted byte limit"),
     ] {

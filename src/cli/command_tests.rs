@@ -5,10 +5,10 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-fn child(name: &str, ranking: &str) -> bool {
+fn child(name: &str, ranking: &str) -> Option<std::process::Output> {
     const CHILD: &str = "DOCSBASE_B3_COMMAND_CHILD";
     if std::env::var_os(CHILD).is_some() {
-        return true;
+        return None;
     }
     let root = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
@@ -38,7 +38,7 @@ fn child(name: &str, ranking: &str) -> bool {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    false
+    Some(output)
 }
 fn read_request(socket: &std::net::TcpStream) -> Option<serde_json::Value> {
     socket
@@ -99,10 +99,12 @@ fn http_fixture(
 
 #[test]
 fn configured_direct_index_uses_async_http_without_synchronous_transport() {
-    if !child(
+    if child(
         "configured_direct_index_uses_async_http_without_synchronous_transport",
         "lexical",
-    ) {
+    )
+    .is_some()
+    {
         return;
     }
     let (addr, calls, server) = http_fixture(1);
@@ -129,12 +131,21 @@ fn configured_direct_index_uses_async_http_without_synchronous_transport() {
 }
 #[test]
 fn configured_direct_search_uses_async_http_without_synchronous_transport() {
-    if !child(
+    if let Some(output) = child(
         "configured_direct_search_uses_async_http_without_synchronous_transport",
         "rrf",
     ) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("\"exact-fallback\""), "{stdout}");
         return;
     }
+    let config = crate::config::paths::config_dir().unwrap();
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        "config_version = 2\n[dense]\nmax_vectors = 0\n",
+    )
+    .unwrap();
     let (addr, calls, server) = http_fixture(2);
     let settings = crate::store::settings::standalone().unwrap();
     let target = std::env::current_dir().unwrap();
@@ -171,10 +182,12 @@ fn configured_direct_search_uses_async_http_without_synchronous_transport() {
 }
 #[test]
 fn direct_command_error_and_unwind_wait_for_actual_native_terminal_retirement() {
-    if !child(
+    if child(
         "direct_command_error_and_unwind_wait_for_actual_native_terminal_retirement",
         "lexical",
-    ) {
+    )
+    .is_some()
+    {
         return;
     }
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -261,10 +274,12 @@ fn direct_command_error_and_unwind_wait_for_actual_native_terminal_retirement() 
 }
 #[test]
 fn current_thread_command_refuses_before_polling_or_effects() {
-    if !child(
+    if child(
         "current_thread_command_refuses_before_polling_or_effects",
         "lexical",
-    ) {
+    )
+    .is_some()
+    {
         return;
     }
     let runtime = tokio::runtime::Builder::new_current_thread()

@@ -1630,7 +1630,10 @@ fn run_batch_using(
                 ))
             }
         };
-        let mut index = IndexHandle::open_or_create(&lifecycle::index_dir(cache, project.id))?;
+        let mut index = IndexHandle::open_or_create_with_settings(
+            &lifecycle::index_dir(cache, project.id),
+            config.index_writer,
+        )?;
         // A rejected stale attempt may have recreated the index. Even an
         // ignored-only retry must finish that full rebuild for allowed files
         // outside its raw batch before reporting success.

@@ -18,6 +18,7 @@ pub const DEFAULT_QUERY_CACHE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 pub const DEFAULT_DENSE_MAX_VECTORS: usize = 1_000_000;
 /// Default lower threshold for ANN construction and persisted lookup.
 pub const DEFAULT_ANN_MIN_VECTORS: usize = 4096;
+pub(crate) const DEFAULT_ANN_KEEP_GENERATIONS: usize = 2;
 /// Default lease window for backfill and its following ANN build.
 pub const DEFAULT_BACKFILL_PIN_TTL: Duration = Duration::from_hours(1);
 /// Default authority window for the last observed ANN outcome.
@@ -105,7 +106,7 @@ pub fn standalone() -> Result<Resolved<DenseSettings>> {
     crate::config::resolve::resolve_component::<DenseSpec>(&DefaultsContext::standalone(), [])
 }
 
-/// Complete dense policy; remaining runtime adoption follows in its owning task.
+/// Complete dense policy captured when constructing a cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DenseSettings {
     /// Maximum vectors per project before exact streaming.
@@ -120,8 +121,10 @@ pub struct DenseSettings {
     pub build_backoff: Duration,
     /// Legacy vector-cache budget used by the dense path; not strict-v2 scope.
     pub vector_cache_max_bytes: u64,
-    /// ANN dump budget; zero removes all eligible dumps during cleanup.
+    /// Best-effort ANN dump budget, with one index retained during disk cleanup.
     pub max_ann_disk_bytes: u64,
+    /// Newest generations kept per project and model during retention cleanup.
+    pub ann_keep_generations: usize,
     /// Maximum cached query vectors.
     pub query_cache_max_entries: usize,
     /// Cached query vector bytes.
@@ -138,8 +141,48 @@ impl DenseSettings {
             max_bytes: self.query_cache_max_bytes,
         }
     }
+
+    pub(crate) fn view_fields(
+        &self,
+        view: &mut crate::config::view::ViewBuilder<'_>,
+    ) -> Result<()> {
+        for (key, value) in [
+            ("dense.max_vectors", serde_json::json!(self.max_vectors)),
+            ("dense.max_bytes", self.max_bytes.into()),
+            ("dense.max_projects", serde_json::json!(self.max_projects)),
+            ("dense.min_vectors", serde_json::json!(self.min_vectors)),
+            ("dense.max_ann_disk_bytes", self.max_ann_disk_bytes.into()),
+            (
+                "dense.ann_keep_generations",
+                self.ann_keep_generations.into(),
+            ),
+            (
+                "dense.query_cache_max_entries",
+                serde_json::json!(self.query_cache_max_entries),
+            ),
+            (
+                "dense.query_cache_max_bytes",
+                self.query_cache_max_bytes.into(),
+            ),
+        ] {
+            view.push(key, value, None)?;
+        }
+        for (key, value) in [
+            ("dense.build_backoff", self.build_backoff),
+            (
+                "dense.backfill_pin_ttl",
+                self.ann_lifetimes.backfill_pin_ttl(),
+            ),
+            ("dense.ann_outcome_ttl", self.ann_lifetimes.outcome_ttl()),
+        ] {
+            let millis = u64::try_from(value.as_millis())
+                .map_err(|_| Error::internal("cannot display dense setting milliseconds"))?;
+            view.push(key, millis.into(), None)?;
+        }
+        Ok(())
+    }
 }
-/// Explicit typed overrides; these are not accepted TOML keys yet.
+/// Explicit typed overrides for a dense cache and its ANN workers.
 #[derive(Debug, Clone, Default)]
 pub struct DensePatch {
     /// Maximum vectors per project before exact streaming.
@@ -154,8 +197,10 @@ pub struct DensePatch {
     pub build_backoff: Option<Duration>,
     /// Legacy vector-cache budget used by the dense path; not strict-v2 scope.
     pub vector_cache_max_bytes: Option<u64>,
-    /// ANN dump budget; zero removes all eligible dumps during cleanup.
+    /// Best-effort ANN dump budget, with one index retained during disk cleanup.
     pub max_ann_disk_bytes: Option<u64>,
+    /// Newest generations kept per project and model during retention cleanup.
+    pub ann_keep_generations: Option<usize>,
     /// Maximum cached query vectors.
     pub query_cache_max_entries: Option<usize>,
     /// Cached query vector bytes.
@@ -165,8 +210,52 @@ pub struct DensePatch {
     /// Monotonic status authority window; positive.
     pub ann_outcome_ttl: Option<Duration>,
 }
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DenseFilePatch {
+    max_vectors: Option<usize>,
+    max_bytes: Option<u64>,
+    max_projects: Option<usize>,
+    min_vectors: Option<usize>,
+    build_backoff: Option<u64>,
+    max_ann_disk_bytes: Option<u64>,
+    ann_keep_generations: Option<usize>,
+    query_cache_max_entries: Option<usize>,
+    query_cache_max_bytes: Option<u64>,
+    backfill_pin_ttl: Option<u64>,
+    ann_outcome_ttl: Option<u64>,
+}
+
+impl From<DenseFilePatch> for DensePatch {
+    fn from(patch: DenseFilePatch) -> Self {
+        Self {
+            max_vectors: patch.max_vectors,
+            max_bytes: patch.max_bytes,
+            max_projects: patch.max_projects,
+            min_vectors: patch.min_vectors,
+            build_backoff: patch.build_backoff.map(Duration::from_millis),
+            vector_cache_max_bytes: None,
+            max_ann_disk_bytes: patch.max_ann_disk_bytes,
+            ann_keep_generations: patch.ann_keep_generations,
+            query_cache_max_entries: patch.query_cache_max_entries,
+            query_cache_max_bytes: patch.query_cache_max_bytes,
+            backfill_pin_ttl: patch.backfill_pin_ttl.map(Duration::from_millis),
+            ann_outcome_ttl: patch.ann_outcome_ttl.map(Duration::from_millis),
+        }
+    }
+}
+
 /// Component owner of defaults, scope and admission.
 pub struct DenseSpec;
+impl DenseSpec {
+    pub(crate) fn file_fields() -> impl Iterator<Item = FieldSpec> {
+        Self::FIELDS
+            .iter()
+            .copied()
+            .filter(|field| field.key != "dense.vector_cache_max_bytes")
+    }
+}
 impl SettingsSpec for DenseSpec {
     type Patch = DensePatch;
     type Settings = DenseSettings;
@@ -180,6 +269,7 @@ impl SettingsSpec for DenseSpec {
         FieldSpec::new("dense.build_backoff", Scope::Daemon, Unit::Milliseconds),
         FieldSpec::new("dense.vector_cache_max_bytes", Scope::Daemon, Unit::Bytes),
         FieldSpec::new("dense.max_ann_disk_bytes", Scope::Daemon, Unit::Bytes),
+        FieldSpec::new("dense.ann_keep_generations", Scope::Daemon, Unit::Count),
         FieldSpec::new("dense.query_cache_max_entries", Scope::Daemon, Unit::Count),
         FieldSpec::new("dense.query_cache_max_bytes", Scope::Daemon, Unit::Bytes),
         FieldSpec::new("dense.backfill_pin_ttl", Scope::Daemon, Unit::Milliseconds),
@@ -194,6 +284,7 @@ impl SettingsSpec for DenseSpec {
             build_backoff: Duration::from_secs(30),
             vector_cache_max_bytes: 1024 * 1024 * 1024,
             max_ann_disk_bytes: 4 * 1024 * 1024 * 1024,
+            ann_keep_generations: DEFAULT_ANN_KEEP_GENERATIONS,
             query_cache_max_entries: DEFAULT_QUERY_CACHE_MAX_ENTRIES,
             query_cache_max_bytes: DEFAULT_QUERY_CACHE_MAX_BYTES,
             ann_lifetimes: AnnLifetimes {
@@ -240,6 +331,10 @@ impl SettingsSpec for DenseSpec {
             settings.max_ann_disk_bytes = value;
             origins.set("dense.max_ann_disk_bytes", source)?;
         }
+        if let Some(value) = patch.ann_keep_generations {
+            settings.ann_keep_generations = value;
+            origins.set("dense.ann_keep_generations", source)?;
+        }
         if let Some(value) = patch.query_cache_max_entries {
             settings.query_cache_max_entries = value;
             origins.set("dense.query_cache_max_entries", source)?;
@@ -267,6 +362,11 @@ impl SettingsSpec for DenseSpec {
         Ok(())
     }
     fn validate(settings: &Self::Settings, _: &Capabilities) -> Result<()> {
+        if settings.ann_keep_generations == 0 {
+            return Err(Error::Admission {
+                message: "dense.ann_keep_generations must be positive".into(),
+            });
+        }
         settings.query_cache_settings().validate()
     }
     fn impact(
