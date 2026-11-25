@@ -142,6 +142,26 @@ fn models_use_embed_dry_run_prints_table_without_writing() {
 }
 
 #[test]
+fn first_global_models_use_previews_v2() {
+    let env = Env::new();
+    let result = env
+        .cmd()
+        .args([
+            "models",
+            "use",
+            "embed",
+            "fastembed/bge-small-en-v1.5",
+            "--global",
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&result.get_output().stdout);
+    assert!(stdout.contains("config_version = 2"), "{stdout}");
+    assert!(!env.config.path().join("config.toml").exists());
+}
+
+#[test]
 fn models_use_preserved_stage_provider_and_normalize_are_validated() {
     // Pinning one stage must not silently bless a broken *other* stage: the
     // preserved provider is validated against the registry and a
@@ -297,6 +317,11 @@ fn models_use_dry_run_previews_full_merged_file() {
     // C12: `--dry-run` must render the file as it would be written,
     // preserving unrelated keys from the existing project file.
     let env = Env::new();
+    std::fs::write(
+        env.config.path().join("config.toml"),
+        "# Legacy installation",
+    )
+    .unwrap();
     let dir = tempfile::TempDir::new().expect("tmp");
     std::fs::write(
         dir.path().join(".docsbase.toml"),

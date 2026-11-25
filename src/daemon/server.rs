@@ -318,7 +318,7 @@ impl Shared {
         pool_settings: &Resolved<ReadPoolSettings>,
         dense_settings: &crate::hybrid::dense_settings::DenseSettings,
     ) -> Result<Arc<Self>> {
-        let launch = LaunchSnapshot::capture().legacy(DaemonPatch::default())?;
+        let launch = LaunchSnapshot::capture().library_compatibility(DaemonPatch::default())?;
         Self::open_with_launch_config(cache, settings, pool_settings, dense_settings, launch)
     }
 
@@ -927,7 +927,7 @@ impl Shared {
             )?;
             let reservation = service.reserve(detached)?;
             let context = crate::index::async_job::JobContext {
-                input: crate::index::async_job::JobInput::Sync,
+                input: crate::index::async_job::JobInput::Sync { join_active: true },
                 singleton: None,
                 cache: self.cache.clone(),
                 db_settings: self.db_settings.clone(),
@@ -1173,12 +1173,39 @@ impl Shared {
         F: FnOnce(&Config) -> Result<HybridStages>,
         O: FnOnce(),
     {
+        self.publish_project_config(project, build, on_publication_contention, None)
+            .map(|(config, _)| config)
+    }
+
+    fn publish_project_config<F, O>(
+        &self,
+        project: &crate::store::models::Project,
+        build: F,
+        on_publication_contention: O,
+        explicit_index_db: Option<&Db>,
+    ) -> Result<(Arc<Config>, Arc<HybridStages>)>
+    where
+        F: FnOnce(&Config) -> Result<HybridStages>,
+        O: FnOnce(),
+    {
         self.admit_project(project)?;
         let slot = self.project_slot(project.id);
         // Only same-project reloads wait for construction. Existing runtime
         // reads and unrelated projects keep their last coherent state.
         let _reload = slot.reload.lock().unwrap_or_else(PoisonError::into_inner);
-        let config = Arc::new(self.config_for_root(&project.canonical_root)?);
+        let config = self.config_for_root(&project.canonical_root)?;
+        if explicit_index_db.is_some() {
+            let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(current) = &state.config
+                && let Some(stages) = &state.search_stages
+                && current.as_ref() == &config
+            {
+                // A second Index can prepare before the first job row exists.
+                // Keep the validated snapshot both workers use as their revision.
+                return Ok((Arc::clone(current), Arc::clone(stages)));
+            }
+        }
+        let config = Arc::new(config);
         let stages = Arc::new(if self.website.is_some() {
             HybridStages::default()
         } else {
@@ -1206,13 +1233,23 @@ impl Shared {
                     .unwrap_or_else(PoisonError::into_inner)
             }
         };
+        // Sync creates its row while holding a read lease on this project.
+        // Check again under the publication lease before replacing its settings.
+        if let Some(db) = explicit_index_db
+            && crate::store::repo::active_sync_job(db.connection(), project.id)?.is_some()
+        {
+            return Err(crate::index::async_job::active_sync_conflict());
+        }
         let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
         if self.website.is_none() && self.global_config.vector_store.is_none() {
             self.dense
                 .set_vector_cache_max_bytes(project.id, config.hybrid_cfg.cache.max_bytes)?;
         }
-        let changed = state.config.as_deref() != Some(config.as_ref());
-        if changed && self.website.is_none() {
+        let dense_changed = state
+            .config
+            .as_deref()
+            .is_none_or(|previous| config.changes_dense_state(previous));
+        if dense_changed && self.website.is_none() {
             self.dense.invalidate_memory(project.id);
         }
         // All fallible preparation steps precede publication: a rejected
@@ -1220,9 +1257,9 @@ impl Shared {
         state.config = Some(Arc::clone(&config));
         if self.jobs.get().is_some() {
             state.stages = None;
-            state.search_stages = Some(stages);
+            state.search_stages = Some(Arc::clone(&stages));
         } else {
-            state.stages = Some(stages);
+            state.stages = Some(Arc::clone(&stages));
             state.search_stages = None;
         }
         // Provider construction may refresh credentials even when Config values
@@ -1247,7 +1284,7 @@ impl Shared {
                 eprintln!("warning: cannot watch project {}: {err}", project.id);
             }
         }
-        Ok(config)
+        Ok((config, stages))
     }
 
     /// Starts watchers for every indexed project in the registry (daemon
@@ -2156,7 +2193,13 @@ fn prepare_index_context(
     };
     shared.admit_project(&project)?;
     registry::ensure_root_present(&project)?;
+    let refresh_config = !detached
+        && shared.global_config.vector_store.is_some()
+        && args.get("refresh_config").and_then(Value::as_bool) == Some(true);
     if let Some(job) = crate::store::repo::active_sync_job(db.connection(), project.id)? {
+        if refresh_config {
+            return Err(crate::index::async_job::active_sync_conflict());
+        }
         return Ok(Err(tools::sync_status(&db, &json!({"job_id":job.id}))?));
     }
     let singleton = if shared.website.is_some() {
@@ -2172,10 +2215,23 @@ fn prepare_index_context(
     } else {
         None
     };
-    let (config, stages) = shared.project_runtime_for_search(&project)?;
+    let (config, stages) = if refresh_config {
+        // Explicit v2 Index can arrive on a registry-only session. Refresh the
+        // project and retain the same revision to admit its index job.
+        shared.publish_project_config(
+            &project,
+            |config| shared.async_stages(config),
+            || {},
+            Some(&db),
+        )?
+    } else {
+        shared.project_runtime_for_search(&project)?
+    };
     let source = shared.vector_source_for(project.id, &config);
     Ok(Ok(crate::index::async_job::JobContext {
-        input: crate::index::async_job::JobInput::Sync,
+        input: crate::index::async_job::JobInput::Sync {
+            join_active: !refresh_config,
+        },
         singleton,
         cache: shared.cache.clone(),
         db_settings: shared.db_settings.clone(),
@@ -2371,6 +2427,7 @@ fn route_search(
             cache: &shared.cache,
             project: &project,
             window,
+            ann_search: config.ann_search,
             payload_budget: &shared.payload_budget,
             operation,
         },
@@ -3542,6 +3599,45 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn changing_only_ann_traversal_keeps_the_daemons_resident_dense_state() {
+        let fixture = RefreshFixture::new(true, Some("rrf"), crate::hybrid::ann::ANN_MIN_VECTORS);
+        let current = || {
+            fixture
+                .shared
+                .open_project_config_with(&fixture.project, |_| Ok(HybridStages::default()))
+                .unwrap()
+        };
+        let original = current();
+        finish_refresh(fixture.shared.refresh_ann_after_sync(&fixture.project));
+        let resident = || {
+            fixture
+                .shared
+                .dense
+                .get(&fixture.db, fixture.project.id, FakeEmbedder.model_id())
+                .unwrap()
+        };
+        let deadline = Instant::now() + REFRESH_WATCHDOG;
+        let graph = loop {
+            if let DenseRows::Ann(graph) = resident() {
+                break graph;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "refresh did not publish the ANN graph"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let path = fixture.root.path().join(".docsbase.toml");
+        let mut text = fs::read_to_string(&path).unwrap();
+        text.push_str("\n[ann.search]\nef_base=16\nef_max=32\n");
+        fs::write(&path, text).unwrap();
+        let refreshed = current();
+        assert!(original.ann_search.is_none());
+        assert_eq!(refreshed.ann_search.unwrap().ef_max(), 32);
+        assert!(matches!(resident(), DenseRows::Ann(reused) if Arc::ptr_eq(&graph, &reused)));
     }
 
     #[test]

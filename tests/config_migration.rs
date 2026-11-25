@@ -638,3 +638,36 @@ fn preview_vector_budget_provenance_matches_source_version_and_scope() {
         assert!(origins.get("hybrid.cache.max_bytes").is_none());
     }
 }
+
+#[test]
+fn ann_search_file_policy_inherits_global_fields_and_reports_project_origin() {
+    let root = tempfile::tempdir().unwrap();
+    let config_dir = root.path().join("config");
+    let project = root.path().join("project");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "config_version=2\n[ann.search]\nef_base=32\nef_max=128\nfetch_multiplier=2\n",
+    )
+    .unwrap();
+    let file = project.join(".docsbase.toml");
+    std::fs::write(&file, "config_version=2\n[ann.search]\nef_base=12\n").unwrap();
+    let view = docsbase_memory::config::view::load_from(&config_dir, Some(&project)).unwrap();
+    let fields = serde_json::to_value(view).unwrap();
+    let field = |key: &str| {
+        fields["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["key"] == key)
+            .unwrap()
+    };
+    assert_eq!(field("ann.search.ef_base")["value"], 12);
+    assert_eq!(field("ann.search.ef_base")["source"]["kind"], "project");
+    assert_eq!(field("ann.search.ef_max")["value"], 128);
+    assert_eq!(field("ann.search.ef_max")["source"]["kind"], "global");
+    assert_eq!(field("ann.search.fetch_multiplier")["value"], 2);
+    std::fs::write(&file, "config_version=2\n[ann.search]\nef_max=8\n").unwrap();
+    assert!(Config::load_from(&config_dir, Some(&project)).is_err());
+}

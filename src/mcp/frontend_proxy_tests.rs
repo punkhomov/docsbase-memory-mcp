@@ -672,7 +672,7 @@ async fn one_slot_mcp_waits_for_physical_capacity_and_retries_once() {
         drop(old);
 
         let raw_connect = client_transport.connect_async(&endpoint).await;
-        let mut open = std::pin::pin!(super::open_conn(&client_transport, fake.cache.path()));
+        let mut open = std::pin::pin!(super::open_conn(&client_transport, fake.cache.path(), None));
         let while_full = poll_fn(|cx| Poll::Ready(open.as_mut().poll(cx))).await;
         let sent_while_full = fake.received.try_recv().is_ok();
         release.send(()).expect("release native owner");

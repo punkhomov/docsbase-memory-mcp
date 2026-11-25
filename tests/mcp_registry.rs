@@ -582,7 +582,7 @@ fn malformed_config_does_not_stick_queued() {
         .handshake(env.root())
         .expect_err("broken config must fail project open");
     assert!(
-        matches!(err, docsbase_memory::error::Error::Internal { .. }),
+        matches!(err, docsbase_memory::error::Error::Admission { .. }),
         "unexpected error: {err}"
     );
 

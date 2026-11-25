@@ -64,6 +64,12 @@ impl OwnedWriterLease {
 
 pub(crate) use super::job::JobInput;
 
+pub(crate) fn active_sync_conflict() -> Error {
+    Error::Admission {
+        message: "index requires a new job to use current project settings; wait for the active sync to finish and retry `docsbase index`".to_owned(),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mutation {
     Untouched,
@@ -170,9 +176,20 @@ impl IndexState {
         context.source.validate_root(&context.cache)?;
         let revision = context.revision.clone();
         let config = context.config.clone();
+        let explicit_index = matches!(context.input, JobInput::Sync { join_active: false });
         let _revision = revision
             .as_ref()
-            .map(|slot| slot.preparation_lease(&config))
+            .map(|slot| {
+                slot.preparation_lease(&config).map_err(|error| {
+                    if explicit_index {
+                        Error::Admission {
+                            message: "project settings changed during index preparation; wait for any active sync to finish and retry `docsbase index`".to_owned(),
+                        }
+                    } else {
+                        error
+                    }
+                })
+            })
             .transpose()?;
         self.db = Some(Db::open_with_settings(
             &context.cache,
@@ -184,9 +201,12 @@ impl IndexState {
             .ok_or_else(|| Error::internal("job database absent"))?;
         // Only explicit Sync owns a durable job row. Direct/full/incremental
         // lexical callers preserve their existing no-Sync-row contract.
-        if matches!(context.input, JobInput::Sync) {
+        if let JobInput::Sync { join_active } = context.input {
             let tx = db.begin_write()?;
             if let Some(existing) = repo::active_sync_job(&tx, context.project.id)? {
+                if !join_active {
+                    return Err(active_sync_conflict());
+                }
                 self.sync_id = Some(existing.id);
                 drop(tx);
                 self.complete = true;
@@ -382,7 +402,7 @@ impl IndexState {
         }
         self.generation = Some(repo::index_generation(db.connection(), context.project.id)?);
         self.mutation = Mutation::LexicalCommitted;
-        Ok(matches!(context.input, JobInput::Sync))
+        Ok(matches!(context.input, JobInput::Sync { .. }))
     }
     fn batch(
         &mut self,

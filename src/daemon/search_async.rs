@@ -85,6 +85,7 @@ impl SearchSession {
                 .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |stage| {
                     stage.window
                 }),
+            ann_search: self.config.ann_search,
             payload_budget: &self.owners.payload_budget,
             operation: self.operation.clone(),
         }
