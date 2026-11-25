@@ -41,7 +41,7 @@ pub(crate) fn ensure_search_query_mode(
 /// Absent for Shared. Additive Hello marker; wire shape and required SDK caps stay unchanged.
 pub const ACTIVE_WEBSITE_CAPABILITY: &str = "active-website-profile-v1";
 
-/// The running daemon resolved an explicit v2 configuration and owns the shared vectors.
+/// The running daemon resolved v2 configuration and owns the shared vectors.
 pub(crate) const ACTIVE_CONFIG_V2_CAPABILITY: &str = "active-config-v2";
 
 pub(crate) fn ensure_config_version(capabilities: &[String], requested_v2: bool) -> Result<()> {

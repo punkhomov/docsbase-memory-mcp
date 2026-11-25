@@ -209,7 +209,7 @@ pub fn run_daemon_with_dense_policy(
     let grace_ms = u64::try_from(grace.as_millis()).map_err(|_| Error::Admission {
         message: "daemon grace milliseconds overflow".to_owned(),
     })?;
-    let launch = LaunchSnapshot::capture().legacy(DaemonPatch {
+    let launch = LaunchSnapshot::capture().library_compatibility(DaemonPatch {
         idle_grace_ms: Some(grace_ms),
         ..DaemonPatch::default()
     })?;

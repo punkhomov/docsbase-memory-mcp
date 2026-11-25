@@ -360,6 +360,11 @@ fn migration_draft_preserves_actual_v1_settings_and_never_writes_sources() {
             .map(|e| SourceLayer::parse(e.source.clone(), &e.after).unwrap());
         let actual = preview_sources(&proposed_global, proposed.as_ref()).unwrap();
         expected.hybrid_cfg.cache.max_bytes = 16384;
+        let mut settings = docsbase_memory::vector_cache::settings::standalone()
+            .unwrap()
+            .into_settings();
+        settings.max_bytes = 16384;
+        expected.vector_store = Some(settings);
         assert_eq!(actual.effective.settings(), &expected);
         assert_eq!(
             actual.conflicts,
@@ -598,6 +603,75 @@ fn versioned_preview_respects_local_build_capability_without_provisioning() {
 }
 
 #[test]
+fn v2_policy_origins_and_non_byte_limits_survive_a_budget_migration_plan() {
+    let source = global("config_version=2\n[vector_cache]\nmax_entries=74\nbusy_timeout=33\n");
+    let resolved = preview_sources(&source, None).unwrap();
+    let report = serde_json::to_value(
+        docsbase_memory::config::view::from_resolved(&resolved.effective).unwrap(),
+    )
+    .unwrap();
+    let field = |key: &str| {
+        report["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["key"] == key)
+            .unwrap()
+    };
+    assert_eq!(field("vector_cache.max_entries")["value"], 74);
+    assert_eq!(
+        field("vector_cache.max_entries")["source"]["kind"],
+        "global"
+    );
+    assert_eq!(field("vector_cache.max_entries")["unit"], "count");
+    assert_eq!(field("vector_cache.busy_timeout")["value"], 33);
+    assert_eq!(field("vector_cache.busy_timeout")["unit"], "milliseconds");
+    assert_eq!(
+        field("vector_cache.max_bytes")["source"]["kind"],
+        "defaults"
+    );
+    let draft = draft_migration(
+        &source,
+        &[],
+        &[],
+        Some(VectorBudgetDecision::UseBytes(8192)),
+    )
+    .unwrap();
+    let edit = &draft.edits[0];
+    let changed = SourceLayer::parse(edit.source.clone(), &edit.after).unwrap();
+    let after = preview_sources(&changed, None).unwrap();
+    let policy = after.effective.settings().vector_store.as_ref().unwrap();
+    assert_eq!(policy.max_entries, 74);
+    assert_eq!(policy.max_bytes, 8192);
+    assert_eq!(policy.busy_timeout.as_millis(), 33);
+    for override_text in ["max_entries=0", "busy_timeout=2147483648", "max_bytes=0"] {
+        assert!(
+            SourceLayer::parse(
+                source.source().clone(),
+                &format!("config_version=2\n[vector_cache]\n{override_text}\n"),
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        SourceLayer::parse(
+            source.source().clone(),
+            "config_version=2\nvector_cache=[74,8192,33]\n",
+        )
+        .is_err()
+    );
+    let defaults = preview_sources(&global("config_version=2\n"), None).unwrap();
+    let policy = defaults.effective.settings().vector_store.as_ref().unwrap();
+    assert_eq!(policy.max_entries, 1_000_000);
+    assert_eq!(policy.busy_timeout.as_millis(), 5_000);
+    for key in ["vector_cache.max_entries", "vector_cache.busy_timeout"] {
+        let origin = defaults.effective.provenance().get(key).unwrap();
+        assert_eq!(origin.source, SourceId::Defaults);
+        assert_eq!(origin.scope, docsbase_memory::config::schema::Scope::Daemon);
+    }
+}
+
+#[test]
 fn preview_vector_budget_provenance_matches_source_version_and_scope() {
     use docsbase_memory::config::schema::{Scope, Unit};
     let g = global(CUSTOM);
@@ -636,5 +710,74 @@ fn preview_vector_budget_provenance_matches_source_version_and_scope() {
         assert_eq!(cap.scope, Scope::Daemon);
         assert_eq!(cap.unit, Unit::Bytes);
         assert!(origins.get("hybrid.cache.max_bytes").is_none());
+    }
+}
+
+#[test]
+fn ann_search_file_policy_inherits_global_fields_and_reports_project_origin() {
+    let root = tempfile::tempdir().unwrap();
+    let config_dir = root.path().join("config");
+    let project = root.path().join("project");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "config_version=2\n[ann.search]\nef_base=32\nef_max=128\nfetch_multiplier=2\n",
+    )
+    .unwrap();
+    let file = project.join(".docsbase.toml");
+    std::fs::write(&file, "config_version=2\n[ann.search]\nef_base=12\n").unwrap();
+    let view = docsbase_memory::config::view::load_from(&config_dir, Some(&project)).unwrap();
+    let fields = serde_json::to_value(view).unwrap();
+    let field = |key: &str| {
+        fields["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["key"] == key)
+            .unwrap()
+    };
+    assert_eq!(field("ann.search.ef_base")["value"], 12);
+    assert_eq!(field("ann.search.ef_base")["source"]["kind"], "project");
+    assert_eq!(field("ann.search.ef_max")["value"], 128);
+    assert_eq!(field("ann.search.ef_max")["source"]["kind"], "global");
+    assert_eq!(field("ann.search.fetch_multiplier")["value"], 2);
+    std::fs::write(&file, "config_version=2\n[ann.search]\nef_max=8\n").unwrap();
+    assert!(Config::load_from(&config_dir, Some(&project)).is_err());
+}
+
+#[test]
+fn ann_build_file_policy_resolves_a_project_recipe_before_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let config_dir = root.path().join("config");
+    let project = root.path().join("project");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "config_version=2\n[ann.build]\nm=12\nef_construction=120\n",
+    )
+    .unwrap();
+    let file = project.join(".docsbase.toml");
+    std::fs::write(&file, "config_version=2\n[ann.build]\nef_construction=64\n").unwrap();
+    let view = docsbase_memory::config::view::load_from(&config_dir, Some(&project)).unwrap();
+    for (key, value, source) in [
+        ("ann.build.m", 12, "global"),
+        ("ann.build.ef_construction", 64, "project"),
+    ] {
+        let field = view.fields.iter().find(|field| field.key == key).unwrap();
+        assert_eq!(field.value, value);
+        assert_eq!(
+            serde_json::to_value(&field.origin.source).unwrap()["kind"],
+            source
+        );
+    }
+    for invalid in [
+        "[ann.build]\nef_construction=20\n",
+        "[ann]\nbuild=[12,64]\n",
+        "ann=[{build={m=12}}]\n",
+    ] {
+        std::fs::write(&file, format!("config_version=2\n{invalid}")).unwrap();
+        assert!(Config::load_from(&config_dir, Some(&project)).is_err());
     }
 }

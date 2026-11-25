@@ -1,4 +1,4 @@
-//! Pure policy owner for the shared vector store. File-v2 activation is separate.
+//! Policy owner for the shared vector store.
 
 use std::time::Duration;
 
@@ -7,6 +7,7 @@ use crate::config::schema::{
     ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Resolved, Scope,
     SettingsSpec, SourceId, Unit,
 };
+use crate::config::view::ViewBuilder;
 use crate::error::{Error, Result};
 
 pub(crate) const MAX_BYTES_FIELD: FieldSpec =
@@ -29,10 +30,15 @@ impl VectorStoreSettings {
     /// # Errors
     /// Nonpositive capacities or a timeout outside SQLite's signed milliseconds.
     pub fn validate(&self) -> Result<()> {
-        if self.max_entries == 0 || self.max_bytes == 0 {
-            return Err(Error::Admission {
-                message: "vector-store entry and byte limits must be positive".into(),
-            });
+        for (value, field) in [
+            (self.max_entries, "vector_cache.max_entries"),
+            (self.max_bytes, "vector_cache.max_bytes"),
+        ] {
+            if value == 0 {
+                return Err(Error::Admission {
+                    message: format!("{field} must be positive"),
+                });
+            }
         }
         // rusqlite otherwise panics while converting this value for SQLite.
         if self.busy_timeout.as_millis() > i32::MAX as u128 {
@@ -53,9 +59,25 @@ impl VectorStoreSettings {
             max_bytes: self.max_bytes,
         }
     }
+
+    pub(crate) fn view_fields(&self, view: &mut ViewBuilder<'_>) -> Result<()> {
+        use serde_json::json;
+
+        for (field, value) in [
+            ("vector_cache.max_entries", json!(self.max_entries)),
+            (MAX_BYTES_FIELD.key, json!(self.max_bytes)),
+            (
+                "vector_cache.busy_timeout",
+                json!(self.busy_timeout.as_millis()),
+            ),
+        ] {
+            view.push(field, value, None)?;
+        }
+        Ok(())
+    }
 }
 
-/// Typed construction overrides; these are not new TOML keys.
+/// Typed construction overrides for the shared vector store.
 #[derive(Debug, Clone, Default)]
 pub struct VectorStorePatch {
     /// Maximum retained vectors.
@@ -64,6 +86,40 @@ pub struct VectorStorePatch {
     pub max_bytes: Option<u64>,
     /// Writer wait and constructor/WAL window on every owned connection.
     pub busy_timeout: Option<Duration>,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VectorStoreFile {
+    max_entries: Option<u64>,
+    max_bytes: Option<u64>,
+    busy_timeout: Option<u64>,
+}
+
+pub(crate) fn resolve_file(
+    source: &SourceId,
+    value: Option<toml::Value>,
+) -> Result<Resolved<VectorStoreSettings>> {
+    let file: VectorStoreFile = match value {
+        Some(value @ toml::Value::Table(_)) => value.try_into().map_err(|_| Error::Admission {
+            message: "invalid global vector_cache fields".into(),
+        })?,
+        Some(_) => {
+            return Err(Error::Admission {
+                message: "global vector_cache must be a table".into(),
+            });
+        }
+        None => VectorStoreFile::default(),
+    };
+    let patch = VectorStorePatch {
+        max_entries: file.max_entries,
+        max_bytes: file.max_bytes,
+        busy_timeout: file.busy_timeout.map(Duration::from_millis),
+    };
+    crate::config::resolve::resolve_component::<VectorStoreSpec>(
+        &DefaultsContext::standalone(),
+        [(source.clone(), patch)],
+    )
 }
 
 /// Sole owner of strict vector-store defaults, scope and validation.

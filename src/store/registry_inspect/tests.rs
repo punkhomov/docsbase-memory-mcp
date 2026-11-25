@@ -404,7 +404,7 @@ fn catalog_observation_binds_epoch_and_active_head_at_equal_content_revision() {
         else {
             panic!("prepared catalog must be observable, got {report:?}");
         };
-        assert_eq!(schema_version, 4);
+        assert_eq!(schema_version, 5);
         assert!(revision.starts_with("registry-v2:"), "{revision}");
         revision
     };

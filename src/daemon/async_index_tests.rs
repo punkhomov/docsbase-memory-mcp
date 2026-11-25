@@ -60,6 +60,156 @@ impl AsyncEmbedder for DocumentGate {
     }
 }
 
+fn open_v2_index_shared(cache: &Path, config: &Path) -> Arc<Shared> {
+    std::fs::write(config.join("config.toml"), "config_version = 2\n").unwrap();
+    Shared::open_with_launch(
+        cache,
+        &crate::store::settings::standalone().unwrap(),
+        &crate::store::settings::standalone_read_pool().unwrap(),
+        crate::hybrid::dense_settings::standalone()
+            .unwrap()
+            .settings(),
+        &LaunchSnapshot::capture_from(config),
+        DaemonPatch::default(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn two_v2_index_preparations_before_job_creation_keep_the_same_revision() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let cache = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let shared = open_v2_index_shared(cache.path(), config.path());
+    let jobs = crate::daemon::job_service::JobRoot::new(shared.daemon_settings());
+    shared.activate_jobs(jobs.service()).unwrap();
+
+    let args = json!({"path": project.path(), "refresh_config": true});
+    let first = prepare_index_context(&shared, None, &args, false)
+        .unwrap()
+        .unwrap();
+    let second = prepare_index_context(&shared, None, &args, false)
+        .unwrap()
+        .unwrap();
+    let db = shared.db();
+    assert!(
+        crate::store::repo::active_sync_job(db.connection(), first.project.id)
+            .unwrap()
+            .is_none()
+    );
+    drop(db);
+    let slot = first.revision.as_ref().unwrap();
+    assert!(slot.preparation_lease(&first.config).is_ok());
+    assert!(slot.preparation_lease(&second.config).is_ok());
+    assert!(Arc::ptr_eq(&first.stages, &second.stages));
+    std::fs::write(
+        project.path().join(".docsbase.toml"),
+        "max_docs_per_project = 19\n",
+    )
+    .unwrap();
+    let revised = prepare_index_context(&shared, None, &args, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(revised.config.max_docs_per_project, 19);
+    assert!(slot.preparation_lease(&first.config).is_err());
+    assert!(slot.preparation_lease(&revised.config).is_ok());
+}
+
+#[test]
+fn explicit_v2_index_rejects_an_active_sync_at_each_boundary() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let cache = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let shared = open_v2_index_shared(cache.path(), config.path());
+    let mut jobs = crate::daemon::job_service::JobRoot::new(shared.daemon_settings());
+    shared.activate_jobs(jobs.service()).unwrap();
+
+    let args = json!({"path": project.path(), "refresh_config": true});
+    let superseded = prepare_index_context(&shared, None, &args, false)
+        .unwrap()
+        .unwrap();
+    let config_path = project.path().join(".docsbase.toml");
+    std::fs::write(&config_path, "max_docs_per_project = 19\n").unwrap();
+    let prepared = prepare_index_context(&shared, None, &args, false)
+        .unwrap()
+        .unwrap();
+    let slot = prepared.revision.as_ref().unwrap();
+    let project_id = prepared.project.id;
+
+    // The other Sync creates its row before releasing its preparation lease.
+    std::fs::write(config_path, "max_docs_per_project = 18\n").unwrap();
+    let read_db = Db::open_with_settings(&shared.cache, &shared.db_settings).unwrap();
+    let preparation = slot.preparation_lease(&prepared.config).unwrap();
+    let mut job_id = None;
+    let publication = shared.publish_project_config(
+        &prepared.project,
+        |config| shared.async_stages(config),
+        || {
+            job_id = crate::store::repo::create_sync_job(read_db.connection(), project_id).unwrap();
+            drop(preparation);
+        },
+        Some(&read_db),
+    );
+    let job_id = job_id.expect("publication waited for competing sync");
+    assert!(matches!(publication, Err(Error::Admission { .. })));
+    assert!(slot.preparation_lease(&prepared.config).is_ok());
+    assert!(matches!(
+        prepare_index_context(&shared, None, &args, false),
+        Err(Error::Admission { .. })
+    ));
+    for (request, detached) in [
+        (json!({"path":project.path()}), false),
+        (json!({"project_id":project_id}), true),
+    ] {
+        let existing = prepare_index_context(&shared, None, &request, detached)
+            .unwrap()
+            .err()
+            .expect("ordinary Index and Sync join the current job");
+        assert_eq!(existing["job_id"], job_id);
+    }
+
+    let operation = crate::search::operation::SearchOperation::with_timeout(
+        Instant::now(),
+        std::time::Duration::from_secs(5),
+        crate::hybrid::work::Cancellation::new(),
+    )
+    .unwrap();
+    let service = jobs.service();
+    jobs.run(&runtime, async {
+        for context in [prepared, superseded] {
+            let result = crate::index::async_job::run(
+                &service,
+                &shared.workers,
+                shared.activity.track(),
+                operation.clone(),
+                &shared.payload_budget,
+                context,
+            )
+            .await;
+            assert!(
+                matches!(&result, Err(Error::Admission { message }) if message.contains("retry `docsbase index`")),
+                "{result:?}"
+            );
+        }
+        Ok(())
+    })
+    .unwrap();
+    let active_job = crate::store::repo::active_sync_job(read_db.connection(), project_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(active_job.id, job_id);
+}
+
 #[test]
 fn held_document_embedding_releases_actual_control_dispatch() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -884,6 +1034,88 @@ impl Drop for OpenBuildOnDrop {
         self.0.open();
     }
 }
+
+#[test]
+fn async_sync_hands_the_resolved_recipe_to_the_physical_ann_worker() {
+    use crate::hybrid::ann_settings::AnnBuildSettings;
+    use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore, chunk_set_digest};
+    use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseCacheLimits};
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut root = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = root.service();
+    root.run(&runtime, async move {
+        let provider = document_gate();
+        let stages = || HybridStages {
+            embedder: Some(provider.clone()),
+            ranking: Ranking::Rrf,
+            reranker: None,
+        };
+        let mut fixture = search_phase_tests::Fixture::new(stages());
+        let shared = Arc::get_mut(&mut fixture.shared).unwrap();
+        shared.dense = DenseCache::with_policy_limits(
+            AnnPolicy::BuildOrLoad,
+            &shared.cache,
+            DenseCacheLimits {
+                min_vectors: 1,
+                ..DenseCacheLimits::default()
+            },
+        );
+        fixture.shared.activate_jobs(service).unwrap();
+        std::fs::write(
+            fixture.project.canonical_root.join(".docsbase.toml"),
+            "[ann.build]\nm=12\nef_construction=64\n",
+        )
+        .unwrap();
+        let config = fixture
+            .shared
+            .open_project_config_with(&fixture.project, |_| Ok(stages()))
+            .unwrap();
+        assert_eq!(config.ann_build, AnnBuildSettings::new(12, 64).unwrap());
+        provider.release.add_permits(1);
+        let result = call_tool(
+            &fixture.shared,
+            Some(fixture.session),
+            "index_project",
+            json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["state"], "done");
+        let dense = fixture.shared.dense.snapshot();
+        tokio::task::spawn_blocking(move || dense.join_job_builds_for_test())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let project_id = fixture.project.id;
+        let db = fixture.shared.db();
+        let chunks = crate::store::repo::chunk_hashes(db.connection(), project_id).unwrap();
+        let key = AnnKey {
+            project_id,
+            generation: crate::store::repo::index_generation(db.connection(), project_id).unwrap(),
+            model_id: provider.model_id().to_owned(),
+            dim: 3,
+            chunk_count: chunks.len(),
+            chunk_set_digest: chunk_set_digest(&chunks),
+            format_version: ANN_FORMAT_VERSION,
+        };
+        let store = AnnStore::new(fixture.shared.cache.clone());
+        let slot = store
+            .load_with_settings(&key, config.ann_build)
+            .unwrap()
+            .expect("async sync must publish the captured recipe");
+        assert_eq!((slot.meta.m, slot.meta.ef_construction), (12, 64));
+        assert_eq!(provider.synchronous.load(Ordering::SeqCst), 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
 #[test]
 fn captured_ttl_and_exact_ann_handoff_isolate_later_job_from_old_worker_cleanup() {
     let runtime = tokio::runtime::Builder::new_current_thread()

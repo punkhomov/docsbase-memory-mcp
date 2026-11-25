@@ -3,7 +3,7 @@ use rusqlite::{Connection, Row, types::ValueRef};
 
 use super::registry_inspect::{RegistryProject, UnavailableReason as Why, sqlite_failure};
 
-pub(super) const SCHEMA_VERSION: u32 = 4;
+pub(super) const SCHEMA_VERSION: u32 = 5;
 const FORMAT_VERSION: i64 = 1;
 
 /// Observe catalog identity on a leased, bounded registry snapshot. Local

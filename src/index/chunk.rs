@@ -7,6 +7,8 @@
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
+use super::settings::ChunkSettings;
+
 /// Kind of a chunk's content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChunkKind {
@@ -24,7 +26,7 @@ pub enum ChunkKind {
 /// Tail of the previous chunk carried into the next one at paragraph splits
 /// (≈10% of the char cap); consumed by the recursive splitter (SQ4) and by
 /// the long-chunk penalty threshold (`tantivy_index`).
-pub const CHUNK_OVERLAP: usize = 150;
+pub const CHUNK_OVERLAP: usize = ChunkSettings::owner_defaults().overlap_chars();
 
 /// One indexed chunk with citation metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,25 +112,33 @@ fn simple_ascii_lines(body: &str) -> Option<u64> {
     Some(count)
 }
 
-/// Conservative logical peak before frontmatter/chunk/JSON/apply allocations.
-/// Parser internals and range arrays are bounded by source bytes; retained heading
-/// breadcrumbs are additionally bounded per section (including all chunk clones).
-pub(crate) fn capture_charge(body: &str, cap: usize) -> crate::error::Result<u64> {
+/// Additional chunk and apply workspace after reserving the Markdown parser.
+/// Heading breadcrumbs are bounded per section, including all retained clones.
+pub(crate) fn capture_chunk_charge(
+    body: &str,
+    settings: ChunkSettings,
+) -> crate::error::Result<u64> {
     use crate::error::Error;
     let denied = || Error::Admission {
         message: "chunk capture preflight overflow".into(),
     };
-    let mut total = capture_parser_charge(body)?;
+    let mut total = 0_u64;
+    let starts = line_starts(body);
     let mut headings = [0_u64; 6];
+    let mut heading_count = 0;
     let mut start = 0;
     let mut previous_heading = 0_u64;
+    let max = settings.max_chars();
     let mut section = |start: usize, end: usize, heading: u64| -> crate::error::Result<()> {
         let text = &body[start..end];
         let pieces = text
             .bytes()
             .filter(|byte| *byte == b'\n')
             .count()
-            .saturating_add(text.len() / cap.saturating_sub(CHUNK_OVERLAP).max(1))
+            // Each pair of consecutive pieces within an oversized line
+            // spans more than one full window. An unpaired piece or a
+            // line-boundary cut is covered by the line count.
+            .saturating_add(2 * (text.len() / (max + 1)))
             .saturating_add(2) as u64;
         let records = heading
             .checked_mul(8)
@@ -140,14 +150,19 @@ pub(crate) fn capture_charge(body: &str, cap: usize) -> crate::error::Result<u64
     };
     #[cfg(test)]
     CAPTURE_PARSER_ENTRIES.set(CAPTURE_PARSER_ENTRIES.get() + 1);
-    for (event, range) in Parser::new_ext(body, Options::all()).into_offset_iter() {
+    for (event, range) in markdown_parser(body).into_offset_iter() {
         if let Event::Start(Tag::Heading { level, .. }) = event {
-            section(start, range.start, previous_heading)?;
-            let level = level as usize;
-            headings[level - 1] = (range.end - range.start) as u64;
-            headings[level..].fill(0);
-            previous_heading = headings.iter().sum();
-            start = range.start;
+            let boundary = line_start_at(&starts, range.start);
+            if boundary > start {
+                section(start, boundary, previous_heading)?;
+            }
+            // Match the chunker's breadcrumb truncation even when headings
+            // skip levels. The source span bounds the normalized heading text.
+            heading_count = heading_count.min(level as usize - 1);
+            headings[heading_count] = (range.end - range.start) as u64;
+            heading_count += 1;
+            previous_heading = headings[..heading_count].iter().sum();
+            start = boundary;
         }
     }
     section(start, body.len(), previous_heading)?;
@@ -157,6 +172,16 @@ pub(crate) fn capture_charge(body: &str, cap: usize) -> crate::error::Result<u64
 /// Splits `body` into chunks no larger than `max_chunk_chars` where possible.
 #[must_use]
 pub fn chunk_markdown(body: &str, max_chunk_chars: usize) -> Vec<Chunk> {
+    chunk_markdown_inner(body, max_chunk_chars, CHUNK_OVERLAP)
+}
+
+/// Splits Markdown using the verified geometry of the indexing recipe.
+#[must_use]
+pub fn chunk_markdown_with_settings(body: &str, settings: ChunkSettings) -> Vec<Chunk> {
+    chunk_markdown_inner(body, settings.max_chars(), settings.overlap_chars())
+}
+
+fn chunk_markdown_inner(body: &str, max_chunk_chars: usize, overlap: usize) -> Vec<Chunk> {
     if body.is_empty() {
         return Vec::new();
     }
@@ -169,7 +194,7 @@ pub fn chunk_markdown(body: &str, max_chunk_chars: usize) -> Vec<Chunk> {
             continue;
         }
         let text = &body[section.start..section.end];
-        for (start, end) in split_ranges(text, max_chunk_chars) {
+        for (start, end) in split_ranges(text, max_chunk_chars, overlap) {
             let piece = &text[start..end];
             if piece.trim().is_empty() {
                 continue;
@@ -196,20 +221,23 @@ struct Section {
     headings: Vec<String>,
 }
 
-fn sections(body: &str, starts: &[usize]) -> Vec<Section> {
-    let parser = Parser::new_ext(
+fn markdown_parser(body: &str) -> Parser<'_> {
+    Parser::new_ext(
         body,
         Options::ENABLE_TABLES
             | Options::ENABLE_STRIKETHROUGH
             | Options::ENABLE_TASKLISTS
             | Options::ENABLE_FOOTNOTES,
-    );
+    )
+}
+
+fn sections(body: &str, starts: &[usize]) -> Vec<Section> {
     let mut sections = Vec::new();
     let mut headings: Vec<String> = Vec::new();
     let mut section_start = 0_usize;
     let mut heading: Option<(usize, String)> = None;
 
-    for (event, range) in parser.into_offset_iter() {
+    for (event, range) in markdown_parser(body).into_offset_iter() {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 let boundary = line_start_at(starts, range.start);
@@ -314,15 +342,15 @@ struct Piece {
     heading_merged: bool,
 }
 
-fn split_ranges(text: &str, max: usize) -> Vec<(usize, usize)> {
+fn split_ranges(text: &str, max: usize, overlap: usize) -> Vec<(usize, usize)> {
     if text.chars().count() <= max {
         // Sections within the cap keep their v1 shape (no segmentation, no
         // synthetic boundaries): recursive treatment is for oversized content.
         return vec![(0, text.len())];
     }
     let pieces = bounded_pieces(text, max);
-    let pieces = merge_heading_only(pieces, text, max);
-    apply_overlap(text, &pieces, max)
+    let pieces = merge_heading_only(pieces, text, max.saturating_add(overlap));
+    apply_overlap(text, &pieces, overlap.min(max / 10))
 }
 
 /// A heading-only piece directly before the next piece is a caption: merge it
@@ -330,7 +358,7 @@ fn split_ranges(text: &str, max: usize) -> Vec<(usize, usize)> {
 /// cap + overlap and the merged piece skips overlap, keeping SC-5. A push/pop
 /// pass keeps the backward re-check without O(n) removal inside the scan
 /// (SQ16).
-fn merge_heading_only(pieces: Vec<Piece>, text: &str, max: usize) -> Vec<Piece> {
+fn merge_heading_only(pieces: Vec<Piece>, text: &str, merged_cap: usize) -> Vec<Piece> {
     let mut merged: Vec<Piece> = Vec::with_capacity(pieces.len());
     for piece in pieces {
         merged.push(piece);
@@ -342,7 +370,7 @@ fn merge_heading_only(pieces: Vec<Piece>, text: &str, max: usize) -> Vec<Piece> 
             let heading_only = !current.atomic
                 && !next.atomic
                 && current.end == next.start
-                && current_chars + next_chars <= max + CHUNK_OVERLAP
+                && current_chars + next_chars <= merged_cap
                 && text[current.start..current.end]
                     .lines()
                     .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'));
@@ -529,15 +557,15 @@ fn is_token_boundary(ch: char) -> bool {
 
 /// Prepends a bounded tail of the previous piece to each following piece so
 /// the citation still carries context (FR-4); atomic blocks are not overlapped.
-/// The tail is at most [`CHUNK_OVERLAP`] and at most a tenth of the cap.
-fn apply_overlap(text: &str, pieces: &[Piece], max: usize) -> Vec<(usize, usize)> {
-    let take = CHUNK_OVERLAP.min(max / 10);
+/// The caller bounds the tail by the overlap allowance and a tenth of the cap.
+fn apply_overlap(text: &str, pieces: &[Piece], take: usize) -> Vec<(usize, usize)> {
     let mut ranges = Vec::with_capacity(pieces.len());
     for (index, piece) in pieces.iter().enumerate() {
         let start = if index == 0
             || take == 0
             || piece.atomic
             || pieces[index - 1].atomic
+            || pieces[index - 1].end != piece.start
             || piece.heading_merged
             || pieces[index - 1].heading_merged
         {
@@ -625,6 +653,69 @@ fn line_of(starts: &[usize], offset: usize) -> u32 {
 #[cfg(test)]
 mod parser_allowance_tests {
     use super::*;
+
+    #[test]
+    fn capture_reserves_record_allowance_when_long_line_cuts_follow_tokens() {
+        let settings = ChunkSettings::new(1000, 0).unwrap();
+        let words = ("w".repeat(520) + " ").repeat(24);
+        let body = format!("# {}\n\n{words}\n", "h".repeat(8192));
+        assert_capture_covers_chunks(&body, settings);
+    }
+
+    #[test]
+    fn capture_accounts_headings_inside_plus_delimiters_and_skipped_levels() {
+        let settings = ChunkSettings::new(128, 0).unwrap();
+        let large_title = "x".repeat(8192);
+        let words = "text ".repeat(8192);
+        for body in [
+            format!("+++\n# {large_title}\n+++\n\n{words}\n"),
+            format!("#### {large_title}\n\n### Next\n\n{words}\n"),
+        ] {
+            assert_capture_covers_chunks(&body, settings);
+        }
+    }
+
+    #[test]
+    fn capture_charges_a_cr_only_document_as_one_lf_delimited_section() {
+        let body = "# x\r".repeat(20_000);
+        let charge = capture_chunk_charge(&body, ChunkSettings::owner_defaults()).unwrap();
+        assert!(
+            charge < 1024 * 1024,
+            "heading events on the same indexed line cannot each create a chunk: {charge}"
+        );
+    }
+
+    #[test]
+    fn overlap_does_not_reintroduce_discarded_blank_lines() {
+        for max in [128_u16, 1500] {
+            let settings = ChunkSettings::new(max, max / 10).unwrap();
+            let body = format!(
+                "{} tail\n{}next paragraph\n",
+                "x".repeat(usize::from(max) - 6),
+                "\n".repeat(usize::from(max) * 2)
+            );
+
+            let chunks = chunk_markdown_with_settings(&body, settings);
+            assert_eq!(chunks.len(), 2);
+            assert_eq!(chunks[1].text, "next paragraph\n");
+        }
+    }
+
+    fn assert_capture_covers_chunks(body: &str, settings: ChunkSettings) {
+        let chunks = chunk_markdown_with_settings(body, settings);
+        let retained_allowance: u64 = chunks
+            .iter()
+            .map(|chunk| {
+                let breadcrumbs: usize = chunk.heading_path.iter().map(String::len).sum();
+                2048 + 8 * breadcrumbs as u64
+            })
+            .sum();
+
+        assert!(
+            capture_chunk_charge(body, settings).unwrap() >= retained_allowance,
+            "the capture admission must charge every retained breadcrumb clone"
+        );
+    }
 
     #[test]
     fn simple_ascii_allowance_accounts_initial_tree_and_keeps_complex_markdown_fallback() {
