@@ -536,6 +536,16 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   для #79 FR-S2. План: [index-outcome-plan.md](index-outcome-plan.md). Scope — A-owned
   index/store плюс существующие wrapper endings; server/readiness/IPC остаются B.
 
+## Delta 2026-11-24 — CF10 и разбиение CF11
+
+- [x] Сопоставить размещения metadata на bounded fixture и определить
+  контракт head, seal, leases и recovery в
+  [storage-publication.md](storage-publication.md).
+- [ ] CF11a — реестр и accessor с legacy совместимостью.
+- [ ] CF11b — изолированный staging и нативная проверка sealing.
+- [ ] CF11c — durable CAS и совместимый snapshot демона и direct CLI.
+- [ ] CF11d — recovery/reclaim, budgets и настоящий согласованный apply.
+
 ## Delta 2026-11-24 — CF8a search-only library adoption
 
 - [x] **CF8a:** I33 project owner, checked immutable policy, additive built/loaded

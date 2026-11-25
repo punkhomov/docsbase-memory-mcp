@@ -829,6 +829,15 @@ evidence. Subset не наследует полноту. DB3 additive migration 
 stamp2→3 без rebuild; absent legacy outcome остаётся unknown. Детали и проверка:
 [index-outcome-plan.md](index-outcome-plan.md). Это prerequisite #79, а не CF11.
 
+## Delta 2026-11-24 — CF10, смена поколения индекса
+
+Полная замена строит отдельную пару SQLite/Tantivy проекта. Реестр
+публикует её одним обновлением head после seal. Обычный инкремент
+продолжает использовать короткую границу чтения текущей пары. Вытесненные
+ресурсы остаются доступными прежним держателям до освобождения leases.
+Схема, идентичность, нативные барьеры и crash matrix описаны в
+[storage-publication.md](storage-publication.md).
+
 ## Delta 2026-11-24 — CF8a search-only owner and compatibility
 
 [CF8a plan](cf8a-plan.md) records the pinned HNSW beam-promotion/allocation evidence,

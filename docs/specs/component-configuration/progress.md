@@ -1018,6 +1018,24 @@ lease, including failed sequence reads. A live successful connection retains its
 existing mode owner. The shared window still bounds contention/retry admission,
 not non-preemptible native completion. No fixture/budget/ignore/dependency change.
 
+## 2026-11-24 — CF10, размещение и публикация поколений
+
+Task CF10: complete (ADR, scratch measurement and fresh review). Отдельная
+metadata SQLite выбрана для полной замены. На 20 000 документах и 80 000
+чанках медианы копии составили 253 мс для строк общей базы и 132 мс для
+изолированной копии. В Linux-пробе остановка до и после commit указателя
+выбрала ожидаемую пару реальной metadata/Tantivy. Старая read-транзакция
+сохранила свои данные.
+
+Ruling: отдельная запись legacy поколения закрывает reclaim первой смены.
+Schema fence требует остановленного перехода и резервной копии. Pending
+проверяется при подготовке и CAS. Определены single daemon owner, source
+leases, durable bindings, удаление под нативным барьером и старение ссылок
+по snapshot token. Существующий числовой маршрут сохранён. Inventory
+stage seal становится историей после публикации независимо от content
+revision. Повторное ревью не выявило Critical/Important.
+CF11a–d сохраняют runtime и native proof gates.
+
 ## 2026-11-24 — CF8a: ANN search settings at the library boundary
 
 Task CF8a: complete (project settings and explicit search on built and loaded
