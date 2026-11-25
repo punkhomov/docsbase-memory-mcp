@@ -323,17 +323,31 @@ fn read_project(path: &Path) -> Result<ProjectFileConfig> {
 
 /// Reads and caps a config file (repo-controlled, T48).
 fn read_capped(path: &Path) -> Result<String> {
-    let bytes = capture::read_file(path, crate::limits::MAX_STATE_BYTES).map_err(|err| {
-        Error::internal_with_source(
-            format!(
-                "read {} ({} byte limit): {err}",
-                path.display(),
-                crate::limits::MAX_STATE_BYTES
-            ),
-            err,
-        )
-    })?;
+    read_capped_if_exists(path)?.ok_or_else(|| {
+        let error = std::io::Error::from(std::io::ErrorKind::NotFound);
+        Error::internal_with_source(format!("read {}: {error}", path.display()), error)
+    })
+}
+
+fn read_capped_if_exists(path: &Path) -> Result<Option<String>> {
+    let bytes = match capture::read_file(path, crate::limits::MAX_STATE_BYTES) {
+        Ok(bytes) => bytes,
+        Err(capture::ReadFailure::Io(error)) if capture::path_is_absent(path, &error) => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(Error::internal_with_source(
+                format!(
+                    "read {} ({} byte limit): {error}",
+                    path.display(),
+                    crate::limits::MAX_STATE_BYTES
+                ),
+                error,
+            ));
+        }
+    };
     String::from_utf8(bytes)
+        .map(Some)
         .map_err(|err| Error::internal_with_source(format!("read {}: {err}", path.display()), err))
 }
 

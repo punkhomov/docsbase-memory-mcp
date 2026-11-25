@@ -536,6 +536,16 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   для #79 FR-S2. План: [index-outcome-plan.md](index-outcome-plan.md). Scope — A-owned
   index/store плюс существующие wrapper endings; server/readiness/IPC остаются B.
 
+## Delta 2026-11-24 — CF10 и разбиение CF11
+
+- [x] Сопоставить размещения metadata на bounded fixture и определить
+  контракт head, seal, leases и recovery в
+  [storage-publication.md](storage-publication.md).
+- [ ] CF11a — реестр и accessor с legacy совместимостью.
+- [ ] CF11b — изолированный staging и нативная проверка sealing.
+- [ ] CF11c — durable CAS и совместимый snapshot демона и direct CLI.
+- [ ] CF11d — recovery/reclaim, budgets и настоящий согласованный apply.
+
 ## Delta 2026-11-24 — CF8a search-only library adoption
 
 - [x] **CF8a:** I33 project owner, checked immutable policy, additive built/loaded
@@ -549,6 +559,18 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   through its native file handle. Test replacement during the read, identical
   replacement of an unchanged project between plans, and hard-linked paths.
 - [ ] Complete the CF5b2b journal, attribute and publication work above.
+
+## Delta 2026-11-24 — CF8b: настройки обхода ANN в работающем поиске
+
+1. Принять `ann.search` в конфиге и наложить разрешённые проектные поля через
+   существующий AnnSearchSpec. Проверить источники значений через config effective.
+2. Передавать разрешённую политику вместе со снимком поиска. При превышении
+   `ef_max` сохранить запрошенное окно точным поиском; поиски внутри окна
+   используют настроенный обход существующего ANN.
+3. Смена поисковой политики без других изменений должна сохранить текущий
+   граф, векторы и идентичность артефактов. Проверить загруженный граф и
+   отсутствие изменения ключа/дампа. Незаданные политики сохраняют прежний
+   маршрут, ограниченный только исторической семантикой ef.
 
 ## Delta 2026-11-24 — CF5b2b: журнал замены
 
@@ -600,14 +622,45 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   булева сокращения и отклонять несовместимый итог до записи. Проверить
   реальный CLI dry-run и путь записи под блокировкой без сети.
 
-## Delta 2026-11-24 — CF8b: настройки обхода ANN в работающем поиске
+## Delta 2026-11-24 — CF5c, CLI index при работающем v2
 
-1. Принять `ann.search` в конфиге и наложить разрешённые проектные поля через
-   существующий AnnSearchSpec. Проверить источники значений через config effective.
-2. Передавать разрешённую политику вместе со снимком поиска. При превышении
-   `ef_max` сохранить запрошенное окно точным поиском; поиски внутри окна
-   используют настроенный обход существующего ANN.
-3. Смена поисковой политики без других изменений должна сохранить текущий
-   граф, векторы и идентичность артефактов. Проверить загруженный граф и
-   отсутствие изменения ключа/дампа. Незаданные политики сохраняют прежний
-   маршрут, ограниченный только исторической семантикой ef.
+- Передать `docsbase index` существующему Shared daemon с v2. Использовать
+  один дедлайн, существующий job protocol и формат счётчиков прямого index.
+  При отсутствии демона остаётся обычная прямая индексация.
+- Проверить регистрацию, индекс повторно по относительному пути, поиск и
+  прежний отказ при несовпадении версии. Проверить обновление конфига,
+  сессию на период опроса и обработку пути вне UTF-8. Website использует sync.
+
+## Delta 2026-11-24 — connected Index contention
+
+- Require an independent job for an explicit CLI Index with current settings.
+- Exercise active work found at discovery, during a configuration change
+  and after preparation. Verify ordinary MCP joins the same original job.
+
+## Delta 2026-11-24 — CF5c, новые глобальные файлы
+
+- Первый global write через connect и models use записывает v2. Предпросмотр
+  models use показывает тот же формат. Существующие файлы сохраняют версию.
+- Проверить фактическую запись и повторное разрешение, сохранение соседа
+  hybrid и provider configuration, и отсутствие записи при dry-run.
+- Переход для отсутствующего файла зависит от лексического запуска без
+  создания vector DB и штатного маршрута CLI index при работающем демоне.
+  Автоматическая конвертация существующих файлов остаётся отдельной задачей.
+
+## Delta 2026-11-24 — CF5c, отложенное открытие векторной базы
+
+- Запуск v2, прямой lexical index/search и sync сохраняют эксклюзивного
+  владельца политики, открывая SQLite только во время работы с векторами.
+- Проверить настоящий CLI и daemon без vectors.db, отказ при legacy lease и
+  продолжение сохранённой LRU последовательности при конкурентном первом
+  подключении. Публичный eager constructor сохраняет контракт.
+
+## Delta 2026-11-24 — CF5c, v2 при отсутствии глобального файла
+
+- CLI, launch и effective view разрешают v2 при отсутствии config.toml.
+  Существующий неверсионированный глобальный файл выбирает v1.
+- Проверить чистую установку через прямой index, подсоединённый index в
+  Shared daemon, sync, эксклюзивное владение и отсутствие vectors.db.
+  MCP сверяет версию при Hello до привязки и повторяет проверку при reconnect.
+- Совместимые библиотечные конструкторы сохраняют контракт отсутствующего
+  источника. Показать переход на существующем проекте через явный файл.
