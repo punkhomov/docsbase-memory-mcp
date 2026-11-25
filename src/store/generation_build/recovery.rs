@@ -179,7 +179,10 @@ pub fn discard_lexical_generation(
     })
 }
 
-fn open_recovery_registry(cache: &Path, settings: &Resolved<DbSettings>) -> Result<super::Db> {
+pub(super) fn open_recovery_registry(
+    cache: &Path,
+    settings: &Resolved<DbSettings>,
+) -> Result<super::Db> {
     // Recovery can open these SQLite-managed sidecars. Regular no-link
     // paths are required under the quiescent maintenance owner.
     for suffix in ["-wal", "-shm", "-journal"] {
@@ -260,7 +263,7 @@ fn release_reservation(
     tx.commit().map_err(repo::db_error)
 }
 
-fn directory_exists(path: &Path) -> Result<bool> {
+pub(super) fn directory_exists(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata)
             if metadata.is_dir()
@@ -274,7 +277,7 @@ fn directory_exists(path: &Path) -> Result<bool> {
     }
 }
 
-fn verify_ownership(
+pub(super) fn verify_ownership(
     path: &Path,
     digest: blake3::Hash,
     claimed: bool,
@@ -308,7 +311,7 @@ fn verify_ownership(
     ))
 }
 
-fn read_owner_record(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(super) fn read_owner_record(path: &Path) -> Result<Option<Vec<u8>>> {
     match fs::symlink_metadata(path) {
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -324,7 +327,7 @@ fn read_owner_record(path: &Path) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-fn validate_owned_files(path: &Path) -> Result<()> {
+pub(super) fn validate_owned_files(path: &Path) -> Result<()> {
     for entry in filesystem(path, "inspect staged directory", fs::read_dir(path))? {
         let entry = filesystem(path, "inspect staged entry", entry)?;
         let child = entry.path();
@@ -437,15 +440,15 @@ fn delete_owned_files(path: &Path) -> Result<()> {
 pub(super) fn sync_directory(path: &Path) -> Result<()> {
     let file = filesystem(
         path,
-        "open discard parent",
+        "open generation directory for sync",
         native_fs::open_readonly_nofollow(path),
     )?;
-    filesystem(path, "flush discard parent", file.sync_all())
+    filesystem(path, "sync generation directory", file.sync_all())
 }
 
 #[cfg(windows)]
-fn sync_directory(_: &Path) -> Result<()> {
+pub(super) fn sync_directory(_: &Path) -> Result<()> {
     Err(admission(
-        "generation discard needs a supported directory durability barrier",
+        "generation operation needs a supported directory durability barrier",
     ))
 }

@@ -79,24 +79,18 @@ impl LockedConnection {
         Ok(header)
     }
 
-    pub(in crate::store) fn configure(&self, value_bytes: i32, cache_kib: i32) -> Observed<()> {
-        // SAFETY: the connection is live, private and has no statement in flight.
-        // The caller admitted positive representable limits before construction.
-        unsafe {
-            ffi::sqlite3_limit(
-                self.connection.handle(),
-                ffi::SQLITE_LIMIT_LENGTH,
-                value_bytes,
-            );
+    /// Flush the exact registry file while its native exclusive lease is held.
+    pub(in crate::store) fn sync_main(&self) -> Observed<()> {
+        let file = native_file(&self.connection)?;
+        // SAFETY: the live connection owns this file and its checked native table.
+        let methods = unsafe { (*file).pMethods };
+        if methods.is_null() {
+            return Err(Why::UnsupportedVfs);
         }
-        self.connection
-            .pragma_update(None, "cache_size", -cache_kib)
-            .map_err(sqlite_failure)?;
-        // Inspection deliberately does not retain mmap views of document payload.
-        self.connection
-            .pragma_update(None, "mmap_size", 0)
-            .map_err(sqlite_failure)?;
-        Ok(())
+        // SAFETY: xSync is a v1 field and this exclusive lease owns the file.
+        let sync = unsafe { (*methods).xSync }.ok_or(Why::UnsupportedVfs)?;
+        // SAFETY: the native file remains live throughout the synchronous flush.
+        status(unsafe { sync(file, ffi::SQLITE_SYNC_FULL) })
     }
 
     pub(in crate::store) fn check_namespace(&self) -> Observed<()> {
@@ -155,6 +149,21 @@ impl LockedConnection {
     fn windows_namespace(&self) -> Observed<()> {
         Err(Why::UnsupportedVfs)
     }
+}
+
+pub(in crate::store) fn configure_connection(
+    connection: &Connection,
+    value_bytes: i32,
+    cache_kib: i32,
+) -> rusqlite::Result<()> {
+    // SAFETY: the caller's connection is private with no statement in flight.
+    // Both limits are positive and validated before opening the connection.
+    unsafe {
+        ffi::sqlite3_limit(connection.handle(), ffi::SQLITE_LIMIT_LENGTH, value_bytes);
+    }
+    connection.pragma_update(None, "cache_size", -cache_kib)?;
+    connection.pragma_update(None, "mmap_size", 0)?;
+    Ok(())
 }
 
 fn lock_file(connection: &Connection, vfs: NativeVfs) -> Observed<()> {

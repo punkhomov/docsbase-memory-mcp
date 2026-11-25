@@ -95,7 +95,7 @@ pub fn inspect_project_index(
     })
 }
 
-fn observe_project(
+pub(in crate::store) fn observe_project(
     registry: &Connection,
     cache: &Path,
     project_id: i64,
@@ -128,15 +128,7 @@ fn observe_project(
     } else {
         None
     };
-    // Retained numeric identity, tag and optional catalog identity.
-    let identity_bytes = 2 * size_of::<i64>()
-        + 1
-        + catalog
-            .as_ref()
-            .map_or(0, |(epoch, _)| epoch.len() + size_of::<i64>());
-    if limits.max_projects == 0 || identity_bytes > limits.max_metadata_bytes - initial_bytes {
-        return Err(Why::LimitExceeded);
-    }
+    check_identity_budget(limits, initial_bytes, catalog.is_some())?;
     let project = project_directory(cache, project_id);
     if catalog.is_none() && legacy_revision(registry, project_id)?.is_none() {
         return Ok(None);
@@ -158,6 +150,23 @@ fn observe_project(
             Ok(Some(index))
         }
     })
+}
+
+pub(in crate::store) fn check_identity_budget(
+    limits: InspectionLimits,
+    initial_bytes: usize,
+    has_catalog: bool,
+) -> Observed<()> {
+    // Retained numeric identity, tag and optional epoch and generation ID.
+    let bytes = 2 * size_of::<i64>() + 1 + usize::from(has_catalog) * (16 + size_of::<i64>());
+    if limits.max_projects == 0
+        || initial_bytes
+            .checked_add(bytes)
+            .is_none_or(|total| total > limits.max_metadata_bytes)
+    {
+        return Err(Why::LimitExceeded);
+    }
+    Ok(())
 }
 
 fn observe_legacy(
@@ -213,29 +222,11 @@ fn observe_local(
             &metadata_path,
             limits,
             || {},
-            |metadata| {
-                if schema_version(metadata)? != LOCAL_SCHEMA_VERSION {
-                    return Err(Why::UnsupportedSchema);
-                }
-                let mut query = metadata.prepare(
-                "SELECT singleton, project_id, generation_id, content_revision FROM generation_state LIMIT 2"
-            ).map_err(sqlite_failure)?;
-                let mut rows = query.query([]).map_err(sqlite_failure)?;
-                let row = rows
-                    .next()
-                    .map_err(sqlite_failure)?
-                    .ok_or(Why::InvalidRegistry)?;
-                let id = |column| row.get::<_, i64>(column).map_err(|_| Why::InvalidRegistry);
-                let (singleton, project_id, generation_id, revision) =
-                    (id(0)?, id(1)?, id(2)?, id(3)?);
-                if singleton != 1
-                    || project_id != head.project_id
-                    || generation_id != head.id
-                    || revision < 0
-                    || rows.next().map_err(sqlite_failure)?.is_some()
-                {
-                    return Err(Why::InvalidRegistry);
-                }
+            |locked| {
+                let metadata = locked.connection();
+                let revision = local_revision(metadata, head.project_id, head.id)?;
+                let project_id = head.project_id;
+                let generation_id = head.id;
                 check_pair(metadata, project_id, &generation.join("tantivy"))?;
                 Ok(ObservedProjectIndex {
                     project_id,
@@ -247,6 +238,36 @@ fn observe_local(
             },
         )
     })
+}
+
+pub(in crate::store) fn local_revision(
+    metadata: &Connection,
+    project: i64,
+    generation: i64,
+) -> Observed<i64> {
+    if schema_version(metadata)? != LOCAL_SCHEMA_VERSION {
+        return Err(Why::UnsupportedSchema);
+    }
+    let mut query = metadata.prepare(
+        "SELECT singleton, project_id, generation_id, content_revision FROM generation_state LIMIT 2",
+    ).map_err(sqlite_failure)?;
+    let mut rows = query.query([]).map_err(sqlite_failure)?;
+    let row = rows
+        .next()
+        .map_err(sqlite_failure)?
+        .ok_or(Why::InvalidRegistry)?;
+    let integer = |column| row.get::<_, i64>(column).map_err(|_| Why::InvalidRegistry);
+    let (singleton, project_id, generation_id, revision) =
+        (integer(0)?, integer(1)?, integer(2)?, integer(3)?);
+    if singleton != 1
+        || project_id != project
+        || generation_id != generation
+        || revision < 0
+        || rows.next().map_err(sqlite_failure)?.is_some()
+    {
+        return Err(Why::InvalidRegistry);
+    }
+    Ok(revision)
 }
 
 fn check_seal(path: &Path, expected: &[u8; 32]) -> Observed<()> {
@@ -265,6 +286,11 @@ fn check_pair(metadata: &Connection, project_id: i64, tantivy: &Path) -> Observe
     if repo::has_pending_docs(metadata, project_id).map_err(|_| Why::Io)? {
         return Err(Why::RecoveryRequired);
     }
+    check_tantivy_files(tantivy)?;
+    ReadIndex::check_health_with_project_lease(tantivy).map_err(|_| Why::Io)
+}
+
+pub(in crate::store) fn check_tantivy_files(tantivy: &Path) -> Observed<()> {
     check_directory(tantivy)?;
     // Tantivy owns the component opens. Check the flat directory first under
     // the cooperating writer lease, including files read through its mmap backend.
@@ -285,7 +311,7 @@ fn check_pair(metadata: &Connection, project_id: i64, tantivy: &Path) -> Observe
             Err(_) => return Err(Why::Io),
         }
     }
-    ReadIndex::check_health_with_project_lease(tantivy).map_err(|_| Why::Io)
+    Ok(())
 }
 
 fn check_directory(path: &Path) -> Observed<()> {

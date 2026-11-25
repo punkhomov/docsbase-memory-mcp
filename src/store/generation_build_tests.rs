@@ -217,6 +217,400 @@ fn real_lexical_build_binds_the_inactive_pair_and_preserves_legacy_search() {
 }
 
 #[test]
+#[cfg(unix)]
+fn publication_selects_the_sealed_pair_and_preserves_the_previous_pair() {
+    let env = Env::new();
+    fs::write(
+        env.source.path().join("guide.md"),
+        "# Peach\n\nPeachmigration\n",
+    )
+    .unwrap();
+    let request = env.request();
+    let staged = env.build(request).unwrap();
+    let db = settings::standalone().unwrap();
+    env.assert_legacy_search();
+    let target = publish_lexical_generation(
+        env.cache.path(),
+        request,
+        staged,
+        &db,
+        limits(),
+        &Config::default(),
+    )
+    .unwrap();
+    assert_eq!(target.layout, ProjectIndexLayout::Local);
+    assert_eq!(target.generation_id, Some(staged.generation_id));
+    assert_eq!(
+        inspect_project_index(env.cache.path(), staged.project_id, &db, limits()).unwrap(),
+        ProjectIndexObservation::Present(target)
+    );
+    let current = ReadIndex::open(&env.generation(staged.generation_id).join("tantivy")).unwrap();
+    assert_eq!(current.search("Peachmigration", 2).unwrap().len(), 1);
+    let previous = ReadIndex::open(&env.cache.path().join("projects/1/tantivy")).unwrap();
+    assert_eq!(previous.search("Applemigration", 2).unwrap().len(), 1);
+    let retried = publish_lexical_generation(
+        env.cache.path(),
+        request,
+        staged,
+        &db,
+        limits(),
+        &Config::default(),
+    )
+    .unwrap();
+    assert_eq!(retried, target);
+}
+
+#[test]
+#[cfg(unix)]
+fn publication_resumes_a_durable_seal_left_before_the_catalog_commit() {
+    let env = Env::new();
+    let request = env.request();
+    let staged = env.build(request).unwrap();
+    let settings = settings::standalone().unwrap();
+    let config = Config::default();
+    let project = super::probe_project(env.cache.path(), request, limits()).unwrap();
+    let dir = env.generation(staged.generation_id);
+    let written = super::publication::verify_and_seal(
+        &dir,
+        request,
+        staged,
+        &project,
+        &settings,
+        limits(),
+        &config,
+    )
+    .unwrap();
+    assert_eq!(env.catalog_state(), (1, Some("building".into())));
+    env.assert_legacy_search();
+
+    let active = publish_lexical_generation(
+        env.cache.path(),
+        request,
+        staged,
+        &settings,
+        limits(),
+        &config,
+    )
+    .unwrap();
+    assert_eq!(active.generation_id, Some(staged.generation_id));
+    assert_eq!(
+        blake3::hash(&fs::read(dir.join("seal.json")).unwrap()),
+        written
+    );
+    assert_eq!(
+        env.catalog_state(),
+        (staged.generation_id, Some("active".into()))
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn publication_retry_recovers_an_abandoned_registry_wal() {
+    const CACHE: &str = "DOCSBASE_GENERATION_PUBLICATION_CRASH_CACHE";
+    if let Some(cache) = std::env::var_os(CACHE) {
+        let registry = Connection::open(Path::new(&cache).join(DB_FILE)).unwrap();
+        registry
+            .execute_batch("PRAGMA synchronous=FULL; PRAGMA user_version=5;")
+            .unwrap();
+        // Persist a WAL frame and interrupt before SQLite can close the file.
+        std::process::exit(0);
+    }
+
+    let env = Env::new();
+    let request = env.request();
+    let staged = env.build(request).unwrap();
+    let settings = settings::standalone().unwrap();
+    let config = Config::default();
+    let publish = || {
+        publish_lexical_generation(
+            env.cache.path(),
+            request,
+            staged,
+            &settings,
+            limits(),
+            &config,
+        )
+    };
+    let active = publish().unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "store::generation_build::tests::publication_retry_recovers_an_abandoned_registry_wal",
+        ])
+        .env(CACHE, env.cache.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(env.cache.path().join(format!("{DB_FILE}-wal")).is_file());
+    assert_eq!(publish().unwrap(), active);
+    assert!(!env.cache.path().join(format!("{DB_FILE}-wal")).exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn publication_rolls_back_phases_if_the_head_cannot_change() {
+    let env = Env::new();
+    let request = env.request();
+    let staged = env.build(request).unwrap();
+    let registry_path = env.cache.path().join(DB_FILE);
+    let conn = Connection::open(&registry_path).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_publication BEFORE UPDATE ON project_generation_head
+         BEGIN SELECT RAISE(ABORT, 'test refused head update'); END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let settings = settings::standalone().unwrap();
+    let config = Config::default();
+    let publish = || {
+        publish_lexical_generation(
+            env.cache.path(),
+            request,
+            staged,
+            &settings,
+            limits(),
+            &config,
+        )
+    };
+    assert!(publish().is_err());
+    assert_eq!(env.catalog_state(), (1, Some("building".into())));
+    env.assert_legacy_search();
+    assert!(
+        env.generation(staged.generation_id)
+            .join("seal.json")
+            .is_file()
+    );
+
+    let conn = Connection::open(&registry_path).unwrap();
+    conn.execute_batch("DROP TRIGGER reject_publication")
+        .unwrap();
+    drop(conn);
+    assert_eq!(publish().unwrap().generation_id, Some(staged.generation_id));
+    let conn = Connection::open(&registry_path).unwrap();
+    let previous: String = conn
+        .query_row(
+            "SELECT phase FROM project_generations WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(previous, "retired");
+}
+
+#[test]
+#[cfg(unix)]
+fn publication_refuses_a_source_edit_of_the_same_length() {
+    let env = Env::new();
+    let request = env.request();
+    let staged = env.build(request).unwrap();
+    fs::write(
+        env.source.path().join("guide.md"),
+        "# Peach\n\nPeachmigration\n",
+    )
+    .unwrap();
+    let error = publish_lexical_generation(
+        env.cache.path(),
+        request,
+        staged,
+        &settings::standalone().unwrap(),
+        limits(),
+        &Config::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("source content changed"),
+        "{error}"
+    );
+    assert!(
+        !env.generation(staged.generation_id)
+            .join("seal.json")
+            .exists()
+    );
+    assert_eq!(env.catalog_state(), (1, Some("building".into())));
+    env.assert_legacy_search();
+}
+
+#[test]
+#[cfg(unix)]
+fn publication_does_not_match_two_source_paths_to_one_saved_row() {
+    let env = Env::new();
+    let root = env.source.path();
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("sub/a.md"), "# Shared file\n").unwrap();
+    fs::write(root.join("retired.md"), "# Retired file\n").unwrap();
+    let request = env.request();
+    let staged = env.build(request).unwrap();
+    fs::remove_file(root.join("retired.md")).unwrap();
+    fs::write(root.join(r"sub\a.md"), "# Shared file\n").unwrap();
+
+    let error = publish_lexical_generation(
+        env.cache.path(),
+        request,
+        staged,
+        &settings::standalone().unwrap(),
+        limits(),
+        &Config::default(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("source path changed"), "{error}");
+    assert!(
+        !env.generation(staged.generation_id)
+            .join("seal.json")
+            .exists()
+    );
+    env.assert_legacy_search();
+}
+
+#[test]
+#[cfg(unix)]
+fn publication_refuses_a_tantivy_stamp_over_the_observer_limit() {
+    use crate::index::tantivy_index::TOKENIZER_VERSION_FILE;
+    use crate::limits::MAX_STATE_BYTES;
+
+    let env = Env::new();
+    let request = env.request();
+    let mut staged = env.build(request).unwrap();
+    let stamp = env
+        .generation(staged.generation_id)
+        .join("tantivy")
+        .join(TOKENIZER_VERSION_FILE);
+    let mut valid = fs::read(&stamp).unwrap();
+    let oversized = usize::try_from(MAX_STATE_BYTES).unwrap() + 1;
+    staged.bytes += (oversized - valid.len()) as u64;
+    valid.resize(oversized, b' ');
+    fs::write(&stamp, valid).unwrap();
+
+    let error = publish_lexical_generation(
+        env.cache.path(),
+        request,
+        staged,
+        &settings::standalone().unwrap(),
+        limits(),
+        &Config::default(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("LimitExceeded"), "{error}");
+    assert_eq!(env.catalog_state(), (1, Some("building".into())));
+    env.assert_legacy_search();
+}
+
+#[test]
+#[cfg(unix)]
+fn publication_requires_a_directory_for_an_empty_source_survey() {
+    let env = Env::new();
+    let root = env.source.path();
+    fs::remove_file(root.join("guide.md")).unwrap();
+    let request = env.request();
+    let staged = env.build(request).unwrap();
+    fs::remove_dir(root).unwrap();
+    fs::write(root, b"not a project directory").unwrap();
+
+    let error = publish_lexical_generation(
+        env.cache.path(),
+        request,
+        staged,
+        &settings::standalone().unwrap(),
+        limits(),
+        &Config::default(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("source root changed"), "{error}");
+    fs::remove_file(root).unwrap();
+    assert_eq!(env.catalog_state(), (1, Some("building".into())));
+    env.assert_legacy_search();
+}
+
+#[test]
+#[cfg(unix)]
+fn publication_rechecks_a_local_base_and_rejects_a_stale_revision() {
+    let env = Env::new();
+    let initial = env.request();
+    let configured = settings::standalone().unwrap();
+    let active = publish_lexical_generation(
+        env.cache.path(),
+        initial,
+        env.build(initial).unwrap(),
+        &configured,
+        limits(),
+        &Config::default(),
+    )
+    .unwrap();
+    fs::write(
+        env.source.path().join("guide.md"),
+        "# Peach\n\nPeachmigration\n",
+    )
+    .unwrap();
+    let next = LexicalBuildRequest {
+        base: Some(active),
+        plan_digest: [6; 32],
+        ..initial
+    };
+    let staged = env.build(next).unwrap();
+    let metadata = Connection::open(
+        env.generation(active.generation_id.unwrap())
+            .join("metadata.db"),
+    )
+    .unwrap();
+    metadata
+        .execute(
+            "UPDATE generation_state SET content_revision = content_revision + 1",
+            [],
+        )
+        .unwrap();
+    drop(metadata);
+    let error = publish_lexical_generation(
+        env.cache.path(),
+        next,
+        staged,
+        &configured,
+        limits(),
+        &Config::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("generation base changed"),
+        "{error}"
+    );
+    assert!(
+        !env.generation(staged.generation_id)
+            .join("seal.json")
+            .exists()
+    );
+    assert_eq!(
+        env.catalog_state(),
+        (active.generation_id.unwrap(), Some("active".into()))
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn publication_without_a_directory_barrier_keeps_the_original_head() {
+    let env = Env::new();
+    let request = env.request();
+    let staged = env.build(request).unwrap();
+    let error = publish_lexical_generation(
+        env.cache.path(),
+        request,
+        staged,
+        &settings::standalone().unwrap(),
+        limits(),
+        &Config::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("directory durability barrier"),
+        "{error}"
+    );
+    assert!(
+        !env.generation(staged.generation_id)
+            .join("seal.json")
+            .exists()
+    );
+    env.assert_legacy_search();
+}
+
+#[test]
 fn completed_pair_rejects_the_wrong_chunk_ids_even_at_equal_counts() {
     let env = Env::new();
     let prepared = env.build(env.request()).unwrap();
@@ -652,6 +1046,56 @@ fn an_active_index_writer_prevents_reservation() {
 #[cfg(test)]
 mod unix {
     use super::*;
+
+    #[test]
+    fn first_publication_does_not_create_a_dangling_writer_lock_target() {
+        let env = Env::new();
+        let source = tempfile::tempdir().unwrap();
+        let registrar = Connection::open(env.cache.path().join(DB_FILE)).unwrap();
+        let project_id: i64 = registrar
+            .query_row(
+                "INSERT INTO projects (canonical_root, name, status, schema_version, created_at)
+             VALUES (?1, 'other', 'not_indexed', ?2, 0) RETURNING id",
+                params![
+                    source.path().canonicalize().unwrap().to_str(),
+                    crate::store::migrations::PROJECT_SCHEMA_VERSION
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(registrar);
+        let request = LexicalBuildRequest {
+            project_id,
+            base: None,
+            ..env.request()
+        };
+        let staged = env.build(request).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("unexpected-lock");
+        let lease = lifecycle::lease_path(env.cache.path(), request.project_id);
+        fs::remove_file(&lease).unwrap();
+        std::os::unix::fs::symlink(&target, &lease).unwrap();
+
+        publish_lexical_generation(
+            env.cache.path(),
+            request,
+            staged,
+            &settings::standalone().unwrap(),
+            limits(),
+            &Config::default(),
+        )
+        .unwrap_err();
+        assert!(!target.exists());
+        let registry = Connection::open(env.cache.path().join(DB_FILE)).unwrap();
+        let heads: i64 = registry
+            .query_row(
+                "SELECT count(*) FROM project_generation_head WHERE project_id = ?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(heads, 0);
+    }
 
     #[test]
     fn a_registered_root_link_to_a_different_directory_is_refused() {
