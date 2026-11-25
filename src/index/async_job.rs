@@ -226,7 +226,10 @@ impl IndexState {
             }
         }
         operation.check()?;
-        self.capture_plan(operation)?;
+        if !self.capture_plan(operation)? {
+            self.complete = true;
+            return Ok(false);
+        }
         let context = self
             .context
             .as_ref()
@@ -262,7 +265,7 @@ impl IndexState {
             )?;
         Ok(true)
     }
-    fn capture_plan(&mut self, operation: &SearchOperation) -> Result<()> {
+    fn capture_plan(&mut self, operation: &SearchOperation) -> Result<bool> {
         let context = self
             .context
             .as_ref()
@@ -299,6 +302,9 @@ impl IndexState {
             Some(&mut capture),
         )?;
         self.plan = Some(plan);
+        let Some(scope) = scope else {
+            return Ok(false);
+        };
         self.scope = scope;
         if let Some(embedder) = &context.stages.embedder {
             self.dimension = crate::hybrid::dense::model_dim(embedder.model_id())
@@ -357,7 +363,7 @@ impl IndexState {
             }
         }
         self.retained = self.account.take();
-        Ok(())
+        Ok(true)
     }
     fn commit(&mut self, operation: &SearchOperation) -> Result<bool> {
         operation.check()?;

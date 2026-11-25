@@ -7,8 +7,9 @@
 //! the cache root (tantivy index state) are ignored so indexing cannot feed
 //! itself (R4).
 //!
-//! Directory events are expanded at flush time and deleted paths may denote
-//! directories; the incremental job purges whole subtrees for those (FR-16).
+//! The daemon expands directory events on admitted job CPU. Blocking callers
+//! receive expanded batches at flush time. Deleted paths may denote directories;
+//! the incremental job purges whole subtrees for those (FR-16).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -25,6 +26,7 @@ use crate::error::{Error, Result};
 use crate::index::job::{JobStats, run_incremental_checked};
 use crate::index::tantivy_index::IndexHandle;
 use crate::index::walk;
+use crate::search::operation::SearchOperation;
 use crate::store::Db;
 use crate::store::models::{Project, ProjectStatus};
 use crate::store::settings::{DbSettings, DbSpec};
@@ -105,6 +107,12 @@ enum ProducerOwner {
         before_native_drop: Option<Arc<dyn Fn() + Send + Sync>>,
     },
 }
+
+enum BatchFilter {
+    ExpandDirectories(Box<IndexFilter>),
+    RetainDirectoryEvents { root: PathBuf, cache: PathBuf },
+}
+
 struct ProducerNative {
     _watcher: RecommendedWatcher,
     #[cfg(test)]
@@ -270,6 +278,7 @@ fn spawn_watcher_sink_owned(
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(initial.watch.native_queue_capacity);
     let wake = event_tx.clone();
     let caller = matches!(owner, ProducerOwner::Caller);
+    let filter_in_producer = !matches!(owner, ProducerOwner::Daemon { .. });
     let watcher = native_watcher(&root, &cache, event_tx, caller.then(|| cancel.clone()))?;
 
     // A caller-owned sender can still be rendezvousing after stop. Its native
@@ -317,7 +326,18 @@ fn spawn_watcher_sink_owned(
     let forwarder = std::thread::Builder::new()
         .name(format!("docsbase-debounce-{project_id}"))
         .spawn(move || {
-            let filter = IndexFilter::new(filter_root, filter_cache, &initial);
+            let filter = if filter_in_producer {
+                BatchFilter::ExpandDirectories(Box::new(IndexFilter::new(
+                    filter_root,
+                    filter_cache,
+                    &initial,
+                )))
+            } else {
+                BatchFilter::RetainDirectoryEvents {
+                    root: filter_root,
+                    cache: filter_cache,
+                }
+            };
             drop(initial);
             forward_batches(
                 filter,
@@ -344,7 +364,7 @@ fn spawn_watcher_sink_owned(
 }
 
 fn forward_batches(
-    mut filter: IndexFilter,
+    mut filter: BatchFilter,
     current_config: impl Fn() -> Arc<Config>,
     mut receive: impl FnMut(Option<Duration>) -> std::result::Result<Option<PathBuf>, RecvTimeoutError>,
     send: impl Fn(Vec<PathBuf>) -> std::result::Result<(), Vec<PathBuf>>,
@@ -371,14 +391,73 @@ fn forward_batches(
                 }
             }
         }
-        // A reopen while events were still arriving governs this batch's
-        // filtering even though its timing was captured at the start (OQ-6).
-        filter.set_config(&current_config());
-        let batch = finalize(&mut filter, raw);
+        let config = current_config();
+        let batch = match &mut filter {
+            BatchFilter::ExpandDirectories(filter) => {
+                filter.set_config(&config);
+                finalize(filter, raw)
+            }
+            BatchFilter::RetainDirectoryEvents { root, cache } => {
+                retain_daemon_events(root, cache, &config, raw, cancel)
+            }
+        };
         if (!batch.is_empty() && send(batch).is_err()) || disconnected {
             return;
         }
     }
+}
+
+fn retain_daemon_events(
+    root: &Path,
+    cache: &Path,
+    config: &Config,
+    raw: Batch,
+    cancel: Option<&crate::hybrid::work::Cancellation>,
+) -> Vec<PathBuf> {
+    let mut matcher = match walk::markdown_builder(root, root, config) {
+        Ok(builder) => builder.build_matchers().pop(),
+        Err(error) => {
+            eprintln!("warning: watcher filter: {error}");
+            None
+        }
+    };
+    let mut paths = raw.into_vec();
+    // Suppress already-ignored notifications without expanding directories.
+    // A fresh matcher's cache lives for one debounce window. The daemon still
+    // refilters admitted paths under the revision it will use for indexing.
+    paths.retain(|path| {
+        if cancel.is_some_and(crate::hybrid::work::Cancellation::is_cancelled)
+            || walk::is_pruned(root, path)
+            || crate::platform::paths::is_under(path, cache)
+        {
+            return false;
+        }
+        let kind = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) => {
+                return matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                );
+            }
+        };
+        if !(kind.is_dir() || (kind.is_file() && walk::is_markdown(path)))
+            || !path
+                .canonicalize()
+                .is_ok_and(|canonical| crate::platform::paths::is_under(&canonical, root))
+        {
+            return false;
+        }
+        let (Ok(relative), Some(matcher)) = (path.strip_prefix(root), &mut matcher) else {
+            return false;
+        };
+        let (decision, error) = matcher.matched_with_errors(relative, kind.is_dir());
+        if let Some(error) = error {
+            eprintln!("warning: watcher filter: {error}");
+        }
+        !decision.is_ignore()
+    });
+    paths
 }
 
 /// Deduplicated batch under construction.
@@ -839,16 +918,21 @@ fn finalize(filter: &mut IndexFilter, raw: Batch) -> Vec<PathBuf> {
     finished
 }
 
+pub(crate) struct WatchSelection {
+    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) expansion_limited: bool,
+    pub(crate) directories_only: bool,
+}
+
 /// Recheck raw pending paths under the current revision on admitted job CPU.
-/// Stream the existing walker and charge retained selections before their copies;
-/// unlike the producer cache, this does not retain uncharged sibling listings.
+/// Stream the existing walker and charge retained selections before their copies.
 pub(crate) fn refilter_accounted(
     project: &Project,
     cache: &Path,
     paths: &[PathBuf],
     config: &Config,
     mut capture: Option<&mut crate::index::job::CaptureBudget<'_>>,
-) -> Result<Vec<PathBuf>> {
+) -> Result<WatchSelection> {
     if let Some(budget) = capture.as_deref_mut() {
         budget.reserve((paths.len() as u64).checked_mul(128).ok_or_else(|| {
             Error::Admission {
@@ -856,14 +940,88 @@ pub(crate) fn refilter_accounted(
             }
         })?)?;
     }
-    let wanted: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
-    // The walker determines current ignore membership only; it must not
-    // determine the order consumed by incremental document-limit admission.
-    let mut allowed = HashSet::new();
-    for entry in walk::walk(&project.canonical_root, config)? {
+    let root = &project.canonical_root;
+    let builder = walk::markdown_builder(root, root, config)?;
+    let allowed = allowed_file_events(&builder, root, cache, paths, capture.as_deref_mut())?;
+    let mut filtered = Batch::new();
+    let mut expansion_limited = false;
+    let mut directories_only = true;
+    for path in paths {
         if let Some(budget) = capture.as_deref_mut() {
             budget.operation.check()?;
         }
+        if path.is_dir() {
+            expansion_limited |= expand_pending_directory(
+                &builder,
+                root,
+                cache,
+                path,
+                config.watch,
+                &mut filtered,
+                capture.as_deref_mut(),
+            )?;
+        } else {
+            directories_only = false;
+            if !path.exists() || allowed.contains(path.as_path()) {
+                // Missing files/directories keep their admitted position too;
+                // the incremental planner resolves exact/subtree purge markers.
+                push_filtered(path, &mut filtered, capture.as_deref_mut())?;
+            }
+        }
+    }
+    Ok(WatchSelection {
+        paths: filtered.into_vec(),
+        expansion_limited,
+        directories_only,
+    })
+}
+
+fn allowed_file_events(
+    base: &ignore::WalkBuilder,
+    root: &Path,
+    cache: &Path,
+    paths: &[PathBuf],
+    mut capture: Option<&mut crate::index::job::CaptureBudget<'_>>,
+) -> Result<HashSet<PathBuf>> {
+    let mut wanted = Vec::new();
+    for path in paths {
+        if let Some(budget) = capture.as_deref_mut() {
+            budget.operation.check()?;
+        }
+        if walk::is_markdown(path) {
+            if let Some(budget) = capture.as_deref_mut() {
+                budget.path(path)?;
+            }
+            wanted.push(path.clone());
+        }
+    }
+    let mut allowed = HashSet::new();
+    if wanted.is_empty() {
+        return Ok(allowed);
+    }
+    wanted.sort_unstable();
+    wanted.dedup();
+    let expected = wanted.len();
+    let operation = capture.as_ref().map(|budget| budget.operation);
+    let scope_operation = operation.cloned();
+    let mut builder = base.clone();
+    // The first requested path at or after this entry must be underneath it
+    // for the entry to lead to a requested file. Preserve raw event order
+    // separately when assembling the actual batch.
+    builder.filter_entry(move |entry| {
+        if operation_stopped(scope_operation.as_ref()) {
+            return true;
+        }
+        let path = entry.path();
+        let directory = entry.file_type().is_some_and(|kind| kind.is_dir());
+        let first = wanted.partition_point(|request| {
+            request.as_path() < path || (directory && request.as_path() == path)
+        });
+        wanted
+            .get(first)
+            .is_some_and(|request| request.starts_with(path))
+    });
+    for entry in watch_walk(&builder, root, operation) {
         let path = match entry {
             Ok(path) => path,
             Err(error) => {
@@ -871,96 +1029,149 @@ pub(crate) fn refilter_accounted(
                 continue;
             }
         };
-        if !crate::platform::paths::is_under(&path, cache)
-            && let Some(original) = wanted.get(path.as_path())
-        {
-            allowed.insert(*original);
-        }
-    }
-    let mut filtered = Vec::new();
-    let mut seen = HashSet::new();
-    for path in paths {
-        if let Some(budget) = capture.as_deref_mut() {
-            budget.operation.check()?;
-        }
-        if path.is_dir() {
-            // Keep each directory's expansion at its original event position.
-            // The same walker supplies ignore/depth checks without retaining
-            // uncharged sibling listings; the existing global expansion cap
-            // applies after previously admitted paths, as in finalize.
-            for entry in walk::walk(&project.canonical_root, config)? {
-                if let Some(budget) = capture.as_deref_mut() {
-                    budget.operation.check()?;
-                }
-                if filtered.len() >= EXPAND_MAX_FILES {
-                    break;
-                }
-                let expanded = match entry {
-                    Ok(path) => path,
-                    Err(error) => {
-                        eprintln!("warning: watcher filter: {error}");
-                        continue;
-                    }
-                };
-                if !crate::platform::paths::is_under(&expanded, cache)
-                    && expanded
-                        .strip_prefix(path)
-                        .is_ok_and(|relative| relative.components().count() <= EXPAND_MAX_DEPTH + 1)
-                {
-                    push_filtered(&expanded, &mut filtered, &mut seen, capture.as_deref_mut())?;
-                }
+        if !crate::platform::paths::is_under(&path, cache) {
+            if let Some(budget) = capture.as_deref_mut() {
+                budget.path(&path)?;
             }
-        } else if !path.exists() || allowed.contains(path.as_path()) {
-            // Missing files/directories keep their admitted position too;
-            // the incremental planner resolves exact/subtree purge markers.
-            push_filtered(path, &mut filtered, &mut seen, capture.as_deref_mut())?;
+            allowed.insert(path);
+            if allowed.len() == expected {
+                break;
+            }
         }
     }
-    Ok(filtered)
+    if let Some(operation) = operation {
+        operation.check()?;
+    }
+    Ok(allowed)
+}
+
+fn operation_stopped(operation: Option<&SearchOperation>) -> bool {
+    operation.is_some_and(|operation| operation.check().is_err())
+}
+
+fn watch_walk<'a>(
+    builder: &ignore::WalkBuilder,
+    root: &Path,
+    operation: Option<&'a SearchOperation>,
+) -> impl Iterator<Item = Result<PathBuf>> + use<'a> {
+    let entries = builder
+        .build()
+        .take_while(move |_| !operation_stopped(operation));
+    walk::markdown_paths(entries, root)
+}
+
+fn expand_pending_directory(
+    base: &ignore::WalkBuilder,
+    root: &Path,
+    cache: &Path,
+    dir: &Path,
+    policy: WatchSettings,
+    batch: &mut Batch,
+    mut capture: Option<&mut crate::index::job::CaptureBudget<'_>>,
+) -> Result<bool> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut builder = base.clone();
+    let depth_reached = Arc::new(AtomicBool::new(false));
+    let reached = depth_reached.clone();
+    let scope = dir.to_path_buf();
+    let cache = cache.to_path_buf();
+    let project = root.to_path_buf();
+    let operation = capture.as_ref().map(|budget| budget.operation);
+    let scope_operation = operation.cloned();
+    // Start at the project root so ignore rules can exclude the event
+    // directory itself. Skip enumeration of unrelated subtrees.
+    builder.filter_entry(move |entry| {
+        if operation_stopped(scope_operation.as_ref()) {
+            return true;
+        }
+        let path = entry.path();
+        if !scope.starts_with(path) && !path.starts_with(&scope) {
+            return false;
+        }
+        let is_directory = entry.file_type().is_some_and(|kind| kind.is_dir());
+        if (is_directory && walk::is_pruned(&project, path))
+            || crate::platform::paths::is_under(path, &cache)
+        {
+            return false;
+        }
+        let Ok(relative) = path.strip_prefix(&scope) else {
+            return true;
+        };
+        if is_directory && relative.components().count() > policy.max_expand_depth {
+            reached.store(true, Ordering::Relaxed);
+            return false;
+        }
+        true
+    });
+    for entry in watch_walk(&builder, root, operation) {
+        let path = match entry {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("warning: watcher filter: {error}");
+                continue;
+            }
+        };
+        if !batch.seen.contains(&path) && batch.paths.len() >= policy.max_expand_files {
+            return Ok(true);
+        }
+        push_filtered(&path, batch, capture.as_deref_mut())?;
+    }
+    if let Some(operation) = operation {
+        operation.check()?;
+    }
+    Ok(depth_reached.load(Ordering::Relaxed))
 }
 
 fn push_filtered(
     path: &Path,
-    filtered: &mut Vec<PathBuf>,
-    seen: &mut HashSet<PathBuf>,
+    batch: &mut Batch,
     capture: Option<&mut crate::index::job::CaptureBudget<'_>>,
 ) -> Result<()> {
-    if seen.contains(path) {
+    if batch.seen.contains(path) {
         return Ok(());
     }
     if let Some(budget) = capture {
         budget.path(path)?;
     }
-    seen.insert(path.to_path_buf());
-    filtered.push(path.to_path_buf());
+    batch.push(path.to_path_buf());
     Ok(())
 }
 
-/// Maximum files and depth for one directory expansion, bounding the work a
-/// single directory-create event can trigger (R4).
-const EXPAND_MAX_FILES: usize = 10_000;
-const EXPAND_MAX_DEPTH: usize = 32;
-
 /// Adds every indexable markdown file under `dir` (recursively, without
-/// following symlinks) to `batch`, bounded by [`EXPAND_MAX_FILES`] and
-/// [`EXPAND_MAX_DEPTH`].
+/// following symlinks) to `batch`, bounded by the captured watcher policy.
 fn expand_dir(filter: &mut IndexFilter, batch: &mut Batch, dir: &Path) {
     expand_dir_inner(filter, batch, dir, 0);
 }
 
 fn expand_dir_inner(filter: &mut IndexFilter, batch: &mut Batch, dir: &Path, depth: usize) {
-    if depth > EXPAND_MAX_DEPTH || batch.paths.len() >= EXPAND_MAX_FILES {
+    let policy = filter.config.watch;
+    if !filter.inside_root(dir) || crate::platform::paths::is_under(dir, &filter.cache) {
         return;
     }
-    if !filter.inside_root(dir) || crate::platform::paths::is_under(dir, &filter.cache) {
+    if depth > policy.max_expand_depth {
+        eprintln!(
+            "warning: watcher directory expansion reached depth {}",
+            policy.max_expand_depth
+        );
+        return;
+    }
+    if batch.paths.len() >= policy.max_expand_files {
+        eprintln!(
+            "warning: watcher directory expansion reached {} files",
+            policy.max_expand_files
+        );
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
-        if batch.paths.len() >= EXPAND_MAX_FILES {
-            eprintln!("warning: watcher directory expansion truncated at {EXPAND_MAX_FILES} files");
+        if batch.paths.len() >= policy.max_expand_files {
+            eprintln!(
+                "warning: watcher directory expansion truncated at {} files",
+                policy.max_expand_files
+            );
             return;
         }
         let Ok(file_type) = entry.file_type() else {
@@ -1129,6 +1340,11 @@ impl Watchers {
     #[cfg(all(test, feature = "hybrid-remote"))]
     pub(crate) fn observe_batches(&self, observer: Arc<dyn Fn(BatchEvent) + Send + Sync>) {
         *self.batch_observer.lock().unwrap() = Some(observer);
+    }
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn deliver_test_path(&self, project: i64, path: PathBuf) {
+        let sender = self.map()[&project].guard.retirement.wake.clone();
+        sender.try_send(Some(path)).unwrap();
     }
     #[cfg(test)]
     pub(crate) fn emit_batch(&self, event: BatchEvent) {
@@ -1778,6 +1994,110 @@ mod tests {
     }
 
     #[test]
+    fn daemon_forwarding_keeps_directories_and_discards_already_ignored_events() {
+        let env = Env::new();
+        fs::create_dir(env.path("aaa")).unwrap();
+        fs::write(env.path(".docsbaseignore"), "aaa/\nignored.md\n").unwrap();
+        fs::write(env.path("ignored.md"), "# ignored").unwrap();
+        fs::write(env.path("replaced-directory"), "file now").unwrap();
+        let mut events = [
+            Ok(Some(env.path("aaa"))),
+            Ok(Some(env.path("ignored.md"))),
+            Ok(Some(env.path("bbb"))),
+            Ok(Some(env.path("removed"))),
+            Ok(Some(env.path("replaced-directory/child.md"))),
+            Err(RecvTimeoutError::Disconnected),
+        ]
+        .into_iter();
+        let received = std::cell::RefCell::new(Vec::new());
+        let config = Arc::new(Config::default());
+        forward_batches(
+            BatchFilter::RetainDirectoryEvents {
+                root: env.project.canonical_root.clone(),
+                cache: env.cache.path().canonicalize().unwrap(),
+            },
+            || Arc::clone(&config),
+            |_| events.next().unwrap(),
+            |batch| {
+                received.borrow_mut().extend(batch);
+                Ok(())
+            },
+            None,
+            Instant::now,
+        );
+        assert_eq!(
+            received.into_inner(),
+            [
+                env.path("bbb"),
+                env.path("removed"),
+                env.path("replaced-directory/child.md")
+            ]
+        );
+    }
+
+    #[test]
+    fn watcher_expansion_applies_v2_file_and_depth_limits() {
+        let env = Env::new();
+        let global = TempDir::new().unwrap();
+        fs::write(global.path().join("config.toml"), "config_version = 2\n").unwrap();
+        let root = &env.project.canonical_root;
+        for (file, text) in [
+            ("arrivals/root.md", "one"),
+            ("arrivals/nested/next.md", "two"),
+            ("arrivals/nested/deeper/skip.md", "three"),
+            ("arrivals/.release.md", "visible by explicit rule"),
+        ] {
+            let path = env.path(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        fs::write(env.path(".docsbaseignore"), "!/arrivals/.release.md\n").unwrap();
+        let configure = |files| {
+            fs::write(
+                env.path(".docsbase.toml"),
+                format!(
+                    "config_version = 2\n[watch]\nmax_expand_files = {files}\nmax_expand_depth = 1\n"
+                ),
+            )
+            .unwrap();
+            Config::load_from(global.path(), Some(root)).unwrap()
+        };
+        let raw_paths = [env.path("arrivals"), env.path("bbb/b.md")];
+        let async_paths = |config| {
+            let selection =
+                super::refilter_accounted(&env.project, env.cache.path(), &raw_paths, config, None)
+                    .unwrap();
+            assert!(selection.expansion_limited);
+            selection.paths
+        };
+        let config = configure(4);
+        for paths in [
+            env.producer_batch(&raw_paths, &config),
+            async_paths(&config),
+        ] {
+            assert_eq!(paths.len(), 4);
+            assert!(paths.contains(&env.path("arrivals/root.md")));
+            assert!(paths.contains(&env.path("arrivals/nested/next.md")));
+            assert!(paths.contains(&env.path("arrivals/.release.md")));
+            assert_eq!(paths.last(), Some(&env.path("bbb/b.md")));
+        }
+        let config = configure(1);
+        for paths in [
+            env.producer_batch(&raw_paths, &config),
+            async_paths(&config),
+        ] {
+            assert_eq!(paths.len(), 2);
+            assert_eq!(paths.last(), Some(&env.path("bbb/b.md")));
+        }
+        fs::write(env.path(".docsbaseignore"), "/arrivals/\n").unwrap();
+        let selection =
+            super::refilter_accounted(&env.project, env.cache.path(), &raw_paths, &config, None)
+                .unwrap();
+        assert_eq!(selection.paths, [env.path("bbb/b.md")]);
+        assert!(!selection.expansion_limited);
+    }
+
+    #[test]
     fn public_watcher_preserves_rendezvous_for_a_polling_receiver() {
         let cache = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
@@ -1946,7 +2266,7 @@ mod tests {
         .into_iter();
 
         forward_batches(
-            filter,
+            BatchFilter::ExpandDirectories(Box::new(filter)),
             || current.borrow().clone(),
             |timeout| {
                 let (expected_timeout, event) = events.next().expect("next watcher read");

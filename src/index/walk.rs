@@ -29,9 +29,15 @@ pub const MAX_IGNORE_FILE_SIZE: u64 = 1_048_576;
 /// Returns [`Error::Project`] for an escaping ignore pattern or an oversized
 /// ignore file, and [`Error::Internal`] when the walker cannot be built.
 pub fn walk(root: &Path, config: &Config) -> Result<impl Iterator<Item = Result<PathBuf>>> {
+    let builder = markdown_builder(root, root, config)?;
+    Ok(markdown_paths(builder.build(), root))
+}
+
+/// Prepares the common ignore stack for full, shallow, and watcher walks.
+pub(crate) fn markdown_builder(dir: &Path, root: &Path, config: &Config) -> Result<WalkBuilder> {
     validate_patterns(root, config)?;
 
-    let mut builder = WalkBuilder::new(root);
+    let mut builder = WalkBuilder::new(dir);
     builder
         .hidden(true)
         .follow_links(false)
@@ -59,8 +65,18 @@ pub fn walk(root: &Path, config: &Config) -> Result<impl Iterator<Item = Result<
         builder.overrides(built);
     }
 
+    Ok(builder)
+}
+
+pub(crate) fn markdown_paths<I>(
+    entries: I,
+    root: &Path,
+) -> impl Iterator<Item = Result<PathBuf>> + use<I>
+where
+    I: Iterator<Item = std::result::Result<ignore::DirEntry, ignore::Error>>,
+{
     let root = root.to_path_buf();
-    Ok(builder.build().filter_map(move |entry| match entry {
+    entries.filter_map(move |entry| match entry {
         Ok(entry) => {
             let path = entry.path();
             let is_file = entry.file_type().is_some_and(|kind| kind.is_file());
@@ -74,7 +90,7 @@ pub fn walk(root: &Path, config: &Config) -> Result<impl Iterator<Item = Result<
             format!("walk: {err}"),
             err,
         ))),
-    }))
+    })
 }
 
 /// Returns every file in `dir` (non-recursive) that [`walk`] would pick,
@@ -95,36 +111,8 @@ pub fn indexable_files(
     root: &Path,
     config: &Config,
 ) -> Result<std::collections::HashSet<PathBuf>> {
-    validate_patterns(root, config)?;
-
-    let mut builder = WalkBuilder::new(dir);
-    builder
-        .hidden(true)
-        .follow_links(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(false)
-        .require_git(false)
-        .max_depth(Some(1))
-        .add_custom_ignore_filename(IGNORE_FILE);
-
-    apply_git_exclude(&mut builder, root);
-
-    if !config.ignores.is_empty() {
-        let mut overrides = OverrideBuilder::new(root);
-        for pattern in &config.ignores {
-            let negative = format!("!{pattern}");
-            overrides.add(&negative).map_err(|err| Error::Project {
-                message: format!("invalid ignore pattern {pattern:?}: {err}"),
-                instruction: None,
-            })?;
-        }
-        let built = overrides.build().map_err(|err| Error::Project {
-            message: format!("invalid ignore overrides: {err}"),
-            instruction: None,
-        })?;
-        builder.overrides(built);
-    }
+    let mut builder = markdown_builder(dir, root, config)?;
+    builder.max_depth(Some(1));
 
     let mut files = std::collections::HashSet::new();
     for entry in builder.build() {

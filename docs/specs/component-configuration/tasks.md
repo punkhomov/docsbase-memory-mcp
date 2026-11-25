@@ -879,3 +879,12 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   deletion and repeated completion with an intact current pair.
 - Continue physical write admission and runtime storage activation as part
   of the applicable generation workflow.
+
+## Delta 2026-11-25 — CF12 I43, watcher directory expansion
+
+- Resolve and validate project expansion limits through the watcher owner.
+  Keep the existing default depth and count and the order of raw events.
+- Bound descent before scanning deeper subtrees and skip unrelated subtrees
+  while resolving each directory event from the project ignore stack.
+- Publish a bounded warning for a truncated expansion through the actual
+  daemon indexing outcome. Direct file events and manual sync still work.
