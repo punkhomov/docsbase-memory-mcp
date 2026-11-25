@@ -503,6 +503,14 @@ capacity and defaults are unchanged. Raw/async one-attempt constructors and
 Stop's original15s overall deadline are preserved. This adds no file key,
 invalidation edge, replay policy or private timeout fallback.
 
+## Delta 2026-11-24 — I32: рецепт ANN
+
+AnnBuildSpec разрешает project-scoped `ann.build.m` (16) и
+`ann.build.ef_construction` (200). Допуск остаётся в проверенных границах.
+Смена рецепта выбирает отдельный граф (A) поверх прежних векторов и поколения.
+16 слоёв требует формат `hnsw_rs 0.3.5` (X05). Учёт памяти использует измеренный
+запас на вершину. [Модель допуска и замеры](cf8-build-plan.md).
+
 ## Delta 2026-11-24 — ASK1 request contract
 
 `ask::AskLimits` owns the initial ask_docs protocol caps: 120s total, six turns,

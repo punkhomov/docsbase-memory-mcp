@@ -285,7 +285,11 @@ pub(super) async fn run(
         let owners = Arc::new(SearchOwners {
             cache: owner.cache.clone(),
             readers: owner.readers.clone(),
-            dense: Arc::new(owner.dense.snapshot_with_activity(dense_activity)),
+            dense: Arc::new(
+                owner
+                    .dense
+                    .snapshot_with_activity(dense_activity, config.ann_build),
+            ),
             workers: owner.workers.clone(),
             payload_budget: owner.payload_budget.clone(),
             policy: owner.global_config.search.clone(),

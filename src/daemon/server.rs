@@ -519,7 +519,10 @@ impl Shared {
             cache: self.cache.clone(),
             db_settings: self.db_settings.clone(),
             revision: Some(self.project_slot(project.id)),
-            dense: Some(Arc::new(self.dense.snapshot())),
+            dense: Some(Arc::new(
+                self.dense
+                    .snapshot_with_build_settings(runtime.config.ann_build),
+            )),
             project,
             config: runtime.config.clone(),
             stages: runtime.stages.clone(),
@@ -932,7 +935,9 @@ impl Shared {
                 cache: self.cache.clone(),
                 db_settings: self.db_settings.clone(),
                 revision: Some(self.project_slot(project.id)),
-                dense: Some(Arc::new(self.dense.snapshot())),
+                dense: Some(Arc::new(
+                    self.dense.snapshot_with_build_settings(config.ann_build),
+                )),
                 project: project.clone(),
                 config,
                 stages,
@@ -1088,7 +1093,7 @@ impl Shared {
         let warm = config.hybrid_cfg.enabled && config.hybrid_cfg.ranking == Ranking::Rrf;
         let model_id = embedding_model_id(embed_cfg);
         let cache_path = self.cache.clone();
-        let dense = self.dense.snapshot();
+        let dense = self.dense.snapshot_with_build_settings(config.ann_build);
         let readers = Arc::clone(&self.readers);
         let project = project.clone();
         let project_id = project.id;
@@ -1127,7 +1132,7 @@ impl Shared {
             if let Err(err) = dense.cleanup(project_id) {
                 eprintln!("warning: ann cleanup failed for project {project_id}: {err}");
             }
-            if let Err(err) = dense.cleanup_disk(project_id) {
+            if let Err(err) = dense.cleanup_ann_disk() {
                 eprintln!("warning: ann disk cleanup failed: {err}");
             }
         }))
@@ -2236,7 +2241,9 @@ fn prepare_index_context(
         cache: shared.cache.clone(),
         db_settings: shared.db_settings.clone(),
         revision: Some(shared.project_slot(project.id)),
-        dense: Some(Arc::new(shared.dense.snapshot())),
+        dense: Some(Arc::new(
+            shared.dense.snapshot_with_build_settings(config.ann_build),
+        )),
         project,
         config,
         stages,
@@ -3638,6 +3645,80 @@ mod tests {
         assert!(original.ann_search.is_none());
         assert_eq!(refreshed.ann_search.unwrap().ef_max(), 32);
         assert!(matches!(resident(), DenseRows::Ann(reused) if Arc::ptr_eq(&graph, &reused)));
+    }
+
+    #[test]
+    fn sync_refresh_builds_the_captured_ann_recipe_from_existing_vectors() {
+        use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnStore, chunk_set_digest};
+
+        let mut fixture = RefreshFixture::new(true, Some("rrf"), 3);
+        let shared = Arc::get_mut(&mut fixture.shared).unwrap();
+        shared.dense = DenseCache::with_policy_limits(
+            AnnPolicy::BuildOrLoad,
+            fixture.cache.path(),
+            DenseCacheLimits {
+                min_vectors: 2,
+                max_ann_disk_bytes: 1,
+                ..DenseCacheLimits::default()
+            },
+        );
+        let path = fixture.root.path().join(".docsbase.toml");
+        let original = fs::read_to_string(&path).unwrap();
+        let project_id = fixture.project.id;
+        let db = fixture.db.connection();
+        let chunks = crate::store::repo::chunk_hashes(db, project_id).unwrap();
+        let generation = crate::store::repo::index_generation(db, project_id).unwrap();
+        let key = AnnKey {
+            project_id,
+            generation,
+            model_id: FakeEmbedder.model_id().to_owned(),
+            dim: 3,
+            chunk_count: chunks.len(),
+            chunk_set_digest: chunk_set_digest(&chunks),
+            format_version: ANN_FORMAT_VERSION,
+        };
+        let store = AnnStore::new(fixture.cache.path().to_path_buf());
+        let mut previous: Option<PathBuf> = None;
+        for (m, ef_construction) in [(12, 64), (16, 98)] {
+            fs::write(
+                &path,
+                format!("{original}\n[ann.build]\nm={m}\nef_construction={ef_construction}\n"),
+            )
+            .unwrap();
+            let config = fixture
+                .shared
+                .open_project_config_with(&fixture.project, |_| Ok(HybridStages::default()))
+                .unwrap();
+            finish_refresh(fixture.shared.refresh_ann_after_sync(&fixture.project));
+            fixture.shared.dense.join_job_builds_for_test().unwrap();
+            let slot = store
+                .load_with_settings(&key, config.ann_build)
+                .unwrap()
+                .expect("sync warm must build the captured recipe");
+            assert_eq!(slot.meta.m, m);
+            assert_eq!(slot.meta.ef_construction, ef_construction);
+            let cold = DenseCache::with_policy_limits(
+                AnnPolicy::LoadOnly,
+                fixture.cache.path(),
+                fixture.shared.dense.limits(),
+            )
+            .snapshot_with_build_settings(config.ann_build);
+            assert!(matches!(
+                cold.get(&fixture.db, project_id, FakeEmbedder.model_id()).unwrap(),
+                DenseRows::Ann(graph) if graph.build_settings() == config.ann_build
+            ));
+            if let Some(previous) = previous.replace(slot.dir) {
+                assert!(
+                    !previous.exists(),
+                    "discard the old recipe under disk pressure"
+                );
+            }
+        }
+        assert!(store.load(&key).unwrap().is_none());
+        assert_eq!(
+            crate::store::repo::index_generation(db, project_id).unwrap(),
+            generation
+        );
     }
 
     #[test]

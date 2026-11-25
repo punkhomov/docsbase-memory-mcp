@@ -18,7 +18,9 @@ use schema::{
     SourceId, Unit,
 };
 
-use crate::hybrid::ann_settings::{AnnConfigPatch, AnnSearchSettings, AnnSearchSpec};
+use crate::hybrid::ann_settings::{
+    AnnBuildSettings, AnnBuildSpec, AnnConfigPatch, AnnSearchSettings, AnnSearchSpec,
+};
 
 pub mod bootstrap;
 pub(crate) mod capture;
@@ -59,6 +61,8 @@ pub struct Config {
     pub hybrid_cfg: HybridCfg,
     /// Explicit per-query ANN traversal policy. Unconfigured search uses the legacy adapter.
     pub ann_search: Option<AnnSearchSettings>,
+    /// Validated ANN construction recipe captured with the project.
+    pub ann_build: AnnBuildSettings,
     /// Installation-wide vector policy selected by a v2 global configuration.
     /// Legacy snapshots use per-project capacity and have no shared owner policy.
     pub vector_store: Option<crate::vector_cache::settings::VectorStoreSettings>,
@@ -104,7 +108,7 @@ struct GlobalFileConfig {
     daemon: Option<DaemonPatch>,
     remote: Option<RemotePatch>,
     hybrid: Option<HybridPatch>,
-    ann: Option<AnnConfigPatch>,
+    ann: Option<toml::Table>,
     providers: Option<HashMap<String, toml::Table>>,
 }
 
@@ -119,7 +123,7 @@ struct ProjectFileConfig {
     max_docs_per_project: Option<usize>,
     auto_index: Option<bool>,
     hybrid: Option<HybridPatch>,
-    ann: Option<AnnConfigPatch>,
+    ann: Option<toml::Table>,
 }
 
 impl ProjectFileConfig {
@@ -388,6 +392,7 @@ impl SettingsSpec for ConfigSpec {
         fields.extend_from_slice(DaemonSpec::FIELDS);
         fields.extend_from_slice(RemoteSpec::FIELDS);
         fields.extend_from_slice(AnnSearchSpec::FIELDS);
+        fields.extend_from_slice(AnnBuildSpec::FIELDS);
         fields
     }
     fn defaults(context: &DefaultsContext) -> Self::Defaults {
@@ -408,6 +413,7 @@ impl SettingsSpec for ConfigSpec {
             hybrid: false,
             hybrid_cfg: HybridSpec::initial(&hybrid),
             ann_search: None,
+            ann_build: AnnBuildSpec::initial(&AnnBuildSpec::defaults(context)),
             providers: ProvidersCfg::default(),
             vector_store: None,
         };
@@ -487,16 +493,22 @@ impl SettingsSpec for ConfigSpec {
                 origins,
             )?;
         }
-        if let Some(ann) = patch.ann {
-            let mut policy = settings.ann_search.unwrap_or(defaults.ann_search);
-            AnnSearchSpec::overlay(
-                &mut policy,
-                ann.search,
-                &defaults.ann_search,
-                source,
-                origins,
-            )?;
-            settings.ann_search = Some(policy);
+        if let Some(table) = patch.ann {
+            let ann = AnnConfigPatch::decode(table)?;
+            if let Some(search) = ann.search {
+                let mut policy = settings.ann_search.unwrap_or(defaults.ann_search);
+                AnnSearchSpec::overlay(&mut policy, search, &defaults.ann_search, source, origins)?;
+                settings.ann_search = Some(policy);
+            }
+            if let Some(build) = ann.build {
+                AnnBuildSpec::overlay(
+                    &mut settings.ann_build,
+                    build,
+                    &defaults.initial.ann_build,
+                    source,
+                    origins,
+                )?;
+            }
         }
         if let Some(patch) = patch.remote {
             RemoteSpec::overlay(
@@ -536,6 +548,7 @@ impl ConfigSpec {
         settings.chunk.view_fields(view)?;
         DaemonSpec::view_fields(&settings.daemon, view)?;
         RemoteSpec::view_fields(&settings.remote, view)?;
+        settings.ann_build.view_fields(view)?;
         let ann = settings
             .ann_search
             .unwrap_or_else(AnnSearchSettings::owner_defaults);
