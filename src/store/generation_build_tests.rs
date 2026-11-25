@@ -97,8 +97,11 @@ impl Env {
     }
 
     fn generation(&self, id: i64) -> std::path::PathBuf {
+        // Internal verification takes the canonical cache used by the publisher.
         self.cache
             .path()
+            .canonicalize()
+            .unwrap()
             .join("projects/1/generations")
             .join(id.to_string())
     }
