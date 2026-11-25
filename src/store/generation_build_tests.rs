@@ -96,6 +96,21 @@ impl Env {
         )
     }
 
+    fn register_second_project(&self, root: &Path) -> LexicalBuildRequest {
+        let conn = Connection::open(self.cache.path().join(DB_FILE)).unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, canonical_root, name, status, schema_version, created_at)
+             VALUES (2, ?1, 'second', 'not_indexed', 3, 0)",
+            [root.canonicalize().unwrap().to_str().unwrap()],
+        )
+        .unwrap();
+        LexicalBuildRequest {
+            project_id: 2,
+            base: None,
+            ..self.request()
+        }
+    }
+
     fn generation(&self, id: i64) -> std::path::PathBuf {
         // Internal verification takes the canonical cache used by the publisher.
         self.cache
@@ -261,6 +276,148 @@ fn publication_selects_the_sealed_pair_and_preserves_the_previous_pair() {
     )
     .unwrap();
     assert_eq!(retried, target);
+}
+
+#[cfg(unix)]
+fn retire_local_pair(env: &Env) -> (ObservedProjectIndex, ObservedProjectIndex) {
+    let settings = settings::standalone().unwrap();
+    let config = Config::default();
+    let build_and_publish = |request| {
+        let staged = env.build(request).unwrap();
+        publish_lexical_generation(
+            env.cache.path(),
+            request,
+            staged,
+            &settings,
+            limits(),
+            &config,
+        )
+        .unwrap()
+    };
+    let previous_request = env.request();
+    let previous = build_and_publish(previous_request);
+    fs::write(
+        env.source.path().join("guide.md"),
+        "# New\n\nCherryupdate\n",
+    )
+    .unwrap();
+    let next_request = LexicalBuildRequest {
+        base: Some(previous),
+        ..previous_request
+    };
+    (previous, build_and_publish(next_request))
+}
+
+#[test]
+#[cfg(unix)]
+fn retired_local_pair_waits_for_readers_and_preserves_unowned_files() {
+    let env = Env::new();
+    let settings = settings::standalone().unwrap();
+    let (previous, next) = retire_local_pair(&env);
+    let previous_request = env.request();
+    let next_request = LexicalBuildRequest {
+        base: Some(previous),
+        ..previous_request
+    };
+    let old_id = previous.generation_id.unwrap();
+    let old = env.generation(old_id);
+    let next_id = next.generation_id.unwrap();
+    let reclaim = |request, id| {
+        reclaim_retired_lexical_generation(env.cache.path(), request, id, &settings, limits())
+    };
+    assert!(reclaim(next_request, next_id).is_err());
+    let other_source = tempfile::tempdir().unwrap();
+    let other_project = env.register_second_project(other_source.path());
+    fs::create_dir(env.cache.path().join("projects/2")).unwrap();
+    let error = reclaim(other_project, old_id).unwrap_err();
+    assert!(error.to_string().contains("different project"), "{error}");
+    let mut wrong_base = previous_request;
+    wrong_base.base.as_mut().unwrap().content_revision += 1;
+    assert!(reclaim(wrong_base, old_id).is_err());
+    let wrong_reservation = LexicalBuildRequest {
+        reserved_disk_bytes: previous_request.reserved_disk_bytes + 1,
+        ..previous_request
+    };
+    assert!(reclaim(wrong_reservation, old_id).is_err());
+    let lock = RwLock::new(open_coordination_file(&old.join(".read.lock"), false).unwrap());
+    let lease = lock.try_read().unwrap();
+    assert!(reclaim(previous_request, old_id).is_err());
+    assert_eq!(env.catalog_state(), (next_id, Some("retired".into())));
+    drop(lease);
+    drop(lock);
+
+    let seal = old.join("seal.json");
+    let stored = fs::read(&seal).unwrap();
+    fs::write(&seal, "foreign seal").unwrap();
+    assert!(reclaim(previous_request, old_id).is_err());
+    assert!(old.join("metadata.db").exists());
+    assert_eq!(env.catalog_state(), (next_id, Some("retired".into())));
+    fs::write(&seal, &stored).unwrap();
+
+    let foreign = old.join("tantivy/00000000000000000000000000000000.idx");
+    fs::write(&foreign, "preserve me").unwrap();
+    assert!(reclaim(previous_request, old_id).is_err());
+    assert_eq!(fs::read_to_string(&foreign).unwrap(), "preserve me");
+    assert_eq!(env.catalog_state(), (next_id, Some("retired".into())));
+    fs::remove_file(foreign).unwrap();
+
+    let registry = env.cache.path().join(DB_FILE);
+    Connection::open(&registry)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_release BEFORE DELETE ON project_generations
+             BEGIN SELECT RAISE(ABORT, 'release interrupted'); END;",
+        )
+        .unwrap();
+    let error = reclaim(previous_request, old_id).unwrap_err();
+    assert!(error.to_string().contains("release interrupted"), "{error}");
+    assert!(!old.exists());
+    assert_eq!(env.catalog_state(), (next_id, Some("reclaiming".into())));
+    Connection::open(registry)
+        .unwrap()
+        .execute_batch("DROP TRIGGER reject_release")
+        .unwrap();
+    reclaim(previous_request, old_id).unwrap();
+    reclaim(previous_request, old_id).unwrap();
+    assert_eq!(env.catalog_state(), (next_id, None));
+    let current = ReadIndex::open(&env.generation(next_id).join("tantivy")).unwrap();
+    assert_eq!(current.search("Cherryupdate", 2).unwrap().len(), 1);
+}
+
+#[test]
+#[cfg(unix)]
+fn retired_reclamation_requires_the_seal_while_payload_remains() {
+    let env = Env::new();
+    let settings = settings::standalone().unwrap();
+    let (previous, next) = retire_local_pair(&env);
+    let old_id = previous.generation_id.unwrap();
+    let old = env.generation(old_id);
+    let request = env.request();
+    let reclaim = |request| {
+        reclaim_retired_lexical_generation(env.cache.path(), request, old_id, &settings, limits())
+    };
+    let db = Connection::open(env.cache.path().join(DB_FILE)).unwrap();
+    db.execute(
+        "UPDATE project_generations SET phase='reclaiming' WHERE id=?1",
+        [old_id],
+    )
+    .unwrap();
+    drop(db);
+    let seal = old.join("seal.json");
+    let stored = fs::read(&seal).unwrap();
+    fs::remove_file(&seal).unwrap();
+    assert!(reclaim(request).is_err());
+    assert!(old.join("metadata.db").exists());
+    fs::write(seal, stored).unwrap();
+    fs::remove_file(old.join("metadata.db")).unwrap();
+    let wrong_reservation = LexicalBuildRequest {
+        reserved_disk_bytes: request.reserved_disk_bytes + 1,
+        ..request
+    };
+    assert!(reclaim(wrong_reservation).is_err());
+    reclaim(request).unwrap();
+    assert!(!old.exists());
+    assert_eq!(env.catalog_state(), (next.generation_id.unwrap(), None));
 }
 
 #[test]
@@ -912,6 +1069,31 @@ fn discard_without_a_qualified_directory_barrier_preserves_the_reservation() {
     assert!(root.join("metadata.db").is_file());
     assert_eq!(env.catalog_state(), (1, Some("building".into())));
     env.assert_legacy_search();
+
+    // Windows cannot publish a local pair. Model a catalog moved from a
+    // supported installation to exercise the same durability gate on retire.
+    Connection::open(env.cache.path().join(DB_FILE))
+        .unwrap()
+        .execute(
+            "UPDATE project_generations SET phase='retired', seal_digest=?1 WHERE id=?2",
+            params![[1_u8; 32].as_slice(), prepared.generation_id],
+        )
+        .unwrap();
+    let error = reclaim_retired_lexical_generation(
+        env.cache.path(),
+        request,
+        prepared.generation_id,
+        &settings::standalone().unwrap(),
+        limits(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("directory durability barrier"),
+        "{error}"
+    );
+    assert!(root.join(".build-owner").is_file());
+    assert!(root.join("metadata.db").is_file());
+    assert_eq!(env.catalog_state(), (1, Some("retired".into())));
 }
 
 #[test]
@@ -941,25 +1123,126 @@ fn disk_reservation_refuses_oversized_completed_files() {
 }
 
 #[test]
+fn installation_reserves_space_for_other_projects_until_discard_finishes() {
+    let env = Env::new();
+    let first_request = env.request();
+    let built = env.build(first_request).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("guide.md"), "# Second project\n").unwrap();
+    let registry = env.cache.path().join(DB_FILE);
+    let second_request = env.register_second_project(source.path());
+    let settings = settings::standalone().unwrap();
+    let build_second = || {
+        prepare_lexical_generation_with_space(
+            env.cache.path(),
+            second_request,
+            &settings,
+            limits(),
+            &Config::default(),
+            |path| {
+                let expected = env
+                    .cache
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("projects/2/generations");
+                assert_eq!(path, expected);
+                assert_reservation_transaction(&registry);
+                Ok(first_request.reserved_disk_bytes + second_request.reserved_disk_bytes - 1)
+            },
+        )
+    };
+    let assert_refused = || {
+        let error = build_second().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("free space for all generation reservations"),
+            "{error}"
+        );
+        let db = Connection::open(&registry).unwrap();
+        let count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM project_generations WHERE project_id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    };
+    assert_refused();
+    for (phase, digest) in [("sealed", Some([1_u8; 32])), ("reclaiming", None)] {
+        Connection::open(&registry)
+            .unwrap()
+            .execute(
+                "UPDATE project_generations SET phase = ?1, seal_digest = ?2 WHERE id = ?3",
+                params![
+                    phase,
+                    digest.as_ref().map(<[u8; 32]>::as_slice),
+                    built.generation_id
+                ],
+            )
+            .unwrap();
+        assert_refused();
+    }
+    env.assert_legacy_search();
+
+    #[cfg(unix)]
+    {
+        discard_lexical_generation(
+            env.cache.path(),
+            first_request,
+            built.generation_id,
+            &settings,
+            limits(),
+        )
+        .unwrap();
+        let staged = build_second().unwrap();
+        assert_eq!(staged.project_id, 2);
+        let config = Config::default();
+        let active = publish_lexical_generation(
+            env.cache.path(),
+            second_request,
+            staged,
+            &settings,
+            limits(),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(active.generation_id, Some(staged.generation_id));
+        let next = prepare_lexical_generation_with_space(
+            env.cache.path(),
+            first_request,
+            &settings,
+            limits(),
+            &config,
+            |_| Ok(first_request.reserved_disk_bytes),
+        )
+        .unwrap();
+        assert_eq!(
+            next.project_id, 1,
+            "available disk already accounts for the active pair"
+        );
+    }
+}
+
+fn assert_reservation_transaction(registry: &Path) {
+    let contender = Connection::open(registry).unwrap();
+    contender.busy_timeout(std::time::Duration::ZERO).unwrap();
+    assert!(matches!(
+        contender.execute_batch("BEGIN IMMEDIATE"),
+        Err(rusqlite::Error::SqliteFailure(code, _))
+            if code.code == rusqlite::ErrorCode::DatabaseBusy
+    ));
+}
+
+#[test]
 fn newly_registered_project_builds_its_first_pair_without_an_active_head() {
     let env = Env::new();
     let source = tempfile::tempdir().unwrap();
     fs::write(source.path().join("start.md"), "# Firstgarden\n").unwrap();
-    let root = source.path().canonicalize().unwrap();
-    let conn = Connection::open(env.cache.path().join(DB_FILE)).unwrap();
-    conn.execute(
-        "INSERT INTO projects (id, canonical_root, name, status, schema_version, created_at)
-          VALUES (2, ?1, 'new', 'not_indexed', 3, 0)",
-        [root.to_str().unwrap()],
-    )
-    .unwrap();
-    drop(conn);
     let result = env
-        .build(LexicalBuildRequest {
-            project_id: 2,
-            base: None,
-            ..env.request()
-        })
+        .build(env.register_second_project(source.path()))
         .unwrap();
     assert_eq!(
         (

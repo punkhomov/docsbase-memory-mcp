@@ -1589,3 +1589,20 @@ The v2 test observes two distinct indexing workers inside Tantivy and a
 real restarted-daemon test verifies that the unchanged file is skipped
 with the same index generation. Full cli-full, Clippy, fmt and offline
 checks passed on Rust 1.100.0 against the existing search baseline.
+
+## 2026-11-25 — CF11d, stopped generation reservations and reclamation
+
+Task CF11d reservation and retired-pair reclaim: complete (installation-wide
+cooperative admission and retryable reclamation of stopped immutable local
+pairs). An immediate SQLite transaction counts unfinished reservations and
+records the successful claim. Reclamation checks the accepted request, holds
+the reader lease, and keeps the seal until payload removal is durable.
+
+Ruling: review found gaps in request identity and file ownership. Recovery
+now compares the original base and reservation, refuses a foreign project,
+and checks surviving payload names and sizes against the seal. A real
+publisher and SQLite failure injection cover retirement, reservation
+retention after deletion, and retry. The targeted suite passed all 31
+generation tests on Rust 1.100.0. Windows continues to refuse removal
+without a qualified namespace barrier. Physical staging limits and runtime
+activation remain open.

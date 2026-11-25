@@ -1,4 +1,4 @@
-//! Retryable discard of a private build with a matching ownership record.
+//! Retryable retirement of inactive local generations.
 
 use std::io::Read as _;
 
@@ -78,6 +78,139 @@ pub fn discard_lexical_generation(
     settings: &Resolved<DbSettings>,
     limits: InspectionLimits,
 ) -> Result<()> {
+    reclaim_local_generation(
+        cache,
+        request,
+        generation,
+        settings,
+        limits,
+        Reclamation::Abandoned,
+    )
+}
+
+/// Reclaims a retired local pair using the request that produced it.
+/// Requires exclusive access to its reader lease and the original publication
+/// seal. An interrupted reclaim can resume after its partial deletion.
+/// # Errors
+/// An active or legacy generation, invalid ownership, a busy reader, or a
+/// failure to durably remove the retired files or catalogue entry.
+pub fn reclaim_retired_lexical_generation(
+    cache: &Path,
+    request: LexicalBuildRequest,
+    generation: i64,
+    settings: &Resolved<DbSettings>,
+    limits: InspectionLimits,
+) -> Result<()> {
+    reclaim_local_generation(
+        cache,
+        request,
+        generation,
+        settings,
+        limits,
+        Reclamation::Retired,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reclamation {
+    Abandoned,
+    Retired,
+}
+
+struct RetainedGeneration {
+    project: i64,
+    phase: String,
+    layout: String,
+    plan: Option<String>,
+    seal: Option<[u8; 32]>,
+    base_id: Option<i64>,
+    base_revision: i64,
+    reservation: i64,
+}
+
+impl RetainedGeneration {
+    fn load(registry: &rusqlite::Connection, generation: i64) -> Result<Option<Self>> {
+        registry
+            .query_row(
+                "SELECT project_id, phase, layout, plan_id, seal_digest,
+                        base_id, base_revision, reserved_disk_bytes
+                 FROM project_generations WHERE id = ?1",
+                [generation],
+                |row| {
+                    Ok(Self {
+                        project: row.get(0)?,
+                        phase: row.get(1)?,
+                        layout: row.get(2)?,
+                        plan: row.get(3)?,
+                        seal: row.get(4)?,
+                        base_id: row.get(5)?,
+                        base_revision: row.get(6)?,
+                        reservation: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(repo::db_error)
+    }
+
+    fn resuming(
+        &self,
+        kind: Reclamation,
+        plan: &str,
+        request: LexicalBuildRequest,
+    ) -> Result<bool> {
+        let (initial_phase, error) = match kind {
+            Reclamation::Abandoned => {
+                ("building", "generation is not the requested inactive build")
+            }
+            Reclamation::Retired => (
+                "retired",
+                "generation is not the requested retired local pair",
+            ),
+        };
+        let resuming = self.phase == "reclaiming";
+        if (!resuming && self.phase != initial_phase)
+            || self.layout != "local"
+            || self.plan.as_deref() != Some(plan)
+            || self.seal.is_some() != (kind == Reclamation::Retired)
+            || (kind == Reclamation::Retired && !self.matches_build(request))
+        {
+            return Err(admission(error));
+        }
+        Ok(resuming)
+    }
+
+    fn matches_build(&self, request: LexicalBuildRequest) -> bool {
+        self.base_id == request.base.and_then(|base| base.generation_id)
+            && self.base_revision == request.base.map_or(0, |base| base.content_revision)
+            && u64::try_from(self.reservation).ok() == Some(request.reserved_disk_bytes)
+    }
+}
+
+fn find_reclamation_record(
+    registry: &rusqlite::Connection,
+    project: i64,
+    generation: i64,
+    kind: Reclamation,
+) -> Result<Option<RetainedGeneration>> {
+    let state = RetainedGeneration::load(registry, generation)?;
+    match state {
+        Some(state) if state.project == project => Ok(Some(state)),
+        Some(_) if kind == Reclamation::Retired => Err(admission(
+            "retired generation belongs to a different project",
+        )),
+        _ => Ok(None),
+    }
+}
+
+fn reclaim_local_generation(
+    cache: &Path,
+    request: LexicalBuildRequest,
+    generation: i64,
+    settings: &Resolved<DbSettings>,
+    limits: InspectionLimits,
+    kind: Reclamation,
+) -> Result<()> {
     if request.project_id <= 0 || generation <= 0 {
         return Err(admission(
             "discard requires positive project and generation IDs",
@@ -102,18 +235,13 @@ pub fn discard_lexical_generation(
         let plan = blake3::Hash::from_bytes(request.plan_digest).to_hex();
         let mut db = open_recovery_registry(&cache, settings)?;
         validate_epoch(db.connection(), request.epoch)?;
-        let state: Option<(String, String, Option<String>, bool)> = db
-            .connection()
-            .query_row(
-                "SELECT phase, layout, plan_id, seal_digest IS NULL FROM project_generations
-             WHERE project_id = ?1 AND id = ?2",
-                params![request.project_id, generation],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()
-            .map_err(repo::db_error)?;
-        let Some((phase, layout, stored_plan, unsealed)) = state else {
-            return if exists {
+        let intent = claim_path(&generations, generation);
+        let Some(state) =
+            find_reclamation_record(db.connection(), request.project_id, generation, kind)?
+        else {
+            return if exists
+                || (kind == Reclamation::Retired && read_owner_record(&intent)?.is_some())
+            {
                 Err(admission(
                     "discard found an uncatalogued generation directory",
                 ))
@@ -121,33 +249,29 @@ pub fn discard_lexical_generation(
                 Ok(())
             };
         };
-        if !matches!(phase.as_str(), "building" | "reclaiming")
-            || layout != "local"
-            || stored_plan.as_deref() != Some(plan.as_str())
-            || !unsealed
-        {
-            return Err(admission("generation is not the requested inactive build"));
-        }
+        let resuming = state.resuming(kind, plan.as_str(), request)?;
+        let seal_digest = state.seal.as_ref().map(<[u8; 32]>::as_slice);
 
         // Confirm the required barrier before changing either durable state.
         sync_directory(parent)?;
         let digest = ownership_digest(request, generation);
-        let intent = claim_path(&generations, generation);
         let intent_bytes = read_owner_record(&intent)?;
-        let claimed = intent_bytes.as_deref() == Some(digest.as_bytes());
-        let partial_intent = !exists
-            && intent_bytes
-                .as_ref()
-                .is_some_and(|bytes| digest.as_bytes().starts_with(bytes));
-        if intent_bytes.is_some() && !claimed && !partial_intent {
-            return Err(admission(
-                "generation intent does not match the accepted build",
-            ));
-        }
+        let claimed = verify_intent(
+            intent_bytes.as_deref(),
+            digest,
+            !exists && kind == Reclamation::Abandoned,
+        )?;
         if exists {
-            verify_ownership(&path, digest, claimed, phase == "reclaiming")?;
+            verify_ownership(&path, digest, claimed, resuming)?;
         }
         let mut reader_lock = open_reader_lock(&path.join(".read.lock"))?;
+        if kind == Reclamation::Retired
+            && ((exists && !claimed) || (!resuming && (!exists || reader_lock.is_none())))
+        {
+            return Err(admission(
+                "retired generation has incomplete ownership or reader lease",
+            ));
+        }
         let _reader_guard = reader_lock
             .as_mut()
             .map(|lock| {
@@ -157,26 +281,90 @@ pub fn discard_lexical_generation(
             })
             .transpose()?;
         if exists {
-            validate_owned_files(&path)?;
+            match seal_digest {
+                Some(seal) => validate_retired_files(&path, seal, limits, resuming)?,
+                None => validate_owned_files(&path)?,
+            }
             sync_directory(&path)?;
         }
-        claim_reclamation(&mut db, request, generation, &phase, plan.as_str())?;
+        claim_reclamation(
+            &mut db,
+            request,
+            generation,
+            &state.phase,
+            plan.as_str(),
+            seal_digest,
+        )?;
         drop(db);
 
-        if exists {
-            delete_owned_files(&path)?;
-        }
-        sync_directory(parent)?;
-        if claimed || partial_intent {
-            filesystem(
-                &intent,
-                "remove generation intent",
-                fs::remove_file(&intent),
-            )?;
-            sync_directory(parent)?;
-        }
-        release_reservation(&cache, request, generation, settings, plan.as_str())
+        remove_reclaiming_generation(
+            parent,
+            exists.then_some(path.as_path()),
+            intent_bytes.as_ref().map(|_| intent.as_path()),
+        )?;
+        release_reservation(
+            &cache,
+            request,
+            generation,
+            settings,
+            plan.as_str(),
+            seal_digest,
+        )
     })
+}
+
+fn verify_intent(bytes: Option<&[u8]>, digest: blake3::Hash, allow_partial: bool) -> Result<bool> {
+    let Some(bytes) = bytes else {
+        return Ok(false);
+    };
+    if bytes == digest.as_bytes() {
+        Ok(true)
+    } else if allow_partial && digest.as_bytes().starts_with(bytes) {
+        Ok(false)
+    } else {
+        Err(admission(
+            "generation intent does not match the accepted build",
+        ))
+    }
+}
+
+fn remove_reclaiming_generation(
+    parent: &Path,
+    path: Option<&Path>,
+    intent: Option<&Path>,
+) -> Result<()> {
+    if let Some(path) = path {
+        delete_owned_files(path)?;
+    }
+    sync_directory(parent)?;
+    if let Some(intent) = intent {
+        filesystem(intent, "remove generation intent", fs::remove_file(intent))?;
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+fn validate_retired_files(
+    path: &Path,
+    expected: &[u8],
+    limits: InspectionLimits,
+    resuming: bool,
+) -> Result<()> {
+    let seal = path.join("seal.json");
+    if resuming && !super::entry_exists(&seal)? {
+        // A retired seal is removed only after syncing the payload removal.
+        return validate_generation_files(path, Some(&[]));
+    }
+    let cap = crate::limits::MAX_STATE_BYTES.min(limits.max_metadata_bytes as u64);
+    let content = crate::config::capture::read_bounded(open_coordination_file(&seal, false)?, cap)
+        .map_err(|error| admission(format!("retired generation seal is unavailable: {error}")))?;
+    if blake3::hash(&content).as_bytes() != expected {
+        return Err(admission("retired generation seal changed"));
+    }
+    let manifest: super::publication::Seal = serde_json::from_slice(&content).map_err(|error| {
+        super::Error::internal_with_source("decode retired generation seal", error)
+    })?;
+    validate_generation_files(path, Some(&manifest.files))
 }
 
 pub(super) fn open_recovery_registry(
@@ -214,6 +402,7 @@ fn claim_reclamation(
     generation: i64,
     phase: &str,
     plan: &str,
+    seal: Option<&[u8]>,
 ) -> Result<()> {
     db.connection()
         .pragma_update(None, "synchronous", "EXTRA")
@@ -224,8 +413,9 @@ fn claim_reclamation(
         .execute(
             "UPDATE project_generations SET phase = 'reclaiming'
          WHERE project_id = ?1 AND id = ?2 AND phase = ?3
-            AND layout = 'local' AND plan_id = ?4 AND seal_digest IS NULL",
-            params![request.project_id, generation, phase, plan],
+            AND layout = 'local' AND plan_id = ?4 AND seal_digest IS ?5
+            AND NOT EXISTS (SELECT 1 FROM project_generation_head WHERE project_id = ?1 AND active_id = ?2)",
+            params![request.project_id, generation, phase, plan, seal],
         )
         .map_err(repo::db_error)?;
     if changed != 1 {
@@ -240,6 +430,7 @@ fn release_reservation(
     generation: i64,
     settings: &Resolved<DbSettings>,
     plan: &str,
+    seal: Option<&[u8]>,
 ) -> Result<()> {
     let mut db = open_recovery_registry(cache, settings)?;
     db.connection()
@@ -251,8 +442,9 @@ fn release_reservation(
         .execute(
             "DELETE FROM project_generations WHERE project_id = ?1 AND id = ?2
             AND phase = 'reclaiming' AND layout = 'local'
-            AND plan_id = ?3 AND seal_digest IS NULL",
-            params![request.project_id, generation, plan],
+            AND plan_id = ?3 AND seal_digest IS ?4
+            AND NOT EXISTS (SELECT 1 FROM project_generation_head WHERE project_id = ?1 AND active_id = ?2)",
+            params![request.project_id, generation, plan, seal],
         )
         .map_err(repo::db_error)?;
     if removed != 1 {
@@ -328,12 +520,18 @@ pub(super) fn read_owner_record(path: &Path) -> Result<Option<Vec<u8>>> {
 }
 
 pub(super) fn validate_owned_files(path: &Path) -> Result<()> {
+    validate_generation_files(path, None)
+}
+
+fn validate_generation_files(path: &Path, manifest: Option<&[(String, u64)]>) -> Result<()> {
     for entry in filesystem(path, "inspect staged directory", fs::read_dir(path))? {
         let entry = filesystem(path, "inspect staged entry", entry)?;
         let child = entry.path();
         let name = entry.file_name();
         match name.to_str() {
-            Some("tantivy") if directory_exists(&child)? => {
+            Some("tantivy")
+                if manifest.is_none_or(|files| !files.is_empty()) && directory_exists(&child)? =>
+            {
                 for file in filesystem(&child, "inspect staged Tantivy", fs::read_dir(&child))? {
                     let file = filesystem(&child, "inspect staged Tantivy component", file)?.path();
                     if !file
@@ -343,30 +541,54 @@ pub(super) fn validate_owned_files(path: &Path) -> Result<()> {
                     {
                         return Err(admission("discard found an unrecognized Tantivy entry"));
                     }
-                    filesystem(
-                        &file,
-                        "verify staged Tantivy component",
-                        native_fs::check_single_link(&file),
-                    )?;
+                    verify_generation_file(path, &file, manifest)?;
                 }
+            }
+            Some(".build-owner" | "seal.json") => {
+                verify_generation_file(path, &child, None)?;
             }
             Some(
                 REBUILD_MARKER
-                | ".build-owner"
                 | ".read.lock"
                 | "metadata.db"
                 | "metadata.db-journal"
                 | "metadata.db-wal"
-                | "metadata.db-shm"
-                | "seal.json",
+                | "metadata.db-shm",
             ) => {
-                filesystem(
-                    &child,
-                    "verify owned staged file",
-                    native_fs::check_single_link(&child),
-                )?;
+                verify_generation_file(path, &child, manifest)?;
             }
             _ => return Err(admission("discard found an unrecognized generation entry")),
+        }
+    }
+    Ok(())
+}
+
+fn verify_generation_file(
+    root: &Path,
+    file: &Path,
+    manifest: Option<&[(String, u64)]>,
+) -> Result<()> {
+    filesystem(
+        file,
+        "verify owned generation file",
+        native_fs::check_single_link(file),
+    )?;
+    if let Some(manifest) = manifest {
+        let relative = file
+            .strip_prefix(root)
+            .map(crate::index::walk::portable_rel)
+            .map_err(|_| admission("generation component left its directory"))?;
+        let entry = manifest
+            .binary_search_by(|(name, _)| name.cmp(&relative))
+            .map_err(|_| admission("retired generation contains a file absent from its seal"))?;
+        let bytes = filesystem(
+            file,
+            "inspect retired component",
+            fs::symlink_metadata(file),
+        )?
+        .len();
+        if manifest[entry].1 != bytes {
+            return Err(admission("retired generation component size changed"));
         }
     }
     Ok(())
@@ -406,9 +628,10 @@ fn is_tantivy_file(name: &str) -> bool {
 fn delete_owned_files(path: &Path) -> Result<()> {
     let marker = path.join(".build-owner");
     let tantivy = path.join("tantivy");
+    let seal = path.join("seal.json");
     for entry in filesystem(path, "list generation to discard", fs::read_dir(path))? {
         let file = filesystem(path, "list generation entry", entry)?.path();
-        if file == marker {
+        if file == marker || file == seal {
             continue;
         }
         if file == tantivy {
@@ -425,9 +648,13 @@ fn delete_owned_files(path: &Path) -> Result<()> {
             filesystem(&file, "remove staged file", fs::remove_file(&file))?;
         }
     }
-    // Make the payload removal durable before unlinking the ownership
-    // marker. A crash after that point can leave only an empty directory.
+    // Keep the seal available to authenticate surviving payload after a crash.
     sync_directory(path)?;
+    match fs::remove_file(&seal) {
+        Ok(()) => sync_directory(path)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return filesystem(&seal, "remove generation seal", Err(error)),
+    }
     match fs::remove_file(&marker) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}

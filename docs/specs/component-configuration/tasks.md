@@ -865,3 +865,17 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   isolated generation builds. Keep typed compatibility defaults.
 - Exercise a non-default native writer, invalid preflight and no rebuild on
   a writer-only change. Preserve the default search benchmark.
+
+## Delta 2026-11-25 — CF11d, общий резерв подготовки
+
+- Compare unfinished reservations with the candidate volume's free space in
+  the same SQLite transaction that records the new building row.
+- Reject the second project when each request fits on its own. Retain the
+  charge through interrupted discard. Verify retry after durable discard and
+  account for published files through free space.
+- Reclaim an exact stopped retired local pair under its reader lease,
+  accepted request and sealed file inventory. Exercise a wrong project, base
+  or reservation, a held reader, a replaced seal, an unlisted file, partial
+  deletion and repeated completion with an intact current pair.
+- Continue physical write admission and runtime storage activation as part
+  of the applicable generation workflow.
