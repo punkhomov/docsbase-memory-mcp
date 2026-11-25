@@ -400,11 +400,22 @@ config_version = 2
 
 [vector_cache]
 max_bytes = 536870912
+max_entries = 250000
+busy_timeout = 5000
 ```
 
 All projects in the same cache root share this budget. SQLite opens the vector
 database on the first vector operation. Lexical indexing and search can run
 without creating it.
+
+The whole `[vector_cache]` table is global-only. Each omitted field keeps
+its default.
+
+| Key | Default | Behavior |
+| --- | ---: | --- |
+| `max_bytes` | 1073741824 | Positive limit on retained vector payload bytes. |
+| `max_entries` | 1000000 | Positive limit on retained vectors across all projects and models. |
+| `busy_timeout` | 5000 | SQLite contention budget in milliseconds, from 0 (immediate) through 2147483647. |
 
 An existing unversioned global file selects v1. Create an empty unversioned
 global file to retain the project-specific budgets of legacy projects. To use
@@ -441,12 +452,12 @@ bools retain the v1 reset semantics. An existing stage inherits provider, model
 and dimensions independently; changing provider does not silently reset the
 other fields. `enabled` also inherits when absent.
 
-V2 source previews place the vector budget in global `vector_cache.max_bytes`.
-Project overrides of that key and v2 `hybrid.cache` are rejected. An explicit
+V2 source previews resolve the global `[vector_cache]` policy. Project overrides
+of that table and v2 `hybrid.cache` are rejected. An explicit
 legacy project cache override under a v2 global source is reported as a scope
-conflict. It does not change the strict global budget in the preview. V2 provenance
-uses `vector_cache.max_bytes` with daemon scope; v1 retains the legacy
-project-scoped key. The preview settings retain the compatibility Rust layout.
+conflict. The preview uses the shared budget from the global configuration.
+V2 reports the three vector cache fields with daemon scope. V1 reports
+the legacy project-scoped key `hybrid.cache.max_bytes`.
 
 `config::migrate::draft_migration` takes an explicit list of registered project
 config paths, loaded/observed-missing sources and a budget decision. Uninspected

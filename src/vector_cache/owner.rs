@@ -230,6 +230,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn v2_file_limits_live_connections_and_shared_entry_eviction() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("config.toml"),
+            "config_version=2\n[vector_cache]\nmax_entries=1\nbusy_timeout=37\n",
+        )
+        .unwrap();
+        let config = crate::config::Config::global_from(directory.path()).unwrap();
+        let owner = VectorStore::acquire(directory.path(), &config.vector_store.unwrap()).unwrap();
+        let mut first = owner.connect().unwrap();
+        let mut second = owner.connect().unwrap();
+        for cache in [&first, &second] {
+            let busy_ms: i64 = cache
+                .conn
+                .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .unwrap();
+            assert_eq!(busy_ms, 37);
+        }
+        first.put("model", "first", &[1.0, 2.0]).unwrap();
+        second.put("model", "second", &[3.0, 4.0]).unwrap();
+        assert_eq!(first.len().unwrap(), 1);
+        assert!(first.get("model", "first").unwrap().is_none());
+        assert_eq!(first.get("model", "second").unwrap(), Some(vec![3.0, 4.0]));
+    }
+
+    #[test]
     fn owned_connections_install_the_policy_busy_timeout() {
         for millis in [0_u64, 17, 5000] {
             let root = tempfile::tempdir().unwrap();

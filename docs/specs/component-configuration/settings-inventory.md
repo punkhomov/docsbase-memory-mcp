@@ -455,6 +455,13 @@ Probes/rootless compatibility adapters remain named exceptions, not binary
 operational paths. Full CF13/v2/provisioning remains outside this adoption.
 
 
+## Delta 2026-11-24 — I20/I27 в глобальном v2
+
+Один VectorStoreSpec разрешает `vector_cache.max_entries` (1 000 000),
+`max_bytes` (1 ГиБ) и `busy_timeout` (5 000 мс). Эти настройки действуют
+на все соединения одного корня кеша. Изменение применяется при новом запуске
+и относится к допуску и вытеснению (R/E). Ключи и рецепты векторов сохраняются.
+
 ## MODIFIED 2026-11-15 — #161 vector cold WAL contention
 
 I20/VectorStoreSpec busy_timeout (default5s, zero immediate, signed SQLite-ms

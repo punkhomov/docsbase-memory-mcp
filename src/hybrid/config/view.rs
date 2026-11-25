@@ -49,11 +49,5 @@ pub(crate) fn fields(settings: &HybridCfg, view: &mut ViewBuilder<'_>) -> Result
             super::Ranking::Rrf => "rrf",
         }),
         None,
-    )?;
-    let key = if view.has_field(crate::vector_cache::V2_MAX_BYTES_FIELD.key) {
-        crate::vector_cache::V2_MAX_BYTES_FIELD.key
-    } else {
-        "hybrid.cache.max_bytes"
-    };
-    view.push(key, json!(settings.cache.max_bytes), None)
+    )
 }

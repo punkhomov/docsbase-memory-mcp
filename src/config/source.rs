@@ -58,7 +58,7 @@ pub struct SourceLayer {
     pub(super) version: ConfigVersion,
     pub(super) base: GlobalFileConfig,
     pub(super) hybrid_merge: Option<HybridMergePatch>,
-    pub(super) vector_max_bytes: Option<u64>,
+    pub(super) vector_store: Option<Resolved<crate::vector_cache::settings::VectorStoreSettings>>,
     pub(super) original: String,
     pub(super) document: toml::Table,
 }
@@ -69,11 +69,6 @@ impl fmt::Debug for SourceLayer {
             .field("version", &self.version)
             .finish_non_exhaustive()
     }
-}
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct VectorBudget {
-    max_bytes: u64,
 }
 impl SourceLayer {
     /// Parses one bounded global/project source. Diagnostics do not echo its text.
@@ -111,7 +106,7 @@ impl SourceLayer {
             }
         };
         let mut hybrid_merge = None;
-        let mut vector_max_bytes = None;
+        let mut vector_store = None;
         if version == ConfigVersion::V2 {
             if let Some(hybrid) = fields.remove("hybrid") {
                 hybrid_merge = Some(
@@ -120,17 +115,13 @@ impl SourceLayer {
                         .map_err(|_| invalid("invalid v2 hybrid fields"))?,
                 );
             }
-            if let Some(vector) = fields.remove("vector_cache") {
-                if matches!(source, SourceId::Project(_)) {
-                    return Err(invalid("vector_cache is global-only"));
-                }
-                let budget: VectorBudget = vector
-                    .try_into()
-                    .map_err(|_| invalid("invalid global vector_cache fields"))?;
-                if budget.max_bytes == 0 {
-                    return Err(invalid("vector_cache.max_bytes must be positive"));
-                }
-                vector_max_bytes = Some(budget.max_bytes);
+            let vector = fields.remove("vector_cache");
+            if matches!(source, SourceId::Global(_)) {
+                vector_store = Some(crate::vector_cache::settings::resolve_file(
+                    &source, vector,
+                )?);
+            } else if vector.is_some() {
+                return Err(invalid("vector_cache is global-only"));
             }
         }
         if matches!(source, SourceId::Project(_)) && fields.contains_key("providers") {
@@ -151,7 +142,7 @@ impl SourceLayer {
             version,
             base,
             hybrid_merge,
-            vector_max_bytes,
+            vector_store,
             original: text.to_owned(),
             document,
         })
@@ -194,9 +185,8 @@ pub enum PreviewConflict {
 /// Fully resolved values for source review, not an operational v2 snapshot.
 #[derive(Debug, Clone)]
 pub struct SourcePreview {
-    /// Effective values in the compatibility Config layout. For a v2 global,
-    /// budget provenance uses `vector_cache.max_bytes` with daemon scope instead
-    /// of the legacy project-scoped `hybrid.cache.max_bytes` key.
+    /// Effective values with typed shared vector policy for a v2 global.
+    /// V1 retains the project-scoped `hybrid.cache.max_bytes` key.
     pub effective: Resolved<Config>,
     /// Effective legacy budget before strict-global projection.
     pub legacy_vector_max_bytes: u64,
