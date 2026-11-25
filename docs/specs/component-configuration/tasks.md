@@ -546,6 +546,20 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - [ ] CF11c — durable CAS и совместимый snapshot демона и direct CLI.
 - [ ] CF11d — recovery/reclaim, budgets и настоящий согласованный apply.
 
+## Delta 2026-11-24 — CF11a, project storage binding
+
+- [x] CF11a-1: Capture the validated project and content revision together
+  while holding the project read lease. Resolve the Tantivy location from
+  that same binding before returning the SQL reader to the pool. Initial
+  search, refill, dense metadata, payload and Website readiness consume the
+  binding. Keep current wire values and writer layout. Test real SQLite and
+  Tantivy with an invalid revision and keep the quality gate intact.
+- [ ] CF11a-2: Separate the registry schema version from the existing project
+  format stamp. Implement the versioned head and local metadata binding,
+  bounded no-write observation and explicit legacy registration described in
+  [the storage ADR](storage-publication.md). Generation activation requires
+  the publication and recovery gates in CF11b–CF11d.
+
 ## Delta 2026-11-24 — CF8a search-only library adoption
 
 - [x] **CF8a:** I33 project owner, checked immutable policy, additive built/loaded

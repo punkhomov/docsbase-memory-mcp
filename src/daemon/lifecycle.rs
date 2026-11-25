@@ -987,10 +987,7 @@ fn open_lock_file(path: &Path) -> Result<File> {
 
 /// Per-project index directory (design §3 runtime layout).
 pub(crate) fn index_dir(cache_root: &Path, project_id: i64) -> PathBuf {
-    cache_root
-        .join("projects")
-        .join(project_id.to_string())
-        .join("tantivy")
+    crate::store::project_index::legacy_tantivy_dir(cache_root, project_id)
 }
 
 /// True when `err` is the per-project writer-lease conflict (I5); callers

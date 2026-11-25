@@ -1036,6 +1036,22 @@ stage seal становится историей после публикации
 revision. Повторное ревью не выявило Critical/Important.
 CF11a–d сохраняют runtime и native proof gates.
 
+## 2026-11-24 — CF11a-1, project storage binding
+
+Task CF11a-1: complete (validated legacy project/revision binding across
+initial search, refill, dense metadata, payload and Website readiness).
+The Tantivy location comes from the bound metadata reader. The reader and
+SQL transaction finish before lexical IO, under the same project lease.
+Existing writer and wire formats are preserved. The real-index regression
+refuses an invalid revision and recovers the same search after restoration.
+
+Ruling: fresh review found a pre-existing write in the readiness health
+path. The probe now opens the validated segment and store components under
+the existing project lease. A healthy index stays ready with the Tantivy
+metadata lock file absent. A missing store component makes readiness fail.
+The zero-limit explained search also uses the bound revision. Re-review,
+1747 cli-full tests, the quality gate, Clippy and fmt passed locally.
+
 ## 2026-11-24 — CF8a: ANN search settings at the library boundary
 
 Task CF8a: complete (project settings and explicit search on built and loaded

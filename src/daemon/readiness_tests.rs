@@ -39,12 +39,19 @@ fn stable_observation_reads_two_fresh_snapshots_and_checks_health_once() {
             reads.set(reads.get() + 1);
             Snapshot::read(&env.db, env.project.id)
         },
-        || {
+        |snapshot| {
             checks.set(checks.get() + 1);
             assert!(
                 env.db.connection().is_autocommit(),
                 "O1 transaction must end before index IO"
             );
+            let dir = snapshot.index.tantivy_dir(env.db.cache_root());
+            lifecycle::with_existing_project_read_lease(
+                env.db.cache_root(),
+                env.project.id,
+                || ReadIndex::check_health_with_project_lease(&dir),
+            )
+            .unwrap();
             IndexHealth::Healthy
         },
     )
@@ -69,7 +76,7 @@ fn generation_movement_is_state_changed_without_retry() {
             reads.set(reads.get() + 1);
             Snapshot::read(&env.db, env.project.id)
         },
-        || {
+        |_| {
             assert!(env.db.connection().is_autocommit());
             checks.set(checks.get() + 1);
             let writer = Db::open(env.cache.path()).unwrap();
@@ -124,7 +131,7 @@ fn changed(env: &Env, sql: &str) {
             reads.set(reads.get() + 1);
             Snapshot::read(&env.db, env.project.id)
         },
-        || {
+        |_| {
             assert!(env.db.connection().is_autocommit());
             checks.set(checks.get() + 1);
             // A distinct connection commits between O1/O2: an O1 transaction
@@ -154,7 +161,7 @@ fn unreadable_first_snapshot_never_checks_health_or_retries() {
             reads.set(reads.get() + 1);
             Err(Error::internal("unavailable O1"))
         },
-        || {
+        |_| {
             checks.set(checks.get() + 1);
             IndexHealth::Healthy
         },

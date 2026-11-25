@@ -12,6 +12,7 @@ use crate::index::outcome::{self, IndexOutcome, SurveyScope};
 use crate::index::tantivy_index::ReadIndex;
 use crate::ipc::panel::{IndexHealth, ReadinessReason, ServerProject, ServerStatus, ServerSync};
 use crate::store::models::{Project, SyncState};
+use crate::store::project_index::ProjectIndex;
 use crate::store::read_pool::ReadPool;
 use crate::store::repo::db_error;
 use crate::store::{Db, migrations};
@@ -151,7 +152,7 @@ impl SyncEvidence {
             && identity.scope == SurveyScope::FullSurvey
             && identity.canonical_root == snapshot.project.root
             && identity.attempt_id <= snapshot.attempt
-            && identity.index_generation <= snapshot.generation
+            && identity.index_generation <= snapshot.index.content_revision()
             && (identity.attempt_id != snapshot.attempt
                 || snapshot.outcome.as_ref().is_some_and(|current| {
                     identity == SyncAttribution::from(current) && stats == current.stats
@@ -163,7 +164,7 @@ impl SyncEvidence {
 struct Snapshot {
     project: ServerProject,
     schema_version: i64,
-    generation: i64,
+    index: ProjectIndex,
     attempt: i64,
     outcome_len: Option<i64>,
     raw_outcome: Option<Vec<u8>>,
@@ -176,7 +177,7 @@ impl Snapshot {
         let bound = i64::try_from(crate::limits::MAX_STATE_BYTES)
             .map_err(|_| Error::internal("readiness metadata bound overflow"))?;
         let tx = db.connection().unchecked_transaction().map_err(db_error)?;
-        let mut snapshot = tx.query_row(
+        let (identity, schema_version, revision, attempt, outcome_len, raw_outcome) = tx.query_row(
             "SELECT id,
                 CASE WHEN typeof(name)='text' AND length(CAST(name AS BLOB))<=?2 THEN name END,
                 CASE WHEN typeof(canonical_root)='text' AND length(CAST(canonical_root AS BLOB))<=?2 THEN canonical_root END,
@@ -185,13 +186,20 @@ impl Snapshot {
                 CASE WHEN typeof(index_outcome_json)='text' AND length(CAST(index_outcome_json AS BLOB))<=?2
                     THEN CAST(index_outcome_json AS BLOB) END
              FROM projects WHERE id=?1", params![project,bound], |row| {
-                Ok(Self { project: ServerProject { id: row.get(0)?, name: row.get(1)?, root: row.get(2)?, status: row.get(3)? },
-                    schema_version: row.get(4)?, generation: row.get(5)?, attempt: row.get(6)?,
-                    outcome_len: row.get(7)?, raw_outcome: row.get(8)?, outcome: None, active: None, latest: None })
+                Ok((ServerProject { id: row.get(0)?, name: row.get(1)?, root: row.get(2)?, status: row.get(3)? },
+                    row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?))
             }).map_err(db_error)?;
-        snapshot.outcome = outcome::read(db, project)?;
-        snapshot.active = SyncEvidence::read(db, project, true, bound)?;
-        snapshot.latest = SyncEvidence::read(db, project, false, bound)?;
+        let snapshot = Self {
+            index: ProjectIndex::legacy(identity.id, revision)?,
+            project: identity,
+            schema_version,
+            attempt,
+            outcome_len,
+            raw_outcome,
+            outcome: outcome::read(db, project)?,
+            active: SyncEvidence::read(db, project, true, bound)?,
+            latest: SyncEvidence::read(db, project, false, bound)?,
+        };
         tx.commit().map_err(db_error)?;
         Ok(snapshot)
     }
@@ -272,10 +280,10 @@ pub fn observe(
                 let reader = pool.try_acquire()?;
                 Snapshot::read(&reader, project.id)
             },
-            || {
-                let dir = lifecycle::index_dir(pool.cache_root(), project.id);
-                match ReadIndex::open(&dir) {
-                    Ok(_) => IndexHealth::Healthy,
+            |snapshot| {
+                let dir = snapshot.index.tantivy_dir(pool.cache_root());
+                match ReadIndex::check_health_with_project_lease(&dir) {
+                    Ok(()) => IndexHealth::Healthy,
                     Err(Error::Project { .. }) if dir.join("meta.json").exists() => {
                         IndexHealth::RebuildRequired
                     }
@@ -291,10 +299,10 @@ fn observe_with(
     recipe: &str,
     notice: Option<String>,
     mut metadata: impl FnMut() -> Result<Snapshot>,
-    health: impl FnOnce() -> IndexHealth,
+    health: impl FnOnce(&Snapshot) -> IndexHealth,
 ) -> Result<ServerStatus> {
     let first = metadata()?;
-    let index_health = health();
+    let index_health = health(&first);
     let current = metadata()?;
     let reason = if first != current
         || current.project.id != project.id
@@ -308,7 +316,7 @@ fn observe_with(
         schema_version: 1,
         profile: "website".into(),
         project: current.project,
-        index_generation: current.generation,
+        index_generation: current.index.content_revision(),
         index_attempt: current.attempt,
         index_health,
         outcome: current.outcome,
