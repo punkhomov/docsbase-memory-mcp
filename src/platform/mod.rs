@@ -71,21 +71,21 @@ pub(crate) struct FileIdentity {
 /// fetch/connect preflight (FR-13).
 #[cfg(unix)]
 pub mod fs {
-    pub(crate) use super::unix::file_identity_and_links;
     pub use super::unix::{
         available_space, is_regular_nofollow, open_private_lock, open_private_log,
         open_readonly_nofollow, secure_dir, secure_executable, secure_file,
     };
+    pub(crate) use super::unix::{check_single_link, file_identity_and_links};
 }
 /// Private-path policy on Windows is best-effort (ADR-10: `%LOCALAPPDATA%`
 /// ACLs; no chmod semantics).
 #[cfg(windows)]
 pub mod fs {
-    pub(crate) use super::windows::file_identity_and_links;
     pub use super::windows::{
         available_space, is_regular_nofollow, native_file_matches_path, open_private_lock,
         open_private_log, open_readonly_nofollow, secure_dir, secure_executable, secure_file,
     };
+    pub(crate) use super::windows::{check_single_link, file_identity_and_links};
 }
 
 /// Process liveness, counters and detach (Linux `/proc`; ADR-10 on Windows).

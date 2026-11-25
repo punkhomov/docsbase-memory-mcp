@@ -10,6 +10,10 @@ use crate::config::schema::{Capabilities, Resolved, SettingsSpec};
 use crate::error::{Error, Result};
 
 pub(super) mod lease;
+mod project;
+pub use project::{
+    ObservedProjectIndex, ProjectIndexLayout, ProjectIndexObservation, inspect_project_index,
+};
 
 /// Caller-owned limits; no runtime fallback/default is chosen by the observer.
 #[derive(Debug, Clone, Copy)]
@@ -122,12 +126,12 @@ fn inspect_with(
     })
 }
 fn presence(cache: &Path) -> std::result::Result<bool, UnavailableReason> {
-    sidecars_absent(cache)?;
     let path = cache.join(super::DB_FILE);
+    sidecars_absent(&path)?;
     match std::fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_file() => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            sidecars_absent(cache)?;
+            sidecars_absent(&path)?;
             match std::fs::symlink_metadata(path) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
                 _ => Err(UnavailableReason::Changed),
@@ -136,6 +140,7 @@ fn presence(cache: &Path) -> std::result::Result<bool, UnavailableReason> {
         Ok(_) | Err(_) => Err(UnavailableReason::Io),
     }
 }
+
 fn validate(cache: &Path, limits: InspectionLimits) -> Result<usize> {
     let invalid = || Error::Admission {
         message: "invalid registry inspection limits or cache context".into(),
@@ -165,48 +170,78 @@ fn capture(
     before_lock: impl FnOnce(),
     after_lock: impl FnOnce(&Connection),
 ) -> std::result::Result<RegistryState, UnavailableReason> {
-    // Resolve only the directory: SQLite NOFOLLOW rejects ancestor symlinks too
-    // (including macOS /var), while the DB entry itself must remain no-follow.
-    let directory = std::fs::canonicalize(cache).map_err(|_| UnavailableReason::Io)?;
-    let locked = lease::LockedConnection::open(&directory.join(super::DB_FILE), before_lock)?;
-    sidecars_absent(&directory)?;
-    locked.configure(limits.max_sqlite_value_bytes, limits.sqlite_cache_kib)?;
-    after_lock(locked.connection());
-    let version: i64 = locked
-        .connection()
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(sqlite_failure)?;
-    let version = u32::try_from(version).map_err(|_| UnavailableReason::UnsupportedSchema)?;
-    if !matches!(
-        version,
-        super::migrations::SCHEMA_VERSION | generation_catalog::SCHEMA_VERSION
-    ) {
-        return Err(UnavailableReason::UnsupportedSchema);
-    }
-    let projects = read_rows(locked.connection(), limits, initial_bytes)?;
-    let catalog = if version == generation_catalog::SCHEMA_VERSION {
-        Some(generation_catalog::identity(
-            locked.connection(),
-            &projects,
-        )?)
-    } else {
-        None
-    };
-    locked.check_namespace()?;
-    sidecars_absent(&directory)?;
-    if std::fs::canonicalize(cache).map_err(|_| UnavailableReason::Changed)? != directory {
-        return Err(UnavailableReason::Changed);
-    }
-    let revision = revision(cache, version, &projects, catalog)?;
-    Ok(RegistryState::Ready {
-        schema_version: version,
-        revision,
-        projects,
+    with_registry(cache, limits, before_lock, |connection, _| {
+        after_lock(connection);
+        let version = schema_version(connection)?;
+        if !matches!(
+            version,
+            super::migrations::SCHEMA_VERSION | generation_catalog::SCHEMA_VERSION
+        ) {
+            return Err(UnavailableReason::UnsupportedSchema);
+        }
+        let projects = read_rows(connection, limits, initial_bytes)?;
+        let catalog = (version == generation_catalog::SCHEMA_VERSION)
+            .then(|| generation_catalog::identity(connection, &projects))
+            .transpose()?;
+        let revision = revision(cache, version, &projects, catalog)?;
+        Ok(RegistryState::Ready {
+            schema_version: version,
+            revision,
+            projects,
+        })
     })
 }
-fn sidecars_absent(cache: &Path) -> std::result::Result<(), UnavailableReason> {
+
+fn with_registry<T>(
+    cache: &Path,
+    limits: InspectionLimits,
+    before_lock: impl FnOnce(),
+    read: impl FnOnce(&Connection, &Path) -> std::result::Result<T, UnavailableReason>,
+) -> std::result::Result<T, UnavailableReason> {
+    // Resolve only the cache directory. SQLite NOFOLLOW must still check the DB entry.
+    let directory = std::fs::canonicalize(cache).map_err(|_| UnavailableReason::Io)?;
+    with_locked_db(
+        &directory.join(super::DB_FILE),
+        limits,
+        before_lock,
+        |connection| {
+            let value = read(connection, &directory)?;
+            if std::fs::canonicalize(cache).map_err(|_| UnavailableReason::Changed)? != directory {
+                return Err(UnavailableReason::Changed);
+            }
+            Ok(value)
+        },
+    )
+}
+
+fn with_locked_db<T>(
+    path: &Path,
+    limits: InspectionLimits,
+    before_lock: impl FnOnce(),
+    read: impl FnOnce(&Connection) -> std::result::Result<T, UnavailableReason>,
+) -> std::result::Result<T, UnavailableReason> {
+    sidecars_absent(path)?;
+    let locked = lease::LockedConnection::open(path, before_lock)?;
+    sidecars_absent(path)?;
+    locked.configure(limits.max_sqlite_value_bytes, limits.sqlite_cache_kib)?;
+    let value = read(locked.connection())?;
+    locked.check_namespace()?;
+    sidecars_absent(path)?;
+    Ok(value)
+}
+
+fn schema_version(connection: &Connection) -> std::result::Result<u32, UnavailableReason> {
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(sqlite_failure)?;
+    u32::try_from(version).map_err(|_| UnavailableReason::UnsupportedSchema)
+}
+
+fn sidecars_absent(path: &Path) -> std::result::Result<(), UnavailableReason> {
     for suffix in ["-wal", "-shm", "-journal"] {
-        match std::fs::symlink_metadata(cache.join(format!("{}{suffix}", super::DB_FILE))) {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        match std::fs::symlink_metadata(sidecar) {
             Ok(_) => return Err(UnavailableReason::RecoveryRequired),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(UnavailableReason::Io),
@@ -214,6 +249,7 @@ fn sidecars_absent(cache: &Path) -> std::result::Result<(), UnavailableReason> {
     }
     Ok(())
 }
+
 fn read_rows(
     connection: &Connection,
     limits: InspectionLimits,
@@ -306,3 +342,6 @@ pub(super) fn sqlite_failure(error: rusqlite::Error) -> UnavailableReason {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod project_tests;

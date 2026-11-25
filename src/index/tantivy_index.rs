@@ -5,6 +5,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use tantivy::collector::TopDocs;
+use tantivy::index::SegmentComponent;
 use tantivy::query::{BooleanQuery, ConstScoreQuery, Occur, QueryParser, TermSetQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, Value,
@@ -451,6 +452,11 @@ impl ReadIndex {
     pub(crate) fn check_health_with_project_lease(dir: &Path) -> Result<()> {
         let (index, _) = open_readable_index(dir)?;
         for segment in index.searchable_segments().map_err(tantivy_error)? {
+            // SegmentReader treats positions as optional. Our text fields
+            // require them for phrase queries.
+            let _positions = segment
+                .open_read(SegmentComponent::Positions)
+                .map_err(|error| tantivy_error(error.into()))?;
             SegmentReader::open(&segment)
                 .map_err(tantivy_error)?
                 .get_store_reader(0)

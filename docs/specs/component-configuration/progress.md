@@ -1372,3 +1372,30 @@ Ruling: по ревью временная нехватка места в пам
 minor (deferred): прогон синтетики 75 000 × 2048 с восемью workers вышел за
 420 секунд. План фиксирует замеры 20 000 × 96 и отдельную проверку формулы
 бюджета для 75 000 × 2048.
+
+## 2026-11-24 — CF11a-2b1, observe the selected storage pair
+
+Task CF11a-2b1: complete (quiescent v4/v5 binding with project and
+generation read leases). A real SQLite/Tantivy fixture switches heads at
+equal content revisions. Its current local revision comes from the
+selected metadata database. Busy leases, pending state, an invalid seal
+or a damaged selected pair make observation unavailable. The cache
+tree stays byte-for-byte unchanged.
+
+Ruling: review found that Tantivy can open a populated segment without
+its positions file and follow a linked manifest. The observer requires
+single-link ordinary files under the leases and checks Tantivy's required
+positions. Existing state limits bound buffered stamp and manifest reads
+through the exact lookup paths. Regressions also cover empty indexes,
+no-op sync and both coordination leases. Independent re-review found no
+remaining Critical or Important findings. Rust 1.100.0 passed 1757 cli-full
+and 1450 lean tests, Clippy, fmt and the quality gate at the default local
+latency factor.
+
+minor (deferred): separate contention coverage for native local SQLite.
+The observer uses the same native lease implementation as the registry
+contention tests.
+
+Ruling: the Windows contention fixture snapshots the cache outside the
+exclusive byte-range locks. It still observes Busy while each lock is held
+and compares the full cache tree after releasing the locks.

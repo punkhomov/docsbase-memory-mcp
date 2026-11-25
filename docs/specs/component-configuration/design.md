@@ -1050,3 +1050,31 @@ embedding-модели. После перезагрузки старая сбо�
 временный точный поиск. Перед mmap и heap загрузка резервирует оценку вместе
 с активными сборками и удерживаемыми исходными строками. Публикация переводит
 резерв в учёт резидентного графа.
+
+## Delta 2026-11-24 — inspect the selected project index
+
+The quiescent storage inspector resolves one project from the protected
+registry, then takes the existing project read lease. A v5 selection also
+holds the selected generation's existing read lease. Observation requires
+both leases during the metadata and Tantivy reads. All admissions refuse
+contention immediately, including the native SQLite file leases.
+
+A legacy selection reads `projects.index_generation` in the registry. A local
+selection derives `metadata.db` and `tantivy/` from the registered project and
+active generation IDs. It checks the bounded `seal.json` against the active
+head's BLAKE3 digest of the persisted bytes. Local SQLite uses metadata schema
+v1 with a singleton `generation_state` row. Project ID, generation ID and
+nonnegative revision must agree with the selection. Pending metadata, recovery
+sidecars, missing components or a mismatched seal make the observation
+unavailable. The result carries the epoch, generation ID and revision after
+checking Tantivy's readable segment and store components, including term
+positions required by phrase search. Under the existing leases, the stopped
+observer requires ordinary single-link files for coordination, the seal,
+local metadata and the flat Tantivy directory. It applies the existing state
+byte limit to each buffered Tantivy manifest and tokenizer stamp. Segment
+contents keep Tantivy's mmap behavior. These checks assume cooperating
+writers during the observation.
+
+This is the shared storage boundary for the stopped path. Staging verifies
+complete seal contents separately. Live search and generation publication
+require the later reader pool and publication steps.
