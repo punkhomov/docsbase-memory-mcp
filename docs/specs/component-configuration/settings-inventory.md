@@ -515,3 +515,13 @@ checked before owned text copies, and HTTP response reads obey the smaller cap.
 Model address is request-scoped, credentials stay with the existing provider.
 Future configurable generation policy belongs to the ask/model owners in #128;
 this delta does not claim full CF adoption or create another resolution registry.
+
+## Delta 2026-11-24 — CF9a, I06
+
+I06 принадлежит `index::settings::ChunkSpec` и поддерживает частичные global
+и project overrides. `index.chunk.max_chars` (1–1500, default 1500) и
+`overlap_chars` (0–150, default 150) измеряются в Unicode-символах.
+Обычный overlap ограничен десятой частью cap. Исторический максимум сохраняет
+границу прозовых чанков для существующего поискового штрафа. Версия и геометрия
+образуют персистентный рецепт C; изменения приводят к L, а V переиспользуется
+по совпавшему выходному тексту.

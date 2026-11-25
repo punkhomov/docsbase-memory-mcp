@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::index::chunk::{Chunk, ChunkKind, chunk_markdown};
+use crate::index::chunk::{Chunk, ChunkKind, chunk_markdown_with_settings};
 use crate::index::frontmatter::{self, Frontmatter};
 use crate::index::tantivy_index::IndexHandle;
 use crate::index::walk;
@@ -45,7 +45,7 @@ impl<'a> IndexEmbedding<'a> {
 /// Longest section body kept in one chunk when no paragraph boundary splits
 /// it, in Unicode characters (not bytes; FR-5). Initial calibration ≈300–500
 /// tokens; refined by the S2 measurement (ADR-S1).
-pub const MAX_CHUNK_CHARS: usize = 1_500;
+pub const MAX_CHUNK_CHARS: usize = super::settings::ChunkSettings::owner_defaults().max_chars();
 
 /// One non-fatal per-file problem, surfaced by `status` (FR-19, A4; NFR-8).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -104,6 +104,7 @@ struct Pending {
     size: i64,
     mtime: i64,
     content_hash: String,
+    chunk_recipe: i64,
     chunks: Vec<Chunk>,
 }
 
@@ -1112,7 +1113,7 @@ fn relative_to_root(path: &Path, root: &Path) -> Option<String> {
 }
 
 /// Reads and hashes one walked file. Returns `Ok(None)` when both the source
-/// hash and extracted metadata match, `Err` for per-file problems (A4).
+/// hash, extracted metadata and chunk recipe match, `Err` for per-file problems.
 fn prepare_doc_accounted(
     path: &Path,
     rel_path: &str,
@@ -1173,13 +1174,33 @@ fn prepare_doc_inner(
         Some(budget) => budget.read(path, config.max_file_size)?,
         None => std::fs::read_to_string(path).map_err(|err| file_error(path, &err))?,
     };
+    if let Some(budget) = capture.as_deref_mut() {
+        // Cover frontmatter parsing and JSON before processing the source.
+        // Without frontmatter this also covers the eager Markdown parser.
+        budget.reserve(crate::index::chunk::capture_parser_charge(&text)?)?;
+    }
+    let content_hash = blake3::hash(text.as_bytes()).to_hex().to_string();
+    let (meta, body) = frontmatter::parse(&text);
+    let frontmatter_json = serialize_metadata(&meta)?;
+    let chunk_recipe = config.chunk.recipe_id();
+    // Parser fixes must refresh derived metadata even when the source bytes
+    // have not changed since an older build indexed the file.
+    if existing.is_some_and(|state| {
+        !state.content_hash.is_empty()
+            && state.content_hash == content_hash
+            && state.frontmatter_json == frontmatter_json
+            && state.chunk_recipe == Some(chunk_recipe)
+    }) {
+        return Ok(None);
+    }
+
     if let Some(budget) = capture {
-        // pulldown-cmark builds its first-pass tree eagerly in Parser::new_ext.
-        // Reserve that allowance before the estimator enters the constructor.
-        let parser = crate::index::chunk::capture_parser_charge(&text)?;
-        budget.reserve(parser)?;
-        let total = crate::index::chunk::capture_charge(&text, MAX_CHUNK_CHARS)?;
-        budget.reserve(total.saturating_sub(parser))?;
+        if body.len() != text.len() {
+            // Frontmatter is still retained while the body parser allocates.
+            budget.reserve(crate::index::chunk::capture_parser_charge(body)?)?;
+        }
+        let chunks = crate::index::chunk::capture_chunk_charge(body, config.chunk)?;
+        budget.reserve(chunks)?;
         #[cfg(test)]
         if let Some(observer) = budget.observed {
             observer(CaptureEvent::Copy(
@@ -1187,21 +1208,9 @@ fn prepare_doc_inner(
             ));
         }
     }
-    let content_hash = blake3::hash(text.as_bytes()).to_hex().to_string();
-    let (meta, body) = frontmatter::parse(&text);
-    let frontmatter_json = serialize_metadata(&meta)?;
-    // Parser fixes must refresh derived metadata even when the source bytes
-    // have not changed since an older build indexed the file.
-    if existing.is_some_and(|state| {
-        !state.content_hash.is_empty()
-            && state.content_hash == content_hash
-            && state.frontmatter_json == frontmatter_json
-    }) {
-        return Ok(None);
-    }
 
     let line_shift = frontmatter_line_shift(&text, body);
-    let mut chunks = chunk_markdown(body, MAX_CHUNK_CHARS);
+    let mut chunks = chunk_markdown_with_settings(body, config.chunk);
     for chunk in &mut chunks {
         chunk.line_start = chunk.line_start.saturating_add(line_shift);
         chunk.line_end = chunk.line_end.saturating_add(line_shift);
@@ -1219,6 +1228,7 @@ fn prepare_doc_inner(
         size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
         mtime: mtime_seconds(&metadata),
         content_hash,
+        chunk_recipe,
         chunks,
     }))
 }
@@ -1241,7 +1251,7 @@ fn apply_plan(db: &mut Db, project_id: i64, plan: &[Pending], removed: &[&DocSta
             content_hash: &pending.content_hash,
             indexed_at: now,
         };
-        repo::upsert_doc(&tx, project_id, id, &doc)?;
+        repo::upsert_indexed_doc(&tx, project_id, id, &doc, Some(pending.chunk_recipe))?;
 
         let paths: Vec<String> = pending
             .chunks
@@ -1558,6 +1568,7 @@ mod tests {
             size: 0,
             mtime: 0,
             content_hash: "def".to_owned(),
+            chunk_recipe: Config::default().chunk.recipe_id(),
             chunks: Vec::new(),
         }];
         let removed_state = DocState {
@@ -1565,6 +1576,7 @@ mod tests {
             rel_path: "gone.md".to_owned(),
             content_hash: "abc".to_owned(),
             frontmatter_json: None,
+            chunk_recipe: None,
         };
         let removed = [&removed_state];
 

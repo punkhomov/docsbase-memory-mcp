@@ -699,3 +699,31 @@ SDK's immutable fixed-project client once, with no fallback operational values.
 This does not activate v2 configuration or change index/vector/ANN invalidation.
 Use explicit `docsbase sync ABS` and read-only `docsbase status --project ABS` for
 updates/readiness; watcher-off filesystem freshness is not inferred.
+
+## Markdown chunk settings
+
+Set `[index.chunk]` in global `config.toml` or project `.docsbase.toml`.
+The project can override one setting and inherit the other. Both settings
+count Unicode characters.
+
+```toml
+[index.chunk]
+max_chars = 1000      # 1–1500, default 1500
+overlap_chars = 100   # 0–150, default 150
+```
+
+The prose overlap is capped at one tenth of `max_chars`. A heading merged
+with its prose can use the full overlap allowance. Fenced code and tables
+remain atomic. `docsbase config effective` reports both values and their sources.
+
+After changing the recipe, run `docsbase sync ABS` to update the entire project.
+A watcher batch applies the recipe to the files it processes. Website readiness
+requires a full sync at the current recipe and reports `recipe_changed` when
+the last full sync used a different one. Embeddings for identical chunk text
+and the same embedding model remain reusable.
+
+On upgrade from index schema 3, the next full sync records the recipe and
+recomputes chunks. Existing index files are retained until the index job
+updates them. For an existing Website deployment, stop the daemon and run
+`docsbase index ABS` once before restarting `docsbase serve --project ABS`.
+Website launch checks the schema before opening the index for writes.
