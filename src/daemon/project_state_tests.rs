@@ -23,12 +23,13 @@ impl Fixture {
         let cache = tempfile::TempDir::new().expect("cache");
         let root = tempfile::TempDir::new().expect("root");
         let config_dir = cache.path().join("test-config");
-        if let Some(text) = global_config {
-            std::fs::create_dir(&config_dir).expect("config dir");
-            std::fs::write(config_dir.join("config.toml"), text).expect("global config");
-        }
-        // Other unit tests temporarily redirect process-global configuration.
-        // This fixture owns its launch policy and must never inherit their caps.
+        // The fixture owns its launch policy and never inherits process-global overrides.
+        std::fs::create_dir(&config_dir).expect("config dir");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            global_config.unwrap_or("# Legacy launch"),
+        )
+        .expect("global config");
         let shared = Shared::open_with_launch(
             cache.path(),
             &crate::store::settings::standalone().unwrap(),

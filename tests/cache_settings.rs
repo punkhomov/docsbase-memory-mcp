@@ -168,7 +168,7 @@ fn explicit_daemon_policy_reaches_dense_and_query_resources() {
 fn static_ann_ineligibility_never_takes_pins_during_real_embedding() {
     for limits in [
         DenseCacheLimits {
-            max_bytes: 4_500,
+            max_bytes: 20_000,
             min_vectors: 1,
             ..DenseCacheLimits::default()
         },
@@ -210,7 +210,7 @@ fn eligible_duplicate_chunk_rows_keep_their_pins_after_embedding() {
     let (_project, db, id) = indexed(root.path());
     let probe = LeaseProbe::new(root.path());
     let limits = DenseCacheLimits {
-        max_bytes: 6_000,
+        max_bytes: 25_000,
         max_vectors: 5,
         min_vectors: 5,
         ..DenseCacheLimits::default()
@@ -255,7 +255,7 @@ fn supplied_project_capacity_evicts_the_actual_resident_view() {
 #[test]
 fn parallel_backfills_use_their_own_supplied_policy() {
     let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let threads: Vec<_> = [4_500, 6_000]
+    let threads: Vec<_> = [20_000, 25_000]
         .into_iter()
         .map(|max_bytes| {
             let gate = std::sync::Arc::clone(&gate);

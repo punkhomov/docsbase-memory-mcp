@@ -173,11 +173,10 @@ impl Embedder for LeaseProbe {
 #[test]
 fn backfill_leases_only_when_the_build_can_be_admitted() {
     let (cache, db, project_id) = indexed_project();
-    // Dim 3 costs 1048 bytes per row (graph 1036 + exact 12): 4 distinct hashes
-    // fit 4500 bytes, 5 chunk rows do not. The lease must follow the row count
-    // (what `resolve_rows` admits), not the deduped hash count.
+    // At dim 3 the estimate admits four rows but excludes five at this cap.
+    // The lease must follow the five actual chunk rows.
     let small = docsbase_memory::hybrid::dense::DenseCacheLimits {
-        max_bytes: 4_500,
+        max_bytes: 20_000,
         min_vectors: 1,
         ..docsbase_memory::hybrid::dense::DenseCacheLimits::default()
     };
