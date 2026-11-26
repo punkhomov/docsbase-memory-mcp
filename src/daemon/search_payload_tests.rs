@@ -714,6 +714,54 @@ fn load_catalog_rows(
     dense.get_bound_with_metadata_admitted(request, &Cancellation::new(), load, || Ok(()))
 }
 
+#[cfg(unix)]
+fn assert_catalog_persisted_graph(
+    root: &Path,
+    index: ProjectIndex,
+    query: [f32; 2],
+    load: impl Fn() -> Result<DenseMetadata>,
+) {
+    use crate::hybrid::ann_store::AnnStore;
+    use crate::hybrid::dense::{AnnPolicy, DenseCacheLimits};
+
+    let limits = DenseCacheLimits {
+        min_vectors: 0,
+        ..DenseCacheLimits::default()
+    };
+    let request = BoundDenseRequest {
+        cache_root: root,
+        index,
+        model_id: CATALOG_MODEL,
+    };
+    let building = DenseCache::with_policy_limits(AnnPolicy::BuildOrLoad, root, limits);
+    assert!(matches!(
+        load_catalog_rows(&building, request, &load).unwrap(),
+        DenseRows::Building(_)
+    ));
+    building.join_job_builds_for_test().unwrap();
+    drop(building);
+
+    let (epoch, head) = index.catalog_generation().unwrap();
+    let epoch = u128::from_be_bytes(epoch);
+    let marker = format!("-g{}-v5.{epoch:032x}.{head}-", index.content_revision());
+    let root_path = AnnStore::new(root.into()).project_ann_root(index.project_id());
+    assert!(
+        std::fs::read_dir(root_path).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(&marker)),
+        "a real catalog build must publish its own epoch and head"
+    );
+    let cold = DenseCache::with_policy_limits(AnnPolicy::LoadOnly, root, limits);
+    let DenseRows::Ann(loaded) = load_catalog_rows(&cold, request, load).unwrap() else {
+        panic!("cold lookup must load the matching catalog dump");
+    };
+    let [(chunk, score)] = loaded.search(&query, 1).unwrap().try_into().unwrap();
+    assert!(chunk > 0);
+    assert!((score - 1.0).abs() < f32::EPSILON);
+}
+
 #[test]
 #[cfg(unix)]
 #[allow(clippy::too_many_lines)] // Several search phases share two real publications.
@@ -794,9 +842,10 @@ fn search_phases_refuse_a_new_published_pair_at_the_same_content_revision() {
         assert_eq!(metadata.cache_root(), db.cache_root());
         assert_eq!(metadata.chunks().len(), 1);
         assert_catalog_vectors(context.dense, metadata, [1.0, 0.0]);
-        let previous =
-            capture_dense(MetadataSource::Borrowed(&db), &project, start.lexical.index).unwrap();
-        (start, previous)
+        let index = start.lexical.index;
+        let capture = || capture_dense(MetadataSource::Borrowed(&db), &project, index);
+        assert_catalog_persisted_graph(cache, index, [1.0, 0.0], capture);
+        (start, capture().unwrap())
     };
 
     assert_eq!(publish(request, receipt), first);
@@ -819,7 +868,9 @@ fn search_phases_refuse_a_new_published_pair_at_the_same_content_revision() {
     assert_ne!(current.chunks(), previous.chunks());
     assert_eq!(current.chunks().len(), previous.chunks().len());
     assert_catalog_vectors(context.dense, current, [0.0, 1.0]);
-    assert_catalog_flights(previous, capture_dense(source, &project, index).unwrap());
+    let capture = || capture_dense(source, &project, index);
+    assert_catalog_persisted_graph(cache, index, [0.0, 1.0], capture);
+    assert_catalog_flights(previous, capture().unwrap());
     let refill_error = lexical_refill(
         &context,
         source,

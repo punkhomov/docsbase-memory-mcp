@@ -85,6 +85,11 @@ impl ProjectIndex {
         self.generation.map(|generation| generation.id)
     }
 
+    pub(crate) fn catalog_generation(self) -> Option<([u8; 16], i64)> {
+        self.generation
+            .map(|generation| (generation.epoch, generation.id))
+    }
+
     pub(crate) fn chunk_binding(self) -> Option<crate::search::chunk_ref::ChunkBinding> {
         self.generation
             .map(|generation| crate::search::chunk_ref::ChunkBinding {

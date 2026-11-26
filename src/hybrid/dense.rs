@@ -23,7 +23,9 @@ use crate::hybrid::ann::{self, AnnIndex};
 use crate::hybrid::ann_settings::AnnBuildSettings;
 #[cfg(test)]
 use crate::hybrid::ann_store;
-use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnSlotAccess, AnnSlotPin, AnnStore};
+use crate::hybrid::ann_store::{
+    ANN_FORMAT_VERSION, AnnArtifact, AnnKey, AnnSlotAccess, AnnSlotPin, AnnStore,
+};
 use crate::hybrid::dense_metadata::DenseMetadata;
 use crate::hybrid::dense_settings::{DenseSettings, DenseSpec, QueryCacheSettings};
 use crate::hybrid::flight::{Flights, WorkResult};
@@ -1516,10 +1518,11 @@ impl DenseCache {
         let Some(store) = &self.store else {
             return Ok(AnnLoad::Missing);
         };
-        let Some(pin) = store.pin_slot(key, self.ann_build, AnnSlotAccess::Read) else {
+        let artifact = AnnArtifact::for_index(key, index);
+        let Some(pin) = store.pin_slot(artifact, self.ann_build, AnnSlotAccess::Read) else {
             return Ok(AnnLoad::Deferred);
         };
-        let Ok(Some(slot)) = store.load_with_settings(key, self.ann_build) else {
+        let Some(slot) = store.load_artifact(artifact, self.ann_build) else {
             return Ok(AnnLoad::Missing);
         };
         check()?;
@@ -1757,11 +1760,13 @@ impl DenseCache {
                     return self.stash_ready(index, &job.model_id, job.rows, job.hashes);
                 }
             }
-            let Some(pin) = self
-                .store
-                .as_ref()
-                .and_then(|store| store.pin_slot(&job.key, self.ann_build, AnnSlotAccess::Build))
-            else {
+            let Some(pin) = self.store.as_ref().and_then(|store| {
+                store.pin_slot(
+                    AnnArtifact::for_index(&job.key, index),
+                    self.ann_build,
+                    AnnSlotAccess::Build,
+                )
+            }) else {
                 drop(entries);
                 return self.stream_transient(index, &job.model_id, job.hashes);
             };
@@ -2318,7 +2323,7 @@ fn build_in_background(
     // 41043371926, `cold_start_loads_persisted_ann_without_vectors_db`).
     let result: Result<(Arc<AnnIndex>, u64)> = catch_unwind(AssertUnwindSafe(|| {
         let ann = AnnIndex::build_with_settings(&rows, dim, cache.ann_build)?;
-        let slot = ann.dump(store, &key)?;
+        let slot = ann.dump_artifact(store, AnnArtifact::for_index(&key, index))?;
         // Loading must not hold the source rows, the built graph and the loaded
         // copy at once: on the heap-reload path that would add a third full
         // copy (~1.86 GiB at 75k x 2048) on top of the admitted peak.
@@ -2382,8 +2387,15 @@ fn build_in_background(
     }
     cache.enforce_byte_cap(&mut entries, project_id);
     drop(entries);
-    if dump_completed && let Err(err) = cache.cleanup_ann_disk() {
-        eprintln!("warning: ann disk cleanup after build failed: {err}");
+    if dump_completed {
+        if index.generation_id().is_some()
+            && let Err(err) = cache.cleanup(project_id)
+        {
+            eprintln!("warning: ann generation cleanup after build failed: {err}");
+        }
+        if let Err(err) = cache.cleanup_ann_disk() {
+            eprintln!("warning: ann disk cleanup after build failed: {err}");
+        }
     }
 }
 

@@ -1831,3 +1831,20 @@ vectors. The old scalar key returned the first pair's vectors after the
 replacement. A deterministic paused loader now checks that separate flights
 each return their own vectors and the older completion preserves the new
 entry. Physical workers retain their existing resource charges.
+
+## 2026-11-26 — CF11c, сохранённые ANN-графы v5
+
+Task CF11c persisted ANN identity: complete (catalog path and metadata,
+pinning and retention, local verification, fresh review and fix review).
+A real catalog fixture builds both graphs through DenseCache and opens
+each with a fresh load-only cache. Equal local revisions select separate
+physical generations and the test checks the graph scores.
+
+Ruling: native HNSW fixtures check wrong-head metadata, release of an
+obsolete mapped graph and retention of the last two of three revisions
+of one head. The legacy ANN suite and all-target Clippy passed.
+
+minor (deferred): the installation-wide disk target still evicts by
+modification time. An older head whose build finishes late can survive
+that sweep longer than an unpinned newer graph. Exact identity makes
+a later lookup reload or rebuild the graph for its own head.
