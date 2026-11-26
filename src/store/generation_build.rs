@@ -15,6 +15,7 @@ use crate::index::{
     job,
     tantivy_index::{IndexHandle, ReadIndex, chunk_id},
 };
+use crate::platform::file_lease::ExclusiveFileLease;
 use crate::platform::fs as native_fs;
 
 use super::project_index::{LOCAL_SCHEMA_SQL, LOCAL_SCHEMA_VERSION, project_directory};
@@ -100,6 +101,11 @@ fn prepare_lexical_generation_with_space(
         .ok()
         .filter(|bytes| *bytes > 0)
         .ok_or_else(|| admission("invalid generation disk reservation"))?;
+    let pair_budget = request
+        .reserved_disk_bytes
+        .checked_sub(2 * blake3::OUT_LEN as u64)
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| admission("generation disk reservation cannot cover ownership records"))?;
     if request.project_id <= 0 {
         return Err(admission("generation build requires a positive project ID"));
     }
@@ -165,7 +171,15 @@ fn prepare_lexical_generation_with_space(
         write_owner_record(&path.join(".build-owner"), digest)?;
         #[cfg(unix)]
         recovery::sync_directory(&path)?;
-        let revision = build_pair(&path, &project, generation, settings, config, limits)?;
+        let revision = build_pair(
+            &path,
+            &project,
+            generation,
+            settings,
+            config,
+            limits,
+            pair_budget,
+        )?;
         let bytes = size_of_pair(&path)?
             .checked_add(digest.as_bytes().len() as u64)
             .ok_or_else(|| admission("generation size overflow"))?;
@@ -426,20 +440,61 @@ fn build_pair(
     settings: &Resolved<DbSettings>,
     config: &Config,
     limits: InspectionLimits,
+    bytes: u64,
 ) -> Result<i64> {
-    let lease = path.join(".read.lock");
-    filesystem(
-        &lease,
+    let lease_path = path.join(".read.lock");
+    let lease_file = filesystem(
+        &lease_path,
         "create generation read lease",
-        File::create_new(&lease),
+        File::create_new(&lease_path),
     )?;
+    let lease = filesystem(
+        &lease_path,
+        "lock staged generation",
+        ExclusiveFileLease::try_acquire(lease_file),
+    )?;
+    let metadata = path.join("metadata.db");
+    let (revision, prepared) = build_metadata(path, project, generation, settings, config, bytes)?;
+    let metadata_bytes = filesystem(
+        &metadata,
+        "measure staged metadata",
+        fs::metadata(&metadata),
+    )?
+    .len();
+    let tantivy_bytes = bytes
+        .checked_sub(metadata_bytes)
+        .ok_or_else(|| admission("staged metadata exceeds its disk reservation"))?;
+    let tantivy = path.join("tantivy");
+    IndexHandle::build_staged(
+        &tantivy,
+        config.index_writer,
+        tantivy_bytes,
+        lease,
+        |writer| prepared.write_lexical_chunks(writer),
+    )?;
+    drop(prepared);
+    let db = publication::open_local_metadata(path, settings, limits)?;
+    verify_chunk_pair(db.connection(), project.id, &tantivy, limits)?;
+    db.conn
+        .close()
+        .map_err(|(_, error)| repo::db_error(error))?;
+    Ok(revision)
+}
+
+fn build_metadata(
+    path: &Path,
+    project: &Project,
+    generation: i64,
+    settings: &Resolved<DbSettings>,
+    config: &Config,
+    bytes: u64,
+) -> Result<(i64, job::PreparedPlan)> {
     let metadata = path.join("metadata.db");
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_CREATE
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
     let conn = Connection::open_with_flags(&metadata, flags).map_err(repo::db_error)?;
-    conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA foreign_keys=ON;")
-        .map_err(repo::db_error)?;
+    bound_metadata_writes(&conn, bytes)?;
     migrations::migrate(&conn)?;
     conn.execute(
         "INSERT INTO projects (id, canonical_root, name, status, schema_version, created_at)
@@ -458,11 +513,8 @@ fn build_pair(
         cache_root: path.to_owned(),
         settings: settings.clone(),
     };
-    let mut index =
-        IndexHandle::open_or_create_with_settings(&path.join("tantivy"), config.index_writer)?;
-    let stats = job::run_full_lexical(&mut db, &mut index, project, config)?;
-    index.finish()?;
-    if stats.errors != 0 || repo::has_pending_docs(db.connection(), project.id)? {
+    let prepared = job::prepare_staged_metadata(&mut db, project, config)?;
+    if prepared.stats.errors != 0 || repo::has_pending_docs(db.connection(), project.id)? {
         return Err(admission(
             "lexical generation has an incomplete source survey",
         ));
@@ -478,13 +530,66 @@ fn build_pair(
     tx.pragma_update(None, "user_version", LOCAL_SCHEMA_VERSION)
         .map_err(repo::db_error)?;
     tx.commit().map_err(repo::db_error)?;
-    verify_chunk_pair(db.connection(), project.id, &path.join("tantivy"), limits)?;
     db.conn
         .close()
         .map_err(|(_, error)| repo::db_error(error))?;
     registry_inspect::sidecars_absent(&metadata)
         .map_err(|reason| admission(format!("prepared metadata is unavailable ({reason:?})")))?;
-    Ok(revision)
+    Ok((revision, prepared))
+}
+
+fn bound_metadata_writes(connection: &Connection, bytes: u64) -> Result<()> {
+    let page_size: i64 = connection
+        .pragma_query_value(None, "page_size", |row| row.get(0))
+        .map_err(repo::db_error)?;
+    let pages = i64::try_from(bytes)
+        .ok()
+        .and_then(|bytes| bytes.checked_div(page_size))
+        .filter(|pages| *pages > 0)
+        .ok_or_else(|| admission("generation reservation cannot cover a SQLite page"))?;
+    let mut applied = None;
+    connection
+        .pragma(None, "max_page_count", pages, |row| {
+            applied = Some(row.get::<_, i64>(0)?);
+            Ok(())
+        })
+        .map_err(repo::db_error)?;
+    if !applied.is_some_and(|actual| (1..=pages).contains(&actual)) {
+        return Err(admission("SQLite could not enforce the staged page limit"));
+    }
+    // This database has no reader or prior state to recover. On any failure
+    // the whole generation is discarded. Keep journals and sort workspace
+    // off disk so the main-file page limit covers its writes.
+    let journal: String = connection
+        .query_row("PRAGMA journal_mode=OFF", [], |row| row.get(0))
+        .map_err(repo::db_error)?;
+    if !journal.eq_ignore_ascii_case("off") {
+        return Err(admission(
+            "SQLite could not disable journaling for private staging",
+        ));
+    }
+    use_memory_temp_store(connection)?;
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .map_err(repo::db_error)
+}
+
+fn use_memory_temp_store(connection: &Connection) -> Result<()> {
+    let forces_disk: bool = connection
+        .query_row(
+            "SELECT sqlite_compileoption_used('TEMP_STORE=0')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(repo::db_error)?;
+    if forces_disk {
+        return Err(admission(
+            "SQLite build requires disk-backed temporary files",
+        ));
+    }
+    connection
+        .pragma_update(None, "temp_store", "MEMORY")
+        .map_err(repo::db_error)
 }
 
 // The caller owns the inactive pair for both reads. The comparison covers

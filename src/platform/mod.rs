@@ -10,6 +10,7 @@
 //! directly; it is not a stable API.
 
 pub(crate) mod basic_attributes;
+pub(crate) mod file_lease;
 pub mod paths;
 pub mod transport;
 

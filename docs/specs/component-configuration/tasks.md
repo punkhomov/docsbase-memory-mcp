@@ -888,3 +888,15 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   while resolving each directory event from the project ignore stack.
 - Publish a bounded warning for a truncated expansion through the actual
   daemon indexing outcome. Direct file events and manual sync still work.
+
+## Delta 2026-11-26 — CF11d, enforcement before staged writes
+
+- Apply a page limit before the private SQLite schema writes. Keep its
+  rollback journal and temporary data off disk. Finish the ordinary lexical
+  plan's metadata before giving Tantivy the remaining reservation.
+- Charge both atomic replacement and streaming segment writes before I/O.
+  Keep charges for deleted segments while the stage can still hold mappings.
+  Retain the existing reader lease through background writer retirement.
+- Reject over-budget builds with the previous published pair intact. Exercise
+  unsupported-small budgets, real SQLite and Tantivy growth, competing writers
+  and reclamation. Runtime binding and publication on Windows are later work.
