@@ -120,11 +120,12 @@ pub(crate) struct LexicalCommit<'a> {
 
 impl LexicalCommit<'_> {
     pub(crate) fn commit(self, admit: impl FnOnce() -> Result<()>) -> Result<ObservedProjectIndex> {
-        self.commit_with(|_, _| Ok(()), admit)
+        self.commit_with(|| Ok(()), |_, _| Ok(()), admit)
     }
 
-    pub(crate) fn commit_with(
+    pub(crate) fn commit_with<Admission>(
         self,
+        hold: impl FnOnce() -> Result<Admission>,
         record: impl FnOnce(&Connection, ObservedProjectIndex) -> Result<()>,
         admit: impl FnOnce() -> Result<()>,
     ) -> Result<ObservedProjectIndex> {
@@ -132,7 +133,7 @@ impl LexicalCommit<'_> {
         lifecycle::with_writer_lock(
             open_coordination_file(&writer_lock, false)?,
             &writer_lock,
-            || commit_head(&self, record, admit),
+            || commit_head(&self, hold, record, admit),
         )?;
         Ok(self.current)
     }
@@ -611,8 +612,9 @@ fn write_seal(path: &Path, bytes: &[u8]) -> Result<()> {
     filesystem(path, "sync generation seal", file.sync_all())
 }
 
-fn commit_head(
+fn commit_head<Admission>(
     commit: &LexicalCommit<'_>,
+    hold: impl FnOnce() -> Result<Admission>,
     record: impl FnOnce(&Connection, ObservedProjectIndex) -> Result<()>,
     admit: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
@@ -635,6 +637,9 @@ fn commit_head(
         .pragma_update(None, "synchronous", "EXTRA")
         .map_err(repo::db_error)?;
     let retirement = prepare_retirement(connection, &commit.publication)?;
+    // Verify external artifacts before excluding the other registry writers.
+    // Keep the returned proof alive until the catalog transaction settles.
+    let artifact_guard = hold()?;
     let tx = registry.begin_write()?;
     validate_catalog(&tx, request)?;
     let registered = registry::project_by_id_in(&tx, project.id)?
@@ -703,6 +708,7 @@ fn commit_head(
             error,
         )
     })?;
+    drop(artifact_guard);
     registry
         .conn
         .close()

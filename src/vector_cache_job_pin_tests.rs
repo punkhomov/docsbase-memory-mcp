@@ -201,3 +201,85 @@ fn negative_authority_release_restores_cache_budget_and_renew_prunes_expired_lea
         );
     }
 }
+
+#[test]
+fn catalog_pin_admission_bounds_distinct_vector_payload() {
+    let root = tempfile::tempdir().unwrap();
+    let source = VectorCacheSource::Legacy(CacheLimits {
+        max_entries: 2,
+        max_bytes: 8,
+    });
+    let mut pin = JobPinAuthority::allocate(
+        root.path(),
+        source,
+        "model".into(),
+        Duration::from_secs(60),
+        3,
+    )
+    .unwrap();
+    pin.track("first").unwrap();
+    pin.track("first").unwrap();
+    pin.check_capacity(2).unwrap();
+    pin.track("second").unwrap();
+    pin.check_capacity(1).unwrap();
+    assert!(pin.check_capacity(2).is_err());
+    pin.track("third").unwrap();
+    assert!(pin.check_capacity(1).is_err());
+}
+
+#[test]
+fn publication_vector_proof_rejects_missing_or_wrong_dimensions_and_holds_the_writer() {
+    let root = tempfile::tempdir().unwrap();
+    let mut pin = authority(root.path());
+    pin.track("first").unwrap();
+    pin.renew().unwrap();
+    let mut cache = VectorCache::open(root.path()).unwrap();
+    assert!(
+        pin.prepare_verification(2)
+            .unwrap()
+            .hold_verified(|| Ok(()))
+            .is_err()
+    );
+    cache.put("model", "first", &[1.0]).unwrap();
+    assert!(
+        pin.prepare_verification(2)
+            .unwrap()
+            .hold_verified(|| Ok(()))
+            .is_err()
+    );
+    cache
+        .conn
+        .execute(
+            "UPDATE vector_cache SET dim = 2, vector = 'bad row!' WHERE chunk_hash = 'first'",
+            [],
+        )
+        .unwrap();
+    assert!(
+        cache
+            .get_for_dimension("model", "first", 2)
+            .unwrap()
+            .is_none()
+    );
+    let pending = pin.prepare_verification(2).unwrap();
+    cache.put("model", "first", &[f32::NAN, 0.0]).unwrap();
+    assert!(pending.hold_verified(|| Ok(())).is_err());
+    cache.put("model", "first", &[1.0, 0.0]).unwrap();
+    let pending = pin.prepare_verification(2).unwrap();
+    cache.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(pending.hold_verified(|| Ok(())).is_err());
+    cache.conn.execute_batch("ROLLBACK").unwrap();
+    let proof = pin
+        .prepare_verification(2)
+        .unwrap()
+        .hold_verified(|| Ok(()))
+        .unwrap();
+    cache.conn.busy_timeout(Duration::ZERO).unwrap();
+    let blocked = cache.conn.execute_batch("BEGIN IMMEDIATE").unwrap_err();
+    assert!(matches!(blocked, rusqlite::Error::SqliteFailure(code, _)
+        if code.code == rusqlite::ErrorCode::DatabaseBusy));
+    drop(proof);
+    cache
+        .conn
+        .execute_batch("BEGIN IMMEDIATE; ROLLBACK")
+        .unwrap();
+}

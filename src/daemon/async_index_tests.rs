@@ -372,6 +372,236 @@ fn batch_fixture(
     slot.state.lock().unwrap().config = Some(Arc::new(config));
     fixture
 }
+#[cfg(unix)]
+fn selected_catalog_hits(
+    shared: &Shared,
+    project: &crate::store::models::Project,
+    query: &str,
+) -> usize {
+    let reader = shared.readers.try_acquire().unwrap();
+    crate::store::project_index::with_catalog_pair(reader, project, |_, local, _| {
+        let dir = local.unwrap().tantivy_dir()?;
+        Ok(crate::index::tantivy_index::ReadIndex::open(&dir)?
+            .search(query, 3)?
+            .len())
+    })
+    .unwrap()
+}
+
+#[cfg(unix)]
+async fn catalog_index_waiting_for_provider(
+    shared: &Arc<Shared>,
+    args: &Value,
+    provider: &DocumentGate,
+) -> tokio::task::JoinHandle<Result<Value>> {
+    let owner = shared.clone();
+    let args = args.clone();
+    let mut indexing =
+        tokio::spawn(async move { call_tool(&owner, None, "index_project", args).await });
+    tokio::select! {
+        entered = tokio::time::timeout(Duration::from_secs(5), provider.entered.acquire()) => entered.unwrap().unwrap().forget(),
+        result = &mut indexing => panic!("catalog job finished before embedding: {result:?}"),
+    }
+    indexing
+}
+
+#[test]
+#[cfg(unix)]
+#[allow(clippy::too_many_lines)] // The same live catalog exercises two failure boundaries and retry.
+fn catalog_sync_embeds_before_publication_and_reuses_valid_batches_on_retry() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let guide = root.path().join("guide.md");
+        std::fs::write(&guide, "oldcatalogwidget").unwrap();
+        let db = Db::open_for_index(
+            cache.path(),
+            &crate::store::settings::standalone().unwrap(),
+            true,
+        )
+        .unwrap();
+        db.close().unwrap();
+        let mut shared = open_v2_index_shared(cache.path(), config.path());
+        let owner = Arc::get_mut(&mut shared).unwrap();
+        owner.watchers = Arc::new(Watchers::with_enabled(false));
+        let mut workers = owner.global_config.daemon.clone();
+        workers.background_active = 1;
+        owner.workers = Arc::new(
+            crate::daemon::worker_admission::WorkerAdmission::with_policies(
+                &workers,
+                &owner.global_config.remote,
+            )
+            .unwrap(),
+        );
+        shared.activate_jobs(service).unwrap();
+
+        let args = json!({"path": root.path()});
+        call_tool(&shared, None, "index_project", args.clone())
+            .await
+            .unwrap();
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "oldcatalogwidget"),
+            1
+        );
+
+        let provider = document_gate();
+        provider.invalid_on.store(2, Ordering::SeqCst);
+        let slot = shared.project_slot(project.id);
+        {
+            let mut state = slot.state.lock().unwrap();
+            let mut config = (**state.config.as_ref().unwrap()).clone();
+            config.remote.embed_batch_texts = 1;
+            state.config = Some(Arc::new(config));
+            state.search_stages = Some(Arc::new(HybridStages {
+                embedder: Some(provider.clone()),
+                ..HybridStages::default()
+            }));
+        }
+        {
+            let config = shared.project_config(&project).unwrap();
+            let source = shared.vector_source_for(project.id, &config);
+            let mut cache = source.connect(&shared.cache).unwrap();
+            for (text, vector) in [
+                ("newcatalogwidget", &[0.0, 1.0][..]),
+                ("anothercatalogwidget", &[f32::NAN, 0.0, 0.0]),
+            ] {
+                cache
+                    .put(
+                        provider.model_id(),
+                        &crate::vector_cache::chunk_hash(text),
+                        vector,
+                    )
+                    .unwrap();
+            }
+        }
+        std::fs::write(&guide, "newcatalogwidget").unwrap();
+        std::fs::write(root.path().join("second.md"), "anothercatalogwidget").unwrap();
+        let indexing = catalog_index_waiting_for_provider(&shared, &args, &provider).await;
+        let operation = crate::search::operation::SearchOperation::with_timeout(
+            Instant::now(),
+            Duration::from_secs(5),
+            crate::hybrid::work::Cancellation::new(),
+        )
+        .unwrap();
+        let free_background = shared.workers.background(&operation).await;
+        let free_writer =
+            lifecycle::with_writer_lease(&shared.cache, project.id, || Ok(())).is_ok();
+        let old_hit = selected_catalog_hits(&shared, &project, "oldcatalogwidget");
+        let new_hit = selected_catalog_hits(&shared, &project, "newcatalogwidget");
+        provider.release.add_permits(1);
+        assert!(
+            free_background.is_ok(),
+            "provider must release native worker admission"
+        );
+        drop(free_background);
+        assert!(
+            free_writer,
+            "provider must not hold the active pair's writer lease"
+        );
+        assert_eq!((old_hit, new_hit), (1, 0));
+        tokio::time::timeout(Duration::from_secs(5), provider.entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        provider.release.add_permits(1);
+        let error = indexing.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("invalid embedding batch"));
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "oldcatalogwidget"),
+            1
+        );
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "newcatalogwidget"),
+            0
+        );
+
+        provider.invalid_on.store(0, Ordering::SeqCst);
+        let retry = catalog_index_waiting_for_provider(&shared, &args, &provider).await;
+        {
+            // The valid first batch was reused before waiting on the second.
+            // Replace it now to exercise the final proof, not batch validation.
+            let config = shared.project_config(&project).unwrap();
+            let mut cache = shared
+                .vector_source_for(project.id, &config)
+                .connect(&shared.cache)
+                .unwrap();
+            cache
+                .put(
+                    provider.model_id(),
+                    &crate::vector_cache::chunk_hash("newcatalogwidget"),
+                    &[f32::NAN, 0.0, 0.0],
+                )
+                .unwrap();
+        }
+        provider.release.add_permits(1);
+        let error = tokio::time::timeout(Duration::from_secs(5), retry)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("prepared embedding vector has invalid values")
+        );
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "oldcatalogwidget"),
+            1
+        );
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "newcatalogwidget"),
+            0
+        );
+
+        provider.release.add_permits(1);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            call_tool(&shared, None, "index_project", args),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(provider.batches.lock().unwrap().len(), 4);
+        assert_eq!(provider.synchronous.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "oldcatalogwidget"),
+            0
+        );
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "newcatalogwidget"),
+            1
+        );
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "anothercatalogwidget"),
+            1
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
 #[test]
 fn detached_sync_acknowledges_own_job_and_deduplicates_while_provider_is_held() {
     let runtime = tokio::runtime::Builder::new_current_thread()

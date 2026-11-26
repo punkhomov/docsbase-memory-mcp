@@ -2602,18 +2602,14 @@ async fn start_catalog_sync(
     let service = service.clone();
     let shared = shared.clone();
     let run = async move {
-        let call = operation.clone();
-        let (owner, result) = service
-            .phase(
-                &shared.workers,
-                activity.clone(),
-                &operation,
-                owner,
-                move |state| state.run_catalog_sync(&call),
-            )
-            .await?;
-        drop(result);
-        drop(owner);
+        crate::index::async_job::catalog_sync::execute(
+            &service,
+            &shared.workers,
+            &activity,
+            &operation,
+            owner,
+        )
+        .await?;
         finish_index_watch(&shared, project_id, &operation, &activity).await;
         Ok::<_, Error>(())
     };
@@ -2656,12 +2652,18 @@ fn capture_catalog_sync(
             message: "project sync is starting or retiring; retry sync".into(),
         });
     };
-    let config = if refresh {
-        shared.open_project_config(&project)?
+    let (config, stages) = if refresh {
+        shared.publish_project_config(
+            &project,
+            |config| shared.async_stages(config),
+            || {},
+            None,
+        )?
     } else {
-        shared.project_config(&project)?
+        shared.project_runtime_for_search(&project)?
     };
     super::launch::catalog_lexical_only(&config)?;
+    let source = shared.vector_source_for(project.id, &config);
     Ok(Ok(crate::index::async_job::catalog_sync::Context {
         cache: shared.cache.clone(),
         epoch,
@@ -2669,6 +2671,9 @@ fn capture_catalog_sync(
         revision,
         project,
         config,
+        stages,
+        source,
+        pin_ttl: shared.dense.limits().ann_lifetimes.backfill_pin_ttl(),
         owner,
     }))
 }

@@ -294,30 +294,15 @@ impl IndexState {
         };
         self.scope = scope;
         if let Some(embedder) = &context.stages.embedder {
-            self.dimension = crate::hybrid::dense::model_dim(embedder.model_id())
-                .or_else(|| {
-                    context
-                        .config
-                        .hybrid_cfg
-                        .embedding
-                        .as_ref()
-                        .map(|cfg| cfg.dimensions as usize)
-                })
-                .filter(|dim| *dim > 0)
-                .ok_or_else(|| Error::internal("embedding stage has no captured dimension"))?;
-            let (rows, longest): (i64, i64) = db.connection().query_row("SELECT COUNT(*), COALESCE(MAX(length(CAST(c.text AS BLOB))),0) FROM chunks c JOIN docs d ON d.id=c.doc_id WHERE d.project_id=?1", [context.project.id], |r| Ok((r.get(0)?,r.get(1)?))).map_err(repo::db_error)?;
-            let count = usize::try_from(rows)
-                .ok()
-                .and_then(|rows| {
-                    self.plan
-                        .as_ref()
-                        .and_then(|plan| rows.checked_add(plan.chunk_count()))
-                })
+            self.dimension = embedding_dimension(&context.config, embedder.as_ref())?;
+            let (rows, longest) = embedding_shape(db, context.project.id)?;
+            let count = self
+                .plan
+                .as_ref()
+                .and_then(|plan| rows.checked_add(plan.chunk_count()))
                 .ok_or_else(|| Error::Admission {
                     message: "job hash tracking count overflow".into(),
                 })?;
-            let longest = usize::try_from(longest)
-                .map_err(|_| Error::internal("invalid backfill text length"))?;
             let policy = &context.config.remote;
             let captured_peak = self
                 .plan
@@ -427,34 +412,13 @@ impl IndexState {
                     message: "project generation changed before backfill".into(),
                 });
             }
-            let mut statement = db.connection().prepare("SELECT c.doc_id,c.seq,length(CAST(c.text AS BLOB)),c.text FROM chunks c JOIN docs d ON d.id=c.doc_id WHERE d.project_id=?1 AND (c.doc_id,c.seq)>(?2,?3) ORDER BY c.doc_id,c.seq LIMIT ?4").map_err(repo::db_error)?;
-            let mut rows = statement
-                .query(rusqlite::params![
-                    context.project.id,
-                    self.backfill_cursor.0,
-                    self.backfill_cursor.1,
-                    i64::try_from(policy.embed_batch_texts)
-                        .map_err(|_| Error::internal("batch count overflow"))?
-                ])
-                .map_err(repo::db_error)?;
-            let mut texts = Vec::new();
-            let mut bytes = 0_usize;
-            while let Some(row) = rows.next().map_err(repo::db_error)? {
-                let length: i64 = row.get(2).map_err(repo::db_error)?;
-                let length = usize::try_from(length)
-                    .map_err(|_| Error::internal("backfill text length invalid"))?;
-                if !texts.is_empty() && bytes.saturating_add(length) > policy.embed_batch_bytes {
-                    break;
-                }
-                operation.check()?;
-                texts.push(row.get::<_, String>(3).map_err(repo::db_error)?);
-                bytes = bytes.saturating_add(length);
-                self.backfill_cursor = (
-                    row.get(0).map_err(repo::db_error)?,
-                    row.get(1).map_err(repo::db_error)?,
-                );
-            }
-            texts
+            embedding_texts(
+                db,
+                context.project.id,
+                &mut self.backfill_cursor,
+                policy,
+                operation,
+            )?
         } else {
             self.plan
                 .as_ref()
@@ -479,6 +443,7 @@ impl IndexState {
             &context.cache,
             embedder.model_id(),
             texts,
+            None,
         )?))
     }
     pub(crate) fn acknowledgement(&self) -> Result<serde_json::Value> {
@@ -651,6 +616,75 @@ impl IndexState {
     }
 }
 
+fn embedding_dimension(
+    config: &Config,
+    embedder: &dyn crate::vector_cache::Embedder,
+) -> Result<usize> {
+    crate::hybrid::dense::model_dim(embedder.model_id())
+        .or_else(|| {
+            config
+                .hybrid_cfg
+                .embedding
+                .as_ref()
+                .map(|cfg| cfg.dimensions as usize)
+        })
+        .filter(|dim| *dim > 0)
+        .ok_or_else(|| Error::internal("embedding stage has no captured dimension"))
+}
+
+fn embedding_shape(db: &Db, project: i64) -> Result<(usize, usize)> {
+    let (rows, longest): (i64, i64) = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*), COALESCE(MAX(length(CAST(c.text AS BLOB))), 0)
+         FROM chunks c JOIN docs d ON d.id=c.doc_id WHERE d.project_id=?1",
+            [project],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(repo::db_error)?;
+    Ok((
+        usize::try_from(rows).map_err(|_| Error::internal("invalid embedding chunk count"))?,
+        usize::try_from(longest).map_err(|_| Error::internal("invalid embedding text length"))?,
+    ))
+}
+
+fn embedding_texts(
+    db: &Db,
+    project: i64,
+    cursor: &mut (i64, i64),
+    policy: &crate::hybrid::remote_settings::RemoteSettings,
+    operation: &SearchOperation,
+) -> Result<Vec<String>> {
+    let mut statement = db.connection().prepare("SELECT c.doc_id,c.seq,length(CAST(c.text AS BLOB)),c.text FROM chunks c JOIN docs d ON d.id=c.doc_id WHERE d.project_id=?1 AND (c.doc_id,c.seq)>(?2,?3) ORDER BY c.doc_id,c.seq LIMIT ?4").map_err(repo::db_error)?;
+    let mut rows = statement
+        .query(rusqlite::params![
+            project,
+            cursor.0,
+            cursor.1,
+            i64::try_from(policy.embed_batch_texts)
+                .map_err(|_| Error::internal("batch count overflow"))?
+        ])
+        .map_err(repo::db_error)?;
+    let mut texts = Vec::new();
+    let mut bytes = 0_usize;
+    while let Some(row) = rows.next().map_err(repo::db_error)? {
+        let length: i64 = row.get(2).map_err(repo::db_error)?;
+        let length =
+            usize::try_from(length).map_err(|_| Error::internal("backfill text length invalid"))?;
+        if !texts.is_empty() && bytes.saturating_add(length) > policy.embed_batch_bytes {
+            break;
+        }
+        operation.check()?;
+        texts.push(row.get::<_, String>(3).map_err(repo::db_error)?);
+        bytes = bytes.saturating_add(length);
+        *cursor = (
+            row.get(0).map_err(repo::db_error)?,
+            row.get(1).map_err(repo::db_error)?,
+        );
+    }
+    Ok(texts)
+}
+
 // Includes oversized new/old atomic text, worst-case 6-byte JSON escapes,
 // concurrent Rig bytes/Value/final String growth and the live input clones.
 fn embedding_workspace(
@@ -819,6 +853,9 @@ async fn embed_batches(
         let call = operation.clone();
         let (next, packet) = service
             .phase(workers, activity.clone(), operation, owner, move |state| {
+                if let Some(sync) = &mut state.catalog_sync {
+                    return sync.batch_packet(&call, state.account.clone());
+                }
                 let batch = state.batch(backfill, &call)?;
                 let context = state
                     .context
@@ -847,6 +884,13 @@ async fn embed_batches(
         let (next, written) = service
             .phase(workers, activity.clone(), operation, owner, move |state| {
                 call.check()?;
+                if let Some(sync) = &state.catalog_sync {
+                    let batch = packet
+                        .0
+                        .as_ref()
+                        .ok_or_else(|| Error::internal("embedding batch absent"))?;
+                    return sync.store(batch, &vectors);
+                }
                 let context = state
                     .context
                     .as_ref()

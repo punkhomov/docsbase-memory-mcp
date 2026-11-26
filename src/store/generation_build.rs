@@ -148,6 +148,33 @@ impl PreparedLexicalPublication {
         &self.pair.outcome
     }
 
+    /// Read inactive metadata without lending a connection to the caller.
+    pub(crate) fn with_metadata<T>(&self, read: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
+        let staged = self.pair.staged;
+        let dir = self
+            .pair
+            .project_dir
+            .join("generations")
+            .join(staged.generation_id.to_string());
+        let metadata = publication::open_local_metadata(&dir, &self.settings, self.pair.limits)?;
+        let revision = registry_inspect::local_revision(
+            metadata.connection(),
+            staged.project_id,
+            staged.generation_id,
+        )
+        .map_err(|reason| {
+            admission(format!(
+                "prepared chunk metadata is unavailable ({reason:?})"
+            ))
+        })?;
+        if revision.content_revision != staged.content_revision || revision.manifest.is_some() {
+            return Err(admission(
+                "prepared chunk metadata changed before embedding",
+            ));
+        }
+        read(&metadata)
+    }
+
     pub(crate) fn publish(
         self,
         finalize: impl FnOnce(publication::LexicalCommit<'_>) -> Result<ObservedProjectIndex>,

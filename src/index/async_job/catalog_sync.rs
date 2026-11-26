@@ -1,16 +1,27 @@
-//! Publication and terminal ownership for a daemon's lexical generation job.
+//! Publication and terminal ownership for a daemon's catalog generation job.
 
-use super::{Config, IndexState, PayloadPermit, Project, SearchOperation};
+use super::{
+    Activity, BatchPacket, Config, IndexState, JobOwner, JobService, PayloadPermit, Project,
+    SearchOperation, WorkerAdmission,
+};
 use crate::config::schema::Resolved;
 use crate::daemon::{readiness::SyncAttribution, server::ProjectCell, tools};
 use crate::error::{Error, Result};
+use crate::hybrid::{
+    HybridStages,
+    async_jobs::{self, EmbeddingBatch},
+};
 use crate::index::{generation_job::GenerationJob, job::CaptureBudget};
 use crate::store::{
-    generation_build::open_index_registry, models::SyncState, repo, settings::DbSettings,
+    generation_build::{PreparedLexicalPublication, open_index_registry},
+    models::SyncState,
+    repo,
+    settings::DbSettings,
 };
+use crate::vector_cache::{JobPinAuthority, VectorCacheSource};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub(crate) struct Context {
@@ -19,6 +30,9 @@ pub(crate) struct Context {
     pub(crate) settings: Resolved<DbSettings>,
     pub(crate) project: Project,
     pub(crate) config: Arc<Config>,
+    pub(crate) stages: Arc<HybridStages>,
+    pub(crate) source: VectorCacheSource,
+    pub(crate) pin_ttl: Duration,
     pub(crate) revision: Arc<ProjectCell>,
     pub(crate) owner: Owner,
 }
@@ -63,8 +77,17 @@ impl Drop for Owner {
 }
 
 pub(super) struct CatalogSync {
+    staged: Option<PreparedLexicalPublication>,
+    embedding: Option<CatalogEmbeddings>,
     context: Context,
     id: i64,
+}
+
+struct CatalogEmbeddings {
+    cursor: (i64, i64),
+    pin: JobPinAuthority,
+    dimension: usize,
+    complete: bool,
 }
 
 impl IndexState {
@@ -89,33 +112,68 @@ impl IndexState {
         if !created {
             return Err(super::active_sync_conflict());
         }
-        let sync = self.catalog_sync.insert(CatalogSync { context, id });
+        let sync = self.catalog_sync.insert(CatalogSync {
+            staged: None,
+            embedding: None,
+            context,
+            id,
+        });
         repo::mark_sync_running(db.connection(), id)?;
         let status = tools::sync_status(&db, &json!({"job_id": id}))?;
         db.close()?;
         sync.context.owner.active_id.store(id, Ordering::Release);
         Ok(status)
     }
+}
 
-    pub(crate) fn run_catalog_sync(&mut self, operation: &SearchOperation) -> Result<()> {
-        let sync = self
-            .catalog_sync
-            .as_ref()
-            .ok_or_else(|| Error::internal("catalog sync owner missing"))?;
-        let account = self
-            .account
-            .as_ref()
-            .ok_or_else(|| Error::internal("catalog sync payload account missing"))?;
-        let result = sync.run(operation, account);
-        if let Err(error) = &result {
-            self.fail(error.to_string());
-        }
-        result
+pub(crate) async fn execute(
+    service: &JobService,
+    workers: &Arc<WorkerAdmission>,
+    activity: &Arc<Activity>,
+    operation: &SearchOperation,
+    owner: JobOwner,
+) -> Result<()> {
+    let call = operation.clone();
+    let (owner, embed) = service
+        .phase(workers, activity.clone(), operation, owner, move |state| {
+            let account = state
+                .account
+                .as_deref()
+                .ok_or_else(|| Error::internal("catalog sync payload account missing"))?;
+            let sync = state
+                .catalog_sync
+                .as_mut()
+                .ok_or_else(|| Error::internal("catalog sync owner missing"))?;
+            let embed = sync.stage(&call, account)?;
+            if !embed {
+                sync.publish(&call)?;
+            }
+            Ok(embed)
+        })
+        .await?;
+    let needs_embeddings = **embed;
+    drop(embed);
+    if !needs_embeddings {
+        return Ok(());
     }
+    let owner = super::embed_batches(service, workers, activity, operation, owner, false).await?;
+    let call = operation.clone();
+    let (owner, published) = service
+        .phase(workers, activity.clone(), operation, owner, move |state| {
+            state
+                .catalog_sync
+                .as_mut()
+                .ok_or_else(|| Error::internal("catalog sync owner missing"))?
+                .publish(&call)
+        })
+        .await?;
+    drop(published);
+    drop(owner);
+    Ok(())
 }
 
 impl CatalogSync {
-    fn run(&self, operation: &SearchOperation, account: &PayloadPermit) -> Result<()> {
+    fn stage(&mut self, operation: &SearchOperation, account: &PayloadPermit) -> Result<bool> {
         let Context {
             cache,
             epoch,
@@ -138,11 +196,141 @@ impl CatalogSync {
             settings,
             config,
         };
+        drop(revision.preparation_lease(config)?);
         let prepared = job.stage(&mut capture)?;
+        if let Some(embedder) = &self.context.stages.embedder {
+            let (count, longest) =
+                prepared.with_metadata(|db| super::embedding_shape(db, project.id))?;
+            if count > 0 {
+                let dimension = super::embedding_dimension(config, embedder.as_ref())?;
+                capture.reserve(super::embedding_workspace(
+                    &config.remote,
+                    longest,
+                    0,
+                    count,
+                    dimension,
+                )?)?;
+                let pin = JobPinAuthority::allocate(
+                    cache,
+                    self.context.source.clone(),
+                    embedder.model_id().to_owned(),
+                    self.context.pin_ttl,
+                    count,
+                )?;
+                self.embedding = Some(CatalogEmbeddings {
+                    cursor: (0, -1),
+                    pin,
+                    dimension,
+                    complete: false,
+                });
+            }
+        }
+        self.staged = Some(prepared);
+        Ok(self.embedding.is_some())
+    }
+
+    pub(super) fn batch_packet(
+        &mut self,
+        operation: &SearchOperation,
+        account: Option<Arc<PayloadPermit>>,
+    ) -> Result<BatchPacket> {
+        let context = &self.context;
+        let _revision = context.revision.preparation_lease(&context.config)?;
+        let embedder = context
+            .stages
+            .embedder
+            .as_ref()
+            .ok_or_else(|| Error::internal("catalog embedding stage absent"))?;
+        let embedding = self
+            .embedding
+            .as_mut()
+            .ok_or_else(|| Error::internal("catalog embedding work absent"))?;
+        let staged = self
+            .staged
+            .as_ref()
+            .ok_or_else(|| Error::internal("catalog stage absent"))?;
+        let texts = staged.with_metadata(|db| {
+            super::embedding_texts(
+                db,
+                context.project.id,
+                &mut embedding.cursor,
+                &context.config.remote,
+                operation,
+            )
+        })?;
+        if texts.is_empty() {
+            embedding.complete = true;
+            return Ok((None, None, account));
+        }
+        for text in &texts {
+            embedding
+                .pin
+                .track(&crate::vector_cache::chunk_hash(text))?;
+        }
+        embedding.pin.check_capacity(embedding.dimension)?;
+        embedding.pin.renew()?;
+        let batch = async_jobs::missing(
+            &context.source,
+            &context.cache,
+            embedder.model_id(),
+            texts,
+            Some(embedding.dimension),
+        )?;
+        Ok((Some(batch), Some(embedder.clone()), account))
+    }
+
+    pub(super) fn store(&self, batch: &EmbeddingBatch, vectors: &[Vec<f32>]) -> Result<()> {
+        let context = &self.context;
+        let _revision = context.revision.preparation_lease(&context.config)?;
+        let embedder = context
+            .stages
+            .embedder
+            .as_ref()
+            .ok_or_else(|| Error::internal("catalog embedding stage absent"))?;
+        let embedding = self
+            .embedding
+            .as_ref()
+            .ok_or_else(|| Error::internal("catalog embedding work absent"))?;
+        embedding.pin.renew()?;
+        async_jobs::store(
+            &context.source,
+            &context.cache,
+            embedder.model_id(),
+            batch,
+            vectors,
+            embedding.dimension,
+        )
+    }
+
+    fn publish(&mut self, operation: &SearchOperation) -> Result<()> {
+        operation.check()?;
+        let context = &self.context;
+        let embedding = self.embedding.as_ref();
+        if embedding.is_some_and(|embedding| !embedding.complete) {
+            return Err(Error::internal("catalog embedding scan did not finish"));
+        }
+        let prepared = self
+            .staged
+            .take()
+            .ok_or_else(|| Error::internal("catalog stage absent"))?;
         let outcome = prepared.outcome().clone();
         prepared.publish(|commit| {
-            let _revision = revision.preparation_lease(config)?;
+            operation.check()?;
+            let _revision = context.revision.preparation_lease(&context.config)?;
+            let verification = embedding
+                .map(|embedding| {
+                    embedding.pin.renew()?;
+                    operation.check()?;
+                    embedding.pin.prepare_verification(embedding.dimension)
+                })
+                .transpose()?;
             commit.commit_with(
+                || {
+                    operation.check()?;
+                    verification
+                        .map(|proof| proof.hold_verified(|| operation.check()))
+                        .transpose()
+                },
                 |conn, published| {
                     let id = published.generation_id.ok_or_else(|| {
                         Error::internal("published catalog sync generation missing")

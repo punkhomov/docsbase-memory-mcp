@@ -1864,3 +1864,27 @@ selected pair then has the nondefault ignore recipe and only its
 accepted changed content. Failed or abandoned stages retain normal
 recovery ownership. The next phase uses the staged value for bounded
 embedding reads between native workers.
+
+## 2026-11-26 — CF11c, async-подготовка векторов каталога
+
+Task CF11c staged vectors for Index and Sync: complete (catalog job owner,
+bounded native phases, pre-CAS vector proof, fresh review and fix reviews).
+
+Ruling: the real Index route uses a gated hermetic provider against two
+SQLite/Tantivy pairs. During provider wait, the test takes the native
+background slot and the old project's writer lease, then searches the
+still selected old pair. An invalid provider batch preserves that pair.
+The retry reuses the valid earlier batch. Overwriting one retained vector
+during a later provider wait refuses publication. A further retry
+repairs the missing vector and selects the new pair.
+
+Ruling: cache lookup and the publication scan filter by expected
+dimension, storage type and byte length before reading vector payload.
+Nonfinite values are misses for preparation and fail the final proof.
+The vector writer and catalog writer use try-lock admission. Vector
+verification runs before the registry write transaction and holds its
+guard through the catalog commit. Cancellation is checked before fresh
+waits and before commit. The full cli-full suite, all-target Clippy and
+lean offline passed on Rust 1.100.0. The command test was repeated after
+bounding the last fixture wait. Shared hybrid remains gated while the
+remaining consumers and active state protection are implemented.

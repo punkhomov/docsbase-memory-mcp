@@ -995,3 +995,16 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - Продолжить с сохранёнными ANN-графами, coverage и warm, подготовкой
   векторов под бюджетом и приёмкой Shared hybrid через рабочие Index, Sync,
   watcher и search.
+
+## Delta 2026-11-26 — CF11c, подготовка векторов для Index и Sync
+
+- Даём одному JobService owner подготовить неактивную пару, читать текст
+  ограниченными страницами и продолжать работу после ответа провайдера.
+  Во время запроса к нему старый head доступен для чтения. Native worker,
+  SQLite connection и project writer lease свободны.
+- Перед сменой head подтвердить размерность, конечность и наличие в кеше
+  каждого вектора запрошенного рецепта под защитой job pins. Сохранить
+  результаты валидных батчей при отказе и повторе.
+- Для допуска Shared hybrid остаются защита векторов активного head в
+  пределах бюджета, согласованная публикация runtime, direct Index,
+  watcher, warm/coverage и проверка реального поиска.

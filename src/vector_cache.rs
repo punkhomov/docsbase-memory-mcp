@@ -147,6 +147,26 @@ impl VectorCache {
     /// # Errors
     /// Returns [`Error::Internal`] on `SQLite` failures or a corrupt row.
     pub fn get(&mut self, model_id: &str, chunk_hash: &str) -> Result<Option<Vec<f32>>> {
+        self.get_using(model_id, chunk_hash, None)
+    }
+
+    /// Treats an incompatible vector row as a cache miss when preparing a
+    /// catalog generation that requires valid vectors of the resolved width.
+    pub(crate) fn get_for_dimension(
+        &mut self,
+        model_id: &str,
+        chunk_hash: &str,
+        dimension: usize,
+    ) -> Result<Option<Vec<f32>>> {
+        self.get_using(model_id, chunk_hash, Some(dimension))
+    }
+
+    fn get_using(
+        &mut self,
+        model_id: &str,
+        chunk_hash: &str,
+        expected_dimension: Option<usize>,
+    ) -> Result<Option<Vec<f32>>> {
         if self.access.is_owned() {
             // Reserve the writer before issuing a recency number. Otherwise an
             // older blocked touch could commit after a more recent operation.
@@ -154,12 +174,24 @@ impl VectorCache {
                 .conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(|err| Error::internal_with_source("begin vector lookup", err))?;
-            let result = lookup(&tx, &mut self.access, model_id, chunk_hash)?;
+            let result = lookup(
+                &tx,
+                &mut self.access,
+                model_id,
+                chunk_hash,
+                expected_dimension,
+            )?;
             tx.commit()
                 .map_err(|err| Error::internal_with_source("commit vector lookup", err))?;
             Ok(result)
         } else {
-            lookup(&self.conn, &mut self.access, model_id, chunk_hash)
+            lookup(
+                &self.conn,
+                &mut self.access,
+                model_id,
+                chunk_hash,
+                expected_dimension,
+            )
         }
     }
 
@@ -496,12 +528,19 @@ fn lookup(
     access: &mut owner::Access,
     model_id: &str,
     chunk_hash: &str,
+    expected_dimension: Option<usize>,
 ) -> Result<Option<Vec<f32>>> {
+    let expected_width = expected_dimension
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| Error::internal("vector dimension overflow"))?;
     let row = conn
         .query_row(
             "SELECT dim, vector FROM vector_cache
-                 WHERE model_id = ?1 AND chunk_hash = ?2",
-            params![model_id, chunk_hash],
+                 WHERE model_id = ?1 AND chunk_hash = ?2
+                   AND (?3 IS NULL OR (dim = ?3 AND typeof(vector) = 'blob'
+                                       AND length(vector) = 4 * ?3))",
+            params![model_id, chunk_hash, expected_width],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )
         .optional()
@@ -509,6 +548,11 @@ fn lookup(
     let Some((dim, bytes)) = row else {
         return Ok(None);
     };
+    if let Some(expected) = expected_dimension
+        && !valid_vector_blob(expected, &bytes)
+    {
+        return Ok(None);
+    }
     let used_at = access.next_use();
     conn.execute(
         "UPDATE vector_cache SET used_at = ?3
@@ -691,6 +735,16 @@ fn now_secs() -> i64 {
         .map_or(0, |duration| {
             i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
         })
+}
+
+fn valid_vector_blob(dim: usize, blob: &[u8]) -> bool {
+    dim > 0
+        && dim.checked_mul(4) == Some(blob.len())
+        && blob
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|value| f32::from_le_bytes(*value).is_finite())
 }
 
 fn decode_vector(dim: usize, bytes: &[u8]) -> Result<Vec<f32>> {
