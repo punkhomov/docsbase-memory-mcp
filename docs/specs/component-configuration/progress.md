@@ -1755,3 +1755,43 @@ Complete local Rust 1.100.0 cli-full, Clippy (including the two opt-in
 targets), fmt, lean offline and Node 24.22.3 client checks passed. Targeted
 runtime and harness checks and all-target Clippy were repeated after the
 last binding and tool-definition adjustments.
+
+## 2026-11-26 — CF11c/CF11d, revisable lexical projects in Shared
+
+Task CF11c/CF11d Shared lexical v5: complete (existing v5 Unix catalog,
+connected CLI/IPC, local verification, fresh review and fix reviews).
+Explicit Index and Sync stage a complete pair. The project owns Sync
+admission and join identity. Worker and payload limits remain shared.
+Watcher updates reuse the admitted incremental plan and a current
+configuration guard. Terms and metadata publish together under the
+project lease, with a stable generation and a new content revision.
+
+Ruling: a real daemon test holds one project's SQLite writer while another
+project serves search and registry views. The first project gains one
+revision and its old chunk reference requires a new search. A missing
+table in its local SQLite produces a project-specific diagnostic. A gated
+registration test holds the actual configuration guard and demonstrates
+that a refused Shared reload releases the sole control slot. Website
+retains its existing serialized configuration binds.
+
+Ruling: real subprocesses leave hot and cold local journals. An explicit
+rebuild checks the selected identity and lets SQLite recover before
+staging. A failed publication retains its old head and a successful one
+records bounded retirement evidence with the new head. Tests preserve an
+unowned segment-like file and resume after partial deletion of the pair.
+Per-file capture warnings remain in a successful subset outcome.
+
+Ruling: a synthetic local Linux run with 20,000 Markdown files indexed
+in 5.52 s in the debug build. One watcher edit reached the next revision
+in 1.57 s including debounce. Peak daemon RSS was 59 MiB. These are local
+observations under default budgets. Search benchmark thresholds and
+baseline are unchanged.
+
+Rust 1.100.0 full cli-full, lean offline, all-target Clippy including the
+opt-in targets, fmt and Node/web build checks passed. Targeted contention
+and profile tests were repeated after the review fixes.
+
+Ruling: macOS native tests exposed a fixture that passed a linked temporary
+directory directly to the internal stopped observer. The public observer
+resolves that directory before checking the pair. The fixture follows the
+same contract. A linked TMPDIR reproduced the exact failure on Linux.

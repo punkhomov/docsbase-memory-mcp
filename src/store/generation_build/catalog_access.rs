@@ -11,12 +11,14 @@ use crate::store::registry_inspect::{InspectionLimits, ObservedProjectIndex};
 use crate::store::settings::DbSettings;
 use crate::store::{Db, registry_inspect, repo};
 
+use super::interrupted::{self, InterruptedBase};
 use super::{admission, open_registry, recovery::open_recovery_registry, validate_epoch};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CatalogAccess {
     Stopped,
     Operational,
+    Repair(InterruptedBase),
 }
 
 impl CatalogAccess {
@@ -34,7 +36,7 @@ impl CatalogAccess {
                         admission(format!("generation registry is unavailable ({reason:?})"))
                     })?
             }
-            Self::Operational => {
+            Self::Operational | Self::Repair(_) => {
                 let db = open_operational_reader(cache, settings, limits)?;
                 let tx = db
                     .connection()
@@ -51,7 +53,7 @@ impl CatalogAccess {
     pub(super) fn writer(self, cache: &Path, settings: &Resolved<DbSettings>) -> Result<Db> {
         match self {
             Self::Stopped => open_registry(cache, settings),
-            Self::Operational => open_recovery_registry(cache, settings),
+            Self::Operational | Self::Repair(_) => open_recovery_registry(cache, settings),
         }
     }
 }
@@ -96,4 +98,32 @@ pub(crate) fn observe_index_base(
     let observed = observe_catalog_index(&db, &project, limits)?;
     db.close()?;
     Ok(observed)
+}
+
+/// Capture a usable base, or prove that an explicit full rebuild can replace
+/// the selected generation without using its incomplete contents as input.
+pub(crate) fn observe_replacement_base(
+    cache: &Path,
+    project_id: i64,
+    epoch: [u8; 16],
+    settings: &Resolved<DbSettings>,
+    limits: InspectionLimits,
+) -> Result<(Option<ObservedProjectIndex>, Option<InterruptedBase>)> {
+    match observe_index_base(cache, project_id, epoch, settings, limits) {
+        Ok(base) => return Ok((base, None)),
+        Err(error) if !cfg!(unix) => return Err(error),
+        Err(_) => {}
+    }
+    let db = open_operational_reader(cache, settings, limits)?;
+    validate_epoch(db.connection(), epoch)?;
+    let interrupted = interrupted::inspect_for_replacement(&db, project_id, limits)?;
+    db.close()?;
+    if let Some(base) = interrupted {
+        return Ok((Some(base.index), Some(base)));
+    }
+    // SQLite may have rolled back a journal left before the intent committed.
+    Ok((
+        observe_index_base(cache, project_id, epoch, settings, limits)?,
+        None,
+    ))
 }

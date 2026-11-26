@@ -74,10 +74,11 @@ async fn prepare_and_index(
     let call = operation.clone();
     let work = request::spawn(Some(permit), Some(activity.clone()), move || {
         call.check()?;
-        let db = Db::open_with_settings(&owner.cache, &owner.db_settings)?;
+        let db = owner.open_work_registry()?;
         if let Err(error) = indexed {
             // Preserve the existing concurrent-registration winner rule.
-            if let Ok(project) = registry::resolve_by_cwd(&db, &cwd)
+            if let Ok(project) =
+                registry::resolve_by_cwd(&db, &cwd).map(|project| registered_view(&db, project))
                 && project.status == crate::store::models::ProjectStatus::Indexed
             {
                 return Ok(project);
@@ -86,6 +87,7 @@ async fn prepare_and_index(
         }
         let project = registry::project_by_id(&db, plan.project.id)?
             .ok_or_else(|| Error::internal("project vanished after automatic index"))?;
+        let project = registered_view(&db, project);
         owner.open_project_config(&project)?;
         Ok(project)
     });
@@ -96,9 +98,10 @@ fn prepare(shared: &Arc<Shared>, cwd: &Path, operation: &SearchOperation) -> Res
     #[cfg(test)]
     shared.observe_registration_work();
     operation.check()?;
-    let mut db = Db::open_with_settings(&shared.cache, &shared.db_settings)?;
+    let mut db = shared.open_work_registry()?;
     let error = match registry::resolve_by_cwd(&db, cwd) {
         Ok(project) => {
+            let project = registered_view(&db, project);
             shared.open_project_config(&project)?;
             shared.schedule_backfill_in(&project, Some(operation.clone()))?;
             return Ok(Plan {
@@ -123,4 +126,15 @@ fn prepare(shared: &Arc<Shared>, cwd: &Path, operation: &SearchOperation) -> Res
         project,
         index: true,
     })
+}
+
+fn registered_view(db: &Db, project: Project) -> Project {
+    if db.has_generation_catalog()
+        && let Ok(Some(local)) = crate::store::project_index::local_watcher_project(db, &project)
+    {
+        return local;
+    }
+    // Registration binds the root even when its selected index is busy or
+    // needs repair. Explicit Sync can repair it through that session.
+    project
 }

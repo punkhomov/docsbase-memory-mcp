@@ -392,6 +392,418 @@ fn catalog_reader_holds_the_pair_lease_and_distinguishes_equal_revisions() {
     assert!(error.to_string().contains("Tantivy"), "{error}");
 }
 
+#[cfg(unix)]
+struct RevisablePair {
+    env: Env,
+    policy: Resolved<DbSettings>,
+    config: Config,
+    registry: Db,
+    project: Project,
+    request: LexicalBuildRequest,
+    generation: i64,
+}
+
+#[cfg(unix)]
+impl RevisablePair {
+    fn new() -> Self {
+        let env = Env::new();
+        let request = env.request();
+        let policy = settings::standalone().unwrap();
+        let config = Config::default();
+        let first = publish_lexical_generation(
+            env.cache.path(),
+            request,
+            env.build(request).unwrap(),
+            &policy,
+            limits(),
+            &config,
+        )
+        .unwrap();
+        let generation = first.generation_id.unwrap();
+        let registry = Db::open_readonly_for_search(env.cache.path(), &policy).unwrap();
+        let project = registry::project_by_id(&registry, first.project_id)
+            .unwrap()
+            .unwrap();
+        Self {
+            env,
+            policy,
+            config,
+            registry,
+            project,
+            request,
+            generation,
+        }
+    }
+
+    fn dir(&self) -> std::path::PathBuf {
+        self.env.generation(self.generation)
+    }
+
+    fn use_schema_1(&self) -> Vec<u8> {
+        let metadata_path = self.dir().join("metadata.db");
+        let metadata = Connection::open(&metadata_path).unwrap();
+        metadata
+            .execute_batch(
+                "ALTER TABLE generation_state DROP COLUMN mutation_pending;
+             ALTER TABLE generation_state DROP COLUMN tantivy_manifest;
+             PRAGMA user_version=1;",
+            )
+            .unwrap();
+        drop(metadata);
+        let seal_path = self.dir().join("seal.json");
+        let mut seal: crate::store::generation_seal::GenerationSeal =
+            serde_json::from_slice(&fs::read(&seal_path).unwrap()).unwrap();
+        seal.metadata_schema = 1;
+        for (_, bytes) in seal
+            .files
+            .iter_mut()
+            .filter(|(name, _)| name == "metadata.db")
+        {
+            *bytes = metadata_path.metadata().unwrap().len();
+        }
+        let seal = serde_json::to_vec(&seal).unwrap();
+        fs::write(&seal_path, &seal).unwrap();
+        let connection = Connection::open(self.env.cache.path().join(DB_FILE)).unwrap();
+        connection
+            .execute(
+                "UPDATE project_generations SET seal_digest=?1 WHERE id=?2",
+                params![blake3::hash(&seal).as_bytes().as_slice(), self.generation],
+            )
+            .unwrap();
+        seal
+    }
+
+    fn write_source(&self, text: &str) {
+        fs::write(self.env.source.path().join("guide.md"), text).unwrap();
+    }
+
+    fn apply(&self) -> Result<job::JobStats> {
+        let input =
+            job::JobInput::Incremental(vec![self.env.source.path().join("guide.md")].into());
+        crate::store::project_index::apply_lexical_batch(
+            &self.registry,
+            &self.project,
+            &self.config,
+            &input,
+            None,
+            || Ok(()),
+        )
+    }
+
+    fn search(&self, query: &str) -> Result<(crate::store::project_index::ProjectIndex, usize)> {
+        crate::store::project_index::with_catalog_pair(
+            &self.registry,
+            &self.project,
+            |_, local, binding| {
+                let dir = local.unwrap().tantivy_dir()?;
+                let hits = ReadIndex::open(&dir)?.search(query, 2)?;
+                Ok((binding, hits.len()))
+            },
+        )
+    }
+
+    fn rebuild(&self, admit: impl FnOnce() -> Result<()>) -> Result<job::JobStats> {
+        let budget = crate::search::budget::PayloadBudget::new(self.config.search.clone()).unwrap();
+        let operation = crate::search::operation::SearchOperation::new(
+            budget.settings(),
+            std::time::Instant::now(),
+            crate::hybrid::work::Cancellation::new(),
+        )
+        .unwrap();
+        let account = budget.reserve(0).unwrap();
+        let mut capture = job::CaptureBudget {
+            account: &account,
+            operation: &operation,
+            observed: None,
+        };
+        let rebuild = crate::index::generation_job::GenerationJob {
+            cache: self.env.cache.path(),
+            project: &self.project,
+            epoch: self.request.epoch,
+            settings: &self.policy,
+            config: &self.config,
+        };
+        rebuild.prepare(&mut capture, |pair| {
+            pair.publish(|commit| commit.commit(admit))
+        })
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_reads_incremental_revision_after_schema_1_upgrade() {
+    let pair = RevisablePair::new();
+    let directory = pair.dir();
+    let tantivy = directory.join("tantivy");
+    let seal = pair.use_schema_1();
+    let (initial, hits) = pair.search("Applemigration").unwrap();
+    assert_eq!(hits, 1);
+
+    pair.write_source("# Cherry\n\nCherryupdatedbatch\n");
+    assert_eq!(pair.apply().unwrap().docs, 1);
+    let (current, hits) = pair.search("Cherryupdatedbatch").unwrap();
+    assert_eq!(current.generation_id(), Some(pair.generation));
+    assert_eq!(current.content_revision(), initial.content_revision() + 1);
+    assert_eq!(hits, 1);
+    assert_eq!(pair.search("Applemigration").unwrap().1, 0);
+    let manifest = fs::read(tantivy.join("meta.json")).unwrap();
+    assert_eq!(pair.apply().unwrap().docs, 0);
+    assert_eq!(pair.search("Cherryupdatedbatch").unwrap().0, current);
+    assert_eq!(fs::read(tantivy.join("meta.json")).unwrap(), manifest);
+    assert_eq!(fs::read(directory.join("seal.json")).unwrap(), seal);
+    let cache = pair.env.cache.path().canonicalize().unwrap();
+    assert_eq!(
+        registry_inspect::observe_project(
+            pair.registry.connection(),
+            &cache,
+            pair.project.id,
+            limits(),
+            0,
+        )
+        .unwrap()
+        .unwrap()
+        .content_revision,
+        current.content_revision(),
+    );
+
+    let metadata = Connection::open(directory.join("metadata.db")).unwrap();
+    let schema: i64 = metadata
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(schema, 2);
+    metadata
+        .execute(
+            "UPDATE generation_state SET tantivy_manifest=zeroblob(32)",
+            [],
+        )
+        .unwrap();
+    assert!(
+        pair.search("Cherryupdatedbatch")
+            .unwrap_err()
+            .to_string()
+            .contains("Tantivy")
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_rebuild_replaces_an_interrupted_revision_and_resumes_cleanup() {
+    let pair = RevisablePair::new();
+    let directory = pair.dir();
+    let tantivy = directory.join("tantivy");
+    let metadata_path = directory.join("metadata.db");
+    let metadata = Connection::open(&metadata_path).unwrap();
+    metadata
+        .execute_batch(
+            "CREATE TRIGGER fail_terminal_revision BEFORE UPDATE OF mutation_pending
+         ON generation_state WHEN NEW.mutation_pending=0
+         BEGIN SELECT RAISE(ABORT, 'interrupted revision publication'); END;",
+        )
+        .unwrap();
+    drop(metadata);
+
+    pair.write_source("# Plum\n\nPlumincompletebatch\n");
+    let error = pair.apply().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("interrupted revision publication"),
+        "{error}"
+    );
+    assert_eq!(
+        ReadIndex::open(&tantivy)
+            .unwrap()
+            .search("Plumincompletebatch", 1)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        pair.search("Applemigration")
+            .unwrap_err()
+            .to_string()
+            .contains("RecoveryRequired")
+    );
+    assert_eq!(
+        inspect_project_index(
+            pair.env.cache.path(),
+            pair.project.id,
+            &pair.policy,
+            limits()
+        )
+        .unwrap(),
+        ProjectIndexObservation::Unavailable(registry_inspect::UnavailableReason::RecoveryRequired),
+    );
+
+    let unknown = tantivy.join("12345678901234567890123456789012.idx");
+    fs::write(&unknown, "not owned by the index").unwrap();
+    let refusal = pair
+        .rebuild(|| Err(admission("rebuild cancelled")))
+        .unwrap_err();
+    assert!(
+        refusal.to_string().contains("rebuild cancelled"),
+        "{refusal}"
+    );
+    assert_eq!(pair.env.catalog_state().0, pair.generation);
+    assert!(pair.search("Plumincompletebatch").is_err());
+
+    assert_eq!(pair.rebuild(|| Ok(())).unwrap().docs, 1);
+    let (repaired, hits) = pair.search("Plumincompletebatch").unwrap();
+    assert_ne!(repaired.generation_id(), Some(pair.generation));
+    assert_eq!(hits, 1);
+
+    let reclaim = || {
+        reclaim_retired_lexical_generation(
+            pair.env.cache.path(),
+            pair.request,
+            pair.generation,
+            &pair.policy,
+            limits(),
+        )
+    };
+    assert!(reclaim().is_err());
+    assert!(unknown.is_file());
+    fs::remove_file(unknown).unwrap();
+    let db = Connection::open(pair.env.cache.path().join(DB_FILE)).unwrap();
+    db.execute(
+        "UPDATE project_generations SET phase='reclaiming' WHERE id=?1",
+        [pair.generation],
+    )
+    .unwrap();
+    drop(db);
+    fs::remove_file(metadata_path).unwrap();
+    reclaim().unwrap();
+    assert!(!directory.exists());
+    assert_eq!(pair.search("Plumincompletebatch").unwrap().0, repaired);
+}
+
+#[test]
+#[cfg(unix)]
+fn explicit_rebuild_recovers_local_rollback_journals() {
+    const CHILD_METADATA: &str = "DOCSBASE_TEST_ABANDON_LOCAL_METADATA";
+    const CHILD_SPILL: &str = "DOCSBASE_TEST_ABANDON_LOCAL_SPILL";
+    if let Some(path) = std::env::var_os(CHILD_METADATA) {
+        let db = Connection::open(path).unwrap();
+        db.pragma_update(None, "cache_spill", std::env::var(CHILD_SPILL).unwrap())
+            .unwrap();
+        db.execute_batch(
+            "PRAGMA synchronous=EXTRA;
+             PRAGMA cache_size=1;
+             BEGIN IMMEDIATE;
+             UPDATE generation_state SET content_revision=content_revision+99;
+             UPDATE chunks SET text=hex(zeroblob(65536));",
+        )
+        .unwrap();
+        std::process::exit(0);
+    }
+    for (spill, header) in [
+        ("1", [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7]),
+        ("0", [0; 8]),
+    ] {
+        check_local_rollback_journal(CHILD_METADATA, CHILD_SPILL, spill, header);
+    }
+}
+
+#[cfg(unix)]
+fn check_local_rollback_journal(metadata_env: &str, spill_env: &str, spill: &str, header: [u8; 8]) {
+    let env = Env::new();
+    let request = env.request();
+    let settings = settings::standalone().unwrap();
+    let config = Config::default();
+    let active = publish_lexical_generation(
+        env.cache.path(),
+        request,
+        env.build(request).unwrap(),
+        &settings,
+        limits(),
+        &config,
+    )
+    .unwrap();
+    let dir = env.generation(active.generation_id.unwrap());
+    let metadata = dir.join("metadata.db");
+    let db = Connection::open(&metadata).unwrap();
+    db.execute("UPDATE generation_state SET mutation_pending=1", [])
+        .unwrap();
+    drop(db);
+
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "store::generation_build::tests::explicit_rebuild_recovers_local_rollback_journals",
+        ])
+        .env(metadata_env, &metadata)
+        .env(spill_env, spill)
+        .status()
+        .unwrap();
+    assert!(child.success());
+    let journal = dir.join("metadata.db-journal");
+    let bytes = fs::read(&journal).unwrap();
+    assert!(
+        bytes.len() > 512 && bytes[..8] == header,
+        "spill={spill}, header={:?}",
+        &bytes[..8]
+    );
+    let cache = env.cache.path().canonicalize().unwrap();
+    assert!(
+        observe_index_base(
+            &cache,
+            active.project_id,
+            request.epoch,
+            &settings,
+            limits()
+        )
+        .is_err()
+    );
+    assert!(
+        journal.is_file(),
+        "a normal observer changed the SQLite journal"
+    );
+
+    let (base, interrupted) = observe_replacement_base(
+        &cache,
+        active.project_id,
+        request.epoch,
+        &settings,
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(base, Some(active));
+    assert!(interrupted.is_some());
+    assert!(!journal.exists());
+    let db = Connection::open(&metadata).unwrap();
+    let text: String = db
+        .query_row("SELECT text FROM chunks LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    assert!(text.contains("Applemigration"));
+    assert!(text.len() < 128);
+}
+
+#[test]
+#[cfg(unix)]
+fn an_unindexed_vanished_file_does_not_drop_an_unrelated_edit() {
+    let pair = RevisablePair::new();
+    pair.write_source("addedowl");
+    let input = job::JobInput::Incremental(
+        vec![
+            pair.env.source.path().join("guide.md"),
+            pair.env.source.path().join("vanished.md"),
+        ]
+        .into(),
+    );
+    let stats = crate::store::project_index::apply_lexical_batch(
+        &pair.registry,
+        &pair.project,
+        &pair.config,
+        &input,
+        None,
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(stats.errors, 1);
+    assert_eq!(stats.docs, 1);
+    assert_eq!(pair.search("addedowl").unwrap().1, 1);
+}
+
 #[test]
 #[cfg(unix)]
 fn retired_local_pair_waits_for_readers_and_preserves_unowned_files() {
@@ -798,15 +1210,37 @@ fn publication_rechecks_a_local_base_and_rejects_a_stale_revision() {
         ..initial
     };
     let staged = env.build(next).unwrap();
-    let metadata = Connection::open(
-        env.generation(active.generation_id.unwrap())
-            .join("metadata.db"),
+    let directory = env.generation(active.generation_id.unwrap());
+    let tantivy = directory.join("tantivy");
+    let registry = Db::open_readonly_for_search(env.cache.path(), &configured).unwrap();
+    let project = registry::project_by_id(&registry, active.project_id)
+        .unwrap()
+        .unwrap();
+    drop(registry);
+    let mut metadata = Db {
+        conn: Connection::open(directory.join("metadata.db")).unwrap(),
+        cache_root: directory.clone(),
+        settings: configured.clone(),
+        generation_catalog: false,
+    };
+    let config = Config::default();
+    let mut writer =
+        IndexHandle::open_or_create_with_settings(&tantivy, config.index_writer).unwrap();
+    job::run_incremental_with(
+        &mut metadata,
+        &mut writer,
+        &project,
+        &[env.source.path().join("guide.md")],
+        &config,
     )
     .unwrap();
+    writer.finish().unwrap();
+    let manifest = blake3::hash(&fs::read(tantivy.join("meta.json")).unwrap());
     metadata
+        .connection()
         .execute(
-            "UPDATE generation_state SET content_revision = content_revision + 1",
-            [],
+            "UPDATE generation_state SET content_revision = content_revision + 1, tantivy_manifest = ?1",
+            [manifest.as_bytes().as_slice()],
         )
         .unwrap();
     drop(metadata);
@@ -1640,7 +2074,10 @@ fn direct_index_refusal_at_the_commit_boundary_preserves_the_old_pair() {
     };
     let result = with_prepared_lexical_generation(
         env.cache.path(),
-        request,
+        OperationalBuild {
+            request,
+            interrupted: None,
+        },
         &settings,
         limits(),
         &config,
@@ -1665,7 +2102,10 @@ fn direct_index_refusal_at_the_commit_boundary_preserves_the_old_pair() {
 
     let stats = with_prepared_lexical_generation(
         env.cache.path(),
-        request,
+        OperationalBuild {
+            request,
+            interrupted: None,
+        },
         &settings,
         limits(),
         &config,

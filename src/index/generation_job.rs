@@ -7,7 +7,7 @@ use crate::config::schema::Resolved;
 use crate::error::Result;
 use crate::index::job::{CaptureBudget, JobStats};
 use crate::store::generation_build::{
-    LexicalBuildRequest, PreparedLexicalPublication, observe_index_base,
+    LexicalBuildRequest, OperationalBuild, PreparedLexicalPublication, observe_replacement_base,
     with_prepared_lexical_generation,
 };
 use crate::store::{models::Project, settings::DbSettings};
@@ -28,7 +28,8 @@ impl GenerationJob<'_> {
     ) -> Result<JobStats> {
         let limits = crate::config::observe::PlanningLimits::standard().registry;
         let project_id = self.project.id;
-        let base = observe_index_base(self.cache, project_id, self.epoch, self.settings, limits)?;
+        let (base, interrupted) =
+            observe_replacement_base(self.cache, project_id, self.epoch, self.settings, limits)?;
         // Direct index and daemon Sync own the same project's lexical staging.
         // The legacy key retains ownership across upgrades. The staged receipt
         // and CAS bind the base and the validated effective index recipe.
@@ -44,7 +45,10 @@ impl GenerationJob<'_> {
         };
         with_prepared_lexical_generation(
             self.cache,
-            request,
+            OperationalBuild {
+                request,
+                interrupted,
+            },
             self.settings,
             limits,
             self.config,

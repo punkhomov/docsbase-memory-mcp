@@ -68,6 +68,15 @@ pub(crate) fn lexical_only(config: &Config) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn catalog_lexical_only(config: &Config) -> Result<()> {
+    if config.hybrid || config.hybrid_cfg.enabled {
+        return Err(Error::Admission {
+            message: "v5 registry requires lexical-only global and project policy".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 impl LaunchConfig {
     pub(crate) fn admit(
         self,
@@ -77,7 +86,19 @@ impl LaunchConfig {
         self.config.settings().validate()?;
         let mut catalog_epoch = None;
         let website = match &self.config.settings().daemon.profile {
-            crate::daemon::settings::DaemonProfile::Shared => None,
+            crate::daemon::settings::DaemonProfile::Shared => {
+                let config = self.config.settings();
+                if cfg!(unix)
+                    && config.vector_store.is_some()
+                    && let Ok(db) =
+                        crate::store::Db::open_readonly_for_admission(cache, settings, true)
+                    && db.has_generation_catalog()
+                {
+                    catalog_lexical_only(config)?;
+                    catalog_epoch = Some(db.generation_epoch()?);
+                }
+                None
+            }
             crate::daemon::settings::DaemonProfile::Website { project_root } => {
                 lexical_only(self.config.settings())?;
                 let root = project_root

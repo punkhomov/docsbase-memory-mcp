@@ -204,9 +204,21 @@ pub(crate) fn publish(
     attempt: i64,
     stats: &JobStats,
 ) -> Result<()> {
-    let root = project.canonical_root.to_string_lossy();
     let tx = db.begin_write()?;
-    let generation = repo::index_generation(&tx, project.id)?;
+    publish_in(&tx, project, config, scope, attempt, stats)?;
+    tx.commit().map_err(db_error)
+}
+
+pub(crate) fn publish_in(
+    tx: &rusqlite::Transaction<'_>,
+    project: &Project,
+    config: &Config,
+    scope: SurveyScope,
+    attempt: i64,
+    stats: &JobStats,
+) -> Result<()> {
+    let root = project.canonical_root.to_string_lossy();
+    let generation = repo::index_generation(tx, project.id)?;
     let outcome = IndexOutcome {
         schema_version: OUTCOME_VERSION,
         attempt_id: attempt,
@@ -243,7 +255,6 @@ pub(crate) fn publish(
             "indexing outcome was superseded before publication",
         ));
     }
-    tx.commit().map_err(db_error)?;
     Ok(())
 }
 

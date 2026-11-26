@@ -11,7 +11,7 @@ use crate::store::{
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::{path::PathBuf, sync::Arc};
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub(crate) struct Context {
     pub(crate) cache: PathBuf,
@@ -28,12 +28,30 @@ pub(crate) struct Owner {
     _singleton: OwnedSemaphorePermit,
 }
 
-impl Owner {
-    pub(crate) fn new(active_id: Arc<AtomicI64>, singleton: OwnedSemaphorePermit) -> Self {
+pub(crate) struct Slot {
+    permit: Arc<Semaphore>,
+    active_id: Arc<AtomicI64>,
+}
+
+impl Default for Slot {
+    fn default() -> Self {
         Self {
-            active_id,
-            _singleton: singleton,
+            permit: Arc::new(Semaphore::new(1)),
+            active_id: Arc::new(AtomicI64::new(0)),
         }
+    }
+}
+
+impl Slot {
+    pub(crate) fn try_own(&self) -> Option<Owner> {
+        Some(Owner {
+            active_id: self.active_id.clone(),
+            _singleton: self.permit.clone().try_acquire_owned().ok()?,
+        })
+    }
+
+    pub(crate) fn active_id(&self) -> i64 {
+        self.active_id.load(Ordering::Acquire)
     }
 }
 

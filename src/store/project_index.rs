@@ -10,15 +10,21 @@ use crate::error::{Error, Result};
 use crate::index::{outcome, tantivy_index::ReadIndex};
 
 use super::generation_catalog::{self, Layout};
-use super::generation_seal::{GenerationSeal, SEAL_FORMAT};
+use super::generation_seal::GenerationSeal;
 use super::models::{Project, ProjectStatus};
 use super::registry_inspect::{
     self, InspectionLimits, ObservedProjectIndex, ProjectIndexLayout, UnavailableReason,
 };
 use super::{Db, migrations, repo};
 
-pub(super) const LOCAL_SCHEMA_VERSION: u32 = 1;
+mod update;
+pub(crate) use update::apply_lexical_batch;
+
+pub(super) const SEALED_LOCAL_SCHEMA_VERSION: u32 = 1;
+pub(super) const LOCAL_SCHEMA_VERSION: u32 = 2;
 pub(super) const LOCAL_SCHEMA_SQL: &str = include_str!("registry_inspect/project_schema.sql");
+pub(super) const LOCAL_REVISION_SCHEMA_SQL: &str =
+    include_str!("registry_inspect/revision_schema.sql");
 
 /// Identifies one revision of a project's existing SQLite/Tantivy pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,13 +92,25 @@ pub(crate) struct LocalMetadata {
     pub(crate) db: Db,
     pub(crate) index_recipe: String,
     tantivy: PathBuf,
-    sealed_files: Vec<(String, u64)>,
+    publication: TantivyPublication,
+}
+
+enum TantivyPublication {
+    Sealed(Vec<(String, u64)>),
+    Revised([u8; 32]),
 }
 
 impl LocalMetadata {
     pub(crate) fn tantivy_dir(&self) -> Result<PathBuf> {
-        registry_inspect::check_tantivy_files(&self.tantivy, Some(&self.sealed_files))
-            .map_err(|reason| unavailable("Tantivy files", reason))?;
+        let proof = match &self.publication {
+            TantivyPublication::Sealed(files) => {
+                registry_inspect::check_tantivy_files(&self.tantivy, Some(files))
+            }
+            TantivyPublication::Revised(digest) => {
+                registry_inspect::check_revised_tantivy(&self.tantivy, digest)
+            }
+        };
+        proof.map_err(|reason| unavailable("Tantivy files", reason))?;
         Ok(self.tantivy.clone())
     }
 }
@@ -108,13 +126,69 @@ pub(crate) fn with_catalog_pair<R, T>(
 where
     R: Deref<Target = Db>,
 {
-    with_catalog_pair_using(registry, project, None, read)
+    with_catalog_pair_using(registry, project, PairAccess::Read(None), read)
+}
+
+/// A watcher can update a selected local pair. Read registration status
+/// from that pair because a new v5 project has no index rows in the registry.
+pub(crate) fn local_watcher_project(registry: &Db, project: &Project) -> Result<Option<Project>> {
+    let head = generation_catalog::active_head(registry.connection(), project.id)
+        .map_err(|reason| unavailable("active generation", reason))?;
+    if !head.is_some_and(|head| matches!(head.layout, Layout::Local { .. })) {
+        return Ok(None);
+    }
+    with_catalog_pair(registry, project, |_, local, _| match local {
+        Some(local) => registry::project_by_id(&local.db, project.id),
+        None => Ok(None),
+    })
+}
+
+pub(crate) struct CatalogProjectInfo {
+    pub(crate) project: Project,
+    pub(crate) counts: repo::ProjectCounts,
+    pub(crate) revision: i64,
+}
+
+pub(crate) fn catalog_project_info(
+    registry: &Db,
+    project: &Project,
+) -> Result<Option<CatalogProjectInfo>> {
+    let head = generation_catalog::active_head(registry.connection(), project.id)
+        .map_err(|reason| unavailable("active generation", reason))?;
+    if head.is_none() {
+        return Ok(None);
+    }
+    with_catalog_pair(registry, project, |registry, local, index| {
+        let summarize = |metadata: &Db| {
+            let registered = registry::project_by_id(metadata, project.id)?
+                .ok_or_else(|| invalid_index("selected generation has no project metadata"))?;
+            let counts = repo::project_counts(metadata.connection(), project.id)?;
+            Ok(Some(CatalogProjectInfo {
+                project: registered,
+                counts,
+                revision: index.content_revision(),
+            }))
+        };
+        match local.as_ref() {
+            Some(local) => {
+                local.tantivy_dir()?;
+                summarize(&local.db).map_err(local_metadata_error)
+            }
+            None => summarize(registry),
+        }
+    })
+}
+
+#[derive(Clone, Copy)]
+enum PairAccess {
+    Read(Option<InspectionLimits>),
+    Write,
 }
 
 fn with_catalog_pair_using<R, T>(
     registry: R,
     project: &Project,
-    limits: Option<InspectionLimits>,
+    access: PairAccess,
     read: impl FnOnce(R, Option<LocalMetadata>, ProjectIndex) -> Result<T>,
 ) -> Result<T>
 where
@@ -125,7 +199,7 @@ where
     registry_inspect::check_directory(&directory)
         .map_err(|reason| unavailable("project generation directory", reason))?;
     let writer = lifecycle::lease_path(&cache, project.id);
-    with_catalog_lease(&writer, "project lease", || {
+    let work = || {
         let current = registry::project_by_id(&registry, project.id)?
             .filter(|current| current.canonical_root == project.canonical_root)
             .ok_or_else(|| invalid_index("project binding changed before search preparation"))?;
@@ -171,52 +245,68 @@ where
                     let seal: GenerationSeal = serde_json::from_slice(&bytes).map_err(|_| {
                         invalid_index("published generation seal has an invalid format")
                     })?;
-                    let metadata = open_catalog_metadata(&registry, &generation_dir, limits)?;
+                    let metadata = open_catalog_metadata(&registry, &generation_dir, access)
+                        .map_err(local_metadata_error)?;
                     let revision = registry_inspect::local_revision(
                         metadata.connection(),
                         project.id,
                         head.id,
                     )
                     .map_err(|reason| unavailable("generation metadata", reason))?;
-                    if seal.format != SEAL_FORMAT
-                        || seal.installation_epoch != epoch
-                        || seal.project_id != project.id
-                        || seal.generation_id != head.id
-                        || seal.content_revision != revision
-                        || seal.metadata_schema != LOCAL_SCHEMA_VERSION
-                    {
+                    if !revision.matches_seal(&seal, epoch, project.id, head.id) {
                         return Err(invalid_index(
                             "published generation seal does not match the selected metadata identity",
                         ));
                     }
-                    let outcome = outcome::read(&metadata, project.id)?;
-                    if !outcome.is_some_and(|outcome| {
-                        outcome.is_complete()
-                            && outcome.index_generation == revision
-                            && project.canonical_root.to_str()
-                                == Some(outcome.canonical_root.as_str())
-                            && outcome.recipe_id == seal.index_recipe
-                    }) {
-                        return Err(invalid_index(
-                            "published generation seal does not match the complete index outcome",
-                        ));
-                    }
+                    verify_local_outcome(&metadata, project, revision, &seal)?;
                     let index = ProjectIndex {
                         project_id: project.id,
-                        content_revision: revision,
+                        content_revision: revision.content_revision,
                         generation: Some(generation),
                     };
                     let local = LocalMetadata {
                         db: metadata,
                         index_recipe: seal.index_recipe,
                         tantivy: generation_dir.join("tantivy"),
-                        sealed_files: seal.files,
+                        publication: match revision.manifest {
+                            Some(digest) => TantivyPublication::Revised(digest),
+                            None => TantivyPublication::Sealed(seal.files),
+                        },
                     };
                     read(registry, Some(local), index)
                 })
             }
         }
-    })
+    };
+    let file = registry_inspect::open_checked_file(&writer)
+        .map_err(|reason| unavailable("project lease", reason))?;
+    match access {
+        PairAccess::Read(_) => lifecycle::with_read_lock(file, &writer, work),
+        PairAccess::Write => lifecycle::with_writer_lock(file, &writer, work),
+    }
+}
+
+fn verify_local_outcome(
+    metadata: &Db,
+    project: &Project,
+    revision: registry_inspect::LocalRevision,
+    seal: &GenerationSeal,
+) -> Result<()> {
+    let outcome = outcome::read(metadata, project.id).map_err(local_metadata_error)?;
+    if !outcome.is_some_and(|outcome| {
+        // The seal proves original corpus coverage. An incremental outcome
+        // also reports per-path capture errors while committing valid edits.
+        (outcome.is_complete()
+            || (revision.manifest.is_some() && outcome.scope == outcome::SurveyScope::Subset))
+            && outcome.index_generation == revision.content_revision
+            && project.canonical_root.to_str() == Some(outcome.canonical_root.as_str())
+            && outcome.recipe_id == seal.index_recipe
+    }) {
+        return Err(invalid_index(
+            "published generation seal or revision does not match a successful index outcome",
+        ));
+    }
+    Ok(())
 }
 
 /// Observe a registered base through the same leases and artifact proofs as
@@ -239,51 +329,56 @@ pub(super) fn observe_catalog_index(
             ))
         };
     }
-    with_catalog_pair_using(db, project, Some(limits), |registry, local, index| {
-        let generation = index
-            .generation
-            .ok_or_else(|| invalid_index("selected pair has no catalog identity"))?;
-        let dir = if let Some(local) = local {
-            local.tantivy_dir()?
-        } else {
-            let dir = index.tantivy_dir(registry.cache_root());
-            registry_inspect::check_tantivy_files(&dir, None)
-                .map_err(|reason| unavailable("Tantivy files", reason))?;
-            dir
-        };
-        ReadIndex::check_health_with_project_lease(&dir)?;
-        Ok(Some(ObservedProjectIndex {
-            project_id: project.id,
-            epoch: Some(generation.epoch),
-            generation_id: Some(generation.id),
-            content_revision: index.content_revision,
-            layout: if generation.seal.is_some() {
-                ProjectIndexLayout::Local
+    with_catalog_pair_using(
+        db,
+        project,
+        PairAccess::Read(Some(limits)),
+        |registry, local, index| {
+            let generation = index
+                .generation
+                .ok_or_else(|| invalid_index("selected pair has no catalog identity"))?;
+            let dir = if let Some(local) = local {
+                local.tantivy_dir()?
             } else {
-                ProjectIndexLayout::Legacy
-            },
-        }))
-    })
+                let dir = index.tantivy_dir(registry.cache_root());
+                registry_inspect::check_tantivy_files(&dir, None)
+                    .map_err(|reason| unavailable("Tantivy files", reason))?;
+                dir
+            };
+            ReadIndex::check_health_with_project_lease(&dir)?;
+            Ok(Some(ObservedProjectIndex {
+                project_id: project.id,
+                epoch: Some(generation.epoch),
+                generation_id: Some(generation.id),
+                content_revision: index.content_revision,
+                layout: if generation.seal.is_some() {
+                    ProjectIndexLayout::Local
+                } else {
+                    ProjectIndexLayout::Legacy
+                },
+            }))
+        },
+    )
 }
 
-fn open_catalog_metadata(
-    registry: &Db,
-    directory: &Path,
-    limits: Option<InspectionLimits>,
-) -> Result<Db> {
+fn open_catalog_metadata(registry: &Db, directory: &Path, access: PairAccess) -> Result<Db> {
     let path = directory.join("metadata.db");
     registry_inspect::sidecars_absent(&path)
         .map_err(|reason| unavailable("generation metadata sidecars", reason))?;
     crate::platform::fs::check_single_link(&path)
         .map_err(|err| Error::internal_with_source("inspect generation metadata file", err))?;
-    let conn = Connection::open_with_flags(
-        &path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(repo::db_error)?;
-    conn.busy_timeout(registry.settings().settings().read_busy_timeout)
+    let settings = registry.settings().settings();
+    let (flags, timeout) = match access {
+        PairAccess::Read(_) => (OpenFlags::SQLITE_OPEN_READ_ONLY, settings.read_busy_timeout),
+        PairAccess::Write => (
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+            settings.write_busy_timeout,
+        ),
+    };
+    let conn = Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_NOFOLLOW)
         .map_err(repo::db_error)?;
-    if let Some(limits) = limits {
+    conn.busy_timeout(timeout).map_err(repo::db_error)?;
+    if let PairAccess::Read(Some(limits)) = access {
         registry_inspect::configure_connection(&conn, limits).map_err(repo::db_error)?;
     }
     Ok(Db {
@@ -314,6 +409,13 @@ fn invalid_index(message: impl Into<String>) -> Error {
     Error::Project {
         message: message.into(),
         instruction: Some("check the published project index before retrying".into()),
+    }
+}
+
+fn local_metadata_error(error: Error) -> Error {
+    match error {
+        Error::Project { .. } => error,
+        _ => invalid_index(format!("cannot read generation-local metadata: {error}")),
     }
 }
 

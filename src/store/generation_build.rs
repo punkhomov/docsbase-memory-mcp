@@ -18,7 +18,9 @@ use crate::index::{
 use crate::platform::file_lease::ExclusiveFileLease;
 use crate::platform::fs as native_fs;
 
-use super::project_index::{LOCAL_SCHEMA_SQL, LOCAL_SCHEMA_VERSION, project_directory};
+use super::project_index::{
+    LOCAL_REVISION_SCHEMA_SQL, LOCAL_SCHEMA_SQL, LOCAL_SCHEMA_VERSION, project_directory,
+};
 use super::registry_inspect::{
     self, InspectionLimits, ObservedProjectIndex, ProjectIndexLayout, ProjectIndexObservation,
     inspect_project_index,
@@ -32,12 +34,18 @@ use super::{
 
 mod catalog_access;
 use catalog_access::CatalogAccess;
-pub(crate) use catalog_access::{observe_index_base, open_index_registry};
+use catalog_access::observe_index_base;
+pub(crate) use catalog_access::{observe_replacement_base, open_index_registry};
+
+mod interrupted;
+use interrupted::InterruptedBase;
 
 mod publication;
 pub use publication::publish_lexical_generation;
 
 mod recovery;
+mod retirement;
+pub(super) use recovery::sync_directory;
 pub use recovery::{
     discard_lexical_generation, find_lexical_build_to_discard, reclaim_retired_lexical_generation,
 };
@@ -137,7 +145,7 @@ impl PreparedLexicalPublication<'_> {
 
 pub(crate) fn with_prepared_lexical_generation<T>(
     cache: &Path,
-    request: LexicalBuildRequest,
+    build: OperationalBuild,
     settings: &Resolved<DbSettings>,
     limits: InspectionLimits,
     config: &Config,
@@ -147,15 +155,24 @@ pub(crate) fn with_prepared_lexical_generation<T>(
     prepare_and_then(
         cache,
         BuildInputs {
-            request,
+            request: build.request,
             settings,
             limits,
             config,
         },
         native_fs::available_space,
-        BuildPurpose::DirectIndex(capture),
+        BuildPurpose::DirectIndex {
+            capture,
+            interrupted: build.interrupted,
+        },
         complete,
     )
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct OperationalBuild {
+    pub(crate) request: LexicalBuildRequest,
+    pub(crate) interrupted: Option<InterruptedBase>,
 }
 
 #[derive(Clone, Copy)]
@@ -168,14 +185,23 @@ struct BuildInputs<'a> {
 
 enum BuildPurpose<'a, 'b> {
     Maintenance,
-    DirectIndex(&'a mut job::CaptureBudget<'b>),
+    DirectIndex {
+        capture: &'a mut job::CaptureBudget<'b>,
+        interrupted: Option<InterruptedBase>,
+    },
 }
 
 impl BuildPurpose<'_, '_> {
     const fn access(&self) -> CatalogAccess {
         match self {
             Self::Maintenance => CatalogAccess::Stopped,
-            Self::DirectIndex(_) => CatalogAccess::Operational,
+            Self::DirectIndex {
+                interrupted: None, ..
+            } => CatalogAccess::Operational,
+            Self::DirectIndex {
+                interrupted: Some(base),
+                ..
+            } => CatalogAccess::Repair(*base),
         }
     }
 }
@@ -224,10 +250,10 @@ fn prepare_and_then<T>(
     ensure_directory(&cache.join("projects"))?;
     ensure_directory(&project_dir)?;
     with_preparation_lease(&project_dir, || {
-        let direct = access == CatalogAccess::Operational;
+        let direct = access != CatalogAccess::Stopped;
         let capture = match purpose {
             BuildPurpose::Maintenance => None,
-            BuildPurpose::DirectIndex(capture) => {
+            BuildPurpose::DirectIndex { capture, .. } => {
                 capture.operation.check()?;
                 // The preparation lease excludes an active builder. Reclaim
                 // only this command's old attempt, under its own reader lease.
@@ -380,6 +406,20 @@ fn verify_base(
     let observed = match access {
         CatalogAccess::Operational => {
             observe_index_base(cache, request.project_id, request.epoch, settings, limits)?
+        }
+        CatalogAccess::Repair(base) => {
+            if request.base != Some(base.index) {
+                return Err(admission(
+                    "generation rebuild base disagrees with its mutation intent",
+                ));
+            }
+            let lock = lifecycle::lease_path(cache, request.project_id);
+            lifecycle::with_read_lock(open_coordination_file(&lock, false)?, &lock, || {
+                access.read(cache, settings, limits, |conn| {
+                    interrupted::recheck(conn, cache, base, settings, limits)
+                })
+            })?;
+            Some(base.index)
         }
         CatalogAccess::Stopped => {
             match inspect_project_index(cache, request.project_id, settings, limits)? {
@@ -693,6 +733,8 @@ fn build_metadata(
         params![project.id, generation, revision],
     )
     .map_err(repo::db_error)?;
+    tx.execute_batch(LOCAL_REVISION_SCHEMA_SQL)
+        .map_err(repo::db_error)?;
     tx.pragma_update(None, "user_version", LOCAL_SCHEMA_VERSION)
         .map_err(repo::db_error)?;
     tx.commit().map_err(repo::db_error)?;
