@@ -214,15 +214,16 @@ impl PreparedLexicalPublication {
         finalize: impl FnOnce(publication::LexicalCommit<'_>) -> Result<ObservedProjectIndex>,
     ) -> Result<job::JobStats> {
         self.publish_with_embedding(None, finalize)
+            .map(|(stats, _)| stats)
     }
 
     pub(crate) fn publish_with_embedding(
         self,
         embedding_recipe: Option<crate::vector_cache::EmbeddingRecipe>,
         finalize: impl FnOnce(publication::LexicalCommit<'_>) -> Result<ObservedProjectIndex>,
-    ) -> Result<job::JobStats> {
+    ) -> Result<(job::JobStats, ObservedProjectIndex)> {
         let pair = self.pair;
-        publication::publish_prepared(
+        let published = publication::publish_prepared(
             publication::StagedPublication {
                 cache: &pair.cache,
                 project_dir: &pair.project_dir,
@@ -243,7 +244,7 @@ impl PreparedLexicalPublication {
             &self.settings,
             pair.limits,
         );
-        Ok(pair.outcome.stats)
+        Ok((pair.outcome.stats, published))
     }
 }
 

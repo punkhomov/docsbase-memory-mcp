@@ -40,6 +40,7 @@ use crate::search::metadata::MetadataSource;
 use crate::store::Db;
 use crate::store::migrations;
 use crate::store::read_pool::ReadPool;
+use crate::store::registry_inspect::ObservedProjectIndex;
 use crate::store::settings::{DbSettings, ReadPoolSettings};
 use crate::store::{
     generation_build::CatalogHead,
@@ -2847,6 +2848,14 @@ async fn start_catalog_sync(
     };
 
     let project_id = context.project.id;
+    let warm = (shared.website.is_none()
+        && context.stages.ranking == Ranking::Rrf
+        && context.stages.embedder.is_some())
+    .then(|| CatalogAnnWarm {
+        project: context.project.clone(),
+        config: context.config.clone(),
+        stages: context.stages.clone(),
+    });
     let owner = service
         .admit_with_account(
             shared.workers.clone(),
@@ -2866,11 +2875,12 @@ async fn start_catalog_sync(
             move |state| state.prepare_catalog_sync(context, &call),
         )
         .await?;
-    let status = (**status).clone();
+    let acknowledgement = (**status).clone();
+    drop(status);
     let service = service.clone();
     let shared = shared.clone();
     let run = async move {
-        crate::index::async_job::catalog_sync::execute(
+        let published = crate::index::async_job::catalog_sync::execute(
             &service,
             &shared.workers,
             &activity,
@@ -2879,6 +2889,9 @@ async fn start_catalog_sync(
         )
         .await?;
         finish_index_watch(&shared, project_id, &operation, &activity).await;
+        if let Some(warm) = warm {
+            warm.schedule(&shared, &service, &operation, published);
+        }
         Ok::<_, Error>(())
     };
     // The JobRoot owns the terminal envelope and native work even if the
@@ -2888,7 +2901,115 @@ async fn start_catalog_sync(
     } else {
         run.await?;
     }
-    Ok(status)
+    Ok(acknowledgement)
+}
+
+struct CatalogAnnWarm {
+    project: Project,
+    config: Arc<Config>,
+    stages: Arc<HybridStages>,
+}
+
+impl CatalogAnnWarm {
+    fn schedule(
+        self,
+        shared: &Arc<Shared>,
+        service: &super::job_service::JobService,
+        operation: &crate::search::operation::SearchOperation,
+        published: ObservedProjectIndex,
+    ) {
+        let shutdown = service.shutdown_token();
+        if shared.stopping.load(Ordering::SeqCst) || shutdown.is_cancelled() {
+            return;
+        }
+        let Ok(reservation) = shared.workers.reserve_background(operation) else {
+            return;
+        };
+        let owner = shared.clone();
+        let activity = shared.activity.track();
+        let call = operation.clone();
+        let project_id = self.project.id;
+        drop(tokio::spawn(async move {
+            let mut cancellation = request::CancelOnDrop(Some(call.cancellation().clone()));
+            let work = async {
+                let permit = owner
+                    .workers
+                    .background_reserved(&call, reservation)
+                    .await?;
+                let native_call = call.clone();
+                let native_activity = activity.clone();
+                let worker = request::spawn(Some(permit), Some(activity), move || {
+                    native_call.check()?;
+                    self.run(&owner, &native_call, native_activity, published)
+                });
+                request::run(worker, Some(&call)).await
+            };
+            let result = tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return,
+                result = work => result,
+            };
+            cancellation.0 = None;
+            if let Err(error) = result {
+                eprintln!("warning: catalog ANN warm for project {project_id}: {error}");
+            }
+        }));
+    }
+
+    fn run(
+        &self,
+        shared: &Shared,
+        operation: &crate::search::operation::SearchOperation,
+        activity: Arc<Activity>,
+        published: ObservedProjectIndex,
+    ) -> Result<()> {
+        let Some(embedder) = self.stages.embedder.as_ref() else {
+            return Ok(());
+        };
+        let model = embedder.model_id();
+        let project = &self.project;
+        let slot = shared.project_slot(project.id);
+        let dense = shared
+            .dense
+            .snapshot_with_activity(activity, self.config.ann_build);
+        let admit = || slot.search_preparation_lease(&self.config, &self.stages);
+        let mut eligible = false;
+        let index = {
+            let _revision = admit()?;
+            let reader = shared.readers.try_acquire()?;
+            ann_warm_binding(reader, project, &shared.cache, model, |db, id, model| {
+                let limit = i64::try_from(dense.limits().max_vectors)
+                    .unwrap_or(i64::MAX)
+                    .saturating_add(1);
+                let count = crate::store::repo::count_chunks_up_to(db.connection(), id, limit)?;
+                eligible = usize::try_from(count)
+                    .is_ok_and(|chunks| dense.limits().ann_build_eligible_for_model(chunks, model));
+                Ok(())
+            })?
+        };
+        if index.project_id() != published.project_id
+            || index.catalog_generation() != published.epoch.zip(published.generation_id)
+            || index.content_revision() != published.content_revision
+        {
+            return Ok(());
+        }
+        if eligible {
+            operation.check()?;
+            dense.warm_bound_with_metadata_admitted(
+                BoundDenseRequest {
+                    cache_root: &shared.cache,
+                    index,
+                    model_id: model,
+                },
+                operation.cancellation(),
+                || tools::capture_dense(MetadataSource::Prepared(&shared.readers), project, index),
+                admit,
+            )?;
+        }
+        operation.check()?;
+        dense.cleanup(project.id)?;
+        dense.cleanup_ann_disk()
+    }
 }
 
 fn capture_catalog_sync(

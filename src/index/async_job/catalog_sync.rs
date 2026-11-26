@@ -193,7 +193,7 @@ pub(crate) async fn execute(
     activity: &Arc<Activity>,
     operation: &SearchOperation,
     owner: JobOwner,
-) -> Result<()> {
+) -> Result<ObservedProjectIndex> {
     let call = operation.clone();
     let (owner, embed) = service
         .phase(workers, activity.clone(), operation, owner, move |state| {
@@ -205,17 +205,17 @@ pub(crate) async fn execute(
                 .catalog_sync
                 .as_mut()
                 .ok_or_else(|| Error::internal("catalog sync owner missing"))?;
-            let embed = sync.stage(&call, account)?;
-            if !embed {
-                sync.publish(&call)?;
+            if sync.stage(&call, account)? {
+                Ok(None)
+            } else {
+                sync.publish(&call).map(Some)
             }
-            Ok(embed)
         })
         .await?;
-    let needs_embeddings = **embed;
+    let already_published = **embed;
     drop(embed);
-    if !needs_embeddings {
-        return Ok(());
+    if let Some(published) = already_published {
+        return Ok(published);
     }
     let owner = super::embed_batches(service, workers, activity, operation, owner, false).await?;
     let call = operation.clone();
@@ -228,9 +228,10 @@ pub(crate) async fn execute(
                 .publish(&call)
         })
         .await?;
+    let observed = **published;
     drop(published);
     drop(owner);
-    Ok(())
+    Ok(observed)
 }
 
 impl CatalogSync {
@@ -465,7 +466,7 @@ impl CatalogSync {
         )
     }
 
-    fn publish(&mut self, operation: &SearchOperation) -> Result<()> {
+    fn publish(&mut self, operation: &SearchOperation) -> Result<ObservedProjectIndex> {
         operation.check()?;
         if self
             .embedding
@@ -497,7 +498,7 @@ impl CatalogSync {
             .embedder
             .as_ref()
             .map(|embedder| EmbeddingRecipe::for_model(embedder.model_id()));
-        prepared.publish_with_embedding(recipe, |commit| {
+        let (_, selected) = prepared.publish_with_embedding(recipe, |commit| {
             let finalize = || {
                 self.commit_prepared(
                     commit,
@@ -513,7 +514,7 @@ impl CatalogSync {
                 finalize()
             }
         })?;
-        Ok(())
+        Ok(selected)
     }
 
     fn commit_prepared(

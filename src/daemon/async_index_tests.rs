@@ -71,15 +71,16 @@ fn open_v2_index_shared(cache: &Path, config: &Path) -> Arc<Shared> {
 
 fn open_v2_index_shared_with_config(cache: &Path, config: &Path, toml: &str) -> Arc<Shared> {
     std::fs::write(config.join("config.toml"), toml).unwrap();
-    Shared::open_with_launch(
+    let launch = LaunchSnapshot::capture_from(config)
+        .strict(DaemonPatch::default())
+        .unwrap();
+    let dense = launch.config.settings().dense.clone();
+    Shared::open_with_launch_config(
         cache,
         &crate::store::settings::standalone().unwrap(),
         &crate::store::settings::standalone_read_pool().unwrap(),
-        crate::hybrid::dense_settings::standalone()
-            .unwrap()
-            .settings(),
-        &LaunchSnapshot::capture_from(config),
-        DaemonPatch::default(),
+        &dense,
+        launch,
     )
     .unwrap()
 }
@@ -1042,6 +1043,124 @@ fn catalog_search_checks_the_sealed_model_before_query_embedding() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_index_and_detached_sync_warm_the_published_ann() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut policy = crate::daemon::settings::standalone()
+        .unwrap()
+        .into_settings();
+    policy.background_active = 1;
+    policy.background_pending = 0;
+    let mut jobs = crate::daemon::job_service::JobRoot::new(&policy);
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("guide.md"), "catalogwarmguide").unwrap();
+        std::fs::write(root.path().join("reference.md"), "catalogwarmreference").unwrap();
+        let mut shared = open_v5_index_shared(
+            cache.path(),
+            config.path(),
+            "config_version = 2\n[dense]\nmin_vectors = 1\n[daemon]\nbackground_active = 1\nbackground_pending = 0\n",
+        );
+        let warm_gate = Arc::get_mut(&mut shared).unwrap().dense.pause_job_builds_for_test();
+        shared.activate_jobs(service).unwrap();
+        let project = registry::ensure_project(&mut shared.db(), root.path()).unwrap();
+        let provider = document_gate_for("test/catalog-warm@d3@l2");
+        catalog_test_embedder(&shared, &project, &provider);
+        provider.release.add_permits(3);
+        let (session, _cancel) = shared
+            .sessions
+            .join(
+                std::process::id(),
+                project.canonical_root.clone(),
+                Some(project.id),
+            )
+            .unwrap();
+        let wait_for_background = || async {
+            tokio::time::timeout(
+                Duration::from_secs(8),
+                shared
+                    .activity
+                    .drain(Duration::from_millis(policy.drain_poll_ms)),
+            )
+            .await
+            .unwrap();
+        };
+
+        let reply = tokio::time::timeout(Duration::from_secs(8), call_tool(
+            &shared, Some(session), "index_project", json!({"path": root.path()}),
+        )).await;
+        let warm_active = shared.activity.counter.load(Ordering::SeqCst) > 0;
+        warm_gate.open();
+        reply.unwrap().unwrap();
+        assert!(warm_active);
+        wait_for_background().await;
+        let view = catalog_diagnostics(&shared, session).await;
+        assert_eq!(view["ann"]["vectors"], 2);
+        assert_eq!(view["ann"]["state"], "loading");
+
+        reopen_catalog_with_new_ann_recipe(&shared, &project, &provider);
+        let reloaded = catalog_diagnostics(&shared, session).await;
+        assert_eq!(reloaded["index_generation"], view["index_generation"]);
+        assert!(reloaded["ann"]["vectors"].is_null());
+
+        std::fs::write(root.path().join("new.md"), "catalogwarmnew").unwrap();
+        let ack = call_tool(
+            &shared,
+            Some(session),
+            "sync_start",
+            json!({"project_id": project.id}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ack["state"], "running");
+        wait_for_background().await;
+        let sync = call_tool(
+            &shared,
+            Some(session),
+            "sync_status",
+            json!({"job_id": ack["job_id"]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(sync["state"], "done");
+        let view = catalog_diagnostics(&shared, session).await;
+        assert_eq!(view["ann"]["vectors"], 3);
+        assert_eq!(provider.queries.load(Ordering::SeqCst), 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn reopen_catalog_with_new_ann_recipe(
+    shared: &Shared,
+    project: &Project,
+    provider: &Arc<DocumentGate>,
+) {
+    std::fs::write(
+        project.canonical_root.join(".docsbase.toml"),
+        "config_version = 2\n[ann.build]\nm = 12\n",
+    )
+    .unwrap();
+    let reopened = shared
+        .open_project_config_with(project, |_| {
+            Ok(HybridStages {
+                embedder: Some(provider.clone()),
+                ranking: Ranking::Rrf,
+                ..HybridStages::default()
+            })
+        })
+        .unwrap();
+    assert_eq!(reopened.ann_build.m(), 12);
 }
 
 #[test]

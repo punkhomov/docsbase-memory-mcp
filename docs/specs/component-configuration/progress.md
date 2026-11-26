@@ -1978,3 +1978,26 @@ the real search's outcome and its retirement after publishing another head.
 Automatic warming and resident-graph acceptance continue in the same Shared
 hybrid work. All 830 runnable cli-full library tests, all-target Clippy,
 lean offline and formatting passed.
+
+## 2026-11-26 — CF11c, прогрев ANN после Index и Sync
+
+Task CF11c catalog ANN warm: complete (Shared routes, bounded CPU admission,
+shutdown and publication proof, fresh review and fix review).
+
+Ruling: actual Index returns with a paused ANN builder, then `status` shows
+two resident graph vectors before a search. A recipe-only reopen removes
+the old graph from diagnostics and keeps the index revision. Detached Sync
+returns its running acknowledgement and warms the new three-vector graph.
+The fixture admits only one background worker with zero pending entries.
+No query embedding is used in the fixture.
+
+Ruling: scheduling reserves the existing native background lane before
+creating its coordinator. It carries the accepted project and runtime
+identity, releases metadata before the cold flight, and cancels on job-root
+shutdown. ANN construction retains Activity through worker retirement. Full
+cli-full, all-target Clippy, lean offline and formatting passed.
+
+minor (deferred): the paused route fixture proves acknowledgement independence
+but does not sample Activity after isolating both earlier native retirements.
+The common graph lifetime is also exercised by the existing retained ANN
+handoff test.

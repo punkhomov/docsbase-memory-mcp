@@ -682,6 +682,17 @@ pub fn project_counts(conn: &Connection, project_id: i64) -> Result<ProjectCount
     .map_err(db_error)
 }
 
+/// Counts up to the caller's eligibility sentinel without scanning a larger corpus.
+pub(crate) fn count_chunks_up_to(conn: &Connection, project_id: i64, limit: i64) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM docs d JOIN chunks c ON c.doc_id = d.id
+         WHERE d.project_id = ?1 LIMIT ?2)",
+        params![project_id, limit],
+        |row| row.get(0),
+    )
+    .map_err(db_error)
+}
+
 /// Whether an unfinished index publication left document crash markers for
 /// this project. Callers must separately resolve/validate the project and own
 /// the cooperative project read lease when using this as a search admission gate.
