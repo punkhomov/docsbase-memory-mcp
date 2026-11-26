@@ -754,6 +754,92 @@ fn website_explicit_sync_adds_and_removes_files_and_publishes_readiness() {
     env.stop(&mut daemon);
 }
 
+#[cfg(unix)]
+fn assert_mcp_catalog_binding(cache: &Path, config: &Path, root: &Path, expected: Option<&str>) {
+    use serde_json::{Value, json};
+    use std::io::{BufRead, BufReader, Write};
+
+    let mut frontend = Daemon(
+        cli(cache, config)
+            .arg("mcp")
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut input = frontend.0.stdin.take().unwrap();
+    let output = BufReader::new(frontend.0.stdout.take().unwrap());
+    let (send, replies) = std::sync::mpsc::sync_channel(1);
+    let pump = std::thread::spawn(move || {
+        for line in output.lines() {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let receive = || -> Value {
+        let line = replies
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        serde_json::from_str(&line).unwrap()
+    };
+    writeln!(input, "{}", json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}
+    }})).unwrap();
+    assert_eq!(
+        receive()["result"]["serverInfo"]["name"],
+        "docsbase-memory-mcp"
+    );
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"search_docs","arguments":{"query":"websitefirsthelix","chunk_ref":true}
+        }})
+    )
+    .unwrap();
+    let hits = receive();
+    if let Some(expected) = expected {
+        assert_eq!(
+            hits["result"]["structuredContent"][0]["chunk_ref"], expected,
+            "{hits}"
+        );
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+                "name":"read_neighbors_at","arguments":{"chunk_ref":expected}
+            }})
+        )
+        .unwrap();
+        let neighbors = receive();
+        assert!(
+            neighbors["result"]["structuredContent"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("websitefirsthelix")
+        );
+    } else {
+        assert_eq!(
+            hits["result"]["structuredContent"]["code"], -32010,
+            "{hits}"
+        );
+    }
+    drop(input);
+    drop(replies);
+    drop(frontend);
+    pump.join().unwrap();
+}
+
 #[test]
 #[cfg(unix)]
 #[allow(clippy::too_many_lines)] // Exercise the complete pair lifecycle through the daemon.
@@ -866,6 +952,7 @@ fn website_serves_and_replaces_an_existing_v5_generation() {
     let hits = client
         .call_tool("search_docs", json!({"query": "websitefirsthelix"}))
         .unwrap();
+    assert!(hits[0].get("chunk_ref").is_none());
     let neighbors = client
         .call_tool("read_neighbors", json!({"chunk_id": hits[0]["chunk_id"]}))
         .unwrap();
@@ -875,6 +962,19 @@ fn website_serves_and_replaces_an_existing_v5_generation() {
             .unwrap()
             .contains("websitefirsthelix")
     );
+    let referenced = client
+        .call_tool(
+            "search_docs",
+            json!({"query": "websitefirsthelix", "chunk_ref": true}),
+        )
+        .unwrap();
+    let first_ref = referenced[0]["chunk_ref"].as_str().unwrap();
+    let at = client
+        .call_tool("read_neighbors_at", json!({"chunk_ref": first_ref}))
+        .unwrap();
+    assert_eq!(at, neighbors);
+    assert_mcp_catalog_binding(&cache_alias, config.path(), root.path(), Some(first_ref));
+    assert_mcp_catalog_binding(&cache_alias, config.path(), config.path(), None);
 
     std::fs::write(doc, "# Profile\n\nwebsitesecondspiral\n").unwrap();
     std::fs::write(root.path().join("new.md"), "websiteadditionnote\n").unwrap();
@@ -916,6 +1016,33 @@ fn website_serves_and_replaces_an_existing_v5_generation() {
     let current = ready();
     assert_eq!(current["ready"], true);
     assert_eq!(current["index_generation"], status["index_generation"]);
+    let second = client
+        .call_tool(
+            "search_docs",
+            json!({"query": "websitesecondspiral", "chunk_ref": true}),
+        )
+        .unwrap();
+    assert_eq!(second[0]["chunk_id"], referenced[0]["chunk_id"]);
+    assert_ne!(second[0]["chunk_ref"], first_ref);
+    assert!(matches!(
+        client.call_tool("read_neighbors_at", json!({"chunk_ref": first_ref})),
+        Err(docsbase_memory::error::Error::Project {
+            instruction: Some(_),
+            ..
+        })
+    ));
+    let latest = client
+        .call_tool(
+            "read_neighbors_at",
+            json!({"chunk_ref": second[0]["chunk_ref"]}),
+        )
+        .unwrap();
+    assert!(
+        latest[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("websitesecondspiral")
+    );
     assert_eq!(
         run(&["search", "websitesecondspiral"])[0]["path"],
         "guide.md"

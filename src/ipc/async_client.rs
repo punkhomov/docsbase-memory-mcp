@@ -205,7 +205,9 @@ impl AsyncClient {
     /// Returns transport/protocol errors or the daemon's advertised category.
     pub async fn call_tool(&mut self, name: &str, args: Value) -> Result<Value> {
         if name == "search_docs" {
-            protocol::ensure_search_query_mode(&args, &self.capabilities)?;
+            protocol::ensure_search_capabilities(&args, &self.capabilities)?;
+        } else if name == "read_neighbors_at" {
+            protocol::ensure_chunk_reference_support(&self.capabilities)?;
         }
         value(
             self.call(Request::CallTool {
@@ -237,7 +239,7 @@ impl AsyncClient {
 
     async fn exchange_search(&mut self, args: Value, operation: &SearchOperation) -> Result<Value> {
         operation.check()?;
-        protocol::ensure_search_query_mode(&args, &self.capabilities)?;
+        protocol::ensure_search_capabilities(&args, &self.capabilities)?;
         if !self
             .capabilities
             .iter()

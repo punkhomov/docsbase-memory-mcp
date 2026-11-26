@@ -947,3 +947,12 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
   результата. Присоединять клиента только к принятому ID фонового владельца.
 - Включение v5 на чистой установке, Shared daemon с watcher, hybrid и
   Windows publication остаются отдельными работами.
+
+## Delta 2026-11-26 — CF11c, точное чтение найденного чанка
+
+- Проверить поиск и чтение через реальный daemon v5. При неизменных chunk ID и
+  content revision смена физического поколения должна отклонять старую ссылку.
+- Проверить точный u64, несовпадение проекта, эпохи и content revision,
+  ограниченную форму токена и допуск памяти при opt-in.
+- Согласовать capability через Rust IPC и TypeScript, добавить схему MCP
+  и выбор подходящего инструмента в `ask_docs`.

@@ -36,6 +36,7 @@ use crate::platform::transport::Stream;
 use crate::search::metadata::MetadataSource;
 use crate::store::Db;
 use crate::store::migrations;
+use crate::store::project_index::ProjectIndex;
 use crate::store::read_pool::ReadPool;
 use crate::store::settings::{DbSettings, ReadPoolSettings};
 use crate::watch::Watchers;
@@ -1710,6 +1711,9 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                             capabilities.push(protocol::ACTIVE_WEBSITE_CAPABILITY.to_owned());
                             capabilities.push(protocol::SERVER_STATUS_CAPABILITY.to_owned());
                         }
+                        if shared.catalog_epoch.is_some() {
+                            capabilities.push(protocol::CHUNK_REF_CAPABILITY.to_owned());
+                        }
                         capabilities
                     },
                 },
@@ -2648,7 +2652,12 @@ fn route_metadata_tool_in(
     }
     if matches!(
         name,
-        "status" | "panel_projects" | "list_projects" | "list_docs" | "read_neighbors"
+        "status"
+            | "panel_projects"
+            | "list_projects"
+            | "list_docs"
+            | "read_neighbors"
+            | "read_neighbors_at"
     ) {
         if shared.catalog_epoch.is_some() {
             let fixed = shared.website.as_ref().ok_or_else(Shared::profile_denial)?;
@@ -2656,14 +2665,22 @@ fn route_metadata_tool_in(
             return crate::store::project_index::with_catalog_pair(
                 reader,
                 &fixed.project,
-                |registry, local, _| {
+                |registry, local, index| {
                     let metadata = local.as_ref().map_or(&*registry, |local| &local.db);
-                    route_index_metadata(shared, session_id, name, args, &registry, metadata)
+                    route_index_metadata(
+                        shared,
+                        session_id,
+                        name,
+                        args,
+                        &registry,
+                        metadata,
+                        Some(index),
+                    )
                 },
             );
         }
         let db = shared.db();
-        return route_index_metadata(shared, session_id, name, args, &db, &db);
+        return route_index_metadata(shared, session_id, name, args, &db, &db, None);
     }
     let db = shared.db();
     match name {
@@ -2676,6 +2693,9 @@ fn route_metadata_tool_in(
                 ];
                 if shared.website.is_some() {
                     capabilities.push(protocol::SERVER_STATUS_CAPABILITY.into());
+                }
+                if shared.catalog_epoch.is_some() {
+                    capabilities.push(protocol::CHUNK_REF_CAPABILITY.into());
                 }
                 capabilities
             },
@@ -2822,6 +2842,7 @@ fn route_index_metadata(
     args: &Value,
     registry_db: &Db,
     metadata: &Db,
+    index: Option<ProjectIndex>,
 ) -> Result<Value> {
     match name {
         "status" => runtime_status(shared, registry_db, metadata),
@@ -2877,6 +2898,11 @@ fn route_index_metadata(
         "read_neighbors" => {
             let project = bound_project(shared, metadata, session_id)?;
             tools::read_neighbors(metadata, &project, args)
+        }
+        "read_neighbors_at" => {
+            let index = index.ok_or_else(crate::search::chunk_ref::unavailable)?;
+            let project = bound_project(shared, metadata, session_id)?;
+            tools::read_neighbors_at(metadata, &project, index, args, None)
         }
         _ => Err(Error::internal("unexpected index metadata tool")),
     }

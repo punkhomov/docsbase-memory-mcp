@@ -23,6 +23,7 @@ export interface SearchOptions {
   readonly limit?: number | null;
   readonly explain?: boolean | null;
   readonly snippet?: boolean | null;
+  readonly chunk_ref?: boolean | null;
   readonly rerank?: boolean | null;
   readonly dedupe?: 'none' | 'path' | null;
   readonly n_per_doc?: number | null;
@@ -37,6 +38,7 @@ export interface CallOptions {
 export interface SearchHit {
   /** Exact Rust u64 rendered in canonical decimal notation; never a JS number. */
   readonly chunk_id: string;
+  readonly chunk_ref?: string;
   readonly path: string;
   readonly heading_path: string;
   readonly lines: readonly [number, number];
@@ -45,6 +47,16 @@ export interface SearchHit {
   readonly snippet_truncated?: boolean;
 }
 export type SearchResult = SearchHit[] | { hits: SearchHit[]; meta: Record<string, unknown> };
+export interface NeighborOptions {
+  readonly before?: number | null;
+  readonly after?: number | null;
+}
+export interface NeighborChunk
+  extends Pick<SearchHit, 'chunk_id' | 'path' | 'heading_path' | 'lines'> {
+  readonly seq: number;
+  readonly kind: string;
+  readonly text: string;
+}
 export interface ProjectStatus {
   readonly id: number;
   readonly name: string;

@@ -18,7 +18,22 @@ pub const PANEL_READ_CAPABILITY: &str = "panel-read-v1";
 /// Literal query interpretation.
 pub const LITERAL_QUERY_CAPABILITY: &str = "literal-query-v1";
 
-pub(crate) fn ensure_search_query_mode(
+/// Opt-in references to one published revision, consumed by `read_neighbors_at`.
+pub const CHUNK_REF_CAPABILITY: &str = "chunk-ref-v1";
+
+pub(crate) fn ensure_chunk_reference_support(capabilities: &[String]) -> Result<()> {
+    if !capabilities
+        .iter()
+        .any(|capability| capability == CHUNK_REF_CAPABILITY)
+    {
+        return Err(Error::Protocol {
+            message: format!("daemon does not advertise {CHUNK_REF_CAPABILITY}"),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_search_capabilities(
     args: &serde_json::Value,
     capabilities: &[String],
 ) -> Result<()> {
@@ -33,6 +48,9 @@ pub(crate) fn ensure_search_query_mode(
                 "daemon does not advertise {LITERAL_QUERY_CAPABILITY}; restart the daemon and frontend"
             ),
         });
+    }
+    if crate::search::chunk_ref::requested(args)? {
+        ensure_chunk_reference_support(capabilities)?;
     }
     Ok(())
 }
@@ -102,6 +120,7 @@ pub const TOOL_ALLOWLIST: &[&str] = &[
     "search_docs",
     "get_doc",
     "read_neighbors",
+    "read_neighbors_at",
     "list_docs",
     "list_projects",
     "index_project",

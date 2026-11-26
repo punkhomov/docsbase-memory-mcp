@@ -24,7 +24,10 @@ use crate::error::{Error, Result};
 use crate::hybrid::work::Cancellation;
 use crate::ipc::async_client::{AsyncClient, within_operation};
 use crate::ipc::client::is_transport_error;
-use crate::ipc::protocol::{MAX_FRAME_BYTES, TOOL_ALLOWLIST, ensure_config_version};
+use crate::ipc::protocol::{
+    ACTIVE_WEBSITE_CAPABILITY, CHUNK_REF_CAPABILITY, MAX_FRAME_BYTES, TOOL_ALLOWLIST,
+    ensure_config_version,
+};
 use crate::mcp::tools;
 use crate::search::operation::SearchOperation;
 use crate::search::settings::{SearchSettings, SearchSpec};
@@ -344,7 +347,45 @@ async fn negotiate_config(client: &mut AsyncClient, config_v2: Option<bool>) -> 
 
 async fn bind_project(client: &mut AsyncClient, cwd: &Path, config_v2: Option<bool>) -> Result<()> {
     negotiate_config(client, config_v2).await?;
+    let capabilities = client.capabilities();
+    if [ACTIVE_WEBSITE_CAPABILITY, CHUNK_REF_CAPABILITY]
+        .into_iter()
+        .all(|expected| capabilities.iter().any(|value| value == expected))
+    {
+        return bind_catalog_website(client, cwd).await;
+    }
     client.register_session(cwd).await
+}
+
+// Website's list is already confined to the fixed project. Resolve the
+// frontend cwd before asking the daemon to bind that existing ID read-only.
+async fn bind_catalog_website(client: &mut AsyncClient, cwd: &Path) -> Result<()> {
+    #[derive(serde::Deserialize)]
+    struct FixedProject {
+        id: i64,
+        root: PathBuf,
+    }
+
+    let listed = client.call_tool("list_projects", json!({})).await?;
+    let invalid = || Error::Protocol {
+        message: "invalid fixed Website project from the daemon".into(),
+    };
+    let [project]: [FixedProject; 1] = serde_json::from_value(listed).map_err(|_| invalid())?;
+    if project.id <= 0 || !project.root.is_absolute() {
+        return Err(invalid());
+    }
+    let cwd = cwd.to_owned();
+    let cwd = tokio::task::spawn_blocking(move || cwd.canonicalize())
+        .await
+        .map_err(|error| Error::internal_with_source("Website project binding join", error))?
+        .map_err(|error| Error::internal_with_source("resolve MCP cwd", error))?;
+    // Both paths are canonical. Keep the case of the selected filesystem entries.
+    if !cwd.starts_with(&project.root) {
+        return Err(Error::Admission {
+            message: "MCP working directory is outside the fixed Website project".into(),
+        });
+    }
+    client.bind_read_only(Some(project.id)).await
 }
 
 async fn call_bound(

@@ -14,6 +14,11 @@ use crate::hybrid::remote::{RemoteCall, StageFuture};
 
 /// Only the three explicitly allowed read tools reach this boundary.
 pub trait DocumentTools: Send + Sync {
+    /// Whether search results can carry generation-bound neighbor references.
+    fn has_chunk_references(&self) -> bool {
+        false
+    }
+
     /// Execute inside the already bound project and original operation.
     fn call<'a>(&'a self, name: &'a str, args: Value) -> StageFuture<'a, Value>;
 }
@@ -137,10 +142,21 @@ pub async fn run(
     call: &RemoteCall,
 ) -> Result<Value> {
     request.validate()?;
+    let (neighbors, prompt) = if tools.has_chunk_references() {
+        (
+            "read_neighbors_at",
+            format!(
+                "{} Pass chunk_ref from the latest relevant search to read_neighbors_at. Repeat search if a reference is stale.",
+                PROMPT.replace("or read_neighbors;", "or read_neighbors_at;")
+            ),
+        )
+    } else {
+        ("read_neighbors", PROMPT.to_owned())
+    };
     let mut input = CompletionRequest::new(request.question)
-        .preamble(PROMPT)
+        .preamble(prompt)
         .max_tokens(AskLimits::OUTPUT_TOKENS);
-    input.tools = definitions()?.into_iter().map(Arc::new).collect();
+    input.tools = definitions(neighbors)?.into_iter().map(Arc::new).collect();
     let mut state = State::default();
     for turn in 0..request.max_turns.unwrap_or(AskLimits::TURNS) {
         call.check()?;
@@ -197,7 +213,7 @@ pub async fn run(
                     Ok(answer) => return Ok(answer),
                     Err(error) => json!({"error":error}),
                 }
-            } else if matches!(name, "search_docs" | "get_doc" | "read_neighbors") {
+            } else if matches!(name, "search_docs" | "get_doc") || name == neighbors {
                 if let Ok(value) = tools.call(name, args).await {
                     if fits_json(&value, AskLimits::TOOL_BYTES) {
                         state.evidence(name, value)
@@ -209,7 +225,7 @@ pub async fn run(
                     json!({"error":"document tool failed; check arguments, use a project-relative path from search, or read fewer chunks"})
                 }
             } else {
-                json!({"error":"unknown tool; only search_docs, get_doc, read_neighbors and finish_answer are allowed"})
+                json!({"error":format!("unknown tool; only search_docs, get_doc, {neighbors} and finish_answer are allowed")})
             };
             input.chat_history.push(Arc::new(Message::tool_result(
                 tool_call.id.clone(),
@@ -245,19 +261,27 @@ fn fits_json(value: &impl serde::Serialize, maximum: usize) -> bool {
     serde_json::to_writer(Counter(maximum), value).is_ok()
 }
 
-fn definitions() -> Result<Vec<ToolDefinition>> {
+fn definitions(neighbors: &str) -> Result<Vec<ToolDefinition>> {
     let mut tools = Vec::new();
     for tool in crate::mcp::tools::catalogue() {
-        if matches!(
-            tool.name.as_ref(),
-            "search_docs" | "get_doc" | "read_neighbors"
-        ) {
+        if matches!(tool.name.as_ref(), "search_docs" | "get_doc")
+            || tool.name.as_ref() == neighbors
+        {
+            let mut parameters = (*tool.input_schema).clone();
+            // The harness chooses whether search requests references.
+            if tool.name.as_ref() == "search_docs"
+                && let Some(properties) = parameters
+                    .get_mut("properties")
+                    .and_then(Value::as_object_mut)
+            {
+                properties.remove("chunk_ref");
+            }
             tools.push(ToolDefinition::new(
                 ToolName::new(tool.name.to_string())
                     .map_err(|_| Error::internal("empty read tool name"))?,
                 tool.description
                     .map_or_else(String::new, |text| text.to_string()),
-                Value::Object((*tool.input_schema).clone()),
+                Value::Object(parameters),
             ));
         }
     }

@@ -99,6 +99,9 @@ impl ConfigView {
 #[cfg_attr(feature = "web", derive(ts_rs::TS))]
 pub struct SearchHit {
     pub chunk_id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "web", ts(optional))]
+    pub chunk_ref: Option<String>,
     pub path: String,
     pub heading_path: String,
     pub lines: [u32; 2],

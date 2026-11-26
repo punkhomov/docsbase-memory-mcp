@@ -58,6 +58,16 @@ impl ProjectIndex {
         self.generation.map(|generation| generation.id)
     }
 
+    pub(crate) fn chunk_binding(self) -> Option<crate::search::chunk_ref::ChunkBinding> {
+        self.generation
+            .map(|generation| crate::search::chunk_ref::ChunkBinding {
+                epoch: generation.epoch,
+                project_id: self.project_id,
+                generation_id: generation.id,
+                content_revision: self.content_revision,
+            })
+    }
+
     /// Resolve within the same cache as the metadata reader that supplied this binding.
     pub(crate) fn tantivy_dir(self, cache: &Path) -> PathBuf {
         match self.generation {

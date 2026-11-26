@@ -237,7 +237,9 @@ impl Client {
     /// [`Response::Error`].
     pub fn call_tool(&mut self, name: &str, args: Value) -> Result<Value> {
         if name == "search_docs" {
-            protocol::ensure_search_query_mode(&args, &self.capabilities)?;
+            protocol::ensure_search_capabilities(&args, &self.capabilities)?;
+        } else if name == "read_neighbors_at" {
+            protocol::ensure_chunk_reference_support(&self.capabilities)?;
         }
         match self.call(Request::CallTool {
             name: name.to_owned(),

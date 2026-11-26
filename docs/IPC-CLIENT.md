@@ -63,6 +63,10 @@ with a published lexical index. Hello reports schema 5 for this registry.
 An accepted Sync continues after the client disconnects. If publication fails,
 the previous index remains readable and `serverStatus()` reports the failed Sync.
 
+`chunk-ref-v1` enables opt-in `chunk_ref` on search hits from a v5 daemon.
+`readNeighborsAt()` verifies the reference against the client's bound project
+and current index revision. On a stale reference, search again to get a new one.
+
 ## Lifetime, concurrency and errors
 
 See the package README for complete typed options. The application configuration

@@ -26,6 +26,7 @@ use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts}
 use crate::index::{LexicalSettings, QueryMode, lexical_settings};
 use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
 use crate::search::budget::PayloadBudget;
+use crate::search::chunk_ref::{self, ChunkBinding};
 use crate::search::metadata::{MetadataSource, ProjectReader};
 use crate::search::operation::SearchOperation;
 use crate::search::payload::{OwnedPayload, PayloadRequest};
@@ -579,6 +580,9 @@ pub(super) fn start_search<Guard>(
         ensure_indexed(context.project)?;
     }
     let arguments = parse_search_args(args)?;
+    if arguments.chunk_ref && !catalog {
+        return Err(chunk_ref::unavailable());
+    }
     if arguments.limit == 0 {
         if !arguments.explain && !catalog {
             return Ok(SearchStart::Complete(Value::Array(Vec::new())));
@@ -616,6 +620,7 @@ pub(super) fn start_search<Guard>(
 /// No Db, SQL transaction, index handle or filesystem lease can escape capture.
 pub(super) struct PreparedSearch {
     payload: OwnedPayload,
+    chunk_binding: Option<ChunkBinding>,
     arguments: SearchArgs,
     ordered: Vec<(u64, f32)>,
     active: ActiveStages,
@@ -726,7 +731,12 @@ impl PreparedSearch {
             &self.arguments.tags,
         );
         self.ordered.truncate(self.arguments.limit);
-        let rows = build_rows(&self.payload, self.ordered, self.arguments.snippet);
+        let rows = build_rows(
+            &self.payload,
+            self.ordered,
+            self.arguments.snippet,
+            self.chunk_binding,
+        );
         self.operation.check()?;
         if !self.arguments.explain {
             return Ok(Value::Array(rows));
@@ -1120,7 +1130,7 @@ pub(super) fn prepare_with_query_vector<Guard>(
     }
     // Preparation and final payload allowances never overlap per request.
     drop(lexical.scope);
-    let payload = capture_search_payload(
+    let (payload, chunk_binding) = capture_search_payload(
         context,
         source,
         admit,
@@ -1132,6 +1142,7 @@ pub(super) fn prepare_with_query_vector<Guard>(
     context.operation.check()?;
     Ok(PreparedSearch {
         payload,
+        chunk_binding,
         arguments,
         ordered,
         active,
@@ -1151,9 +1162,9 @@ fn capture_search_payload<Guard>(
     ordered: &[(u64, f32)],
     active: ActiveStages,
     arguments: &SearchArgs,
-) -> Result<OwnedPayload> {
+) -> Result<(OwnedPayload, Option<ChunkBinding>)> {
     let ids: Vec<_> = ordered.iter().map(|(id, _)| *id).collect();
-    in_read_phase(context, source, admit, |reader, current| {
+    let mut payload = in_read_phase(context, source, admit, |reader, current| {
         require_search_index(current, Some(index))?;
         OwnedPayload::capture(
             &reader,
@@ -1169,7 +1180,15 @@ fn capture_search_payload<Guard>(
             context.payload_budget,
             context.operation.cancellation(),
         )
-    })
+    })?;
+    let chunk_binding = if arguments.chunk_ref {
+        let binding = index.chunk_binding().ok_or_else(chunk_ref::unavailable)?;
+        payload.charge_chunk_references(ordered.len().min(arguments.limit))?;
+        Some(binding)
+    } else {
+        None
+    };
+    Ok((payload, chunk_binding))
 }
 
 /// Global query-vector cache counters (`search-cost` FR-4). A caller that
@@ -1237,7 +1256,12 @@ fn degrade(degraded: &mut Vec<Degraded>, reason: Degraded) {
 }
 
 /// Citation rows use only the captured payload, in final ranking order.
-fn build_rows(payload: &OwnedPayload, ordered: Vec<(u64, f32)>, snippet: bool) -> Vec<Value> {
+fn build_rows(
+    payload: &OwnedPayload,
+    ordered: Vec<(u64, f32)>,
+    snippet: bool,
+    binding: Option<ChunkBinding>,
+) -> Vec<Value> {
     let mut rows = Vec::with_capacity(ordered.len());
     for (chunk_id, score) in ordered {
         let Some(citation) = payload.citation(chunk_id) else {
@@ -1253,6 +1277,7 @@ fn build_rows(payload: &OwnedPayload, ordered: Vec<(u64, f32)>, snippet: bool) -
         };
         rows.push(json!(crate::ipc::panel::SearchHit {
             chunk_id,
+            chunk_ref: binding.map(|binding| binding.reference(chunk_id)),
             path: citation.path.clone(),
             heading_path: citation.heading_path.clone(),
             lines: [citation.line_start, citation.line_end],
@@ -1454,6 +1479,7 @@ struct SearchArgs {
     explain: bool,
     rerank: Option<bool>,
     snippet: bool,
+    chunk_ref: bool,
     dedupe: Dedupe,
     n_per_doc: usize,
     path_prefix: Option<String>,
@@ -1530,6 +1556,7 @@ fn parse_search_args(args: &Value) -> Result<SearchArgs> {
         explain,
         rerank,
         snippet,
+        chunk_ref: chunk_ref::requested(args)?,
         dedupe,
         n_per_doc,
         path_prefix,
@@ -1808,6 +1835,29 @@ pub(crate) fn read_neighbors_bounded(
                 args.get("chunk_id")
             ),
         })?;
+    read_neighbor_rows(db, project, raw, args, maximum_row_bytes)
+}
+
+pub(super) fn read_neighbors_at(
+    db: &Db,
+    project: &Project,
+    index: ProjectIndex,
+    args: &Value,
+    maximum_row_bytes: Option<usize>,
+) -> Result<Value> {
+    ensure_indexed(project)?;
+    let binding = index.chunk_binding().ok_or_else(chunk_ref::unavailable)?;
+    let chunk = binding.resolve(args)?;
+    read_neighbor_rows(db, project, chunk, args, maximum_row_bytes)
+}
+
+fn read_neighbor_rows(
+    db: &Db,
+    project: &Project,
+    raw: u64,
+    args: &Value,
+    maximum_row_bytes: Option<usize>,
+) -> Result<Value> {
     let side = |key: &str| -> Result<i64> {
         match args.get(key) {
             None | Some(Value::Null) => Ok(1),
