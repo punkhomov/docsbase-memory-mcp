@@ -521,6 +521,10 @@ pub(super) fn open_recovery_registry(
     cache: &Path,
     settings: &Resolved<DbSettings>,
 ) -> Result<super::Db> {
+    // Resolve the configured directory before SQLite's NOFOLLOW open, which
+    // also rejects linked ancestors such as /var on macOS. The registry and
+    // its sidecars are still checked at their final names without following links.
+    let cache = filesystem(cache, "resolve registry cache", fs::canonicalize(cache))?;
     // The SQLite VFS can open these entries during normal WAL access or
     // recovery. A cooperating connection may remove an absent/closing sidecar.
     for suffix in ["-wal", "-shm", "-journal"] {
@@ -531,7 +535,7 @@ pub(super) fn open_recovery_registry(
             Err(error) => return filesystem(&path, "inspect registry sidecar", Err(error)),
         }
     }
-    open_registry_file(cache, &cache.join(DB_FILE), settings)
+    open_registry_file(&cache, &cache.join(DB_FILE), settings)
 }
 
 fn open_reader_lock(path: &Path) -> Result<Option<RwLock<super::File>>> {

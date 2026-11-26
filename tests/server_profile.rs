@@ -763,6 +763,12 @@ fn website_serves_and_replaces_an_existing_v5_generation() {
     use serde_json::{Value, json};
 
     let cache = tempfile::tempdir().unwrap();
+    // macOS paths such as /var/folders have a symlinked ancestor.
+    // Keep the Unix socket path independent of TMPDIR's length.
+    let alias_dir = tempfile::tempdir_in("/tmp").unwrap();
+    let parent = alias_dir.path().join("p");
+    std::os::unix::fs::symlink(cache.path().parent().unwrap(), &parent).unwrap();
+    let cache_alias = parent.join(cache.path().file_name().unwrap());
     let root = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
     let doc = root.path().join("guide.md");
@@ -783,7 +789,7 @@ fn website_serves_and_replaces_an_existing_v5_generation() {
     drop(registry);
 
     let run = |args: &[&str]| -> Value {
-        let output = cli(cache.path(), config.path())
+        let output = cli(&cache_alias, config.path())
             .current_dir(root.path())
             .args(args)
             .output()
@@ -807,7 +813,7 @@ fn website_serves_and_replaces_an_existing_v5_generation() {
     };
     let first = active();
     let mut daemon = Daemon(
-        cli(cache.path(), config.path())
+        cli(&cache_alias, config.path())
             .args(["serve", "--project"])
             .arg(root.path())
             .current_dir(config.path())
@@ -818,8 +824,8 @@ fn website_serves_and_replaces_an_existing_v5_generation() {
             .unwrap(),
     );
     let transport = test_transport::TestTransport::new(4);
-    await_started(&transport, &mut daemon, cache.path());
-    let mut probe = Client::connect(&transport, cache.path()).unwrap();
+    await_started(&transport, &mut daemon, &cache_alias);
+    let mut probe = Client::connect(&transport, &cache_alias).unwrap();
     assert!(matches!(
         probe
             .call(Request::Hello {
@@ -847,7 +853,7 @@ fn website_serves_and_replaces_an_existing_v5_generation() {
     assert_eq!(status["ready"], true);
     assert_eq!(run(&["search", "websitefirsthelix"])[0]["path"], "guide.md");
 
-    let mut client = Client::connect(&transport, cache.path()).unwrap();
+    let mut client = Client::connect(&transport, &cache_alias).unwrap();
     client.handshake_registry().unwrap();
     client
         .call(Request::BindReadOnly {
@@ -879,7 +885,7 @@ fn website_serves_and_replaces_an_existing_v5_generation() {
              WHEN NEW.state = 'done' BEGIN SELECT RAISE(ABORT, 'test interrupted publication'); END;",
         )
         .unwrap();
-    let failed = cli(cache.path(), config.path())
+    let failed = cli(&cache_alias, config.path())
         .current_dir(root.path())
         .arg("sync")
         .output()
@@ -943,7 +949,7 @@ fn website_serves_and_replaces_an_existing_v5_generation() {
         "a row without its native owner cannot be joined"
     );
     drop(client);
-    let mut client = Client::connect(&transport, cache.path()).unwrap();
+    let mut client = Client::connect(&transport, &cache_alias).unwrap();
     client.handshake_registry().unwrap();
     let retired = client
         .call_tool("sync_status", json!({"job_id": orphan}))

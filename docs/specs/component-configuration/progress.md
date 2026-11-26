@@ -1724,3 +1724,9 @@ Rust 1.100.0 full cli-full passed 1880 tests with the existing benchmark
 baseline. Clippy for all default targets and both opt-in targets, fmt and
 the lean Linux offline check passed. Stock initialization, Shared and
 hybrid writers, and Windows publication remain open.
+
+Ruling: macOS CI reproduced SQLite's refusal of a linked cache ancestor
+(`/var`). Resolve the directory before the operational writer/recovery
+open. The registry and WAL/SHM/journal names still require ordinary
+single-link files. A real Website start/search/Sync through a linked cache
+ancestor reproduces the failure on Linux and passes after the fix.
