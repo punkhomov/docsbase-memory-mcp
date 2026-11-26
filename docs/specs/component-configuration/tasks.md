@@ -900,3 +900,18 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - Reject over-budget builds with the previous published pair intact. Exercise
   unsupported-small budgets, real SQLite and Tantivy growth, competing writers
   and reclamation. Runtime binding and publication on Windows are later work.
+
+## Delta 2026-11-26 — CF11c, прямой поиск по опубликованной паре
+
+- Провести обычный `docsbase search` через активную пару v5. Сопоставить
+  epoch, проект, поколение, ревизию и рецепт seal с локальной SQLite.
+  Удерживать аренду поколения после освобождения SQLite-слота до конца
+  работы Tantivy. При refill и получении фрагментов сверять полную identity.
+- Проверить настоящий поиск без legacy rows, отказ на несовместимом seal и
+  рецепте, смену поколения при равных content revisions и блокировку
+  эксклюзивного доступа до освобождения читателя.
+- Проверить имена и длины компонентов неизменяемой пары. Замена Tantivy
+  каталогом другого поколения той же схемы должна отклоняться.
+- Проверить повторную подготовку после поиска и явного recovery с тем же
+  запросом и квитанцией. Daemon, hybrid и штатные writers остаются за
+  пределами этого этапа.

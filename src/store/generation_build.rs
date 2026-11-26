@@ -430,6 +430,7 @@ fn open_registry_file(cache: &Path, path: &Path, settings: &Resolved<DbSettings>
         conn,
         cache_root: cache.to_owned(),
         settings: settings.clone(),
+        generation_catalog: true,
     })
 }
 
@@ -512,6 +513,7 @@ fn build_metadata(
         conn,
         cache_root: path.to_owned(),
         settings: settings.clone(),
+        generation_catalog: false,
     };
     let prepared = job::prepare_staged_metadata(&mut db, project, config)?;
     if prepared.stats.errors != 0 || repo::has_pending_docs(db.connection(), project.id)? {
@@ -600,7 +602,7 @@ fn verify_chunk_pair(
     tantivy: &Path,
     limits: InspectionLimits,
 ) -> Result<()> {
-    registry_inspect::check_tantivy_files(tantivy).map_err(|reason| {
+    registry_inspect::check_tantivy_files(tantivy, None).map_err(|reason| {
         admission(format!("generation Tantivy files unavailable ({reason:?})"))
     })?;
     let chunk_count: i64 = metadata

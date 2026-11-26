@@ -2,6 +2,7 @@
 
 pub mod generation_build;
 mod generation_catalog;
+mod generation_seal;
 mod inspect;
 pub mod migrations;
 pub mod models;
@@ -32,6 +33,7 @@ pub struct Db {
     conn: Connection,
     cache_root: PathBuf,
     settings: Resolved<DbSettings>,
+    generation_catalog: bool,
 }
 
 impl Db {
@@ -122,6 +124,7 @@ impl Db {
             conn,
             cache_root: cache_dir.to_path_buf(),
             settings: settings.clone(),
+            generation_catalog: false,
         })
     }
 
@@ -147,7 +150,7 @@ impl Db {
         cache_dir: &Path,
         settings: &Resolved<DbSettings>,
     ) -> Result<Self> {
-        Self::open_readonly_using(cache_dir, settings, true)
+        Self::open_readonly_using(cache_dir, settings, true, false)
     }
 
     // Startup admission must observe SQLite's actual live WAL/schema without
@@ -157,13 +160,21 @@ impl Db {
         cache_dir: &Path,
         settings: &Resolved<DbSettings>,
     ) -> Result<Self> {
-        Self::open_readonly_using(cache_dir, settings, false)
+        Self::open_readonly_using(cache_dir, settings, false, false)
+    }
+
+    pub(crate) fn open_readonly_for_search(
+        cache_dir: &Path,
+        settings: &Resolved<DbSettings>,
+    ) -> Result<Self> {
+        Self::open_readonly_using(cache_dir, settings, true, true)
     }
 
     fn open_readonly_using(
         cache_dir: &Path,
         settings: &Resolved<DbSettings>,
         report_conflict: bool,
+        allow_generation_catalog: bool,
     ) -> Result<Self> {
         DbSpec::validate(settings.settings(), &Capabilities::current())?;
         let path = cache_dir.join(DB_FILE);
@@ -178,7 +189,9 @@ impl Db {
         conn.busy_timeout(settings.settings().read_busy_timeout)
             .map_err(|err| sql_error(&path, err))?;
         let version = migrations::read_version(&conn)?;
-        if version != migrations::SCHEMA_VERSION {
+        let generation_catalog =
+            allow_generation_catalog && version == generation_catalog::SCHEMA_VERSION;
+        if version != migrations::SCHEMA_VERSION && !generation_catalog {
             let expected = migrations::SCHEMA_VERSION.to_string();
             let actual = version.to_string();
             let newer = version > migrations::SCHEMA_VERSION;
@@ -215,7 +228,13 @@ impl Db {
             conn,
             cache_root: cache_dir.to_path_buf(),
             settings: settings.clone(),
+            generation_catalog,
         })
+    }
+
+    #[must_use]
+    pub(crate) const fn has_generation_catalog(&self) -> bool {
+        self.generation_catalog
     }
 
     /// Complete caller policy retained for explicit child connection creation.

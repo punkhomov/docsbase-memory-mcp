@@ -26,13 +26,13 @@ use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts}
 use crate::index::{LexicalSettings, QueryMode, lexical_settings};
 use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
 use crate::search::budget::PayloadBudget;
-use crate::search::metadata::{MetadataReader, MetadataSource};
+use crate::search::metadata::{MetadataSource, ProjectReader};
 use crate::search::operation::SearchOperation;
 use crate::search::payload::{OwnedPayload, PayloadRequest};
 use crate::search::scope::{DocumentScope, ScopeRequest, has_tags};
 use crate::store::migrations;
 use crate::store::models::{Project, ProjectStatus, SyncJob, SyncState};
-use crate::store::project_index::ProjectIndex;
+use crate::store::project_index::{ProjectIndex, with_catalog_pair};
 use crate::store::{Db, repo};
 
 #[path = "search_refill.rs"]
@@ -154,8 +154,8 @@ fn dense_candidates<Guard>(
         .ann_search
         .is_some_and(|settings| query.fetch > settings.ef_max())
     {
-        let metadata = in_read_phase(context, source, admit, |reader| {
-            snapshot_info(&reader, project, Some(query.index))?;
+        let metadata = in_read_phase(context, source, admit, |reader, index| {
+            require_search_index(index, Some(query.index))?;
             DenseMetadata::capture(&reader, project.id)
         })?;
         operation.check()?;
@@ -323,12 +323,12 @@ fn scoped_dense<Guard>(
         let mut after = (0_i64, 0_u32);
         loop {
             context.operation.check()?;
-            let hashes = in_read_phase(context, source, admit, |reader| {
+            let hashes = in_read_phase(context, source, admit, |reader, index| {
                 let transaction = reader
                     .connection()
                     .unchecked_transaction()
                     .map_err(repo::db_error)?;
-                snapshot_info(&reader, context.project, Some(query.index))?;
+                require_search_index(index, Some(query.index))?;
                 let hashes = crate::search::scope::hash_page(
                     &transaction,
                     context.project.id,
@@ -478,25 +478,28 @@ pub fn search_docs_from<Guard>(
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct SearchRankingSettings {
+pub(super) struct SearchRankingSettings<'a> {
     lexical: LexicalSettings,
     rrf: RrfSettings,
+    config: Option<&'a Config>,
 }
 
-impl SearchRankingSettings {
+impl SearchRankingSettings<'_> {
     fn standalone() -> Result<Self> {
         Ok(Self {
             lexical: lexical_settings::standalone()?,
             rrf: crate::hybrid::rrf::settings::standalone()?,
+            config: None,
         })
     }
 }
 
-impl From<&Config> for SearchRankingSettings {
-    fn from(config: &Config) -> Self {
+impl<'a> From<&'a Config> for SearchRankingSettings<'a> {
+    fn from(config: &'a Config) -> Self {
         Self {
             lexical: config.lexical,
             rrf: config.rrf,
+            config: Some(config),
         }
     }
 }
@@ -506,7 +509,7 @@ pub(super) fn search_docs_with_ranking_settings<Guard>(
     source: MetadataSource<'_>,
     args: &Value,
     admit: impl Fn() -> Result<Guard>,
-    settings: SearchRankingSettings,
+    settings: SearchRankingSettings<'_>,
 ) -> Result<Value> {
     match start_search(context, source, args, &admit, settings)? {
         SearchStart::Complete(value) => Ok(value),
@@ -550,7 +553,7 @@ pub(super) fn start_search<Guard>(
     source: MetadataSource<'_>,
     args: &Value,
     admit: impl Fn() -> Result<Guard>,
-    settings: SearchRankingSettings,
+    settings: SearchRankingSettings<'_>,
 ) -> Result<SearchStart> {
     context.operation.check()?;
     if source.cache_root() != context.cache {
@@ -562,14 +565,29 @@ pub(super) fn start_search<Guard>(
         .dense
         .vector_source(context.project.id)
         .validate_root(context.cache)?;
-    ensure_indexed(context.project)?;
+    let catalog = source.has_generation_catalog();
+    if catalog {
+        if context.stages.ranking == Ranking::Rrf
+            || context.stages.embedder.is_some()
+            || context.stages.reranker.is_some()
+        {
+            return Err(Error::Admission {
+                message: "published v5 generations require lexical search".into(),
+            });
+        }
+    } else {
+        ensure_indexed(context.project)?;
+    }
     let arguments = parse_search_args(args)?;
     if arguments.limit == 0 {
-        if !arguments.explain {
+        if !arguments.explain && !catalog {
             return Ok(SearchStart::Complete(Value::Array(Vec::new())));
         }
-        return in_read_phase(context, source, &admit, |reader| {
-            let index = snapshot_info(&reader, context.project, None)?;
+        return in_read_phase(context, source, &admit, |reader, index| {
+            verify_index_recipe(&reader, settings.config)?;
+            if !arguments.explain {
+                return Ok(Value::Array(Vec::new()));
+            }
             empty_response(
                 index,
                 filters_of(
@@ -584,7 +602,7 @@ pub(super) fn start_search<Guard>(
         .map(SearchStart::Complete);
     }
     let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
-    let lexical = lexical_snapshot(context, source, &admit, &arguments, fetch, settings.lexical)?;
+    let lexical = lexical_snapshot(context, source, &admit, &arguments, fetch, settings)?;
     Ok(SearchStart::Prepared(StartedSearch {
         arguments,
         active,
@@ -789,12 +807,7 @@ pub(super) fn snapshot_info(
         current.id,
         repo::index_generation(db.connection(), current.id)?,
     )?;
-    if expected.is_some_and(|expected| expected != index) {
-        return Err(Error::Project {
-            message: "project generation changed during search preparation".to_owned(),
-            instruction: Some("retry search".to_owned()),
-        });
-    }
+    require_search_index(index, expected)?;
     if repo::has_pending_docs(db.connection(), project.id)? {
         return Err(Error::Project {
             message: "project has an incomplete index update".to_owned(),
@@ -806,20 +819,37 @@ pub(super) fn snapshot_info(
     Ok(index)
 }
 
+fn require_search_index(index: ProjectIndex, expected: Option<ProjectIndex>) -> Result<()> {
+    if expected.is_some_and(|expected| expected != index) {
+        return Err(Error::Project {
+            message: "project generation changed during search preparation".to_owned(),
+            instruction: Some("retry search".to_owned()),
+        });
+    }
+    Ok(())
+}
+
 fn in_read_phase<'a, T, Guard>(
     context: &SearchContext<'_>,
     source: MetadataSource<'a>,
     admit: &impl Fn() -> Result<Guard>,
-    work: impl FnOnce(MetadataReader<'a>) -> Result<T>,
+    work: impl FnOnce(ProjectReader<'a>, ProjectIndex) -> Result<T>,
 ) -> Result<T> {
     context.operation.check()?;
     let reader = source.acquire(&context.operation)?;
     context.operation.check()?;
     let _revision = admit()?;
     context.operation.check()?;
+    if reader.has_generation_catalog() {
+        return with_catalog_pair(reader, context.project, |reader, local, index| {
+            context.operation.check()?;
+            work(ProjectReader::new(reader, local), index)
+        });
+    }
     lifecycle::with_project_read_lease(context.cache, context.project.id, || {
         context.operation.check()?;
-        work(reader)
+        let index = snapshot_info(&reader, context.project, None)?;
+        work(ProjectReader::new(reader, None), index)
     })
 }
 
@@ -851,15 +881,15 @@ fn lexical_snapshot<Guard>(
     admit: &impl Fn() -> Result<Guard>,
     arguments: &SearchArgs,
     fetch: usize,
-    settings: LexicalSettings,
+    settings: SearchRankingSettings<'_>,
 ) -> Result<LexicalSnapshot> {
-    in_read_phase(context, source, admit, |reader| {
+    in_read_phase(context, source, admit, |reader, index| {
         let started = std::time::Instant::now();
+        verify_index_recipe(&reader, settings.config)?;
         let transaction = reader
             .connection()
             .unchecked_transaction()
             .map_err(repo::db_error)?;
-        let index = snapshot_info(&reader, context.project, None)?;
         let scope = if arguments.path_prefix.is_some() || !arguments.tags.is_empty() {
             Some(DocumentScope::capture(
                 &transaction,
@@ -876,17 +906,40 @@ fn lexical_snapshot<Guard>(
             None
         };
         transaction.commit().map_err(repo::db_error)?;
-        let dir = index.tantivy_dir(reader.cache_root());
+        let dir = reader.tantivy_dir(index)?;
         drop(reader);
-        let hits = lexical_hits(context, &dir, arguments, fetch, scope.as_ref(), settings)?;
+        let hits = lexical_hits(
+            context,
+            &dir,
+            arguments,
+            fetch,
+            scope.as_ref(),
+            settings.lexical,
+        )?;
         Ok(LexicalSnapshot {
             index,
-            settings,
+            settings: settings.lexical,
             hits,
             elapsed_ms: elapsed_ms(started),
             scope,
         })
     })
+}
+
+fn verify_index_recipe(reader: &ProjectReader<'_>, config: Option<&Config>) -> Result<()> {
+    let Some(sealed) = reader.index_recipe() else {
+        return Ok(());
+    };
+    let config = config.ok_or_else(|| Error::Admission {
+        message: "published v5 search requires a resolved project configuration".into(),
+    })?;
+    if sealed != crate::index::outcome::recipe_id(config) {
+        return Err(Error::Project {
+            message: "published index recipe does not match the configured project".into(),
+            instruction: Some("publish a generation built with the current configuration".into()),
+        });
+    }
+    Ok(())
 }
 
 fn lexical_hits(
@@ -923,9 +976,9 @@ fn lexical_refill<Guard>(
     fetch: usize,
     snapshot: &LexicalSnapshot,
 ) -> Result<Vec<(u64, f32)>> {
-    in_read_phase(context, source, admit, |reader| {
-        let index = snapshot_info(&reader, context.project, Some(snapshot.index))?;
-        let dir = index.tantivy_dir(reader.cache_root());
+    in_read_phase(context, source, admit, |reader, index| {
+        require_search_index(index, Some(snapshot.index))?;
+        let dir = reader.tantivy_dir(index)?;
         drop(reader);
         lexical_hits(
             context,
@@ -962,7 +1015,7 @@ fn prepare_search<Guard>(
 ) -> Result<PreparedSearch> {
     let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
     let settings = SearchRankingSettings::standalone()?;
-    let lexical = lexical_snapshot(context, source, admit, &arguments, fetch, settings.lexical)?;
+    let lexical = lexical_snapshot(context, source, admit, &arguments, fetch, settings)?;
     prepare_with_query_vector(
         context,
         source,
@@ -1100,8 +1153,8 @@ fn capture_search_payload<Guard>(
     arguments: &SearchArgs,
 ) -> Result<OwnedPayload> {
     let ids: Vec<_> = ordered.iter().map(|(id, _)| *id).collect();
-    in_read_phase(context, source, admit, |reader| {
-        snapshot_info(&reader, context.project, Some(index))?;
+    in_read_phase(context, source, admit, |reader, current| {
+        require_search_index(current, Some(index))?;
         OwnedPayload::capture(
             &reader,
             PayloadRequest {

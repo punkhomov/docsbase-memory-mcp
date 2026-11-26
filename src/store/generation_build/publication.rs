@@ -6,7 +6,6 @@ use std::path::Path;
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::config::schema::{Capabilities, Resolved, SettingsSpec};
@@ -21,7 +20,9 @@ use crate::store::registry_inspect::{
 };
 use crate::store::settings::{DbSettings, DbSpec};
 use crate::store::{
-    DB_FILE, Db, migrations,
+    DB_FILE, Db,
+    generation_seal::{GenerationSeal, SEAL_FORMAT},
+    migrations,
     project_index::{LOCAL_SCHEMA_VERSION, project_directory},
     repo,
 };
@@ -302,8 +303,8 @@ pub(super) fn verify_and_seal(
     if bytes.checked_add(digest.as_bytes().len() as u64) != Some(staged.bytes) {
         return Err(admission("prepared file sizes changed before publication"));
     }
-    let seal = Seal {
-        format: 1,
+    let seal = GenerationSeal {
+        format: SEAL_FORMAT,
         installation_epoch: request.epoch,
         project_id: project.id,
         generation_id: staged.generation_id,
@@ -376,6 +377,7 @@ pub(super) fn open_local_metadata(
         conn,
         cache_root: dir.to_path_buf(),
         settings: settings.clone(),
+        generation_catalog: false,
     })
 }
 
@@ -485,21 +487,6 @@ fn verify_sources(metadata: &Db, project: &Project, config: &Config) -> Result<(
         return Err(admission("source survey lost documents before publication"));
     }
     Ok(())
-}
-
-#[derive(Deserialize, Serialize)]
-pub(super) struct Seal {
-    format: u32,
-    installation_epoch: [u8; 16],
-    project_id: i64,
-    generation_id: i64,
-    content_revision: i64,
-    metadata_schema: u32,
-    base_id: Option<i64>,
-    base_revision: i64,
-    plan: String,
-    index_recipe: String,
-    pub(super) files: Vec<(String, u64)>,
 }
 
 fn flush_generation_files(

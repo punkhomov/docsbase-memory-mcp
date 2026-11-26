@@ -15,6 +15,22 @@ use crate::store::{DB_FILE, Db};
 pub(crate) fn read_project_with_settings(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> Result<(Db, Project)> {
+    read_project_using(settings, Db::open_readonly_with_settings)
+}
+
+pub(crate) fn read_project_for_search(
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) -> Result<(Db, Project)> {
+    read_project_using(settings, Db::open_readonly_for_search)
+}
+
+fn read_project_using(
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    open: impl FnOnce(
+        &std::path::Path,
+        &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    ) -> Result<Db>,
+) -> Result<(Db, Project)> {
     let cache = paths::cache_dir()?;
     if !cache.join(DB_FILE).exists() {
         return Err(Error::Project {
@@ -22,7 +38,7 @@ pub(crate) fn read_project_with_settings(
             instruction: Some("run `docsbase index` in your project".to_owned()),
         });
     }
-    let db = Db::open_readonly_with_settings(&cache, settings)?;
+    let db = open(&cache, settings)?;
     let cwd = std::env::current_dir().map_err(|err| {
         Error::internal_with_source(format!("resolve current directory: {err}"), err)
     })?;

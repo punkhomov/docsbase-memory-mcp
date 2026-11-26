@@ -600,3 +600,127 @@ fn scoped_dense_reads_late_pages_and_rejects_changes_between_pages() {
     );
     assert_released(&policy, CAP);
 }
+
+#[cfg(unix)]
+fn install_v5_catalog(mut db: Db, epoch: [u8; 16]) {
+    let tx = db.begin_write().unwrap();
+    tx.execute_batch(include_str!("../store/generation_catalog/schema.sql"))
+        .unwrap();
+    tx.execute(
+        "INSERT INTO generation_store VALUES (1, 1, ?1)",
+        [epoch.as_slice()],
+    )
+    .unwrap();
+    tx.pragma_update(None, "user_version", 5).unwrap();
+    tx.commit().unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn refill_and_payload_refuse_a_new_published_pair_at_the_same_content_revision() {
+    use crate::store::generation_build::{
+        LexicalBuildRequest, prepare_lexical_generation, publish_lexical_generation,
+    };
+    use crate::store::registry_inspect::InspectionLimits;
+
+    let cache = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let source_path = root.path().join("guide.md");
+    std::fs::write(&source_path, "# Guide\n\ninitial widgets\n").unwrap();
+    let mut db = Db::open(cache.path()).unwrap();
+    let project = registry::ensure_project(&mut db, root.path()).unwrap();
+    let epoch = [9; 16];
+    install_v5_catalog(db, epoch);
+
+    let limits = InspectionLimits {
+        max_projects: 8,
+        max_metadata_bytes: 65_536,
+        max_sqlite_value_bytes: 1_048_576,
+        sqlite_cache_kib: 64,
+    };
+    let request = LexicalBuildRequest {
+        project_id: project.id,
+        epoch,
+        base: None,
+        plan_digest: [7; 32],
+        reserved_disk_bytes: 16 * 1024 * 1024,
+    };
+    let cache = cache.path();
+    let settings = crate::store::settings::standalone().unwrap();
+    let config = Config::default();
+    let build =
+        |request| prepare_lexical_generation(cache, request, &settings, limits, &config).unwrap();
+    let publish = |request, prepared| {
+        publish_lexical_generation(cache, request, prepared, &settings, limits, &config).unwrap()
+    };
+    let receipt = build(request);
+    let first = publish(request, receipt);
+
+    let budget = budget(CAP);
+    let context = SearchContext {
+        stages: &HybridStages {
+            ranking: Ranking::Lexical,
+            embedder: None,
+            reranker: None,
+        },
+        dense: &DenseCache::new(),
+        cache,
+        project: &project,
+        window: 3,
+        ann_search: None,
+        payload_budget: &budget,
+        operation: SearchOperation::new(
+            budget.settings(),
+            std::time::Instant::now(),
+            Cancellation::new(),
+        )
+        .unwrap(),
+    };
+    let admit = || Ok(());
+    let start = {
+        let db = Db::open_readonly_for_search(cache, &settings).unwrap();
+        let SearchStart::Prepared(start) = start_search(
+            &context,
+            MetadataSource::Borrowed(&db),
+            &json!({"query": "widgets", "snippet": true}),
+            admit,
+            SearchRankingSettings::from(&config),
+        )
+        .unwrap() else {
+            panic!("expected a lexical snapshot");
+        };
+        start
+    };
+
+    assert_eq!(publish(request, receipt), first);
+    std::fs::write(source_path, "# Guide\n\nupdated widgets\n").unwrap();
+    let request = LexicalBuildRequest {
+        base: Some(first),
+        ..request
+    };
+    let next = publish(request, build(request));
+    assert_eq!(first.content_revision, next.content_revision);
+
+    let db = Db::open_readonly_for_search(cache, &settings).unwrap();
+    let source = MetadataSource::Borrowed(&db);
+    let refill_error = lexical_refill(
+        &context,
+        source,
+        &admit,
+        &start.arguments,
+        start.fetch + 1,
+        &start.lexical,
+    )
+    .unwrap_err();
+    let payload_error = prepare_with_query_vector(&context, source, &admit, start, None)
+        .err()
+        .expect("stale generation cannot supply payload");
+    for error in [refill_error, payload_error] {
+        assert!(
+            matches!(error, Error::Project { ref message, .. }
+            if message == "project generation changed during search preparation"),
+            "{error}"
+        );
+    }
+    assert_released(&budget, CAP);
+}

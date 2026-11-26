@@ -1,12 +1,13 @@
 //! Explicit metadata sources. Prepared leases never open a query connection.
 
 use std::ops::Deref;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::error::{Error, Result};
 use crate::search::operation::SearchOperation;
 use crate::store::Db;
+use crate::store::project_index::{LocalMetadata, ProjectIndex};
 use crate::store::read_pool::{ReadLease, ReadPool};
 
 /// Composition boundary for daemon readers and caller-owned direct searches.
@@ -25,6 +26,13 @@ impl<'a> MetadataSource<'a> {
         match self {
             Self::Borrowed(db) => db.cache_root(),
             Self::Prepared(pool) => pool.cache_root(),
+        }
+    }
+
+    pub(crate) fn has_generation_catalog(self) -> bool {
+        match self {
+            Self::Borrowed(db) => db.has_generation_catalog(),
+            Self::Prepared(pool) => pool.has_generation_catalog(),
         }
     }
 
@@ -71,5 +79,39 @@ impl Deref for MetadataReader<'_> {
             Self::Borrowed(db) => db,
             Self::Prepared(reader) => reader,
         }
+    }
+}
+
+/// One reader slot and its selected metadata. The local connection drops
+/// before the registry slot is returned to the pool.
+pub(crate) struct ProjectReader<'a> {
+    local: Option<LocalMetadata>,
+    registry: MetadataReader<'a>,
+}
+
+impl<'a> ProjectReader<'a> {
+    pub(crate) const fn new(registry: MetadataReader<'a>, local: Option<LocalMetadata>) -> Self {
+        Self { local, registry }
+    }
+
+    pub(crate) fn index_recipe(&self) -> Option<&str> {
+        self.local.as_ref().map(|local| local.index_recipe.as_str())
+    }
+
+    pub(crate) fn tantivy_dir(&self, index: ProjectIndex) -> Result<PathBuf> {
+        match &self.local {
+            Some(local) => local.tantivy_dir(),
+            None => Ok(index.tantivy_dir(self.registry.cache_root())),
+        }
+    }
+}
+
+impl Deref for ProjectReader<'_> {
+    type Target = Db;
+
+    fn deref(&self) -> &Self::Target {
+        self.local
+            .as_ref()
+            .map_or(&self.registry, |local| &local.db)
     }
 }
