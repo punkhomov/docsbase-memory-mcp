@@ -86,6 +86,21 @@ pub(crate) fn with_config_write_lock<T>(
     with_config_write_lock_with_wait(path, f, std::thread::sleep)
 }
 
+/// Hold source guards in global-to-project order during index publication.
+pub(crate) fn with_index_config_write_locks<T>(
+    global_file: Option<&Path>,
+    project_root: &Path,
+    work: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let project_file = project_root.join(".docsbase.toml");
+    let lock_project = || with_config_write_lock(&project_file, work);
+    if let Some(global_file) = global_file {
+        with_config_write_lock(global_file, lock_project)
+    } else {
+        lock_project()
+    }
+}
+
 /// Per-call retry seam; production uses the same real backoff as before.
 /// `wait` runs only after a failed OS-lock attempt, never while holding it.
 pub(crate) fn with_config_write_lock_with_wait<T>(

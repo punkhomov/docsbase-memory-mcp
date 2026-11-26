@@ -36,9 +36,9 @@ use crate::platform::transport::Stream;
 use crate::search::metadata::MetadataSource;
 use crate::store::Db;
 use crate::store::migrations;
-use crate::store::project_index::ProjectIndex;
 use crate::store::read_pool::ReadPool;
 use crate::store::settings::{DbSettings, ReadPoolSettings};
+use crate::store::{generation_build::CatalogHead, project_index::ProjectIndex};
 use crate::watch::Watchers;
 
 #[cfg(test)]
@@ -128,6 +128,7 @@ pub(crate) struct ProjectCell {
     reload: Mutex<()>,
     preparation: RwLock<()>,
     catalog_sync: crate::index::async_job::catalog_sync::Slot,
+    watch_candidate: crate::watch::WatchConfigCandidate,
     #[cfg(test)]
     preparation_observer: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
@@ -176,29 +177,131 @@ impl ProjectCell {
             .preparation
             .read()
             .unwrap_or_else(PoisonError::into_inner);
-        let current = self
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.check_config_revision(expected)?;
+        Ok(preparation)
+    }
+
+    fn check_config_revision(&self, expected: &Arc<Config>) -> Result<()> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.unverified.is_some() {
+            return Err(Shared::catalog_config_busy());
+        }
+        if !state
             .config
             .as_ref()
-            .is_some_and(|config| Arc::ptr_eq(config, expected));
-        if !current {
+            .is_some_and(|config| Arc::ptr_eq(config, expected))
+        {
             return Err(Error::Project {
                 message: "project configuration changed before search preparation".to_owned(),
                 instruction: Some("retry search".to_owned()),
             });
         }
-        Ok(preparation)
+        Ok(())
+    }
+
+    pub(crate) fn begin_watch_config_transition(
+        &self,
+        config: Arc<Config>,
+    ) -> crate::watch::WatchConfigTransition {
+        crate::watch::WatchConfigTransition::begin(&self.watch_candidate, config)
+    }
+
+    pub(crate) fn try_catalog_reload(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        match self.reload.try_lock() {
+            Ok(guard) => Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(error)) => Ok(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => Err(Shared::catalog_config_busy()),
+        }
+    }
+
+    pub(crate) fn catalog_publication(
+        &self,
+        expected: &Arc<Config>,
+    ) -> Result<CatalogConfigPublication<'_>> {
+        let publication = self.try_catalog_publication()?;
+        self.check_config_revision(expected)?;
+        Ok(publication)
+    }
+
+    fn try_catalog_publication(&self) -> Result<CatalogConfigPublication<'_>> {
+        // Match the lock order of ordinary reload and watcher installation.
+        let reload = self.try_catalog_reload()?;
+        let preparation = match self.preparation.try_write() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(Shared::catalog_config_busy()),
+        };
+        Ok(CatalogConfigPublication {
+            slot: self,
+            preparation,
+            reload,
+        })
+    }
+}
+
+pub(crate) struct CatalogConfigPublication<'a> {
+    slot: &'a ProjectCell,
+    preparation: std::sync::RwLockWriteGuard<'a, ()>,
+    reload: std::sync::MutexGuard<'a, ()>,
+}
+
+impl<'a> CatalogConfigPublication<'a> {
+    /// Readers can use the new runtime while watcher installation remains
+    /// serialized with any subsequent config publication.
+    pub(crate) fn release_preparation(self) -> std::sync::MutexGuard<'a, ()> {
+        drop(self.preparation);
+        self.reload
+    }
+
+    pub(crate) fn retain_unverified(
+        &self,
+        head: CatalogHead,
+        runtime: Arc<crate::watch::WatchRuntime>,
+        watch_transition: Option<crate::watch::WatchConfigTransition>,
+    ) {
+        let mut state = self
+            .slot
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.unverified = Some(UnverifiedRuntime {
+            head,
+            runtime,
+            _watch_transition: watch_transition,
+        });
+    }
+
+    pub(crate) fn install(&self, config: Arc<Config>, stages: Arc<HybridStages>) -> ProjectState {
+        let mut state = self
+            .slot
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        std::mem::replace(
+            &mut *state,
+            ProjectState {
+                config: Some(config),
+                stages: None,
+                search_stages: Some(stages),
+                ..ProjectState::default()
+            },
+        )
     }
 }
 
 /// A config Arc is its revision identity. Stages always belong to that Arc.
 #[derive(Default)]
-struct ProjectState {
+pub(crate) struct ProjectState {
     config: Option<Arc<Config>>,
     stages: Option<Arc<HybridStages>>,
     search_stages: Option<Arc<HybridStages>>,
+    unverified: Option<UnverifiedRuntime>,
+}
+
+struct UnverifiedRuntime {
+    head: CatalogHead,
+    runtime: Arc<crate::watch::WatchRuntime>,
+    _watch_transition: Option<crate::watch::WatchConfigTransition>,
 }
 
 /// Explicit bootstrap ownership supplied before the daemon's first CPU/native work.
@@ -453,6 +556,7 @@ impl Shared {
                         config: Some(Arc::clone(&fixed.config)),
                         stages: Some(Arc::new(HybridStages::default())),
                         search_stages: None,
+                        ..ProjectState::default()
                     }),
                     ..ProjectCell::default()
                 }),
@@ -602,8 +706,17 @@ impl Shared {
                 {
                     return Err(error);
                 }
-                let db = owner.open_work_registry()?;
+                call.check()?;
                 let slot = owner.project_slot(project.id);
+                owner
+                    .reconcile_catalog_runtime(project.id, &slot)
+                    .map_err(|error| {
+                        Error::internal_with_source(
+                            "retry catalog runtime verification for watcher",
+                            error,
+                        )
+                    })?;
+                let db = owner.open_work_registry()?;
                 let mut capture = crate::index::job::CaptureBudget {
                     account: &account,
                     operation: &call,
@@ -617,7 +730,13 @@ impl Shared {
                     &input,
                     Some(&mut capture),
                     || {
-                        let accepted = slot.preparation_lease(&runtime.config)?;
+                        let accepted =
+                            slot.preparation_lease(&runtime.config).map_err(|error| {
+                                Error::internal_with_source(
+                                    "retry watcher with the current catalog runtime",
+                                    error,
+                                )
+                            })?;
                         call.check()?;
                         Ok(accepted)
                     },
@@ -731,6 +850,13 @@ impl Shared {
     pub(crate) fn watch_activity_source(&self) -> request::ActivitySource {
         self.activity.clone()
     }
+
+    pub(crate) fn watch_config_candidate(
+        &self,
+        project_id: i64,
+    ) -> crate::watch::WatchConfigCandidate {
+        self.project_slot(project_id).watch_candidate.clone()
+    }
     pub(crate) fn watch_operation(&self) -> Result<crate::search::operation::SearchOperation> {
         crate::search::operation::SearchOperation::with_timeout(
             Instant::now(),
@@ -826,6 +952,64 @@ impl Shared {
         )
     }
 
+    fn reconcile_catalog_runtime(&self, project_id: i64, slot: &ProjectCell) -> Result<()> {
+        if self.catalog_epoch.is_none()
+            || slot
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .unverified
+                .is_none()
+        {
+            return Ok(());
+        }
+        let reader = self.readers.try_acquire()?;
+        let publication = slot.try_catalog_publication()?;
+        let head = slot
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .unverified
+            .as_ref()
+            .map(|candidate| candidate.head);
+        let Some(head) = head else {
+            return Ok(());
+        };
+        // Keep the candidate available for another retry if the registry
+        // is still unreadable. Only an exact head can adopt this runtime.
+        let selected = head.is_selected(reader.connection())?;
+        let candidate = slot
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .unverified
+            .take();
+        drop(reader);
+        let retired = candidate.as_ref().and_then(|candidate| {
+            selected.then(|| {
+                publication.install(
+                    candidate.runtime.config.clone(),
+                    candidate.runtime.stages.clone(),
+                )
+            })
+        });
+        let reload = publication.release_preparation();
+        if selected
+            && let Some(candidate) = &candidate
+            && let Err(error) = self.watchers.revise_with_runtime(
+                &self.cache,
+                project_id,
+                candidate.runtime.clone(),
+            )
+        {
+            eprintln!("warning: cannot revise watcher for project {project_id}: {error}");
+        }
+        drop(reload);
+        drop(retired);
+        drop(candidate);
+        Ok(())
+    }
+
     /// Resolved hybrid stages of `project`; built on first use and refreshed
     /// when the project is reopened. Feature-off + enabled hybrid is an
     /// explicit [`Error::Admission`] (FR-14) - no silent BM25-only fallback.
@@ -912,6 +1096,7 @@ impl Shared {
         self.admit_project(project)?;
         let slot = self.project_slot(project.id);
         loop {
+            self.reconcile_catalog_runtime(project.id, &slot)?;
             let config = {
                 let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
                 let config = self.config_in(&mut state, project)?;
@@ -946,10 +1131,11 @@ impl Shared {
                 build(&config)
             };
             let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
-            if !state
-                .config
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &config))
+            if state.unverified.is_some()
+                || !state
+                    .config
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &config))
             {
                 // Neither an obsolete result nor its error may escape.
                 continue;
@@ -1135,6 +1321,9 @@ impl Shared {
         project: &crate::store::models::Project,
     ) -> Result<Arc<Config>> {
         self.admit_project(project)?;
+        if state.unverified.is_some() {
+            return Err(Self::catalog_config_busy());
+        }
         if let Some(config) = &state.config {
             return Ok(Arc::clone(config));
         }
@@ -1155,6 +1344,7 @@ impl Shared {
     pub fn project_config(&self, project: &crate::store::models::Project) -> Result<Arc<Config>> {
         self.admit_project(project)?;
         let slot = self.project_slot(project.id);
+        self.reconcile_catalog_runtime(project.id, &slot)?;
         let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
         self.config_in(&mut state, project)
     }
@@ -1294,6 +1484,60 @@ impl Shared {
             .map(|(config, _)| config)
     }
 
+    fn stage_catalog_config(
+        &self,
+        project: &crate::store::models::Project,
+        active: &Arc<Config>,
+    ) -> Result<(Arc<Config>, Arc<HybridStages>)> {
+        let slot = self.project_slot(project.id);
+        let _reload = slot.try_catalog_reload()?;
+        slot.check_config_revision(active)?;
+        let config = self.config_for_root(&project.canonical_root)?;
+        if config == **active {
+            return self.project_runtime_for_search(project);
+        }
+        let stages = self.async_stages(&config)?;
+        Ok((Arc::new(config), Arc::new(stages)))
+    }
+
+    fn runtime_for_config_open(
+        &self,
+        slot: &ProjectCell,
+        project: &crate::store::models::Project,
+        desired: Arc<Config>,
+        shared_catalog: bool,
+    ) -> Result<(Arc<Config>, Option<Arc<HybridStages>>)> {
+        let (current, stages) = {
+            let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.unverified.is_some() {
+                return Err(Self::catalog_config_busy());
+            }
+            (
+                state.config.clone(),
+                state
+                    .search_stages
+                    .as_ref()
+                    .or(state.stages.as_ref())
+                    .cloned(),
+            )
+        };
+        if let Some(current) = current
+            && (current == desired
+                || (shared_catalog
+                    && catalog_requires_index(&current, &desired)
+                    && crate::store::project_index::catalog_needs_index_for(
+                        self.readers.try_acquire()?,
+                        project,
+                        &crate::index::outcome::recipe_id(&desired),
+                    )?))
+        {
+            // Opens retain the active recipe until explicit Index can
+            // publish the required pair together with the new settings.
+            return Ok((current, stages));
+        }
+        Ok((desired, None))
+    }
+
     fn publish_project_config<F, O>(
         &self,
         project: &crate::store::models::Project,
@@ -1307,31 +1551,27 @@ impl Shared {
     {
         self.admit_project(project)?;
         let slot = self.project_slot(project.id);
+        self.reconcile_catalog_runtime(project.id, &slot)?;
         // Only same-project reloads wait for construction. Existing runtime
         // reads and unrelated projects keep their last coherent state.
         let shared_catalog = self.catalog_epoch.is_some() && self.website.is_none();
         let _reload = if shared_catalog {
-            match slot.reload.try_lock() {
-                Ok(guard) => guard,
-                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => return Err(Self::catalog_config_busy()),
-            }
+            slot.try_catalog_reload()?
         } else {
             slot.reload.lock().unwrap_or_else(PoisonError::into_inner)
         };
-        let config = self.config_for_root(&project.canonical_root)?;
-        if self.website.is_some() || self.catalog_epoch.is_some() || explicit_index_db.is_some() {
-            let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(current) = &state.config
-                && let Some(stages) = state.search_stages.as_ref().or(state.stages.as_ref())
-                && current.as_ref() == &config
-            {
-                // An equal explicit Index or Website read-only bind must keep
-                // the revision that already-admitted work will publish against.
-                return Ok((Arc::clone(current), Arc::clone(stages)));
-            }
+        let config = Arc::new(self.config_for_root(&project.canonical_root)?);
+        let (config, stages) = if self.website.is_some()
+            || self.catalog_epoch.is_some()
+            || explicit_index_db.is_some()
+        {
+            self.runtime_for_config_open(&slot, project, config, shared_catalog)?
+        } else {
+            (config, None)
+        };
+        if let Some(stages) = stages {
+            return Ok((config, stages));
         }
-        let config = Arc::new(config);
         let stages = Arc::new(if self.website.is_some() {
             HybridStages::default()
         } else {
@@ -2652,18 +2892,30 @@ fn capture_catalog_sync(
             message: "project sync is starting or retiring; retry sync".into(),
         });
     };
+    let active = shared.project_config(&project)?;
     let (config, stages) = if refresh {
-        shared.publish_project_config(
-            &project,
-            |config| shared.async_stages(config),
-            || {},
-            None,
-        )?
+        shared.stage_catalog_config(&project, &active)?
     } else {
         shared.project_runtime_for_search(&project)?
     };
     super::launch::catalog_lexical_only(&config)?;
     let source = shared.vector_source_for(project.id, &config);
+    let refresh = if refresh {
+        source.validate_root(&shared.cache)?;
+        Some(crate::index::async_job::catalog_sync::RuntimeUpdate {
+            active,
+            watchers: Arc::clone(&shared.watchers),
+            global_config: shared.global_config.clone(),
+            global_path: shared.global_config_path.clone(),
+            watch_runtime: Arc::new(crate::watch::WatchRuntime::new(
+                Arc::clone(&config),
+                Arc::clone(&stages),
+                source.clone(),
+            )),
+        })
+    } else {
+        None
+    };
     Ok(Ok(crate::index::async_job::catalog_sync::Context {
         cache: shared.cache.clone(),
         epoch,
@@ -2675,7 +2927,21 @@ fn capture_catalog_sync(
         source,
         pin_ttl: shared.dense.limits().ann_lifetimes.backfill_pin_ttl(),
         owner,
+        refresh,
     }))
+}
+
+fn catalog_requires_index(active: &Config, desired: &Config) -> bool {
+    fn model(config: &Config) -> Option<String> {
+        config
+            .hybrid_cfg
+            .embedding
+            .as_ref()
+            .filter(|_| config.hybrid_cfg.enabled)
+            .map(embedding_model_id)
+    }
+    crate::index::outcome::recipe_id(active) != crate::index::outcome::recipe_id(desired)
+        || model(active) != model(desired)
 }
 
 fn catalog_job_project(

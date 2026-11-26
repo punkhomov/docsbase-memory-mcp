@@ -43,6 +43,7 @@ use interrupted::InterruptedBase;
 
 mod publication;
 pub use publication::publish_lexical_generation;
+pub(crate) use publication::{CatalogCommit, CatalogHead, LexicalCommit};
 
 mod recovery;
 mod retirement;

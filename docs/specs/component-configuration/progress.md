@@ -1905,3 +1905,28 @@ checks the two candidate keys after retirement. The watcher test
 reproduces mutation despite a held preparation lease, then checks
 retry, continued reads and one successful edit after release.
 All 24 catalog tests, 19 server profile tests and formatting passed.
+
+## 2026-11-26 — CF11c, публикация Shared runtime вместе с индексом
+
+Task CF11c catalog runtime publication: complete (explicit refresh, source
+revalidation, exact-head reconciliation, watcher handoff, and fresh review).
+
+Ruling: the actual connected Index fixture forces deferred SQLite constraint
+failure on COMMIT. The active Config and stages retain their Arc identity and
+the old index remains searchable. A retry adopts the new ignore recipe with
+the new head. A captured candidate whose project file changes before
+publication is refused under the existing config write locks. The restored
+recipe can be opened normally after a daemon restart.
+
+Ruling: an inconclusive COMMIT reread retains the candidate for exact epoch,
+head and seal confirmation. Config, search and watcher resolve it under
+project authority. A regression emulates the inconclusive runtime boundary
+over real published files and verifies that the same watcher payload can be
+retried under the accepted runtime. During transition the producer retains
+events accepted by either recipe. Common ignored notifications remain outside
+the raw capture budget. Retired stages are dropped after native leases.
+
+Ruling: 29 catalog tests, 30 config-runtime cases, all 19 server-profile
+cases, the legacy forwarding test, lean offline, all-target Clippy and
+formatting passed. Persisted embedding recipe admission and configured
+Shared hybrid still require integration.

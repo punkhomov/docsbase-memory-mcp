@@ -16,14 +16,15 @@ use super::{
 };
 
 /// The project lease excludes both readers and head publication. The admission
-/// guard returned after capture stays live until the durable commit is settled.
+/// check rejects obsolete watcher settings before using the selected recipe.
+/// The recheck after capture stays live until the durable commit settles.
 pub(crate) fn apply_lexical_batch<A>(
     registry: &Db,
     project: &Project,
     config: &Config,
     input: &JobInput<'_>,
     capture: Option<&mut CaptureBudget<'_>>,
-    admit: impl FnOnce() -> Result<A>,
+    admit: impl Fn() -> Result<A>,
 ) -> Result<JobStats> {
     if !cfg!(unix) || config.hybrid || config.hybrid_cfg.enabled {
         return Err(Error::Admission {
@@ -32,6 +33,7 @@ pub(crate) fn apply_lexical_batch<A>(
         });
     }
     with_catalog_pair_using(registry, project, PairAccess::Write, |_, local, index| {
+        drop(admit()?);
         let mut local = local.ok_or_else(|| invalid_index("index has no local generation"))?;
         if local.index_recipe != outcome::recipe_id(config) {
             return Err(invalid_index(

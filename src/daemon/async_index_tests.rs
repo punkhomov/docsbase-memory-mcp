@@ -409,6 +409,409 @@ async fn catalog_index_waiting_for_provider(
     indexing
 }
 
+#[cfg(unix)]
+fn open_v5_index_shared(cache: &Path, config: &Path, toml: &str) -> Arc<Shared> {
+    Db::open_for_index(cache, &crate::store::settings::standalone().unwrap(), true)
+        .unwrap()
+        .close()
+        .unwrap();
+    let mut shared = open_v2_index_shared_with_config(cache, config, toml);
+    Arc::get_mut(&mut shared).unwrap().watchers = Arc::new(Watchers::with_enabled(false));
+    shared
+}
+
+#[cfg(unix)]
+async fn catalog_search_hits(shared: &Arc<Shared>, session: u64, query: &str) -> usize {
+    call_tool(
+        shared,
+        Some(session),
+        "search_docs",
+        json!({"query": query}),
+    )
+    .await
+    .unwrap()
+    .as_array()
+    .unwrap()
+    .len()
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_refresh_keeps_old_runtime_until_the_index_commits() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("guide.md"), "retainedcatalogwidget").unwrap();
+        std::fs::write(root.path().join("extra.md"), "omittedcatalogwidget").unwrap();
+        let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+        shared.activate_jobs(service).unwrap();
+        let args = json!({"path": root.path(), "refresh_config": true});
+        call_tool(&shared, None, "index_project", args.clone())
+            .await
+            .unwrap();
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+        let (session, _cancel) = shared
+            .sessions
+            .join(
+                std::process::id(),
+                project.canonical_root.clone(),
+                Some(project.id),
+            )
+            .unwrap();
+        let (before, before_stages) = shared.project_runtime_for_search(&project).unwrap();
+        let hits = |query: &'static str| catalog_search_hits(&shared, session, query);
+        assert_eq!(hits("omittedcatalogwidget").await, 1);
+        shared
+            .db()
+            .connection()
+            .execute_batch(
+                "CREATE TABLE deferred_refresh_failure (
+                   project_id INTEGER REFERENCES projects(id) DEFERRABLE INITIALLY DEFERRED
+                 );
+                 CREATE TRIGGER reject_catalog_refresh AFTER UPDATE ON project_generation_head
+                 BEGIN INSERT INTO deferred_refresh_failure VALUES (-1); END;",
+            )
+            .unwrap();
+        std::fs::write(
+            root.path().join(".docsbase.toml"),
+            "config_version = 2\nignores = [\"extra.md\"]\n",
+        )
+        .unwrap();
+        let error = call_tool(&shared, None, "index_project", args.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("new head was not committed"),
+            "{error}"
+        );
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        let (active, stages) = shared.project_runtime_for_search(&project).unwrap();
+        assert!(
+            Arc::ptr_eq(&before, &active),
+            "rollback replaced active config"
+        );
+        assert!(
+            Arc::ptr_eq(&before_stages, &stages),
+            "rollback replaced active stages"
+        );
+        assert!(Arc::ptr_eq(
+            &before,
+            &shared.open_project_config(&project).unwrap()
+        ));
+        assert_eq!(hits("omittedcatalogwidget").await, 1);
+
+        shared
+            .db()
+            .connection()
+            .execute_batch(
+                "DROP TRIGGER reject_catalog_refresh; DROP TABLE deferred_refresh_failure",
+            )
+            .unwrap();
+        call_tool(&shared, None, "index_project", args)
+            .await
+            .unwrap();
+        assert_eq!(
+            shared.project_config(&project).unwrap().ignores,
+            ["extra.md"]
+        );
+        assert_eq!(hits("omittedcatalogwidget").await, 0);
+        assert_eq!(hits("retainedcatalogwidget").await, 1);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn shared_catalog_reopen_accepts_the_restored_published_recipe() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("guide.md"), "restoredcatalogwidget").unwrap();
+    let mut original = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = original.service();
+    original
+        .run(&runtime, async {
+            let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+            shared.activate_jobs(service).unwrap();
+            call_tool(&shared, None, "index_project", json!({"path": root.path()}))
+                .await
+                .unwrap();
+            shared
+                .activity
+                .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+                .await;
+            Ok(())
+        })
+        .unwrap();
+
+    let path = root.path().join(".docsbase.toml");
+    std::fs::write(&path, "config_version = 2\nignores = ['guide.md']\n").unwrap();
+    let mut restarted = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = restarted.service();
+    restarted
+        .run(&runtime, async {
+            let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+            shared.activate_jobs(service).unwrap();
+            let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+            assert_eq!(
+                shared.open_project_config(&project).unwrap().ignores,
+                ["guide.md"]
+            );
+            std::fs::remove_file(path).unwrap();
+            let restored = shared.open_project_config(&project).unwrap();
+            assert_eq!(restored.ignores, Vec::<String>::new());
+
+            let (session, _cancel) = shared
+                .sessions
+                .join(
+                    std::process::id(),
+                    project.canonical_root.clone(),
+                    Some(project.id),
+                )
+                .unwrap();
+            assert_eq!(
+                catalog_search_hits(&shared, session, "restoredcatalogwidget").await,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[cfg(unix)]
+async fn retry_catalog_watch_after_runtime_reconciliation(
+    shared: &Arc<Shared>,
+    project: &crate::store::models::Project,
+    previous: Arc<crate::watch::WatchRuntime>,
+    accepted: Arc<crate::watch::WatchRuntime>,
+) {
+    let doc = project.canonical_root.join("new.md");
+    std::fs::write(&doc, "recoveredcatalogwatch").unwrap();
+    let (_sender, mut events) = tokio::sync::mpsc::channel(1);
+    let operation = shared.watch_operation().unwrap();
+    let paths = crate::watch::merge_pending(
+        &shared.payload_budget,
+        None,
+        Some(vec![doc]),
+        &mut events,
+        &operation,
+        &shared.watchers,
+    )
+    .unwrap();
+    let result = shared
+        .run_watch_batch(
+            project.clone(),
+            previous,
+            paths.clone(),
+            operation.clone(),
+            shared.watch_activity(),
+        )
+        .await;
+    assert!(matches!(result, Err(Error::Internal { .. })), "{result:?}");
+    let stats = shared
+        .run_watch_batch(
+            project.clone(),
+            accepted,
+            paths,
+            operation,
+            shared.watch_activity(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stats.docs, 1);
+}
+
+#[test]
+#[cfg(unix)]
+fn shared_catalog_reconciles_a_retained_runtime_against_the_selected_seal() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("guide.md"), "selectedcatalogwidget").unwrap();
+        let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+        shared.activate_jobs(service).unwrap();
+        let args = json!({"path": root.path(), "refresh_config": true});
+        call_tool(&shared, None, "index_project", args.clone())
+            .await
+            .unwrap();
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+        let (previous, previous_stages) = shared.project_runtime_for_search(&project).unwrap();
+
+        let path = root.path().join(".docsbase.toml");
+        std::fs::write(&path, "config_version = 2\nignores = ['guide.md']\n").unwrap();
+        call_tool(&shared, None, "index_project", args)
+            .await
+            .unwrap();
+        let (committed, committed_stages) = shared.project_runtime_for_search(&project).unwrap();
+        let head =
+            CatalogHead::from_selected_fixture(shared.db().connection(), project.id).unwrap();
+        let pending = Arc::new(crate::watch::WatchRuntime::new(
+            committed.clone(),
+            committed_stages,
+            shared.vector_source_for(project.id, &committed),
+        ));
+        let slot = shared.project_slot(project.id);
+        {
+            // Emulate the in-memory boundary after SQLite committed and its
+            // first independent verification failed. The actual seal is intact.
+            let publication = slot.catalog_publication(&committed).unwrap();
+            publication.install(previous.clone(), previous_stages.clone());
+            let transition = slot.begin_watch_config_transition(committed.clone());
+            publication.retain_unverified(head, pending.clone(), Some(transition));
+        }
+        assert!(slot.preparation_lease(&previous).is_err());
+        // A source edit after the accepted commit must not replace its candidate.
+        std::fs::remove_file(path).unwrap();
+        let previous_runtime = Arc::new(crate::watch::WatchRuntime::new(
+            previous.clone(),
+            previous_stages,
+            shared.vector_source_for(project.id, &previous),
+        ));
+        retry_catalog_watch_after_runtime_reconciliation(
+            &shared,
+            &project,
+            previous_runtime,
+            pending,
+        )
+        .await;
+        let (session, _cancel) = shared
+            .sessions
+            .join(
+                std::process::id(),
+                project.canonical_root.clone(),
+                Some(project.id),
+            )
+            .unwrap();
+        assert_eq!(
+            catalog_search_hits(&shared, session, "selectedcatalogwidget").await,
+            0
+        );
+        assert_eq!(
+            catalog_search_hits(&shared, session, "recoveredcatalogwatch").await,
+            1
+        );
+        assert!(Arc::ptr_eq(
+            &committed,
+            &shared.project_config(&project).unwrap()
+        ));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_refresh_rechecks_the_project_source_after_capture() {
+    use crate::index::async_job::catalog_sync;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("guide.md"), "retainedcatalogsource").unwrap();
+        let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+        shared.activate_jobs(service.clone()).unwrap();
+        let args = json!({"path": root.path(), "refresh_config": true});
+        call_tool(&shared, None, "index_project", args.clone())
+            .await
+            .unwrap();
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+        let old = shared.project_config(&project).unwrap();
+
+        let path = root.path().join(".docsbase.toml");
+        std::fs::write(&path, "config_version = 2\nignores = ['guide.md']\n").unwrap();
+        let context =
+            capture_catalog_sync(&shared, None, &args, shared.catalog_epoch.unwrap(), false)
+                .unwrap()
+                .unwrap();
+        std::fs::write(&path, "config_version = 2\nignores = ['different.md']\n").unwrap();
+
+        let operation = shared.watch_operation().unwrap();
+        let activity = shared.activity.track();
+        let owner = service
+            .admit(
+                shared.workers.clone(),
+                activity.clone(),
+                &operation,
+                &shared.payload_budget,
+            )
+            .await
+            .unwrap();
+        let call = operation.clone();
+        let (owner, status) = service
+            .phase(
+                &shared.workers,
+                activity.clone(),
+                &operation,
+                owner,
+                move |state| state.prepare_catalog_sync(context, &call),
+            )
+            .await
+            .unwrap();
+        drop(status);
+        let failure =
+            catalog_sync::execute(&service, &shared.workers, &activity, &operation, owner)
+                .await
+                .unwrap_err();
+        assert!(
+            failure
+                .to_string()
+                .contains("configuration changed before publication"),
+            "{failure}"
+        );
+        assert!(Arc::ptr_eq(&old, &shared.project_config(&project).unwrap()));
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "retainedcatalogsource"),
+            1
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
 #[test]
 #[cfg(unix)]
 fn catalog_index_capacity_failure_preserves_selected_vectors() {
@@ -426,21 +829,12 @@ fn catalog_index_capacity_failure_preserves_selected_vectors() {
         let guide = root.path().join("guide.md");
         let old_text = "oldcatalogwidget";
         std::fs::write(&guide, old_text).unwrap();
-        Db::open_for_index(
-            cache.path(),
-            &crate::store::settings::standalone().unwrap(),
-            true,
-        )
-        .unwrap()
-        .close()
-        .unwrap();
-        let mut shared = open_v2_index_shared_with_config(
+        let mut shared = open_v5_index_shared(
             cache.path(),
             config.path(),
             "config_version = 2\n[vector_cache]\nmax_entries = 2\n",
         );
         let owner = Arc::get_mut(&mut shared).unwrap();
-        owner.watchers = Arc::new(Watchers::with_enabled(false));
         let mut budget = owner.global_config.search.clone();
         budget.max_request_payload_bytes = 32 * 1024 * 1024;
         owner.payload_budget = crate::search::budget::PayloadBudget::new(budget).unwrap();

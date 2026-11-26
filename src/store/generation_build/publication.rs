@@ -22,6 +22,7 @@ use crate::store::registry_inspect::{
 use crate::store::settings::{DbSettings, DbSpec};
 use crate::store::{
     DB_FILE, Db,
+    generation_catalog::{self, Layout},
     generation_seal::{GenerationSeal, SEAL_FORMAT},
     migrations,
     project_index::project_directory,
@@ -118,9 +119,51 @@ pub(crate) struct LexicalCommit<'a> {
     current: ObservedProjectIndex,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CatalogHead {
+    epoch: [u8; 16],
+    project_id: i64,
+    generation: i64,
+    seal: [u8; 32],
+}
+
+impl CatalogHead {
+    #[cfg(all(test, unix, feature = "hybrid-remote"))]
+    pub(crate) fn from_selected_fixture(conn: &Connection, project_id: i64) -> Result<Self> {
+        let epoch = generation_catalog::read_epoch(conn).map_err(registry_unavailable)?;
+        let head = generation_catalog::active_head(conn, project_id)
+            .map_err(registry_unavailable)?
+            .ok_or_else(|| admission("fixture has no active head"))?;
+        let Layout::Local { seal_digest } = head.layout else {
+            return Err(admission("fixture has no published local seal"));
+        };
+        Ok(Self {
+            epoch,
+            project_id,
+            generation: head.id,
+            seal: seal_digest,
+        })
+    }
+
+    pub(crate) fn is_selected(self, conn: &Connection) -> Result<bool> {
+        validate_epoch(conn, self.epoch)?;
+        let head =
+            generation_catalog::active_head(conn, self.project_id).map_err(registry_unavailable)?;
+        Ok(head.is_some_and(|head| {
+            head.id == self.generation
+                && matches!(head.layout, Layout::Local { seal_digest } if seal_digest == self.seal)
+        }))
+    }
+}
+
+pub(crate) enum CatalogCommit {
+    Committed,
+    Unverified(CatalogHead),
+}
+
 impl LexicalCommit<'_> {
     pub(crate) fn commit(self, admit: impl FnOnce() -> Result<()>) -> Result<ObservedProjectIndex> {
-        self.commit_with(|| Ok(()), |_, _| Ok(()), admit)
+        self.commit_with(|| Ok(()), |_, _| Ok(()), admit, |_| {})
     }
 
     pub(crate) fn commit_with<Admission>(
@@ -128,12 +171,13 @@ impl LexicalCommit<'_> {
         hold: impl FnOnce() -> Result<Admission>,
         record: impl FnOnce(&Connection, ObservedProjectIndex) -> Result<()>,
         admit: impl FnOnce() -> Result<()>,
+        after_commit: impl FnOnce(CatalogCommit),
     ) -> Result<ObservedProjectIndex> {
         let writer_lock = lifecycle::lease_path(self.publication.cache, self.project.id);
         lifecycle::with_writer_lock(
             open_coordination_file(&writer_lock, false)?,
             &writer_lock,
-            || commit_head(&self, hold, record, admit),
+            || commit_head(&self, hold, record, admit, after_commit),
         )?;
         Ok(self.current)
     }
@@ -617,6 +661,7 @@ fn commit_head<Admission>(
     hold: impl FnOnce() -> Result<Admission>,
     record: impl FnOnce(&Connection, ObservedProjectIndex) -> Result<()>,
     admit: impl FnOnce() -> Result<()>,
+    after_commit: impl FnOnce(CatalogCommit),
 ) -> Result<()> {
     let StagedPublication {
         cache,
@@ -702,18 +747,49 @@ fn commit_head<Admission>(
     record(&tx, commit.current)?;
     // All validation and SQL writes are still reversible at this boundary.
     admit()?;
-    tx.commit().map_err(|error| {
-        crate::error::Error::internal_with_source(
-            "commit generation catalog (publication result may be indeterminate)",
-            error,
-        )
-    })?;
+    if let Err(error) = tx.commit() {
+        // Reopen the registry under the same project writer authority. The
+        // failed SQLite connection may not be able to observe its own result.
+        drop(registry);
+        let head = CatalogHead {
+            epoch: request.epoch,
+            project_id: request.project_id,
+            generation: staged.generation_id,
+            seal: *seal.as_bytes(),
+        };
+        let selected = access.read(cache, settings, limits, |conn| head.is_selected(conn));
+        drop(artifact_guard);
+        return Err(reconcile_commit_error(error, selected, head, after_commit));
+    }
+    // The head is visible after COMMIT. Runtime publication must happen
+    // under the same project authority even if a later durability step fails.
     drop(artifact_guard);
+    after_commit(CatalogCommit::Committed);
     registry
         .conn
         .close()
         .map_err(|(_, err)| repo::db_error(err))?;
     sync_directory(cache)
+}
+
+fn reconcile_commit_error(
+    error: rusqlite::Error,
+    selected: Result<bool>,
+    head: CatalogHead,
+    after_commit: impl FnOnce(CatalogCommit),
+) -> crate::error::Error {
+    let state = match selected {
+        Ok(true) => {
+            after_commit(CatalogCommit::Committed);
+            "new head observed after commit error".into()
+        }
+        Ok(false) => "new head was not committed".into(),
+        Err(inspect) => {
+            after_commit(CatalogCommit::Unverified(head));
+            format!("commit result could not be determined: {inspect}")
+        }
+    };
+    crate::error::Error::internal_with_source(format!("commit generation catalog ({state})"), error)
 }
 
 /// Under the project writer lease, before starting the shared registry write

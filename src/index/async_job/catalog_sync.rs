@@ -5,7 +5,11 @@ use super::{
     SearchOperation, WorkerAdmission,
 };
 use crate::config::schema::Resolved;
-use crate::daemon::{readiness::SyncAttribution, server::ProjectCell, tools};
+use crate::daemon::{
+    readiness::SyncAttribution,
+    server::{CatalogConfigPublication, ProjectCell, ProjectState},
+    tools,
+};
 use crate::error::{Error, Result};
 use crate::hybrid::{
     HybridStages,
@@ -13,8 +17,11 @@ use crate::hybrid::{
 };
 use crate::index::{generation_job::GenerationJob, job::CaptureBudget};
 use crate::store::{
-    generation_build::{PreparedLexicalPublication, open_index_registry},
+    generation_build::{
+        CatalogCommit, LexicalCommit, PreparedLexicalPublication, open_index_registry,
+    },
     models::SyncState,
+    registry_inspect::ObservedProjectIndex,
     repo,
     settings::DbSettings,
 };
@@ -35,6 +42,56 @@ pub(crate) struct Context {
     pub(crate) pin_ttl: Duration,
     pub(crate) revision: Arc<ProjectCell>,
     pub(crate) owner: Owner,
+    pub(crate) refresh: Option<RuntimeUpdate>,
+}
+
+pub(crate) struct RuntimeUpdate {
+    pub(crate) active: Arc<Config>,
+    pub(crate) global_config: Config,
+    pub(crate) global_path: Option<PathBuf>,
+    pub(crate) watchers: Arc<crate::watch::Watchers>,
+    pub(crate) watch_runtime: Arc<crate::watch::WatchRuntime>,
+}
+
+impl RuntimeUpdate {
+    fn with_current_sources<T>(
+        &self,
+        context: &Context,
+        operation: &SearchOperation,
+        publish: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let root = &context.project.canonical_root;
+        crate::config::paths::with_index_config_write_locks(
+            self.global_path.as_deref(),
+            root,
+            || {
+                operation.check()?;
+                if Config::for_project(&self.global_config, root)? != *context.config {
+                    return Err(Error::Admission {
+                        message:
+                            "project index configuration changed before publication; retry index"
+                                .into(),
+                    }
+                    .into());
+                }
+                Ok(publish()?)
+            },
+        )
+        .map_err(|error| match error.downcast::<Error>() {
+            Ok(error) => error,
+            Err(error) => Error::Admission {
+                message: format!("could not lock the index configuration: {error}"),
+            },
+        })
+    }
+}
+
+impl Context {
+    fn active_config(&self) -> &Arc<Config> {
+        self.refresh
+            .as_ref()
+            .map_or(&self.config, |update| &update.active)
+    }
 }
 
 pub(crate) struct Owner {
@@ -199,7 +256,7 @@ impl CatalogSync {
             settings,
             config,
         };
-        drop(revision.preparation_lease(config)?);
+        drop(revision.preparation_lease(self.context.active_config())?);
         let prepared = job.stage(&mut capture)?;
         if let Some(embedder) = &self.context.stages.embedder {
             let (count, longest) =
@@ -302,7 +359,9 @@ impl CatalogSync {
         account: Option<Arc<PayloadPermit>>,
     ) -> Result<BatchPacket> {
         let context = &self.context;
-        let _revision = context.revision.preparation_lease(&context.config)?;
+        let _revision = context
+            .revision
+            .preparation_lease(context.active_config())?;
         let embedder = context
             .stages
             .embedder
@@ -348,7 +407,9 @@ impl CatalogSync {
 
     pub(super) fn store(&self, batch: &EmbeddingBatch, vectors: &[Vec<f32>]) -> Result<()> {
         let context = &self.context;
-        let _revision = context.revision.preparation_lease(&context.config)?;
+        let _revision = context
+            .revision
+            .preparation_lease(context.active_config())?;
         let embedder = context
             .stages
             .embedder
@@ -372,9 +433,11 @@ impl CatalogSync {
 
     fn publish(&mut self, operation: &SearchOperation) -> Result<()> {
         operation.check()?;
-        let context = &self.context;
-        let embedding = self.embedding.as_ref();
-        if embedding.is_some_and(|embedding| !embedding.complete) {
+        if self
+            .embedding
+            .as_ref()
+            .is_some_and(|embedding| !embedding.complete)
+        {
             return Err(Error::internal("catalog embedding scan did not finish"));
         }
         let prepared = self
@@ -382,46 +445,132 @@ impl CatalogSync {
             .take()
             .ok_or_else(|| Error::internal("catalog stage absent"))?;
         let outcome = prepared.outcome().clone();
+        // Keep retiring providers alive until the staged pair has dropped its
+        // native preparation lease, including any reclaim work.
+        let mut retired = None;
+        // The producer must know both eligible scopes before the final
+        // Markdown survey. Keep filtering until the handoff or rollback.
+        let mut watch_transition = (crate::index::outcome::recipe_id(self.context.active_config())
+            != crate::index::outcome::recipe_id(&self.context.config))
+        .then(|| {
+            self.context
+                .revision
+                .begin_watch_config_transition(self.context.config.clone())
+        });
         prepared.publish(|commit| {
-            operation.check()?;
-            let _revision = context.revision.preparation_lease(&context.config)?;
-            let verification = embedding
-                .map(|embedding| {
-                    embedding.pin.renew()?;
-                    operation.check()?;
-                    embedding.pin.prepare_verification(embedding.dimension)
-                })
-                .transpose()?;
-            commit.commit_with(
-                || {
-                    operation.check()?;
-                    verification
-                        .map(|proof| proof.hold_verified(|| operation.check()))
-                        .transpose()
-                },
-                |conn, published| {
-                    let id = published.generation_id.ok_or_else(|| {
-                        Error::internal("published catalog sync generation missing")
-                    })?;
-                    let mut record = serde_json::to_value(&outcome.stats).map_err(|error| {
-                        Error::internal_with_source("encode catalog sync counters", error)
-                    })?;
-                    record["index_outcome"] =
-                        serde_json::to_value(SyncAttribution::for_generation(&outcome, id))
-                            .map_err(|error| {
-                                Error::internal_with_source("encode catalog sync identity", error)
-                            })?;
-                    repo::finish_sync_job(
-                        conn,
-                        self.id,
-                        SyncState::Done,
-                        Some(&encoded_record(&record)?),
-                    )
-                },
-                || operation.check(),
-            )
+            let finalize = || {
+                self.commit_prepared(
+                    commit,
+                    &outcome,
+                    operation,
+                    &mut retired,
+                    &mut watch_transition,
+                )
+            };
+            if let Some(update) = &self.context.refresh {
+                update.with_current_sources(&self.context, operation, finalize)
+            } else {
+                finalize()
+            }
         })?;
         Ok(())
+    }
+
+    fn commit_prepared(
+        &self,
+        commit: LexicalCommit<'_>,
+        outcome: &crate::index::outcome::IndexOutcome,
+        operation: &SearchOperation,
+        retired: &mut Option<ProjectState>,
+        watch_transition: &mut Option<crate::watch::WatchConfigTransition>,
+    ) -> Result<ObservedProjectIndex> {
+        operation.check()?;
+        let context = &self.context;
+        let verification = self
+            .embedding
+            .as_ref()
+            .map(|embedding| {
+                embedding.pin.renew()?;
+                operation.check()?;
+                embedding.pin.prepare_verification(embedding.dimension)
+            })
+            .transpose()?;
+        let active = context.active_config();
+        let (publication, unchanged) = if Arc::ptr_eq(active, &context.config) {
+            // A first publication must not race a re-open that saw no head.
+            let reload = context.revision.try_catalog_reload()?;
+            (
+                None,
+                Some((reload, context.revision.preparation_lease(active)?)),
+            )
+        } else {
+            (Some(context.revision.catalog_publication(active)?), None)
+        };
+        let result = commit.commit_with(
+            || {
+                operation.check()?;
+                verification
+                    .map(|proof| proof.hold_verified(|| operation.check()))
+                    .transpose()
+            },
+            |conn, published| {
+                let id = published
+                    .generation_id
+                    .ok_or_else(|| Error::internal("published catalog sync generation missing"))?;
+                let mut record = serde_json::to_value(&outcome.stats).map_err(|error| {
+                    Error::internal_with_source("encode catalog sync counters", error)
+                })?;
+                record["index_outcome"] =
+                    serde_json::to_value(SyncAttribution::for_generation(outcome, id)).map_err(
+                        |error| Error::internal_with_source("encode catalog sync identity", error),
+                    )?;
+                repo::finish_sync_job(
+                    conn,
+                    self.id,
+                    SyncState::Done,
+                    Some(&encoded_record(&record)?),
+                )
+            },
+            || operation.check(),
+            |result| {
+                if let Some(publication) = &publication {
+                    match result {
+                        CatalogCommit::Committed => {
+                            *retired = Some(
+                                publication.install(context.config.clone(), context.stages.clone()),
+                            );
+                        }
+                        CatalogCommit::Unverified(head) => {
+                            if let Some(update) = &context.refresh {
+                                publication.retain_unverified(
+                                    head,
+                                    update.watch_runtime.clone(),
+                                    watch_transition.take(),
+                                );
+                            }
+                        }
+                    }
+                }
+            },
+        );
+        // Watcher handoff must follow a committed runtime even if the
+        // subsequent durability barrier returned an error.
+        drop(unchanged);
+        let _reload = publication.map(CatalogConfigPublication::release_preparation);
+        if retired.is_some()
+            && let Some(update) = &context.refresh
+            && let Err(error) = update.watchers.revise_with_runtime(
+                &context.cache,
+                context.project.id,
+                update.watch_runtime.clone(),
+            )
+        {
+            eprintln!(
+                "warning: cannot revise watcher for project {}: {error}",
+                context.project.id
+            );
+        }
+        result
     }
 
     pub(super) fn terminal(&self, error: Option<&str>) -> Result<Value> {

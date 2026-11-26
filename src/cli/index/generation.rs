@@ -120,9 +120,11 @@ fn with_config_guards<T>(
     root: &Path,
     work: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    paths::with_config_write_lock(&config_dir.join("config.toml"), || {
-        paths::with_config_write_lock(&root.join(".docsbase.toml"), || Ok(work()?))
-    })
+    paths::with_index_config_write_locks(
+        Some(&config_dir.join("config.toml")),
+        root,
+        || Ok(work()?),
+    )
     .map_err(|error| match error.downcast::<Error>() {
         Ok(error) => error,
         Err(error) => admission(format!("could not lock the index configuration: {error}")),

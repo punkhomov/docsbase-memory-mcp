@@ -103,6 +103,7 @@ enum ProducerOwner {
     Managed,
     Daemon {
         source: crate::daemon::request::ActivitySource,
+        candidate: WatchConfigCandidate,
         #[cfg(test)]
         before_native_drop: Option<Arc<dyn Fn() + Send + Sync>>,
         #[cfg(test)]
@@ -112,7 +113,11 @@ enum ProducerOwner {
 
 enum BatchFilter {
     ExpandDirectories(Box<IndexFilter>),
-    RetainDirectoryEvents { root: PathBuf, cache: PathBuf },
+    RetainDirectoryEvents {
+        root: PathBuf,
+        cache: PathBuf,
+        candidate: WatchConfigCandidate,
+    },
 }
 
 struct ProducerNative {
@@ -280,7 +285,10 @@ fn spawn_watcher_sink_owned(
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(initial.watch.native_queue_capacity);
     let wake = event_tx.clone();
     let caller = matches!(owner, ProducerOwner::Caller);
-    let filter_in_producer = !matches!(owner, ProducerOwner::Daemon { .. });
+    let candidate = match &owner {
+        ProducerOwner::Daemon { candidate, .. } => Some(candidate.clone()),
+        ProducerOwner::Caller | ProducerOwner::Managed => None,
+    };
     #[cfg(test)]
     let use_native = !matches!(
         owner,
@@ -340,18 +348,7 @@ fn spawn_watcher_sink_owned(
     let forwarder = std::thread::Builder::new()
         .name(format!("docsbase-debounce-{project_id}"))
         .spawn(move || {
-            let filter = if filter_in_producer {
-                BatchFilter::ExpandDirectories(Box::new(IndexFilter::new(
-                    filter_root,
-                    filter_cache,
-                    &initial,
-                )))
-            } else {
-                BatchFilter::RetainDirectoryEvents {
-                    root: filter_root,
-                    cache: filter_cache,
-                }
-            };
+            let filter = producer_filter(filter_root, filter_cache, &initial, candidate);
             drop(initial);
             forward_batches(
                 filter,
@@ -375,6 +372,22 @@ fn spawn_watcher_sink_owned(
         forwarder: Some(forwarder),
         retirement,
     })
+}
+
+fn producer_filter(
+    root: PathBuf,
+    cache: PathBuf,
+    config: &Config,
+    candidate: Option<WatchConfigCandidate>,
+) -> BatchFilter {
+    match candidate {
+        Some(candidate) => BatchFilter::RetainDirectoryEvents {
+            root,
+            cache,
+            candidate,
+        },
+        None => BatchFilter::ExpandDirectories(Box::new(IndexFilter::new(root, cache, config))),
+    }
 }
 
 fn forward_batches(
@@ -405,14 +418,30 @@ fn forward_batches(
                 }
             }
         }
-        let config = current_config();
         let batch = match &mut filter {
             BatchFilter::ExpandDirectories(filter) => {
-                filter.set_config(&config);
+                filter.set_config(&current_config());
                 finalize(filter, raw)
             }
-            BatchFilter::RetainDirectoryEvents { root, cache } => {
-                retain_daemon_events(root, cache, &config, raw, cancel)
+            BatchFilter::RetainDirectoryEvents {
+                root,
+                cache,
+                candidate,
+            } => {
+                // Publication installs the candidate before scanning, then
+                // updates the current runtime before releasing the candidate.
+                let proposed = candidate
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                retain_daemon_events(
+                    root,
+                    cache,
+                    &current_config(),
+                    proposed.as_deref(),
+                    raw,
+                    cancel,
+                )
             }
         };
         if (!batch.is_empty() && send(batch).is_err()) || disconnected {
@@ -425,20 +454,22 @@ fn retain_daemon_events(
     root: &Path,
     cache: &Path,
     config: &Config,
+    candidate: Option<&Config>,
     raw: Batch,
     cancel: Option<&crate::hybrid::work::Cancellation>,
 ) -> Vec<PathBuf> {
-    let mut matcher = match walk::markdown_builder(root, root, config) {
-        Ok(builder) => builder.build_matchers().pop(),
-        Err(error) => {
-            eprintln!("warning: watcher filter: {error}");
-            None
-        }
-    };
+    let mut matchers = [Some(config), candidate].map(|config| {
+        config.and_then(|config| match walk::markdown_builder(root, root, config) {
+            Ok(builder) => builder.build_matchers().pop(),
+            Err(error) => {
+                eprintln!("warning: watcher filter: {error}");
+                None
+            }
+        })
+    });
     let mut paths = raw.into_vec();
-    // Suppress already-ignored notifications without expanding directories.
-    // A fresh matcher's cache lives for one debounce window. The daemon still
-    // refilters admitted paths under the revision it will use for indexing.
+    // During a staged publication retain paths accepted by either recipe.
+    // Paths ignored by both stay outside the bounded consumer capture.
     paths.retain(|path| {
         if cancel.is_some_and(crate::hybrid::work::Cancellation::is_cancelled)
             || walk::is_pruned(root, path)
@@ -462,14 +493,16 @@ fn retain_daemon_events(
         {
             return false;
         }
-        let (Ok(relative), Some(matcher)) = (path.strip_prefix(root), &mut matcher) else {
+        let Ok(relative) = path.strip_prefix(root) else {
             return false;
         };
-        let (decision, error) = matcher.matched_with_errors(relative, kind.is_dir());
-        if let Some(error) = error {
-            eprintln!("warning: watcher filter: {error}");
-        }
-        !decision.is_ignore()
+        matchers.iter_mut().flatten().any(|matcher| {
+            let (decision, error) = matcher.matched_with_errors(relative, kind.is_dir());
+            if let Some(error) = error {
+                eprintln!("warning: watcher filter: {error}");
+            }
+            !decision.is_ignore()
+        })
     });
     paths
 }
@@ -1205,6 +1238,38 @@ fn expand_dir_inner(filter: &mut IndexFilter, batch: &mut Batch, dir: &Path, dep
     }
 }
 
+pub(crate) type WatchConfigCandidate = Arc<Mutex<Option<Arc<Config>>>>;
+
+pub(crate) struct WatchConfigTransition {
+    candidate: WatchConfigCandidate,
+    config: Arc<Config>,
+}
+
+impl WatchConfigTransition {
+    pub(crate) fn begin(candidate: &WatchConfigCandidate, config: Arc<Config>) -> Self {
+        *candidate.lock().unwrap_or_else(PoisonError::into_inner) = Some(config.clone());
+        Self {
+            candidate: candidate.clone(),
+            config,
+        }
+    }
+}
+
+impl Drop for WatchConfigTransition {
+    fn drop(&mut self) {
+        let mut candidate = self
+            .candidate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if candidate
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(&self.config, active))
+        {
+            *candidate = None;
+        }
+    }
+}
+
 /// Immutable provider and vector-source snapshot supplied by the composition root.
 /// Config selects indexing limits; the prepared stages select embedding.
 pub struct WatchRuntime {
@@ -1576,6 +1641,7 @@ impl Watchers {
                 move |batch| tx.blocking_send(batch).map_err(|error| error.0),
                 ProducerOwner::Daemon {
                     source: shared.watch_activity_source(),
+                    candidate: shared.watch_config_candidate(project.id),
                     #[cfg(test)]
                     before_native_drop: self.producer_retirement.lock().unwrap().clone(),
                     #[cfg(test)]
@@ -2042,6 +2108,7 @@ mod tests {
             BatchFilter::RetainDirectoryEvents {
                 root: env.project.canonical_root.clone(),
                 cache: env.cache.path().canonicalize().unwrap(),
+                candidate: WatchConfigCandidate::default(),
             },
             || Arc::clone(&config),
             |_| events.next().unwrap(),
@@ -2059,6 +2126,52 @@ mod tests {
                 env.path("removed"),
                 env.path("replaced-directory/child.md")
             ]
+        );
+    }
+
+    #[test]
+    fn catalog_producer_applies_both_recipes_during_a_transition() {
+        let env = Env::new();
+        let guide = env.path("guide.md");
+        let generated = env.path("generated.md");
+        fs::write(&guide, "catalog after publication").unwrap();
+        fs::write(&generated, "ignored by either runtime").unwrap();
+        let current = Config {
+            ignores: vec!["guide.md".into(), "generated.md".into()],
+            ..Config::default()
+        };
+        let candidate = Config {
+            ignores: vec!["generated.md".into()],
+            ..Config::default()
+        };
+        let inputs = || {
+            let mut events = Batch::new();
+            events.push(guide.clone());
+            events.push(generated.clone());
+            events
+        };
+        assert_eq!(
+            retain_daemon_events(
+                &env.project.canonical_root,
+                env.cache.path(),
+                &current,
+                None,
+                inputs(),
+                None
+            ),
+            Vec::<PathBuf>::new(),
+        );
+        assert_eq!(
+            retain_daemon_events(
+                &env.project.canonical_root,
+                env.cache.path(),
+                &current,
+                Some(&candidate),
+                inputs(),
+                None
+            )
+            .as_slice(),
+            std::slice::from_ref(&guide),
         );
     }
 

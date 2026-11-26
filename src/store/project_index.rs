@@ -155,6 +155,26 @@ where
     with_catalog_pair_using(registry, project, PairAccess::Read(None), read)
 }
 
+/// Whether a config proposing a different recipe needs a new head.
+pub(crate) fn catalog_needs_index_for<R>(
+    registry: R,
+    project: &Project,
+    recipe: &str,
+) -> Result<bool>
+where
+    R: Deref<Target = Db>,
+{
+    let head = generation_catalog::active_head(registry.connection(), project.id)
+        .map_err(|reason| unavailable("active generation", reason))?;
+    match head.map(|head| head.layout) {
+        None => Ok(false),
+        Some(Layout::Legacy) => Ok(true),
+        Some(Layout::Local { .. }) => with_catalog_pair(registry, project, |_, local, _| {
+            Ok(local.is_none_or(|local| local.index_recipe != recipe))
+        }),
+    }
+}
+
 /// A watcher can update a selected local pair. Read registration status
 /// from that pair because a new v5 project has no index rows in the registry.
 pub(crate) fn local_watcher_project(registry: &Db, project: &Project) -> Result<Option<Project>> {
