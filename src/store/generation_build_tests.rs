@@ -1112,14 +1112,113 @@ fn stale_base_and_a_contending_builder_cannot_reserve_a_generation() {
 }
 
 #[test]
-fn disk_reservation_refuses_oversized_completed_files() {
+fn disk_reservation_refuses_a_request_smaller_than_the_ownership_records() {
     let env = Env::new();
     let mut request = env.request();
     request.reserved_disk_bytes = 1;
     assert!(env.build(request).is_err());
-    assert_eq!(env.catalog_state(), (1, Some("building".into())));
-    assert!(!env.generation(2).join("seal.json").exists());
+    assert_eq!(env.catalog_state(), (1, None));
+    assert!(!env.generation(2).exists());
     env.assert_legacy_search();
+}
+
+#[test]
+fn metadata_growth_stops_at_the_staged_disk_reservation() {
+    let env = Env::new();
+    let request = LexicalBuildRequest {
+        reserved_disk_bytes: 4096 + 2 * blake3::OUT_LEN as u64,
+        ..env.request()
+    };
+    let error = env.build(request).unwrap_err();
+    let cause =
+        std::error::Error::source(&error).and_then(|cause| cause.downcast_ref::<rusqlite::Error>());
+    assert!(
+        matches!(cause, Some(rusqlite::Error::SqliteFailure(code, _))
+            if code.code == rusqlite::ErrorCode::DiskFull),
+        "{error}"
+    );
+    let stage = env.generation(2);
+    let metadata = fs::metadata(stage.join("metadata.db")).unwrap();
+    assert!(
+        metadata.len() <= 4096,
+        "metadata used {} bytes",
+        metadata.len()
+    );
+    assert!(!stage.join("tantivy").exists());
+    assert_eq!(env.catalog_state(), (1, Some("building".into())));
+    env.assert_legacy_search();
+    #[cfg(unix)]
+    discard_failed_quota_and_retry(&env, request);
+}
+
+#[test]
+fn tantivy_growth_stops_at_the_staged_disk_reservation() {
+    let reference = Env::new();
+    let staged = reference.build(reference.request()).unwrap();
+    let metadata = fs::metadata(
+        reference
+            .generation(staged.generation_id)
+            .join("metadata.db"),
+    )
+    .unwrap()
+    .len();
+    let metadata_and_owners = metadata + 2 * blake3::OUT_LEN as u64;
+    let env = Env::new();
+    let request = LexicalBuildRequest {
+        reserved_disk_bytes: metadata_and_owners + (staged.bytes - metadata_and_owners) / 2,
+        ..env.request()
+    };
+    let error = env.build(request).unwrap_err();
+    assert!(
+        matches!(&error, Error::Admission { message } if message.contains("Tantivy write exceeds")),
+        "{error}"
+    );
+    let stage = env.generation(2);
+    let used = size_of_pair(&stage).unwrap() + blake3::OUT_LEN as u64;
+    assert!(
+        used <= request.reserved_disk_bytes,
+        "staging used {used} bytes with a {}-byte reservation",
+        request.reserved_disk_bytes
+    );
+    assert!(!stage.join("seal.json").exists());
+    assert_eq!(env.catalog_state(), (1, Some("building".into())));
+    env.assert_legacy_search();
+    #[cfg(unix)]
+    discard_failed_quota_and_retry(&env, request);
+}
+
+#[cfg(unix)]
+fn discard_failed_quota_and_retry(env: &Env, request: LexicalBuildRequest) {
+    // A writer may release the caller before its last directory handle drops.
+    let read_lock = env.generation(2).join(".read.lock");
+    let mut lock = RwLock::new(open_coordination_file(&read_lock, false).unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match lock.try_write() {
+            Ok(_) => break,
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => panic!("staged writer did not release its lease: {error}"),
+        }
+    }
+    drop(lock);
+    discard_lexical_generation(
+        env.cache.path(),
+        request,
+        2,
+        &settings::standalone().unwrap(),
+        limits(),
+    )
+    .unwrap();
+    assert!(!env.generation(2).exists());
+    let retried = env.build(env.request()).unwrap();
+    assert!(retried.generation_id > 2);
+    let reader = ReadIndex::open(&env.generation(retried.generation_id).join("tantivy")).unwrap();
+    assert_eq!(reader.search("Applemigration", 5).unwrap().len(), 1);
 }
 
 #[test]

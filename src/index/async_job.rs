@@ -1,5 +1,4 @@
 //! Resumable lexical jobs. Native state is unique and only accessed by admitted phases.
-use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -29,37 +28,24 @@ use crate::store::{
 };
 use crate::vector_cache::VectorCacheSource;
 
-#[ouroboros::self_referencing]
-struct OwnedWriterLease {
-    lock: fd_lock::RwLock<File>,
-    #[borrows(mut lock)]
-    #[not_covariant]
-    guard: fd_lock::RwLockWriteGuard<'this, File>,
-}
-impl OwnedWriterLease {
-    fn acquire(cache: &std::path::Path, project: i64) -> Result<Self> {
-        let path = lifecycle::lease_path(cache, project);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| Error::internal_with_source("create writer lease directory", e))?;
-        }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| Error::internal_with_source("open writer lease", e))?;
-        OwnedWriterLeaseTryBuilder {
-            lock: fd_lock::RwLock::new(file),
-            guard_builder: |lock| {
-                lock.try_write().map_err(|e| Error::Project {
-                    message: format!("another writer holds {}: {e}", path.display()),
-                    instruction: Some("wait for the running index to finish".into()),
-                })
-            },
-        }
-        .try_build()
+use crate::platform::file_lease::ExclusiveFileLease;
+
+fn acquire_writer_lease(cache: &std::path::Path, project: i64) -> Result<ExclusiveFileLease> {
+    let path = lifecycle::lease_path(cache, project);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| Error::internal_with_source("create writer lease directory", e))?;
     }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| Error::internal_with_source("open writer lease", e))?;
+    ExclusiveFileLease::try_acquire(file).map_err(|e| Error::Project {
+        message: format!("another writer holds {}: {e}", path.display()),
+        instruction: Some("wait for the running index to finish".into()),
+    })
 }
 
 pub(crate) use super::job::JobInput;
@@ -115,7 +101,7 @@ pub(crate) struct IndexState {
     dimension: usize,
     account: Option<Arc<PayloadPermit>>,
     retained: Option<Arc<PayloadPermit>>,
-    lease: Option<OwnedWriterLease>,
+    lease: Option<ExclusiveFileLease>,
     singleton: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl IndexState {
@@ -274,10 +260,7 @@ impl IndexState {
             .db
             .as_ref()
             .ok_or_else(|| Error::internal("job database absent"))?;
-        self.lease = Some(OwnedWriterLease::acquire(
-            &context.cache,
-            context.project.id,
-        )?);
+        self.lease = Some(acquire_writer_lease(&context.cache, context.project.id)?);
         // Re-read after writer admission, before capture/index/marker effects.
         if matches!(context.input, JobInput::Watch(_)) {
             crate::watch::admit_incremental(db, &context.project)?;

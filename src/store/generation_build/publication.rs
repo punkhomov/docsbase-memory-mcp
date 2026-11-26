@@ -355,7 +355,7 @@ fn verified_recipe(
     Ok(indexed.recipe_id)
 }
 
-fn open_local_metadata(
+pub(super) fn open_local_metadata(
     dir: &Path,
     settings: &Resolved<DbSettings>,
     limits: InspectionLimits,
@@ -371,6 +371,7 @@ fn open_local_metadata(
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW;
     let conn = Connection::open_with_flags(path, flags).map_err(repo::db_error)?;
     configure_publication_connection(&conn, limits)?;
+    super::use_memory_temp_store(&conn)?;
     Ok(Db {
         conn,
         cache_root: dir.to_path_buf(),

@@ -239,14 +239,26 @@ pub fn run_full_with_embedding(
     )
 }
 
-/// Full lexical rebuild into an isolated pair without constructing provider inputs.
-pub(crate) fn run_full_lexical(
+/// Materializes metadata for an unpublished lexical generation. The caller
+/// can finish the Tantivy side after closing the only SQLite writer.
+pub(crate) fn prepare_staged_metadata(
     db: &mut Db,
-    index: &mut IndexHandle,
     project: &Project,
     config: &Config,
-) -> Result<JobStats> {
-    run_full_using(db, index, project, config, || Ok(()), |_, _| Ok(0))
+) -> Result<PreparedPlan> {
+    let mut prepared = capture_full(db, project, config, true)?;
+    super::outcome::run(
+        db,
+        project,
+        config,
+        super::outcome::SurveyScope::FullSurvey,
+        |db| {
+            prepared.assign_documents(db, project.id, true)?;
+            prepared.commit_metadata(db, project.id)?;
+            Ok(prepared.stats.clone())
+        },
+    )?;
+    Ok(prepared)
 }
 
 fn run_full_using(
@@ -591,7 +603,12 @@ impl PreparedPlan {
         index: &mut IndexHandle,
         project_id: i64,
     ) -> Result<()> {
-        if index.was_recreated() {
+        self.assign_documents(db, project_id, index.was_recreated())?;
+        self.write_lexical_chunks(index)
+    }
+
+    fn assign_documents(&mut self, db: &mut Db, project_id: i64, recreate: bool) -> Result<()> {
+        if recreate {
             repo::delete_project_docs(db.connection(), project_id)?;
         }
         let removed: Vec<_> = self.removed.iter().collect();
@@ -600,18 +617,27 @@ impl PreparedPlan {
             let id = pending
                 .id
                 .ok_or_else(|| Error::internal("pending document without id"))?;
-            index.delete_doc(id);
             for chunk in &mut pending.chunks {
                 chunk.doc_id = id;
             }
-            index.add_chunks(&pending.chunks)?;
             self.stats.docs += 1;
             self.stats.chunks += pending.chunks.len();
+        }
+        self.stats.removed = self.removed.len();
+        Ok(())
+    }
+
+    pub(crate) fn write_lexical_chunks(&self, index: &mut IndexHandle) -> Result<()> {
+        for pending in &self.plan {
+            let id = pending
+                .id
+                .ok_or_else(|| Error::internal("pending document without id"))?;
+            index.delete_doc(id);
+            index.add_chunks(&pending.chunks)?;
         }
         for state in &self.removed {
             index.delete_doc(state.id);
         }
-        self.stats.removed = self.removed.len();
         Ok(())
     }
     #[cfg(test)]
@@ -715,12 +741,16 @@ impl PreparedPlan {
         project_id: i64,
     ) -> Result<()> {
         index.commit()?;
-        let removed: Vec<_> = self.removed.iter().collect();
-        apply_plan(db, project_id, &self.plan, &removed)?;
+        self.commit_metadata(db, project_id)?;
         if index.was_recreated() {
             index.mark_rebuilt()?;
         }
         Ok(())
+    }
+
+    fn commit_metadata(&self, db: &mut Db, project_id: i64) -> Result<()> {
+        let removed: Vec<_> = self.removed.iter().collect();
+        apply_plan(db, project_id, &self.plan, &removed)
     }
 }
 

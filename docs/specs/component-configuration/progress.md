@@ -1631,3 +1631,20 @@ the platform event source while retaining the actual bounded queue, producer,
 and consumer. The Linux writer-policy test compares scores in rank order and
 complete hits by chunk ID so it tolerates equal-score permutations. Windows
 phase tests use a longer watchdog around the same synchronization points.
+
+## 2026-11-26 — CF11d, staged write admission
+
+Task CF11d staged write admission: complete (SQLite page limit and a
+conservative Tantivy write budget for stopped lexical preparation). The
+metadata writer finishes before Tantivy receives the remaining bytes.
+Atomic replacements, streamed segments and background merge workers share
+that allowance and retain the generation's reader lease.
+
+Ruling: both growth tests exceeded their reservations on the previous
+implementation. The same tests now check the exact refusal, preserve the
+active pair, and discard and retry on supported platforms. The competing
+writes test holds a real writer across the end of the directory owner and
+observes that reclamation remains excluded. Fresh review and re-review
+passed after the discard test was synchronized with writer retirement.
+The stage uses logical lengths. Runtime activation and native Windows
+publication remain open.

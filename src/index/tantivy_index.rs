@@ -22,6 +22,8 @@ use crate::index::chunk::{CHUNK_OVERLAP, Chunk};
 use crate::index::job::MAX_CHUNK_CHARS;
 use crate::index::tokenizer::{self, IdentifierTokenizer};
 
+mod staging;
+
 /// In-process commit-fault budget, scoped by index-dir prefix (test seam:
 /// the watcher arms it to model a commit that died mid-way; see
 /// `tests/mcp_registry.rs::watcher_recovers_from_a_commit_failure`).
@@ -194,7 +196,6 @@ impl IndexHandle {
         dir: &Path,
         writer_settings: super::writer_settings::IndexWriterSettings,
     ) -> Result<Self> {
-        let search_settings = lexical_settings::standalone()?;
         std::fs::create_dir_all(dir).map_err(|err| {
             Error::internal_with_source(format!("create index dir {}: {err}", dir.display()), err)
         })?;
@@ -245,11 +246,81 @@ impl IndexHandle {
             recreated = true;
             index
         };
+        Self::open_writer(&index, dir, recreated, writer_settings)
+    }
+
+    /// Builds a new unpublished index under one cumulative byte allowance.
+    /// The directory must be absent. Success settles all merge work. Workers
+    /// still dropping after an error retain the generation lease.
+    pub(crate) fn build_staged(
+        dir: &Path,
+        writer_settings: super::writer_settings::IndexWriterSettings,
+        bytes: u64,
+        lease: crate::platform::file_lease::ExclusiveFileLease,
+        write: impl FnOnce(&mut Self) -> Result<()>,
+    ) -> Result<()> {
+        use std::sync::Arc;
+        use tantivy::directory::{Directory as _, MmapDirectory};
+
+        let budget = Arc::new(staging::WriteBudget::new(bytes, lease));
+        let result = (|| {
+            std::fs::create_dir(dir).map_err(|err| {
+                Error::internal_with_source(format!("create staged index {}", dir.display()), err)
+            })?;
+            let directory = MmapDirectory::open(dir)
+                .map_err(tantivy::TantivyError::from)
+                .map_err(tantivy_error)?;
+            let directory = staging::StagingDirectory::new(directory, budget.clone());
+            for (name, data) in [
+                (REBUILD_MARKER, b"rebuild required\n".as_slice()),
+                (
+                    TOKENIZER_VERSION_FILE,
+                    format!("{}\n", tokenizer::TOKENIZER_VERSION).as_bytes(),
+                ),
+            ] {
+                directory
+                    .atomic_write(Path::new(name), data)
+                    .map_err(|err| {
+                        Error::internal_with_source(format!("write staged index {name}"), err)
+                    })?;
+            }
+            let index = Index::builder()
+                .schema(build_schema())
+                .open_or_create(directory)
+                .map_err(tantivy_error)?;
+            register_tokenizer(&index);
+            let mut writer = Self::open_writer(&index, dir, true, writer_settings)?;
+            write(&mut writer)?;
+            if let Some(error) = injected_commit_fault(dir) {
+                return Err(error);
+            }
+            // The scratch marker is already present. A failed commit must
+            // not use the live-index path that writes a sibling marker.
+            writer.writer_mut()?.commit().map_err(tantivy_error)?;
+            writer.finish()
+        })();
+        if budget.exhausted() {
+            return Err(Error::Admission {
+                message: "staged Tantivy write exceeds its disk reservation".into(),
+            });
+        }
+        result?;
+        let marker = dir.join(REBUILD_MARKER);
+        std::fs::remove_file(&marker)
+            .map_err(|err| Error::internal_with_source(format!("remove {}", marker.display()), err))
+    }
+
+    fn open_writer(
+        index: &Index,
+        dir: &Path,
+        recreated: bool,
+        writer_settings: super::writer_settings::IndexWriterSettings,
+    ) -> Result<Self> {
         let fields = fields_from(&index.schema())?;
         let writer: IndexWriter = index
             .writer_with_options(writer_settings.options())
             .map_err(tantivy_error)?;
-        let search = ReadIndex::from_index(&index, fields, search_settings)?;
+        let search = ReadIndex::from_index(index, fields, lexical_settings::standalone()?)?;
 
         Ok(Self {
             writer: Some(writer),
