@@ -23,9 +23,10 @@ fn watcher_directory_limit_publishes_partial_indexing_diagnostics() {
         }
         let empty = fixture.project.canonical_root.join("empty");
         std::fs::create_dir(&empty).unwrap();
+        fixture.shared.watchers.use_manual_events();
         assert!(fixture.shared.ensure_watcher(&fixture.project).unwrap());
-        // Deliver the same directory notification on all platforms. The files
-        // predate watcher registration so direct file events cannot mask it.
+        // Use just this directory event. A replayed native notification for
+        // a child would admit that file independently of the directory limit.
         let project = fixture.project.id;
         fixture.shared.watchers.deliver_test_path(project, dir);
         let outcome = tokio::time::timeout(Duration::from_secs(10), async {
@@ -530,6 +531,8 @@ fn assert_no_watch_sync_rows(fixture: &search_phase_tests::Fixture, id: i64) {
 
 #[test]
 fn actual_watch_reload_while_remote_is_held_retries_the_original_raw_batch() {
+    const PHASE_WATCHDOG: Duration = Duration::from_mins(1);
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -545,18 +548,21 @@ fn actual_watch_reload_while_remote_is_held_retries_the_original_raw_batch() {
         );
         fixture.shared.activate_jobs(service).unwrap();
         {let slot=fixture.shared.project_slot(fixture.project.id);let mut state=slot.state.lock().unwrap();state.search_stages=state.stages.clone();}
+        fixture.shared.watchers.use_manual_events();
         assert!(fixture.shared.ensure_watcher(&fixture.project).unwrap());
         let body="# Reload\n\nheld remote reload must retry this document\n";
-        std::fs::write(fixture.project.canonical_root.join("guide.md"),body).unwrap();
-        tokio::time::timeout(Duration::from_secs(10),provider.entered.acquire()).await.unwrap().unwrap().forget();
+        let path = fixture.project.canonical_root.join("guide.md");
+        std::fs::write(&path, body).unwrap();
+        fixture.shared.watchers.deliver_test_path(fixture.project.id, path);
+        tokio::time::timeout(PHASE_WATCHDOG,provider.entered.acquire()).await.unwrap().unwrap().forget();
         std::fs::write(fixture.project.canonical_root.join(".docsbase.toml"),"config_version=2\nignores=['unrelated/**']\n[watch]\ntransient_retries=0\n").unwrap();
         fixture.shared.open_project_config_with(&fixture.project,|_|Ok(HybridStages{embedder:Some(provider.clone()),..HybridStages::default()})).unwrap();
         provider.release.add_permits(1);
-        let retried=tokio::time::timeout(Duration::from_secs(5),provider.entered.acquire()).await.is_ok_and(|entered| {entered.unwrap().forget();true});
+        let retried=tokio::time::timeout(PHASE_WATCHDOG,provider.entered.acquire()).await.is_ok_and(|entered| {entered.unwrap().forget();true});
         provider.release.add_permits(16);
         if retried {
             let expected=blake3::hash(body.as_bytes()).to_hex().to_string();
-            tokio::time::timeout(Duration::from_secs(10),async {loop {
+            tokio::time::timeout(PHASE_WATCHDOG,async {loop {
                 let current:Option<String>=fixture.shared.db().connection().query_row("SELECT content_hash FROM docs WHERE project_id=?1 AND rel_path='guide.md'",[fixture.project.id],|row|row.get(0)).ok();
                 if current.as_deref()==Some(expected.as_str()) && lifecycle::with_writer_lease(&fixture.shared.cache,fixture.project.id,||Ok(())).is_ok(){break;}
                 tokio::task::yield_now().await;

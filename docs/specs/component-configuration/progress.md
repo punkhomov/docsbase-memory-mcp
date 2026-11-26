@@ -1624,3 +1624,10 @@ production producer, saved outcome and legacy blocking consumers.
 Minor (deferred): one invocation of the pinned ignore iterator can consume
 multiple ignored entries internally. Cancellation checks run on entries
 exposed by the walker and its filter callback.
+
+Ruling: the first native run for #201 received unrelated native notifications
+alongside injected test events. The deterministic watcher tests now replace
+the platform event source while retaining the actual bounded queue, producer,
+and consumer. The Linux writer-policy test compares scores in rank order and
+complete hits by chunk ID so it tolerates equal-score permutations. Windows
+phase tests use a longer watchdog around the same synchronization points.

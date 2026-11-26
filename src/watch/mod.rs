@@ -105,6 +105,8 @@ enum ProducerOwner {
         source: crate::daemon::request::ActivitySource,
         #[cfg(test)]
         before_native_drop: Option<Arc<dyn Fn() + Send + Sync>>,
+        #[cfg(test)]
+        manual_events: bool,
     },
 }
 
@@ -279,14 +281,26 @@ fn spawn_watcher_sink_owned(
     let wake = event_tx.clone();
     let caller = matches!(owner, ProducerOwner::Caller);
     let filter_in_producer = !matches!(owner, ProducerOwner::Daemon { .. });
-    let watcher = native_watcher(&root, &cache, event_tx, caller.then(|| cancel.clone()))?;
+    #[cfg(test)]
+    let use_native = !matches!(
+        owner,
+        ProducerOwner::Daemon {
+            manual_events: true,
+            ..
+        }
+    );
+    #[cfg(not(test))]
+    let use_native = true;
+    let watcher = use_native
+        .then(|| native_watcher(&root, &cache, event_tx, caller.then(|| cancel.clone())))
+        .transpose()?;
 
     // A caller-owned sender can still be rendezvousing after stop. Its native
     // watcher stays with the guard and has a separately cancellable event send.
     let (caller_native, native) = if caller {
-        (Some(watcher), None)
+        (watcher, None)
     } else {
-        (None, Some(watcher))
+        (None, watcher)
     };
     #[cfg(test)]
     let before_native_drop = match &owner {
@@ -1291,6 +1305,8 @@ pub struct Watchers {
     #[cfg(test)]
     producer_retirement: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
+    manual_events: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
     batch_observer: Mutex<Option<BatchObserver>>,
     #[cfg(test)]
     pending_copy: Mutex<Option<CopyObserver>>,
@@ -1305,6 +1321,8 @@ impl Default for Watchers {
             close: crate::hybrid::work::Cancellation::new(),
             #[cfg(test)]
             producer_retirement: Mutex::new(None),
+            #[cfg(test)]
+            manual_events: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             batch_observer: Mutex::new(None),
             #[cfg(test)]
@@ -1340,6 +1358,11 @@ impl Watchers {
     #[cfg(all(test, feature = "hybrid-remote"))]
     pub(crate) fn observe_batches(&self, observer: Arc<dyn Fn(BatchEvent) + Send + Sync>) {
         *self.batch_observer.lock().unwrap() = Some(observer);
+    }
+    #[cfg(all(test, feature = "hybrid-remote"))]
+    pub(crate) fn use_manual_events(&self) {
+        self.manual_events
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
     #[cfg(all(test, feature = "hybrid-remote"))]
     pub(crate) fn deliver_test_path(&self, project: i64, path: PathBuf) {
@@ -1555,6 +1578,10 @@ impl Watchers {
                     source: shared.watch_activity_source(),
                     #[cfg(test)]
                     before_native_drop: self.producer_retirement.lock().unwrap().clone(),
+                    #[cfg(test)]
+                    manual_events: self
+                        .manual_events
+                        .load(std::sync::atomic::Ordering::Relaxed),
                 },
                 cancel.clone(),
             )?;
