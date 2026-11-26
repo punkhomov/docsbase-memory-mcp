@@ -1,4 +1,4 @@
-//! Watcher queue capacity and per-batch timing policy.
+//! Watcher queue, timing, and directory expansion policy.
 
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,8 @@ const MAX_DEBOUNCE_MS: u64 = 2_000;
 // Preserve the per-watcher capacity bound from T46.
 const MAX_QUEUE_CAPACITY: usize = 4096;
 const MAX_TRANSIENT_RETRIES: u32 = u32::MAX.ilog(3) + 1;
+const MAX_EXPAND_FILES: usize = 10_000;
+const MAX_EXPAND_DEPTH: usize = 32;
 
 /// Default quiet window after the last event.
 pub const DEBOUNCE: Duration = Duration::from_millis(DEFAULT_DEBOUNCE_MS);
@@ -34,6 +36,8 @@ pub struct WatchSettings {
     transient_retries: u32,
     transient_backoff_ms: u64,
     lease_retry_ms: u64,
+    pub(super) max_expand_files: usize,
+    pub(super) max_expand_depth: usize,
 }
 
 impl WatchSettings {
@@ -73,6 +77,8 @@ pub(crate) struct WatchPatch {
     transient_retries: Option<u32>,
     transient_backoff_ms: Option<u64>,
     lease_retry_ms: Option<u64>,
+    max_expand_files: Option<usize>,
+    max_expand_depth: Option<usize>,
 }
 
 pub(crate) struct WatchSpec;
@@ -86,6 +92,8 @@ impl WatchSpec {
         transient_retries: 3,
         transient_backoff_ms: 100,
         lease_retry_ms: 250,
+        max_expand_files: MAX_EXPAND_FILES,
+        max_expand_depth: MAX_EXPAND_DEPTH,
     };
 
     pub(crate) fn view_fields(settings: WatchSettings, view: &mut ViewBuilder<'_>) -> Result<()> {
@@ -106,6 +114,8 @@ impl WatchSpec {
                 settings.transient_backoff_ms.into(),
             ),
             ("watch.lease_retry_ms", settings.lease_retry_ms.into()),
+            ("watch.max_expand_files", settings.max_expand_files.into()),
+            ("watch.max_expand_depth", settings.max_expand_depth.into()),
         ] {
             view.push(key, value, None)?;
         }
@@ -130,6 +140,8 @@ impl SettingsSpec for WatchSpec {
             Unit::Milliseconds,
         ),
         FieldSpec::new("watch.lease_retry_ms", Scope::Project, Unit::Milliseconds),
+        FieldSpec::new("watch.max_expand_files", Scope::Project, Unit::Count),
+        FieldSpec::new("watch.max_expand_depth", Scope::Project, Unit::Count),
     ];
 
     fn defaults(_: &DefaultsContext) -> WatchSettings {
@@ -172,6 +184,8 @@ impl SettingsSpec for WatchSpec {
             transient_retries,
             transient_backoff_ms,
             lease_retry_ms,
+            max_expand_files,
+            max_expand_depth,
         );
         Self::validate(&candidate, &Capabilities::current())?;
         *settings = candidate;
@@ -196,6 +210,15 @@ impl SettingsSpec for WatchSpec {
             return Err(Error::Admission {
                 message: format!(
                     "watch queue capacities must be between 1 and {MAX_QUEUE_CAPACITY}"
+                ),
+            });
+        }
+        if !(1..=MAX_EXPAND_FILES).contains(&settings.max_expand_files)
+            || !(1..=MAX_EXPAND_DEPTH).contains(&settings.max_expand_depth)
+        {
+            return Err(Error::Admission {
+                message: format!(
+                    "watch requires 1 <= max_expand_files <= {MAX_EXPAND_FILES} and 1 <= max_expand_depth <= {MAX_EXPAND_DEPTH}"
                 ),
             });
         }

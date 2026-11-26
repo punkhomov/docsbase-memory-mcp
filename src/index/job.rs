@@ -578,6 +578,7 @@ impl CaptureBudget<'_> {
 }
 
 /// Captured lexical plan, without native writer state or an open transaction.
+#[derive(Default)]
 pub(crate) struct PreparedPlan {
     plan: Vec<Pending>,
     removed: Vec<DocState>,
@@ -746,28 +747,45 @@ pub(crate) fn capture_input(
     recreated: bool,
     input: &JobInput<'_>,
     mut capture: Option<&mut CaptureBudget<'_>>,
-) -> Result<(PreparedPlan, super::outcome::SurveyScope)> {
+) -> Result<(PreparedPlan, Option<super::outcome::SurveyScope>)> {
     match input {
         JobInput::Watch(changed) if !recreated => {
-            let filtered = crate::watch::refilter_accounted(
+            const WARNING: &str = "watcher directory expansion reached its file or depth limit; run `docsbase sync` to reconcile skipped paths";
+            let selected = crate::watch::refilter_accounted(
                 project,
                 db.cache_root(),
                 &changed.paths,
                 config,
                 capture.as_deref_mut(),
             )?;
-            Ok((
-                capture_incremental_accounted(db, project, &filtered, config, capture)?,
-                super::outcome::SurveyScope::Subset,
-            ))
+            if selected.paths.is_empty() && !selected.expansion_limited && selected.directories_only
+            {
+                // An empty directory expansion never admitted a file. Keep
+                // the previous survey and avoid opening a Tantivy writer.
+                return Ok((PreparedPlan::default(), None));
+            }
+            if selected.expansion_limited
+                && let Some(budget) = capture.as_deref_mut()
+            {
+                budget.warning(&WARNING)?;
+            }
+            let mut plan =
+                capture_incremental_accounted(db, project, &selected.paths, config, capture)?;
+            if selected.expansion_limited {
+                if plan.stats.warnings.len() == MAX_WARNINGS {
+                    plan.stats.warnings.pop();
+                }
+                push_warning(&mut plan.stats, ".", WARNING);
+            }
+            Ok((plan, Some(super::outcome::SurveyScope::Subset)))
         }
         JobInput::Incremental(changed) if !recreated => Ok((
             capture_incremental_accounted(db, project, changed, config, capture)?,
-            super::outcome::SurveyScope::Subset,
+            Some(super::outcome::SurveyScope::Subset),
         )),
         _ => Ok((
             capture_full_accounted(db, project, config, recreated, capture)?,
-            super::outcome::SurveyScope::FullSurvey,
+            Some(super::outcome::SurveyScope::FullSurvey),
         )),
     }
 }

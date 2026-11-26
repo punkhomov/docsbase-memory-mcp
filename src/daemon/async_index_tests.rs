@@ -724,6 +724,8 @@ impl crate::hybrid::remote::AsyncTransport for NoNetwork {
 #[test]
 #[allow(clippy::too_many_lines)] // One ordered real-resource cancellation/retirement proof.
 fn abandoned_actual_document_codec_holds_native_retirement_until_physical_finish_or_unwind() {
+    const PHASE_WATCHDOG: Duration = Duration::from_mins(1);
+
     for unwind in [false, true] {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -761,7 +763,7 @@ fn abandoned_actual_document_codec_holds_native_retirement_until_physical_finish
                 proceed
                     .lock()
                     .unwrap()
-                    .recv_timeout(Duration::from_secs(5))
+                    .recv_timeout(PHASE_WATCHDOG)
                     .unwrap();
                 assert!(!unwind, "controlled real document codec unwind");
             }));
@@ -802,7 +804,7 @@ fn abandoned_actual_document_codec_holds_native_retirement_until_physical_finish
             drop(permit);
             let shared = fixture.shared.clone();
             let session = fixture.session;
-            let request = tokio::spawn(async move {
+            let mut request = tokio::spawn(async move {
                 call_tool_in(
                     &shared,
                     Some(session),
@@ -814,11 +816,14 @@ fn abandoned_actual_document_codec_holds_native_retirement_until_physical_finish
                 .await
             });
             let release = ReleaseOnDrop(Some(release));
-            tokio::time::timeout(Duration::from_secs(5), entered.acquire())
-                .await
-                .unwrap()
-                .unwrap()
-                .forget();
+            tokio::select! {
+                result = &mut request => {
+                    panic!("index request ended before document codec admission: {result:?}");
+                }
+                entered = tokio::time::timeout(PHASE_WATCHDOG, entered.acquire()) => {
+                    entered.expect("document codec admission").unwrap().forget();
+                }
+            }
             request.abort();
             let _ = request.await;
             tokio::task::yield_now().await;

@@ -2,6 +2,89 @@
 use super::*;
 
 #[test]
+fn watcher_directory_limit_publishes_partial_indexing_diagnostics() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut root = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = root.service();
+    root.run(&runtime, async move {
+        let fixture = search_phase_tests::Fixture::with_global(
+            HybridStages::default(),
+            "config_version=2\n[watch]\ndebounce_ms=10\nmax_debounce_ms=20\nmax_expand_files=1\n",
+        );
+        fixture.shared.activate_jobs(service).unwrap();
+        let dir = fixture.project.canonical_root.join("incoming.md");
+        std::fs::create_dir(&dir).unwrap();
+        for name in ["first.md", "second.md"] {
+            std::fs::write(dir.join(name), "# Arrival\n\nimported queue document\n").unwrap();
+        }
+        let empty = fixture.project.canonical_root.join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        fixture.shared.watchers.use_manual_events();
+        assert!(fixture.shared.ensure_watcher(&fixture.project).unwrap());
+        // Use just this directory event. A replayed native notification for
+        // a child would admit that file independently of the directory limit.
+        let project = fixture.project.id;
+        fixture.shared.watchers.deliver_test_path(project, dir);
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let outcome = crate::index::outcome::read(&fixture.shared.db(), project).unwrap();
+                if let Some(outcome) = outcome
+                    && outcome.scope == crate::index::outcome::SurveyScope::Subset
+                {
+                    break outcome;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(outcome.stats.docs, 1);
+        assert!(
+            outcome
+                .stats
+                .warnings
+                .iter()
+                .any(|warning| warning.message.contains("docsbase sync"))
+        );
+        let (config, stages) = fixture.shared.project_runtime(&fixture.project)?;
+        let watch = Arc::new(crate::watch::WatchRuntime::new(
+            config.clone(),
+            stages,
+            fixture.shared.vector_source_for(project, &config),
+        ));
+        let operation = fixture.shared.watch_operation()?;
+        let (_, mut queue) = tokio::sync::mpsc::channel(1);
+        let pending = crate::watch::merge_pending(
+            &fixture.shared.payload_budget,
+            None,
+            Some(vec![empty]),
+            &mut queue,
+            &operation,
+            &fixture.shared.watchers,
+        )?;
+        fixture
+            .shared
+            .run_watch_batch(
+                fixture.project.clone(),
+                watch,
+                pending,
+                operation,
+                fixture.shared.activity.track(),
+            )
+            .await?;
+        let after = crate::index::outcome::read(&fixture.shared.db(), project)?.unwrap();
+        assert_eq!(after.attempt_id, outcome.attempt_id);
+        assert_eq!(after.stats.warnings, outcome.stats.warnings);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
 fn actual_watch_retry_deadline_reports_the_pending_paths() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -448,6 +531,8 @@ fn assert_no_watch_sync_rows(fixture: &search_phase_tests::Fixture, id: i64) {
 
 #[test]
 fn actual_watch_reload_while_remote_is_held_retries_the_original_raw_batch() {
+    const PHASE_WATCHDOG: Duration = Duration::from_mins(1);
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -463,18 +548,21 @@ fn actual_watch_reload_while_remote_is_held_retries_the_original_raw_batch() {
         );
         fixture.shared.activate_jobs(service).unwrap();
         {let slot=fixture.shared.project_slot(fixture.project.id);let mut state=slot.state.lock().unwrap();state.search_stages=state.stages.clone();}
+        fixture.shared.watchers.use_manual_events();
         assert!(fixture.shared.ensure_watcher(&fixture.project).unwrap());
         let body="# Reload\n\nheld remote reload must retry this document\n";
-        std::fs::write(fixture.project.canonical_root.join("guide.md"),body).unwrap();
-        tokio::time::timeout(Duration::from_secs(10),provider.entered.acquire()).await.unwrap().unwrap().forget();
+        let path = fixture.project.canonical_root.join("guide.md");
+        std::fs::write(&path, body).unwrap();
+        fixture.shared.watchers.deliver_test_path(fixture.project.id, path);
+        tokio::time::timeout(PHASE_WATCHDOG,provider.entered.acquire()).await.unwrap().unwrap().forget();
         std::fs::write(fixture.project.canonical_root.join(".docsbase.toml"),"config_version=2\nignores=['unrelated/**']\n[watch]\ntransient_retries=0\n").unwrap();
         fixture.shared.open_project_config_with(&fixture.project,|_|Ok(HybridStages{embedder:Some(provider.clone()),..HybridStages::default()})).unwrap();
         provider.release.add_permits(1);
-        let retried=tokio::time::timeout(Duration::from_secs(5),provider.entered.acquire()).await.is_ok_and(|entered| {entered.unwrap().forget();true});
+        let retried=tokio::time::timeout(PHASE_WATCHDOG,provider.entered.acquire()).await.is_ok_and(|entered| {entered.unwrap().forget();true});
         provider.release.add_permits(16);
         if retried {
             let expected=blake3::hash(body.as_bytes()).to_hex().to_string();
-            tokio::time::timeout(Duration::from_secs(10),async {loop {
+            tokio::time::timeout(PHASE_WATCHDOG,async {loop {
                 let current:Option<String>=fixture.shared.db().connection().query_row("SELECT content_hash FROM docs WHERE project_id=?1 AND rel_path='guide.md'",[fixture.project.id],|row|row.get(0)).ok();
                 if current.as_deref()==Some(expected.as_str()) && lifecycle::with_writer_lease(&fixture.shared.cache,fixture.project.id,||Ok(())).is_ok(){break;}
                 tokio::task::yield_now().await;
@@ -602,14 +690,15 @@ async fn ordered_watch_case(
             &call,
             &owner.watchers,
         )?;
-        let retained = crate::watch::refilter_accounted(
+        let selection = crate::watch::refilter_accounted(
             &project,
             &owner.cache,
             &pending.paths,
             &config_copy,
             None,
         )?;
-        Ok((pending, retained))
+        assert!(!selection.expansion_limited);
+        Ok((pending, selection.paths))
     })
     .await
     .unwrap()

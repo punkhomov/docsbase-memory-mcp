@@ -844,7 +844,14 @@ fn writer_policy_change_preserves_existing_index_and_applies_to_connected_jobs()
     assert_eq!(repeated["stats"]["docs"], 0);
     assert_eq!(repeated["stats"]["skipped"], 1);
     let after = env.run_json(&query);
-    assert_eq!(after["hits"], initial["hits"]);
+    let hits_by_id = |result: &Value| {
+        let mut hits = result["hits"].as_array().unwrap().clone();
+        let scores: Vec<_> = hits.iter().map(|hit| hit["score"].clone()).collect();
+        // Tantivy may change equal-score order when segments merge.
+        hits.sort_by_key(|hit| hit["chunk_id"].as_u64().unwrap());
+        (scores, hits)
+    };
+    assert_eq!(hits_by_id(&after), hits_by_id(&initial));
     assert_eq!(after["meta"]["index_generation"], generation);
 }
 

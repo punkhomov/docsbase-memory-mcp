@@ -779,6 +779,7 @@ fn v2_watcher_resource_policy_separates_project_retries_from_daemon_queues() {
 native_queue_capacity = 11
 batch_queue_capacity = 7
 lease_retry_ms = 54
+max_expand_files = 120
 ",
     );
     layer(
@@ -788,6 +789,7 @@ lease_retry_ms = 54
 [watch]
 transient_retries = 0
 transient_backoff_ms = 15
+max_expand_depth = 4
 ",
     );
     let view =
@@ -798,6 +800,8 @@ transient_backoff_ms = 15
     assert_eq!(field("watch.lease_retry_ms").value, 54);
     assert_eq!(field("watch.transient_retries").value, 0);
     assert_eq!(field("watch.transient_backoff_ms").value, 15);
+    assert_eq!(field("watch.max_expand_files").value, 120);
+    assert_eq!(field("watch.max_expand_depth").value, 4);
     assert_eq!(
         field("watch.native_queue_capacity").origin.source,
         SourceId::Global(global.path().join("config.toml")),
@@ -806,6 +810,18 @@ transient_backoff_ms = 15
         field("watch.transient_retries").origin.source,
         SourceId::Project(project.path().join(".docsbase.toml")),
     );
+    assert_eq!(
+        field("watch.max_expand_depth").origin.source,
+        SourceId::Project(project.path().join(".docsbase.toml")),
+    );
+
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2\n[watch]\nmax_expand_depth = 33\n",
+    );
+    let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+    assert!(error.to_string().contains("max_expand_depth"), "{error}");
 
     layer(
         &project,

@@ -1606,3 +1606,28 @@ retention after deletion, and retry. The targeted suite passed all 31
 generation tests on Rust 1.100.0. Windows continues to refuse removal
 without a qualified namespace barrier. Physical staging limits and runtime
 activation remain open.
+
+## 2026-11-25 — CF12 I43, watcher directory expansion
+
+Task CF12 I43: complete (v2 project expansion limits, scoped traversal on
+admitted daemon CPU, and a persisted warning for incomplete expansion).
+Limits apply to directory events while direct notifications and purge
+markers keep their order. Explicit sync can reconcile omitted paths.
+
+Ruling: the producer had expanded directory events before the job could
+observe truncation. It now retains eligible directories and drops events
+already excluded by ignore rules. Empty, untruncated directory-only batches
+preserve the previous outcome without opening a writer. A directory replaced
+by a file retains the descendant purge markers. Targeted tests cover the
+production producer, saved outcome and legacy blocking consumers.
+
+Minor (deferred): one invocation of the pinned ignore iterator can consume
+multiple ignored entries internally. Cancellation checks run on entries
+exposed by the walker and its filter callback.
+
+Ruling: the first native run for #201 received unrelated native notifications
+alongside injected test events. The deterministic watcher tests now replace
+the platform event source while retaining the actual bounded queue, producer,
+and consumer. The Linux writer-policy test compares scores in rank order and
+complete hits by chunk ID so it tolerates equal-score permutations. Windows
+phase tests use a longer watchdog around the same synchronization points.
