@@ -235,6 +235,7 @@ impl Resolution<ConfigSpec> {
                 &layer.source,
                 &mut self.origins,
             )?;
+            WriterSpec::validate(&self.settings.index_writer, &self.capabilities)?;
         }
         self.validate()
             .map_err(|_| invalid("invalid effective settings in versioned source"))

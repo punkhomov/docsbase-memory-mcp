@@ -82,26 +82,63 @@ pub fn publish_lexical_generation(
     }
     with_preparation_lease(&project_dir, || {
         publish_stopped(
-            &cache,
-            &project_dir,
-            request,
-            staged,
-            settings,
-            limits,
-            config,
+            StagedPublication {
+                cache: &cache,
+                project_dir: &project_dir,
+                request,
+                staged,
+                settings,
+                limits,
+                config,
+            },
+            |ready| ready.commit(|| Ok(())),
         )
     })
 }
 
-fn publish_stopped(
-    cache: &Path,
-    project_dir: &Path,
-    request: LexicalBuildRequest,
-    staged: PreparedLexicalGeneration,
-    settings: &Resolved<DbSettings>,
-    limits: InspectionLimits,
-    config: &Config,
+pub(super) struct StagedPublication<'a> {
+    pub(super) cache: &'a Path,
+    pub(super) project_dir: &'a Path,
+    pub(super) request: LexicalBuildRequest,
+    pub(super) staged: PreparedLexicalGeneration,
+    pub(super) settings: &'a Resolved<DbSettings>,
+    pub(super) limits: InspectionLimits,
+    pub(super) config: &'a Config,
+}
+
+/// A sealed pair ready for the final project writer lease and catalog CAS.
+pub(crate) struct LexicalCommit<'a> {
+    publication: StagedPublication<'a>,
+    project: &'a Project,
+    seal: blake3::Hash,
+    current: ObservedProjectIndex,
+}
+
+impl LexicalCommit<'_> {
+    pub(crate) fn commit(self, admit: impl FnOnce() -> Result<()>) -> Result<ObservedProjectIndex> {
+        let writer_lock = lifecycle::lease_path(self.publication.cache, self.project.id);
+        lifecycle::with_writer_lock(
+            open_coordination_file(&writer_lock, false)?,
+            &writer_lock,
+            || commit_head(&self, admit),
+        )?;
+        Ok(self.current)
+    }
+}
+
+pub(super) fn publish_stopped(
+    publication: StagedPublication<'_>,
+    finalize: impl FnOnce(LexicalCommit<'_>) -> Result<ObservedProjectIndex>,
 ) -> Result<ObservedProjectIndex> {
+    let StagedPublication {
+        cache,
+        project_dir,
+        request,
+        staged,
+        settings,
+        limits,
+        config,
+    } = publication;
     let dir = project_dir
         .join("generations")
         .join(staged.generation_id.to_string());
@@ -166,13 +203,12 @@ fn publish_stopped(
         &read_lock,
         || verify_and_seal(&dir, request, staged, &project, settings, limits, config),
     )?;
-    let writer_lock = lifecycle::lease_path(cache, project.id);
-    lifecycle::with_writer_lock(
-        open_coordination_file(&writer_lock, false)?,
-        &writer_lock,
-        || commit_head(cache, request, staged, settings, limits, &project, &seal),
-    )?;
-    Ok(current)
+    finalize(LexicalCommit {
+        publication,
+        project: &project,
+        seal,
+        current,
+    })
 }
 
 fn confirm_publication(
@@ -556,15 +592,17 @@ fn write_seal(path: &Path, bytes: &[u8]) -> Result<()> {
     filesystem(path, "sync generation seal", file.sync_all())
 }
 
-fn commit_head(
-    cache: &Path,
-    request: LexicalBuildRequest,
-    staged: PreparedLexicalGeneration,
-    settings: &Resolved<DbSettings>,
-    limits: InspectionLimits,
-    project: &Project,
-    seal: &blake3::Hash,
-) -> Result<()> {
+fn commit_head(commit: &LexicalCommit<'_>, admit: impl FnOnce() -> Result<()>) -> Result<()> {
+    let StagedPublication {
+        cache,
+        request,
+        staged,
+        settings,
+        limits,
+        ..
+    } = commit.publication;
+    let project = commit.project;
+    let seal = &commit.seal;
     let mut registry = open_registry(cache, settings)?;
     let connection = registry.connection();
     configure_publication_connection(connection, limits)?;
@@ -640,6 +678,8 @@ fn commit_head(
         params![request.project_id, staged.generation_id],
     )
     .map_err(repo::db_error)?;
+    // All validation and SQL writes are still reversible at this boundary.
+    admit()?;
     tx.commit().map_err(|error| {
         crate::error::Error::internal_with_source(
             "commit generation catalog (publication result may be indeterminate)",

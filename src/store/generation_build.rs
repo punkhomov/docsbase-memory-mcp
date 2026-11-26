@@ -97,6 +97,85 @@ fn prepare_lexical_generation_with_space(
     config: &Config,
     available_space: impl FnOnce(&Path) -> io::Result<u64>,
 ) -> Result<PreparedLexicalGeneration> {
+    prepare_and_then(
+        cache,
+        BuildInputs {
+            request,
+            settings,
+            limits,
+            config,
+        },
+        available_space,
+        BuildPurpose::Maintenance,
+        |pair| Ok(pair.publication.staged),
+    )
+}
+
+/// A staged pair under its project's preparation lease.
+pub(crate) struct PreparedLexicalPublication<'a> {
+    publication: publication::StagedPublication<'a>,
+    stats: job::JobStats,
+}
+
+impl PreparedLexicalPublication<'_> {
+    pub(crate) fn publish(
+        self,
+        finalize: impl FnOnce(publication::LexicalCommit<'_>) -> Result<ObservedProjectIndex>,
+    ) -> Result<job::JobStats> {
+        publication::publish_stopped(self.publication, finalize)?;
+        Ok(self.stats)
+    }
+}
+
+pub(crate) fn with_prepared_lexical_generation<T>(
+    cache: &Path,
+    request: LexicalBuildRequest,
+    settings: &Resolved<DbSettings>,
+    limits: InspectionLimits,
+    config: &Config,
+    capture: &mut job::CaptureBudget<'_>,
+    complete: impl FnOnce(PreparedLexicalPublication<'_>) -> Result<T>,
+) -> Result<T> {
+    prepare_and_then(
+        cache,
+        BuildInputs {
+            request,
+            settings,
+            limits,
+            config,
+        },
+        native_fs::available_space,
+        BuildPurpose::DirectIndex(capture),
+        complete,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct BuildInputs<'a> {
+    request: LexicalBuildRequest,
+    settings: &'a Resolved<DbSettings>,
+    limits: InspectionLimits,
+    config: &'a Config,
+}
+
+enum BuildPurpose<'a, 'b> {
+    Maintenance,
+    DirectIndex(&'a mut job::CaptureBudget<'b>),
+}
+
+fn prepare_and_then<T>(
+    cache: &Path,
+    inputs: BuildInputs<'_>,
+    available_space: impl FnOnce(&Path) -> io::Result<u64>,
+    purpose: BuildPurpose<'_, '_>,
+    complete: impl FnOnce(PreparedLexicalPublication<'_>) -> Result<T>,
+) -> Result<T> {
+    let BuildInputs {
+        request,
+        settings,
+        limits,
+        config,
+    } = inputs;
     let reservation = i64::try_from(request.reserved_disk_bytes)
         .ok()
         .filter(|bytes| *bytes > 0)
@@ -127,6 +206,19 @@ fn prepare_lexical_generation_with_space(
     ensure_directory(&cache.join("projects"))?;
     ensure_directory(&project_dir)?;
     with_preparation_lease(&project_dir, || {
+        let direct = matches!(&purpose, BuildPurpose::DirectIndex(_));
+        let capture = match purpose {
+            BuildPurpose::Maintenance => None,
+            BuildPurpose::DirectIndex(capture) => {
+                capture.operation.check()?;
+                // The preparation lease excludes an active builder. Reclaim
+                // only this command's old attempt, under its own reader lease.
+                recovery::discard_index_attempt(&cache, &project_dir, request, settings, limits)?;
+                recovery::reclaim_index_pairs(&cache, &project_dir, request, settings, limits);
+                capture.operation.check()?;
+                Some(capture)
+            }
+        };
         // Keep the coordination path available if reservation commits
         // before the generation directory or its intent are created.
         #[cfg(unix)]
@@ -155,46 +247,78 @@ fn prepare_lexical_generation_with_space(
         // The base lease ends before any index or merge work. Publication will
         // require a new freshness check under its own writer authority.
 
-        let path = generations.join(generation.to_string());
-        let digest = ownership_digest(request, generation);
-        let intent = claim_path(&generations, generation);
-        write_owner_record(&intent, digest)?;
-        #[cfg(unix)]
-        for directory in [&generations, &project_dir] {
-            recovery::sync_directory(directory)?;
-        }
-        filesystem(
-            &path,
-            "create generation directory",
-            native_fs::create_private_directory(&path),
-        )?;
-        write_owner_record(&path.join(".build-owner"), digest)?;
-        #[cfg(unix)]
-        recovery::sync_directory(&path)?;
-        let revision = build_pair(
-            &path,
+        let (staged, stats) = build_reserved_pair(
+            &project_dir,
+            &generations,
             &project,
             generation,
-            settings,
-            config,
-            limits,
+            inputs,
             pair_budget,
+            capture,
         )?;
-        let bytes = size_of_pair(&path)?
-            .checked_add(digest.as_bytes().len() as u64)
-            .ok_or_else(|| admission("generation size overflow"))?;
-        if bytes > request.reserved_disk_bytes {
-            return Err(admission(
-                "prepared generation exceeds its disk reservation",
-            ));
+        let result = complete(PreparedLexicalPublication {
+            publication: publication::StagedPublication {
+                cache: &cache,
+                project_dir: &project_dir,
+                request,
+                staged,
+                settings,
+                limits,
+                config,
+            },
+            stats,
+        })?;
+        if direct {
+            recovery::reclaim_index_pairs(&cache, &project_dir, request, settings, limits);
         }
-        Ok(PreparedLexicalGeneration {
+        Ok(result)
+    })
+}
+
+fn build_reserved_pair(
+    #[cfg_attr(not(unix), allow(unused_variables))] project_dir: &Path,
+    generations: &Path,
+    project: &Project,
+    generation: i64,
+    inputs: BuildInputs<'_>,
+    pair_budget: u64,
+    capture: Option<&mut job::CaptureBudget<'_>>,
+) -> Result<(PreparedLexicalGeneration, job::JobStats)> {
+    let request = inputs.request;
+    let path = generations.join(generation.to_string());
+    let digest = ownership_digest(request, generation);
+    let intent = claim_path(generations, generation);
+    write_owner_record(&intent, digest)?;
+    #[cfg(unix)]
+    for directory in [generations, project_dir] {
+        recovery::sync_directory(directory)?;
+    }
+    filesystem(
+        &path,
+        "create generation directory",
+        native_fs::create_private_directory(&path),
+    )?;
+    write_owner_record(&path.join(".build-owner"), digest)?;
+    #[cfg(unix)]
+    recovery::sync_directory(&path)?;
+    let (revision, stats) = build_pair(&path, project, generation, inputs, pair_budget, capture)?;
+    let bytes = size_of_pair(&path)?
+        .checked_add(digest.as_bytes().len() as u64)
+        .ok_or_else(|| admission("generation size overflow"))?;
+    if bytes > request.reserved_disk_bytes {
+        return Err(admission(
+            "prepared generation exceeds its disk reservation",
+        ));
+    }
+    Ok((
+        PreparedLexicalGeneration {
             project_id: project.id,
             generation_id: generation,
             content_revision: revision,
             bytes,
-        })
-    })
+        },
+        stats,
+    ))
 }
 
 fn with_preparation_lease<T>(project_dir: &Path, run: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -438,11 +562,16 @@ fn build_pair(
     path: &Path,
     project: &Project,
     generation: i64,
-    settings: &Resolved<DbSettings>,
-    config: &Config,
-    limits: InspectionLimits,
+    inputs: BuildInputs<'_>,
     bytes: u64,
-) -> Result<i64> {
+    capture: Option<&mut job::CaptureBudget<'_>>,
+) -> Result<(i64, job::JobStats)> {
+    let BuildInputs {
+        settings,
+        limits,
+        config,
+        ..
+    } = inputs;
     let lease_path = path.join(".read.lock");
     let lease_file = filesystem(
         &lease_path,
@@ -455,7 +584,8 @@ fn build_pair(
         ExclusiveFileLease::try_acquire(lease_file),
     )?;
     let metadata = path.join("metadata.db");
-    let (revision, prepared) = build_metadata(path, project, generation, settings, config, bytes)?;
+    let (revision, prepared) =
+        build_metadata(path, project, generation, settings, config, bytes, capture)?;
     let metadata_bytes = filesystem(
         &metadata,
         "measure staged metadata",
@@ -473,13 +603,13 @@ fn build_pair(
         lease,
         |writer| prepared.write_lexical_chunks(writer),
     )?;
-    drop(prepared);
+    let stats = prepared.stats;
     let db = publication::open_local_metadata(path, settings, limits)?;
     verify_chunk_pair(db.connection(), project.id, &tantivy, limits)?;
     db.conn
         .close()
         .map_err(|(_, error)| repo::db_error(error))?;
-    Ok(revision)
+    Ok((revision, stats))
 }
 
 fn build_metadata(
@@ -489,6 +619,7 @@ fn build_metadata(
     settings: &Resolved<DbSettings>,
     config: &Config,
     bytes: u64,
+    capture: Option<&mut job::CaptureBudget<'_>>,
 ) -> Result<(i64, job::PreparedPlan)> {
     let metadata = path.join("metadata.db");
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -515,7 +646,7 @@ fn build_metadata(
         settings: settings.clone(),
         generation_catalog: false,
     };
-    let prepared = job::prepare_staged_metadata(&mut db, project, config)?;
+    let prepared = job::prepare_staged_metadata(&mut db, project, config, capture)?;
     if prepared.stats.errors != 0 || repo::has_pending_docs(db.connection(), project.id)? {
         return Err(admission(
             "lexical generation has an incomplete source survey",

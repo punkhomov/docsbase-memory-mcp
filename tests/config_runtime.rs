@@ -822,6 +822,31 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
 }
 
 #[cfg(unix)]
+fn seed_v5_registry(env: &Env) {
+    let mut db = docsbase_memory::store::Db::open(env.cache()).unwrap();
+    seed_v5_catalog(&mut db);
+}
+
+#[cfg(unix)]
+fn seed_v5_catalog(db: &mut docsbase_memory::store::Db) -> [u8; 16] {
+    let epoch = [17; 16];
+    // Fresh runtime initialization is covered separately. This seeds only the
+    // empty catalog, so ordinary CLI commands must perform all writes.
+    let tx = db.begin_write().unwrap();
+    tx.execute_batch(include_str!("../src/store/generation_catalog/schema.sql"))
+        .unwrap();
+    tx.execute(
+        "INSERT INTO generation_store VALUES (1, 1, ?1)",
+        [epoch.as_slice()],
+    )
+    .unwrap();
+    tx.pragma_update(None, "user_version", 5).unwrap();
+    tx.commit().unwrap();
+
+    epoch
+}
+
+#[cfg(unix)]
 fn seed_published_v5_pair(
     env: &Env,
 ) -> docsbase_memory::store::generation_build::PreparedLexicalGeneration {
@@ -837,19 +862,7 @@ fn seed_published_v5_pair(
     let config = Config::load_from(&env.cache().join("config"), Some(env.root())).unwrap();
     let mut db = Db::open_with_settings(env.cache(), &db_settings).unwrap();
     let project = docsbase_memory::daemon::registry::ensure_project(&mut db, env.root()).unwrap();
-    // Seed a new v5 registry. Staging and head publication then use the real
-    // maintenance API, with no legacy document or chunk rows to fall back to.
-    let tx = db.begin_write().unwrap();
-    tx.execute_batch(include_str!("../src/store/generation_catalog/schema.sql"))
-        .unwrap();
-    let epoch = [17; 16];
-    tx.execute(
-        "INSERT INTO generation_store VALUES (1, 1, ?1)",
-        [epoch.as_slice()],
-    )
-    .unwrap();
-    tx.pragma_update(None, "user_version", 5).unwrap();
-    tx.commit().unwrap();
+    let epoch = seed_v5_catalog(&mut db);
     drop(db);
 
     let request = LexicalBuildRequest {
@@ -965,6 +978,144 @@ fn direct_search_reads_the_published_v5_pair() {
 
     fs::write(seal, "foreign seal").unwrap();
     assert_published_search_refuses(&env, "seal");
+}
+
+#[test]
+#[cfg(unix)]
+fn direct_index_publishes_and_replaces_a_lexical_v5_pair() {
+    let env = Env::new(&[("guide.md", "# Guide\n\nfirstgenerationpulsar\n")]);
+    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    seed_v5_registry(&env);
+
+    let initial = env.run_json(&["index"]);
+    assert_eq!(initial["stats"]["docs"], 1);
+    let hits = env.run_json(&["search", "firstgenerationpulsar", "--snippet"]);
+    assert_eq!(hits[0]["path"], "guide.md");
+    assert!(
+        hits[0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("firstgenerationpulsar")
+    );
+
+    let first_dir = env
+        .cache()
+        .join("projects")
+        .join(initial["project_id"].as_i64().unwrap().to_string())
+        .join("generations/1");
+    let mut reader = fd_lock::RwLock::new(fs::File::open(first_dir.join(".read.lock")).unwrap());
+    let lease = reader.try_read().unwrap();
+
+    let doc = env.root().join("guide.md");
+    fs::write(doc, "# Guide\n\nsecondgenerationquasar\n").unwrap();
+    let updated = env.run_json(&["index"]);
+    assert_eq!(updated["project_id"], initial["project_id"]);
+    assert_eq!(updated["stats"]["docs"], 1);
+    assert_eq!(
+        env.run_json(&["search", "firstgenerationpulsar"]),
+        serde_json::json!([])
+    );
+    let hits = env.run_json(&["search", "secondgenerationquasar", "--snippet"]);
+    assert!(
+        hits[0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("secondgenerationquasar")
+    );
+
+    let registry =
+        rusqlite::Connection::open(env.cache().join(docsbase_memory::store::DB_FILE)).unwrap();
+    let (active, retired): (i64, i64) = registry
+        .query_row(
+            "SELECT active_id, (SELECT count(*) FROM project_generations WHERE phase = 'retired')
+         FROM project_generation_head",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(active > 1);
+    assert_eq!(retired, 1);
+    assert!(first_dir.exists());
+    assert_eq!(
+        registry
+            .query_row("SELECT count(*) FROM docs", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(registry);
+    drop(lease);
+    assert!(reader.try_write().is_ok());
+    drop(reader);
+    assert_eq!(env.run_json(&["index"])["stats"]["docs"], 1);
+    assert!(!first_dir.exists());
+    let registry =
+        rusqlite::Connection::open(env.cache().join(docsbase_memory::store::DB_FILE)).unwrap();
+    assert_eq!(
+        registry
+            .query_row(
+                "SELECT count(*) FROM project_generations WHERE phase != 'active'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn failed_v5_index_keeps_the_active_pair_and_is_retryable() {
+    let env = Env::new(&[("guide.md", "# Guide\n\nlastgoodpulsar\n")]);
+    let default = "config_version = 2\n";
+    fs::write(env.global_config(), default).unwrap();
+    seed_v5_registry(&env);
+    let indexed = env.run_json(&["index"]);
+    assert_eq!(indexed["stats"]["docs"], 1);
+
+    fs::write(
+        env.root().join("guide.md"),
+        "# Guide\n\nreplacementquasar\n",
+    )
+    .unwrap();
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[index.writer]\nstaging_disk_bytes = 4096\n",
+    )
+    .unwrap();
+    let limited = env.cmd().arg("index").output().unwrap();
+    assert!(!limited.status.success());
+    let hits = env.run_json(&["search", "lastgoodpulsar", "--snippet"]);
+    assert!(
+        hits[0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("lastgoodpulsar")
+    );
+
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[search]\nmax_request_payload_bytes = 32768\n",
+    )
+    .unwrap();
+    let limited = env.cmd().arg("index").output().unwrap();
+    assert!(!limited.status.success());
+    let stderr = String::from_utf8_lossy(&limited.stderr);
+    assert!(stderr.contains("max_request_payload_bytes"), "{stderr}");
+
+    fs::write(env.global_config(), default).unwrap();
+    assert_eq!(env.run_json(&["index"])["stats"]["docs"], 1);
+    assert_eq!(
+        env.run_json(&["search", "replacementquasar"])[0]["path"],
+        "guide.md"
+    );
+    let registry =
+        rusqlite::Connection::open(env.cache().join(docsbase_memory::store::DB_FILE)).unwrap();
+    let unfinished = registry.query_row(
+        "SELECT count(*) FROM project_generations WHERE phase IN ('building', 'sealed', 'reclaiming')",
+        [],
+        |row| row.get::<_, i64>(0),
+    ).unwrap();
+    assert_eq!(unfinished, 0);
 }
 
 #[test]
