@@ -1,4 +1,5 @@
 //! Bounded read-only Website readiness over the existing index/writer contract.
+use std::path::Path;
 use std::str::FromStr;
 
 use rusqlite::{OptionalExtension, params};
@@ -12,7 +13,7 @@ use crate::index::outcome::{self, IndexOutcome, SurveyScope};
 use crate::index::tantivy_index::ReadIndex;
 use crate::ipc::panel::{IndexHealth, ReadinessReason, ServerProject, ServerStatus, ServerSync};
 use crate::store::models::{Project, SyncState};
-use crate::store::project_index::ProjectIndex;
+use crate::store::project_index::{ProjectIndex, with_catalog_pair};
 use crate::store::read_pool::ReadPool;
 use crate::store::repo::db_error;
 use crate::store::{Db, migrations};
@@ -27,6 +28,8 @@ pub(crate) struct SyncAttribution {
     schema_version: u32,
     attempt_id: i64,
     index_generation: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation_id: Option<i64>,
     canonical_root: String,
     recipe_id: String,
     scope: SurveyScope,
@@ -37,6 +40,7 @@ impl From<&IndexOutcome> for SyncAttribution {
             schema_version: outcome.schema_version,
             attempt_id: outcome.attempt_id,
             index_generation: outcome.index_generation,
+            generation_id: None,
             canonical_root: outcome.canonical_root.clone(),
             recipe_id: outcome.recipe_id.clone(),
             scope: outcome.scope,
@@ -44,10 +48,18 @@ impl From<&IndexOutcome> for SyncAttribution {
     }
 }
 impl SyncAttribution {
+    pub(crate) fn for_generation(outcome: &IndexOutcome, generation_id: i64) -> Self {
+        Self {
+            generation_id: Some(generation_id),
+            ..Self::from(outcome)
+        }
+    }
+
     pub(crate) fn valid(&self) -> bool {
         self.schema_version == 1
             && self.attempt_id > 0
             && self.index_generation >= 0
+            && self.generation_id.is_none_or(|id| id > 0)
             && self
                 .recipe_id
                 .strip_prefix("index-recipe-v1:")
@@ -146,17 +158,30 @@ impl SyncEvidence {
         let Some(stats) = self.stats() else {
             return false;
         };
-        self.state == SyncState::Done
-            && self.finished_at.is_some()
-            && stats.errors == 0
-            && identity.scope == SurveyScope::FullSurvey
-            && identity.canonical_root == snapshot.project.root
-            && identity.attempt_id <= snapshot.attempt
-            && identity.index_generation <= snapshot.index.content_revision()
-            && (identity.attempt_id != snapshot.attempt
-                || snapshot.outcome.as_ref().is_some_and(|current| {
-                    identity == SyncAttribution::from(current) && stats == current.stats
-                }))
+        if self.state != SyncState::Done
+            || self.finished_at.is_none()
+            || stats.errors != 0
+            || identity.scope != SurveyScope::FullSurvey
+            || identity.canonical_root != snapshot.project.root
+        {
+            return false;
+        }
+        match (identity.generation_id, snapshot.index.generation_id()) {
+            (Some(observed), Some(active)) if observed != active => observed < active,
+            (Some(generation), Some(_)) => snapshot.outcome.as_ref().is_some_and(|current| {
+                identity == SyncAttribution::for_generation(current, generation)
+                    && stats == current.stats
+            }),
+            (None, None) => {
+                identity.attempt_id <= snapshot.attempt
+                    && identity.index_generation <= snapshot.index.content_revision()
+                    && (identity.attempt_id != snapshot.attempt
+                        || snapshot.outcome.as_ref().is_some_and(|current| {
+                            identity == SyncAttribution::from(current) && stats == current.stats
+                        }))
+            }
+            _ => false,
+        }
     }
 }
 
@@ -174,10 +199,20 @@ struct Snapshot {
 }
 impl Snapshot {
     fn read(db: &Db, project: i64) -> Result<Self> {
+        Self::read_bound(db, project, None, None)
+    }
+
+    fn read_bound(
+        db: &Db,
+        project: i64,
+        local: Option<&Db>,
+        index: Option<ProjectIndex>,
+    ) -> Result<Self> {
         let bound = i64::try_from(crate::limits::MAX_STATE_BYTES)
             .map_err(|_| Error::internal("readiness metadata bound overflow"))?;
         let tx = db.connection().unchecked_transaction().map_err(db_error)?;
-        let (identity, schema_version, revision, attempt, outcome_len, raw_outcome) = tx.query_row(
+        let metadata = local.unwrap_or(db);
+        let (identity, schema_version, revision, attempt, outcome_len, raw_outcome) = metadata.connection().query_row(
             "SELECT id,
                 CASE WHEN typeof(name)='text' AND length(CAST(name AS BLOB))<=?2 THEN name END,
                 CASE WHEN typeof(canonical_root)='text' AND length(CAST(canonical_root AS BLOB))<=?2 THEN canonical_root END,
@@ -190,13 +225,16 @@ impl Snapshot {
                     row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?))
             }).map_err(db_error)?;
         let snapshot = Self {
-            index: ProjectIndex::legacy(identity.id, revision)?,
+            index: match index {
+                Some(index) => index,
+                None => ProjectIndex::legacy(identity.id, revision)?,
+            },
             project: identity,
             schema_version,
             attempt,
             outcome_len,
             raw_outcome,
-            outcome: outcome::read(db, project)?,
+            outcome: outcome::read(metadata, project)?,
             active: SyncEvidence::read(db, project, true, bound)?,
             latest: SyncEvidence::read(db, project, false, bound)?,
         };
@@ -271,6 +309,9 @@ pub fn observe(
     config: &Config,
     notice: Option<String>,
 ) -> Result<ServerStatus> {
+    if pool.has_generation_catalog() {
+        return observe_catalog(pool, project, config, notice, index_health);
+    }
     lifecycle::with_existing_project_read_lease(pool.cache_root(), project.id, || {
         observe_with(
             project,
@@ -282,16 +323,46 @@ pub fn observe(
             },
             |snapshot| {
                 let dir = snapshot.index.tantivy_dir(pool.cache_root());
-                match ReadIndex::check_health_with_project_lease(&dir) {
-                    Ok(()) => IndexHealth::Healthy,
-                    Err(Error::Project { .. }) if dir.join("meta.json").exists() => {
-                        IndexHealth::RebuildRequired
-                    }
-                    Err(_) => IndexHealth::IndexUnavailable,
-                }
+                index_health(&dir)
             },
         )
     })
+}
+
+fn observe_catalog(
+    pool: &ReadPool,
+    project: &Project,
+    config: &Config,
+    notice: Option<String>,
+    check_health: impl FnOnce(&Path) -> IndexHealth,
+) -> Result<ServerStatus> {
+    let reader = pool.try_acquire()?;
+    with_catalog_pair(reader, project, |registry, local, index| {
+        let dir = local.as_ref().map_or_else(
+            || Ok(index.tantivy_dir(pool.cache_root())),
+            crate::store::project_index::LocalMetadata::tantivy_dir,
+        )?;
+        // The pair cannot change under its leases. Sync rows can still move,
+        // so each observation gets a fresh, short registry transaction.
+        let metadata = local.as_ref().map(|local| &local.db);
+        observe_with(
+            project,
+            &outcome::recipe_id(config),
+            notice,
+            || Snapshot::read_bound(&registry, project.id, metadata, Some(index)),
+            |_| check_health(&dir),
+        )
+    })
+}
+
+fn index_health(dir: &Path) -> IndexHealth {
+    match ReadIndex::check_health_with_project_lease(dir) {
+        Ok(()) => IndexHealth::Healthy,
+        Err(Error::Project { .. }) if dir.join("meta.json").exists() => {
+            IndexHealth::RebuildRequired
+        }
+        Err(_) => IndexHealth::IndexUnavailable,
+    }
 }
 
 fn observe_with(

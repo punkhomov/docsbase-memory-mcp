@@ -753,3 +753,227 @@ fn website_explicit_sync_adds_and_removes_files_and_publishes_readiness() {
     drop(index);
     env.stop(&mut daemon);
 }
+
+#[test]
+#[cfg(unix)]
+#[allow(clippy::too_many_lines)] // Exercise the complete pair lifecycle through the daemon.
+fn website_serves_and_replaces_an_existing_v5_generation() {
+    use docsbase_memory::ipc::protocol::{self, Response};
+    use docsbase_memory::store::{DB_FILE, Db};
+    use serde_json::{Value, json};
+
+    let cache = tempfile::tempdir().unwrap();
+    // macOS paths such as /var/folders have a symlinked ancestor.
+    // Keep the Unix socket path independent of TMPDIR's length.
+    let alias_dir = tempfile::tempdir_in("/tmp").unwrap();
+    let parent = alias_dir.path().join("p");
+    std::os::unix::fs::symlink(cache.path().parent().unwrap(), &parent).unwrap();
+    let cache_alias = parent.join(cache.path().file_name().unwrap());
+    let root = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let doc = root.path().join("guide.md");
+    std::fs::write(&doc, "# Profile\n\nwebsitefirsthelix\n").unwrap();
+    std::fs::write(config.path().join("config.toml"), "config_version = 2\n").unwrap();
+
+    let mut registry = Db::open(cache.path()).unwrap();
+    let tx = registry.begin_write().unwrap();
+    tx.execute_batch(include_str!("../src/store/generation_catalog/schema.sql"))
+        .unwrap();
+    tx.execute(
+        "INSERT INTO generation_store VALUES (1, 1, ?1)",
+        [[25_u8; 16].as_slice()],
+    )
+    .unwrap();
+    tx.pragma_update(None, "user_version", 5).unwrap();
+    tx.commit().unwrap();
+    drop(registry);
+
+    let run = |args: &[&str]| -> Value {
+        let output = cli(&cache_alias, config.path())
+            .current_dir(root.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let indexed = run(&["index"]);
+    let active = || {
+        let registry = rusqlite::Connection::open(cache.path().join(DB_FILE)).unwrap();
+        registry
+            .query_row("SELECT active_id FROM project_generation_head", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    let first = active();
+    let mut daemon = Daemon(
+        cli(&cache_alias, config.path())
+            .args(["serve", "--project"])
+            .arg(root.path())
+            .current_dir(config.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let transport = test_transport::TestTransport::new(4);
+    await_started(&transport, &mut daemon, &cache_alias);
+    let mut probe = Client::connect(&transport, &cache_alias).unwrap();
+    assert!(matches!(
+        probe
+            .call(Request::Hello {
+                protocol_version: protocol::PROTOCOL_VERSION,
+                build_id: protocol::build_id(),
+                client: "website-catalog-test".into(),
+            })
+            .unwrap(),
+        Response::Hello {
+            schema_version: 5,
+            ..
+        }
+    ));
+    drop(probe);
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(cache.path().join("state/daemon.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["schema_version"], 5);
+
+    let project = root.path().to_str().unwrap();
+    let ready = || run(&["status", "--project", project]);
+    let status = ready();
+    assert_eq!(status["profile"], "website");
+    assert_eq!(status["project"]["id"], indexed["project_id"]);
+    assert_eq!(status["ready"], true);
+    assert_eq!(run(&["search", "websitefirsthelix"])[0]["path"], "guide.md");
+
+    let mut client = Client::connect(&transport, &cache_alias).unwrap();
+    client.handshake_registry().unwrap();
+    client
+        .call(Request::BindReadOnly {
+            pid: std::process::id(),
+            project_id: indexed["project_id"].as_i64(),
+        })
+        .unwrap();
+    let documents = client.call_tool("list_docs", json!({})).unwrap();
+    assert_eq!(documents["docs"][0]["path"], "guide.md");
+    let hits = client
+        .call_tool("search_docs", json!({"query": "websitefirsthelix"}))
+        .unwrap();
+    let neighbors = client
+        .call_tool("read_neighbors", json!({"chunk_id": hits[0]["chunk_id"]}))
+        .unwrap();
+    assert!(
+        neighbors[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("websitefirsthelix")
+    );
+
+    std::fs::write(doc, "# Profile\n\nwebsitesecondspiral\n").unwrap();
+    std::fs::write(root.path().join("new.md"), "websiteadditionnote\n").unwrap();
+    let registry = rusqlite::Connection::open(cache.path().join(DB_FILE)).unwrap();
+    registry
+        .execute_batch(
+            "CREATE TRIGGER reject_sync_completion BEFORE UPDATE OF state ON sync_jobs
+             WHEN NEW.state = 'done' BEGIN SELECT RAISE(ABORT, 'test interrupted publication'); END;",
+        )
+        .unwrap();
+    let failed = cli(&cache_alias, config.path())
+        .current_dir(root.path())
+        .arg("sync")
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    let failure: Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(failure["state"], "error");
+    assert!(
+        failure["stats"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("test interrupted publication")
+    );
+    assert_eq!(active(), first);
+    assert_eq!(ready()["reason"], "sync_failed");
+    assert_eq!(run(&["search", "websitefirsthelix"])[0]["path"], "guide.md");
+    assert_eq!(run(&["search", "websitesecondspiral"]), json!([]));
+    registry
+        .execute_batch("DROP TRIGGER reject_sync_completion")
+        .unwrap();
+    drop(registry);
+
+    let sync = run(&["sync"]);
+    assert_eq!(sync["state"], "done");
+    let next = active();
+    assert!(next > first);
+    assert_eq!(sync["stats"]["index_outcome"]["generation_id"], next);
+    let current = ready();
+    assert_eq!(current["ready"], true);
+    assert_eq!(current["index_generation"], status["index_generation"]);
+    assert_eq!(
+        run(&["search", "websitesecondspiral"])[0]["path"],
+        "guide.md"
+    );
+    assert_eq!(run(&["search", "websitefirsthelix"]), serde_json::json!([]));
+
+    let documents = client.call_tool("list_docs", json!({})).unwrap();
+    assert_eq!(documents["docs"][1]["path"], "new.md");
+    for tool in ["list_projects", "panel_projects"] {
+        let projects = client.call_tool(tool, json!({})).unwrap();
+        assert_eq!(projects[0]["status"], "indexed", "{tool}");
+        assert_eq!(projects[0]["docs"], 2, "{tool}");
+    }
+    let status = client.call_tool("status", json!({})).unwrap();
+    assert_eq!(status["schema_version"], 5);
+    assert_eq!(status["projects"][0]["status"], "indexed");
+    assert_eq!(status["projects"][0]["docs"], 2);
+
+    let orphan = rusqlite::Connection::open(cache.path().join(DB_FILE))
+        .unwrap()
+        .query_row(
+            "INSERT INTO sync_jobs (project_id, state, started_at) VALUES (?1, 'running', 1) RETURNING id",
+            [indexed["project_id"].as_i64().unwrap()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    let started = client.call_tool("sync_start", json!({})).unwrap();
+    let job = started["job_id"].as_i64().unwrap();
+    assert_ne!(
+        job, orphan,
+        "a row without its native owner cannot be joined"
+    );
+    drop(client);
+    let mut client = Client::connect(&transport, &cache_alias).unwrap();
+    client.handshake_registry().unwrap();
+    let retired = client
+        .call_tool("sync_status", json!({"job_id": orphan}))
+        .unwrap();
+    assert_eq!(retired["state"], "error");
+    assert_eq!(retired["stats"]["orphaned"], true);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let result = client
+            .call_tool("sync_status", json!({"job_id": job}))
+            .unwrap();
+        if result["state"] == "done" {
+            break;
+        }
+        assert_eq!(result["state"], "running", "{result}");
+        assert!(
+            Instant::now() < deadline,
+            "detached sync did not finish: {result}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(active() > next);
+
+    client.call(Request::StopDaemon).unwrap();
+    drop(client);
+    assert!(daemon.0.wait().unwrap().success());
+}

@@ -32,7 +32,7 @@ use super::{
 
 mod catalog_access;
 use catalog_access::CatalogAccess;
-pub(crate) use catalog_access::observe_index_base;
+pub(crate) use catalog_access::{observe_index_base, open_index_registry};
 
 mod publication;
 pub use publication::publish_lexical_generation;
@@ -118,16 +118,20 @@ fn prepare_lexical_generation_with_space(
 /// A staged pair under its project's preparation lease.
 pub(crate) struct PreparedLexicalPublication<'a> {
     publication: publication::StagedPublication<'a>,
-    stats: job::JobStats,
+    outcome: crate::index::outcome::IndexOutcome,
 }
 
 impl PreparedLexicalPublication<'_> {
+    pub(crate) const fn outcome(&self) -> &crate::index::outcome::IndexOutcome {
+        &self.outcome
+    }
+
     pub(crate) fn publish(
         self,
         finalize: impl FnOnce(publication::LexicalCommit<'_>) -> Result<ObservedProjectIndex>,
     ) -> Result<job::JobStats> {
         publication::publish_prepared(self.publication, finalize)?;
-        Ok(self.stats)
+        Ok(self.outcome.stats)
     }
 }
 
@@ -261,7 +265,7 @@ fn prepare_and_then<T>(
         // The base lease ends before any index or merge work. Publication will
         // require a new freshness check under its own writer authority.
 
-        let (staged, stats) = build_reserved_pair(
+        let (staged, outcome) = build_reserved_pair(
             &project_dir,
             &generations,
             &project,
@@ -281,7 +285,7 @@ fn prepare_and_then<T>(
                 config,
                 access,
             },
-            stats,
+            outcome,
         })?;
         if direct {
             recovery::reclaim_index_pairs(&cache, &project_dir, request, settings, limits);
@@ -298,7 +302,10 @@ fn build_reserved_pair(
     inputs: BuildInputs<'_>,
     pair_budget: u64,
     capture: Option<&mut job::CaptureBudget<'_>>,
-) -> Result<(PreparedLexicalGeneration, job::JobStats)> {
+) -> Result<(
+    PreparedLexicalGeneration,
+    crate::index::outcome::IndexOutcome,
+)> {
     let request = inputs.request;
     let path = generations.join(generation.to_string());
     let digest = ownership_digest(request, generation);
@@ -316,7 +323,7 @@ fn build_reserved_pair(
     write_owner_record(&path.join(".build-owner"), digest)?;
     #[cfg(unix)]
     recovery::sync_directory(&path)?;
-    let (revision, stats) = build_pair(&path, project, generation, inputs, pair_budget, capture)?;
+    let (revision, outcome) = build_pair(&path, project, generation, inputs, pair_budget, capture)?;
     let bytes = size_of_pair(&path)?
         .checked_add(digest.as_bytes().len() as u64)
         .ok_or_else(|| admission("generation size overflow"))?;
@@ -332,7 +339,7 @@ fn build_reserved_pair(
             content_revision: revision,
             bytes,
         },
-        stats,
+        outcome,
     ))
 }
 
@@ -588,7 +595,7 @@ fn build_pair(
     inputs: BuildInputs<'_>,
     bytes: u64,
     capture: Option<&mut job::CaptureBudget<'_>>,
-) -> Result<(i64, job::JobStats)> {
+) -> Result<(i64, crate::index::outcome::IndexOutcome)> {
     let BuildInputs {
         settings,
         limits,
@@ -626,13 +633,16 @@ fn build_pair(
         lease,
         |writer| prepared.write_lexical_chunks(writer),
     )?;
-    let stats = prepared.stats;
+    drop(prepared);
     let db = publication::open_local_metadata(path, settings, limits)?;
     verify_chunk_pair(db.connection(), project.id, &tantivy, limits)?;
+    let outcome = crate::index::outcome::read(&db, project.id)?
+        .filter(|outcome| outcome.is_complete() && outcome.index_generation == revision)
+        .ok_or_else(|| admission("staged lexical outcome is incomplete"))?;
     db.conn
         .close()
         .map_err(|(_, error)| repo::db_error(error))?;
-    Ok((revision, stats))
+    Ok((revision, outcome))
 }
 
 fn build_metadata(

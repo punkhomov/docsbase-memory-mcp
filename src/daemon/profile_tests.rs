@@ -206,6 +206,53 @@ fn fixed_runtime_skips_factories_and_every_background_hook() {
 }
 
 #[test]
+fn unchanged_website_binding_keeps_an_accepted_preparation_revision() {
+    let fixture = Fixture::new();
+    let shared = fixture.open().unwrap();
+    let accepted = shared.open_project_config(&fixture.project).unwrap();
+    let slot = shared.project_slot(fixture.project.id);
+
+    // BindReadOnly resolves the project's lexical policy again before joining.
+    shared.open_project_config(&fixture.project).unwrap();
+    assert!(slot.preparation_lease(&accepted).is_ok());
+
+    std::fs::write(
+        fixture.root.path().join(".docsbase.toml"),
+        "max_file_size = 512",
+    )
+    .unwrap();
+    shared.open_project_config(&fixture.project).unwrap();
+    assert!(slot.preparation_lease(&accepted).is_err());
+}
+
+#[test]
+fn concurrent_catalog_sync_cannot_join_an_unreconciled_orphan() {
+    let fixture = Fixture::new();
+    let shared = fixture.open().unwrap();
+    let (session, _cancel) = shared
+        .sessions
+        .join(
+            std::process::id(),
+            fixture.root.path().to_owned(),
+            Some(fixture.project.id),
+        )
+        .unwrap();
+    // A retry acquired the slot but has not begun reconciling the old row.
+    let _starting = shared.sync_slot.clone().try_acquire_owned().unwrap();
+    let db = shared.db();
+    let orphan = crate::store::repo::create_sync_job(db.connection(), fixture.project.id)
+        .unwrap()
+        .unwrap();
+    crate::store::repo::mark_sync_running(db.connection(), orphan).unwrap();
+    drop(db);
+
+    assert!(matches!(
+        capture_catalog_sync(&shared, Some(session), &json!({}), [1; 16]),
+        Err(Error::Admission { .. })
+    ));
+}
+
+#[test]
 fn status_and_panel_filter_before_unrelated_runtime_or_coverage() {
     let f = Fixture::new();
     std::fs::write(f.other.path().join(".docsbase.toml"), "hybrid=true").unwrap();

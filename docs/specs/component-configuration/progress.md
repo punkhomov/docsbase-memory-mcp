@@ -1699,3 +1699,34 @@ validated sidecar paths and the same artifact binding as search.
 Independent review and fix review passed. Full cli-full and lean offline
 tests, Clippy including the opt-in targets, fmt and the existing benchmark
 passed after the live WAL change.
+
+## 2026-11-26 — CF11c, Website on a published lexical v5 generation
+
+Task CF11c Website lexical v5: complete (real CLI/IPC, local verification,
+and fresh review plus fix rounds). Website opens the captured catalog epoch,
+reports schema 5 in Hello and daemon state, and binds search, metadata and
+status to the published pair. Its explicit Sync uses the ordinary bounded
+lexical generation coordinator.
+
+Ruling: the head and attributed Done record share one transaction. A native
+SQLite trigger rolls back the head if completion cannot be recorded. The
+previous pair then remains searchable and a retry succeeds. Equal content
+revisions across two builds still identify distinct physical generations.
+
+Ruling: readiness takes two fresh registry snapshots around the real Tantivy
+check. An equal Website rebind retains the accepted config revision. An
+ownerless active job can be retired by a later Sync, and competing callers
+join only the exact ID held by the active job owner. RED and GREEN cover
+each race. A detached client can observe the eventual result through a new
+connection.
+
+Rust 1.100.0 full cli-full passed 1880 tests with the existing benchmark
+baseline. Clippy for all default targets and both opt-in targets, fmt and
+the lean Linux offline check passed. Stock initialization, Shared and
+hybrid writers, and Windows publication remain open.
+
+Ruling: macOS CI reproduced SQLite's refusal of a linked cache ancestor
+(`/var`). Resolve the directory before the operational writer/recovery
+open. The registry and WAL/SHM/journal names still require ordinary
+single-link files. A real Website start/search/Sync through a linked cache
+ancestor reproduces the failure on Linux and passes after the fix.

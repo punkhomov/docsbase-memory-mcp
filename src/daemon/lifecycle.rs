@@ -20,7 +20,6 @@ use crate::error::{Error, Result};
 use crate::ipc::protocol::{self, Request};
 use crate::platform::transport::Listener;
 use crate::platform::{self, Endpoint};
-use crate::store::migrations;
 
 #[cfg(test)]
 #[path = "project_read_tests.rs"]
@@ -350,42 +349,46 @@ fn run_with_launch(
     let transport_policy =
         crate::ipc::transport::policy(native_handles, &launch.config.settings().daemon)?;
     let launch = launch.admit(cache, settings)?;
-    run_with_admission(cache, &transport_policy, move |transport| {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(workers)
-            .max_blocking_threads(launch.launch.config.settings().daemon.max_blocking_threads)
-            .enable_all()
-            .build()
-            .map_err(|err| Error::internal_with_source("build tokio runtime", err))?;
-        let mut jobs = super::job_service::JobRoot::new(&launch.launch.config.settings().daemon);
-        let service = jobs.service();
-        jobs.run(
-            &runtime,
-            serve(
-                cache,
-                settings,
-                pool_settings,
-                dense_settings,
-                launch,
-                service,
-                transport,
-            ),
-        )
-    })
+    run_with_admission(
+        cache,
+        &transport_policy,
+        launch.registry_schema(),
+        move |transport| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(workers)
+                .max_blocking_threads(launch.launch.config.settings().daemon.max_blocking_threads)
+                .enable_all()
+                .build()
+                .map_err(|err| Error::internal_with_source("build tokio runtime", err))?;
+            let mut jobs =
+                super::job_service::JobRoot::new(&launch.launch.config.settings().daemon);
+            let service = jobs.service();
+            jobs.run(
+                &runtime,
+                serve(
+                    cache,
+                    settings,
+                    pool_settings,
+                    dense_settings,
+                    launch,
+                    service,
+                    transport,
+                ),
+            )
+        },
+    )
 }
 
 pub(super) fn run_with_admission<T: Send>(
     cache: &Path,
     policy: &crate::platform::transport::Options,
+    schema_version: u32,
     work: impl FnOnce(crate::platform::transport::Transport) -> Result<T> + Send,
 ) -> Result<T> {
     // The daemon remains admitted while the outer transport root drains native
     // tails after application return, errors or unwind.
-    let _lease = crate::daemon::admission::Lease::acquire(
-        cache,
-        &protocol::build_id(),
-        migrations::SCHEMA_VERSION,
-    )?;
+    let _lease =
+        crate::daemon::admission::Lease::acquire(cache, &protocol::build_id(), schema_version)?;
     crate::ipc::transport::run(policy, work)
 }
 
@@ -571,7 +574,7 @@ async fn serve(
     })?;
     platform::fs::secure_file(endpoint.as_path())
         .map_err(|err| Error::internal_with_source("chmod 0600 socket", err))?;
-    write_state(cache)?;
+    write_state(cache, shared.registry_schema())?;
 
     let result = accept_loop(Arc::clone(&shared), &listener).await;
     shared.activity.retire_bridge();
@@ -919,12 +922,12 @@ fn wait_for_daemon(cache: &Path, timeout: Duration) -> Result<()> {
     )))
 }
 
-fn write_state(cache: &Path) -> Result<()> {
+fn write_state(cache: &Path, schema_version: u32) -> Result<()> {
     let state = DaemonState {
         pid: std::process::id(),
         socket: platform::daemon_endpoint(cache),
         build_id: protocol::build_id(),
-        schema_version: migrations::SCHEMA_VERSION,
+        schema_version,
         cache_root: cache.to_path_buf(),
     };
     let json = serde_json::to_vec_pretty(&state)

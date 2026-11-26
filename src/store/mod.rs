@@ -26,6 +26,7 @@ use settings::{DbSettings, DbSpec};
 
 /// Database file name inside the cache root.
 pub const DB_FILE: &str = "registry.db";
+pub(crate) const GENERATION_SCHEMA_VERSION: u32 = generation_catalog::SCHEMA_VERSION;
 
 /// Handle to the metadata database. One writer per process.
 #[derive(Debug)]
@@ -169,8 +170,9 @@ impl Db {
     pub(crate) fn open_readonly_for_admission(
         cache_dir: &Path,
         settings: &Resolved<DbSettings>,
+        allow_generation_catalog: bool,
     ) -> Result<Self> {
-        Self::open_readonly_using(cache_dir, settings, false, false)
+        Self::open_readonly_using(cache_dir, settings, false, allow_generation_catalog)
     }
 
     pub(crate) fn open_readonly_for_search(
@@ -357,7 +359,7 @@ mod tests {
         drop(connection);
         let bytes = std::fs::read(&path).unwrap();
         assert!(matches!(
-            Db::open_readonly_for_admission(cache.path(), &settings::standalone().unwrap()),
+            Db::open_readonly_for_admission(cache.path(), &settings::standalone().unwrap(), false),
             Err(Error::Admission { .. })
         ));
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
@@ -391,7 +393,7 @@ mod tests {
             "main-only inspection would see an obsolete schema"
         );
         let reader =
-            Db::open_readonly_for_admission(cache.path(), &settings::standalone().unwrap())
+            Db::open_readonly_for_admission(cache.path(), &settings::standalone().unwrap(), false)
                 .unwrap();
         assert_eq!(reader.schema_version().unwrap(), migrations::SCHEMA_VERSION);
         assert_eq!(
@@ -416,7 +418,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let absent = root.path().join("missing");
         assert!(
-            Db::open_readonly_for_admission(&absent, &settings::standalone().unwrap()).is_err()
+            Db::open_readonly_for_admission(&absent, &settings::standalone().unwrap(), false)
+                .is_err()
         );
         assert!(!absent.exists());
     }

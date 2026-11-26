@@ -1524,6 +1524,29 @@ mod unix {
     use super::*;
 
     #[test]
+    fn operational_registry_still_refuses_linked_database_and_sidecar_names() {
+        let env = Env::new();
+        let cache = env.cache.path();
+        let policy = settings::standalone().unwrap();
+        let registry = cache.join(DB_FILE);
+        let sidecar = cache.join(format!("{DB_FILE}-wal"));
+        std::os::unix::fs::symlink(&registry, &sidecar).unwrap();
+        let error = open_index_registry(cache, &policy, env.request().epoch).unwrap_err();
+        assert!(error.inner_message().contains("inspect registry sidecar"));
+        fs::remove_file(sidecar).unwrap();
+
+        let moved = cache.join("moved-registry.db");
+        fs::rename(&registry, &moved).unwrap();
+        std::os::unix::fs::symlink(moved, registry).unwrap();
+        let error = open_index_registry(cache, &policy, env.request().epoch).unwrap_err();
+        assert!(
+            error
+                .inner_message()
+                .contains("inspect generation registry file")
+        );
+    }
+
+    #[test]
     fn first_publication_does_not_create_a_dangling_writer_lock_target() {
         let env = Env::new();
         let source = tempfile::tempdir().unwrap();
