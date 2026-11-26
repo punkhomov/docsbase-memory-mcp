@@ -1847,15 +1847,18 @@ impl DenseCache {
         load: impl FnOnce() -> Result<DenseMetadata>,
         admit: impl Fn() -> Result<Guard>,
     ) -> Result<()> {
-        self.access(
-            request.bind()?,
-            cancellation,
-            Lookup::Warm,
-            load,
-            admit,
-            None,
-        )
-        .map(|_| ())
+        self.warm_bound_with_metadata_admitted(request.bind()?, cancellation, load, admit)
+    }
+
+    pub(crate) fn warm_bound_with_metadata_admitted<Guard>(
+        &self,
+        request: BoundDenseRequest<'_>,
+        cancellation: &Cancellation,
+        load: impl FnOnce() -> Result<DenseMetadata>,
+        admit: impl Fn() -> Result<Guard>,
+    ) -> Result<()> {
+        self.access(request, cancellation, Lookup::Warm, load, admit, None)
+            .map(|_| ())
     }
 
     #[cfg(test)]

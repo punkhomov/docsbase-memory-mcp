@@ -30,6 +30,24 @@ mod job_pin_tests;
 #[path = "vector_cache_batch_tests.rs"]
 mod batch_tests;
 
+/// Versioned, non-secret identity of the document-vector cache key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct EmbeddingRecipe([u8; 32]);
+
+impl EmbeddingRecipe {
+    /// Room for the largest bounded config input and its provider's cache-key
+    /// decoration (provider, dimension and normalization).
+    pub(crate) const MAX_MODEL_BYTES: u64 = 2 * crate::limits::MAX_STATE_BYTES;
+
+    pub(crate) fn for_model(model_id: &str) -> Self {
+        Self(blake3::derive_key(
+            "docsbase.catalog.embedding.v1",
+            model_id.as_bytes(),
+        ))
+    }
+}
+
 /// Separate `SQLite` file in the cache root; one cache per machine user.
 pub const VECTOR_DB_FILE: &str = "vectors.db";
 
@@ -495,6 +513,56 @@ impl VectorCache {
                 vector.ok_or_else(|| Error::internal(format!("missing vector for chunk {index}")))
             })
             .collect()
+    }
+
+    /// Resolve a sealed recipe without reading vector payloads. Advance by
+    /// the representative rowid in a read snapshot so a cached model's
+    /// whole key range is skipped, including unsupported raw identifiers.
+    pub(crate) fn model_for_recipe(
+        &self,
+        recipe: EmbeddingRecipe,
+        mut check: impl FnMut() -> Result<()>,
+        charge: impl FnOnce(u64) -> Result<()>,
+    ) -> Result<Option<String>> {
+        let db_error = |error| Error::internal_with_source("read cached model identity", error);
+        let max_bytes = i64::try_from(EmbeddingRecipe::MAX_MODEL_BYTES)
+            .map_err(|_| Error::internal("catalog model identity bound exceeds SQLite range"))?;
+        check()?;
+        let tx = self.conn.unchecked_transaction().map_err(db_error)?;
+        let mut first = tx
+            .prepare(
+                "SELECT rowid, CASE WHEN octet_length(model_id) <= ?1 THEN model_id END
+             FROM vector_cache ORDER BY model_id LIMIT 1",
+            )
+            .map_err(db_error)?;
+        let mut next = tx
+            .prepare(
+                "SELECT rowid, CASE WHEN octet_length(model_id) <= ?1 THEN model_id END
+             FROM vector_cache
+             WHERE model_id > (SELECT model_id FROM vector_cache WHERE rowid = ?2)
+             ORDER BY model_id LIMIT 1",
+            )
+            .map_err(db_error)?;
+        let mut after = None;
+        loop {
+            check()?;
+            let mut rows = match after {
+                None => first.query([max_bytes]),
+                Some(rowid) => next.query(params![max_bytes, rowid]),
+            }
+            .map_err(db_error)?;
+            let Some(row) = rows.next().map_err(db_error)? else {
+                return Ok(None);
+            };
+            let value = row.get_ref(1).map_err(db_error)?;
+            if let Ok(model) = value.as_str()
+                && EmbeddingRecipe::for_model(model) == recipe
+            {
+                charge(model.len() as u64)?;
+                return Ok(Some(model.to_owned()));
+            }
+            after = Some(row.get::<_, i64>(0).map_err(db_error)?);
+        }
     }
 
     /// How many of `hashes` are present for `model_id` (coverage diagnostics,

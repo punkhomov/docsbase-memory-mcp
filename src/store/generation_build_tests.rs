@@ -310,6 +310,35 @@ fn retire_local_pair(env: &Env) -> (ObservedProjectIndex, ObservedProjectIndex) 
 
 #[test]
 #[cfg(unix)]
+fn catalog_embedding_recipe_distinguishes_legacy_from_a_local_lexical_seal() {
+    use crate::store::project_index::{require_catalog_embedding, with_catalog_pair};
+    const MODEL: &str = "test/legacy-embedding@d3@l2";
+    let env = Env::new();
+    let settings = settings::standalone().unwrap();
+    let registry = Db::open_readonly_for_search(env.cache.path(), &settings).unwrap();
+    let project = registry::project_by_id(&registry, env.request().project_id)
+        .unwrap()
+        .unwrap();
+    with_catalog_pair(&registry, &project, |_, local, _| {
+        assert!(local.is_none());
+        require_catalog_embedding(local.as_ref(), MODEL)
+    })
+    .unwrap();
+
+    let local_pair = RevisablePair::new();
+    let error = with_catalog_pair(&local_pair.registry, &local_pair.project, |_, local, _| {
+        assert!(local.is_some());
+        require_catalog_embedding(local.as_ref(), MODEL)
+    })
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("published embedding recipe"),
+        "{error}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn catalog_reader_holds_the_pair_lease_and_distinguishes_equal_revisions() {
     use crate::store::project_index::with_catalog_pair;
 
@@ -952,12 +981,18 @@ fn publication_resumes_a_durable_seal_left_before_the_catalog_commit() {
     let dir = env.generation(staged.generation_id);
     let written = super::publication::verify_and_seal(
         &dir,
-        request,
-        staged,
+        &super::publication::StagedPublication {
+            cache: env.cache.path(),
+            project_dir: dir.parent().unwrap().parent().unwrap(),
+            request,
+            staged,
+            settings: &settings,
+            limits: limits(),
+            config: &config,
+            embedding_recipe: None,
+            access: CatalogAccess::Stopped,
+        },
         &project,
-        &settings,
-        limits(),
-        &config,
     )
     .unwrap();
     assert_eq!(env.catalog_state(), (1, Some("building".into())));

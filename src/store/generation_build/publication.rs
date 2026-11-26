@@ -93,6 +93,7 @@ pub fn publish_lexical_generation(
                 settings,
                 limits,
                 config,
+                embedding_recipe: None,
                 access: CatalogAccess::Stopped,
             },
             |ready| ready.commit(|| Ok(())),
@@ -108,6 +109,7 @@ pub(super) struct StagedPublication<'a> {
     pub(super) settings: &'a Resolved<DbSettings>,
     pub(super) limits: InspectionLimits,
     pub(super) config: &'a Config,
+    pub(super) embedding_recipe: Option<crate::vector_cache::EmbeddingRecipe>,
     pub(super) access: CatalogAccess,
 }
 
@@ -196,6 +198,7 @@ pub(super) fn publish_prepared(
         limits,
         config,
         access,
+        ..
     } = publication;
     let dir = project_dir
         .join("generations")
@@ -255,7 +258,7 @@ pub(super) fn publish_prepared(
     let seal = lifecycle::with_read_lock(
         open_coordination_file(&read_lock, false)?,
         &read_lock,
-        || verify_and_seal(&dir, request, staged, &project, settings, limits, config),
+        || verify_and_seal(&dir, &publication, &project),
     )?;
     finalize(LexicalCommit {
         publication,
@@ -350,13 +353,18 @@ fn candidate_is_active(
 
 pub(super) fn verify_and_seal(
     dir: &Path,
-    request: LexicalBuildRequest,
-    staged: PreparedLexicalGeneration,
+    publication: &StagedPublication<'_>,
     project: &Project,
-    settings: &Resolved<DbSettings>,
-    limits: InspectionLimits,
-    config: &Config,
 ) -> Result<blake3::Hash> {
+    let StagedPublication {
+        request,
+        staged,
+        settings,
+        limits,
+        config,
+        embedding_recipe,
+        ..
+    } = *publication;
     let parent = dir
         .parent()
         .ok_or_else(|| admission("invalid generation directory"))?;
@@ -409,6 +417,7 @@ pub(super) fn verify_and_seal(
             .to_hex()
             .to_string(),
         index_recipe: recipe,
+        embedding_recipe,
         files,
     };
     let encoded = serde_json::to_vec(&seal)

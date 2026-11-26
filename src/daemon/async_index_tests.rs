@@ -4,6 +4,8 @@ use crate::hybrid::remote::{AsyncEmbedder, RemoteCall, StageFuture};
 use crate::vector_cache::Embedder;
 
 struct DocumentGate {
+    model: &'static str,
+    queries: AtomicUsize,
     entered: tokio::sync::Semaphore,
     release: tokio::sync::Semaphore,
     legacy: tokio::runtime::Handle,
@@ -13,7 +15,7 @@ struct DocumentGate {
 }
 impl Embedder for DocumentGate {
     fn model_id(&self) -> &'static str {
-        "test/async-documents@d3@l2"
+        self.model
     }
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         self.synchronous.fetch_add(1, Ordering::SeqCst);
@@ -56,7 +58,10 @@ impl AsyncEmbedder for DocumentGate {
         })
     }
     fn embed_query<'a>(&'a self, _: Arc<str>, _: &'a RemoteCall) -> StageFuture<'a, Vec<f32>> {
-        Box::pin(async { Ok(vec![1.0, 0.0, 0.0]) })
+        Box::pin(async {
+            self.queries.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![1.0, 0.0, 0.0])
+        })
     }
 }
 
@@ -225,14 +230,7 @@ fn held_document_embedding_releases_actual_control_dispatch() {
     let mut root = crate::daemon::job_service::JobRoot::new(settings.settings());
     let service = root.service();
     root.run(&runtime, async move {
-        let provider = Arc::new(DocumentGate {
-            entered: tokio::sync::Semaphore::new(0),
-            release: tokio::sync::Semaphore::new(0),
-            legacy: tokio::runtime::Handle::current(),
-            synchronous: AtomicUsize::new(0),
-            batches: Mutex::new(vec![]),
-            invalid_on: AtomicUsize::new(0),
-        });
+        let provider = document_gate();
         let mut fixture = search_phase_tests::Fixture::new(HybridStages {
             embedder: Some(provider.clone()),
             ..HybridStages::default()
@@ -351,7 +349,12 @@ fn low_capture_budget_refuses_before_project_effects_and_terminalizes_only_own_s
 }
 
 fn document_gate() -> Arc<DocumentGate> {
+    document_gate_for("test/async-documents@d3@l2")
+}
+fn document_gate_for(model: &'static str) -> Arc<DocumentGate> {
     Arc::new(DocumentGate {
+        model,
+        queries: AtomicUsize::new(0),
         entered: tokio::sync::Semaphore::new(0),
         release: tokio::sync::Semaphore::new(0),
         legacy: tokio::runtime::Handle::current(),
@@ -812,6 +815,139 @@ fn catalog_refresh_rechecks_the_project_source_after_capture() {
     .unwrap();
 }
 
+#[cfg(unix)]
+fn catalog_test_embedder(
+    shared: &Arc<Shared>,
+    project: &crate::store::models::Project,
+    provider: &Arc<DocumentGate>,
+) -> Arc<Config> {
+    let mut config = (*shared.project_config(project).unwrap()).clone();
+    config.remote.embed_batch_texts = 1;
+    let config = Arc::new(config);
+    let slot = shared.project_slot(project.id);
+    let mut state = slot.state.lock().unwrap();
+    state.config = Some(config.clone());
+    state.search_stages = Some(Arc::new(HybridStages {
+        embedder: Some(provider.clone()),
+        ranking: Ranking::Rrf,
+        ..HybridStages::default()
+    }));
+    config
+}
+
+#[cfg(unix)]
+fn catalog_warm_metadata(
+    shared: &Arc<Shared>,
+    project: &crate::store::models::Project,
+) -> Option<(i64, String)> {
+    let (called, metadata) = std::sync::mpsc::channel();
+    shared
+        .refresh_ann_after_sync_with(project, move |db, _, model| {
+            let generation = db
+                .connection()
+                .query_row(
+                    "SELECT generation_id FROM generation_state WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap();
+            called.send((generation, model.to_owned())).unwrap();
+            Ok(())
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    metadata.try_recv().ok()
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_search_checks_the_sealed_model_before_query_embedding() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("guide.md"), "sealedmodelwidget").unwrap();
+    let model = "test/sealed-model@d3@l2";
+
+    let mut initial = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = initial.service();
+    initial
+        .run(&runtime, async {
+            let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+            shared.activate_jobs(service).unwrap();
+            let project = registry::ensure_project(&mut shared.db(), root.path()).unwrap();
+            let provider = document_gate_for(model);
+            catalog_test_embedder(&shared, &project, &provider);
+            provider.release.add_permits(1);
+            call_tool(&shared, None, "index_project", json!({"path": root.path()}))
+                .await
+                .unwrap();
+            shared
+                .activity
+                .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+                .await;
+            Ok(())
+        })
+        .unwrap();
+
+    let mut restarted = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = restarted.service();
+    restarted
+        .run(&runtime, async {
+            let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+            shared.activate_jobs(service).unwrap();
+            let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+            let (session, _cancel) = shared
+                .sessions
+                .join(
+                    std::process::id(),
+                    project.canonical_root.clone(),
+                    Some(project.id),
+                )
+                .unwrap();
+            let other = document_gate_for("test/new-model@d3@l2");
+            catalog_test_embedder(&shared, &project, &other);
+            let error = call_tool(
+                &shared,
+                Some(session),
+                "search_docs",
+                json!({"query": "sealedmodelwidget"}),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("embedding recipe"), "{error}");
+            assert_eq!(other.queries.load(Ordering::SeqCst), 0);
+            assert_eq!(catalog_warm_metadata(&shared, &project), None);
+
+            let original = document_gate_for(model);
+            catalog_test_embedder(&shared, &project, &original);
+            let (generation, used) = catalog_warm_metadata(&shared, &project).unwrap();
+            assert_eq!(used, model);
+            let seal = shared
+                .cache
+                .join("projects")
+                .join(project.id.to_string())
+                .join("generations")
+                .join(generation.to_string())
+                .join("seal.json");
+            let seal = std::fs::read_to_string(seal).unwrap();
+            assert!(seal.contains("embedding_recipe"));
+            assert!(!seal.contains(model));
+            assert_eq!(
+                catalog_search_hits(&shared, session, "sealedmodelwidget").await,
+                1
+            );
+            assert_eq!(original.queries.load(Ordering::SeqCst), 1);
+            Ok(())
+        })
+        .unwrap();
+}
+
 #[test]
 #[cfg(unix)]
 fn catalog_index_capacity_failure_preserves_selected_vectors() {
@@ -840,6 +976,10 @@ fn catalog_index_capacity_failure_preserves_selected_vectors() {
         owner.payload_budget = crate::search::budget::PayloadBudget::new(budget).unwrap();
         shared.activate_jobs(service).unwrap();
         let args = json!({"path": root.path()});
+        let project = registry::ensure_project(&mut shared.db(), root.path()).unwrap();
+        let original = document_gate_for("test/initial-catalog-cache@d3@l2");
+        catalog_test_embedder(&shared, &project, &original);
+        original.release.add_permits(1);
         call_tool(&shared, None, "index_project", args.clone())
             .await
             .unwrap();
@@ -848,26 +988,13 @@ fn catalog_index_capacity_failure_preserves_selected_vectors() {
             .drain(Duration::from_millis(policy.settings().drain_poll_ms))
             .await;
 
-        let provider = document_gate();
-        let project = registry::list_projects(&shared.db()).unwrap().remove(0);
-        let slot = shared.project_slot(project.id);
-        let config = {
-            let mut state = slot.state.lock().unwrap();
-            let mut config = (**state.config.as_ref().unwrap()).clone();
-            config.remote.embed_batch_texts = 1;
-            let config = Arc::new(config);
-            state.config = Some(config.clone());
-            state.search_stages = Some(Arc::new(HybridStages {
-                embedder: Some(provider.clone()),
-                ..HybridStages::default()
-            }));
-            config
-        };
+        let provider = document_gate_for("test/replacement-catalog-cache@d3@l2");
+        let config = catalog_test_embedder(&shared, &project, &provider);
         let source = shared.vector_source_for(project.id, &config);
         let old_hash = crate::vector_cache::chunk_hash(old_text);
         let mut vectors = source.connect(cache.path()).unwrap();
         vectors
-            .put(provider.model_id(), &old_hash, &[0.0, 1.0, 0.0])
+            .put("aaa/foreign-model@d3@l2", "unreferenced", &[0.0, 0.0, 1.0])
             .unwrap();
         std::fs::write(&guide, "newcatalogwidget").unwrap();
         std::fs::write(root.path().join("second.md"), "anothercatalogwidget").unwrap();
@@ -884,8 +1011,8 @@ fn catalog_index_capacity_failure_preserves_selected_vectors() {
             .drain(Duration::from_millis(policy.settings().drain_poll_ms))
             .await;
         assert_eq!(
-            vectors.get(provider.model_id(), &old_hash).unwrap(),
-            Some(vec![0.0, 1.0, 0.0])
+            vectors.get(original.model_id(), &old_hash).unwrap(),
+            Some(vec![1.0, 0.0, 0.0])
         );
         assert_eq!(
             vectors.len().unwrap(),

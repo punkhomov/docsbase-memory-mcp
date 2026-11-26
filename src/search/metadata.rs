@@ -98,6 +98,10 @@ impl<'a> ProjectReader<'a> {
         self.local.as_ref().map(|local| local.index_recipe.as_str())
     }
 
+    pub(crate) fn require_embedding(&self, model_id: &str) -> Result<()> {
+        crate::store::project_index::require_catalog_embedding(self.local.as_ref(), model_id)
+    }
+
     pub(crate) fn tantivy_dir(&self, index: ProjectIndex) -> Result<PathBuf> {
         match &self.local {
             Some(local) => local.tantivy_dir(),

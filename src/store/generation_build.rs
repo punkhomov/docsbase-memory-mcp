@@ -154,7 +154,7 @@ impl PreparedLexicalPublication {
     pub(crate) fn with_base_metadata<T>(
         &self,
         project: &Project,
-        read: impl FnOnce(&Db) -> Result<T>,
+        read: impl FnOnce(&Db, Option<&super::project_index::LocalMetadata>) -> Result<T>,
     ) -> Result<Option<T>> {
         let pair = &self.pair;
         let Some(base) = pair.request.base else {
@@ -173,7 +173,10 @@ impl PreparedLexicalPublication {
                         "generation base changed before vector protection",
                     ));
                 }
-                read(local.as_ref().map_or(registry, |local| &local.db))
+                read(
+                    local.as_ref().map_or(registry, |local| &local.db),
+                    local.as_ref(),
+                )
             })?;
         db.close()?;
         Ok(Some(result))
@@ -210,6 +213,14 @@ impl PreparedLexicalPublication {
         self,
         finalize: impl FnOnce(publication::LexicalCommit<'_>) -> Result<ObservedProjectIndex>,
     ) -> Result<job::JobStats> {
+        self.publish_with_embedding(None, finalize)
+    }
+
+    pub(crate) fn publish_with_embedding(
+        self,
+        embedding_recipe: Option<crate::vector_cache::EmbeddingRecipe>,
+        finalize: impl FnOnce(publication::LexicalCommit<'_>) -> Result<ObservedProjectIndex>,
+    ) -> Result<job::JobStats> {
         let pair = self.pair;
         publication::publish_prepared(
             publication::StagedPublication {
@@ -220,6 +231,7 @@ impl PreparedLexicalPublication {
                 settings: &self.settings,
                 limits: pair.limits,
                 config: &self.config,
+                embedding_recipe,
                 access: pair.access,
             },
             finalize,

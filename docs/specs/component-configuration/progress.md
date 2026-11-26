@@ -1930,3 +1930,32 @@ Ruling: 29 catalog tests, 30 config-runtime cases, all 19 server-profile
 cases, the legacy forwarding test, lean offline, all-target Clippy and
 formatting passed. Persisted embedding recipe admission and configured
 Shared hybrid still require integration.
+
+## 2026-11-26 — CF11c, provenance эмбеддинга опубликованной пары
+
+Task CF11c sealed embedding recipe: complete (digest in the native seal,
+query and warm proof, model-specific base protection, fresh review and fixes).
+
+Ruling: a real daemon job publishes vectors using a hermetic provider.
+After restart, a different model is refused before query embedding and
+before ANN warm capture. The original model uses the selected local
+metadata and returns the indexed document. The seal contains the digest
+and omits the raw key. Stopped CLI search refuses a lexical local
+generation before opening a configured embedding provider. A migrated
+legacy head still uses the existing content-addressed cache contract.
+
+Ruling: a constrained rebuild writes with a different model from the
+active pair. Its first vector fits. The second is refused while the old
+model's vector and index stay usable. Candidate lookup after restart
+uses the covering vector index to seek per model and charges the matched
+key before copying it. SQL projects no vector bytes.
+
+Ruling: 31 catalog tests, stopped CLI and profile integration, lean offline,
+all-target Clippy and formatting passed. The warm observer accepts only
+the selected model. Automatic warm scheduling and coverage remain for the
+Shared hybrid activation work.
+
+minor (deferred): ordinary reopen compares the configured cache key with
+the seal. Recheck the key of its actual built stage before installing it
+when enabling configured Shared hybrid. The shipped provider factories
+derive the same key and query admission already checks the actual stage.

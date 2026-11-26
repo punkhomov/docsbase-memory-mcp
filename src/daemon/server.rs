@@ -28,7 +28,9 @@ use crate::hybrid::HybridStages;
 use crate::hybrid::config::{Ranking, embedding_model_id};
 #[cfg(test)]
 use crate::hybrid::dense::DenseCacheLimits;
-use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseRequest};
+#[cfg(test)]
+use crate::hybrid::dense::DenseRequest;
+use crate::hybrid::dense::{AnnPolicy, BoundDenseRequest, DenseCache};
 use crate::hybrid::jobs as hybrid_jobs;
 use crate::ipc::framing::{Frame, FrameReader};
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
@@ -1391,9 +1393,25 @@ impl Shared {
         }
         let config = self.project_config(project).ok()?;
         let slot = self.project_slot(project.id);
-        let embed_cfg = config.hybrid_cfg.embedding.as_ref()?;
-        let warm = config.hybrid_cfg.enabled && config.hybrid_cfg.ranking == Ranking::Rrf;
-        let model_id = embedding_model_id(embed_cfg);
+        let runtime = {
+            let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state
+                .config
+                .as_ref()
+                .filter(|current| Arc::ptr_eq(current, &config))
+                .and(state.search_stages.as_ref().or(state.stages.as_ref()))
+                .cloned()
+        };
+        let (model_id, warm) = match runtime {
+            Some(stages) if self.catalog_epoch.is_some() => (
+                stages.embedder.as_ref()?.model_id().to_owned(),
+                stages.ranking == Ranking::Rrf,
+            ),
+            _ => (
+                embedding_model_id(config.hybrid_cfg.embedding.as_ref()?),
+                config.hybrid_cfg.enabled && config.hybrid_cfg.ranking == Ranking::Rrf,
+            ),
+        };
         let cache_path = self.cache.clone();
         let dense = self.dense.snapshot_with_build_settings(config.ann_build);
         let readers = Arc::clone(&self.readers);
@@ -1406,20 +1424,22 @@ impl Shared {
                     let index = {
                         let reader = readers.try_acquire()?;
                         slot.with_preparation(&config, || {
-                            lifecycle::with_project_read_lease(&cache_path, project_id, || {
-                                before_metadata(&reader, project_id, &model_id)?;
-                                tools::snapshot_info(&reader, &project, None)
-                            })
+                            ann_warm_binding(
+                                reader,
+                                &project,
+                                &cache_path,
+                                &model_id,
+                                before_metadata,
+                            )
                         })?
                     };
                     // The scalar lease is gone before entering the shared flight.
                     // Its factory has no personal query budget or outer READ gate.
                     let source = MetadataSource::Prepared(&readers);
-                    dense.warm_with_metadata_admitted(
-                        DenseRequest {
+                    dense.warm_bound_with_metadata_admitted(
+                        BoundDenseRequest {
                             cache_root: &cache_path,
-                            project_id,
-                            generation: index.content_revision(),
+                            index,
                             model_id: &model_id,
                         },
                         &crate::hybrid::work::Cancellation::new(),
@@ -1529,6 +1549,7 @@ impl Shared {
                         self.readers.try_acquire()?,
                         project,
                         &crate::index::outcome::recipe_id(&desired),
+                        configured_catalog_embedding(&desired),
                     )?))
         {
             // Opens retain the active recipe until explicit Index can
@@ -2899,6 +2920,19 @@ fn capture_catalog_sync(
         shared.project_runtime_for_search(&project)?
     };
     super::launch::catalog_lexical_only(&config)?;
+    let active_model = {
+        let state = revision
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state
+            .config
+            .as_ref()
+            .filter(|current| Arc::ptr_eq(current, &active))
+            .and(state.search_stages.as_ref().or(state.stages.as_ref()))
+            .and_then(|stages| stages.embedder.as_ref())
+            .map(|embedder| embedder.model_id().to_owned())
+    };
     let source = shared.vector_source_for(project.id, &config);
     let refresh = if refresh {
         source.validate_root(&shared.cache)?;
@@ -2924,6 +2958,7 @@ fn capture_catalog_sync(
         project,
         config,
         stages,
+        active_model,
         source,
         pin_ttl: shared.dense.limits().ann_lifetimes.backfill_pin_ttl(),
         owner,
@@ -2931,17 +2966,42 @@ fn capture_catalog_sync(
     }))
 }
 
-fn catalog_requires_index(active: &Config, desired: &Config) -> bool {
-    fn model(config: &Config) -> Option<String> {
-        config
-            .hybrid_cfg
-            .embedding
-            .as_ref()
-            .filter(|_| config.hybrid_cfg.enabled)
-            .map(embedding_model_id)
+fn configured_catalog_embedding(config: &Config) -> Option<crate::vector_cache::EmbeddingRecipe> {
+    config
+        .hybrid_cfg
+        .embedding_model_key()
+        .as_deref()
+        .map(crate::vector_cache::EmbeddingRecipe::for_model)
+}
+
+fn ann_warm_binding(
+    reader: crate::store::read_pool::ReadLease<'_>,
+    project: &crate::store::models::Project,
+    cache: &Path,
+    model_id: &str,
+    before_metadata: impl FnOnce(&Db, i64, &str) -> Result<()>,
+) -> Result<ProjectIndex> {
+    if reader.has_generation_catalog() {
+        use crate::store::project_index::{require_catalog_embedding, with_catalog_pair};
+        return with_catalog_pair(reader, project, |registry, local, index| {
+            require_catalog_embedding(local.as_ref(), model_id)?;
+            before_metadata(
+                local.as_ref().map_or(&*registry, |local| &local.db),
+                project.id,
+                model_id,
+            )?;
+            Ok(index)
+        });
     }
+    lifecycle::with_project_read_lease(cache, project.id, || {
+        before_metadata(&reader, project.id, model_id)?;
+        tools::snapshot_info(&reader, project, None)
+    })
+}
+
+fn catalog_requires_index(active: &Config, desired: &Config) -> bool {
     crate::index::outcome::recipe_id(active) != crate::index::outcome::recipe_id(desired)
-        || model(active) != model(desired)
+        || configured_catalog_embedding(active) != configured_catalog_embedding(desired)
 }
 
 fn catalog_job_project(

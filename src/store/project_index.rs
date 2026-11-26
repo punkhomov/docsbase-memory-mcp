@@ -117,6 +117,7 @@ impl ProjectIndex {
 pub(crate) struct LocalMetadata {
     pub(crate) db: Db,
     pub(crate) index_recipe: String,
+    pub(crate) embedding_recipe: Option<crate::vector_cache::EmbeddingRecipe>,
     tantivy: PathBuf,
     publication: TantivyPublication,
 }
@@ -124,6 +125,23 @@ pub(crate) struct LocalMetadata {
 enum TantivyPublication {
     Sealed(Vec<(String, u64)>),
     Revised([u8; 32]),
+}
+
+pub(crate) fn require_catalog_embedding(
+    local: Option<&LocalMetadata>,
+    model_id: &str,
+) -> Result<()> {
+    // A migrated legacy head still uses the v4 content-addressed cache
+    // contract. A local head must prove the recipe selected at publication.
+    if let Some(local) = local
+        && local.embedding_recipe != Some(crate::vector_cache::EmbeddingRecipe::for_model(model_id))
+    {
+        return Err(Error::Project {
+            message: "published embedding recipe does not match the configured model".into(),
+            instruction: Some("publish a generation built with the current embedding model".into()),
+        });
+    }
+    Ok(())
 }
 
 impl LocalMetadata {
@@ -160,6 +178,7 @@ pub(crate) fn catalog_needs_index_for<R>(
     registry: R,
     project: &Project,
     recipe: &str,
+    embedding_recipe: Option<crate::vector_cache::EmbeddingRecipe>,
 ) -> Result<bool>
 where
     R: Deref<Target = Db>,
@@ -170,7 +189,10 @@ where
         None => Ok(false),
         Some(Layout::Legacy) => Ok(true),
         Some(Layout::Local { .. }) => with_catalog_pair(registry, project, |_, local, _| {
-            Ok(local.is_none_or(|local| local.index_recipe != recipe))
+            Ok(local.is_none_or(|local| {
+                local.index_recipe != recipe
+                    || embedding_recipe.is_some_and(|wanted| local.embedding_recipe != Some(wanted))
+            }))
         }),
     }
 }
@@ -313,6 +335,7 @@ where
                     let local = LocalMetadata {
                         db: metadata,
                         index_recipe: seal.index_recipe,
+                        embedding_recipe: seal.embedding_recipe,
                         tantivy: generation_dir.join("tantivy"),
                         publication: match revision.manifest {
                             Some(digest) => TantivyPublication::Revised(digest),

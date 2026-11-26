@@ -25,7 +25,7 @@ use crate::store::{
     repo,
     settings::DbSettings,
 };
-use crate::vector_cache::{JobPinAuthority, VectorCacheSource, WriteCapacity};
+use crate::vector_cache::{EmbeddingRecipe, JobPinAuthority, VectorCacheSource, WriteCapacity};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -38,6 +38,7 @@ pub(crate) struct Context {
     pub(crate) project: Project,
     pub(crate) config: Arc<Config>,
     pub(crate) stages: Arc<HybridStages>,
+    pub(crate) active_model: Option<String>,
     pub(crate) source: VectorCacheSource,
     pub(crate) pin_ttl: Duration,
     pub(crate) revision: Arc<ProjectCell>,
@@ -259,6 +260,11 @@ impl CatalogSync {
         drop(revision.preparation_lease(self.context.active_config())?);
         let prepared = job.stage(&mut capture)?;
         if let Some(embedder) = &self.context.stages.embedder {
+            if embedder.model_id().len() as u64 > EmbeddingRecipe::MAX_MODEL_BYTES {
+                return Err(Error::Admission {
+                    message: "embedding model key exceeds the catalog identity bound".into(),
+                });
+            }
             let (count, longest) =
                 prepared.with_metadata(|db| super::embedding_shape(db, project.id))?;
             if count > 0 {
@@ -298,6 +304,31 @@ impl CatalogSync {
         Ok(self.embedding.is_some())
     }
 
+    fn base_model(
+        &self,
+        local: Option<&crate::store::project_index::LocalMetadata>,
+        requested: &str,
+        capture: &mut CaptureBudget<'_>,
+    ) -> Result<Option<String>> {
+        let context = &self.context;
+        let Some(local) = local else {
+            return Ok(context.active_model.clone());
+        };
+        let Some(recipe) = local.embedding_recipe else {
+            return Ok(None);
+        };
+        if let Some(model) = [context.active_model.as_deref(), Some(requested)]
+            .into_iter()
+            .flatten()
+            .find(|model| EmbeddingRecipe::for_model(model) == recipe)
+        {
+            return Ok(Some(model.to_owned()));
+        }
+        let cache = context.source.connect(&context.cache)?;
+        let operation = capture.operation;
+        cache.model_for_recipe(recipe, || operation.check(), |bytes| capture.reserve(bytes))
+    }
+
     fn protect_base(
         &self,
         prepared: &PreparedLexicalPublication,
@@ -307,7 +338,10 @@ impl CatalogSync {
     ) -> Result<Option<JobPinAuthority>> {
         let context = &self.context;
         let pin = prepared
-            .with_base_metadata(&context.project, |db| {
+            .with_base_metadata(&context.project, |db, local| {
+                let Some(model) = self.base_model(local, model, capture)? else {
+                    return Ok(None);
+                };
                 let (count, longest) = super::embedding_shape(db, context.project.id)?;
                 if count == 0 {
                     return Ok(None);
@@ -324,7 +358,7 @@ impl CatalogSync {
                 let mut pin = JobPinAuthority::allocate(
                     &context.cache,
                     context.source.clone(),
-                    model.to_owned(),
+                    model,
                     ttl,
                     count,
                 )?;
@@ -457,7 +491,13 @@ impl CatalogSync {
                 .revision
                 .begin_watch_config_transition(self.context.config.clone())
         });
-        prepared.publish(|commit| {
+        let recipe = self
+            .context
+            .stages
+            .embedder
+            .as_ref()
+            .map(|embedder| EmbeddingRecipe::for_model(embedder.model_id()));
+        prepared.publish_with_embedding(recipe, |commit| {
             let finalize = || {
                 self.commit_prepared(
                     commit,

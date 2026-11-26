@@ -566,16 +566,7 @@ pub(super) fn start_search<Guard>(
         .vector_source(context.project.id)
         .validate_root(context.cache)?;
     let catalog = source.has_generation_catalog();
-    if catalog {
-        if context.stages.ranking == Ranking::Rrf
-            || context.stages.embedder.is_some()
-            || context.stages.reranker.is_some()
-        {
-            return Err(Error::Admission {
-                message: "published v5 generations require lexical search".into(),
-            });
-        }
-    } else {
+    if !catalog {
         ensure_indexed(context.project)?;
     }
     let arguments = parse_search_args(args)?;
@@ -587,7 +578,7 @@ pub(super) fn start_search<Guard>(
             return Ok(SearchStart::Complete(Value::Array(Vec::new())));
         }
         return in_read_phase(context, source, &admit, |reader, index| {
-            verify_index_recipe(&reader, settings.config)?;
+            verify_index_recipe(&reader, settings.config, context.stages)?;
             if !arguments.explain {
                 return Ok(Value::Array(Vec::new()));
             }
@@ -902,7 +893,7 @@ fn lexical_snapshot<Guard>(
 ) -> Result<LexicalSnapshot> {
     in_read_phase(context, source, admit, |reader, index| {
         let started = std::time::Instant::now();
-        verify_index_recipe(&reader, settings.config)?;
+        verify_index_recipe(&reader, settings.config, context.stages)?;
         let transaction = reader
             .connection()
             .unchecked_transaction()
@@ -943,7 +934,16 @@ fn lexical_snapshot<Guard>(
     })
 }
 
-fn verify_index_recipe(reader: &ProjectReader<'_>, config: Option<&Config>) -> Result<()> {
+fn verify_index_recipe(
+    reader: &ProjectReader<'_>,
+    config: Option<&Config>,
+    stages: &HybridStages,
+) -> Result<()> {
+    if stages.ranking == Ranking::Rrf
+        && let Some(embedder) = &stages.embedder
+    {
+        reader.require_embedding(embedder.model_id())?;
+    }
     let Some(sealed) = reader.index_recipe() else {
         return Ok(());
     };

@@ -16,5 +16,7 @@ pub(super) struct GenerationSeal {
     pub(super) base_revision: i64,
     pub(super) plan: String,
     pub(super) index_recipe: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) embedding_recipe: Option<crate::vector_cache::EmbeddingRecipe>,
     pub(super) files: Vec<(String, u64)>,
 }
