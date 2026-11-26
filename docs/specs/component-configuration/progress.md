@@ -1795,3 +1795,26 @@ Ruling: macOS native tests exposed a fixture that passed a linked temporary
 directory directly to the internal stopped observer. The public observer
 resolves that directory before checking the pair. The fixture follows the
 same contract. A linked TMPDIR reproduced the exact failure on Linux.
+
+## 2026-11-26 — CF11a, первый лексический Website на v5
+
+Task CF11a Website catalog bootstrap: complete (implementation, local
+verification, fresh review and fix reviews). The first stopped Index for
+the configured project uses the existing canonical cache and vector
+ownership policy. One SQLite transaction commits the catalog schema,
+OS-random installation epoch and schema version. A concurrent initializer
+keeps the first committed epoch. Existing registries preserve their format.
+
+Ruling: the real CLI/daemon/IPC fixture creates an index in a new nested
+cache, searches it, reopens it, and checks a distinct second installation.
+SQLite tests cover rollback and concurrent initialization. A mode lease
+held by another owner prevents SQLite creation. A linked legacy registry
+keeps its opener without creation rights. A fresh candidate with an unsafe
+sidecar fails before SQLite opens. The linked file stays unchanged and the
+registry remains absent.
+
+Ruling: the full `cli-full` suite found an ADR-9 boundary violation in the
+Unix file alias probe. The change uses the platform filesystem seam for the
+native probe. Fix review, the boundary test, the full suite, lean offline,
+all-target Clippy and formatting passed on Rust 1.100.0. The Shared default
+requires hybrid and native Windows publication.

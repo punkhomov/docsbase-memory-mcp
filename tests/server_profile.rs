@@ -326,6 +326,166 @@ fn indexed_global_website_profile_starts_with_zero_owned_watchers() {
 }
 
 #[test]
+#[cfg(unix)]
+fn fresh_v2_website_index_initializes_and_reopens_its_catalog() {
+    use docsbase_memory::store::DB_FILE;
+
+    let scratch = tempfile::tempdir_in("/tmp").unwrap();
+    let cache = scratch.path().join("new-cache/website");
+    let second = tempfile::tempdir_in("/tmp").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    configure_v2_website(config.path(), root.path());
+    let indexed =
+        index_project_through_cli(&cache, config.path(), root.path(), "firstcatalogheron");
+    let identity = |cache: &Path| {
+        let db = rusqlite::Connection::open(cache.join(DB_FILE)).unwrap();
+        let version: u32 = db
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 5);
+        let epoch: [u8; 16] = db
+            .query_row(
+                "SELECT epoch FROM generation_store WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let generation: i64 = db
+            .query_row(
+                "SELECT active_id FROM project_generation_head WHERE project_id=?1",
+                [indexed],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (epoch, generation)
+    };
+    let (epoch, generation) = identity(&cache);
+    let (mut daemon, transport) = start_shared_daemon(&cache, config.path());
+    let mut client = Client::connect(&transport, &cache).unwrap();
+    client.handshake_registry().unwrap();
+    client
+        .call(Request::BindReadOnly {
+            pid: std::process::id(),
+            project_id: Some(indexed),
+        })
+        .unwrap();
+    let ready = client
+        .call_tool("server_status", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(ready["profile"], "website");
+    assert_eq!(ready["ready"], true);
+    let found = client
+        .call_tool(
+            "search_docs",
+            serde_json::json!({"query":"firstcatalogheron","chunk_ref":true}),
+        )
+        .unwrap();
+    assert_eq!(found[0]["path"], "guide.md");
+    assert!(found[0]["chunk_ref"].as_str().is_some());
+    drop(client);
+    let stopped = cli(&cache, config.path())
+        .args(["daemon", "stop"])
+        .output()
+        .unwrap();
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    daemon.0.wait().unwrap();
+    assert_eq!(
+        index_project_through_cli(&cache, config.path(), root.path(), "secondcatalogheron"),
+        indexed
+    );
+    let (same_epoch, next_generation) = identity(&cache);
+    assert_eq!(same_epoch, epoch);
+    assert!(next_generation > generation);
+    assert_eq!(
+        index_project_through_cli(
+            second.path(),
+            config.path(),
+            root.path(),
+            "anotherinstallheron"
+        ),
+        indexed
+    );
+    assert_ne!(identity(second.path()).0, epoch);
+}
+
+#[cfg(unix)]
+fn configure_v2_website(config: &Path, root: &Path) {
+    std::fs::write(
+        config.join("config.toml"),
+        format!(
+            "config_version = 2\n[daemon]\nprofile = {{ mode = 'website', project_root = {} }}\n",
+            toml::Value::String(root.to_string_lossy().into_owned())
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn fresh_website_index_waits_for_vector_mode_ownership_before_sqlite() {
+    use docsbase_memory::{config::Config, store::DB_FILE, vector_cache::VectorStore};
+
+    let cache = tempfile::tempdir_in("/tmp").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    configure_v2_website(config.path(), root.path());
+    let resolved = Config::load_from(config.path(), Some(root.path())).unwrap();
+    let owner =
+        VectorStore::acquire(cache.path(), resolved.vector_store.as_ref().unwrap()).unwrap();
+    let blocked = cli(cache.path(), config.path())
+        .current_dir(root.path())
+        .arg("index")
+        .output()
+        .unwrap();
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("incompatible ownership mode"));
+    assert!(!cache.path().join(DB_FILE).exists());
+    drop(owner);
+    index_project_through_cli(cache.path(), config.path(), root.path(), "unblockedv5");
+    let registry = rusqlite::Connection::open(cache.path().join(DB_FILE)).unwrap();
+    assert_eq!(
+        registry
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        5
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn existing_v4_website_registry_keeps_its_legacy_open_path() {
+    use docsbase_memory::store::{DB_FILE, Db};
+
+    let cache = tempfile::tempdir_in("/tmp").unwrap();
+    let legacy = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    configure_v2_website(config.path(), root.path());
+    drop(Db::open(legacy.path()).unwrap());
+    let registry_alias = cache.path().join(DB_FILE);
+    std::os::unix::fs::symlink(legacy.path().join(DB_FILE), &registry_alias).unwrap();
+    index_project_through_cli(
+        cache.path(),
+        config.path(),
+        root.path(),
+        "legacycatalogcrane",
+    );
+    assert!(registry_alias.is_symlink());
+    assert_eq!(
+        Db::open_readonly(legacy.path())
+            .unwrap()
+            .schema_version()
+            .unwrap(),
+        4
+    );
+}
+
+#[test]
 fn cli_project_selects_a_complete_website_profile_from_unrelated_cwd() {
     let cache = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();

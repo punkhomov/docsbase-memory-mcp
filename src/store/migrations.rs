@@ -1,8 +1,10 @@
 //! Schema versioning and migrations (NFR-7).
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use crate::error::{Error, Result};
+
+use super::generation_catalog;
 
 /// Current schema version understood by this build.
 pub const SCHEMA_VERSION: u32 = 4;
@@ -73,7 +75,65 @@ ALTER TABLE projects ADD COLUMN index_outcome_json TEXT;
 /// Returns [`Error::Admission`] when the database is newer than this build and
 /// [`Error::Internal`] when a migration statement fails.
 pub fn migrate(conn: &Connection) -> Result<()> {
-    let version = read_version(conn)?;
+    migrate_registry(conn, RegistryOpen::Legacy, || Ok(())).map(|_| ())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RegistryOpen {
+    Legacy,
+    ExistingCatalog,
+    FreshCatalog,
+}
+
+pub(super) fn migrate_registry(
+    conn: &Connection,
+    mode: RegistryOpen,
+    before_catalog: impl FnOnce() -> Result<()>,
+) -> Result<bool> {
+    if let Some(catalog) = supported_registry(read_version(conn)?, mode)? {
+        return Ok(catalog);
+    }
+    // `BEGIN IMMEDIATE` serializes concurrent first opens (daemon and CLI can
+    // race on a fresh cache). The version is re-read inside the lock: the
+    // fast path above may be stale, and the re-read keeps the loser of a race
+    // from replaying an `ALTER TABLE` (`ADD COLUMN` has no `IF NOT EXISTS`).
+    let tx =
+        Transaction::new_unchecked(conn, TransactionBehavior::Immediate).map_err(migrate_error)?;
+    let version = read_version(&tx)?;
+    if let Some(catalog) = supported_registry(version, mode)? {
+        tx.commit().map_err(migrate_error)?;
+        return Ok(catalog);
+    }
+    let fresh_catalog = mode == RegistryOpen::FreshCatalog && version == 0 && empty_schema(&tx)?;
+    if fresh_catalog {
+        before_catalog()?;
+    }
+    migrate_legacy_tables(&tx, version)?;
+    let target = if fresh_catalog {
+        generation_catalog::initialize(&tx)?;
+        generation_catalog::SCHEMA_VERSION
+    } else {
+        SCHEMA_VERSION
+    };
+    tx.pragma_update(None, "user_version", target)
+        .map_err(migrate_error)?;
+    tx.commit().map_err(migrate_error)?;
+    Ok(fresh_catalog)
+}
+
+fn empty_schema(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT NOT EXISTS (SELECT 1 FROM sqlite_schema)",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(migrate_error)
+}
+
+fn supported_registry(version: u32, mode: RegistryOpen) -> Result<Option<bool>> {
+    if version == generation_catalog::SCHEMA_VERSION && mode != RegistryOpen::Legacy {
+        return Ok(Some(true));
+    }
     if version > SCHEMA_VERSION {
         return Err(Error::Admission {
             message: format!(
@@ -81,26 +141,10 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             ),
         });
     }
-    if version == SCHEMA_VERSION {
-        return Ok(());
-    }
-    // `BEGIN IMMEDIATE` serializes concurrent first opens (daemon and CLI can
-    // race on a fresh cache). The version is re-read inside the lock: the
-    // fast path above may be stale, and the re-read keeps the loser of a race
-    // from replaying an `ALTER TABLE` (`ADD COLUMN` has no `IF NOT EXISTS`).
-    conn.execute_batch("BEGIN IMMEDIATE;")
-        .map_err(migrate_error)?;
-    let version = match read_version(conn) {
-        Ok(version) => version,
-        Err(err) => {
-            drop(conn.execute_batch("ROLLBACK;"));
-            return Err(err);
-        }
-    };
-    if version == SCHEMA_VERSION {
-        conn.execute_batch("COMMIT;").map_err(migrate_error)?;
-        return Ok(());
-    }
+    Ok((version == SCHEMA_VERSION).then_some(false))
+}
+
+fn migrate_legacy_tables(conn: &Connection, version: u32) -> Result<()> {
     let mut script = String::new();
     if version < 1 {
         script += SCHEMA_V1;
@@ -130,14 +174,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         // additive migration retains the existing chunks and search index.
         script += "UPDATE projects SET schema_version = 4 WHERE schema_version = 3;";
     }
-    script.push_str("PRAGMA user_version = ");
-    script.push_str(&SCHEMA_VERSION.to_string());
-    script.push(';');
-    if let Err(err) = conn.execute_batch(&format!("{script}COMMIT;")) {
-        drop(conn.execute_batch("ROLLBACK;"));
-        return Err(migrate_error(err));
-    }
-    Ok(())
+    conn.execute_batch(&script).map_err(migrate_error)
 }
 
 fn migrate_error(err: rusqlite::Error) -> Error {
@@ -182,6 +219,69 @@ mod tests {
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .expect("timeout");
         conn
+    }
+
+    #[test]
+    fn failed_catalog_bootstrap_leaves_no_partial_schema() {
+        let dir = TempDir::new().unwrap();
+        let legacy = open(&dir.path().join("legacy.sqlite"));
+        migrate(&legacy).unwrap();
+        let legacy_pages: u32 = legacy
+            .pragma_query_value(None, "page_count", |row| row.get(0))
+            .unwrap();
+        let conn = open(&dir.path().join("db.sqlite"));
+        conn.pragma_update(None, "max_page_count", legacy_pages + 1)
+            .unwrap();
+        assert!(migrate_registry(&conn, RegistryOpen::FreshCatalog, || Ok(())).is_err());
+        assert!(conn.is_autocommit());
+        assert_eq!(read_version(&conn).unwrap(), 0);
+        let definitions: i64 = conn
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(definitions, 0);
+        conn.pragma_update(None, "max_page_count", 128).unwrap();
+        assert!(migrate_registry(&conn, RegistryOpen::FreshCatalog, || Ok(())).unwrap());
+        assert_eq!(
+            read_version(&conn).unwrap(),
+            generation_catalog::SCHEMA_VERSION
+        );
+        assert_eq!(generation_catalog::read_epoch(&conn).unwrap().len(), 16);
+    }
+
+    #[test]
+    fn concurrent_catalog_bootstrap_reads_the_same_committed_epoch() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("db.sqlite");
+        let together = Arc::new(Barrier::new(2));
+        std::thread::scope(|scope| {
+            let open_catalog = || {
+                let conn = open(&path);
+                together.wait();
+                assert!(migrate_registry(&conn, RegistryOpen::FreshCatalog, || Ok(())).unwrap());
+                generation_catalog::read_epoch(&conn).unwrap()
+            };
+            let first = scope.spawn(open_catalog);
+            let second = scope.spawn(open_catalog);
+            assert_eq!(first.join().unwrap(), second.join().unwrap());
+        });
+    }
+
+    #[test]
+    fn catalog_bootstrap_preserves_an_existing_unversioned_schema() {
+        let dir = TempDir::new().unwrap();
+        let conn = open(&dir.path().join("db.sqlite"));
+        conn.execute_batch(
+            "CREATE TABLE label (value TEXT); INSERT INTO label VALUES ('previous state');",
+        )
+        .unwrap();
+        let reject = || panic!("existing schema must keep its namespace policy");
+        assert!(!migrate_registry(&conn, RegistryOpen::FreshCatalog, reject).unwrap());
+        assert!(!migrate_registry(&conn, RegistryOpen::FreshCatalog, reject).unwrap());
+        assert_eq!(read_version(&conn).unwrap(), SCHEMA_VERSION);
+        let label: String = conn
+            .query_row("SELECT value FROM label", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(label, "previous state");
     }
 
     #[test]

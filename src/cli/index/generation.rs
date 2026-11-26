@@ -15,6 +15,20 @@ use crate::store::Db;
 use crate::store::models::Project;
 use crate::store::settings::DbSettings;
 
+/// The explicitly selected Website profile already requires one lexical
+/// project. It can create a fresh catalog before any daemon owns that cache.
+pub(super) fn create_for_website(global: &Config, project: &Config, root: &Path) -> bool {
+    use crate::daemon::settings::DaemonProfile;
+
+    let DaemonProfile::Website { project_root } = &global.daemon.profile else {
+        return false;
+    };
+    if !cfg!(unix) || !project_root.canonicalize().is_ok_and(|fixed| fixed == root) {
+        return false;
+    }
+    lexical(global) && lexical(project)
+}
+
 pub(super) struct Target {
     cache: PathBuf,
     project: Project,

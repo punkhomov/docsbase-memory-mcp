@@ -1,5 +1,5 @@
--- Run inside the stopped registry transition with foreign keys enabled.
--- The transition inserts the epoch and legacy heads before committing v4.
+-- Run inside the SQLite transaction that initializes or adopts a v5 registry.
+-- Insert the epoch before committing, along with any explicitly adopted heads.
 CREATE TABLE generation_store (
     singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
     format_version INTEGER NOT NULL CHECK (format_version = 1),
