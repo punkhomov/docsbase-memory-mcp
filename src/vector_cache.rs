@@ -93,6 +93,12 @@ pub struct VectorCache {
     access: owner::Access,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteCapacity {
+    AllowPinnedOverflow,
+    RequireFit,
+}
+
 impl VectorCache {
     /// Opens (creating if needed) the cache under `cache_root`.
     ///
@@ -257,6 +263,21 @@ impl VectorCache {
     /// # Errors
     /// Returns [`Error::Internal`] on `SQLite` failures or an empty vector.
     pub fn put(&mut self, model_id: &str, chunk_hash: &str, vector: &[f32]) -> Result<()> {
+        self.put_with_capacity(
+            model_id,
+            chunk_hash,
+            vector,
+            WriteCapacity::AllowPinnedOverflow,
+        )
+    }
+
+    pub(crate) fn put_with_capacity(
+        &mut self,
+        model_id: &str,
+        chunk_hash: &str,
+        vector: &[f32],
+        capacity: WriteCapacity,
+    ) -> Result<()> {
         if vector.is_empty() {
             return Err(Error::internal("refusing to cache an empty vector"));
         }
@@ -278,9 +299,9 @@ impl VectorCache {
                 params![model_id, chunk_hash, dim, bytes, used_at],
             )
             .map_err(|err| Error::internal_with_source("store vector", err))?;
-            evict(conn, self.limits, warned)
+            evict_with_capacity(conn, self.limits, warned, capacity)
         };
-        if self.access.is_owned() {
+        if self.access.is_owned() || capacity == WriteCapacity::RequireFit {
             let tx = self
                 .conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -566,6 +587,20 @@ fn lookup(
 }
 
 fn evict(conn: &Connection, limits: CacheLimits, warned_over_budget: &mut bool) -> Result<()> {
+    evict_with_capacity(
+        conn,
+        limits,
+        warned_over_budget,
+        WriteCapacity::AllowPinnedOverflow,
+    )
+}
+
+fn evict_with_capacity(
+    conn: &Connection,
+    limits: CacheLimits,
+    warned_over_budget: &mut bool,
+    capacity: WriteCapacity,
+) -> Result<()> {
     loop {
         let (count, bytes): (i64, i64) = conn
             .query_row(
@@ -610,6 +645,13 @@ fn evict(conn: &Connection, limits: CacheLimits, warned_over_budget: &mut bool) 
                 // Expired leases may have freed rows in this round; recheck
                 // before giving up (Delta 0.3, FR-9 diagnostics).
                 continue;
+            }
+            if capacity == WriteCapacity::RequireFit {
+                return Err(Error::Admission {
+                    message:
+                        "active and prepared vectors cannot fit together in the configured cache"
+                            .into(),
+                });
             }
             if !*warned_over_budget {
                 *warned_over_budget = true;

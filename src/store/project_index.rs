@@ -308,7 +308,10 @@ where
         .map_err(|reason| unavailable("project lease", reason))?;
     match access {
         PairAccess::Read(_) => lifecycle::with_read_lock(file, &writer, work),
-        PairAccess::Write => lifecycle::with_writer_lock(file, &writer, work),
+        PairAccess::Write => {
+            let _preparation = super::generation_build::acquire_preparation_lease(&directory)?;
+            lifecycle::with_writer_lock(file, &writer, work)
+        }
     }
 }
 

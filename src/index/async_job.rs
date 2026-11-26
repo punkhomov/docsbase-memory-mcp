@@ -685,6 +685,10 @@ fn embedding_texts(
     Ok(texts)
 }
 
+const fn pin_tracking_bytes(count: usize) -> Option<u64> {
+    (count as u64).checked_mul(1024)
+}
+
 // Includes oversized new/old atomic text, worst-case 6-byte JSON escapes,
 // concurrent Rig bytes/Value/final String growth and the live input clones.
 fn embedding_workspace(
@@ -702,11 +706,7 @@ fn embedding_workspace(
                 .and_then(|n| n.checked_mul(8))
                 .and_then(|vectors| bytes.checked_add(vectors))
         })
-        .and_then(|bytes| {
-            (count as u64)
-                .checked_mul(1024)
-                .and_then(|hashes| bytes.checked_add(hashes))
-        })
+        .and_then(|bytes| pin_tracking_bytes(count).and_then(|hashes| bytes.checked_add(hashes)))
         .ok_or_else(|| Error::Admission {
             message: "job embedding workspace overflow".into(),
         })
@@ -914,6 +914,7 @@ async fn embed_batches(
                         .ok_or_else(|| Error::internal("embedding batch absent"))?,
                     &vectors,
                     state.dimension,
+                    crate::vector_cache::WriteCapacity::AllowPinnedOverflow,
                 )?;
                 if let Some(pin) = &state.pin {
                     pin.renew()?;

@@ -1888,3 +1888,20 @@ waits and before commit. The full cli-full suite, all-target Clippy and
 lean offline passed on Rust 1.100.0. The command test was repeated after
 bounding the last fixture wait. Shared hybrid remains gated while the
 remaining consumers and active state protection are implemented.
+
+## 2026-11-26 — CF11d, сохранение векторов выбранного поколения
+
+Task CF11d protect active vectors during same-recipe preparation: complete
+(native and cache ownership, regressions, fresh review and fix reviews).
+A stage with a readable base pins its old recipe's keys before storing
+candidate vectors. The active hash scan uses bounded row memory and an
+unordered SQL plan. A stage and a watcher share the native preparation
+lease. The project reader lease remains separate.
+
+Ruling: with a two-entry cache and a 32 MiB job budget, actual daemon
+Index can preserve the old vector, retain the first valid candidate and
+refuse the second. The old lexical head stays searchable. The test
+checks the two candidate keys after retirement. The watcher test
+reproduces mutation despite a held preparation lease, then checks
+retry, continued reads and one successful edit after release.
+All 24 catalog tests, 19 server profile tests and formatting passed.

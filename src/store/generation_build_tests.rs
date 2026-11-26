@@ -532,6 +532,22 @@ impl RevisablePair {
 
 #[test]
 #[cfg(unix)]
+fn catalog_watcher_retries_while_full_preparation_owns_the_active_base() {
+    let pair = RevisablePair::new();
+    pair.write_source("# Cherry\n\nCherryupdatedbatch\n");
+    let project_dir = project_directory(pair.env.cache.path(), pair.project.id);
+    let preparation = acquire_preparation_lease(&project_dir).unwrap();
+    let error = pair.apply().unwrap_err();
+    assert!(lifecycle::is_lease_conflict(&error), "{error}");
+    assert_eq!(pair.search("Applemigration").unwrap().1, 1);
+    assert_eq!(pair.search("Cherryupdatedbatch").unwrap().1, 0);
+    drop(preparation);
+    assert_eq!(pair.apply().unwrap().docs, 1);
+    assert_eq!(pair.search("Cherryupdatedbatch").unwrap().1, 1);
+}
+
+#[test]
+#[cfg(unix)]
 fn catalog_reads_incremental_revision_after_schema_1_upgrade() {
     let pair = RevisablePair::new();
     let directory = pair.dir();

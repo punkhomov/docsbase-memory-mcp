@@ -18,7 +18,7 @@ use crate::store::{
     repo,
     settings::DbSettings,
 };
-use crate::vector_cache::{JobPinAuthority, VectorCacheSource};
+use crate::vector_cache::{JobPinAuthority, VectorCacheSource, WriteCapacity};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -79,6 +79,8 @@ impl Drop for Owner {
 pub(super) struct CatalogSync {
     staged: Option<PreparedLexicalPublication>,
     embedding: Option<CatalogEmbeddings>,
+    // Release candidate pins first, with the old pair still protected.
+    protected_base: Option<JobPinAuthority>,
     context: Context,
     id: i64,
 }
@@ -115,6 +117,7 @@ impl IndexState {
         let sync = self.catalog_sync.insert(CatalogSync {
             staged: None,
             embedding: None,
+            protected_base: None,
             context,
             id,
         });
@@ -210,11 +213,20 @@ impl CatalogSync {
                     count,
                     dimension,
                 )?)?;
+                // Pins cover provider waits through the operation deadline.
+                // Round up for the durable lease's second-granularity clock.
+                let ttl = self.context.pin_ttl.max(
+                    operation
+                        .remaining()?
+                        .saturating_add(Duration::from_secs(1)),
+                );
+                self.protected_base =
+                    self.protect_base(&prepared, embedder.model_id(), ttl, &mut capture)?;
                 let pin = JobPinAuthority::allocate(
                     cache,
                     self.context.source.clone(),
                     embedder.model_id().to_owned(),
-                    self.context.pin_ttl,
+                    ttl,
                     count,
                 )?;
                 self.embedding = Some(CatalogEmbeddings {
@@ -227,6 +239,61 @@ impl CatalogSync {
         }
         self.staged = Some(prepared);
         Ok(self.embedding.is_some())
+    }
+
+    fn protect_base(
+        &self,
+        prepared: &PreparedLexicalPublication,
+        model: &str,
+        ttl: Duration,
+        capture: &mut CaptureBudget<'_>,
+    ) -> Result<Option<JobPinAuthority>> {
+        let context = &self.context;
+        let pin = prepared
+            .with_base_metadata(&context.project, |db| {
+                let (count, longest) = super::embedding_shape(db, context.project.id)?;
+                if count == 0 {
+                    return Ok(None);
+                }
+                // Only the hash set and one SQL text row plus its Rust copy
+                // live here. The base never enters the provider pipeline.
+                let bytes = (longest as u64)
+                    .checked_mul(2)
+                    .and_then(|text| super::pin_tracking_bytes(count)?.checked_add(text))
+                    .ok_or_else(|| Error::Admission {
+                        message: "active vector pin workspace overflow".into(),
+                    })?;
+                capture.reserve(bytes)?;
+                let mut pin = JobPinAuthority::allocate(
+                    &context.cache,
+                    context.source.clone(),
+                    model.to_owned(),
+                    ttl,
+                    count,
+                )?;
+                // The pin set is unordered. Projecting text through a sorted
+                // scan would let SQLite retain the whole corpus in a sorter.
+                let mut select = db
+                    .connection()
+                    .prepare(
+                        "SELECT c.text FROM chunks c JOIN docs d ON d.id = c.doc_id
+                     WHERE d.project_id = ?1",
+                    )
+                    .map_err(repo::db_error)?;
+                let mut rows = select.query([context.project.id]).map_err(repo::db_error)?;
+                while let Some(row) = rows.next().map_err(repo::db_error)? {
+                    capture.operation.check()?;
+                    let text: String = row.get(0).map_err(repo::db_error)?;
+                    pin.track(&crate::vector_cache::chunk_hash(&text))?;
+                }
+                Ok(Some(pin))
+            })?
+            .flatten();
+        if let Some(pin) = &pin {
+            capture.operation.check()?;
+            pin.renew()?;
+        }
+        Ok(pin)
     }
 
     pub(super) fn batch_packet(
@@ -299,6 +366,7 @@ impl CatalogSync {
             batch,
             vectors,
             embedding.dimension,
+            WriteCapacity::RequireFit,
         )
     }
 

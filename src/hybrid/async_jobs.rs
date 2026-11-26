@@ -1,6 +1,6 @@
 //! Bounded lookup/validation/write kernels. Connections never cross provider awaits.
 use crate::error::{Error, Result};
-use crate::vector_cache::{VectorCacheSource, chunk_hash};
+use crate::vector_cache::{VectorCacheSource, WriteCapacity, chunk_hash};
 use std::sync::Arc;
 
 pub(crate) struct EmbeddingBatch {
@@ -43,6 +43,7 @@ pub(crate) fn store(
     batch: &EmbeddingBatch,
     vectors: &[Vec<f32>],
     expected_dim: usize,
+    capacity: WriteCapacity,
 ) -> Result<()> {
     if vectors.len() != batch.hashes.len()
         || vectors
@@ -53,7 +54,7 @@ pub(crate) fn store(
     }
     let mut cache = source.connect(root)?;
     for (hash, vector) in batch.hashes.iter().zip(vectors) {
-        cache.put(model, hash, vector)?;
+        cache.put_with_capacity(model, hash, vector, capacity)?;
     }
     Ok(())
 }

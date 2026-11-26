@@ -61,7 +61,11 @@ impl AsyncEmbedder for DocumentGate {
 }
 
 fn open_v2_index_shared(cache: &Path, config: &Path) -> Arc<Shared> {
-    std::fs::write(config.join("config.toml"), "config_version = 2\n").unwrap();
+    open_v2_index_shared_with_config(cache, config, "config_version = 2\n")
+}
+
+fn open_v2_index_shared_with_config(cache: &Path, config: &Path, toml: &str) -> Arc<Shared> {
+    std::fs::write(config.join("config.toml"), toml).unwrap();
     Shared::open_with_launch(
         cache,
         &crate::store::settings::standalone().unwrap(),
@@ -403,6 +407,118 @@ async fn catalog_index_waiting_for_provider(
         result = &mut indexing => panic!("catalog job finished before embedding: {result:?}"),
     }
     indexing
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_index_capacity_failure_preserves_selected_vectors() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let guide = root.path().join("guide.md");
+        let old_text = "oldcatalogwidget";
+        std::fs::write(&guide, old_text).unwrap();
+        Db::open_for_index(
+            cache.path(),
+            &crate::store::settings::standalone().unwrap(),
+            true,
+        )
+        .unwrap()
+        .close()
+        .unwrap();
+        let mut shared = open_v2_index_shared_with_config(
+            cache.path(),
+            config.path(),
+            "config_version = 2\n[vector_cache]\nmax_entries = 2\n",
+        );
+        let owner = Arc::get_mut(&mut shared).unwrap();
+        owner.watchers = Arc::new(Watchers::with_enabled(false));
+        let mut budget = owner.global_config.search.clone();
+        budget.max_request_payload_bytes = 32 * 1024 * 1024;
+        owner.payload_budget = crate::search::budget::PayloadBudget::new(budget).unwrap();
+        shared.activate_jobs(service).unwrap();
+        let args = json!({"path": root.path()});
+        call_tool(&shared, None, "index_project", args.clone())
+            .await
+            .unwrap();
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+
+        let provider = document_gate();
+        let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+        let slot = shared.project_slot(project.id);
+        let config = {
+            let mut state = slot.state.lock().unwrap();
+            let mut config = (**state.config.as_ref().unwrap()).clone();
+            config.remote.embed_batch_texts = 1;
+            let config = Arc::new(config);
+            state.config = Some(config.clone());
+            state.search_stages = Some(Arc::new(HybridStages {
+                embedder: Some(provider.clone()),
+                ..HybridStages::default()
+            }));
+            config
+        };
+        let source = shared.vector_source_for(project.id, &config);
+        let old_hash = crate::vector_cache::chunk_hash(old_text);
+        let mut vectors = source.connect(cache.path()).unwrap();
+        vectors
+            .put(provider.model_id(), &old_hash, &[0.0, 1.0, 0.0])
+            .unwrap();
+        std::fs::write(&guide, "newcatalogwidget").unwrap();
+        std::fs::write(root.path().join("second.md"), "anothercatalogwidget").unwrap();
+
+        provider.release.add_permits(2);
+        let failure = tokio::time::timeout(
+            Duration::from_secs(5),
+            call_tool(&shared, None, "index_project", args),
+        )
+        .await
+        .unwrap();
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        assert_eq!(
+            vectors.get(provider.model_id(), &old_hash).unwrap(),
+            Some(vec![0.0, 1.0, 0.0])
+        );
+        assert_eq!(
+            vectors.len().unwrap(),
+            2,
+            "staging must respect the shared entry cap"
+        );
+        let batches = provider.batches.lock().unwrap();
+        assert_eq!(batches.len(), 2, "{failure:?}");
+        let first = crate::vector_cache::chunk_hash(&batches[0][0]);
+        let second = crate::vector_cache::chunk_hash(&batches[1][0]);
+        assert_eq!(
+            vectors.get(provider.model_id(), &first).unwrap(),
+            Some(vec![1.0, 0.0, 0.0])
+        );
+        assert!(vectors.get(provider.model_id(), &second).unwrap().is_none());
+        assert_eq!(selected_catalog_hits(&shared, &project, old_text), 1);
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "newcatalogwidget"),
+            0
+        );
+        assert!(
+            matches!(failure, Err(Error::Admission { .. })),
+            "{failure:?}"
+        );
+        Ok(())
+    })
+    .unwrap();
 }
 
 #[test]

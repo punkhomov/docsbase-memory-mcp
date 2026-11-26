@@ -148,6 +148,36 @@ impl PreparedLexicalPublication {
         &self.pair.outcome
     }
 
+    /// Read the selected metadata that supplied the stage's validated base.
+    /// Interrupted pairs cannot supply a readable base.
+    pub(crate) fn with_base_metadata<T>(
+        &self,
+        project: &Project,
+        read: impl FnOnce(&Db) -> Result<T>,
+    ) -> Result<Option<T>> {
+        let pair = &self.pair;
+        let Some(base) = pair.request.base else {
+            return Ok(None);
+        };
+        if matches!(pair.access, CatalogAccess::Repair(_)) {
+            return Ok(None);
+        }
+        let db = open_index_registry(&pair.cache, &self.settings, pair.request.epoch)?;
+        let result =
+            super::project_index::with_catalog_pair(&db, project, |registry, local, index| {
+                if index.generation_id() != base.generation_id
+                    || index.content_revision() != base.content_revision
+                {
+                    return Err(admission(
+                        "generation base changed before vector protection",
+                    ));
+                }
+                read(local.as_ref().map_or(registry, |local| &local.db))
+            })?;
+        db.close()?;
+        Ok(Some(result))
+    }
+
     /// Read inactive metadata without lending a connection to the caller.
     pub(crate) fn with_metadata<T>(&self, read: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
         let staged = self.pair.staged;
@@ -428,11 +458,14 @@ fn with_preparation_lease<T>(project_dir: &Path, run: impl FnOnce() -> Result<T>
     run()
 }
 
-fn acquire_preparation_lease(project_dir: &Path) -> Result<ExclusiveFileLease> {
+pub(super) fn acquire_preparation_lease(project_dir: &Path) -> Result<ExclusiveFileLease> {
     let lock_path = project_dir.join(".prepare.lock");
     ExclusiveFileLease::try_acquire(open_coordination_file(&lock_path, true)?).map_err(|error| {
         if error.kind() == io::ErrorKind::WouldBlock {
-            admission("another builder holds the project preparation lease")
+            Error::Project {
+                message: "another writer holds the project preparation lease".into(),
+                instruction: Some("wait for the running index to finish".into()),
+            }
         } else {
             Error::internal_with_source("lock project generation preparation", error)
         }
