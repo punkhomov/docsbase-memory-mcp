@@ -194,7 +194,13 @@ pub(super) async fn run_with_operation(
                 let root = registry::project_root_for(&target, &owner.cache)?;
                 let config = Config::for_project(&owner.global, &root)?;
                 let store = VectorStore::reserve(&owner.cache, policy)?;
-                let mut db = Db::open_for_index(&owner.cache, &settings)?;
+                let create_catalog = generation::create_for_website(&owner.global, &config, &root);
+                let registry_root = if create_catalog {
+                    store.root()
+                } else {
+                    &owner.cache
+                };
+                let mut db = Db::open_for_index(registry_root, &settings, create_catalog)?;
                 if db.has_generation_catalog() {
                     return generation::Target::capture(db, &root, config, settings)
                         .map(DirectIndex::Generation);

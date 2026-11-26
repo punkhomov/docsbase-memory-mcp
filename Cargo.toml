@@ -19,7 +19,7 @@ default = []
 # Official CLI distribution: providers are available, enabled at runtime only
 # by explicit config. Keep the lean Cargo default for internal/embedded builds.
 cli-full = ["hybrid-local", "hybrid-remote", "web"]
-web = ["dep:axum", "dep:getrandom", "dep:ts-rs"]
+web = ["dep:axum", "dep:ts-rs"]
 # OpenRouter embeddings + rerank (spec docs/specs/hybrid-providers, ADR-14).
 # The default build stays fully offline: no network crates, no reqwest.
 hybrid-remote = ["dep:reqwest", "dep:rig-core"]
@@ -39,7 +39,7 @@ hybrid-local = [
 
 [dependencies]
 axum = { version = "0.8", optional = true }
-getrandom = { version = "0.3", optional = true }
+getrandom = "0.3"
 ts-rs = { version = "11", optional = true, features = ["serde-json-impl"] }
 # ADR-RIG1: provider codecs only; transport/retries stay owned by docsbase.
 rig-core = { version = "=0.45.0", default-features = false, optional = true }

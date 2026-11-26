@@ -919,6 +919,21 @@ watcher-off/no-idle invariants. Explicit Shared grace0 remains valid; Website
 cannot take an idle-grace override. Daemon resources remain complete restart-time
 `[daemon]` policy; they do not become HTTP settings.
 
+To initialize v5 for a new lexical Website deployment on a supported Unix
+filesystem, select the project in the global configuration before the first
+`docsbase index ABS`:
+
+```toml
+config_version = 2
+
+[daemon]
+profile = { mode = "website", project_root = "/absolute/path/to/project" }
+```
+
+Use the configured path for `ABS`. The first index creates the catalog, and
+`docsbase serve` binds to the published project. Existing registries retain
+their format.
+
 The [Node HTTP example](../examples/website-search/README.md) has a separate
 complete application-owned JSON policy, passed through `DOCSBASE_WEBSITE_CONFIG`.
 Its config owner validates every HTTP count/byte/timer and constructs the existing
@@ -987,4 +1002,5 @@ with the existing retained indexing payload budgets. Open SQLite registry
 readers keep their snapshots while a later search sees the newly published
 pair. A rejected build leaves
 the old head available. A later index retries cleanup of its retired local pairs once their readers
-release them. New installations still use the ordinary v4 storage path.
+release them. A fresh lexical Website deployment can initialize v5 through
+the global profile above.

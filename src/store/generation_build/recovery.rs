@@ -533,14 +533,7 @@ pub(super) fn open_recovery_registry(
     let cache = filesystem(cache, "resolve registry cache", fs::canonicalize(cache))?;
     // The SQLite VFS can open these entries during normal WAL access or
     // recovery. A cooperating connection may remove an absent/closing sidecar.
-    for suffix in ["-wal", "-shm", "-journal"] {
-        let path = cache.join(format!("{DB_FILE}{suffix}"));
-        match native_fs::check_single_link(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return filesystem(&path, "inspect registry sidecar", Err(error)),
-        }
-    }
+    crate::store::check_catalog_database_paths(&cache)?;
     open_registry_file(&cache, &cache.join(DB_FILE), settings)
 }
 

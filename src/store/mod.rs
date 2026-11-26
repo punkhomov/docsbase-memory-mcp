@@ -22,6 +22,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use crate::config::schema::{ArtifactFacts, Capabilities, Resolved, SettingsSpec};
 use crate::error::{Error, Result};
+use migrations::RegistryOpen;
 use settings::{DbSettings, DbSpec};
 
 /// Database file name inside the cache root.
@@ -59,27 +60,60 @@ impl Db {
     /// Invalid policy is rejected before filesystem access. Other errors match
     /// [`Self::open`].
     pub fn open_with_settings(cache_dir: &Path, settings: &Resolved<DbSettings>) -> Result<Self> {
-        Self::open_with_wait(cache_dir, settings, false, std::thread::sleep)
+        Self::open_with_wait(
+            cache_dir,
+            settings,
+            RegistryOpen::Legacy,
+            std::thread::sleep,
+        )
     }
 
     pub(crate) fn open_for_index(
         cache_dir: &Path,
         settings: &Resolved<DbSettings>,
+        create_catalog: bool,
     ) -> Result<Self> {
-        Self::open_with_wait(cache_dir, settings, true, std::thread::sleep)
+        let mode = if create_catalog {
+            RegistryOpen::FreshCatalog
+        } else {
+            RegistryOpen::ExistingCatalog
+        };
+        Self::open_with_wait(cache_dir, settings, mode, std::thread::sleep)
     }
 
     fn open_with_wait(
         cache_dir: &Path,
         settings: &Resolved<DbSettings>,
-        allow_generation_catalog: bool,
+        mode: RegistryOpen,
         mut wait: impl FnMut(std::time::Duration),
     ) -> Result<Self> {
         DbSpec::validate(settings.settings(), &Capabilities::current())?;
         let policy = settings.settings();
         ensure_private_dir(cache_dir)?;
+        let cache_root = if mode == RegistryOpen::FreshCatalog {
+            cache_dir.canonicalize().map_err(|error| {
+                Error::internal_with_source("resolve generation registry cache", error)
+            })?
+        } else {
+            cache_dir.to_path_buf()
+        };
+        let cache_dir = cache_root.as_path();
         let path = cache_dir.join(DB_FILE);
-        let conn = Connection::open(&path).map_err(|err| sql_error(&path, err))?;
+        let mut flags = rusqlite::OpenFlags::default();
+        let mode = if mode != RegistryOpen::FreshCatalog {
+            mode
+        } else if is_registry_alias(&path)? {
+            // An existing linked legacy registry retains its former opener.
+            // A dangling alias must not create a registry at another location.
+            flags.remove(rusqlite::OpenFlags::SQLITE_OPEN_CREATE);
+            RegistryOpen::Legacy
+        } else {
+            check_catalog_database_paths(cache_dir)?;
+            flags.insert(rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW);
+            mode
+        };
+        let conn =
+            Connection::open_with_flags(&path, flags).map_err(|err| sql_error(&path, err))?;
         conn.busy_timeout(policy.write_busy_timeout)
             .map_err(|err| sql_error(&path, err))?;
         conn.pragma_update(None, "foreign_keys", "ON")
@@ -106,34 +140,45 @@ impl Db {
                 }
             }
         }
-        let generation_catalog = allow_generation_catalog
-            && migrations::read_version(&conn)? == generation_catalog::SCHEMA_VERSION;
-        if !generation_catalog && let Err(err) = migrations::migrate(&conn) {
-            if matches!(err, Error::Admission { .. }) {
-                let version = migrations::read_version(&conn).ok();
-                let expected = migrations::SCHEMA_VERSION.to_string();
-                let actual = version.map_or_else(|| "?".to_owned(), |v| v.to_string());
-                crate::conflict::record(
-                    cache_dir,
-                    &crate::conflict::Conflict {
-                        kind: "db_schema_newer",
-                        expected: &expected,
-                        actual: &actual,
-                        build_id: &crate::ipc::protocol::build_id(),
-                        schema_version: migrations::SCHEMA_VERSION,
-                        cache_root: cache_dir,
-                        pid: std::process::id(),
-                        recorded_build_id: None,
-                        recorded_schema_version: version,
-                        holder_pid: None,
-                    },
-                );
-            }
-            return Err(err);
+        if mode == RegistryOpen::FreshCatalog && migrations::read_version(&conn)? == 0 {
+            conn.pragma_update(None, "synchronous", "EXTRA")
+                .map_err(|err| sql_error(&path, err))?;
+        }
+        let mut created_catalog = false;
+        let before_creation = || {
+            sync_catalog_namespace(cache_dir)?;
+            created_catalog = true;
+            Ok(())
+        };
+        let generation_catalog = migrations::migrate_registry(&conn, mode, before_creation)
+            .inspect_err(|err| {
+                if matches!(err, Error::Admission { .. }) {
+                    let version = migrations::read_version(&conn).ok();
+                    let expected = migrations::SCHEMA_VERSION.to_string();
+                    let actual = version.map_or_else(|| "?".to_owned(), |v| v.to_string());
+                    crate::conflict::record(
+                        cache_dir,
+                        &crate::conflict::Conflict {
+                            kind: "db_schema_newer",
+                            expected: &expected,
+                            actual: &actual,
+                            build_id: &crate::ipc::protocol::build_id(),
+                            schema_version: migrations::SCHEMA_VERSION,
+                            cache_root: cache_dir,
+                            pid: std::process::id(),
+                            recorded_build_id: None,
+                            recorded_schema_version: version,
+                            holder_pid: None,
+                        },
+                    );
+                }
+            })?;
+        if created_catalog {
+            generation_build::sync_directory(cache_dir)?;
         }
         Ok(Self {
             conn,
-            cache_root: cache_dir.to_path_buf(),
+            cache_root,
             settings: settings.clone(),
             generation_catalog,
         })
@@ -313,6 +358,45 @@ impl Db {
     }
 }
 
+fn is_registry_alias(path: &Path) -> Result<bool> {
+    match crate::platform::is_file_alias(path) {
+        Ok(linked) => Ok(linked),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(Error::internal_with_source(
+            "inspect generation registry file",
+            error,
+        )),
+    }
+}
+
+fn sync_catalog_namespace(cache: &Path) -> Result<()> {
+    // Earlier attempts may have created any prefix before the directory
+    // barriers completed. A fresh catalog must make the entire path durable.
+    for directory in cache.ancestors() {
+        generation_build::sync_directory(directory)?;
+    }
+    Ok(())
+}
+
+fn check_catalog_database_paths(cache: &Path) -> Result<()> {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let path = cache.join(format!("{DB_FILE}{suffix}"));
+        match crate::platform::fs::check_single_link(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                let context = if suffix.is_empty() {
+                    "inspect generation registry file"
+                } else {
+                    "inspect registry sidecar"
+                };
+                return Err(Error::internal_with_source(context, error));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn sql_error(path: &Path, err: rusqlite::Error) -> Error {
     Error::internal_with_source(format!("sqlite {}: {err}", path.display()), err)
 }
@@ -424,6 +508,23 @@ mod tests {
         assert!(!absent.exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn fresh_catalog_rejects_an_unsafe_sidecar_before_opening_sqlite() {
+        let cache = tempfile::tempdir().unwrap();
+        let db_path = cache.path().join(DB_FILE);
+        let unrelated = cache.path().join("other.db");
+        let sidecar = cache.path().join(format!("{DB_FILE}-shm"));
+        std::fs::write(&unrelated, b"unrelated file").unwrap();
+        std::fs::hard_link(&unrelated, &sidecar).unwrap();
+
+        let error = Db::open_for_index(cache.path(), &settings::standalone().unwrap(), true)
+            .expect_err("fresh catalog refuses a linked SQLite sidecar");
+        assert!(error.to_string().contains("inspect registry sidecar"));
+        assert!(!db_path.exists());
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"unrelated file");
+    }
+
     #[test]
     fn wal_retry_policy_is_explicit() {
         let delay = Duration::from_millis(37);
@@ -436,8 +537,10 @@ mod tests {
                 ..DbPatch::default()
             });
             let mut waits = Vec::new();
-            let err = Db::open_with_wait(cache.path(), &settings, false, |value| waits.push(value))
-                .expect_err("WAL transition is blocked");
+            let err = Db::open_with_wait(cache.path(), &settings, RegistryOpen::Legacy, |value| {
+                waits.push(value);
+            })
+            .expect_err("WAL transition is blocked");
             assert!(matches!(err, Error::Internal { .. }));
             assert_eq!(
                 waits,
@@ -458,7 +561,7 @@ mod tests {
             ..DbPatch::default()
         });
         let mut waits = Vec::new();
-        let db = Db::open_with_wait(cache.path(), &settings, false, |value| {
+        let db = Db::open_with_wait(cache.path(), &settings, RegistryOpen::Legacy, |value| {
             waits.push(value);
             lock.execute_batch("COMMIT;")
                 .expect("release reader on retry");

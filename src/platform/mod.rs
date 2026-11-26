@@ -93,6 +93,29 @@ pub mod fs {
     };
 }
 
+/// Whether an existing name is a symlink or one of multiple links to a file.
+pub(crate) fn is_file_alias(path: &Path) -> std::io::Result<bool> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.is_symlink() {
+        return Ok(true);
+    }
+    if !fs::is_regular_nofollow(&metadata) {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Ok(metadata.nlink() > 1)
+    }
+    #[cfg(windows)]
+    {
+        let file = fs::open_readonly_nofollow(path)?;
+        let metadata = file.metadata()?;
+        Ok(fs::is_regular_nofollow(&metadata)
+            && fs::file_identity_and_links(&file, &metadata)?.1 > 1)
+    }
+}
+
 /// Process liveness, counters and detach (Linux `/proc`; ADR-10 on Windows).
 #[cfg(unix)]
 pub mod process {

@@ -1,5 +1,5 @@
 //! Persisted generation catalog for the next registry layout.
-use rusqlite::{Connection, Row, types::ValueRef};
+use rusqlite::{Connection, Row, Transaction, types::ValueRef};
 
 use super::registry_inspect::{RegistryProject, UnavailableReason as Why, sqlite_failure};
 
@@ -156,5 +156,20 @@ fn integer(row: &Row<'_>, column: usize) -> Result<i64, Why> {
     row.get(column).map_err(|_| Why::InvalidRegistry)
 }
 
-#[cfg(test)]
 pub(super) const SCHEMA_SQL: &str = include_str!("generation_catalog/schema.sql");
+
+/// Called only in the transaction creating a fresh registry.
+pub(super) fn initialize(tx: &Transaction<'_>) -> crate::error::Result<()> {
+    let mut epoch = [0; 16];
+    getrandom::fill(&mut epoch).map_err(|_| {
+        crate::error::Error::internal("OS entropy unavailable for the installation epoch")
+    })?;
+    tx.execute_batch(SCHEMA_SQL)
+        .map_err(super::repo::db_error)?;
+    tx.execute(
+        "INSERT INTO generation_store (singleton, format_version, epoch) VALUES (1, ?1, ?2)",
+        rusqlite::params![FORMAT_VERSION, epoch],
+    )
+    .map_err(super::repo::db_error)?;
+    Ok(())
+}
