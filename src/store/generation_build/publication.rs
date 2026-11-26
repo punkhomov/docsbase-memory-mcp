@@ -32,8 +32,8 @@ use super::recovery::{
     validate_owned_files, verify_ownership,
 };
 use super::{
-    LexicalBuildRequest, PreparedLexicalGeneration, admission, claim_path, filesystem,
-    open_coordination_file, open_registry, ownership_digest, validate_catalog, validate_epoch,
+    CatalogAccess, LexicalBuildRequest, PreparedLexicalGeneration, admission, claim_path,
+    filesystem, open_coordination_file, ownership_digest, validate_catalog, validate_epoch,
     verify_base, verify_chunk_pair, with_preparation_lease,
 };
 
@@ -81,27 +81,67 @@ pub fn publish_lexical_generation(
         return Err(admission("generation project directory is missing"));
     }
     with_preparation_lease(&project_dir, || {
-        publish_stopped(
-            &cache,
-            &project_dir,
-            request,
-            staged,
-            settings,
-            limits,
-            config,
+        publish_prepared(
+            StagedPublication {
+                cache: &cache,
+                project_dir: &project_dir,
+                request,
+                staged,
+                settings,
+                limits,
+                config,
+                access: CatalogAccess::Stopped,
+            },
+            |ready| ready.commit(|| Ok(())),
         )
     })
 }
 
-fn publish_stopped(
-    cache: &Path,
-    project_dir: &Path,
-    request: LexicalBuildRequest,
-    staged: PreparedLexicalGeneration,
-    settings: &Resolved<DbSettings>,
-    limits: InspectionLimits,
-    config: &Config,
+pub(super) struct StagedPublication<'a> {
+    pub(super) cache: &'a Path,
+    pub(super) project_dir: &'a Path,
+    pub(super) request: LexicalBuildRequest,
+    pub(super) staged: PreparedLexicalGeneration,
+    pub(super) settings: &'a Resolved<DbSettings>,
+    pub(super) limits: InspectionLimits,
+    pub(super) config: &'a Config,
+    pub(super) access: CatalogAccess,
+}
+
+/// A sealed pair ready for the final project writer lease and catalog CAS.
+pub(crate) struct LexicalCommit<'a> {
+    publication: StagedPublication<'a>,
+    project: &'a Project,
+    seal: blake3::Hash,
+    current: ObservedProjectIndex,
+}
+
+impl LexicalCommit<'_> {
+    pub(crate) fn commit(self, admit: impl FnOnce() -> Result<()>) -> Result<ObservedProjectIndex> {
+        let writer_lock = lifecycle::lease_path(self.publication.cache, self.project.id);
+        lifecycle::with_writer_lock(
+            open_coordination_file(&writer_lock, false)?,
+            &writer_lock,
+            || commit_head(&self, admit),
+        )?;
+        Ok(self.current)
+    }
+}
+
+pub(super) fn publish_prepared(
+    publication: StagedPublication<'_>,
+    finalize: impl FnOnce(LexicalCommit<'_>) -> Result<ObservedProjectIndex>,
 ) -> Result<ObservedProjectIndex> {
+    let StagedPublication {
+        cache,
+        project_dir,
+        request,
+        staged,
+        settings,
+        limits,
+        config,
+        access,
+    } = publication;
     let dir = project_dir
         .join("generations")
         .join(staged.generation_id.to_string());
@@ -115,7 +155,9 @@ fn publish_stopped(
         "inspect generation registry file",
         native_fs::check_single_link(&registry_path),
     )?;
-    if registry_inspect::sidecars_absent(&registry_path) == Err(UnavailableReason::RecoveryRequired)
+    if access == CatalogAccess::Stopped
+        && registry_inspect::sidecars_absent(&registry_path)
+            == Err(UnavailableReason::RecoveryRequired)
     {
         let registry = open_recovery_registry(cache, settings)?;
         configure_publication_connection(registry.connection(), limits)?;
@@ -125,21 +167,12 @@ fn publish_stopped(
             .close()
             .map_err(|(_, err)| repo::db_error(err))?;
     }
-    let (already_active, project) = registry_inspect::with_registry(
-        cache,
-        limits,
-        || {},
-        |conn, _| {
-            Ok(
-                candidate_is_active(conn, request, staged).and_then(|active| {
-                    let project = registry::project_by_id_in(conn, request.project_id)?
-                        .ok_or_else(|| admission("generation project is no longer registered"))?;
-                    Ok((active, project))
-                }),
-            )
-        },
-    )
-    .map_err(registry_unavailable)??;
+    let (already_active, project) = access.read(cache, settings, limits, |conn| {
+        let active = candidate_is_active(conn, request, staged)?;
+        let project = registry::project_by_id_in(conn, request.project_id)?
+            .ok_or_else(|| admission("generation project is no longer registered"))?;
+        Ok((active, project))
+    })?;
 
     let current = ObservedProjectIndex {
         project_id: staged.project_id,
@@ -149,6 +182,9 @@ fn publish_stopped(
         layout: ProjectIndexLayout::Local,
     };
     if already_active {
+        if access == CatalogAccess::Operational {
+            return Err(admission("prepared generation was already published"));
+        }
         let metadata = open_local_metadata(&dir, settings, limits)?;
         verified_recipe(&metadata, &project, staged.content_revision, config)?;
         metadata
@@ -159,20 +195,19 @@ fn publish_stopped(
         return Ok(current);
     }
 
-    verify_base(cache, request, settings, limits)?;
+    verify_base(cache, request, settings, limits, access)?;
     let read_lock = dir.join(".read.lock");
     let seal = lifecycle::with_read_lock(
         open_coordination_file(&read_lock, false)?,
         &read_lock,
         || verify_and_seal(&dir, request, staged, &project, settings, limits, config),
     )?;
-    let writer_lock = lifecycle::lease_path(cache, project.id);
-    lifecycle::with_writer_lock(
-        open_coordination_file(&writer_lock, false)?,
-        &writer_lock,
-        || commit_head(cache, request, staged, settings, limits, &project, &seal),
-    )?;
-    Ok(current)
+    finalize(LexicalCommit {
+        publication,
+        project: &project,
+        seal,
+        current,
+    })
 }
 
 fn confirm_publication(
@@ -556,16 +591,19 @@ fn write_seal(path: &Path, bytes: &[u8]) -> Result<()> {
     filesystem(path, "sync generation seal", file.sync_all())
 }
 
-fn commit_head(
-    cache: &Path,
-    request: LexicalBuildRequest,
-    staged: PreparedLexicalGeneration,
-    settings: &Resolved<DbSettings>,
-    limits: InspectionLimits,
-    project: &Project,
-    seal: &blake3::Hash,
-) -> Result<()> {
-    let mut registry = open_registry(cache, settings)?;
+fn commit_head(commit: &LexicalCommit<'_>, admit: impl FnOnce() -> Result<()>) -> Result<()> {
+    let StagedPublication {
+        cache,
+        request,
+        staged,
+        settings,
+        limits,
+        access,
+        ..
+    } = commit.publication;
+    let project = commit.project;
+    let seal = &commit.seal;
+    let mut registry = access.writer(cache, settings)?;
     let connection = registry.connection();
     configure_publication_connection(connection, limits)?;
     registry
@@ -640,6 +678,8 @@ fn commit_head(
         params![request.project_id, staged.generation_id],
     )
     .map_err(repo::db_error)?;
+    // All validation and SQL writes are still reversible at this boundary.
+    admit()?;
     tx.commit().map_err(|error| {
         crate::error::Error::internal_with_source(
             "commit generation catalog (publication result may be indeterminate)",

@@ -58,12 +58,20 @@ impl Db {
     /// Invalid policy is rejected before filesystem access. Other errors match
     /// [`Self::open`].
     pub fn open_with_settings(cache_dir: &Path, settings: &Resolved<DbSettings>) -> Result<Self> {
-        Self::open_with_wait(cache_dir, settings, std::thread::sleep)
+        Self::open_with_wait(cache_dir, settings, false, std::thread::sleep)
+    }
+
+    pub(crate) fn open_for_index(
+        cache_dir: &Path,
+        settings: &Resolved<DbSettings>,
+    ) -> Result<Self> {
+        Self::open_with_wait(cache_dir, settings, true, std::thread::sleep)
     }
 
     fn open_with_wait(
         cache_dir: &Path,
         settings: &Resolved<DbSettings>,
+        allow_generation_catalog: bool,
         mut wait: impl FnMut(std::time::Duration),
     ) -> Result<Self> {
         DbSpec::validate(settings.settings(), &Capabilities::current())?;
@@ -97,7 +105,9 @@ impl Db {
                 }
             }
         }
-        if let Err(err) = migrations::migrate(&conn) {
+        let generation_catalog = allow_generation_catalog
+            && migrations::read_version(&conn)? == generation_catalog::SCHEMA_VERSION;
+        if !generation_catalog && let Err(err) = migrations::migrate(&conn) {
             if matches!(err, Error::Admission { .. }) {
                 let version = migrations::read_version(&conn).ok();
                 let expected = migrations::SCHEMA_VERSION.to_string();
@@ -124,7 +134,7 @@ impl Db {
             conn,
             cache_root: cache_dir.to_path_buf(),
             settings: settings.clone(),
-            generation_catalog: false,
+            generation_catalog,
         })
     }
 
@@ -235,6 +245,18 @@ impl Db {
     #[must_use]
     pub(crate) const fn has_generation_catalog(&self) -> bool {
         self.generation_catalog
+    }
+
+    pub(crate) fn generation_epoch(&self) -> Result<[u8; 16]> {
+        generation_catalog::read_epoch(&self.conn).map_err(|reason| Error::Admission {
+            message: format!("invalid generation catalog ({reason:?})"),
+        })
+    }
+
+    pub(crate) fn close(self) -> Result<()> {
+        self.conn
+            .close()
+            .map_err(|(_, error)| repo::db_error(error))
     }
 
     /// Complete caller policy retained for explicit child connection creation.
@@ -411,7 +433,7 @@ mod tests {
                 ..DbPatch::default()
             });
             let mut waits = Vec::new();
-            let err = Db::open_with_wait(cache.path(), &settings, |value| waits.push(value))
+            let err = Db::open_with_wait(cache.path(), &settings, false, |value| waits.push(value))
                 .expect_err("WAL transition is blocked");
             assert!(matches!(err, Error::Internal { .. }));
             assert_eq!(
@@ -433,7 +455,7 @@ mod tests {
             ..DbPatch::default()
         });
         let mut waits = Vec::new();
-        let db = Db::open_with_wait(cache.path(), &settings, |value| {
+        let db = Db::open_with_wait(cache.path(), &settings, false, |value| {
             waits.push(value);
             lock.execute_batch("COMMIT;")
                 .expect("release reader on retry");

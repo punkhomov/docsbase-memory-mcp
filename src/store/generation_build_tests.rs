@@ -512,7 +512,14 @@ fn publication_resumes_a_durable_seal_left_before_the_catalog_commit() {
     let staged = env.build(request).unwrap();
     let settings = settings::standalone().unwrap();
     let config = Config::default();
-    let project = super::probe_project(env.cache.path(), request, limits()).unwrap();
+    let project = super::probe_project(
+        env.cache.path(),
+        request,
+        &settings,
+        limits(),
+        CatalogAccess::Stopped,
+    )
+    .unwrap();
     let dir = env.generation(staged.generation_id);
     let written = super::publication::verify_and_seal(
         &dir,
@@ -1581,4 +1588,143 @@ mod unix {
         assert_eq!(env.catalog_state(), (1, None));
         assert!(!env.generation(2).exists());
     }
+}
+
+#[test]
+#[cfg(unix)]
+fn direct_index_refusal_at_the_commit_boundary_preserves_the_old_pair() {
+    let env = Env::new();
+    let request = env.request();
+    let settings = settings::standalone().unwrap();
+    let config = Config::default();
+    std::fs::write(
+        env.source.path().join("guide.md"),
+        "# Peach\n\nPeachmigration\n",
+    )
+    .unwrap();
+    let budget = crate::search::budget::PayloadBudget::new(config.search.clone()).unwrap();
+    let operation = crate::search::operation::SearchOperation::new(
+        budget.settings(),
+        std::time::Instant::now(),
+        crate::hybrid::work::Cancellation::new(),
+    )
+    .unwrap();
+    let account = budget.reserve(0).unwrap();
+    let mut capture = job::CaptureBudget {
+        account: &account,
+        operation: &operation,
+        observed: None,
+    };
+    let result = with_prepared_lexical_generation(
+        env.cache.path(),
+        request,
+        &settings,
+        limits(),
+        &config,
+        &mut capture,
+        |pair| {
+            pair.publish(|commit| {
+                commit.commit(|| {
+                    let contender = Connection::open(env.cache.path().join(DB_FILE)).unwrap();
+                    contender.busy_timeout(std::time::Duration::ZERO).unwrap();
+                    let error = contender.execute_batch("BEGIN IMMEDIATE").unwrap_err();
+                    assert!(matches!(error, rusqlite::Error::SqliteFailure(code, _)
+                        if code.code == rusqlite::ErrorCode::DatabaseBusy));
+                    Err(admission("late refusal"))
+                })
+            })
+        },
+    );
+    assert!(result.unwrap_err().to_string().contains("late refusal"));
+    assert!(env.generation(2).join("seal.json").exists());
+    assert_eq!(env.catalog_state(), (1, Some("building".into())));
+    env.assert_legacy_search();
+
+    let stats = with_prepared_lexical_generation(
+        env.cache.path(),
+        request,
+        &settings,
+        limits(),
+        &config,
+        &mut capture,
+        |pair| pair.publish(|commit| commit.commit(|| Ok(()))),
+    )
+    .unwrap();
+    assert_eq!(stats.docs, 1);
+    assert_eq!(env.catalog_state(), (3, None));
+}
+
+#[test]
+#[cfg(unix)]
+fn index_cleanup_refuses_a_retired_catalog_base_that_disagrees_with_the_seal() {
+    let env = Env::new();
+    let request = env.request();
+    let settings = settings::standalone().unwrap();
+    let (previous, next) = retire_local_pair(&env);
+    let generation = previous.generation_id.unwrap();
+    let cache = env.cache.path().canonicalize().unwrap();
+    let project = project_directory(&cache, request.project_id);
+    let retired = env.generation(generation);
+    let registry = Connection::open(cache.join(DB_FILE)).unwrap();
+    registry
+        .execute(
+            "UPDATE project_generations SET base_revision=base_revision+1 WHERE id=?1",
+            [generation],
+        )
+        .unwrap();
+    drop(registry);
+
+    // The catalog is still writable, but its recorded base no longer
+    // agrees with the authenticated payload's seal.
+    recovery::reclaim_index_pairs(&cache, &project, request, &settings, limits());
+    assert!(retired.join("metadata.db").exists());
+    assert_eq!(
+        env.catalog_state(),
+        (next.generation_id.unwrap(), Some("retired".into()))
+    );
+
+    let registry = Connection::open(cache.join(DB_FILE)).unwrap();
+    registry
+        .execute(
+            "UPDATE project_generations SET base_revision=base_revision-1 WHERE id=?1",
+            [generation],
+        )
+        .unwrap();
+    drop(registry);
+    recovery::reclaim_index_pairs(&cache, &project, request, &settings, limits());
+    assert!(!retired.exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn operational_base_applies_the_sqlite_value_limit_to_local_metadata() {
+    let env = Env::new();
+    let settings = settings::standalone().unwrap();
+    let (_, active) = retire_local_pair(&env);
+    let metadata = env
+        .generation(active.generation_id.unwrap())
+        .join("metadata.db");
+    let connection = Connection::open(metadata).unwrap();
+    connection
+        .execute(
+            "UPDATE projects SET index_outcome_json = index_outcome_json || ?1",
+            [" ".repeat(32 * 1024)],
+        )
+        .unwrap();
+    drop(connection);
+
+    let observed = observe_index_base(
+        &env.cache.path().canonicalize().unwrap(),
+        active.project_id,
+        active.epoch.unwrap(),
+        &settings,
+        InspectionLimits {
+            max_sqlite_value_bytes: 16 * 1024,
+            ..limits()
+        },
+    );
+    assert!(
+        observed.is_err(),
+        "oversized local SQLite record was accepted"
+    );
 }

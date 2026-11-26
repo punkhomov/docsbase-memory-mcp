@@ -1015,7 +1015,7 @@ fn v2_index_writer_policy_is_global_and_keeps_chunk_overrides_independent() {
     layer(
         &global,
         "config.toml",
-        "config_version = 2\n[index.writer]\nheap_bytes = 30000000\nworker_threads = 2\n[index.chunk]\noverlap_chars = 90\n",
+        "config_version = 2\n[index.writer]\nheap_bytes = 30000000\nworker_threads = 2\nstaging_disk_bytes = 16777216\n[index.chunk]\noverlap_chars = 90\n",
     );
     layer(
         &project,
@@ -1028,6 +1028,7 @@ fn v2_index_writer_policy_is_global_and_keeps_chunk_overrides_independent() {
     assert_eq!(field("index.writer.worker_threads").value, 2);
     assert_eq!(field("index.writer.heap_bytes").value, 30_000_000);
     assert_eq!(field("index.writer.merge_threads").value, 4);
+    assert_eq!(field("index.writer.staging_disk_bytes").value, 16_777_216);
     assert_eq!(field("index.chunk.max_chars").value, 1000);
     assert_eq!(field("index.chunk.overlap_chars").value, 90);
     assert_eq!(
@@ -1036,6 +1037,10 @@ fn v2_index_writer_policy_is_global_and_keeps_chunk_overrides_independent() {
     );
     assert_eq!(
         field("index.writer.heap_bytes").origin.source,
+        SourceId::Global(global.path().join("config.toml"))
+    );
+    assert_eq!(
+        field("index.writer.staging_disk_bytes").origin.source,
         SourceId::Global(global.path().join("config.toml"))
     );
     assert_eq!(
@@ -1058,6 +1063,10 @@ fn v2_index_writer_policy_is_global_and_keeps_chunk_overrides_independent() {
         (
             "[index]\nwriter = []",
             "index.writer settings require a table",
+        ),
+        (
+            "[index.writer]\nstaging_disk_bytes = 0",
+            "index.writer.staging_disk_bytes",
         ),
         (
             "[index.writer]\nworker_threads = 0",

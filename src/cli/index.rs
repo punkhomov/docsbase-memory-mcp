@@ -1,5 +1,7 @@
 //! `docsbase index` through the per-project writer or the running v2 daemon.
 
+mod generation;
+
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
@@ -172,6 +174,11 @@ fn canonical_target(path: Option<PathBuf>) -> Result<PathBuf> {
     })
 }
 
+enum DirectIndex {
+    Legacy(crate::index::async_job::JobContext),
+    Generation(generation::Target),
+}
+
 pub(super) async fn run_with_operation(
     context: super::command::Context,
     path: Option<PathBuf>,
@@ -187,7 +194,11 @@ pub(super) async fn run_with_operation(
                 let root = registry::project_root_for(&target, &owner.cache)?;
                 let config = Config::for_project(&owner.global, &root)?;
                 let store = VectorStore::reserve(&owner.cache, policy)?;
-                let mut db = Db::open_with_settings(&owner.cache, &settings)?;
+                let mut db = Db::open_for_index(&owner.cache, &settings)?;
+                if db.has_generation_catalog() {
+                    return generation::Target::capture(db, &root, config, settings)
+                        .map(DirectIndex::Generation);
+                }
                 (
                     registry::ensure_project(&mut db, &root)?,
                     config,
@@ -202,7 +213,7 @@ pub(super) async fn run_with_operation(
             };
             let config = Arc::new(config);
             let stages = Arc::new(owner.stages(&config)?);
-            Ok(crate::index::async_job::JobContext {
+            Ok(DirectIndex::Legacy(crate::index::async_job::JobContext {
                 input: crate::index::async_job::JobInput::Full,
                 singleton: None,
                 cache: owner.cache,
@@ -213,9 +224,22 @@ pub(super) async fn run_with_operation(
                 source,
                 revision: None,
                 dense: None,
-            })
+            }))
         })
         .await?;
+    let captured = match captured {
+        DirectIndex::Legacy(job) => job,
+        DirectIndex::Generation(target) => {
+            let permit = context.workers.background(&operation).await?;
+            let call = operation.clone();
+            let budget = context.budget.clone();
+            let worker = crate::daemon::request::spawn(Some(permit), Some(activity), move || {
+                let _cpu = call.cpu_timer();
+                target.index(&call, &budget)
+            });
+            return crate::daemon::request::run(worker, Some(&operation)).await;
+        }
+    };
     let id = captured.project.id;
     let result = crate::index::async_job::run(
         &context.jobs,

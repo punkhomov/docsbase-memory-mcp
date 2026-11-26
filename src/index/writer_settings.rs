@@ -14,6 +14,7 @@ use crate::error::{Error, Result};
 const MIN_ARENA_BYTES: usize = 15_000_000;
 const MAX_ARENA_BYTES_EXCLUSIVE: usize = u32::MAX as usize - 1_000_000;
 const MAX_THREADS: usize = 8;
+const DEFAULT_STAGING_DISK_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Validated settings for a single lexical writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +22,7 @@ pub struct IndexWriterSettings {
     heap_bytes: usize,
     worker_threads: usize,
     merge_threads: usize,
+    staging_disk_bytes: u64,
 }
 
 impl IndexWriterSettings {
@@ -47,6 +49,7 @@ impl IndexWriterSettings {
             heap_bytes,
             worker_threads,
             merge_threads,
+            staging_disk_bytes: DEFAULT_STAGING_DISK_BYTES,
         })
     }
 
@@ -56,7 +59,12 @@ impl IndexWriterSettings {
             // The former 20 MB automatic budget always selected one worker.
             worker_threads: 1,
             merge_threads: 4,
+            staging_disk_bytes: DEFAULT_STAGING_DISK_BYTES,
         }
+    }
+
+    pub(crate) const fn staging_disk_bytes(self) -> u64 {
+        self.staging_disk_bytes
     }
 
     pub(crate) fn options(self) -> IndexWriterOptions {
@@ -75,6 +83,11 @@ impl IndexWriterSettings {
         ] {
             view.push(key, value.into(), None)?;
         }
+        view.push(
+            "index.writer.staging_disk_bytes",
+            self.staging_disk_bytes.into(),
+            None,
+        )?;
         Ok(())
     }
 }
@@ -85,6 +98,7 @@ pub(crate) struct WriterPatch {
     heap_bytes: Option<usize>,
     worker_threads: Option<usize>,
     merge_threads: Option<usize>,
+    staging_disk_bytes: Option<u64>,
 }
 
 pub(crate) struct WriterSpec;
@@ -98,6 +112,11 @@ impl SettingsSpec for WriterSpec {
         FieldSpec::new("index.writer.heap_bytes", Scope::Daemon, Unit::Bytes),
         FieldSpec::new("index.writer.worker_threads", Scope::Daemon, Unit::Count),
         FieldSpec::new("index.writer.merge_threads", Scope::Daemon, Unit::Count),
+        FieldSpec::new(
+            "index.writer.staging_disk_bytes",
+            Scope::Daemon,
+            Unit::Bytes,
+        ),
     ];
 
     fn defaults(_: &DefaultsContext) -> IndexWriterSettings {
@@ -115,7 +134,7 @@ impl SettingsSpec for WriterSpec {
         source: &SourceId,
         origins: &mut Provenance,
     ) -> Result<()> {
-        let candidate = IndexWriterSettings::new(
+        let mut candidate = IndexWriterSettings::new(
             patch.heap_bytes.unwrap_or(settings.heap_bytes),
             patch.worker_threads.unwrap_or(settings.worker_threads),
             patch.merge_threads.unwrap_or(settings.merge_threads),
@@ -129,11 +148,24 @@ impl SettingsSpec for WriterSpec {
                 origins.set(key, source)?;
             }
         }
+        candidate.staging_disk_bytes = patch
+            .staging_disk_bytes
+            .unwrap_or(settings.staging_disk_bytes);
+        if patch.staging_disk_bytes.is_some() {
+            origins.set("index.writer.staging_disk_bytes", source)?;
+        }
         *settings = candidate;
         Ok(())
     }
 
-    fn validate(_: &IndexWriterSettings, _: &Capabilities) -> Result<()> {
+    fn validate(settings: &IndexWriterSettings, _: &Capabilities) -> Result<()> {
+        if settings.staging_disk_bytes <= 2 * blake3::OUT_LEN as u64
+            || i64::try_from(settings.staging_disk_bytes).is_err()
+        {
+            return Err(Error::Admission {
+                message: "index.writer.staging_disk_bytes must cover both ownership records and fit a SQLite integer".into(),
+            });
+        }
         Ok(())
     }
 

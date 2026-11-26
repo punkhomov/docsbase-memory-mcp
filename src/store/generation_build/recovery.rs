@@ -39,29 +39,130 @@ pub fn find_lexical_build_to_discard(
     with_preparation_lease(&project, || {
         let db = open_recovery_registry(&cache, settings)?;
         validate_epoch(db.connection(), request.epoch)?;
-        let plan = blake3::Hash::from_bytes(request.plan_digest).to_hex();
-        let mut query = db
-            .connection()
-            .prepare(
-                "SELECT id FROM project_generations WHERE project_id = ?1 AND plan_id = ?2
-               AND layout = 'local' AND phase IN ('building', 'reclaiming')
-               AND seal_digest IS NULL LIMIT 2",
-            )
-            .map_err(repo::db_error)?;
-        let mut rows = query
-            .query(params![request.project_id, plan.as_str()])
-            .map_err(repo::db_error)?;
-        let Some(row) = rows.next().map_err(repo::db_error)? else {
-            return Ok(None);
-        };
-        let id = row.get(0).map_err(repo::db_error)?;
-        if rows.next().map_err(repo::db_error)?.is_some() {
-            return Err(admission(
-                "the accepted plan matches multiple incomplete generations",
-            ));
-        }
-        Ok(Some(id))
+        find_abandoned_build(&db, request)
     })
+}
+
+fn find_abandoned_build(db: &super::Db, request: LexicalBuildRequest) -> Result<Option<i64>> {
+    let plan = blake3::Hash::from_bytes(request.plan_digest).to_hex();
+    let mut query = db
+        .connection()
+        .prepare(
+            "SELECT id FROM project_generations WHERE project_id = ?1 AND plan_id = ?2
+           AND layout = 'local' AND phase IN ('building', 'reclaiming')
+           AND seal_digest IS NULL LIMIT 2",
+        )
+        .map_err(repo::db_error)?;
+    let mut rows = query
+        .query(params![request.project_id, plan.as_str()])
+        .map_err(repo::db_error)?;
+    let Some(row) = rows.next().map_err(repo::db_error)? else {
+        return Ok(None);
+    };
+    let id = row.get(0).map_err(repo::db_error)?;
+    if rows.next().map_err(repo::db_error)?.is_some() {
+        return Err(admission(
+            "the accepted plan matches multiple incomplete generations",
+        ));
+    }
+    Ok(Some(id))
+}
+
+pub(super) fn discard_index_attempt(
+    cache: &Path,
+    project: &Path,
+    request: LexicalBuildRequest,
+    settings: &Resolved<DbSettings>,
+    limits: InspectionLimits,
+) -> Result<()> {
+    let db = open_recovery_registry(cache, settings)?;
+    validate_epoch(db.connection(), request.epoch)?;
+    let abandoned = find_abandoned_build(&db, request)?;
+    db.close()?;
+    if let Some(generation) = abandoned {
+        reclaim_stopped(
+            cache,
+            project,
+            request,
+            generation,
+            settings,
+            limits,
+            Reclamation::Abandoned,
+        )?;
+    }
+    Ok(())
+}
+
+/// Retry reclamation only for retired pairs built by the explicit index owner.
+pub(super) fn reclaim_index_pairs(
+    cache: &Path,
+    project: &Path,
+    request: LexicalBuildRequest,
+    settings: &Resolved<DbSettings>,
+    limits: InspectionLimits,
+) {
+    let retired = match retired_index_receipts(cache, request, settings, limits) {
+        Ok(retired) => retired,
+        Err(error) => {
+            eprintln!("docsbase: retired generation cleanup will be retried: {error}");
+            return;
+        }
+    };
+    for (generation, receipt) in retired {
+        if let Err(error) = reclaim_stopped(
+            cache,
+            project,
+            request,
+            generation,
+            settings,
+            limits,
+            Reclamation::Retired(receipt),
+        ) {
+            eprintln!("docsbase: retained generation {generation} for later cleanup: {error}");
+        }
+    }
+}
+
+fn retired_index_receipts(
+    cache: &Path,
+    request: LexicalBuildRequest,
+    settings: &Resolved<DbSettings>,
+    limits: InspectionLimits,
+) -> Result<Vec<(i64, RetiredReceipt)>> {
+    let db = open_recovery_registry(cache, settings)?;
+    validate_epoch(db.connection(), request.epoch)?;
+    let plan = blake3::Hash::from_bytes(request.plan_digest).to_hex();
+    let maximum_rows = limits.max_metadata_bytes / size_of::<(i64, RetiredReceipt)>();
+    let maximum_rows = i64::try_from(maximum_rows)
+        .map_err(|_| admission("generation recovery exceeds the catalog inspection limit"))?;
+    let retired =
+        {
+            let mut statement = db.connection().prepare(
+            "SELECT id, base_id, base_revision, reserved_disk_bytes FROM project_generations
+             WHERE project_id = ?1 AND plan_id = ?2 AND layout = 'local'
+                AND phase IN ('retired', 'reclaiming') AND seal_digest IS NOT NULL
+             ORDER BY id LIMIT ?3",
+        ).map_err(repo::db_error)?;
+            statement
+                .query_map(
+                    params![request.project_id, plan.as_str(), maximum_rows],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            RetiredReceipt {
+                                base_id: row.get(1)?,
+                                base_revision: row.get(2)?,
+                                reserved_disk_bytes: row.get(3)?,
+                            },
+                        ))
+                    },
+                )
+                .map_err(repo::db_error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(repo::db_error)?
+        };
+    db.close()?;
+    Ok(retired)
 }
 
 /// Discards an inactive attempt with the exact project, generation and plan identity.
@@ -107,14 +208,32 @@ pub fn reclaim_retired_lexical_generation(
         generation,
         settings,
         limits,
-        Reclamation::Retired,
+        Reclamation::Retired(RetiredReceipt {
+            base_id: request.base.and_then(|base| base.generation_id),
+            base_revision: request.base.map_or(0, |base| base.content_revision),
+            reserved_disk_bytes: i64::try_from(request.reserved_disk_bytes)
+                .map_err(|_| admission("retired reservation exceeds the SQLite integer range"))?,
+        }),
     )
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 enum Reclamation {
     Abandoned,
-    Retired,
+    Retired(RetiredReceipt),
+}
+
+impl Reclamation {
+    const fn is_retired(self) -> bool {
+        matches!(self, Self::Retired(_))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RetiredReceipt {
+    base_id: Option<i64>,
+    base_revision: i64,
+    reserved_disk_bytes: i64,
 }
 
 struct RetainedGeneration {
@@ -153,17 +272,12 @@ impl RetainedGeneration {
             .map_err(repo::db_error)
     }
 
-    fn resuming(
-        &self,
-        kind: Reclamation,
-        plan: &str,
-        request: LexicalBuildRequest,
-    ) -> Result<bool> {
+    fn resuming(&self, kind: Reclamation, plan: &str) -> Result<bool> {
         let (initial_phase, error) = match kind {
             Reclamation::Abandoned => {
                 ("building", "generation is not the requested inactive build")
             }
-            Reclamation::Retired => (
+            Reclamation::Retired(_) => (
                 "retired",
                 "generation is not the requested retired local pair",
             ),
@@ -172,18 +286,18 @@ impl RetainedGeneration {
         if (!resuming && self.phase != initial_phase)
             || self.layout != "local"
             || self.plan.as_deref() != Some(plan)
-            || self.seal.is_some() != (kind == Reclamation::Retired)
-            || (kind == Reclamation::Retired && !self.matches_build(request))
+            || self.seal.is_some() != kind.is_retired()
+            || matches!(kind, Reclamation::Retired(receipt) if !self.matches_build(receipt))
         {
             return Err(admission(error));
         }
         Ok(resuming)
     }
 
-    fn matches_build(&self, request: LexicalBuildRequest) -> bool {
-        self.base_id == request.base.and_then(|base| base.generation_id)
-            && self.base_revision == request.base.map_or(0, |base| base.content_revision)
-            && u64::try_from(self.reservation).ok() == Some(request.reserved_disk_bytes)
+    fn matches_build(&self, receipt: RetiredReceipt) -> bool {
+        self.base_id == receipt.base_id
+            && self.base_revision == receipt.base_revision
+            && self.reservation == receipt.reserved_disk_bytes
     }
 }
 
@@ -196,7 +310,7 @@ fn find_reclamation_record(
     let state = RetainedGeneration::load(registry, generation)?;
     match state {
         Some(state) if state.project == project => Ok(Some(state)),
-        Some(_) if kind == Reclamation::Retired => Err(admission(
+        Some(_) if kind.is_retired() => Err(admission(
             "retired generation belongs to a different project",
         )),
         _ => Ok(None),
@@ -224,93 +338,113 @@ fn reclaim_local_generation(
         return Err(admission("project preparation directory is missing"));
     }
     with_preparation_lease(&project, || {
-        let generations = project.join("generations");
-        let parent = if directory_exists(&generations)? {
-            generations.as_path()
-        } else {
-            project.as_path()
-        };
-        let path = generations.join(generation.to_string());
-        let exists = directory_exists(&path)?;
-        let plan = blake3::Hash::from_bytes(request.plan_digest).to_hex();
-        let mut db = open_recovery_registry(&cache, settings)?;
-        validate_epoch(db.connection(), request.epoch)?;
-        let intent = claim_path(&generations, generation);
-        let Some(state) =
-            find_reclamation_record(db.connection(), request.project_id, generation, kind)?
-        else {
-            return if exists
-                || (kind == Reclamation::Retired && read_owner_record(&intent)?.is_some())
-            {
-                Err(admission(
-                    "discard found an uncatalogued generation directory",
-                ))
-            } else {
-                Ok(())
-            };
-        };
-        let resuming = state.resuming(kind, plan.as_str(), request)?;
-        let seal_digest = state.seal.as_ref().map(<[u8; 32]>::as_slice);
-
-        // Confirm the required barrier before changing either durable state.
-        sync_directory(parent)?;
-        let digest = ownership_digest(request, generation);
-        let intent_bytes = read_owner_record(&intent)?;
-        let claimed = verify_intent(
-            intent_bytes.as_deref(),
-            digest,
-            !exists && kind == Reclamation::Abandoned,
-        )?;
-        if exists {
-            verify_ownership(&path, digest, claimed, resuming)?;
-        }
-        let mut reader_lock = open_reader_lock(&path.join(".read.lock"))?;
-        if kind == Reclamation::Retired
-            && ((exists && !claimed) || (!resuming && (!exists || reader_lock.is_none())))
-        {
-            return Err(admission(
-                "retired generation has incomplete ownership or reader lease",
-            ));
-        }
-        let _reader_guard = reader_lock
-            .as_mut()
-            .map(|lock| {
-                lock.try_write().map_err(|error| {
-                    super::Error::internal_with_source("exclude staged generation readers", error)
-                })
-            })
-            .transpose()?;
-        if exists {
-            match seal_digest {
-                Some(seal) => validate_retired_files(&path, seal, limits, resuming)?,
-                None => validate_owned_files(&path)?,
-            }
-            sync_directory(&path)?;
-        }
-        claim_reclamation(
-            &mut db,
-            request,
-            generation,
-            &state.phase,
-            plan.as_str(),
-            seal_digest,
-        )?;
-        drop(db);
-
-        remove_reclaiming_generation(
-            parent,
-            exists.then_some(path.as_path()),
-            intent_bytes.as_ref().map(|_| intent.as_path()),
-        )?;
-        release_reservation(
-            &cache,
-            request,
-            generation,
-            settings,
-            plan.as_str(),
-            seal_digest,
+        reclaim_stopped(
+            &cache, &project, request, generation, settings, limits, kind,
         )
     })
+}
+
+fn reclaim_stopped(
+    cache: &Path,
+    project: &Path,
+    request: LexicalBuildRequest,
+    generation: i64,
+    settings: &Resolved<DbSettings>,
+    limits: InspectionLimits,
+    kind: Reclamation,
+) -> Result<()> {
+    let generations = project.join("generations");
+    let parent = if directory_exists(&generations)? {
+        generations.as_path()
+    } else {
+        project
+    };
+    let path = generations.join(generation.to_string());
+    let exists = directory_exists(&path)?;
+    let plan = blake3::Hash::from_bytes(request.plan_digest).to_hex();
+    let mut db = open_recovery_registry(cache, settings)?;
+    validate_epoch(db.connection(), request.epoch)?;
+    let intent = claim_path(&generations, generation);
+    let Some(state) =
+        find_reclamation_record(db.connection(), request.project_id, generation, kind)?
+    else {
+        return if exists || (kind.is_retired() && read_owner_record(&intent)?.is_some()) {
+            Err(admission(
+                "discard found an uncatalogued generation directory",
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    let resuming = state.resuming(kind, plan.as_str())?;
+    let seal_digest = state.seal.as_ref().map(<[u8; 32]>::as_slice);
+
+    // Confirm the required barrier before changing either durable state.
+    sync_directory(parent)?;
+    let digest = ownership_digest(request, generation);
+    let intent_bytes = read_owner_record(&intent)?;
+    let claimed = verify_intent(
+        intent_bytes.as_deref(),
+        digest,
+        !exists && !kind.is_retired(),
+    )?;
+    if exists {
+        verify_ownership(&path, digest, claimed, resuming)?;
+    }
+    let mut reader_lock = open_reader_lock(&path.join(".read.lock"))?;
+    if kind.is_retired()
+        && ((exists && !claimed) || (!resuming && (!exists || reader_lock.is_none())))
+    {
+        return Err(admission(
+            "retired generation has incomplete ownership or reader lease",
+        ));
+    }
+    let _reader_guard = reader_lock
+        .as_mut()
+        .map(|lock| {
+            lock.try_write().map_err(|error| {
+                super::Error::internal_with_source("exclude staged generation readers", error)
+            })
+        })
+        .transpose()?;
+    if exists {
+        match seal_digest {
+            Some(seal) => validate_retired_files(
+                &path,
+                seal,
+                limits,
+                resuming,
+                request.epoch,
+                generation,
+                &state,
+            )?,
+            None => validate_owned_files(&path)?,
+        }
+        sync_directory(&path)?;
+    }
+    claim_reclamation(
+        &mut db,
+        request,
+        generation,
+        &state.phase,
+        plan.as_str(),
+        seal_digest,
+    )?;
+    drop(db);
+
+    remove_reclaiming_generation(
+        parent,
+        exists.then_some(path.as_path()),
+        intent_bytes.as_ref().map(|_| intent.as_path()),
+    )?;
+    release_reservation(
+        cache,
+        request,
+        generation,
+        settings,
+        plan.as_str(),
+        seal_digest,
+    )
 }
 
 fn verify_intent(bytes: Option<&[u8]>, digest: blake3::Hash, allow_partial: bool) -> Result<bool> {
@@ -349,6 +483,9 @@ fn validate_retired_files(
     expected: &[u8],
     limits: InspectionLimits,
     resuming: bool,
+    epoch: [u8; 16],
+    generation: i64,
+    state: &RetainedGeneration,
 ) -> Result<()> {
     let seal = path.join("seal.json");
     if resuming && !super::entry_exists(&seal)? {
@@ -365,6 +502,18 @@ fn validate_retired_files(
         .map_err(|error| {
             super::Error::internal_with_source("decode retired generation seal", error)
         })?;
+    if manifest.format != crate::store::generation_seal::SEAL_FORMAT
+        || manifest.installation_epoch != epoch
+        || manifest.project_id != state.project
+        || manifest.generation_id != generation
+        || Some(manifest.plan.as_str()) != state.plan.as_deref()
+        || manifest.base_id != state.base_id
+        || manifest.base_revision != state.base_revision
+    {
+        return Err(admission(
+            "retired generation seal does not match its catalog receipt",
+        ));
+    }
     validate_generation_files(path, Some(&manifest.files))
 }
 
@@ -372,18 +521,14 @@ pub(super) fn open_recovery_registry(
     cache: &Path,
     settings: &Resolved<DbSettings>,
 ) -> Result<super::Db> {
-    // Recovery can open these SQLite-managed sidecars. Regular no-link
-    // paths are required under the quiescent maintenance owner.
+    // The SQLite VFS can open these entries during normal WAL access or
+    // recovery. A cooperating connection may remove an absent/closing sidecar.
     for suffix in ["-wal", "-shm", "-journal"] {
         let path = cache.join(format!("{DB_FILE}{suffix}"));
-        match fs::symlink_metadata(&path) {
-            Ok(_) => filesystem(
-                &path,
-                "inspect recovery sidecar",
-                native_fs::check_single_link(&path),
-            )?,
+        match native_fs::check_single_link(&path) {
+            Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return filesystem(&path, "inspect recovery sidecar", Err(error)),
+            Err(error) => return filesystem(&path, "inspect registry sidecar", Err(error)),
         }
     }
     open_registry_file(cache, &cache.join(DB_FILE), settings)

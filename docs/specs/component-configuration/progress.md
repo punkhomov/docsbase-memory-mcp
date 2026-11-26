@@ -1668,3 +1668,34 @@ Stopped preparation keeps its no-write inspection gate.
 Independent review and fix review passed. Full Rust 1.100.0 cli-full, Clippy
 (including the opt-in artifact and performance targets), fmt and the lean
 offline check passed with the existing search benchmark baseline.
+
+## 2026-11-26 — CF11c, explicit CLI index publishes v5 generations
+
+Task CF11c direct lexical index: complete (first build and replacement in an
+initialized v5 catalog, using the normal index command on qualified Unix
+filesystems). The command reserves its global staging disk policy and uses
+the admitted indexing payload account. The same preparation lease protects
+the staged pair through publication and retries.
+
+Ruling: the final operation gate runs inside the SQLite write transaction,
+immediately before commit. A separate SQLite writer proves the transaction
+is active at that gate. Refusal rolls back head and phase updates. A failed
+disk or memory quota preserves the active index and a later invocation
+discards its owned staging. Retired cleanup checks the authenticated seal
+against the catalog receipt and does not disturb a live reader or turn a
+successful index into a failure.
+
+Independent review and fix review passed. Real CLI and generation acceptance,
+full Rust 1.100.0 cli-full, Clippy including both opt-in targets, fmt and
+the lean offline test passed with the existing benchmark baseline.
+
+Ruling: an existing registry reader reproduced the stopped inspector's WAL
+refusal. Direct index now uses short operational registry phases, while the
+maintenance API keeps its no-write proof. A real concurrent SQLite snapshot
+retains the old head across publication and a fresh CLI search finds the
+new pair. Operational verification applies the local SQLite inspection limits,
+validated sidecar paths and the same artifact binding as search.
+
+Independent review and fix review passed. Full cli-full and lean offline
+tests, Clippy including the opt-in targets, fmt and the existing benchmark
+passed after the live WAL change.

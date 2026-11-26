@@ -245,8 +245,9 @@ pub(crate) fn prepare_staged_metadata(
     db: &mut Db,
     project: &Project,
     config: &Config,
+    capture: Option<&mut CaptureBudget<'_>>,
 ) -> Result<PreparedPlan> {
-    let mut prepared = capture_full(db, project, config, true)?;
+    let mut prepared = capture_full_accounted(db, project, config, true, capture)?;
     super::outcome::run(
         db,
         project,

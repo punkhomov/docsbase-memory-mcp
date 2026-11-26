@@ -965,6 +965,7 @@ defaults shown here.
 heap_bytes = 20000000
 worker_threads = 1
 merge_threads = 4
+staging_disk_bytes = 536870912
 ```
 
 The heap is divided evenly among indexing workers. Each worker must receive
@@ -977,3 +978,13 @@ Direct index and sync commands apply the current global settings. Restart
 the daemon to apply them to daemon jobs and watcher updates. These settings
 leave chunk recipes and existing indexes intact. `docsbase config effective`
 reports each value and its source.
+
+`staging_disk_bytes` reserves logical file bytes for one unpublished lexical
+pair in an initialized v5 catalog. The default is 512 MiB. The staged
+metadata and Tantivy writers enforce the reservation during the build. Direct
+`docsbase index` on a qualified Unix filesystem uses this policy together
+with the existing retained indexing payload budgets. Open SQLite registry
+readers keep their snapshots while a later search sees the newly published
+pair. A rejected build leaves
+the old head available. A later index retries cleanup of its retired local pairs once their readers
+release them. New installations still use the ordinary v4 storage path.
