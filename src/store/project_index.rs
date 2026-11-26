@@ -211,38 +211,41 @@ pub(crate) fn local_watcher_project(registry: &Db, project: &Project) -> Result<
     })
 }
 
-pub(crate) struct CatalogProjectInfo {
+pub(crate) struct CatalogProjectInfo<T> {
     pub(crate) project: Project,
     pub(crate) counts: repo::ProjectCounts,
-    pub(crate) revision: i64,
+    pub(crate) index: ProjectIndex,
+    pub(crate) details: T,
 }
 
-pub(crate) fn catalog_project_info(
+pub(crate) fn catalog_project_info<T>(
     registry: &Db,
     project: &Project,
-) -> Result<Option<CatalogProjectInfo>> {
+    observe: impl FnOnce(&Db, Option<&LocalMetadata>, ProjectIndex, repo::ProjectCounts) -> T,
+) -> Result<Option<CatalogProjectInfo<T>>> {
     let head = generation_catalog::active_head(registry.connection(), project.id)
         .map_err(|reason| unavailable("active generation", reason))?;
     if head.is_none() {
         return Ok(None);
     }
     with_catalog_pair(registry, project, |registry, local, index| {
-        let summarize = |metadata: &Db| {
+        let summarize = |metadata: &Db, local: Option<&LocalMetadata>| {
             let registered = registry::project_by_id(metadata, project.id)?
                 .ok_or_else(|| invalid_index("selected generation has no project metadata"))?;
             let counts = repo::project_counts(metadata.connection(), project.id)?;
             Ok(Some(CatalogProjectInfo {
                 project: registered,
                 counts,
-                revision: index.content_revision(),
+                index,
+                details: observe(metadata, local, index, counts),
             }))
         };
         match local.as_ref() {
             Some(local) => {
                 local.tantivy_dir()?;
-                summarize(&local.db).map_err(local_metadata_error)
+                summarize(&local.db, Some(local)).map_err(local_metadata_error)
             }
-            None => summarize(registry),
+            None => summarize(registry, None),
         }
     })
 }

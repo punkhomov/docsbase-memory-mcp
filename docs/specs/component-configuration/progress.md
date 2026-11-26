@@ -1959,3 +1959,22 @@ minor (deferred): ordinary reopen compares the configured cache key with
 the seal. Recheck the key of its actual built stage before installing it
 when enabling configured Shared hybrid. The shipped provider factories
 derive the same key and query admission already checks the actual stage.
+
+## 2026-11-26 — CF11c, диагностика Shared v5
+
+Task CF11c catalog vector coverage and ANN diagnostics: complete (route
+regressions, fresh review, fix reviews, Rust 1.100.0 verification).
+
+Ruling: `status` and `panel_projects` observe coverage from the selected
+metadata pair. The fixture verifies matching and mismatched model keys,
+config-only observation without constructing a stage, distinct duplicate
+chunks, and admission when the payload allowance is exhausted. The cache IO
+starts after the metadata and project leases are released.
+
+Ruling: resident graph dimensions and last-search outcomes are qualified by
+the selected pair, its content revision, embedding key and ANN build recipe.
+A runtime revision guard spans a bound outcome write. The fixture verifies
+the real search's outcome and its retirement after publishing another head.
+Automatic warming and resident-graph acceptance continue in the same Shared
+hybrid work. All 830 runnable cli-full library tests, all-target Clippy,
+lean offline and formatting passed.

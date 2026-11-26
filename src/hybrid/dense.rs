@@ -36,7 +36,7 @@ use crate::store::project_index::ProjectIndex;
 use crate::store::repo;
 #[cfg(test)]
 use crate::vector_cache::VectorCache;
-use crate::vector_cache::{CacheLimits, VectorCacheSource, VectorStore};
+use crate::vector_cache::{CacheLimits, EmbeddingRecipe, VectorCacheSource, VectorStore};
 
 #[cfg(test)]
 #[path = "query_flight_tests.rs"]
@@ -421,6 +421,23 @@ struct Entry {
     bytes: u64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct OutcomeBinding {
+    index: ProjectIndex,
+    embedding: EmbeddingRecipe,
+    ann_build: AnnBuildSettings,
+}
+
+struct RecordedOutcome {
+    binding: Option<OutcomeBinding>,
+    outcome: AnnOutcome,
+}
+
+pub(crate) struct AnnDiagnostics {
+    pub(crate) outcome: Option<AnnOutcome>,
+    pub(crate) resident: Option<(usize, u64)>,
+}
+
 struct CachedDigest {
     digest: String,
     last_used: u64,
@@ -702,7 +719,7 @@ pub struct DenseCache {
     digests: Arc<Mutex<DigestCache>>,
     vector_cache_limits: Arc<Mutex<HashMap<i64, u64>>>,
     vector_store: Option<VectorStore>,
-    outcomes: Arc<Mutex<HashMap<i64, AnnOutcome>>>,
+    outcomes: Arc<Mutex<HashMap<i64, RecordedOutcome>>>,
     query_cache: Arc<Mutex<QueryCache>>,
     clock: Arc<AtomicU64>,
     origin_activity: Option<Arc<crate::daemon::request::Activity>>,
@@ -936,35 +953,98 @@ impl DenseCache {
     /// Records what the ANN tier did for the last search of `project_id`
     /// (FR-6). One record per project; the oldest is dropped at the project cap.
     pub fn record_outcome(&self, project_id: i64, state: AnnState, reason: Option<&'static str>) {
+        self.record(project_id, None, state, reason);
+    }
+
+    pub(crate) fn record_bound_outcome(
+        &self,
+        index: ProjectIndex,
+        model_id: &str,
+        state: AnnState,
+        reason: Option<&'static str>,
+    ) {
+        let binding = index.catalog_generation().map(|_| OutcomeBinding {
+            index,
+            embedding: EmbeddingRecipe::for_model(model_id),
+            ann_build: self.ann_build,
+        });
+        self.record(index.project_id(), binding, state, reason);
+    }
+
+    fn record(
+        &self,
+        project_id: i64,
+        binding: Option<OutcomeBinding>,
+        state: AnnState,
+        reason: Option<&'static str>,
+    ) {
         let outcome = AnnOutcome {
             state,
             reason,
             at: std::time::Instant::now(),
         };
         let mut outcomes = self.lock_outcomes();
+        if let Some(current) = outcomes.get(&project_id).and_then(|record| record.binding)
+            && binding.is_some_and(|candidate| current.index.is_after(candidate.index))
+        {
+            return;
+        }
         if outcomes.len() >= self.limits.max_projects
             && !outcomes.contains_key(&project_id)
-            && let Some((oldest, _)) = outcomes
+            && let Some(oldest) = outcomes
                 .iter()
-                .min_by_key(|(_, record)| record.at)
-                .map(|(id, record)| (*id, *record))
+                .min_by_key(|(_, record)| record.outcome.at)
+                .map(|(id, _)| *id)
         {
             outcomes.remove(&oldest);
         }
-        outcomes.insert(project_id, outcome);
+        outcomes.insert(project_id, RecordedOutcome { binding, outcome });
     }
 
     /// Last recorded ANN outcome for `project_id`, if any.
     #[must_use]
     pub fn outcome(&self, project_id: i64) -> Option<AnnOutcome> {
-        self.lock_outcomes().get(&project_id).copied()
+        self.lock_outcomes()
+            .get(&project_id)
+            .map(|record| record.outcome)
     }
 
     /// Resident ANN size for `project_id`: `(vectors, estimated_bytes)`.
     #[must_use]
     pub fn ann_snapshot(&self, project_id: i64) -> Option<(usize, u64)> {
         let entries = self.lock_entries();
-        match &entries.get(&project_id)?.state {
+        Self::ann_size(&entries.get(&project_id)?.state)
+    }
+
+    pub(crate) fn ann_diagnostics_for(
+        &self,
+        index: ProjectIndex,
+        model_id: &str,
+        ann_build: AnnBuildSettings,
+    ) -> AnnDiagnostics {
+        let project_id = index.project_id();
+        let expected = OutcomeBinding {
+            index,
+            embedding: EmbeddingRecipe::for_model(model_id),
+            ann_build,
+        };
+        let outcome = self
+            .lock_outcomes()
+            .get(&project_id)
+            .filter(|record| record.binding == Some(expected))
+            .map(|record| record.outcome);
+        let resident = self
+            .lock_entries()
+            .get(&project_id)
+            .filter(|entry| {
+                entry.index == index && entry.model_id == model_id && entry.ann_build == ann_build
+            })
+            .and_then(|entry| Self::ann_size(&entry.state));
+        AnnDiagnostics { outcome, resident }
+    }
+
+    fn ann_size(state: &DenseRows) -> Option<(usize, u64)> {
+        match state {
             DenseRows::Ann(ann) => Some((
                 ann.count(),
                 u64::try_from(ann.estimated_bytes()).unwrap_or(u64::MAX),
@@ -1183,7 +1263,7 @@ impl DenseCache {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn lock_outcomes(&self) -> std::sync::MutexGuard<'_, HashMap<i64, AnnOutcome>> {
+    fn lock_outcomes(&self) -> std::sync::MutexGuard<'_, HashMap<i64, RecordedOutcome>> {
         self.outcomes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 

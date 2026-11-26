@@ -860,6 +860,80 @@ fn catalog_warm_metadata(
     metadata.try_recv().ok()
 }
 
+#[cfg(unix)]
+async fn catalog_diagnostics(shared: &Arc<Shared>, session: u64) -> Value {
+    let mut status = call_tool(shared, Some(session), "status", json!({}))
+        .await
+        .unwrap();
+    let project = status["projects"][0].take();
+    let panel = call_tool(shared, Some(session), "panel_projects", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        panel[0]["cached_vectors"],
+        project["embed_coverage"]["cached"]
+    );
+    assert_eq!(
+        panel[0]["vector_chunks"],
+        project["embed_coverage"]["total"]
+    );
+    assert_eq!(panel[0]["ann_state"], project["ann"]["state"]);
+    project
+}
+
+#[cfg(unix)]
+async fn catalog_diagnostics_with_small_payload_allowance(shared: &Arc<Shared>, session: u64) {
+    let policy = shared.payload_budget.settings();
+    let mut remaining = policy.max_retained_payload_bytes - 192;
+    let mut held = Vec::new();
+    while remaining > 0 {
+        let bytes = remaining.min(policy.max_request_payload_bytes);
+        held.push(shared.payload_budget.reserve(bytes).unwrap());
+        remaining -= bytes;
+    }
+    let view = catalog_diagnostics(shared, session).await;
+    assert_eq!(view["docs"], 1);
+    assert!(view["embed_coverage"].is_null());
+    drop(held);
+}
+
+#[cfg(unix)]
+async fn catalog_config_only_diagnostics(shared: &Arc<Shared>, project: &Project, session: u64) {
+    let slot = shared.project_slot(project.id);
+    let prior = {
+        let mut state = slot.state.lock().unwrap();
+        let mut config = (**state.config.as_ref().unwrap()).clone();
+        config.hybrid_cfg.enabled = true;
+        config.hybrid_cfg.ranking = Ranking::Rrf;
+        config.hybrid_cfg.embedding = Some(crate::hybrid::config::EmbeddingCfg {
+            provider: "openrouter".into(),
+            model: "test/sealed-model".into(),
+            dimensions: 3,
+            normalize: true,
+        });
+        let previous = state.config.replace(Arc::new(config));
+        (previous, state.stages.take(), state.search_stages.take())
+    };
+    let view = catalog_diagnostics(shared, session).await;
+    assert_eq!(view["embed_coverage"], json!({"cached": 1, "total": 1}));
+    let mut state = slot.state.lock().unwrap();
+    assert!(state.stages.is_none() && state.search_stages.is_none());
+    (state.config, state.stages, state.search_stages) = prior;
+}
+
+#[cfg(unix)]
+fn assert_catalog_embedding_seal(cache: &Path, project: i64, generation: i64, model: &str) {
+    let seal = cache
+        .join("projects")
+        .join(project.to_string())
+        .join("generations")
+        .join(generation.to_string())
+        .join("seal.json");
+    let seal = std::fs::read_to_string(seal).unwrap();
+    assert!(seal.contains("embedding_recipe"));
+    assert!(!seal.contains(model));
+}
+
 #[test]
 #[cfg(unix)]
 fn catalog_search_checks_the_sealed_model_before_query_embedding() {
@@ -872,7 +946,7 @@ fn catalog_search_checks_the_sealed_model_before_query_embedding() {
     let config = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("guide.md"), "sealedmodelwidget").unwrap();
-    let model = "test/sealed-model@d3@l2";
+    let model = "openrouter/test/sealed-model@d3@l2";
 
     let mut initial = crate::daemon::job_service::JobRoot::new(policy.settings());
     let service = initial.service();
@@ -923,26 +997,48 @@ fn catalog_search_checks_the_sealed_model_before_query_embedding() {
             assert!(error.to_string().contains("embedding recipe"), "{error}");
             assert_eq!(other.queries.load(Ordering::SeqCst), 0);
             assert_eq!(catalog_warm_metadata(&shared, &project), None);
+            let view = catalog_diagnostics(&shared, session).await;
+            assert!(view["embed_coverage"].is_null());
 
             let original = document_gate_for(model);
+            catalog_config_only_diagnostics(&shared, &project, session).await;
             catalog_test_embedder(&shared, &project, &original);
+            catalog_diagnostics_with_small_payload_allowance(&shared, session).await;
+            assert_eq!(original.queries.load(Ordering::SeqCst), 0);
             let (generation, used) = catalog_warm_metadata(&shared, &project).unwrap();
             assert_eq!(used, model);
-            let seal = shared
-                .cache
-                .join("projects")
-                .join(project.id.to_string())
-                .join("generations")
-                .join(generation.to_string())
-                .join("seal.json");
-            let seal = std::fs::read_to_string(seal).unwrap();
-            assert!(seal.contains("embedding_recipe"));
-            assert!(!seal.contains(model));
+            assert_catalog_embedding_seal(&shared.cache, project.id, generation, model);
             assert_eq!(
                 catalog_search_hits(&shared, session, "sealedmodelwidget").await,
                 1
             );
             assert_eq!(original.queries.load(Ordering::SeqCst), 1);
+
+            let view = catalog_diagnostics(&shared, session).await;
+            assert_eq!(view["ann"]["state"], "ready");
+
+            catalog_test_embedder(&shared, &project, &other);
+            let view = catalog_diagnostics(&shared, session).await;
+            assert_eq!(view["ann"]["state"], "stale");
+
+            catalog_test_embedder(&shared, &project, &original);
+            std::fs::write(root.path().join("guide.md"), "newsealedmodelwidget").unwrap();
+            std::fs::write(root.path().join("duplicate.md"), "newsealedmodelwidget").unwrap();
+            original.release.add_permits(2);
+            call_tool(
+                &shared,
+                Some(session),
+                "index_project",
+                json!({"path": root.path()}),
+            )
+            .await
+            .unwrap();
+            let view = catalog_diagnostics(&shared, session).await;
+            assert_eq!(view["docs"], 2);
+            assert_eq!(view["chunks"], 2);
+            assert_eq!(view["embed_coverage"], json!({"cached": 1, "total": 1}));
+            assert_eq!(view["ann"]["state"], "loading");
+            assert!(view["ann"]["vectors"].is_null());
             Ok(())
         })
         .unwrap();

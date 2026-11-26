@@ -32,6 +32,7 @@ use crate::hybrid::dense::DenseCacheLimits;
 use crate::hybrid::dense::DenseRequest;
 use crate::hybrid::dense::{AnnPolicy, BoundDenseRequest, DenseCache};
 use crate::hybrid::jobs as hybrid_jobs;
+use crate::hybrid::meta::AnnState;
 use crate::ipc::framing::{Frame, FrameReader};
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 use crate::platform::transport::Stream;
@@ -40,7 +41,13 @@ use crate::store::Db;
 use crate::store::migrations;
 use crate::store::read_pool::ReadPool;
 use crate::store::settings::{DbSettings, ReadPoolSettings};
-use crate::store::{generation_build::CatalogHead, project_index::ProjectIndex};
+use crate::store::{
+    generation_build::CatalogHead,
+    models::Project,
+    project_index::{
+        CatalogProjectInfo, ProjectIndex, catalog_project_info, require_catalog_embedding,
+    },
+};
 use crate::watch::Watchers;
 
 #[cfg(test)]
@@ -3151,12 +3158,12 @@ fn route_metadata_tool_in(
             | "read_neighbors_at"
     ) {
         if shared.catalog_epoch.is_some() {
-            let reader = shared.readers.try_acquire()?;
             if shared.website.is_none()
                 && matches!(name, "status" | "list_projects" | "panel_projects")
             {
-                return catalog_project_views(shared, &reader, name);
+                return catalog_project_views(shared, name);
             }
+            let reader = shared.readers.try_acquire()?;
             let project = match &shared.website {
                 Some(fixed) => fixed.project.clone(),
                 None => bound_project(shared, &reader, session_id)?,
@@ -3332,41 +3339,189 @@ fn route_metadata_tool_in(
     }
 }
 
-fn catalog_project_views(shared: &Shared, registry: &Db, name: &str) -> Result<Value> {
-    use crate::store::project_index::{CatalogProjectInfo, catalog_project_info};
+struct CatalogDiagnostics {
+    ann: (AnnState, Option<&'static str>),
+    resident: Option<(usize, u64)>,
+    vectors: Option<CatalogCoverage>,
+}
+
+struct CatalogCoverage {
+    hashes: hybrid_jobs::CoverageHashes,
+    source: crate::vector_cache::VectorCacheSource,
+    model: CatalogModel,
+}
+
+struct CatalogModel {
+    key: String,
+    ranking: Ranking,
+    // Keep the charge until the model key and the owned coverage are dropped.
+    permit: crate::search::budget::PayloadPermit,
+}
+
+fn capture_catalog_model(
+    slot: &ProjectCell,
+    config: &Config,
+    budget: &crate::search::budget::PayloadBudget,
+) -> Result<Option<CatalogModel>> {
+    let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(stages) = state.search_stages.as_ref().or(state.stages.as_ref()) {
+        let Some(embedder) = stages.embedder.as_ref() else {
+            return Ok(None);
+        };
+        let model = embedder.model_id();
+        let permit = budget.reserve(2 * model.len() as u64)?;
+        return Ok(Some(CatalogModel {
+            key: model.to_owned(),
+            ranking: stages.ranking,
+            permit,
+        }));
+    }
+    let Some(model) = config
+        .hybrid_cfg
+        .embedding
+        .as_ref()
+        .filter(|_| config.hybrid_cfg.enabled)
+    else {
+        return Ok(None);
+    };
+    // The canonical keys include the provider, model, numeric fields and
+    // optional local revision. Allow growth of the formatted key buffer and
+    // one SQLite binding without constructing the configured provider.
+    let key_bytes = model.provider.len() + model.model.len() + 64;
+    let permit = budget.reserve(3 * key_bytes as u64)?;
+    Ok(Some(CatalogModel {
+        key: embedding_model_id(model),
+        ranking: config.hybrid_cfg.ranking,
+        permit,
+    }))
+}
+
+impl CatalogDiagnostics {
+    fn without_vectors(state: AnnState, reason: &'static str) -> Self {
+        Self {
+            ann: (state, Some(reason)),
+            resident: None,
+            vectors: None,
+        }
+    }
+}
+
+fn catalog_project_summary(
+    shared: &Shared,
+    project: &Project,
+    diagnostics: bool,
+) -> Result<Option<CatalogProjectInfo<CatalogDiagnostics>>> {
+    let config = diagnostics
+        .then(|| shared.project_config(project).ok())
+        .flatten();
+    let slot = config.as_ref().map(|_| shared.project_slot(project.id));
+    let runtime = slot.as_ref().zip(config.as_ref());
+    let preparation = runtime.and_then(|(slot, config)| slot.preparation_lease(config).ok());
+    let reader = shared.readers.try_acquire()?;
+    catalog_project_info(&reader, project, |db, local, index, counts| {
+        let Some((_, (slot, config))) = preparation.as_ref().zip(runtime) else {
+            return CatalogDiagnostics::without_vectors(
+                AnnState::Unknown,
+                "project runtime unavailable",
+            );
+        };
+        let mut model = match capture_catalog_model(slot, config, &shared.payload_budget) {
+            Ok(Some(model)) => model,
+            Ok(None) => {
+                return CatalogDiagnostics::without_vectors(AnnState::Disabled, "hybrid off");
+            }
+            Err(_) => {
+                return CatalogDiagnostics::without_vectors(
+                    AnnState::Unknown,
+                    "diagnostics payload budget exhausted",
+                );
+            }
+        };
+        if require_catalog_embedding(local, &model.key).is_err() {
+            return CatalogDiagnostics::without_vectors(
+                AnnState::Stale,
+                "published embedding recipe does not match",
+            );
+        }
+        let (ann, resident) = if model.ranking == Ranking::Rrf {
+            let diagnostics = shared
+                .dense
+                .ann_diagnostics_for(index, &model.key, config.ann_build);
+            let ann = tools::classify_ann_outcome(&shared.dense, diagnostics.outcome, true);
+            (ann, diagnostics.resident)
+        } else {
+            ((AnnState::Disabled, Some("lexical ranking")), None)
+        };
+        let vectors =
+            hybrid_jobs::CoverageHashes::capture(db, project.id, counts.chunks, &mut model.permit)
+                .ok()
+                .map(|hashes| CatalogCoverage {
+                    model,
+                    source: shared.vector_source_for(project.id, config),
+                    hashes,
+                });
+        CatalogDiagnostics {
+            ann,
+            resident,
+            vectors,
+        }
+    })
+}
+
+fn catalog_project_views(shared: &Shared, name: &str) -> Result<Value> {
     use crate::store::{models::ProjectStatus, repo::ProjectCounts};
 
     let empty = ProjectCounts { docs: 0, chunks: 0 };
     let mut entries = Vec::new();
-    for mut project in registry::list_projects(registry)? {
-        let (project, counts, revision, unavailable) =
-            match catalog_project_info(registry, &project) {
-                Ok(Some(CatalogProjectInfo {
-                    project,
-                    counts,
-                    revision,
-                })) => (project, counts, Some(revision), None),
-                Ok(None) => {
-                    project.status = ProjectStatus::NotIndexed;
-                    (project, empty, None, None)
-                }
-                Err(error) if lifecycle::is_lease_conflict(&error) => {
-                    project.status = ProjectStatus::Indexing;
-                    (project, empty, None, None)
-                }
-                Err(error @ Error::Project { .. }) => {
-                    project.status = ProjectStatus::Error;
-                    (project, empty, None, Some(error.to_string()))
-                }
-                Err(error) => return Err(error),
-            };
+    let projects = {
+        let reader = shared.readers.try_acquire()?;
+        registry::list_projects(&reader)?
+    };
+    for mut project in projects {
+        let selected = catalog_project_summary(shared, &project, name != "list_projects");
+        let (project, counts, revision, details, unavailable) = match selected {
+            Ok(Some(CatalogProjectInfo {
+                project,
+                counts,
+                index,
+                details,
+            })) => (
+                project,
+                counts,
+                Some(index.content_revision()),
+                Some(details),
+                None,
+            ),
+            Ok(None) => {
+                project.status = ProjectStatus::NotIndexed;
+                (project, empty, None, None, None)
+            }
+            Err(error) if lifecycle::is_lease_conflict(&error) => {
+                project.status = ProjectStatus::Indexing;
+                (project, empty, None, None, None)
+            }
+            Err(error @ Error::Project { .. }) => {
+                project.status = ProjectStatus::Error;
+                (project, empty, None, None, Some(error.to_string()))
+            }
+            Err(error) => return Err(error),
+        };
+        let details = details.unwrap_or_else(|| {
+            CatalogDiagnostics::without_vectors(AnnState::Unknown, "published index unavailable")
+        });
+        let coverage = details.vectors.and_then(|vectors| {
+            vectors
+                .hashes
+                .count(&vectors.source, &shared.cache, &vectors.model.key)
+                .ok()
+        });
         let watched = shared.watchers.watching(project.id);
         let mut entry = if name == "panel_projects" {
             json!(crate::ipc::panel::ProjectView {
                 watched,
-                cached_vectors: None,
-                vector_chunks: None,
-                ann_state: None,
+                cached_vectors: coverage.map(|coverage| coverage.cached),
+                vector_chunks: coverage.map(|coverage| coverage.total),
+                ann_state: Some(details.ann.0.as_str().to_owned()),
                 id: project.id,
                 name: project.name.clone(),
                 root: project.canonical_root.to_string_lossy().into_owned(),
@@ -3375,8 +3530,9 @@ fn catalog_project_views(shared: &Shared, registry: &Db, name: &str) -> Result<V
                 chunks: counts.chunks,
             })
         } else {
+            let reader = shared.readers.try_acquire()?;
             tools::project_entry_with_counts(
-                registry,
+                &reader,
                 &project,
                 counts,
                 (name == "status").then_some(watched),
@@ -3386,8 +3542,11 @@ fn catalog_project_views(shared: &Shared, registry: &Db, name: &str) -> Result<V
         if name == "status" {
             entry["root_state"] = json!(registry::root_state(&project.canonical_root).as_str());
             entry["index_generation"] = json!(revision.unwrap_or(0));
-            entry["embed_coverage"] = Value::Null;
-            entry["ann"] = tools::ann_state(None, project.id, false);
+            entry["embed_coverage"] = coverage.map_or(
+                Value::Null,
+                |coverage| json!({"cached": coverage.cached, "total": coverage.total}),
+            );
+            entry["ann"] = tools::ann_state_json(details.ann, details.resident);
         }
         if let Some(error) = unavailable
             && name != "panel_projects"
@@ -3399,8 +3558,9 @@ fn catalog_project_views(shared: &Shared, registry: &Db, name: &str) -> Result<V
     if name != "status" {
         return Ok(json!(entries));
     }
+    let reader = shared.readers.try_acquire()?;
     let status = tools::status_document(
-        registry,
+        &reader,
         &entries,
         &shared.sessions.stats(),
         shared.watchers.count(),

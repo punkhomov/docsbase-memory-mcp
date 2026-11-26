@@ -143,6 +143,17 @@ fn dense_candidates<Guard>(
     // is a pure function of both, so this cannot change the answer
     // (`search-cost` FR-1/FR-3).
     let model_id = embedder.model_id();
+    let record = |state, reason| {
+        let _revision = if query.index.catalog_generation().is_some() {
+            let Ok(guard) = admit() else {
+                return;
+            };
+            Some(guard)
+        } else {
+            None
+        };
+        dense.record_bound_outcome(query.index, model_id, state, reason);
+    };
     let fresh;
     let vector = if let Some(vector) = query.vector {
         vector
@@ -161,8 +172,7 @@ fn dense_candidates<Guard>(
         })?;
         operation.check()?;
         degrade(degraded, Degraded::ExactFallback);
-        dense.record_outcome(
-            project.id,
+        record(
             AnnState::Fallback,
             Some("ANN window exceeds the configured ef_max"),
         );
@@ -182,39 +192,33 @@ fn dense_candidates<Guard>(
     let fetch = query.fetch;
     match rows {
         DenseRows::Ready(index) => {
-            dense.record_outcome(project.id, AnnState::Ready, None);
+            record(AnnState::Ready, None);
             dense::top_k(vector, index.rows(), fetch)
         }
-        DenseRows::Ann(ann) => {
-            search_graph(context, source, query, model_id, vector, &ann, degraded)
-        }
+        DenseRows::Ann(ann) => search_graph(
+            context,
+            source,
+            query,
+            (model_id, vector),
+            &ann,
+            degraded,
+            record,
+        ),
         DenseRows::TooLarge(hashes) => {
             // Above the resident cap by design: exact streaming is the answer,
             // not an error.
             degrade(degraded, Degraded::ExactFallback);
-            dense.record_outcome(
-                project.id,
-                AnnState::TooLarge,
-                Some("above the resident cap"),
-            );
+            record(AnnState::TooLarge, Some("above the resident cap"));
             stream_hashes(context, model_id, &hashes, vector, fetch)
         }
         DenseRows::Building(building) => {
             degrade(degraded, Degraded::AnnBuilding);
-            dense.record_outcome(
-                project.id,
-                AnnState::Building,
-                Some("background build in flight"),
-            );
+            record(AnnState::Building, Some("background build in flight"));
             stream_hashes(context, model_id, &building.hashes, vector, fetch)
         }
         DenseRows::Failed(failed) => {
             degrade(degraded, Degraded::AnnError);
-            dense.record_outcome(
-                project.id,
-                AnnState::Fallback,
-                Some("the last build failed"),
-            );
+            record(AnnState::Fallback, Some("the last build failed"));
             stream_hashes(context, model_id, &failed.hashes, vector, fetch)
         }
     }
@@ -224,17 +228,12 @@ fn search_graph(
     context: &SearchContext<'_>,
     source: MetadataSource<'_>,
     query: DenseQuery<'_>,
-    model_id: &str,
-    vector: &[f32],
+    (model_id, vector): (&str, &[f32]),
     ann: &crate::hybrid::ann::AnnIndex,
     degraded: &mut Vec<Degraded>,
+    record: impl Fn(AnnState, Option<&'static str>),
 ) -> Result<Vec<(u64, f32)>> {
-    let SearchContext {
-        dense,
-        project,
-        operation,
-        ..
-    } = context;
+    let operation = &context.operation;
     let fetch = query.fetch;
     let hits = match context.ann_search {
         Some(settings) => ann.search_with_settings(vector, fetch, &settings),
@@ -244,7 +243,7 @@ fn search_graph(
         Ok(hits) if hits.len() >= fetch => {
             #[cfg(debug_assertions)]
             ANN_SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            dense.record_outcome(project.id, AnnState::Ready, None);
+            record(AnnState::Ready, None);
             Ok(hits)
         }
         Ok(hits) => {
@@ -253,8 +252,7 @@ fn search_graph(
                 hits.len()
             );
             degrade(degraded, Degraded::AnnInsufficient);
-            dense.record_outcome(
-                project.id,
+            record(
                 AnnState::Fallback,
                 Some("ann returned fewer candidates than the window"),
             );
@@ -264,7 +262,7 @@ fn search_graph(
         Err(err) => {
             eprintln!("warning: ann search failed: {err}; falling back to exact");
             degrade(degraded, Degraded::AnnError);
-            dense.record_outcome(project.id, AnnState::Fallback, Some("ann search failed"));
+            record(AnnState::Fallback, Some("ann search failed"));
             operation.check()?;
             stream_exact(context, source, query.index, model_id, vector, fetch)
         }
@@ -1218,18 +1216,21 @@ fn query_cache_json(dense: Option<&DenseCache>) -> Value {
 pub(super) fn ann_state(dense: Option<&DenseCache>, project_id: i64, hybrid_on: bool) -> Value {
     let Some(dense) = dense else {
         // CLI direct mode: the outcome record lives in the daemon process.
-        return json!({
-            "state": AnnState::Unknown.as_str(),
-            "vectors": Value::Null,
-            "estimated_bytes": Value::Null,
-            "reason": "daemon not running",
-        });
+        return ann_state_json((AnnState::Unknown, Some("daemon not running")), None);
     };
-    let snapshot = dense.ann_snapshot(project_id);
+    ann_state_json(
+        classified_ann_state(dense, project_id, hybrid_on),
+        dense.ann_snapshot(project_id),
+    )
+}
+
+pub(super) fn ann_state_json(
+    (state, reason): (AnnState, Option<&'static str>),
+    snapshot: Option<(usize, u64)>,
+) -> Value {
     let (vectors, bytes) = snapshot.map_or((Value::Null, Value::Null), |(count, bytes)| {
         (json!(count), json!(bytes))
     });
-    let (state, reason) = classified_ann_state(dense, project_id, hybrid_on);
     json!({
         "state": state.as_str(),
         "vectors": vectors,
@@ -1244,7 +1245,15 @@ pub(super) fn classified_ann_state(
     project_id: i64,
     hybrid_on: bool,
 ) -> (AnnState, Option<&'static str>) {
-    match dense.outcome(project_id) {
+    classify_ann_outcome(dense, dense.outcome(project_id), hybrid_on)
+}
+
+pub(super) fn classify_ann_outcome(
+    dense: &DenseCache,
+    outcome: Option<crate::hybrid::meta::AnnOutcome>,
+    hybrid_on: bool,
+) -> (AnnState, Option<&'static str>) {
+    match outcome {
         Some(outcome) if outcome.is_stale_after(dense.limits().ann_lifetimes.outcome_ttl()) => (
             AnnState::Stale,
             Some("last search is older than configured TTL"),

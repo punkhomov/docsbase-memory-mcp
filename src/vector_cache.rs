@@ -51,6 +51,24 @@ impl EmbeddingRecipe {
 /// Separate `SQLite` file in the cache root; one cache per machine user.
 pub const VECTOR_DB_FILE: &str = "vectors.db";
 
+const COUNT_PRESENT_SELECT: &str =
+    "SELECT COUNT(*) FROM vector_cache WHERE model_id = ?1 AND chunk_hash IN (";
+
+/// Includes Rust key storage, the generated statement and argument buffers,
+/// and the copies of each key bound to SQLite. The model bind is charged
+/// with its retained key by the caller.
+pub(crate) fn count_present_workspace(keys: usize) -> usize {
+    if keys == 0 {
+        return 0;
+    }
+    let per_key = 2 * 64
+        + size_of::<String>()
+        + size_of::<&str>()
+        + size_of::<&dyn rusqlite::ToSql>()
+        + 2 * "?, ".len();
+    COUNT_PRESENT_SELECT.len() + 1 + size_of::<&dyn rusqlite::ToSql>() + keys * per_key
+}
+
 /// Cache size bounds; eviction drops the least recently used rows first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheLimits {
@@ -97,7 +115,11 @@ pub trait Embedder: Send + Sync {
 /// Stable content key of one chunk (blake3, hex).
 #[must_use]
 pub fn chunk_hash(text: &str) -> String {
-    blake3::hash(text.as_bytes()).to_hex().to_string()
+    chunk_digest(text).to_hex().to_string()
+}
+
+pub(crate) fn chunk_digest(text: &str) -> blake3::Hash {
+    blake3::hash(text.as_bytes())
 }
 
 /// Content-addressed vector cache backed by `vectors.db`.
@@ -574,9 +596,11 @@ impl VectorCache {
         let mut present = 0u64;
         for window in hashes.chunks(500) {
             let placeholders = vec!["?"; window.len()].join(", ");
-            let sql = format!(
-                "SELECT COUNT(*) FROM vector_cache WHERE model_id = ?1 AND chunk_hash IN ({placeholders})"
-            );
+            let mut sql =
+                String::with_capacity(COUNT_PRESENT_SELECT.len() + placeholders.len() + 1);
+            sql.push_str(COUNT_PRESENT_SELECT);
+            sql.push_str(&placeholders);
+            sql.push(')');
             let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(window.len() + 1);
             params.push(&model_id);
             for hash in window {

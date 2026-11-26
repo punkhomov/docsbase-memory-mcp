@@ -266,6 +266,30 @@ pub fn chunk_texts(conn: &Connection, project_id: i64) -> Result<Vec<String>> {
         .map_err(db_error)
 }
 
+/// Scan one text at a time without a `SQLite` sort or an owned text copy.
+pub(crate) fn visit_chunk_texts(
+    conn: &Connection,
+    project_id: i64,
+    mut visit: impl FnMut(&str) -> Result<()>,
+) -> Result<()> {
+    let mut select = conn
+        .prepare(
+            "SELECT c.text FROM chunks c JOIN docs d ON d.id = c.doc_id
+             WHERE d.project_id = ?1",
+        )
+        .map_err(db_error)?;
+    let mut rows = select.query([project_id]).map_err(db_error)?;
+    while let Some(row) = rows.next().map_err(db_error)? {
+        let text = row
+            .get_ref(0)
+            .map_err(db_error)?
+            .as_str()
+            .map_err(|err| Error::internal_with_source("read indexed chunk text", err))?;
+        visit(text)?;
+    }
+    Ok(())
+}
+
 /// Text of one chunk (rerank documents, FR-11).
 ///
 /// # Errors

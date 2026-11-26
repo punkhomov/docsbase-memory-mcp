@@ -8,7 +8,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::search::budget::PayloadPermit;
 use crate::store::Db;
 use crate::store::repo;
 use crate::vector_cache::{CacheLimits, Embedder, VectorCacheSource};
@@ -24,6 +25,73 @@ pub struct Coverage {
     pub cached: u64,
     /// Chunks in the project registry.
     pub total: u64,
+}
+
+/// Hashes copied from one selected metadata pair. Cache IO begins after the
+/// pair leases and the SQLite connection have been returned.
+pub(crate) struct CoverageHashes {
+    hashes: Vec<blake3::Hash>,
+}
+
+impl CoverageHashes {
+    pub(crate) fn capture(
+        db: &Db,
+        project_id: i64,
+        chunks: i64,
+        permit: &mut PayloadPermit,
+    ) -> Result<Self> {
+        let overflow = || Error::Admission {
+            message: "vector coverage workspace overflow".into(),
+        };
+        let count = usize::try_from(chunks).map_err(|_| overflow())?;
+        // Charge the packed hash list and one batch of hex keys and SQL
+        // parameter scratch before either allocation.
+        let batch = count.min(repo::BATCH_KEYS);
+        let bytes = count
+            .checked_mul(size_of::<blake3::Hash>())
+            .and_then(|hashes| {
+                hashes.checked_add(crate::vector_cache::count_present_workspace(batch))
+            })
+            .ok_or_else(overflow)?;
+        let retained = permit
+            .bytes()
+            .checked_add(bytes as u64)
+            .ok_or_else(overflow)?;
+        permit.grow_to(retained)?;
+        let mut hashes = Vec::new();
+        hashes.try_reserve_exact(count).map_err(|_| overflow())?;
+        repo::visit_chunk_texts(db.connection(), project_id, |text| {
+            if hashes.len() == count {
+                return Err(Error::internal(
+                    "coverage chunk count changed during capture",
+                ));
+            }
+            hashes.push(crate::vector_cache::chunk_digest(text));
+            Ok(())
+        })?;
+        Ok(Self { hashes })
+    }
+
+    pub(crate) fn count(
+        mut self,
+        source: &VectorCacheSource,
+        root: &Path,
+        model: &str,
+    ) -> Result<Coverage> {
+        self.hashes
+            .sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        self.hashes.dedup();
+        let total = self.hashes.len() as u64;
+        let mut cached = 0;
+        if total > 0 {
+            let cache = source.connect(root)?;
+            for batch in self.hashes.chunks(repo::BATCH_KEYS) {
+                let keys: Vec<_> = batch.iter().map(|hash| hash.to_hex().to_string()).collect();
+                cached += cache.count_present(model, &keys)?;
+            }
+        }
+        Ok(Coverage { cached, total })
+    }
 }
 
 /// Embeds `texts` through the configured stage; no-op when the stage is off.
