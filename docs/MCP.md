@@ -21,10 +21,11 @@ tools bind correctly.
 
 | Tool | Scope | Input | Notes |
 |---|---|---|---|
-| `search_docs` | project | `{query: string, query_mode?: "syntax"\|"literal", limit?: int ≥ 1 (default 10), scope?: "project", rerank?: bool, explain?: bool, snippet?: bool, dedupe?: "none"\|"path", n_per_doc?: int 1…10, path_prefix?: string, tags?: [string]}` | Lexical BM25 over chunks, or hybrid when the project enables it; returns `{chunk_id, path, heading_path, lines, score}` citations. `scope` is reserved: v1 serves the current project only. `rerank` overrides the project setting per request; `true` requires a rerank stage. `explain` returns `{hits, meta}` — see [Telemetry](#telemetry). `path_prefix`/`tags` define the search scope; `dedupe` caps documents — see [Scope, snippets and document caps](#scope-snippets-and-document-caps) |
+| `search_docs` | project | `{query: string, query_mode?: "syntax"\|"literal", limit?: int ≥ 1 (default 10), scope?: "project", rerank?: bool, explain?: bool, snippet?: bool, chunk_ref?: bool, dedupe?: "none"\|"path", n_per_doc?: int 1…10, path_prefix?: string, tags?: [string]}` | Lexical BM25 over chunks, or hybrid when the project enables it; returns `{chunk_id, path, heading_path, lines, score}` citations. `scope` is reserved: v1 serves the current project only. `rerank` overrides the project setting per request; `true` requires a rerank stage. `explain` returns `{hits, meta}` — see [Telemetry](#telemetry). `path_prefix`/`tags` define the search scope; `dedupe` caps documents — see [Scope, snippets and document caps](#scope-snippets-and-document-caps) |
 | `ask_docs` | project | `{question: string, model: "<provider>/<model>", max_turns?: 1…6}` | Explicit remote prepared answer with verified source IDs; see [Prepared answers](#prepared-answers-with-ask_docs) |
 | `get_doc` | project | `{path: string}` | Full document by project-relative path |
 | `read_neighbors` | project | `{chunk_id: int, before?: int (default 1), after?: int (default 1)}` | Adjacent chunks for progressive disclosure |
+| `read_neighbors_at` | project | `{chunk_ref: string, before?: int (default 1), after?: int (default 1)}` | Adjacent chunks at the exact indexed revision that returned the reference |
 | `list_docs` | project | `{limit?: int (default 50), cursor?: string}` | Keyset-paginated `{title, size, chunks}` |
 | `list_projects` | registry | `{}` | Projects + indexing status; works from any directory |
 | `index_project` | registry | `{path?: string}` | Register + full index (defaults to session dir); long-running (600 s budget) |
@@ -36,6 +37,13 @@ Project tools require a session bound to a registered project; otherwise the
 server returns a `Project` error with a fix-up instruction (e.g. run
 `docsbase index`). `index_project` may take the full indexing budget —
 clients must allow the 600 s IPC timeout; `sync_*` only enqueue/read rows.
+
+When the backend advertises `chunk-ref-v1`, set `chunk_ref: true` on
+`search_docs` to obtain opaque references for `read_neighbors_at`. Search
+again when a published generation, content revision or installation epoch
+changes. Numeric `read_neighbors` continues to read the current revision.
+For a running v5 Website daemon, MCP binds read-only from a working directory
+inside the fixed project. The daemon still enforces its existing Website profile.
 
 ## Query interpretation
 

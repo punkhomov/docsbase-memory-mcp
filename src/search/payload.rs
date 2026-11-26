@@ -61,7 +61,7 @@ struct PayloadData {
 /// returns its charge, including constructor error/unwind cleanup.
 pub struct OwnedPayload {
     data: PayloadData,
-    _permit: PayloadPermit,
+    permit: PayloadPermit,
 }
 
 impl OwnedPayload {
@@ -151,10 +151,7 @@ impl OwnedPayload {
         }
         after_copy(&mut data)?;
         cancellation.check()?;
-        Ok(Self {
-            data,
-            _permit: permit,
-        })
+        Ok(Self { data, permit })
     }
 
     #[cfg(feature = "hybrid-remote")]
@@ -184,6 +181,14 @@ impl OwnedPayload {
     #[must_use]
     pub const fn charged_bytes(&self) -> u64 {
         self.data.charge.total
+    }
+
+    pub(crate) fn charge_chunk_references(&mut self, count: usize) -> Result<()> {
+        let extra = multiply(bytes(count)?, bytes(super::chunk_ref::RESPONSE_BYTES)?)?;
+        let total = add(self.data.charge.total, extra)?;
+        self.permit.grow_to(total)?;
+        self.data.charge.total = total;
+        Ok(())
     }
 
     /// Captured citation, absent for a missing or foreign candidate.

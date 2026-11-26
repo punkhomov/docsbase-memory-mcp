@@ -302,6 +302,29 @@ fn real_payload_respects_request_and_retained_charge_boundaries() {
 }
 
 #[test]
+fn chunk_reference_output_uses_the_existing_payload_allowance() {
+    let fixture = Fixture::new();
+    let reader = fixture.reader();
+    let cancellation = Cancellation::new();
+    let payload =
+        OwnedPayload::capture(&reader, fixture.request(), &ample(), &cancellation).unwrap();
+    let base = payload.charged_bytes();
+    drop(payload);
+    let extra = super::super::chunk_ref::RESPONSE_BYTES as u64;
+    let limit = base + extra;
+    let policy = budget(limit, limit);
+    let mut payload =
+        OwnedPayload::capture(&reader, fixture.request(), &policy, &cancellation).unwrap();
+    assert!(payload.charge_chunk_references(2).is_err());
+    assert_eq!(payload.charged_bytes(), base);
+    payload.charge_chunk_references(1).unwrap();
+    assert_eq!(payload.charged_bytes(), limit);
+    assert!(policy.reserve(1).is_err());
+    drop(payload);
+    assert!(policy.reserve(limit).is_ok());
+}
+
+#[test]
 fn foreign_or_missing_candidates_cannot_expose_another_projects_data() {
     let fixture = Fixture::new();
     let ids = [chunk_id(fixture.other_doc, 0), chunk_id(fixture.doc, 99)];

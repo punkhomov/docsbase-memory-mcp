@@ -12,6 +12,7 @@ pub const PROJECT_TOOLS: &[&str] = &[
     "search_docs",
     "get_doc",
     "read_neighbors",
+    "read_neighbors_at",
     "list_docs",
     "ask_docs",
 ];
@@ -43,6 +44,7 @@ pub fn catalogue() -> Vec<Tool> {
                     "scope": { "type": "string", "enum": ["project"], "description": "Reserved; v1 supports only the current project." },
                     "rerank": { "type": "boolean", "description": "Per-request hybrid rerank override; default follows the project configuration. true requires hybrid rerank to be enabled." },
                     "snippet": { "type": "boolean", "description": "Attach a text fragment (<= 240 chars) to each hit, cut on a character boundary; snippet_truncated marks a cut fragment." },
+                    "chunk_ref": { "type": ["boolean", "null"], "description": "Include references for read_neighbors_at. Requires a v5 daemon advertising chunk-ref-v1." },
                     "dedupe": { "type": "string", "enum": ["none", "path"], "description": "Post-filter: \"path\" keeps at most n_per_doc chunks per document, preserving the order of the survivors. Default \"none\"." },
                     "n_per_doc": { "type": "integer", "minimum": 1, "maximum": 10, "description": "Chunks kept per document when dedupe is \"path\" (default 2, measured on the ru_morph benchmark slice). Rejected without dedupe." },
                     "path_prefix": { "type": "string", "description": "Literal, case-sensitive prefix of the project-relative path; docs/ matches docs/a.md but not Docs/a.md or docsx.md." },
@@ -74,6 +76,7 @@ pub fn catalogue() -> Vec<Tool> {
                 "required": ["chunk_id"]
             }),
         ),
+        read_neighbors_at_tool(),
         tool(
             "list_docs",
             "List indexed documents with title, size and chunk count; keyset-paginated.",
@@ -134,6 +137,22 @@ fn schema_object(value: Value) -> Arc<JsonObject> {
         Value::Object(map) => Arc::new(map),
         _ => Arc::new(JsonObject::new()),
     }
+}
+
+fn read_neighbors_at_tool() -> Tool {
+    tool(
+        "read_neighbors_at",
+        "Read neighbors from the indexed revision identified by chunk_ref. Search again if the reference is stale.",
+        json!({
+            "type": "object",
+            "properties": {
+                "chunk_ref": { "type": "string", "description": "Opaque chunk_ref returned by search_docs." },
+                "before": { "type": "integer", "minimum": 0, "description": "Earlier chunks (default 1)." },
+                "after": { "type": "integer", "minimum": 0, "description": "Later chunks (default 1)." }
+            },
+            "required": ["chunk_ref"]
+        }),
+    )
 }
 
 fn ask_tool() -> Tool {

@@ -4,11 +4,14 @@ import { Pool } from './pool.ts';
 import { resolveClientOptions } from './settings.ts';
 import {
   LITERAL_QUERY,
+  CHUNK_REF,
   SERVER_STATUS,
   MAX_FRAME_BYTES,
   encodeRequest,
   object,
   safeUnsigned,
+  isChunkRef,
+  neighborChunks,
   toolValue,
   searchResult,
   daemonStatus,
@@ -22,6 +25,8 @@ import {
   type CallOptions,
   type SearchOptions,
   type SearchResult,
+  type NeighborChunk,
+  type NeighborOptions,
   type DaemonStatus,
   type ServerStatus,
   type HelloMetadata,
@@ -34,6 +39,8 @@ export type {
   SearchOptions,
   SearchHit,
   SearchResult,
+  NeighborChunk,
+  NeighborOptions,
   ProjectStatus,
   DaemonStatus,
   ServerStatus,
@@ -101,6 +108,7 @@ const searchFields = new Set([
   'limit',
   'explain',
   'snippet',
+  'chunk_ref',
   'rerank',
   'dedupe',
   'n_per_doc',
@@ -122,7 +130,8 @@ function prepareSearch(query: string, options: SearchOptions): Record<string, un
     if (key === 'query_mode') valid ||= value === 'syntax' || value === 'literal';
     else if (key === 'dedupe') valid ||= value === 'none' || value === 'path';
     else if (key === 'limit' || key === 'n_per_doc') valid ||= safeUnsigned(value);
-    else if (['explain', 'snippet', 'rerank'].includes(key)) valid ||= typeof value === 'boolean';
+    else if (['explain', 'snippet', 'rerank', 'chunk_ref'].includes(key))
+      valid ||= typeof value === 'boolean';
     else if (key === 'path_prefix') valid ||= typeof value === 'string';
     else if (key === 'tags') valid ||= Array.isArray(value);
     if (!valid) throw new DocsbaseError('validation', 'invalid docsbase search option');
@@ -204,9 +213,55 @@ export class DocsbaseClient {
           ) {
             throw new DocsbaseError('protocol', 'daemon does not support literal-query-v1');
           }
+          if (args.chunk_ref === true && !connection.metadata.capabilities.includes(CHUNK_REF)) {
+            throw new DocsbaseError('protocol', 'daemon does not support chunk-ref-v1');
+          }
           return { method: 'Search', params: { args, context: operation.context() } };
         },
-        searchResult,
+        (value) => searchResult(value, args.chunk_ref === true),
+      );
+    } finally {
+      this.end(operation);
+    }
+  }
+  /** Read neighbors from the exact index revision that produced the reference. */
+  async readNeighborsAt(
+    reference: string,
+    options: NeighborOptions = {},
+    call: CallOptions = {},
+  ): Promise<NeighborChunk[]> {
+    const operation = this.begin(performance.now(), call);
+    try {
+      if (
+        !isChunkRef(reference) ||
+        !object(options) ||
+        Object.keys(options).some((key) => key !== 'before' && key !== 'after')
+      ) {
+        throw new DocsbaseError(
+          'validation',
+          'invalid docsbase chunk reference or neighbor options',
+        );
+      }
+      const args: Record<string, unknown> = { chunk_ref: reference };
+      for (const key of ['before', 'after'] as const) {
+        const count = options[key];
+        if (count !== undefined) {
+          if (count !== null && !safeUnsigned(count)) {
+            throw new DocsbaseError('validation', 'invalid docsbase neighbor count');
+          }
+          args[key] = count;
+        }
+      }
+      return await this.invoke(
+        this.controls,
+        operation,
+        (connection) => {
+          if (!connection.metadata.capabilities.includes(CHUNK_REF)) {
+            throw new DocsbaseError('protocol', 'daemon does not support chunk-ref-v1');
+          }
+          return { method: 'CallTool', params: { name: 'read_neighbors_at', args } };
+        },
+        neighborChunks,
       );
     } finally {
       this.end(operation);

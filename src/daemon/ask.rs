@@ -21,6 +21,10 @@ struct Reads {
     reservation: Arc<crate::search::budget::PayloadPermit>,
 }
 impl DocumentTools for Reads {
+    fn has_chunk_references(&self) -> bool {
+        self.shared.readers.has_generation_catalog()
+    }
+
     fn call<'a>(&'a self, name: &'a str, mut args: Value) -> StageFuture<'a, Value> {
         Box::pin(async move {
             let object = args
@@ -33,6 +37,7 @@ impl DocumentTools for Reads {
                 object.insert("dedupe".into(), json!("path"));
                 object.insert("n_per_doc".into(), json!(1));
                 object.insert("explain".into(), json!(false));
+                object.insert("chunk_ref".into(), json!(self.has_chunk_references()));
                 return search_async::run(
                     &self.shared,
                     self.session,
@@ -42,7 +47,7 @@ impl DocumentTools for Reads {
                 )
                 .await;
             }
-            if name == "read_neighbors" {
+            if matches!(name, "read_neighbors" | "read_neighbors_at") {
                 for key in ["before", "after"] {
                     let count = match object.get(key) {
                         None => AskLimits::NEIGHBORS,
@@ -68,21 +73,41 @@ impl DocumentTools for Reads {
                 &self.activity,
                 move || {
                     let _reservation = reservation;
-                    if name == "get_doc" {
-                        tools::get_doc(&project, &config, &args)
-                    } else if name == "read_neighbors" {
-                        let reader =
-                            MetadataSource::Prepared(&shared.readers).acquire(&operation)?;
-                        tools::read_neighbors_bounded(
-                            &reader,
+                    let metadata = MetadataSource::Prepared(&shared.readers);
+                    match name.as_str() {
+                        "get_doc" => tools::get_doc(&project, &config, &args),
+                        "read_neighbors" => {
+                            let reader = metadata.acquire(&operation)?;
+                            tools::read_neighbors_bounded(
+                                &reader,
+                                &project,
+                                &args,
+                                Some(AskLimits::TOOL_BYTES),
+                            )
+                        }
+                        "read_neighbors_at" => crate::store::project_index::with_catalog_pair(
+                            metadata.acquire(&operation)?,
                             &project,
-                            &args,
-                            Some(AskLimits::TOOL_BYTES),
-                        )
-                    } else {
-                        Err(Error::Admission {
+                            |registry, local, index| {
+                                let db = local.as_ref().map_or(&*registry, |local| &local.db);
+                                let project = super::registry::project_by_id(db, project.id)?
+                                    .ok_or_else(|| {
+                                        Error::internal(
+                                            "admitted project disappeared from generation metadata",
+                                        )
+                                    })?;
+                                tools::read_neighbors_at(
+                                    db,
+                                    &project,
+                                    index,
+                                    &args,
+                                    Some(AskLimits::TOOL_BYTES),
+                                )
+                            },
+                        ),
+                        _ => Err(Error::Admission {
                             message: "unsupported harness read".into(),
-                        })
+                        }),
                     }
                 },
             )

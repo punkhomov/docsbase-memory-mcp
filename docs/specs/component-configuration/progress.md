@@ -1730,3 +1730,28 @@ Ruling: macOS CI reproduced SQLite's refusal of a linked cache ancestor
 open. The registry and WAL/SHM/journal names still require ordinary
 single-link files. A real Website start/search/Sync through a linked cache
 ancestor reproduces the failure on Linux and passes after the fix.
+
+## 2026-11-26 — CF11c, generation-bound chunk references
+
+Task CF11c chunk references: complete (Rust IPC, Node and real MCP stdio
+on Website v5, local verification and fresh review with fixes).
+Search issues references from its captured pair only on explicit request.
+The neighbor lookup checks the fixed project, installation epoch, physical
+generation and content revision before reading through the same lease.
+
+Ruling: real IPC replaces a generation while keeping the same IDs and content
+revision. The old reference is rejected and a new search supplies a usable
+reference. Unit tests exercise changed epoch/project/revision and exact u64.
+The output charge includes concurrent hit copies in the existing payload
+account. v4 clients keep numeric reads and refuse the unadvertised capability.
+
+Ruling: real MCP stdio binds read-only to the running v5 Website project,
+refuses an unrelated working directory and can request and consume references.
+The ask harness advertises the corresponding neighbor tool according to its
+backend. Actual Shared v5 generation and restore remain subjects of the
+applicable runtime acceptance work.
+
+Complete local Rust 1.100.0 cli-full, Clippy (including the two opt-in
+targets), fmt, lean offline and Node 24.22.3 client checks passed. Targeted
+runtime and harness checks and all-target Clippy were repeated after the
+last binding and tool-definition adjustments.

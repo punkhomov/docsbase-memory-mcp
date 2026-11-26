@@ -315,7 +315,7 @@ fn initialize_and_list_tools() {
         "params": {}
     }));
     let tools = response["result"]["tools"].as_array().expect("tools");
-    assert_eq!(tools.len(), 10, "catalogue must expose exactly 10 tools");
+    assert_eq!(tools.len(), 11, "catalogue must expose exactly 11 tools");
     for tool in tools {
         let schema = tool["inputSchema"].as_object().expect("inputSchema");
         assert!(!schema.is_empty(), "empty schema for {tool:?}");
@@ -331,6 +331,15 @@ fn initialize_and_list_tools() {
     assert_eq!(mode["type"], json!(["string", "null"]));
     assert_eq!(mode["enum"], json!(["syntax", "literal", null]));
     assert_eq!(search["inputSchema"]["required"], json!(["query"]));
+    assert_eq!(
+        search["inputSchema"]["properties"]["chunk_ref"]["type"],
+        json!(["boolean", "null"])
+    );
+    let pinned_read = tools
+        .iter()
+        .find(|tool| tool["name"] == "read_neighbors_at")
+        .unwrap();
+    assert_eq!(pinned_read["inputSchema"]["required"], json!(["chunk_ref"]));
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|tool| tool["name"].as_str())
@@ -339,6 +348,7 @@ fn initialize_and_list_tools() {
         "search_docs",
         "get_doc",
         "read_neighbors",
+        "read_neighbors_at",
         "list_docs",
         "list_projects",
         "index_project",

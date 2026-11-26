@@ -92,6 +92,13 @@ No page totals, stable chunk identity across reindexing or pagination is promise
 With `explain:true`, results are `{hits,meta}`; otherwise they are a citation array.
 `meta` is an additive diagnostic object, not a stable fully typed telemetry schema.
 
+On a daemon advertising `chunk-ref-v1`, `search(query, { chunk_ref: true })`
+adds an opaque reference to each hit. Check `typeof hit.chunk_ref === 'string'`
+before calling `readNeighborsAt(hit.chunk_ref, { before: 1, after: 1 })`.
+If the project or
+index revision changed, the daemon returns a typed error asking you to search
+again. The connector checks support on the connection that sends the request.
+
 `status()` returns only the configured project, `restart_required` and `notice`.
 It exposes current generation diagnostics; it does not prove sync completeness or
 continuous availability during index mutation. `serverStatus()` adds fixed Website readiness under `server-status-v1`: schema1,

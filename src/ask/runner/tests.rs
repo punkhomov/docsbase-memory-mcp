@@ -38,15 +38,19 @@ impl AsyncTransport for Script {
     }
 }
 #[derive(Default)]
-struct Reads(Mutex<Vec<String>>);
+struct Reads(Mutex<Vec<String>>, bool);
 impl DocumentTools for Reads {
+    fn has_chunk_references(&self) -> bool {
+        self.1
+    }
+
     fn call<'a>(&'a self, name: &'a str, _: Value) -> StageFuture<'a, Value> {
         Box::pin(async move {
             self.0.lock().unwrap().push(name.to_owned());
             Ok(match name {
                 "search_docs" => json!([{"path":"guide.md", "chunk_id":1}]),
                 "get_doc" => json!({"path":"guide.md","content":"The widget switch is blue."}),
-                "read_neighbors" => {
+                "read_neighbors" | "read_neighbors_at" => {
                     json!([{"path":"guide.md","text":"The widget switch is blue.","lines":[2,2]}])
                 }
                 _ => panic!("unexpected tool reached backend"),
@@ -133,6 +137,39 @@ async fn real_rig_codec_searches_reads_and_returns_verified_sources() {
             .any(|m| m["role"] == "tool" && m["tool_call_id"] == "call_1")
     );
     assert_eq!(sent[0]["tools"].as_array().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn catalog_read_tools_only_dispatch_generation_bound_neighbors() {
+    let (wire, generator, call) = setup(vec![
+        (200, turn(&[("search_docs", json!({"query":"widget"}))])),
+        (
+            200,
+            turn(&[
+                ("read_neighbors", json!({"chunk_id":1})),
+                ("read_neighbors_at", json!({"chunk_ref":"bound fixture"})),
+            ]),
+        ),
+        (200, turn(&[("finish_answer", finish(&["S1"]))])),
+    ]);
+    let reads = Reads(Mutex::default(), true);
+    let result = run(request(3), generator.as_ref(), &reads, &call)
+        .await
+        .unwrap();
+    assert_eq!(result["stop_reason"], "answered");
+    assert_eq!(
+        *reads.0.lock().unwrap(),
+        vec!["search_docs", "read_neighbors_at"]
+    );
+    let sent = wire.sent.lock().unwrap();
+    let tool_names: Vec<_> = sent[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect();
+    assert!(tool_names.contains(&"read_neighbors_at"));
+    assert!(!tool_names.contains(&"read_neighbors"));
 }
 
 #[tokio::test]
@@ -429,7 +466,11 @@ async fn within_turn_overflow_in_the_fallback_instruction_is_a_context_stop() {
     let mut input = CompletionRequest::new(request.question.clone())
         .preamble(PROMPT)
         .max_tokens(AskLimits::OUTPUT_TOKENS);
-    input.tools = definitions().unwrap().into_iter().map(Arc::new).collect();
+    input.tools = definitions("read_neighbors")
+        .unwrap()
+        .into_iter()
+        .map(Arc::new)
+        .collect();
     let codec = rig_core::providers::openai::wire::OpenAIConfig::with_key(
         &rig_core::providers::openai::wire::OPENROUTER,
         "fixture",

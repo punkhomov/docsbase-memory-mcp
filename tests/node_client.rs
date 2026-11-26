@@ -41,6 +41,7 @@ fn fixture() -> Value {
     ];
     let hit = SearchHit {
         chunk_id: u64::MAX,
+        chunk_ref: None,
         path: "guides/привет.md".into(),
         heading_path: "Guide > Привет".into(),
         lines: [1, 3],

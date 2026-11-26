@@ -3,6 +3,7 @@ import {
   type HelloMetadata,
   type SearchHit,
   type SearchResult,
+  type NeighborChunk,
   type DaemonStatus,
   type ProjectStatus,
   type ServerStatus,
@@ -18,6 +19,7 @@ export const SEARCH_CONTEXT = 'search-context-v1';
 export const PANEL_READ = 'panel-read-v1';
 export const LITERAL_QUERY = 'literal-query-v1';
 export const SERVER_STATUS = 'server-status-v1';
+export const CHUNK_REF = 'chunk-ref-v1';
 export type WireRequest = {
   method: 'Hello' | 'BindReadOnly' | 'Search' | 'CallTool';
   params: unknown;
@@ -116,9 +118,12 @@ export function toolValue(response: WireResponse): unknown {
   if (response.kind !== 'ToolResult') throw protocolError();
   return response.data.value;
 }
-function citation(value: unknown): value is SearchHit {
+export function isChunkRef(value: unknown): value is string {
+  return typeof value === 'string' && value.length === 99 && /^v1\.[0-9a-f]{96}$/.test(value);
+}
+
+function chunkLocation(value: Record<string, unknown>): boolean {
   return (
-    object(value) &&
     typeof value.chunk_id === 'string' &&
     /^(0|[1-9][0-9]*)$/.test(value.chunk_id) &&
     value.chunk_id.length <= 20 &&
@@ -127,22 +132,46 @@ function citation(value: unknown): value is SearchHit {
     typeof value.heading_path === 'string' &&
     Array.isArray(value.lines) &&
     value.lines.length === 2 &&
-    value.lines.every((n) => safeUnsigned(n) && n <= 0xffffffff) &&
+    value.lines.every((n) => safeUnsigned(n) && n <= 0xffffffff)
+  );
+}
+
+function citation(value: unknown): value is SearchHit {
+  return (
+    object(value) &&
+    chunkLocation(value) &&
     typeof value.score === 'number' &&
     Number.isFinite(value.score) &&
     (value.snippet === undefined || typeof value.snippet === 'string') &&
-    (value.snippet_truncated === undefined || typeof value.snippet_truncated === 'boolean')
+    (value.snippet_truncated === undefined || typeof value.snippet_truncated === 'boolean') &&
+    (value.chunk_ref === undefined || isChunkRef(value.chunk_ref))
   );
 }
-export function searchResult(value: unknown): SearchResult {
+export function searchResult(value: unknown, requireReferences = false): SearchResult {
   const hits = Array.isArray(value) ? value : object(value) ? value.hits : null;
   if (
     !Array.isArray(hits) ||
-    !hits.every(citation) ||
+    !hits.every((hit) => citation(hit) && (!requireReferences || hit.chunk_ref !== undefined)) ||
     (!Array.isArray(value) && (!object(value) || !object(value.meta)))
   )
     throw protocolError();
   return value as SearchResult;
+}
+export function neighborChunks(value: unknown): NeighborChunk[] {
+  if (
+    !Array.isArray(value) ||
+    !value.every(
+      (chunk) =>
+        object(chunk) &&
+        chunkLocation(chunk) &&
+        safeUnsigned(chunk.seq) &&
+        chunk.seq <= 0xffffffff &&
+        typeof chunk.kind === 'string' &&
+        typeof chunk.text === 'string',
+    )
+  )
+    throw protocolError();
+  return value as NeighborChunk[];
 }
 export function daemonStatus(value: unknown, projectId: number): DaemonStatus {
   if (

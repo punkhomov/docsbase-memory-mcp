@@ -1,5 +1,5 @@
 // Generated from Rust contracts. Do not edit.
-export type SearchHit = { chunk_id: number, path: string, heading_path: string, lines: [number, number], score: number, snippet?: string, snippet_truncated?: boolean, };
+export type SearchHit = { chunk_id: number, chunk_ref?: string, path: string, heading_path: string, lines: [number, number], score: number, snippet?: string, snippet_truncated?: boolean, };
 export type SearchResponse = Array<SearchHit> | { hits: Array<SearchHit>, meta: unknown, };
 export type ProjectView = { id: number, name: string, root: string, status: string, docs: number, chunks: number, watched: boolean, cached_vectors: number | null, vector_chunks: number | null, ann_state: string | null, };
 export type ConfigField = { group: string, name: string, value: string, source: string | null, };

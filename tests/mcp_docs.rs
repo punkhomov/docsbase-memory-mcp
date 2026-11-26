@@ -300,6 +300,19 @@ fn neighbors_window() {
     index_project(&env);
     let mut client = env.bound();
 
+    for (name, args) in [
+        (
+            "search_docs",
+            json!({"query": "MARKBETA", "chunk_ref": true}),
+        ),
+        ("read_neighbors_at", json!({"chunk_ref": "unavailable"})),
+    ] {
+        assert!(matches!(
+            client.call_tool(name, args),
+            Err(Error::Protocol { .. })
+        ));
+    }
+
     let hits = client
         .call_tool("search_docs", json!({ "query": "MARKBETA", "limit": 1 }))
         .expect("search_docs");
