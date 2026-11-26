@@ -93,19 +93,18 @@ impl Target {
             settings: &self.settings,
             config: &self.config,
         };
-        let stats = job.prepare(&mut capture, |prepared| {
-            operation.check()?;
-            prepared.publish(|commit| {
-                with_config_guards(&config_dir, project_root, || {
-                    operation.check()?;
-                    let current = Config::load_from(&config_dir, Some(project_root))?;
-                    if !lexical(&current) || outcome::recipe_id(&current) != recipe {
-                        return Err(admission(
-                            "project index configuration changed; retry index",
-                        ));
-                    }
-                    commit.commit(|| operation.check())
-                })
+        let prepared = job.stage(&mut capture)?;
+        operation.check()?;
+        let stats = prepared.publish(|commit| {
+            with_config_guards(&config_dir, project_root, || {
+                operation.check()?;
+                let current = Config::load_from(&config_dir, Some(project_root))?;
+                if !lexical(&current) || outcome::recipe_id(&current) != recipe {
+                    return Err(admission(
+                        "project index configuration changed; retry index",
+                    ));
+                }
+                commit.commit(|| operation.check())
             })
         })?;
         Ok(serde_json::json!({ "project_id": project_id, "stats": stats }))

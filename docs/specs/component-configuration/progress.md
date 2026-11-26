@@ -1848,3 +1848,19 @@ minor (deferred): the installation-wide disk target still evicts by
 modification time. An older head whose build finishes late can survive
 that sweep longer than an unpinned newer graph. Exact identity makes
 a later lookup reload or rebuild the graph for its own head.
+
+## 2026-11-26 — CF11b/c, владение подготовленной парой
+
+Task CF11b owned preparation: complete (transferable preparation lease,
+captured config and settings, real store tests, fresh review). Direct
+Index and daemon Sync use the staged value for the existing publication
+CAS. Maintenance receives the checked receipt after the preparation
+lease retires.
+
+Ruling: the prepared pair holds the project lease and excludes another
+builder. The test keeps the old active pair searchable, publishes the
+staged pair on another native thread and reacquires the lease. The
+selected pair then has the nondefault ignore recipe and only its
+accepted changed content. Failed or abandoned stages retain normal
+recovery ownership. The next phase uses the staged value for bounded
+embedding reads between native workers.

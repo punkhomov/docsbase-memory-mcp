@@ -138,36 +138,32 @@ impl CatalogSync {
             settings,
             config,
         };
-        job.prepare(&mut capture, |prepared| {
-            let outcome = prepared.outcome().clone();
-            prepared.publish(|commit| {
-                let _revision = revision.preparation_lease(config)?;
-                commit.commit_with(
-                    |conn, published| {
-                        let id = published.generation_id.ok_or_else(|| {
-                            Error::internal("published catalog sync generation missing")
-                        })?;
-                        let mut record = serde_json::to_value(&outcome.stats).map_err(|error| {
-                            Error::internal_with_source("encode catalog sync counters", error)
-                        })?;
-                        record["index_outcome"] =
-                            serde_json::to_value(SyncAttribution::for_generation(&outcome, id))
-                                .map_err(|error| {
-                                    Error::internal_with_source(
-                                        "encode catalog sync identity",
-                                        error,
-                                    )
-                                })?;
-                        repo::finish_sync_job(
-                            conn,
-                            self.id,
-                            SyncState::Done,
-                            Some(&encoded_record(&record)?),
-                        )
-                    },
-                    || operation.check(),
-                )
-            })
+        let prepared = job.stage(&mut capture)?;
+        let outcome = prepared.outcome().clone();
+        prepared.publish(|commit| {
+            let _revision = revision.preparation_lease(config)?;
+            commit.commit_with(
+                |conn, published| {
+                    let id = published.generation_id.ok_or_else(|| {
+                        Error::internal("published catalog sync generation missing")
+                    })?;
+                    let mut record = serde_json::to_value(&outcome.stats).map_err(|error| {
+                        Error::internal_with_source("encode catalog sync counters", error)
+                    })?;
+                    record["index_outcome"] =
+                        serde_json::to_value(SyncAttribution::for_generation(&outcome, id))
+                            .map_err(|error| {
+                                Error::internal_with_source("encode catalog sync identity", error)
+                            })?;
+                    repo::finish_sync_job(
+                        conn,
+                        self.id,
+                        SyncState::Done,
+                        Some(&encoded_record(&record)?),
+                    )
+                },
+                || operation.check(),
+            )
         })?;
         Ok(())
     }
