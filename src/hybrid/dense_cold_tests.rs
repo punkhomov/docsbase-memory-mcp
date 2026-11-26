@@ -452,8 +452,7 @@ fn warm_building_state_skips_loader_without_refreshing_recency() {
     let cache = DenseCache::new();
     cache
         .stash(
-            fixture.project,
-            generation,
+            legacy_index(fixture.project, generation),
             MODEL,
             DenseRows::Building(Arc::new(BuildingAnn {
                 hashes: Arc::new(fixture.original_hashes()),

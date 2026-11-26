@@ -13,7 +13,7 @@ use crate::hybrid::HybridStages;
 use crate::hybrid::Ranking;
 use crate::hybrid::blocking;
 use crate::hybrid::config::DEFAULT_RERANK_WINDOW;
-use crate::hybrid::dense::{self, DenseCache, DenseRequest, DenseRows};
+use crate::hybrid::dense::{self, BoundDenseRequest, DenseCache, DenseRows};
 use crate::hybrid::dense_metadata::DenseMetadata;
 use crate::hybrid::jobs::{self as hybrid_jobs, Coverage};
 use crate::hybrid::meta::{
@@ -157,7 +157,7 @@ fn dense_candidates<Guard>(
     {
         let metadata = in_read_phase(context, source, admit, |reader, index| {
             require_search_index(index, Some(query.index))?;
-            DenseMetadata::capture(&reader, project.id)
+            DenseMetadata::capture_bound(context.cache, reader.connection(), index)
         })?;
         operation.check()?;
         degrade(degraded, Degraded::ExactFallback);
@@ -168,11 +168,10 @@ fn dense_candidates<Guard>(
         );
         return stream_hashes(context, model_id, metadata.chunks(), vector, query.fetch);
     }
-    let rows = dense.get_with_metadata_admitted(
-        DenseRequest {
+    let rows = dense.get_bound_with_metadata_admitted(
+        BoundDenseRequest {
             cache_root: context.cache,
-            project_id: project.id,
-            generation: query.index.content_revision(),
+            index: query.index,
             model_id,
         },
         operation.cancellation(),
@@ -871,9 +870,17 @@ pub(super) fn capture_dense(
     index: ProjectIndex,
 ) -> Result<DenseMetadata> {
     let reader = source.try_acquire()?;
-    lifecycle::with_project_read_lease(source.cache_root(), project.id, || {
-        snapshot_info(&reader, project, Some(index))?;
-        DenseMetadata::capture(&reader, project.id)
+    let root = source.cache_root();
+    if reader.has_generation_catalog() {
+        return with_catalog_pair(reader, project, |registry, local, current| {
+            require_search_index(current, Some(index))?;
+            let reader = ProjectReader::new(registry, local);
+            DenseMetadata::capture_bound(root, reader.connection(), current)
+        });
+    }
+    lifecycle::with_project_read_lease(root, project.id, || {
+        let current = snapshot_info(&reader, project, Some(index))?;
+        DenseMetadata::capture_bound(root, reader.connection(), current)
     })
 }
 

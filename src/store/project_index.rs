@@ -27,14 +27,14 @@ pub(super) const LOCAL_REVISION_SCHEMA_SQL: &str =
     include_str!("registry_inspect/revision_schema.sql");
 
 /// Identifies one revision of a project's existing SQLite/Tantivy pair.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ProjectIndex {
     project_id: i64,
     content_revision: i64,
     generation: Option<Generation>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Generation {
     epoch: [u8; 16],
     id: i64,
@@ -54,6 +54,27 @@ impl ProjectIndex {
             content_revision,
             generation: None,
         })
+    }
+
+    pub(crate) const fn project_id(self) -> i64 {
+        self.project_id
+    }
+
+    /// Order published snapshots of the same project within one installation.
+    /// An epoch change requires stopped maintenance and has no numeric order.
+    pub(crate) fn is_after(self, other: Self) -> bool {
+        if self.project_id != other.project_id {
+            return false;
+        }
+        match (self.generation, other.generation) {
+            (Some(current), Some(previous)) => {
+                current.epoch == previous.epoch
+                    && (current.id, self.content_revision) > (previous.id, other.content_revision)
+            }
+            (None, None) => self.content_revision > other.content_revision,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+        }
     }
 
     pub(crate) const fn content_revision(self) -> i64 {

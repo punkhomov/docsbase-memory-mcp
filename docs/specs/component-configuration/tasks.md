@@ -983,3 +983,15 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - Сохранить существующие v4/v5 базы и совместимость legacy open.
   Общий v5 для новых Shared установок требует hybrid и Windows
   publication.
+
+## Delta 2026-11-26 — CF11c, snapshot плотного поиска
+
+- Захватывать dense-метаданные из выбранной SQLite-пары под lease поиска.
+  Владелец vectors.db остаётся привязан к корню установки.
+- Использовать полную идентичность опубликованного состояния для resident
+  rows, cold flights, digest memoization и завершения ANN worker. Проверить
+  два реальных head с одинаковой ревизией, оба набора векторов и позднее
+  завершение работы по предыдущему head.
+- Продолжить с сохранёнными ANN-графами, coverage и warm, подготовкой
+  векторов под бюджетом и приёмкой Shared hybrid через рабочие Index, Sync,
+  watcher и search.

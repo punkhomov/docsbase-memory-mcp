@@ -1818,3 +1818,16 @@ Unix file alias probe. The change uses the platform filesystem seam for the
 native probe. Fix review, the boundary test, the full suite, lean offline,
 all-target Clippy and formatting passed on Rust 1.100.0. The Shared default
 requires hybrid and native Windows publication.
+
+## 2026-11-26 — CF11c, snapshot плотного поиска
+
+Task CF11c dense snapshot identity: complete (in-process dense ownership,
+selected metadata path, local verification and fresh review). The full
+published identity follows the metadata, cold flight, digest and resident
+entry through ANN completion. The v4 API still supplies the legacy identity.
+
+Ruling: two real file pairs have the same content revision and different
+vectors. The old scalar key returned the first pair's vectors after the
+replacement. A deterministic paused loader now checks that separate flights
+each return their own vectors and the older completion preserves the new
+entry. Physical workers retain their existing resource charges.

@@ -615,9 +615,109 @@ fn install_v5_catalog(mut db: Db, epoch: [u8; 16]) {
     tx.commit().unwrap();
 }
 
+#[cfg(unix)]
+const CATALOG_MODEL: &str = "test/catalog@d2@l2";
+
+#[cfg(unix)]
+fn assert_catalog_vectors(dense: &DenseCache, metadata: DenseMetadata, expected: [f32; 2]) {
+    let cache = metadata.cache_root().to_path_buf();
+    {
+        let mut vectors = dense
+            .vector_source(metadata.project_id())
+            .connect(&cache)
+            .unwrap();
+        for (_, hash) in metadata.chunks() {
+            vectors.put(CATALOG_MODEL, hash, &expected).unwrap();
+        }
+    }
+    let rows = dense
+        .get_bound_with_metadata_admitted(
+            BoundDenseRequest {
+                cache_root: &cache,
+                index: metadata.index(),
+                model_id: CATALOG_MODEL,
+            },
+            &Cancellation::new(),
+            || Ok(metadata),
+            || Ok(()),
+        )
+        .unwrap();
+    assert_catalog_rows(rows, expected);
+}
+
+#[cfg(unix)]
+fn assert_catalog_rows(rows: DenseRows, expected: [f32; 2]) {
+    let DenseRows::Ready(rows) = rows else {
+        panic!("the fixture fits in the exact dense cache");
+    };
+    assert_eq!(rows.rows().len(), 1);
+    assert_eq!(rows.rows()[0].1.as_ref(), expected);
+}
+
+#[cfg(unix)]
+fn assert_catalog_flights(previous: DenseMetadata, current: DenseMetadata) {
+    // Both snapshots were captured under their real head's lease. No reader
+    // or project lock lives in the parked cold loader.
+    let dense = DenseCache::new();
+    let root = current.cache_root().to_path_buf();
+    let previous_request = BoundDenseRequest {
+        cache_root: &root,
+        index: previous.index(),
+        model_id: CATALOG_MODEL,
+    };
+    let current_request = BoundDenseRequest {
+        index: current.index(),
+        ..previous_request
+    };
+    let dense = &dense;
+    std::thread::scope(|scope| {
+        let (entered, parked) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let old = scope.spawn(|| {
+            load_catalog_rows(dense, previous_request, move || {
+                entered.send(()).unwrap();
+                wait.recv()
+                    .map_err(|_| Error::internal("test loader released without a result"))?;
+                Ok(previous)
+            })
+        });
+        parked.recv_timeout(WATCHDOG).unwrap();
+        let (finished, result) = mpsc::channel();
+        scope.spawn(move || {
+            finished
+                .send(load_catalog_rows(dense, current_request, || Ok(current)))
+                .unwrap();
+        });
+        let fresh = result.recv_timeout(WATCHDOG);
+        release.send(()).unwrap();
+        assert_catalog_rows(
+            fresh
+                .expect("a different head starts its own flight")
+                .unwrap(),
+            [0.0, 1.0],
+        );
+        assert_catalog_rows(old.join().unwrap().unwrap(), [1.0, 0.0]);
+    });
+    let retained = load_catalog_rows(dense, current_request, || {
+        panic!("late work must leave the new entry resident")
+    })
+    .unwrap();
+    assert_catalog_rows(retained, [0.0, 1.0]);
+}
+
+#[cfg(unix)]
+fn load_catalog_rows(
+    dense: &DenseCache,
+    request: BoundDenseRequest<'_>,
+    load: impl FnOnce() -> Result<DenseMetadata>,
+) -> Result<DenseRows> {
+    dense.get_bound_with_metadata_admitted(request, &Cancellation::new(), load, || Ok(()))
+}
+
 #[test]
 #[cfg(unix)]
-fn refill_and_payload_refuse_a_new_published_pair_at_the_same_content_revision() {
+#[allow(clippy::too_many_lines)] // Several search phases share two real publications.
+fn search_phases_refuse_a_new_published_pair_at_the_same_content_revision() {
     use crate::store::generation_build::{
         LexicalBuildRequest, prepare_lexical_generation, publish_lexical_generation,
     };
@@ -677,7 +777,7 @@ fn refill_and_payload_refuse_a_new_published_pair_at_the_same_content_revision()
         .unwrap(),
     };
     let admit = || Ok(());
-    let start = {
+    let (start, previous) = {
         let db = Db::open_readonly_for_search(cache, &settings).unwrap();
         let SearchStart::Prepared(start) = start_search(
             &context,
@@ -689,7 +789,14 @@ fn refill_and_payload_refuse_a_new_published_pair_at_the_same_content_revision()
         .unwrap() else {
             panic!("expected a lexical snapshot");
         };
-        start
+        let metadata = capture_dense(MetadataSource::Borrowed(&db), &project, start.lexical.index)
+            .expect("capture dense hashes from the selected v5 pair");
+        assert_eq!(metadata.cache_root(), db.cache_root());
+        assert_eq!(metadata.chunks().len(), 1);
+        assert_catalog_vectors(context.dense, metadata, [1.0, 0.0]);
+        let previous =
+            capture_dense(MetadataSource::Borrowed(&db), &project, start.lexical.index).unwrap();
+        (start, previous)
     };
 
     assert_eq!(publish(request, receipt), first);
@@ -703,6 +810,16 @@ fn refill_and_payload_refuse_a_new_published_pair_at_the_same_content_revision()
 
     let db = Db::open_readonly_for_search(cache, &settings).unwrap();
     let source = MetadataSource::Borrowed(&db);
+    let dense_error = capture_dense(source, &project, start.lexical.index)
+        .err()
+        .expect("dense cannot read a stale physical generation");
+    let index = with_catalog_pair(&db, &project, |_, _, index| Ok(index)).unwrap();
+    let current =
+        capture_dense(source, &project, index).expect("capture the replacement pair's dense rows");
+    assert_ne!(current.chunks(), previous.chunks());
+    assert_eq!(current.chunks().len(), previous.chunks().len());
+    assert_catalog_vectors(context.dense, current, [0.0, 1.0]);
+    assert_catalog_flights(previous, capture_dense(source, &project, index).unwrap());
     let refill_error = lexical_refill(
         &context,
         source,
@@ -715,7 +832,7 @@ fn refill_and_payload_refuse_a_new_published_pair_at_the_same_content_revision()
     let payload_error = prepare_with_query_vector(&context, source, &admit, start, None)
         .err()
         .expect("stale generation cannot supply payload");
-    for error in [refill_error, payload_error] {
+    for error in [refill_error, payload_error, dense_error] {
         assert!(
             matches!(error, Error::Project { ref message, .. }
             if message == "project generation changed during search preparation"),
