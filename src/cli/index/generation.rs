@@ -12,9 +12,10 @@ use crate::index::{job::CaptureBudget, outcome};
 use crate::search::budget::PayloadBudget;
 use crate::search::operation::SearchOperation;
 use crate::store::Db;
-use crate::store::generation_build::{LexicalBuildRequest, with_prepared_lexical_generation};
+use crate::store::generation_build::{
+    LexicalBuildRequest, observe_index_base, with_prepared_lexical_generation,
+};
 use crate::store::models::Project;
-use crate::store::registry_inspect::{ProjectIndexObservation, inspect_project_index};
 use crate::store::settings::DbSettings;
 
 pub(super) struct Target {
@@ -45,8 +46,8 @@ impl Target {
         })?;
         let epoch = db.generation_epoch()?;
         let project = registry::ensure_project(&mut db, root)?;
-        // The writer's native close retires any recoverable SQLite sidecars
-        // before the stopped preparation inspector takes its no-write lease.
+        // Project registration is complete. Preparation uses short registry
+        // phases, leaving neither a writer connection nor a lock across staging.
         db.close()?;
         Ok(Self {
             cache,
@@ -65,15 +66,7 @@ impl Target {
         operation.check()?;
         let limits = crate::config::observe::PlanningLimits::standard().registry;
         let project_id = self.project.id;
-        let base = match inspect_project_index(&self.cache, project_id, &self.settings, limits)? {
-            ProjectIndexObservation::Missing => None,
-            ProjectIndexObservation::Present(base) => Some(base),
-            ProjectIndexObservation::Unavailable(reason) => {
-                return Err(admission(format!(
-                    "generation base unavailable ({reason:?})"
-                )));
-            }
-        };
+        let base = observe_index_base(&self.cache, project_id, self.epoch, &self.settings, limits)?;
         let recipe = outcome::recipe_id(&self.config);
         let reserved_disk_bytes = self.config.index_writer.staging_disk_bytes();
         let mut plan = blake3::Hasher::new_derive_key("docsbase.index.direct.lexical.v1");

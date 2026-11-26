@@ -983,6 +983,8 @@ reports each value and its source.
 pair in an initialized v5 catalog. The default is 512 MiB. The staged
 metadata and Tantivy writers enforce the reservation during the build. Direct
 `docsbase index` on a qualified Unix filesystem uses this policy together
-with the existing retained indexing payload budgets. A rejected build leaves
+with the existing retained indexing payload budgets. Open SQLite registry
+readers keep their snapshots while a later search sees the newly published
+pair. A rejected build leaves
 the old head available. A later index retries cleanup of its retired local pairs once their readers
 release them. New installations still use the ordinary v4 storage path.

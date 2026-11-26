@@ -1688,3 +1688,14 @@ successful index into a failure.
 Independent review and fix review passed. Real CLI and generation acceptance,
 full Rust 1.100.0 cli-full, Clippy including both opt-in targets, fmt and
 the lean offline test passed with the existing benchmark baseline.
+
+Ruling: an existing registry reader reproduced the stopped inspector's WAL
+refusal. Direct index now uses short operational registry phases, while the
+maintenance API keeps its no-write proof. A real concurrent SQLite snapshot
+retains the old head across publication and a fresh CLI search finds the
+new pair. Operational verification applies the local SQLite inspection limits,
+validated sidecar paths and the same artifact binding as search.
+
+Independent review and fix review passed. Full cli-full and lean offline
+tests, Clippy including the opt-in targets, fmt and the existing benchmark
+passed after the live WAL change.

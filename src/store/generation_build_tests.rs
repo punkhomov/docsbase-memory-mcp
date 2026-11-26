@@ -512,7 +512,14 @@ fn publication_resumes_a_durable_seal_left_before_the_catalog_commit() {
     let staged = env.build(request).unwrap();
     let settings = settings::standalone().unwrap();
     let config = Config::default();
-    let project = super::probe_project(env.cache.path(), request, limits()).unwrap();
+    let project = super::probe_project(
+        env.cache.path(),
+        request,
+        &settings,
+        limits(),
+        CatalogAccess::Stopped,
+    )
+    .unwrap();
     let dir = env.generation(staged.generation_id);
     let written = super::publication::verify_and_seal(
         &dir,
@@ -1686,4 +1693,38 @@ fn index_cleanup_refuses_a_retired_catalog_base_that_disagrees_with_the_seal() {
     drop(registry);
     recovery::reclaim_index_pairs(&cache, &project, request, &settings, limits());
     assert!(!retired.exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn operational_base_applies_the_sqlite_value_limit_to_local_metadata() {
+    let env = Env::new();
+    let settings = settings::standalone().unwrap();
+    let (_, active) = retire_local_pair(&env);
+    let metadata = env
+        .generation(active.generation_id.unwrap())
+        .join("metadata.db");
+    let connection = Connection::open(metadata).unwrap();
+    connection
+        .execute(
+            "UPDATE projects SET index_outcome_json = index_outcome_json || ?1",
+            [" ".repeat(32 * 1024)],
+        )
+        .unwrap();
+    drop(connection);
+
+    let observed = observe_index_base(
+        &env.cache.path().canonicalize().unwrap(),
+        active.project_id,
+        active.epoch.unwrap(),
+        &settings,
+        InspectionLimits {
+            max_sqlite_value_bytes: 16 * 1024,
+            ..limits()
+        },
+    );
+    assert!(
+        observed.is_err(),
+        "oversized local SQLite record was accepted"
+    );
 }

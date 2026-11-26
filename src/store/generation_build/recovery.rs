@@ -521,18 +521,14 @@ pub(super) fn open_recovery_registry(
     cache: &Path,
     settings: &Resolved<DbSettings>,
 ) -> Result<super::Db> {
-    // Recovery can open these SQLite-managed sidecars. Regular no-link
-    // paths are required under the quiescent maintenance owner.
+    // The SQLite VFS can open these entries during normal WAL access or
+    // recovery. A cooperating connection may remove an absent/closing sidecar.
     for suffix in ["-wal", "-shm", "-journal"] {
         let path = cache.join(format!("{DB_FILE}{suffix}"));
-        match fs::symlink_metadata(&path) {
-            Ok(_) => filesystem(
-                &path,
-                "inspect recovery sidecar",
-                native_fs::check_single_link(&path),
-            )?,
+        match native_fs::check_single_link(&path) {
+            Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return filesystem(&path, "inspect recovery sidecar", Err(error)),
+            Err(error) => return filesystem(&path, "inspect registry sidecar", Err(error)),
         }
     }
     open_registry_file(cache, &cache.join(DB_FILE), settings)

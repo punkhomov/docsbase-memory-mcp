@@ -32,8 +32,8 @@ use super::recovery::{
     validate_owned_files, verify_ownership,
 };
 use super::{
-    LexicalBuildRequest, PreparedLexicalGeneration, admission, claim_path, filesystem,
-    open_coordination_file, open_registry, ownership_digest, validate_catalog, validate_epoch,
+    CatalogAccess, LexicalBuildRequest, PreparedLexicalGeneration, admission, claim_path,
+    filesystem, open_coordination_file, ownership_digest, validate_catalog, validate_epoch,
     verify_base, verify_chunk_pair, with_preparation_lease,
 };
 
@@ -81,7 +81,7 @@ pub fn publish_lexical_generation(
         return Err(admission("generation project directory is missing"));
     }
     with_preparation_lease(&project_dir, || {
-        publish_stopped(
+        publish_prepared(
             StagedPublication {
                 cache: &cache,
                 project_dir: &project_dir,
@@ -90,6 +90,7 @@ pub fn publish_lexical_generation(
                 settings,
                 limits,
                 config,
+                access: CatalogAccess::Stopped,
             },
             |ready| ready.commit(|| Ok(())),
         )
@@ -104,6 +105,7 @@ pub(super) struct StagedPublication<'a> {
     pub(super) settings: &'a Resolved<DbSettings>,
     pub(super) limits: InspectionLimits,
     pub(super) config: &'a Config,
+    pub(super) access: CatalogAccess,
 }
 
 /// A sealed pair ready for the final project writer lease and catalog CAS.
@@ -126,7 +128,7 @@ impl LexicalCommit<'_> {
     }
 }
 
-pub(super) fn publish_stopped(
+pub(super) fn publish_prepared(
     publication: StagedPublication<'_>,
     finalize: impl FnOnce(LexicalCommit<'_>) -> Result<ObservedProjectIndex>,
 ) -> Result<ObservedProjectIndex> {
@@ -138,6 +140,7 @@ pub(super) fn publish_stopped(
         settings,
         limits,
         config,
+        access,
     } = publication;
     let dir = project_dir
         .join("generations")
@@ -152,7 +155,9 @@ pub(super) fn publish_stopped(
         "inspect generation registry file",
         native_fs::check_single_link(&registry_path),
     )?;
-    if registry_inspect::sidecars_absent(&registry_path) == Err(UnavailableReason::RecoveryRequired)
+    if access == CatalogAccess::Stopped
+        && registry_inspect::sidecars_absent(&registry_path)
+            == Err(UnavailableReason::RecoveryRequired)
     {
         let registry = open_recovery_registry(cache, settings)?;
         configure_publication_connection(registry.connection(), limits)?;
@@ -162,21 +167,12 @@ pub(super) fn publish_stopped(
             .close()
             .map_err(|(_, err)| repo::db_error(err))?;
     }
-    let (already_active, project) = registry_inspect::with_registry(
-        cache,
-        limits,
-        || {},
-        |conn, _| {
-            Ok(
-                candidate_is_active(conn, request, staged).and_then(|active| {
-                    let project = registry::project_by_id_in(conn, request.project_id)?
-                        .ok_or_else(|| admission("generation project is no longer registered"))?;
-                    Ok((active, project))
-                }),
-            )
-        },
-    )
-    .map_err(registry_unavailable)??;
+    let (already_active, project) = access.read(cache, settings, limits, |conn| {
+        let active = candidate_is_active(conn, request, staged)?;
+        let project = registry::project_by_id_in(conn, request.project_id)?
+            .ok_or_else(|| admission("generation project is no longer registered"))?;
+        Ok((active, project))
+    })?;
 
     let current = ObservedProjectIndex {
         project_id: staged.project_id,
@@ -186,6 +182,9 @@ pub(super) fn publish_stopped(
         layout: ProjectIndexLayout::Local,
     };
     if already_active {
+        if access == CatalogAccess::Operational {
+            return Err(admission("prepared generation was already published"));
+        }
         let metadata = open_local_metadata(&dir, settings, limits)?;
         verified_recipe(&metadata, &project, staged.content_revision, config)?;
         metadata
@@ -196,7 +195,7 @@ pub(super) fn publish_stopped(
         return Ok(current);
     }
 
-    verify_base(cache, request, settings, limits)?;
+    verify_base(cache, request, settings, limits, access)?;
     let read_lock = dir.join(".read.lock");
     let seal = lifecycle::with_read_lock(
         open_coordination_file(&read_lock, false)?,
@@ -599,11 +598,12 @@ fn commit_head(commit: &LexicalCommit<'_>, admit: impl FnOnce() -> Result<()>) -
         staged,
         settings,
         limits,
+        access,
         ..
     } = commit.publication;
     let project = commit.project;
     let seal = &commit.seal;
-    let mut registry = open_registry(cache, settings)?;
+    let mut registry = access.writer(cache, settings)?;
     let connection = registry.connection();
     configure_publication_connection(connection, limits)?;
     registry

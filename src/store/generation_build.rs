@@ -30,6 +30,10 @@ use super::{
     repo,
 };
 
+mod catalog_access;
+use catalog_access::CatalogAccess;
+pub(crate) use catalog_access::observe_index_base;
+
 mod publication;
 pub use publication::publish_lexical_generation;
 
@@ -122,7 +126,7 @@ impl PreparedLexicalPublication<'_> {
         self,
         finalize: impl FnOnce(publication::LexicalCommit<'_>) -> Result<ObservedProjectIndex>,
     ) -> Result<job::JobStats> {
-        publication::publish_stopped(self.publication, finalize)?;
+        publication::publish_prepared(self.publication, finalize)?;
         Ok(self.stats)
     }
 }
@@ -163,6 +167,15 @@ enum BuildPurpose<'a, 'b> {
     DirectIndex(&'a mut job::CaptureBudget<'b>),
 }
 
+impl BuildPurpose<'_, '_> {
+    const fn access(&self) -> CatalogAccess {
+        match self {
+            Self::Maintenance => CatalogAccess::Stopped,
+            Self::DirectIndex(_) => CatalogAccess::Operational,
+        }
+    }
+}
+
 fn prepare_and_then<T>(
     cache: &Path,
     inputs: BuildInputs<'_>,
@@ -192,7 +205,8 @@ fn prepare_and_then<T>(
     DbSpec::validate(settings.settings(), &Capabilities::current())?;
     config.validate()?;
     let cache = filesystem(cache, "resolve cache", fs::canonicalize(cache))?;
-    let project = probe_project(&cache, request, limits)?;
+    let access = purpose.access();
+    let project = probe_project(&cache, request, settings, limits, access)?;
     let source = &project.canonical_root;
     if !source.is_absolute()
         || filesystem(source, "resolve registered root", fs::canonicalize(source))? != *source
@@ -206,7 +220,7 @@ fn prepare_and_then<T>(
     ensure_directory(&cache.join("projects"))?;
     ensure_directory(&project_dir)?;
     with_preparation_lease(&project_dir, || {
-        let direct = matches!(&purpose, BuildPurpose::DirectIndex(_));
+        let direct = access == CatalogAccess::Operational;
         let capture = match purpose {
             BuildPurpose::Maintenance => None,
             BuildPurpose::DirectIndex(capture) => {
@@ -232,12 +246,12 @@ fn prepare_and_then<T>(
             open_coordination_file(&base_lease, request.base.is_none())?,
             &base_lease,
             || {
-                verify_base(&cache, request, settings, limits)?;
+                verify_base(&cache, request, settings, limits, access)?;
                 reserve(
                     &cache,
-                    request,
+                    inputs,
                     &project,
-                    settings,
+                    access,
                     reservation,
                     &generations,
                     available_space,
@@ -265,6 +279,7 @@ fn prepare_and_then<T>(
                 settings,
                 limits,
                 config,
+                access,
             },
             stats,
         })?;
@@ -337,21 +352,15 @@ fn with_preparation_lease<T>(project_dir: &Path, run: impl FnOnce() -> Result<T>
 fn probe_project(
     cache: &Path,
     request: LexicalBuildRequest,
+    settings: &Resolved<DbSettings>,
     limits: InspectionLimits,
+    access: CatalogAccess,
 ) -> Result<Project> {
-    // The no-write VFS lease refuses recovery before reading the registry.
-    registry_inspect::with_registry(
-        cache,
-        limits,
-        || {},
-        |connection, _| {
-            Ok(validate_catalog(connection, request).and_then(|()| {
-                registry::project_by_id_in(connection, request.project_id)?
-                    .ok_or_else(|| admission("generation build project is not registered"))
-            }))
-        },
-    )
-    .map_err(|reason| admission(format!("generation registry is unavailable ({reason:?})")))?
+    access.read(cache, settings, limits, |connection| {
+        validate_catalog(connection, request)?;
+        registry::project_by_id_in(connection, request.project_id)?
+            .ok_or_else(|| admission("generation build project is not registered"))
+    })
 }
 
 fn verify_base(
@@ -359,17 +368,28 @@ fn verify_base(
     request: LexicalBuildRequest,
     settings: &Resolved<DbSettings>,
     limits: InspectionLimits,
+    access: CatalogAccess,
 ) -> Result<()> {
-    match (
-        inspect_project_index(cache, request.project_id, settings, limits)?,
-        request.base,
-    ) {
-        (ProjectIndexObservation::Missing, None) => Ok(()),
-        (ProjectIndexObservation::Present(observed), Some(base)) if observed == base => Ok(()),
-        (ProjectIndexObservation::Unavailable(reason), _) => Err(admission(format!(
-            "generation base is unavailable ({reason:?})"
-        ))),
-        _ => Err(admission("generation base changed before preparation")),
+    let observed = match access {
+        CatalogAccess::Operational => {
+            observe_index_base(cache, request.project_id, request.epoch, settings, limits)?
+        }
+        CatalogAccess::Stopped => {
+            match inspect_project_index(cache, request.project_id, settings, limits)? {
+                ProjectIndexObservation::Missing => None,
+                ProjectIndexObservation::Present(observed) => Some(observed),
+                ProjectIndexObservation::Unavailable(reason) => {
+                    return Err(admission(format!(
+                        "generation base is unavailable ({reason:?})"
+                    )));
+                }
+            }
+        }
+    };
+    if observed == request.base {
+        Ok(())
+    } else {
+        Err(admission("generation base changed before preparation"))
     }
 }
 
@@ -415,14 +435,17 @@ fn validate_catalog(connection: &Connection, request: LexicalBuildRequest) -> Re
 
 fn reserve(
     cache: &Path,
-    request: LexicalBuildRequest,
+    inputs: BuildInputs<'_>,
     project: &Project,
-    settings: &Resolved<DbSettings>,
+    access: CatalogAccess,
     reservation: i64,
     generations: &Path,
     available_space: impl FnOnce(&Path) -> io::Result<u64>,
 ) -> Result<i64> {
-    let mut registry = open_registry(cache, settings)?;
+    let BuildInputs {
+        request, settings, ..
+    } = inputs;
+    let mut registry = access.writer(cache, settings)?;
     // Project registration and the head comparison are bound to the same
     // IMMEDIATE transaction as the new reservation.
     let tx = registry.begin_write()?;

@@ -918,9 +918,10 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 
 ## Delta 2026-11-26 — CF11c, прямой index публикует лексическое поколение
 
-- Обычный v2 `docsbase index` открывает существующий реестр v5 для
-  остановленной работы на поддерживаемом Unix-хранилище. Регистрирует
-  проект и передаёт resolved writer, поиск и DB policy до потребителей.
+- Обычный v2 `docsbase index` открывает существующий реестр v5 на
+  поддерживаемом Unix-хранилище. Регистрирует проект и передаёт
+  resolved writer, поиск и DB policy до потребителей. Параллельный
+  читатель реестра сохраняет свой WAL snapshot при смене head.
 - Одна project preparation lease связывает восстановление, подготовку и
   публикацию. Staging расходует `index.writer.staging_disk_bytes` и
   обычный индексный payload budget. Перед CAS повторно проверить рецепт

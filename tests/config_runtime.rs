@@ -1064,6 +1064,48 @@ fn direct_index_publishes_and_replaces_a_lexical_v5_pair() {
 
 #[test]
 #[cfg(unix)]
+fn live_registry_read_keeps_its_snapshot_across_direct_v5_index() {
+    use docsbase_memory::store::DB_FILE;
+    use rusqlite::{Connection, OpenFlags};
+
+    let env = Env::new(&[("guide.md", "# Guide\n\nprevioushelix\n")]);
+    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    seed_v5_registry(&env);
+    let initial = env.run_json(&["index"]);
+
+    // A second process can hold its registry snapshot while a private
+    // generation is prepared and published.
+    let reader =
+        Connection::open_with_flags(env.cache().join(DB_FILE), OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let active = |conn: &Connection| {
+        conn.query_row("SELECT active_id FROM project_generation_head", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    let previous = active(&reader);
+    fs::write(env.root().join("guide.md"), "# Guide\n\npublishedspiral\n").unwrap();
+    assert_eq!(
+        env.run_json(&["index"])["project_id"],
+        initial["project_id"]
+    );
+    assert_eq!(
+        active(&reader),
+        previous,
+        "open transaction sees its old head"
+    );
+    assert_eq!(
+        env.run_json(&["search", "publishedspiral"])[0]["path"],
+        "guide.md"
+    );
+    let current = Connection::open(env.cache().join(DB_FILE)).unwrap();
+    assert!(active(&current) > previous);
+}
+
+#[test]
+#[cfg(unix)]
 fn failed_v5_index_keeps_the_active_pair_and_is_retryable() {
     let env = Env::new(&[("guide.md", "# Guide\n\nlastgoodpulsar\n")]);
     let default = "config_version = 2\n";

@@ -7,12 +7,14 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
-use crate::index::outcome;
+use crate::index::{outcome, tantivy_index::ReadIndex};
 
 use super::generation_catalog::{self, Layout};
 use super::generation_seal::{GenerationSeal, SEAL_FORMAT};
 use super::models::{Project, ProjectStatus};
-use super::registry_inspect::{self, UnavailableReason};
+use super::registry_inspect::{
+    self, InspectionLimits, ObservedProjectIndex, ProjectIndexLayout, UnavailableReason,
+};
 use super::{Db, migrations, repo};
 
 pub(super) const LOCAL_SCHEMA_VERSION: u32 = 1;
@@ -92,8 +94,22 @@ pub(crate) fn with_catalog_pair<R, T>(
 where
     R: Deref<Target = Db>,
 {
+    with_catalog_pair_using(registry, project, None, read)
+}
+
+fn with_catalog_pair_using<R, T>(
+    registry: R,
+    project: &Project,
+    limits: Option<InspectionLimits>,
+    read: impl FnOnce(R, Option<LocalMetadata>, ProjectIndex) -> Result<T>,
+) -> Result<T>
+where
+    R: Deref<Target = Db>,
+{
     let cache = canonical_cache(registry.cache_root())?;
     let directory = project_directory(&cache, project.id);
+    registry_inspect::check_directory(&directory)
+        .map_err(|reason| unavailable("project generation directory", reason))?;
     let writer = lifecycle::lease_path(&cache, project.id);
     with_catalog_lease(&writer, "project lease", || {
         let current = registry::project_by_id(&registry, project.id)?
@@ -141,7 +157,7 @@ where
                     let seal: GenerationSeal = serde_json::from_slice(&bytes).map_err(|_| {
                         invalid_index("published generation seal has an invalid format")
                     })?;
-                    let metadata = open_catalog_metadata(&registry, &generation_dir)?;
+                    let metadata = open_catalog_metadata(&registry, &generation_dir, limits)?;
                     let revision = registry_inspect::local_revision(
                         metadata.connection(),
                         project.id,
@@ -189,7 +205,58 @@ where
     })
 }
 
-fn open_catalog_metadata(registry: &Db, directory: &Path) -> Result<Db> {
+/// Observe a registered base through the same leases and artifact proofs as
+/// search. A registration without a head is safe to inspect before its first
+/// lock file exists; callers still compare that absence before reserving.
+pub(super) fn observe_catalog_index(
+    db: &Db,
+    project: &Project,
+    limits: InspectionLimits,
+) -> Result<Option<ObservedProjectIndex>> {
+    if generation_catalog::active_head(db.connection(), project.id)
+        .map_err(|reason| unavailable("active generation", reason))?
+        .is_none()
+    {
+        return if project.status == ProjectStatus::NotIndexed {
+            Ok(None)
+        } else {
+            Err(invalid_index(
+                "registered project has no published generation",
+            ))
+        };
+    }
+    with_catalog_pair_using(db, project, Some(limits), |registry, local, index| {
+        let generation = index
+            .generation
+            .ok_or_else(|| invalid_index("selected pair has no catalog identity"))?;
+        let dir = if let Some(local) = local {
+            local.tantivy_dir()?
+        } else {
+            let dir = index.tantivy_dir(registry.cache_root());
+            registry_inspect::check_tantivy_files(&dir, None)
+                .map_err(|reason| unavailable("Tantivy files", reason))?;
+            dir
+        };
+        ReadIndex::check_health_with_project_lease(&dir)?;
+        Ok(Some(ObservedProjectIndex {
+            project_id: project.id,
+            epoch: Some(generation.epoch),
+            generation_id: Some(generation.id),
+            content_revision: index.content_revision,
+            layout: if generation.seal.is_some() {
+                ProjectIndexLayout::Local
+            } else {
+                ProjectIndexLayout::Legacy
+            },
+        }))
+    })
+}
+
+fn open_catalog_metadata(
+    registry: &Db,
+    directory: &Path,
+    limits: Option<InspectionLimits>,
+) -> Result<Db> {
     let path = directory.join("metadata.db");
     registry_inspect::sidecars_absent(&path)
         .map_err(|reason| unavailable("generation metadata sidecars", reason))?;
@@ -202,6 +269,9 @@ fn open_catalog_metadata(registry: &Db, directory: &Path) -> Result<Db> {
     .map_err(repo::db_error)?;
     conn.busy_timeout(registry.settings().settings().read_busy_timeout)
         .map_err(repo::db_error)?;
+    if let Some(limits) = limits {
+        registry_inspect::configure_connection(&conn, limits).map_err(repo::db_error)?;
+    }
     Ok(Db {
         conn,
         cache_root: registry.cache_root().to_path_buf(),
