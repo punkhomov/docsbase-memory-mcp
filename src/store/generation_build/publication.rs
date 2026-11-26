@@ -16,14 +16,15 @@ use crate::limits::MAX_STATE_BYTES;
 use crate::platform::fs as native_fs;
 use crate::store::models::{Project, ProjectStatus};
 use crate::store::registry_inspect::{
-    self, InspectionLimits, ObservedProjectIndex, ProjectIndexLayout, UnavailableReason,
+    self, InspectionLimits, LocalRevision, ObservedProjectIndex, ProjectIndexLayout,
+    UnavailableReason,
 };
 use crate::store::settings::{DbSettings, DbSpec};
 use crate::store::{
     DB_FILE, Db,
     generation_seal::{GenerationSeal, SEAL_FORMAT},
     migrations,
-    project_index::{LOCAL_SCHEMA_VERSION, project_directory},
+    project_index::project_directory,
     repo,
 };
 
@@ -31,6 +32,7 @@ use super::recovery::{
     directory_exists, open_recovery_registry, read_owner_record, sync_directory,
     validate_owned_files, verify_ownership,
 };
+use super::retirement::Retirement;
 use super::{
     CatalogAccess, LexicalBuildRequest, PreparedLexicalGeneration, admission, claim_path,
     filesystem, open_coordination_file, ownership_digest, validate_catalog, validate_epoch,
@@ -190,7 +192,7 @@ pub(super) fn publish_prepared(
         layout: ProjectIndexLayout::Local,
     };
     if already_active {
-        if access == CatalogAccess::Operational {
+        if access != CatalogAccess::Stopped {
             return Err(admission("prepared generation was already published"));
         }
         let metadata = open_local_metadata(&dir, settings, limits)?;
@@ -323,12 +325,15 @@ pub(super) fn verify_and_seal(
     verify_ownership(dir, digest, false, false)?;
     validate_owned_files(dir)?;
     let metadata = open_local_metadata(dir, settings, limits)?;
-    check_revision(
+    let revision = check_revision(
         &metadata,
         staged.project_id,
         staged.generation_id,
         staged.content_revision,
     )?;
+    if revision.manifest.is_some() {
+        return Err(admission("prepared metadata already has a live revision"));
+    }
     let recipe = verified_recipe(&metadata, project, staged.content_revision, config)?;
     verify_sources(&metadata, project, config)?;
     verify_chunk_pair(
@@ -352,7 +357,7 @@ pub(super) fn verify_and_seal(
         project_id: project.id,
         generation_id: staged.generation_id,
         content_revision: staged.content_revision,
-        metadata_schema: LOCAL_SCHEMA_VERSION,
+        metadata_schema: revision.schema,
         base_id: request.base.and_then(|base| base.generation_id),
         base_revision: request.base.map_or(0, |base| base.content_revision),
         plan: blake3::Hash::from_bytes(request.plan_digest)
@@ -424,7 +429,7 @@ pub(super) fn open_local_metadata(
     })
 }
 
-fn configure_publication_connection(
+pub(super) fn configure_publication_connection(
     connection: &Connection,
     limits: InspectionLimits,
 ) -> Result<()> {
@@ -434,19 +439,26 @@ fn configure_publication_connection(
     registry_inspect::configure_connection(connection, limits).map_err(repo::db_error)
 }
 
-fn check_revision(metadata: &Db, project: i64, generation: i64, expected: i64) -> Result<()> {
+fn check_revision(
+    metadata: &Db,
+    project: i64,
+    generation: i64,
+    expected: i64,
+) -> Result<LocalRevision> {
     let revision = registry_inspect::local_revision(metadata.connection(), project, generation)
         .map_err(|reason| {
             admission(format!(
                 "local generation identity is unavailable ({reason:?})"
             ))
         })?;
-    if revision != expected || repo::has_pending_docs(metadata.connection(), project)? {
+    if revision.content_revision != expected
+        || repo::has_pending_docs(metadata.connection(), project)?
+    {
         return Err(admission(
             "local generation revision or pending state changed",
         ));
     }
-    Ok(())
+    Ok(revision)
 }
 
 fn verify_sources(metadata: &Db, project: &Project, config: &Config) -> Result<()> {
@@ -622,6 +634,7 @@ fn commit_head(
         .connection()
         .pragma_update(None, "synchronous", "EXTRA")
         .map_err(repo::db_error)?;
+    let retirement = prepare_retirement(connection, &commit.publication)?;
     let tx = registry.begin_write()?;
     validate_catalog(&tx, request)?;
     let registered = registry::project_by_id_in(&tx, project.id)?
@@ -647,18 +660,6 @@ fn commit_head(
         let generation = base
             .generation_id
             .ok_or_else(|| admission("active pair has no generation ID"))?;
-        if base.layout == ProjectIndexLayout::Local {
-            let active = project_directory(cache, request.project_id)
-                .join("generations")
-                .join(generation.to_string());
-            let metadata = open_local_metadata(&active, settings, limits)?;
-            check_revision(
-                &metadata,
-                request.project_id,
-                generation,
-                base.content_revision,
-            )?;
-        }
         let retired = tx
             .execute(
                 "UPDATE project_generations SET phase='retired'
@@ -668,6 +669,9 @@ fn commit_head(
             .map_err(repo::db_error)?;
         if retired != 1 {
             return Err(admission("base generation changed during publication"));
+        }
+        if let Some(retirement) = retirement {
+            retirement.record(&tx)?;
         }
     }
     let activated = tx
@@ -704,4 +708,51 @@ fn commit_head(
         .close()
         .map_err(|(_, err)| repo::db_error(err))?;
     sync_directory(cache)
+}
+
+/// Under the project writer lease, before starting the shared registry write
+/// transaction. The new head and any retirement evidence commit together.
+fn prepare_retirement(
+    registry: &Connection,
+    publication: &StagedPublication<'_>,
+) -> Result<Option<Retirement>> {
+    let StagedPublication {
+        cache,
+        project_dir,
+        request,
+        settings,
+        limits,
+        access,
+        ..
+    } = *publication;
+    let Some(base) = request
+        .base
+        .filter(|base| base.layout == ProjectIndexLayout::Local)
+    else {
+        return Ok(None);
+    };
+    let head = crate::store::generation_catalog::active_head(registry, request.project_id)
+        .map_err(registry_unavailable)?
+        .filter(|head| Some(head.id) == base.generation_id)
+        .ok_or_else(|| admission("local base generation changed during publication"))?;
+    let crate::store::generation_catalog::Layout::Local { seal_digest } = head.layout else {
+        return Err(admission("local base layout changed during publication"));
+    };
+    let path = project_dir.join("generations").join(head.id.to_string());
+    if let CatalogAccess::Repair(interrupted) = access {
+        super::interrupted::recheck(registry, cache, interrupted, settings, limits)?;
+        return Retirement::capture(&path, head.id, seal_digest, limits).map(Some);
+    }
+    let metadata = open_local_metadata(&path, settings, limits)?;
+    let revision = check_revision(
+        &metadata,
+        request.project_id,
+        head.id,
+        base.content_revision,
+    )?;
+    metadata.close()?;
+    if revision.manifest.is_some() {
+        return Retirement::capture(&path, head.id, seal_digest, limits).map(Some);
+    }
+    Ok(None)
 }

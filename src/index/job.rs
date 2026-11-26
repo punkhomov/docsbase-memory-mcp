@@ -598,6 +598,10 @@ pub(crate) struct PreparedPlan {
     pub(crate) stats: JobStats,
 }
 impl PreparedPlan {
+    pub(crate) fn has_changes(&self) -> bool {
+        !self.plan.is_empty() || !self.removed.is_empty()
+    }
+
     pub(crate) fn begin(
         &mut self,
         db: &mut Db,

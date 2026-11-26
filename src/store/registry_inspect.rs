@@ -11,12 +11,13 @@ use crate::error::{Error, Result};
 
 pub(super) mod lease;
 mod project;
+pub(super) use project::{
+    LocalRevision, check_directory, check_identity_budget, check_revised_tantivy,
+    check_tantivy_files, local_revision, observe_project, open_checked_file, read_checked_seal,
+    read_local_revision, tantivy_manifest,
+};
 pub use project::{
     ObservedProjectIndex, ProjectIndexLayout, ProjectIndexObservation, inspect_project_index,
-};
-pub(super) use project::{
-    check_directory, check_identity_budget, check_tantivy_files, local_revision, observe_project,
-    open_checked_file, read_checked_seal,
 };
 
 /// Caller-owned limits; no runtime fallback/default is chosen by the observer.

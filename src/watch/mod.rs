@@ -806,7 +806,7 @@ pub(crate) fn report_async_event(
     event: BatchEvent,
     policy: BatchRetryPolicy,
     pending: Option<&WatchPayload>,
-    db_settings: &Resolved<DbSettings>,
+    open_registry: impl FnOnce() -> Result<Db>,
 ) -> Result<()> {
     let dropped = match &event {
         BatchEvent::DroppedTransient { attempts, error } => Some((*attempts, error.as_str())),
@@ -831,7 +831,7 @@ pub(crate) fn report_async_event(
                 message: "watcher warning capture overflow".into(),
             })?;
         pending.account.grow_shared(bytes)?;
-        let mut db = Db::open_with_settings(cache, db_settings)?;
+        let mut db = open_registry()?;
         record_dropped_paths(&mut db, project.id, &pending.paths, attempts, error);
     }
     report_batch_event(

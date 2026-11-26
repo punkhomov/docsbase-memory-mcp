@@ -304,6 +304,38 @@ impl JobService {
         Ok(owner)
     }
 
+    /// A single native phase shares background admission with detached jobs.
+    /// Its permit and activity travel with the worker through cancellation.
+    pub(crate) async fn run_native<T: Send + 'static>(
+        &self,
+        workers: &WorkerAdmission,
+        activity: Arc<Activity>,
+        operation: &SearchOperation,
+        work: impl FnOnce() -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let queued = std::time::Instant::now();
+        let logical = self
+            .inner
+            .logical
+            .acquire(
+                operation.deadline(),
+                operation.cancellation(),
+                &self.inner.close,
+            )
+            .await?;
+        operation.record_queue(queued.elapsed());
+        let permit = workers.background(operation).await?;
+        let call = operation.clone();
+        let close = self.inner.close.clone();
+        let worker = request::spawn(Some(permit), Some(activity), move || {
+            let _logical = logical;
+            close.check()?;
+            call.check()?;
+            work()
+        });
+        request::run(worker, Some(operation)).await
+    }
+
     pub(crate) async fn phase<T: Send + Sync + 'static>(
         &self,
         workers: &WorkerAdmission,

@@ -409,15 +409,18 @@ fn reclaim_stopped(
         .transpose()?;
     if exists {
         match seal_digest {
-            Some(seal) => validate_retired_files(
-                &path,
-                seal,
-                limits,
-                resuming,
-                request.epoch,
-                generation,
-                &state,
-            )?,
+            Some(seal) => {
+                let files = super::retirement::load(db.connection(), generation, seal, limits)?;
+                validate_retired_files(
+                    &path,
+                    limits,
+                    resuming,
+                    request.epoch,
+                    generation,
+                    &state,
+                    files.as_deref(),
+                )?;
+            }
             None => validate_owned_files(&path)?,
         }
         sync_directory(&path)?;
@@ -480,13 +483,16 @@ fn remove_reclaiming_generation(
 
 fn validate_retired_files(
     path: &Path,
-    expected: &[u8],
     limits: InspectionLimits,
     resuming: bool,
     epoch: [u8; 16],
     generation: i64,
     state: &RetainedGeneration,
+    current_files: Option<&[(String, u64)]>,
 ) -> Result<()> {
+    let expected = state
+        .seal
+        .ok_or_else(|| admission("retired generation seal is missing"))?;
     let seal = path.join("seal.json");
     if resuming && !super::entry_exists(&seal)? {
         // A retired seal is removed only after syncing the payload removal.
@@ -495,7 +501,7 @@ fn validate_retired_files(
     let cap = crate::limits::MAX_STATE_BYTES.min(limits.max_metadata_bytes as u64);
     let content = crate::config::capture::read_bounded(open_coordination_file(&seal, false)?, cap)
         .map_err(|error| admission(format!("retired generation seal is unavailable: {error}")))?;
-    if blake3::hash(&content).as_bytes() != expected {
+    if *blake3::hash(&content).as_bytes() != expected {
         return Err(admission("retired generation seal changed"));
     }
     let manifest: crate::store::generation_seal::GenerationSeal = serde_json::from_slice(&content)
@@ -514,7 +520,7 @@ fn validate_retired_files(
             "retired generation seal does not match its catalog receipt",
         ));
     }
-    validate_generation_files(path, Some(&manifest.files))
+    validate_generation_files(path, Some(current_files.unwrap_or(&manifest.files)))
 }
 
 pub(super) fn open_recovery_registry(
@@ -746,7 +752,7 @@ fn verify_generation_file(
 
 // Tantivy's fixed names and UUID-based segment components. A failed
 // managed-directory atomic write can also leave its tempfile.
-fn is_tantivy_file(name: &str) -> bool {
+pub(super) fn is_tantivy_file(name: &str) -> bool {
     if matches!(
         name,
         ".managed.json"
@@ -814,7 +820,7 @@ fn delete_owned_files(path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub(super) fn sync_directory(path: &Path) -> Result<()> {
+pub(in crate::store) fn sync_directory(path: &Path) -> Result<()> {
     let file = filesystem(
         path,
         "open generation directory for sync",
@@ -824,7 +830,7 @@ pub(super) fn sync_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-pub(super) fn sync_directory(_: &Path) -> Result<()> {
+pub(in crate::store) fn sync_directory(_: &Path) -> Result<()> {
     Err(admission(
         "generation operation needs a supported directory durability barrier",
     ))

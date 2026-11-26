@@ -39,7 +39,7 @@ fn await_started(transport: &platform::Transport, daemon: &mut Daemon, cache: &P
                 .unwrap()
                 .read_to_string(&mut diagnostic)
                 .unwrap();
-            panic!("indexed Website startup failed: {status}: {diagnostic}");
+            panic!("daemon startup failed: {status}: {diagnostic}");
         }
         if platform::exists(&platform::daemon_endpoint(cache))
             && let Some(mut client) = Client::connect(transport, cache)
@@ -53,6 +53,228 @@ fn await_started(transport: &platform::Transport, daemon: &mut Daemon, cache: &P
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[cfg(unix)]
+fn seed_empty_v5(cache: &Path) {
+    let mut registry = docsbase_memory::store::Db::open(cache).unwrap();
+    let tx = registry.begin_write().unwrap();
+    tx.execute_batch(include_str!("../src/store/generation_catalog/schema.sql"))
+        .unwrap();
+    tx.execute(
+        "INSERT INTO generation_store VALUES (1, 1, ?1)",
+        [[25_u8; 16].as_slice()],
+    )
+    .unwrap();
+    tx.pragma_update(None, "user_version", 5).unwrap();
+    tx.commit().unwrap();
+}
+
+#[cfg(unix)]
+fn wait_for(mut done: impl FnMut() -> bool, context: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(Instant::now() < deadline, "{context}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+fn index_project_through_cli(cache: &Path, config: &Path, root: &Path, text: &str) -> i64 {
+    std::fs::write(root.join("guide.md"), text).unwrap();
+    let output = cli(cache, config)
+        .current_dir(root)
+        .arg("index")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    value["project_id"].as_i64().unwrap()
+}
+
+#[cfg(unix)]
+fn assert_catalog_views(client: &mut Client, updated: i64, state: &str, other: i64) {
+    let expected = serde_json::json!({});
+    let status = client.call_tool("status", expected.clone()).unwrap();
+    assert_eq!(status["watchers"], 2);
+    assert_eq!(status["schema_version"], 5);
+    for projects in [
+        status["projects"].clone(),
+        client.call_tool("list_projects", expected.clone()).unwrap(),
+        client.call_tool("panel_projects", expected).unwrap(),
+    ] {
+        let lookup = |id| {
+            projects
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == id)
+                .unwrap()
+        };
+        assert_eq!(lookup(updated)["status"], state);
+        assert_eq!(lookup(other)["status"], "indexed");
+        assert_eq!(lookup(other)["docs"], 1);
+    }
+}
+
+#[cfg(unix)]
+fn start_shared_daemon(cache: &Path, config: &Path) -> (Daemon, test_transport::TestTransport) {
+    let mut daemon = Daemon(
+        cli(cache, config)
+            .arg("serve")
+            .current_dir(config)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let transport = test_transport::TestTransport::new(4);
+    await_started(&transport, &mut daemon, cache);
+    (daemon, transport)
+}
+
+#[test]
+#[cfg(unix)]
+fn shared_v5_watcher_updates_one_project_while_another_remains_searchable() {
+    use docsbase_memory::store::DB_FILE;
+    use serde_json::json;
+
+    let cache = tempfile::tempdir_in("/tmp").unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join("config.toml"),
+        "config_version = 2\n[daemon]\ncontrol_active = 1\n",
+    )
+    .unwrap();
+    seed_empty_v5(cache.path());
+    let first_id =
+        index_project_through_cli(cache.path(), config.path(), first.path(), "earlierlemur");
+    let other_id =
+        index_project_through_cli(cache.path(), config.path(), other.path(), "separateotter");
+    let (_daemon, transport) = start_shared_daemon(cache.path(), config.path());
+    let client = |id| {
+        let mut client = Client::connect(&transport, cache.path()).unwrap();
+        client.handshake_registry().unwrap();
+        client
+            .call(Request::BindReadOnly {
+                pid: std::process::id(),
+                project_id: Some(id),
+            })
+            .unwrap();
+        client
+    };
+    let mut first_client = client(first_id);
+    let mut other_client = client(other_id);
+    let initial = first_client
+        .call_tool(
+            "search_docs",
+            json!({"query":"earlierlemur","chunk_ref":true}),
+        )
+        .unwrap();
+    let stale = initial[0]["chunk_ref"].as_str().unwrap();
+    let db = rusqlite::Connection::open(cache.path().join(DB_FILE)).unwrap();
+    let read_head = || {
+        db.query_row(
+            "SELECT active_id FROM project_generation_head WHERE project_id=?1",
+            [first_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    let head = read_head();
+    let storage = cache.path().join("projects").join(first_id.to_string());
+    let lock = fd_lock::RwLock::new(std::fs::File::open(storage.join(".writer.lock")).unwrap());
+    let local = rusqlite::Connection::open(
+        storage
+            .join("generations")
+            .join(head.to_string())
+            .join("metadata.db"),
+    )
+    .unwrap();
+    local.execute_batch("BEGIN IMMEDIATE").unwrap();
+    std::fs::write(first.path().join("guide.md"), "updatedlemur").unwrap();
+    wait_for(
+        || lock.try_read().is_err(),
+        "first watcher did not enter its writer lease",
+    );
+    assert_eq!(
+        other_client
+            .call_tool("search_docs", json!({"query":"separateotter"}))
+            .unwrap()[0]["path"],
+        "guide.md"
+    );
+    assert_catalog_views(&mut other_client, first_id, "indexing", other_id);
+    local.execute_batch("ROLLBACK").unwrap();
+    wait_for(
+        || {
+            first_client
+                .call_tool("search_docs", json!({"query":"updatedlemur"}))
+                .is_ok_and(|result| result[0]["path"] == "guide.md")
+        },
+        "watcher did not publish edited file",
+    );
+    assert_eq!(read_head(), head);
+    let error = first_client
+        .call_tool("read_neighbors_at", json!({"chunk_ref":stale}))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("chunk_ref does not match the current project generation"),
+        "{error}"
+    );
+    local.execute("DROP TABLE chunks", []).unwrap();
+    assert_catalog_views(&mut other_client, first_id, "error", other_id);
+}
+
+#[test]
+#[cfg(unix)]
+fn shared_v5_indexes_new_projects_and_syncs_an_existing_project() {
+    let cache = tempfile::tempdir_in("/tmp").unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(config.path().join("config.toml"), "config_version = 2\n").unwrap();
+    seed_empty_v5(cache.path());
+    let (_daemon, transport) = start_shared_daemon(cache.path(), config.path());
+    let project_id =
+        index_project_through_cli(cache.path(), config.path(), root.path(), "connectedvireo");
+    let mut client = Client::connect(&transport, cache.path()).unwrap();
+    client.handshake_registry().unwrap();
+    let bound = client
+        .call(Request::RegisterSession {
+            pid: std::process::id(),
+            cwd: root.path().to_owned(),
+        })
+        .unwrap();
+    assert!(
+        matches!(bound, docsbase_memory::ipc::protocol::Response::ToolResult { value }
+        if value["project_id"] == project_id && value["status"] == "indexed"),
+        "register did not select the published project"
+    );
+    let hit = client
+        .call_tool("search_docs", serde_json::json!({"query":"connectedvireo"}))
+        .unwrap();
+    assert_eq!(hit[0]["path"], "guide.md");
+    let sync = cli(cache.path(), config.path())
+        .current_dir(root.path())
+        .arg("sync")
+        .output()
+        .unwrap();
+    assert!(
+        sync.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sync.stderr)
+    );
+    let sync: serde_json::Value = serde_json::from_slice(&sync.stdout).unwrap();
+    assert_eq!(sync["project_id"], project_id);
+    assert_eq!(sync["state"], "done");
 }
 
 #[test]

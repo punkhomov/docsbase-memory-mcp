@@ -178,6 +178,20 @@ impl IndexHandle {
             || open_index(dir).map_or(true, |index| fields_from(&index.schema()).is_err())
     }
 
+    pub(crate) fn open_existing_writer(
+        dir: &Path,
+        settings: super::writer_settings::IndexWriterSettings,
+    ) -> Result<Self> {
+        if dir.join(REBUILD_MARKER).exists() {
+            return Err(Error::Index {
+                path: Some(dir.to_owned()),
+                message: "index requires a full rebuild before writing".to_owned(),
+            });
+        }
+        let (index, _) = open_readable_index(dir)?;
+        Self::open_writer(&index, dir, false, settings)
+    }
+
     /// Opens the index in `dir`, creating it when absent.
     ///
     /// # Errors

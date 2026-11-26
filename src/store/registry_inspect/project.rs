@@ -18,8 +18,11 @@ use crate::platform::fs::{
     check_single_link, file_identity_and_links, is_regular_nofollow, open_readonly_nofollow,
 };
 use crate::store::generation_catalog::{self, Head, Layout};
+use crate::store::generation_seal::{GenerationSeal, SEAL_FORMAT};
 use crate::store::models::ProjectStatus;
-use crate::store::project_index::{LOCAL_SCHEMA_VERSION, ProjectIndex, project_directory};
+use crate::store::project_index::{
+    LOCAL_SCHEMA_VERSION, ProjectIndex, SEALED_LOCAL_SCHEMA_VERSION, project_directory,
+};
 use crate::store::settings::{DbSettings, DbSpec};
 use crate::store::{migrations, repo};
 
@@ -177,7 +180,9 @@ fn observe_legacy(
 ) -> Observed<ObservedProjectIndex> {
     let revision = legacy_revision(registry, project_id)?.ok_or(Why::InvalidRegistry)?;
     let index = ProjectIndex::legacy(project_id, revision).map_err(|_| Why::InvalidRegistry)?;
-    check_pair(registry, project_id, &index.tantivy_dir(cache))?;
+    check_pair(registry, project_id, &index.tantivy_dir(cache), |dir| {
+        check_tantivy_files(dir, None)
+    })?;
     Ok(ObservedProjectIndex {
         project_id,
         epoch: catalog.map(|(epoch, _)| epoch),
@@ -215,7 +220,7 @@ fn observe_local(
     let generation = project.join("generations").join(head.id.to_string());
     check_directory(&generation)?;
     with_read_lease(&generation.join(".read.lock"), || {
-        check_seal(&generation.join("seal.json"), &seal_digest)?;
+        let seal = read_checked_seal(&generation.join("seal.json"), &seal_digest)?;
         let metadata_path = generation.join("metadata.db");
         check_single_link(&metadata_path).map_err(|_| Why::Io)?;
         with_locked_db(
@@ -227,12 +232,28 @@ fn observe_local(
                 let revision = local_revision(metadata, head.project_id, head.id)?;
                 let project_id = head.project_id;
                 let generation_id = head.id;
-                check_pair(metadata, project_id, &generation.join("tantivy"))?;
+                check_pair(metadata, project_id, &generation.join("tantivy"), |dir| {
+                    if revision.schema == SEALED_LOCAL_SCHEMA_VERSION {
+                        return check_tantivy_files(dir, None);
+                    }
+                    let seal: GenerationSeal =
+                        serde_json::from_slice(&seal).map_err(|_| Why::InvalidRegistry)?;
+                    if !revision.matches_seal(&seal, epoch, project_id, generation_id) {
+                        return Err(Why::InvalidRegistry);
+                    }
+                    if legacy_revision(metadata, project_id)? != Some(revision.content_revision) {
+                        return Err(Why::InvalidRegistry);
+                    }
+                    match revision.manifest {
+                        Some(digest) => check_revised_tantivy(dir, &digest),
+                        None => check_tantivy_files(dir, Some(&seal.files)),
+                    }
+                })?;
                 Ok(ObservedProjectIndex {
                     project_id,
                     epoch: Some(epoch),
                     generation_id: Some(generation_id),
-                    content_revision: revision,
+                    content_revision: revision.content_revision,
                     layout: ProjectIndexLayout::Local,
                 })
             },
@@ -240,17 +261,65 @@ fn observe_local(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::store) struct LocalRevision {
+    pub(in crate::store) schema: u32,
+    pub(in crate::store) content_revision: i64,
+    pub(in crate::store) manifest: Option<[u8; 32]>,
+    pub(in crate::store) pending: bool,
+}
+
+impl LocalRevision {
+    pub(in crate::store) fn matches_seal(
+        self,
+        seal: &GenerationSeal,
+        epoch: [u8; 16],
+        project: i64,
+        generation: i64,
+    ) -> bool {
+        seal.format == SEAL_FORMAT
+            && seal.installation_epoch == epoch
+            && seal.project_id == project
+            && seal.generation_id == generation
+            && (seal.metadata_schema == self.schema
+                || (seal.metadata_schema == SEALED_LOCAL_SCHEMA_VERSION
+                    && self.schema == LOCAL_SCHEMA_VERSION))
+            && seal.content_revision >= 0
+            && if self.manifest.is_some() {
+                self.content_revision > seal.content_revision
+            } else {
+                self.content_revision == seal.content_revision
+            }
+    }
+}
+
 pub(in crate::store) fn local_revision(
     metadata: &Connection,
     project: i64,
     generation: i64,
-) -> Observed<i64> {
-    if schema_version(metadata)? != LOCAL_SCHEMA_VERSION {
-        return Err(Why::UnsupportedSchema);
+) -> Observed<LocalRevision> {
+    let revision = read_local_revision(metadata, project, generation)?;
+    if revision.pending {
+        return Err(Why::RecoveryRequired);
     }
-    let mut query = metadata.prepare(
-        "SELECT singleton, project_id, generation_id, content_revision FROM generation_state LIMIT 2",
-    ).map_err(sqlite_failure)?;
+    Ok(revision)
+}
+
+pub(in crate::store) fn read_local_revision(
+    metadata: &Connection,
+    project: i64,
+    generation: i64,
+) -> Observed<LocalRevision> {
+    let schema = schema_version(metadata)?;
+    let sql = match schema {
+        SEALED_LOCAL_SCHEMA_VERSION => "SELECT singleton, project_id, generation_id, content_revision, 0, NULL FROM generation_state LIMIT 2",
+        LOCAL_SCHEMA_VERSION => "SELECT singleton, project_id, generation_id, content_revision, mutation_pending,
+            CASE WHEN tantivy_manifest IS NULL THEN NULL
+                 WHEN typeof(tantivy_manifest)='blob' AND length(tantivy_manifest)=32 THEN tantivy_manifest
+                 ELSE X'' END FROM generation_state LIMIT 2",
+        _ => return Err(Why::UnsupportedSchema),
+    };
+    let mut query = metadata.prepare(sql).map_err(sqlite_failure)?;
     let mut rows = query.query([]).map_err(sqlite_failure)?;
     let row = rows
         .next()
@@ -259,6 +328,11 @@ pub(in crate::store) fn local_revision(
     let integer = |column| row.get::<_, i64>(column).map_err(|_| Why::InvalidRegistry);
     let (singleton, project_id, generation_id, revision) =
         (integer(0)?, integer(1)?, integer(2)?, integer(3)?);
+    let pending = integer(4)?;
+    let bytes: Option<Vec<u8>> = row.get(5).map_err(|_| Why::InvalidRegistry)?;
+    let manifest = bytes
+        .map(|bytes| bytes.try_into().map_err(|_| Why::InvalidRegistry))
+        .transpose()?;
     if singleton != 1
         || project_id != project
         || generation_id != generation
@@ -267,11 +341,17 @@ pub(in crate::store) fn local_revision(
     {
         return Err(Why::InvalidRegistry);
     }
-    Ok(revision)
-}
-
-pub(in crate::store) fn check_seal(path: &Path, expected: &[u8; 32]) -> Observed<()> {
-    read_checked_seal(path, expected).map(|_| ())
+    let pending = match pending {
+        0 => false,
+        1 => true,
+        _ => return Err(Why::InvalidRegistry),
+    };
+    Ok(LocalRevision {
+        schema,
+        content_revision: revision,
+        manifest,
+        pending,
+    })
 }
 
 pub(in crate::store) fn read_checked_seal(path: &Path, expected: &[u8; 32]) -> Observed<Vec<u8>> {
@@ -286,12 +366,34 @@ pub(in crate::store) fn read_checked_seal(path: &Path, expected: &[u8; 32]) -> O
     Ok(bytes)
 }
 
-fn check_pair(metadata: &Connection, project_id: i64, tantivy: &Path) -> Observed<()> {
+fn check_pair(
+    metadata: &Connection,
+    project_id: i64,
+    tantivy: &Path,
+    artifact: impl FnOnce(&Path) -> Observed<()>,
+) -> Observed<()> {
     if repo::has_pending_docs(metadata, project_id).map_err(|_| Why::Io)? {
         return Err(Why::RecoveryRequired);
     }
-    check_tantivy_files(tantivy, None)?;
+    artifact(tantivy)?;
     ReadIndex::check_health_with_project_lease(tantivy).map_err(|_| Why::Io)
+}
+
+pub(in crate::store) fn check_revised_tantivy(tantivy: &Path, expected: &[u8; 32]) -> Observed<()> {
+    check_tantivy_files(tantivy, None)?;
+    if &tantivy_manifest(tantivy)? != expected {
+        return Err(Why::Changed);
+    }
+    Ok(())
+}
+
+pub(in crate::store) fn tantivy_manifest(tantivy: &Path) -> Observed<[u8; 32]> {
+    let file = open_checked_file(&tantivy.join("meta.json"))?;
+    let bytes = read_bounded(file, MAX_STATE_BYTES).map_err(|error| match error {
+        ReadFailure::LimitExceeded => Why::LimitExceeded,
+        _ => Why::Io,
+    })?;
+    Ok(*blake3::hash(&bytes).as_bytes())
 }
 
 pub(in crate::store) fn check_tantivy_files(

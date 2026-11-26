@@ -1208,7 +1208,7 @@ fn query_cache_json(dense: Option<&DenseCache>) -> Value {
 
 /// ANN tier state as the daemon last saw it (FR-5/FR-6): the last recorded
 /// outcome when there is one, otherwise the config/absence tells the story.
-fn ann_state(dense: Option<&DenseCache>, project_id: i64, hybrid_on: bool) -> Value {
+pub(super) fn ann_state(dense: Option<&DenseCache>, project_id: i64, hybrid_on: bool) -> Value {
     let Some(dense) = dense else {
         // CLI direct mode: the outcome record lives in the daemon process.
         return json!({
@@ -1989,6 +1989,17 @@ pub(super) fn status_for_projects(
         entry["ann"] = ann_state(dense, project.id, hybrid_on);
         projects.push(entry);
     }
+    status_document(registry, &projects, stats, watchers, restart_notice, dense)
+}
+
+pub(super) fn status_document(
+    registry: &Db,
+    projects: &[Value],
+    stats: &Stats,
+    watchers: u64,
+    restart_notice: Option<&str>,
+    dense: Option<&DenseCache>,
+) -> Result<Value> {
     let hint = projects
         .is_empty()
         .then_some("run `docsbase index` in your project");
@@ -2016,6 +2027,16 @@ fn project_entry(
     with_git: bool,
 ) -> Result<Value> {
     let counts = repo::project_counts(metadata.connection(), project.id)?;
+    project_entry_with_counts(registry, project, counts, watched, with_git)
+}
+
+pub(super) fn project_entry_with_counts(
+    registry: &Db,
+    project: &Project,
+    counts: repo::ProjectCounts,
+    watched: Option<bool>,
+    with_git: bool,
+) -> Result<Value> {
     // The newest job's own warnings and error are surfaced whatever its state:
     // a dropped watcher batch records its lost paths here (FR-19), while a
     // failed full job carries `error` and no warnings. An older job's warnings

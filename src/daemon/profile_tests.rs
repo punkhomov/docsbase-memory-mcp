@@ -238,7 +238,8 @@ fn concurrent_catalog_sync_cannot_join_an_unreconciled_orphan() {
         )
         .unwrap();
     // A retry acquired the slot but has not begun reconciling the old row.
-    let _starting = shared.sync_slot.clone().try_acquire_owned().unwrap();
+    let slot = shared.project_slot(fixture.project.id);
+    let _starting = slot.catalog_sync.try_own().unwrap();
     let db = shared.db();
     let orphan = crate::store::repo::create_sync_job(db.connection(), fixture.project.id)
         .unwrap()
@@ -247,9 +248,81 @@ fn concurrent_catalog_sync_cannot_join_an_unreconciled_orphan() {
     drop(db);
 
     assert!(matches!(
-        capture_catalog_sync(&shared, Some(session), &json!({}), [1; 16]),
+        capture_catalog_sync(&shared, Some(session), &json!({}), [1; 16], true),
         Err(Error::Admission { .. })
     ));
+}
+
+#[test]
+#[cfg(unix)]
+fn shared_catalog_reopen_releases_control_while_a_writer_holds_the_configuration() {
+    let cache = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join("config.toml"),
+        "config_version = 2\n[daemon]\ncontrol_active = 1\n",
+    )
+    .unwrap();
+    let mut db = Db::open(cache.path()).unwrap();
+    let project = registry::ensure_project(&mut db, root.path()).unwrap();
+    let tx = db.begin_write().unwrap();
+    tx.execute_batch(include_str!("../store/generation_catalog/schema.sql"))
+        .unwrap();
+    tx.execute(
+        "INSERT INTO generation_store VALUES (1, 1, ?1)",
+        [[42_u8; 16].as_slice()],
+    )
+    .unwrap();
+    tx.pragma_update(
+        None,
+        "user_version",
+        crate::store::GENERATION_SCHEMA_VERSION,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    db.close().unwrap();
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let shared = Shared::open_with_launch(
+        cache.path(),
+        &crate::store::settings::standalone().unwrap(),
+        &crate::store::settings::standalone_read_pool().unwrap(),
+        crate::hybrid::dense_settings::standalone()
+            .unwrap()
+            .settings(),
+        &LaunchSnapshot::capture_from(config.path()),
+        DaemonPatch::default(),
+    )
+    .unwrap();
+    let accepted = shared.open_project_config(&project).unwrap();
+    let slot = shared.project_slot(project.id);
+    let writer = slot.preparation_lease(&accepted).unwrap();
+    std::fs::write(
+        root.path().join(".docsbase.toml"),
+        "config_version = 2\nmax_file_size = 123456\n",
+    )
+    .unwrap();
+    let result = runtime.block_on(async {
+        let attempt = tokio::time::timeout(
+            Duration::from_secs(2),
+            registration_async::run(&shared, std::process::id(), root.path(), false, None),
+        )
+        .await?;
+        let control =
+            tokio::time::timeout(Duration::from_secs(2), shared.workers.control()).await?;
+        drop(control.unwrap());
+        Ok::<_, tokio::time::error::Elapsed>(attempt)
+    });
+    drop(writer);
+    let error = result
+        .expect("configuration reopen retained the only control slot")
+        .unwrap_err();
+    assert!(matches!(error, Error::Admission { message } if message.contains("retry")));
 }
 
 #[test]
